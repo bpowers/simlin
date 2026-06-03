@@ -1238,6 +1238,16 @@ mod tests {
         })
     }
 
+    fn arc_link(uid: i32, from_uid: i32, to_uid: i32, angle: f64) -> ViewElement {
+        ViewElement::Link(view_element::Link {
+            uid,
+            from_uid,
+            to_uid,
+            shape: LinkShape::Arc(angle),
+            polarity: None,
+        })
+    }
+
     /// A flow valve at `(x, y)` with a two-point polyline whose endpoints attach
     /// to `from_uid` and `to_uid` (a stock--flow--stock segment). The point
     /// coordinates are irrelevant to `loop_compactness` (which uses node-box
@@ -2608,6 +2618,72 @@ mod tests {
         ]);
         let m = compute_layout_metrics(&view, &cfg());
         assert_eq!(m.loop_compactness, 0.0);
+    }
+
+    // --- loop_straightness (loop connectors drawn as visible curves) ---
+
+    /// A square 4-node loop wired with STRAIGHT links scores high
+    /// loop_straightness: the loop's causal connectors are drawn as flat chords,
+    /// so the loop reads as a zig-zag, not a circle.
+    #[test]
+    fn test_loop_straightness_straight_loop_is_high() {
+        let view = make_view(vec![
+            aux(1, "a", 0.0, 0.0),
+            aux(2, "b", 300.0, 0.0),
+            aux(3, "c", 300.0, 300.0),
+            aux(4, "d", 0.0, 300.0),
+            straight_link(11, 1, 2),
+            straight_link(12, 2, 3),
+            straight_link(13, 3, 4),
+            straight_link(14, 4, 1),
+        ]);
+        let m = compute_layout_metrics(&view, &cfg());
+        assert!(
+            m.loop_straightness > 0.9,
+            "a loop drawn with straight chords should score near 1, got {}",
+            m.loop_straightness
+        );
+    }
+
+    /// The SAME square loop wired with ARC links that bow well outward scores
+    /// near zero: every loop connector is drawn as a visible curve.
+    #[test]
+    fn test_loop_straightness_curved_loop_is_low() {
+        // 45deg takeoff arcs bow ~0.2 (a quarter-circle), above the target bow.
+        let view = make_view(vec![
+            aux(1, "a", 0.0, 0.0),
+            aux(2, "b", 300.0, 0.0),
+            aux(3, "c", 300.0, 300.0),
+            aux(4, "d", 0.0, 300.0),
+            arc_link(11, 1, 2, 45.0),
+            arc_link(12, 2, 3, 45.0),
+            arc_link(13, 3, 4, 45.0),
+            arc_link(14, 4, 1, 45.0),
+        ]);
+        let m = compute_layout_metrics(&view, &cfg());
+        assert!(
+            m.loop_straightness < m.loop_compactness.max(0.5),
+            "a curved loop should score lower loop_straightness than a straight one"
+        );
+        assert!(
+            m.loop_straightness < 0.5,
+            "a loop drawn with well-bowed arcs should score low, got {}",
+            m.loop_straightness
+        );
+    }
+
+    /// A pure chain (no cycle) has no loop connector, so loop_straightness is 0.
+    #[test]
+    fn test_loop_straightness_no_loop_is_zero() {
+        let view = make_view(vec![
+            aux(1, "a", 0.0, 0.0),
+            aux(2, "b", 200.0, 0.0),
+            aux(3, "c", 400.0, 0.0),
+            straight_link(10, 1, 2),
+            straight_link(11, 2, 3),
+        ]);
+        let m = compute_layout_metrics(&view, &cfg());
+        assert_eq!(m.loop_straightness, 0.0);
     }
 
     #[test]
