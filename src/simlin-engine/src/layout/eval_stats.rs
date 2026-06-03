@@ -875,6 +875,8 @@ mod tests {
             aspect_penalty: 0.0,
             chain_straightness: 0.0,
             loop_compactness: 0.0,
+            flow_bends: 0.0,
+            loop_straightness: 0.0,
         }
     }
 

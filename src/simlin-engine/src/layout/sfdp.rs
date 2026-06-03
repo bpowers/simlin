@@ -107,13 +107,17 @@ impl SfdpConfig {
     /// so every layout was cut off mid-flight rather than settled.
     pub fn for_aux_placement() -> Self {
         Self {
-            // The ideal edge length must leave room for LABELS, not just node
-            // shapes: a converged layout puts connected nodes ~k apart, and a
-            // typical two-line variable label is 100-150 units wide. At the
-            // pre-quiescence k of 75 the equilibrium piled labels on top of
-            // each other (the non-converging schedule masked this by cutting
-            // layouts off mid-expansion).
-            k: 150.0,
+            // The ideal edge length needs SOME room for labels, but it no longer
+            // has to leave room for the WHOLE label: the deterministic declutter
+            // (which runs after placement) pushes apart exactly the pairs whose
+            // labels collide, so the equilibrium can pack tighter than the widest
+            // label and let declutter open up only where needed. The historical
+            // k of 75 piled labels up because the declutter did not yet exist (or
+            // converge); at 110 the force pass settles connected nodes about a
+            // label-width apart, near the density of hand-drawn diagrams, and
+            // declutter cleans up the residual collisions -- markedly less sprawl
+            // than the old label-oblivious k of 150.
+            k: 110.0,
             max_iterations: 5000,
             convergence_threshold: 0.001,
             initial_step_size: 1.0,
@@ -127,8 +131,11 @@ impl SfdpConfig {
     /// relative to each other (`chain::compute_chain_positions`): larger ideal
     /// edge length and weaker attraction than aux placement.
     pub fn for_chain_positioning() -> Self {
+        // Slightly larger than aux placement: a chain occupies more than a single
+        // node, so its centers want a bit more separation. Lowered from 150 in
+        // step with aux placement (declutter opens up colliding chain labels).
         Self {
-            k: 150.0,
+            k: 130.0,
             max_iterations: 5000,
             convergence_threshold: 0.001,
             initial_step_size: 1.0,

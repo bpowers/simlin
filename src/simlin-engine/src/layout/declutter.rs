@@ -64,6 +64,18 @@ const MAX_RELAX_ATTEMPTS: usize = 6;
 /// jammed cluster actually needs.
 const JAM_ZOOM_STEP: f64 = 1.3;
 
+/// Most a compaction pass may shrink a layout (a floor on the uniform scale).
+/// Force-directed placement leaves global slack and jam-recovery can over-zoom,
+/// so after overlaps are cleared we pull the diagram back in toward the tightest
+/// still-separated arrangement; this caps how aggressive that is so a sparse
+/// layout cannot collapse to an unreadable knot even if the geometry would allow
+/// it.
+const COMPACT_MIN_SCALE: f64 = 0.4;
+
+/// Binary-search steps for the compaction scale. 2^-18 of the [min,1] range is
+/// far finer than a pixel at any diagram scale.
+const COMPACT_ITERS: usize = 18;
+
 /// Greedy label-side passes inside `choose_label_sides` per outer round.
 const LABEL_SIDE_ROUNDS: usize = 3;
 
@@ -599,6 +611,92 @@ fn relax_positions(elements: &mut [ViewElement], alias_names: &HashMap<i32, Stri
     converged
 }
 
+/// True if any two element footprints (shape box + current label box) are closer
+/// than `SEPARATION_MARGIN` -- i.e. the layout is not cleanly separated. Pure
+/// read-only companion to `relax_positions` (which uses the same footprints), so
+/// the compaction search below can probe a candidate scale without mutating.
+fn layout_has_overlap(elements: &[ViewElement], alias_names: &HashMap<i32, String>) -> bool {
+    let items: Vec<Vec<Rect>> = elements
+        .iter()
+        .filter_map(|e| {
+            let mut rects = Vec::with_capacity(2);
+            if let Some(shape) = node_shape_box(e) {
+                rects.push(shape);
+            }
+            if let Some(lbox) = current_label_box(e, alias_names) {
+                rects.push(lbox);
+            }
+            if rects.is_empty() { None } else { Some(rects) }
+        })
+        .collect();
+    for i in 0..items.len() {
+        for j in (i + 1)..items.len() {
+            for a in &items[i] {
+                for b in &items[j] {
+                    if separation_mtv(a, b, SEPARATION_MARGIN).is_some() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Pull a cleanly-separated layout in toward the origin by the largest factor
+/// that keeps every footprint at least `SEPARATION_MARGIN` apart, removing the
+/// global slack a force-directed pass leaves (and any over-zoom from jam
+/// recovery). Uniform scaling preserves all relative geometry, so chains stay
+/// straight and angles unchanged; only the empty space between elements shrinks,
+/// which is exactly what `sprawl` measures. A subsequent `normalize_coordinates`
+/// re-anchors the diagram, so scaling about the origin is immaterial.
+///
+/// Feasibility is monotone in the scale (shrinking can only bring footprints
+/// closer), so a binary search finds the tightest separated scale. A layout with
+/// no slack (already touching at margin) is left unchanged. Must be called on an
+/// already overlap-free layout (the final declutter state); a no-op otherwise.
+fn compact_view(elements: &mut [ViewElement], alias_names: &HashMap<i32, String>) {
+    if elements.len() < 2 || layout_has_overlap(elements, alias_names) {
+        return;
+    }
+
+    // Probe a candidate scale on a throwaway copy: scale positions, re-snap flow
+    // endpoints to the (fixed-size) stocks they moved off of, then test
+    // separation. Flows scale their pipe with the layout, so re-snapping mirrors
+    // the jam-zoom companion and keeps the probe faithful to the applied result.
+    let original = elements.to_vec();
+    let separated_at = |s: f64| -> bool {
+        let mut probe = original.clone();
+        scale_all_positions(&mut probe, s);
+        resnap_flow_endpoints_to_stocks(&mut probe);
+        !layout_has_overlap(&probe, alias_names)
+    };
+
+    // Smallest separated scale. If even the floor is separated, compact straight
+    // to it; otherwise binary-search [floor, 1.0] keeping `hi` feasible (s=1 is,
+    // by precondition) and `lo` infeasible, converging `hi` to the threshold.
+    let best_scale = if separated_at(COMPACT_MIN_SCALE) {
+        COMPACT_MIN_SCALE
+    } else {
+        let mut lo = COMPACT_MIN_SCALE;
+        let mut hi = 1.0;
+        for _ in 0..COMPACT_ITERS {
+            let mid = (lo + hi) / 2.0;
+            if separated_at(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
+    };
+
+    if best_scale < 1.0 - 1e-9 {
+        scale_all_positions(elements, best_scale);
+        resnap_flow_endpoints_to_stocks(elements);
+    }
+}
+
 /// Declutter a laid-out view in place: deterministically choose label sides and
 /// push overlapping footprints apart so labels and shapes stop colliding. Runs
 /// `OUTER_ROUNDS` of (choose sides -> relax positions) so the side choice can
@@ -638,6 +736,12 @@ pub fn declutter_view(elements: &mut [ViewElement]) {
     // their labels optimal.
     relax_positions(elements, &alias_names);
     optimize_label_sides(elements, &alias_names);
+
+    // Now that the layout is cleanly separated, pull it back in to the tightest
+    // still-separated scale, removing the global slack the force pass left (and
+    // any over-zoom the jam recovery above introduced). This drives `sprawl`
+    // down toward hand-drawn density without ever reintroducing an overlap.
+    compact_view(elements, &alias_names);
 }
 
 #[cfg(test)]
@@ -1155,6 +1259,115 @@ mod tests {
             (f.points[0].y - scaled_edge_y).abs() < 1e-9,
             "endpoint must sit on the scaled stock's bottom edge: {} vs {scaled_edge_y}",
             f.points[0].y
+        );
+    }
+
+    // ── compaction ──
+
+    fn aux_at(uid: i32, x: f64, y: f64, name: &str) -> ViewElement {
+        ViewElement::Aux(crate::datamodel::view_element::Aux {
+            name: name.to_string(),
+            uid,
+            x,
+            y,
+            label_side: LabelSide::Bottom,
+            compat: None,
+        })
+    }
+
+    fn layout_extent(elements: &[ViewElement]) -> f64 {
+        let names = alias_source_names(elements);
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for e in elements {
+            for r in [node_shape_box(e), current_label_box(e, &names)]
+                .into_iter()
+                .flatten()
+            {
+                min_x = min_x.min(r.left);
+                max_x = max_x.max(r.right);
+                min_y = min_y.min(r.top);
+                max_y = max_y.max(r.bottom);
+            }
+        }
+        (max_x - min_x).max(max_y - min_y)
+    }
+
+    #[test]
+    fn test_compaction_shrinks_sparse_layout_without_overlap() {
+        // Three auxes spread far apart (lots of slack between fixed-size labels).
+        let mut elements = vec![
+            aux_at(1, 0.0, 0.0, "alpha"),
+            aux_at(2, 600.0, 0.0, "beta"),
+            aux_at(3, 0.0, 600.0, "gamma"),
+        ];
+        let names = alias_source_names(&elements);
+        assert!(
+            !layout_has_overlap(&elements, &names),
+            "precondition: the sparse layout is overlap-free"
+        );
+        let before = layout_extent(&elements);
+
+        compact_view(&mut elements, &names);
+
+        let after = layout_extent(&elements);
+        assert!(
+            after < before * 0.9,
+            "compaction should noticeably shrink the layout: {after} vs {before}"
+        );
+        assert!(
+            !layout_has_overlap(&elements, &names),
+            "compaction must never introduce an overlap"
+        );
+    }
+
+    #[test]
+    fn test_compaction_respects_min_scale_floor() {
+        // Hugely sprawled: even at the floor the labels stay far apart, so
+        // compaction is clamped to COMPACT_MIN_SCALE rather than collapsing the
+        // diagram to a knot.
+        let mut elements = vec![aux_at(1, 0.0, 0.0, "alpha"), aux_at(2, 5000.0, 0.0, "beta")];
+        let names = alias_source_names(&elements);
+        compact_view(&mut elements, &names);
+        let ViewElement::Aux(a2) = &elements[1] else {
+            panic!("aux")
+        };
+        // aux 1 is at the origin, so aux 2's x is scaled directly by the factor.
+        let applied = a2.x / 5000.0;
+        assert!(
+            (applied - COMPACT_MIN_SCALE).abs() < 1e-3,
+            "huge slack should compact exactly to the floor {COMPACT_MIN_SCALE}, got {applied}"
+        );
+        assert!(!layout_has_overlap(&elements, &names));
+    }
+
+    #[test]
+    fn test_compaction_keeps_flow_endpoints_attached() {
+        use crate::diagram::constants::STOCK_WIDTH;
+        // A stock with a horizontal flow to a far cloud: compaction pulls the
+        // cloud in, and the re-snap must keep the source endpoint on the stock.
+        let edge_x = 100.0 + STOCK_WIDTH / 2.0;
+        let mut elements = vec![
+            stock_at(1, 100.0, 100.0),
+            flow_attached_to(2, (400.0, 100.0), (edge_x, 100.0), 1, (700.0, 100.0)),
+            aux_at(3, 100.0, 600.0, "far aux"),
+        ];
+        let names = alias_source_names(&elements);
+        compact_view(&mut elements, &names);
+        let ViewElement::Stock(s) = &elements[0] else {
+            panic!("stock")
+        };
+        let ViewElement::Flow(f) = &elements[1] else {
+            panic!("flow")
+        };
+        // The source endpoint stays on the (fixed-size) stock's right edge.
+        let expected_edge = s.x + STOCK_WIDTH / 2.0;
+        assert!(
+            (f.points[0].x - expected_edge).abs() < 1.0,
+            "flow source endpoint must stay attached to the stock edge: {} vs {expected_edge}",
+            f.points[0].x
         );
     }
 }

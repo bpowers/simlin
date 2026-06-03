@@ -816,6 +816,8 @@ fn write_metrics_table(html: &mut String, render: &RenderReport) {
         ("aspect_penalty", m.aspect_penalty),
         ("chain_straightness", m.chain_straightness),
         ("loop_compactness", m.loop_compactness),
+        ("flow_bends", m.flow_bends),
+        ("loop_straightness", m.loop_straightness),
     ];
     html.push_str("<table class=\"metrics\">");
     for (name, value) in rows {
@@ -996,6 +998,8 @@ fn render_index_html(report: &EvalReport) -> String {
         ("aspect_penalty", w.aspect_penalty),
         ("chain_straightness", w.chain_straightness),
         ("loop_compactness", w.loop_compactness),
+        ("flow_bends", w.flow_bends),
+        ("loop_straightness", w.loop_straightness),
     ];
     html.push_str("<table class=\"weights\"><caption>weights</caption>");
     for (name, value) in weight_rows {

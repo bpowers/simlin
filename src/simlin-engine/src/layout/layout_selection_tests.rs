@@ -309,9 +309,9 @@ fn test_select_best_layout_all_nan_keeps_earliest() {
 // ~0.1-0.15 of sprawl-times-weight; the readability terms themselves are near
 // zero on these tiny models.) The regeneration procedure printed these via the
 // GUARD_REGEN lines this test emits.
-const GUARD_POP_COST_CEILING: f64 = 0.24;
-const GUARD_CHAIN_COST_CEILING: f64 = 0.57;
-const GUARD_TWO_STOCK_COST_CEILING: f64 = 0.16;
+const GUARD_POP_COST_CEILING: f64 = 0.32;
+const GUARD_CHAIN_COST_CEILING: f64 = 0.17;
+const GUARD_TWO_STOCK_COST_CEILING: f64 = 0.25;
 
 /// Lay `project`'s `main` model out at the fixed seed 42 and return its
 /// calibrated `weighted_cost`. Seeding explicitly (rather than relying on the

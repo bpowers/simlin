@@ -24,8 +24,12 @@ use super::metadata::ComputedMetadata;
 use super::{LayoutState, format_label_with_line_breaks};
 
 /// A connector longer than this many `horizontal_spacing`s is "long": the
-/// distance at which a ghost copy reads better than a cross-diagram line.
-const GHOST_DISTANCE_FACTOR: f64 = 2.5;
+/// distance at which a ghost copy reads better than a cross-diagram line. Tracks
+/// the force-pass spring length (`SfdpConfig::for_aux_placement` k): "long" is
+/// relative to typical node spacing, so this was lowered alongside k (150 -> 110)
+/// to keep the same ~1.7x-spacing trigger rather than drifting to a larger
+/// relative distance that ghosts almost nothing on the now-tighter layouts.
+const GHOST_DISTANCE_FACTOR: f64 = 1.8;
 
 /// At most this fraction of the model's variables become ghosts (the
 /// hand-drawn corpus shows 14-26%; the cap keeps a pathological model from
