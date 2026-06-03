@@ -195,6 +195,14 @@ pub struct DiscoveryResult {
     pub partitions: Vec<DiscoveredPartition>,
     /// Whether the time budget elapsed before discovery finished.
     pub truncated: bool,
+    /// Whether cross-element-through-aggregate loop recovery (GH #696) hit its
+    /// loop-count budget (`db::cross_agg_loop_budget`) before stitching every
+    /// disjoint-petal subset -- so some cross-agg reducer loops are absent.
+    /// The exhaustive-mode analogue is `LtmVariablesResult::agg_recovery_truncated`;
+    /// this is the discovery-mode signal that the reported loop list is
+    /// *possibly incomplete* for the same structural reason, distinct from the
+    /// time-`truncated` flag above.
+    pub agg_recovery_truncated: bool,
 }
 
 #[cfg(test)]
@@ -2170,6 +2178,7 @@ pub fn discover_loops_with_graph(
             loops: Vec::new(),
             partitions: Vec::new(),
             truncated: false,
+            agg_recovery_truncated: false,
         });
     }
 
@@ -2184,6 +2193,7 @@ pub fn discover_loops_with_graph(
             loops: Vec::new(),
             partitions: Vec::new(),
             truncated: false,
+            agg_recovery_truncated: false,
         });
     }
 
@@ -2245,8 +2255,62 @@ pub fn discover_loops_with_graph(
             loops: Vec::new(),
             partitions: Vec::new(),
             truncated,
+            agg_recovery_truncated: false,
         });
     }
+
+    // Stitch cross-element-through-aggregate loops (GH #696). The discovery DFS
+    // emits only *elementary* element-graph circuits, so a feedback loop that
+    // traverses a hoisted reducer's synthetic agg node more than once
+    // (`pop[a] → agg → pop[b] → agg → pop[a]`) is structurally unreachable --
+    // its `visiting` set forbids revisiting the agg. Exhaustive mode recovers
+    // these by stitching the single-agg "petals" together; do the same here,
+    // reusing the SAME combinatorial core (`stitch_cross_agg_petals`) so
+    // discovery recovers exactly the loops exhaustive does. Each discovered
+    // elementary path that visits one agg once IS a petal; the stitched
+    // sequences are appended to `all_paths` and flow through the identical
+    // FoundLoop construction / trim / dedup / rank pipeline below. The stitched
+    // loop's edge multiset is the union of its petals' (disjoint) edges, so the
+    // per-step loop score read from `link_offset_map` is exactly the product of
+    // the petals' link scores -- scored identically to any discovered loop.
+    let agg_recovery_truncated = {
+        // `collect_agg_petals` keys the petal map on `&str` agg names borrowed
+        // from `all_paths`, but the stitched sequences own their `Ident` nodes,
+        // so compute the (owned) stitched paths + truncation flag in an inner
+        // scope that ends the immutable borrow before we push to `all_paths`.
+        let (stitched, was_truncated) = {
+            let petals_by_agg = crate::db::collect_agg_petals(&all_paths, |id| id.as_str());
+            let mut sorted: Vec<(&str, Vec<crate::db::StitchPetal<Ident<Canonical>>>)> =
+                petals_by_agg.into_iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(b.0));
+            let (stitched, truncated_aggs) =
+                crate::db::stitch_cross_agg_petals(sorted, crate::db::cross_agg_loop_budget());
+            (stitched, !truncated_aggs.is_empty())
+        };
+        // Append each stitched cycle as a new path, deduped against the already-
+        // discovered paths (and each other) by canonical-rotation of the node
+        // names -- the same dedup notion `seen_sets` uses above, so a stitched
+        // loop never duplicates an elementary one.
+        let mut seen_strs: HashSet<Vec<String>> = all_paths
+            .iter()
+            .map(|p| {
+                crate::ltm::canonical_rotation(
+                    &p.iter().map(|n| n.as_str().to_string()).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        for seq in stitched {
+            let key = crate::ltm::canonical_rotation(
+                &seq.iter()
+                    .map(|n| n.as_str().to_string())
+                    .collect::<Vec<_>>(),
+            );
+            if seen_strs.insert(key) {
+                all_paths.push(seq);
+            }
+        }
+        was_truncated
+    };
 
     // Convert paths to FoundLoop objects with scores
     let mut found_loops: Vec<FoundLoop> = Vec::new();
@@ -2415,6 +2479,7 @@ pub fn discover_loops_with_graph(
         loops: found_loops,
         partitions: partition_meta,
         truncated,
+        agg_recovery_truncated,
     })
 }
 
@@ -5463,5 +5528,276 @@ mod tests {
             vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]],
             "the cycle must still be discovered when the deadline check fires but has not passed"
         );
+    }
+
+    /// Compile an arrayed reducer-in-feedback model with LTM discovery enabled,
+    /// simulate it, and run the full discovery pipeline (the same wiring
+    /// `analysis::analyze_model` uses). Returns the `DiscoveryResult`.
+    ///
+    /// `growth[r] = SUM(pop[*]) * 0.05` over `elems`: one scalar synthetic agg,
+    /// one petal per element, so the cross-agg recovery (GH #696) is exercised.
+    fn discover_reducer_feedback(elems: &[&str]) -> DiscoveryResult {
+        use crate::datamodel::{self, Equation, Variable};
+        use salsa::Setter;
+
+        let project = datamodel::Project {
+            name: "reducer_feedback".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 5.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![datamodel::Dimension::named(
+                "Region".to_string(),
+                elems.iter().map(|s| s.to_string()).collect(),
+            )],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    Variable::Stock(datamodel::Stock {
+                        ident: "pop".to_string(),
+                        equation: Equation::Arrayed(
+                            vec!["Region".to_string()],
+                            elems
+                                .iter()
+                                .enumerate()
+                                .map(|(i, e)| {
+                                    let init = (1000.0 / 3f64.powi(i as i32)).round();
+                                    (e.to_string(), format!("{init}"), None, None)
+                                })
+                                .collect(),
+                            None,
+                            false,
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        inflows: vec!["growth".to_string()],
+                        outflows: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    Variable::Flow(datamodel::Flow {
+                        ident: "growth".to_string(),
+                        equation: Equation::ApplyToAll(
+                            vec!["Region".to_string()],
+                            "SUM(pop[*]) * 0.05".to_string(),
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+        let sp = sync.project;
+        sp.set_ltm_enabled(&mut db).to(true);
+        sp.set_ltm_discovery_mode(&mut db).to(true);
+        let source_model = *sp.models(&db).get("main").unwrap();
+
+        let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+        let mut vm = crate::vm::Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+
+        let element_edges = crate::db::model_element_causal_edges(&db, source_model, sp);
+        let causal_graph = crate::db::causal_graph_from_element_edges(element_edges);
+        let stocks: Vec<Ident<Canonical>> = element_edges
+            .stocks
+            .iter()
+            .map(|s| Ident::new(s.as_str()))
+            .collect();
+        let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
+        let dm_dims = crate::db::project_datamodel_dims(&db, sp);
+
+        discover_loops_with_graph(&results, &causal_graph, &stocks, &ltm.vars, dm_dims, None)
+            .unwrap()
+    }
+
+    /// GH #696: discovery stitches the per-element petals into cross-element
+    /// loops. On the 3-element reducer-in-feedback model it recovers all 7
+    /// (3 single-petal + 3 pair + 1 triple), and the flag is not raised when
+    /// well under budget.
+    #[test]
+    fn discovery_recovers_cross_agg_loops_end_to_end() {
+        let result = discover_reducer_feedback(&["a", "b", "c"]);
+        assert_eq!(
+            result.loops.len(),
+            7,
+            "discovery must recover 3 single + 3 pair + 1 triple loops; got {:?}",
+            result
+                .loops
+                .iter()
+                .map(|l| l
+                    .loop_info
+                    .links
+                    .iter()
+                    .map(|k| k.from.as_str())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !result.agg_recovery_truncated,
+            "a 3-petal model is well under the production budget"
+        );
+        // Loops of three distinct sizes appear (single-petal, pair, triple).
+        let sizes: HashSet<usize> = result
+            .loops
+            .iter()
+            .map(|l| l.loop_info.links.len())
+            .collect();
+        assert!(
+            sizes.contains(&2) && sizes.contains(&4) && sizes.contains(&6),
+            "expected loop link-counts 2/4/6; got {sizes:?}"
+        );
+    }
+
+    /// The cross-agg loop-count budget clips discovery's recovery and raises
+    /// `agg_recovery_truncated`, using a test-only override so a tiny fixture
+    /// trips it (per docs/dev/rust.md#test-time-budgets).
+    #[test]
+    fn discovery_cross_agg_recovery_respects_budget() {
+        // Budget of 1 lets at most one stitched cross-agg loop through; the
+        // 3 single-petal elementary loops are emitted by the DFS regardless
+        // (they are not stitched), so we expect 3 petals + 1 stitched = 4.
+        let _guard = crate::db::AggLoopBudgetGuard::new(1);
+        let result = discover_reducer_feedback(&["a", "b", "c"]);
+        assert!(
+            result.agg_recovery_truncated,
+            "a budget of 1 must clip the 4 stitched loops and flag truncation"
+        );
+        // The single petals always survive (3); only one stitched loop fit.
+        assert_eq!(
+            result.loops.len(),
+            4,
+            "3 elementary petals + 1 budgeted stitched loop; got {}",
+            result.loops.len()
+        );
+    }
+
+    /// A model with no hoisted reducer (plain logistic-style feedback) is
+    /// unaffected by the petal stitcher: no agg nodes means no petals, so the
+    /// discovered loop set and the truncation flag are exactly as before.
+    #[test]
+    fn discovery_no_agg_model_unaffected_by_stitching() {
+        use crate::datamodel::{self, Equation, Variable};
+        use salsa::Setter;
+
+        let project = datamodel::Project {
+            name: "no_agg".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 5.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    Variable::Stock(datamodel::Stock {
+                        ident: "population".to_string(),
+                        equation: Equation::Scalar("100".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        inflows: vec!["births".to_string()],
+                        outflows: vec!["deaths".to_string()],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    Variable::Flow(datamodel::Flow {
+                        ident: "births".to_string(),
+                        equation: Equation::Scalar("population * 0.1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    Variable::Flow(datamodel::Flow {
+                        ident: "deaths".to_string(),
+                        equation: Equation::Scalar("population * population * 0.0001".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+        let sp = sync.project;
+        sp.set_ltm_enabled(&mut db).to(true);
+        sp.set_ltm_discovery_mode(&mut db).to(true);
+        let source_model = *sp.models(&db).get("main").unwrap();
+        let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+        let mut vm = crate::vm::Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+        let element_edges = crate::db::model_element_causal_edges(&db, source_model, sp);
+        let causal_graph = crate::db::causal_graph_from_element_edges(element_edges);
+        let stocks: Vec<Ident<Canonical>> = element_edges
+            .stocks
+            .iter()
+            .map(|s| Ident::new(s.as_str()))
+            .collect();
+        let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
+        let dm_dims = crate::db::project_datamodel_dims(&db, sp);
+        let result =
+            discover_loops_with_graph(&results, &causal_graph, &stocks, &ltm.vars, dm_dims, None)
+                .unwrap();
+
+        assert!(
+            !result.agg_recovery_truncated,
+            "a no-agg model must never flag agg-recovery truncation"
+        );
+        // Two feedback loops (reinforcing births, balancing deaths), no agg.
+        assert_eq!(
+            result.loops.len(),
+            2,
+            "the no-agg model has exactly two loops"
+        );
+        for l in &result.loops {
+            assert!(
+                l.loop_info
+                    .links
+                    .iter()
+                    .all(|k| !k.from.as_str().contains("\u{205A}agg\u{205A}")),
+                "no synthetic agg can appear in a no-agg model's loops"
+            );
+        }
     }
 }

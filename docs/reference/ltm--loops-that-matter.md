@@ -1915,10 +1915,13 @@ variable. Its link scores use a delta-ratio approximation rather than an analyti
 
 A feedback loop that runs through an inlined reducer and visits several distinct array
 elements (a "cross-element through-aggregate" loop) is reconstructed from the loop's pieces
-rather than enumerated directly. For a reducer in a feedback loop over a *very large*
-dimension, the number of such reconstructed loops is capped, so the reported cross-element
-loop list may be incomplete. When this happens, a warning is emitted naming the affected
-reducer.
+rather than enumerated directly, in **both** exhaustive and discovery mode -- the two share
+the same reconstruction, so discovery no longer silently drops these loops the way it did
+before this was fixed. For a reducer in a feedback loop over a *very large* dimension, the
+number of such reconstructed loops is capped, so the reported cross-element loop list may be
+incomplete. When this happens, exhaustive mode emits a warning naming the affected reducer;
+discovery (which reconstructs after simulation, where there is no diagnostic channel) instead
+sets a "recovery truncated" flag on its result.
 
 ---
 

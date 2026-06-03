@@ -1248,10 +1248,12 @@ synthetic agg node (`… → from[<row>] → $⁚ltm⁚agg⁚{n}[<slot>] → to[
 the agg is trimmed from the *reported* node sequence but its two link-score
 halves are factored into the loop score (see "Aggregate Nodes").
 
-**Cross-agg loop recovery** (#515). A cross-element feedback loop *through* an
-inlined reducer visits the (subscript-free, or for an arrayed agg
-`[<slot>]`-subscripted) agg node more than once, so Johnson never emits it
-directly. `recover_cross_agg_loops` reconstructs it from the agg-touching
+**Cross-agg loop recovery** (#515 exhaustive, #696 discovery). A cross-element
+feedback loop *through* an inlined reducer visits the (subscript-free, or for an
+arrayed agg `[<slot>]`-subscripted) agg node more than once, so neither Johnson
+(exhaustive) nor the strongest-path DFS (discovery) emits it directly -- both
+enumerate only elementary circuits. The recovery is shared: the combinatorial
+core `stitch_cross_agg_petals` reconstructs the loop from the agg-touching
 elementary "petals" (`agg → … → agg`), stitching pairwise-disjoint petal
 subsets of size ≥ 2 in every distinct *cyclic ordering*: `cyclic_orderings(m)`
 pins index 0 to kill rotations and skips mirror reversals (`1` for m = 2,
@@ -1262,11 +1264,20 @@ by a deterministic petal priority (fewest internal nodes first, then a stable
 joined-name tiebreaker -- makes truncation reproducible), a soft per-agg petal
 cap (`MAX_AGG_PETALS = 8`, bounding the `2^k` subset enumeration), and a
 model-wide loop-count budget (`MAX_CROSS_AGG_LOOPS = 256`, threaded as
-`agg_loop_budget`, `#[cfg(test)]`-overridable via `AggLoopBudgetGuard`).
-Clipping sets `LtmVariablesResult::agg_recovery_truncated` and accumulates a
-`Warning` (mirroring the auto-flip-to-discovery gate), naming the truncated
-aggs. `recover_agg_hop_polarities` then patches the (variable-graph-invisible,
-hence `Unknown`) agg hops for monotone reducers (GH #516).
+`agg_loop_budget` / `cross_agg_loop_budget()`, `#[cfg(test)]`-overridable via
+`AggLoopBudgetGuard`). The two modes differ only in how they feed the core and
+build the result: exhaustive's `recover_cross_agg_loops` extracts petals from
+Johnson's circuit strings (via `collect_agg_petals`) and turns each stitched
+sequence into a `Loop`, setting `LtmVariablesResult::agg_recovery_truncated` on
+clipping and accumulating a `Warning` (mirroring the auto-flip-to-discovery
+gate), naming the truncated aggs; discovery's `discover_loops_with_graph`
+extracts petals from the discovered element paths, appends the stitched
+sequences back into `all_paths` (so they flow through the identical FoundLoop /
+score / trim / rank pipeline), and sets `DiscoveryResult::agg_recovery_truncated`
+(post-simulation, so a flag rather than a salsa `Warning`).
+`recover_agg_hop_polarities` then patches the (variable-graph-invisible, hence
+`Unknown`) agg hops for monotone reducers in the exhaustive path (GH #516);
+discovery derives polarity from the runtime score series directly.
 
 ### Discovery Mode
 
@@ -1293,15 +1304,32 @@ When `ltm_discovery_mode = true`, element-level discovery proceeds as:
    reducers through their `$⁚ltm⁚agg⁚{n}` nodes) serve as DFS starting points.
 4. Each discovered path becomes its own `FoundLoop`; the synthetic agg nodes
    are trimmed from its node sequence by `trim_synthetic_aggs_from_loop_links`.
-   Discovery does NOT flow through `build_element_level_loops`, and in
-   particular `recover_cross_agg_loops` never runs: a cross-element loop
-   through an inlined reducer visits the agg node more than once, so it is
-   non-elementary in the element graph and the discovery DFS (whose
-   `visiting` set forbids any node revisit) is structurally unable to find
-   it. Discovery therefore silently drops ALL cross-element reducer loops --
-   only the single-petal (elementary) loops through an agg survive. Tracked
-   as GH #696; the bite is worst exactly when a reducer-in-feedback model
-   over a large dimension auto-flips to discovery.
+   The discovery DFS only emits *elementary* element-graph circuits, so a
+   cross-element loop through an inlined reducer -- which visits the agg node
+   more than once and is therefore non-elementary (the `visiting` set forbids
+   any node revisit) -- is structurally unreachable by the search. Discovery
+   recovers these by stitching, exactly as exhaustive mode does (GH #696):
+   after the per-step sweep, `discover_loops_with_graph` treats each discovered
+   single-agg path as a *petal* and feeds them to the SHARED combinatorial core
+   `stitch_cross_agg_petals` (`src/db/ltm/loops.rs`) -- the same petal priority,
+   pairwise-disjoint-internal-node rule, `MAX_AGG_PETALS` / `cyclic_orderings`
+   enumeration, and `cross_agg_loop_budget()` that `recover_cross_agg_loops`
+   uses, so discovery recovers exactly the loops exhaustive does. The stitched
+   element-level node sequences are appended to `all_paths` (deduped by
+   canonical rotation against the elementary ones) and flow through the
+   identical FoundLoop construction / score-product / trim / rank pipeline; a
+   stitched loop's edge multiset is the union of its petals' disjoint edges, so
+   its per-step loop score is the product of the petals' link scores --
+   identical to how any discovered loop is scored. When the loop-count budget
+   clips recovery, `DiscoveryResult::agg_recovery_truncated` is set (the
+   discovery-mode analogue of `LtmVariablesResult::agg_recovery_truncated`),
+   surfaced through `analysis::ModelAnalysis::agg_recovery_truncated`. Because
+   the recovery is post-simulation there is no salsa diagnostic accumulator to
+   emit a `Warning` into, so the flag is the signal. (The shared core is narrow
+   in the same way exhaustive's is: a petal is a circuit touching exactly one
+   agg once, so a single discovered path that already visits two distinct aggs
+   is a complete loop, not a petal -- it is emitted by the DFS directly when it
+   happens to be elementary.)
 
 ### Per-Slot Loop Score Equations
 

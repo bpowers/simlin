@@ -52,6 +52,12 @@ pub struct ModelAnalysis {
     /// True when loop discovery hit its time budget before finishing, so the
     /// loop fields may be partial. See `discover_loops_with_graph`'s budget.
     pub truncated: bool,
+    /// True when discovery's cross-element-through-aggregate loop recovery
+    /// (GH #696) hit its loop-count budget, so some cross-agg reducer loops are
+    /// absent from `loop_dominance`. Distinct from `truncated` (which is the
+    /// wall-clock time budget); this is the structural-completeness signal that
+    /// mirrors exhaustive mode's `LtmVariablesResult::agg_recovery_truncated`.
+    pub agg_recovery_truncated: bool,
 }
 
 /// Build a `json::Model` from the named model in a `datamodel::Project`, with
@@ -127,6 +133,7 @@ pub fn analyze_model(
             partitions: result.partitions,
             dominant_loops_by_period: result.dominant_loops_by_period,
             truncated: result.truncated,
+            agg_recovery_truncated: result.agg_recovery_truncated,
         }),
         None => Ok(ModelAnalysis {
             model: json_model,
@@ -135,6 +142,7 @@ pub fn analyze_model(
             partitions: vec![],
             dominant_loops_by_period: vec![],
             truncated: false,
+            agg_recovery_truncated: false,
         }),
     }
 }
@@ -150,6 +158,7 @@ struct PipelineResult {
     partitions: Vec<crate::ltm_finding::DiscoveredPartition>,
     dominant_loops_by_period: Vec<DominantPeriod>,
     truncated: bool,
+    agg_recovery_truncated: bool,
 }
 
 /// Run the full LTM discovery pipeline.  Returns `None` on any failure.
@@ -225,6 +234,7 @@ fn run_ltm_pipeline(
     let found_loops = discovery.loops;
     let partitions = discovery.partitions;
     let truncated = discovery.truncated;
+    let agg_recovery_truncated = discovery.agg_recovery_truncated;
 
     let time = build_time_array(&results);
 
@@ -247,6 +257,7 @@ fn run_ltm_pipeline(
         partitions,
         dominant_loops_by_period,
         truncated,
+        agg_recovery_truncated,
     })
 }
 

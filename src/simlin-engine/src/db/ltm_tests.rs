@@ -604,3 +604,134 @@ fn cyclic_orderings_enumerates_distinct_rotation_and_mirror_classes() {
         }
     }
 }
+
+/// Build a `StitchPetal<&str>` from `[agg, x1, ..., xm]`.
+fn petal<'a>(nodes: &[&'a str]) -> super::StitchPetal<&'a str> {
+    super::StitchPetal {
+        nodes: nodes.to_vec(),
+        internal: nodes[1..].iter().copied().collect(),
+    }
+}
+
+/// The mode-agnostic petal stitcher (`stitch_cross_agg_petals`, GH #515/#696)
+/// enumerates exactly the disjoint-petal cross-agg loops: for one agg with
+/// `k` pairwise-disjoint petals it emits `Σ_{m=2}^{k} C(k,m)·orderings(m)`
+/// stitched sequences -- the single petals themselves are NOT in the output
+/// (they are already elementary loops the enumerator emits directly).
+#[test]
+fn stitch_cross_agg_petals_enumerates_disjoint_subsets() {
+    // One agg "a" with three disjoint petals (each through its own internals).
+    let petals = vec![(
+        "a",
+        vec![
+            petal(&["a", "p1"]),
+            petal(&["a", "p2"]),
+            petal(&["a", "p3"]),
+        ],
+    )];
+    let (stitched, truncated) = super::stitch_cross_agg_petals(petals, 1024);
+    assert!(truncated.is_empty(), "well under budget");
+    // 3 disjoint pairs (each 1 ordering) + 1 triple ((3-1)!/2 = 1 ordering) = 4.
+    assert_eq!(stitched.len(), 4, "got {stitched:?}");
+    // Each stitched sequence starts at the agg and contains it once per petal.
+    for seq in &stitched {
+        assert_eq!(seq[0], "a");
+        let agg_count = seq.iter().filter(|n| **n == "a").count();
+        let petal_count = seq.len() / 2; // each petal contributes [a, p_i]
+        assert_eq!(agg_count, petal_count, "one agg per petal: {seq:?}");
+    }
+    // Exactly one triple (length 6: a,p?,a,p?,a,p?).
+    assert_eq!(
+        stitched.iter().filter(|s| s.len() == 6).count(),
+        1,
+        "one full-triple loop"
+    );
+    // Three pairs (length 4).
+    assert_eq!(stitched.iter().filter(|s| s.len() == 4).count(), 3);
+}
+
+/// Petals that overlap on an internal node are never stitched together (they
+/// would visit the same node twice, which is not a valid simple-through-agg
+/// loop). With two overlapping petals there are zero cross-agg loops.
+#[test]
+fn stitch_cross_agg_petals_skips_overlapping_petals() {
+    // Both petals share internal node "x".
+    let petals = vec![("a", vec![petal(&["a", "x", "y"]), petal(&["a", "x", "z"])])];
+    let (stitched, truncated) = super::stitch_cross_agg_petals(petals, 1024);
+    assert!(
+        stitched.is_empty(),
+        "overlapping petals yield no loop: {stitched:?}"
+    );
+    assert!(truncated.is_empty());
+}
+
+/// The loop-count budget clips enumeration deterministically and flags the
+/// truncated agg(s). With a budget of 2 over a 3-disjoint-petal agg (which
+/// would otherwise yield 4 loops), only the first 2 are emitted and the agg
+/// is reported truncated.
+#[test]
+fn stitch_cross_agg_petals_respects_budget() {
+    let petals = vec![(
+        "a",
+        vec![
+            petal(&["a", "p1"]),
+            petal(&["a", "p2"]),
+            petal(&["a", "p3"]),
+        ],
+    )];
+    let (stitched, truncated) = super::stitch_cross_agg_petals(petals, 2);
+    assert_eq!(stitched.len(), 2, "budget of 2 stops after 2 loops");
+    assert_eq!(
+        truncated,
+        vec!["a"],
+        "the clipped agg is reported truncated"
+    );
+}
+
+/// When the budget fires partway through one agg, every *later* agg (sorted
+/// after it) that had >= 2 petals is also reported truncated -- it never got
+/// to run. An earlier-sorted agg's loops are emitted first.
+#[test]
+fn stitch_cross_agg_petals_budget_flags_later_aggs() {
+    // Two aggs, each with two disjoint petals (1 pair loop each). A budget of 1
+    // emits agg "a"'s single loop, then fires; agg "z" never runs.
+    let petals = vec![
+        ("a", vec![petal(&["a", "p1"]), petal(&["a", "p2"])]),
+        ("z", vec![petal(&["z", "q1"]), petal(&["z", "q2"])]),
+    ];
+    let (stitched, truncated) = super::stitch_cross_agg_petals(petals, 1);
+    assert_eq!(stitched.len(), 1);
+    assert_eq!(
+        truncated,
+        vec!["a", "z"],
+        "both the clipped agg and the un-reached later agg are truncated"
+    );
+}
+
+/// `collect_agg_petals` extracts a petal only from a circuit touching exactly
+/// one synthetic agg node, rotates it to start at the agg, and dedups
+/// rotations of the same simple cycle on the internal set.
+#[test]
+fn collect_agg_petals_groups_single_agg_circuits() {
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let circuits: Vec<Vec<&str>> = vec![
+        // Single-agg petal: pop[a] -> agg -> growth[a] -> (back to pop[a]).
+        vec!["pop[a]", agg, "growth[a]"],
+        // A rotation of the same petal -- must dedup.
+        vec![agg, "growth[a]", "pop[a]"],
+        // A different element's petal.
+        vec!["pop[b]", agg, "growth[b]"],
+        // A circuit with no agg -- ignored.
+        vec!["x", "y"],
+    ];
+    let map = super::collect_agg_petals(&circuits, |n| n);
+    let petals = map.get(agg).expect("agg group present");
+    assert_eq!(
+        petals.len(),
+        2,
+        "two distinct petals (the rotation deduped)"
+    );
+    for p in petals {
+        assert_eq!(p.nodes[0], agg, "petal rotated to start at the agg");
+    }
+}

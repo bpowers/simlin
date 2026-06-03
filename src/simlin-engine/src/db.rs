@@ -108,6 +108,17 @@ pub use ltm::{
     model_ltm_implicit_module_refs, model_ltm_implicit_var_info, model_ltm_mode,
     model_ltm_var_name_index, model_ltm_variables,
 };
+// The cross-agg petal-stitching core, shared with `crate::ltm_finding`'s
+// discovery-mode recovery (GH #696).
+pub(crate) use ltm::{
+    StitchPetal, collect_agg_petals, cross_agg_loop_budget, stitch_cross_agg_petals,
+};
+// Test-only: the cross-agg loop-count budget override, so `ltm_finding`'s
+// discovery-mode truncation test can trip the budget with a tiny fixture
+// (per docs/dev/rust.md#test-time-budgets) instead of building one large
+// enough to hit the production constant.
+#[cfg(test)]
+pub(crate) use ltm::AggLoopBudgetGuard;
 
 mod analysis;
 pub use analysis::RefShape;

@@ -9184,6 +9184,259 @@ fn test_four_petal_cyclic_orderings_share_loop_score_series() {
     }
 }
 
+/// Build the canonical reducer-in-feedback repro for GH #696:
+/// `growth[r] = SUM(pop[*]) * 0.05` over `n` elements, each `growth[r]` an
+/// inflow to `pop[r]`. The whole-extent `SUM(pop[*])` is hoisted into one
+/// scalar synthetic agg, and every element forms a single petal
+/// (`pop[e] -> agg -> growth[e] -> pop[e]`). Heterogeneous initials keep the
+/// per-element link scores distinct so loops don't degenerate to zero.
+fn build_reducer_feedback_model(name: &str, elems: &[&str]) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+    datamodel::Project {
+        name: name.to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 6.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            elems.iter().map(|s| s.to_string()).collect(),
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        elems
+                            .iter()
+                            .enumerate()
+                            .map(|(i, e)| {
+                                // 1000, 300, 100, ... -- distinct per element.
+                                let init = (1000.0 / 3f64.powi(i as i32)).round();
+                                (e.to_string(), format!("{init}"), None, None)
+                            })
+                            .collect(),
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["growth".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "growth".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "SUM(pop[*]) * 0.05".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// GH #696: discovery mode must recover the cross-element loops that traverse a
+/// hoisted reducer more than once -- not just the single-petal loops.
+///
+/// On the 3-element `growth[r] = SUM(pop[*]) * 0.05` repro, exhaustive mode
+/// emits 7 cross-element loops (3 single-petal + 3 disjoint-pair + 1 triple).
+/// Before the fix, discovery (the production `analyze_model` path) returned
+/// only the 3 single-petal loops because its DFS `visiting` set forbids
+/// revisiting the synthetic agg node. This cross-validates the discovered loop
+/// set against exhaustive on the SAME model: same count, and -- for the
+/// loops that traverse the agg -- a per-element loop-score series equal to the
+/// exhaustive loop_score variables (to within FP reassociation).
+#[test]
+fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
+    let elems = ["a", "b", "c"];
+    let project = build_reducer_feedback_model("reducer_feedback_3", &elems);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // --- Exhaustive mode: enumerate the cross-element loop_score variables ---
+    // and their simulated series. Every loop here traverses the (scalar) agg.
+    let (exhaustive_loop_count, exhaustive_score_set) = {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let source_model = sync.models["main"].source_model;
+        let ltm = model_ltm_variables(&db, source_model, sync.project);
+        let loop_vars: Vec<&simlin_engine::db::LtmSyntheticVar> = ltm
+            .vars
+            .iter()
+            .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+            .collect();
+        assert_eq!(
+            loop_vars.len(),
+            7,
+            "exhaustive must emit 3 single-petal + 3 disjoint-pair + 1 triple = 7 \
+             cross-element loops through the reducer; got {:?}",
+            loop_vars
+                .iter()
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main").expect("exhaustive compile");
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().expect("exhaustive simulate");
+        let results = vm.into_results();
+        // Capture each loop's |score| series as a roundable fingerprint so we
+        // can match discovery's stitched loops against exhaustive's by value
+        // (the two enumerate the same loops but assign different ids).
+        let mut set: std::collections::HashSet<Vec<i64>> = std::collections::HashSet::new();
+        for v in &loop_vars {
+            let off = *results
+                .offsets
+                .get(&Ident::<Canonical>::new(&v.name))
+                .expect("exhaustive loop_score offset");
+            let fingerprint: Vec<i64> = (0..results.step_count)
+                .map(|step| {
+                    let x = results.data[step * results.step_size + off];
+                    if x.is_finite() {
+                        (x.abs() * 1e9).round() as i64
+                    } else {
+                        i64::MIN
+                    }
+                })
+                .collect();
+            set.insert(fingerprint);
+        }
+        (loop_vars.len(), set)
+    };
+
+    // --- Discovery mode through the PRODUCTION analyze_model path ---
+    let (mut db, sp) = {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        (db, sync.project)
+    };
+    let analysis = simlin_engine::analysis::analyze_model(&project, &mut db, sp, "main", None)
+        .expect("analyze_model");
+
+    // Every discovered loop traverses the reducer (the only feedback in this
+    // model runs pop -> agg -> growth -> pop), so the discovered count must
+    // equal the exhaustive cross-element loop count.
+    assert_eq!(
+        analysis.loop_dominance.len(),
+        exhaustive_loop_count,
+        "discovery must recover all {exhaustive_loop_count} cross-element reducer loops; \
+         got {} loops: {:?}. GH #696.",
+        analysis.loop_dominance.len(),
+        analysis
+            .loop_dominance
+            .iter()
+            .map(|l| &l.variables)
+            .collect::<Vec<_>>()
+    );
+
+    // The reported loops never surface the synthetic agg node.
+    for l in &analysis.loop_dominance {
+        assert!(
+            l.variables
+                .iter()
+                .all(|v| !v.contains("\u{205A}agg\u{205A}")),
+            "discovery must trim the synthetic agg from reported loops; got {:?}",
+            l.variables
+        );
+    }
+
+    // There must be loops of three distinct sizes: single-petal (2 vars),
+    // disjoint-pair (4 vars), and triple (6 vars) -- the structural signature
+    // of cross-agg recovery, not just single petals.
+    let sizes: std::collections::HashSet<usize> = analysis
+        .loop_dominance
+        .iter()
+        .map(|l| l.variables.len())
+        .collect();
+    assert!(
+        sizes.contains(&2) && sizes.contains(&4) && sizes.contains(&6),
+        "discovery must recover single-petal (2), pair (4), and triple (6) loops; got sizes {sizes:?}. GH #696."
+    );
+
+    // Cross-validate the score series. Discovery's `importance` is normalized,
+    // so instead re-derive each discovered loop's raw |loop score| series from
+    // its variables and confirm the fingerprint set matches exhaustive's. Use
+    // discovery's own raw loop score: re-run discovery with the helper that
+    // exposes raw FoundLoop scores.
+    let raw = {
+        let mut db2 = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db2, &project, None);
+        set_project_ltm_enabled(&mut db2, sync.project, true);
+        set_project_ltm_discovery_mode(&mut db2, sync.project, true);
+        let source_model = sync.models["main"].source_model;
+        let compiled = compile_project_incremental(&db2, sync.project, "main").unwrap();
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+        let element_edges = model_element_causal_edges(&db2, source_model, sync.project);
+        // This model has no modules, so the bare element-edge graph suffices
+        // (the production analyze_model path uses the module-enriched
+        // constructor for GH #698, irrelevant here).
+        let causal_graph = causal_graph_from_element_edges(element_edges);
+        let stocks: Vec<Ident<Canonical>> = element_edges
+            .stocks
+            .iter()
+            .map(|s| Ident::new(s.as_str()))
+            .collect();
+        let ltm = model_ltm_variables(&db2, source_model, sync.project);
+        let dm_dims = project_datamodel_dims(&db2, sync.project);
+        ltm_finding::discover_loops_with_graph(
+            &results,
+            &causal_graph,
+            &stocks,
+            &ltm.vars,
+            dm_dims,
+            None,
+        )
+        .expect("discovery")
+    };
+    let mut discovery_score_set: std::collections::HashSet<Vec<i64>> =
+        std::collections::HashSet::new();
+    for fl in &raw.loops {
+        let fingerprint: Vec<i64> = fl
+            .scores
+            .iter()
+            .map(|(_, x)| {
+                if x.is_finite() {
+                    (x.abs() * 1e9).round() as i64
+                } else {
+                    i64::MIN
+                }
+            })
+            .collect();
+        discovery_score_set.insert(fingerprint);
+    }
+    assert_eq!(
+        discovery_score_set, exhaustive_score_set,
+        "discovery's recovered loop-score series must match exhaustive's set (GH #696); \
+         agg={agg}"
+    );
+}
+
 /// Enabling LTM must not change (or break) the model's own simulation:
 /// C-LEARN compiled with `ltm_enabled` + discovery mode (the production
 /// `analyze_model` configuration) must produce the SAME values for every
