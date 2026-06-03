@@ -401,6 +401,187 @@ fn test_link_polarity_detection() {
     assert_eq!(polarity, LinkPolarity::Negative);
 }
 
+/// The product rule makes `d(f(x)*g(x))/dx = f'g + fg'` sign-indefinite
+/// whenever BOTH factors depend on `x`: the cross terms depend on the
+/// (unknown) runtime VALUES of `f` and `g`, not just the signs of their
+/// derivatives. The canonical victim is logistic growth,
+/// `flow = r*pop*(1 - pop/K)`, whose partial `r*(1 - 2*pop/K)` flips sign
+/// at K/2 -- the pre-fix sign-composition rule labeled it definitively
+/// Negative (and the loop Balancing at confidence 1.0).
+#[test]
+fn test_polarity_mul_both_operands_referencing_source_is_unknown() {
+    use crate::ast::{Ast, Expr2};
+    let loc = crate::ast::Loc::default();
+    let x_var: Ident<Canonical> = Ident::new("x");
+    let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), v, loc);
+    let op2 =
+        |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
+    let empty_vars = HashMap::new();
+
+    // z = x * (1 - x): d/dx = 1 - 2x, sign-indefinite.
+    let expr = op2(
+        BinaryOp::Mul,
+        var("x"),
+        op2(BinaryOp::Sub, cnst(1.0), var("x")),
+    );
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(expr), &x_var, &empty_vars),
+        LinkPolarity::Unknown,
+        "x * (1 - x) must be Unknown: the partial's sign flips at x = 1/2"
+    );
+
+    // z = x * x: d/dx = 2x. Both factors are bare variable references with
+    // AGREEING derivative signs, so the positive-value labeling convention
+    // applies (x > 0 by convention => 2x > 0): Positive. This is the
+    // quadratic-crowding idiom `pop * pop / capacity`.
+    let expr = op2(BinaryOp::Mul, var("x"), var("x"));
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(expr), &x_var, &empty_vars),
+        LinkPolarity::Positive,
+        "x * x is Positive under the positive-value convention (2x > 0 for x > 0)"
+    );
+}
+
+/// `d(n/y)/dy = -n/y^2`: the denominator-flip rule is only sound when the
+/// numerator's VALUE sign is known. A provably-negative numerator inverts
+/// the flip, and an unknown-sign numerator makes the link Unknown -- the
+/// pre-fix rule flipped unconditionally, labeling `-5/y` Negative when it
+/// is Positive.
+#[test]
+fn test_polarity_div_numerator_value_sign_guards_denominator_flip() {
+    use crate::ast::{Ast, Expr2};
+    let loc = crate::ast::Loc::default();
+    let y_var: Ident<Canonical> = Ident::new("y");
+    let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), v, loc);
+    let op2 =
+        |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
+    let empty_vars = HashMap::new();
+
+    // z = 5 / y: d/dy = -5/y^2 < 0 -> Negative.
+    let expr = op2(BinaryOp::Div, cnst(5.0), var("y"));
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(expr), &y_var, &empty_vars),
+        LinkPolarity::Negative,
+    );
+
+    // z = -5 / y: d/dy = 5/y^2 > 0 -> Positive (pre-fix: wrongly Negative).
+    let expr = op2(BinaryOp::Div, cnst(-5.0), var("y"));
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(expr), &y_var, &empty_vars),
+        LinkPolarity::Positive,
+        "-5 / y must be Positive: d/dy = 5/y^2 > 0"
+    );
+
+    // z = n / y with n a non-constant variable: the positive-value labeling
+    // CONVENTION applies (see the Div arm's comment) -- the conventional
+    // denominator flip, matching how `share = pop / total` reads on an SD
+    // diagram even though `pop > 0` is not provable.
+    let expr = op2(BinaryOp::Div, var("n"), var("y"));
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(expr), &y_var, &empty_vars),
+        LinkPolarity::Negative,
+        "n / y keeps the conventional denominator flip for a non-constant numerator"
+    );
+}
+
+/// `d(f(x)/y)/dx = f'(x)/y`: passing the numerator's polarity through is
+/// only sound when the denominator's VALUE sign is known. The pre-fix rule
+/// passed it through unconditionally, labeling `x / -5` Positive when it is
+/// Negative.
+#[test]
+fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
+    use crate::ast::{Ast, Expr2};
+    let loc = crate::ast::Loc::default();
+    let x_var: Ident<Canonical> = Ident::new("x");
+    let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), v, loc);
+    let op2 =
+        |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
+    let empty_vars = HashMap::new();
+
+    // z = x / 5 -> Positive.
+    let expr = op2(BinaryOp::Div, var("x"), cnst(5.0));
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(expr), &x_var, &empty_vars),
+        LinkPolarity::Positive,
+    );
+
+    // z = x / -5 -> Negative (pre-fix: wrongly Positive).
+    let expr = op2(BinaryOp::Div, var("x"), cnst(-5.0));
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(expr), &x_var, &empty_vars),
+        LinkPolarity::Negative,
+        "x / -5 must be Negative: d/dx = 1/-5 < 0"
+    );
+
+    // z = x / d with d a non-constant variable: the positive-value labeling
+    // CONVENTION applies (see the Div arm's comment) -- the conventional
+    // pass-through, matching how `gap / adjustment_time` reads on an SD
+    // diagram even when the divisor is computed rather than a constant.
+    let expr = op2(BinaryOp::Div, var("x"), var("d"));
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(expr), &x_var, &empty_vars),
+        LinkPolarity::Positive,
+        "x / d keeps the conventional pass-through for a non-constant denominator"
+    );
+
+    // z = x / ttc where ttc is a positive-constant VARIABLE (the dominant SD
+    // idiom: dividing by a named positive parameter) must stay Positive.
+    let ttc: Ident<Canonical> = Ident::new("ttc");
+    let ttc_variable = crate::variable::Variable::Var {
+        ident: ttc.clone(),
+        ast: Some(Ast::Scalar(cnst(5.0))),
+        init_ast: None,
+        eqn: Some(crate::datamodel::Equation::Scalar("5".to_string())),
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let mut vars = HashMap::new();
+    vars.insert(ttc.clone(), ttc_variable);
+    let expr = op2(BinaryOp::Div, var("x"), var("ttc"));
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(expr), &x_var, &vars),
+        LinkPolarity::Positive,
+        "dividing by a positive-constant parameter variable must stay Positive"
+    );
+}
+
+/// The quotient rule `d(f(x)/g(x))/dx = (f'g - fg')/g^2` is sign-indefinite
+/// when both sides depend on `x` (the terms' signs depend on runtime values
+/// of f and g). The pre-fix code returned the numerator's polarity when the
+/// two sides' polarities were mirror images (e.g. `exp(x) / (1 - x)`, whose
+/// true partial `e^x (2 - x) / (1-x)^2` flips sign at x = 2).
+#[test]
+fn test_polarity_div_both_sides_referencing_source_is_unknown() {
+    use crate::ast::{Ast, Expr2};
+    use crate::builtins::BuiltinFn;
+    let loc = crate::ast::Loc::default();
+    let x_var: Ident<Canonical> = Ident::new("x");
+    let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), v, loc);
+    let op2 =
+        |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
+    let empty_vars = HashMap::new();
+
+    let expr = op2(
+        BinaryOp::Div,
+        Expr2::App(BuiltinFn::Exp(Box::new(var("x"))), None, loc),
+        op2(BinaryOp::Sub, cnst(1.0), var("x")),
+    );
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(expr), &x_var, &empty_vars),
+        LinkPolarity::Unknown,
+        "exp(x) / (1 - x) must be Unknown: the quotient-rule sign flips at x = 2"
+    );
+}
+
 #[test]
 fn test_format_path_empty_loop() {
     // Test format_path() with empty links (covers line 44)
@@ -1164,10 +1345,14 @@ fn test_graphical_function_polarity_tolerates_import_noise() {
 fn test_lookup_table_polarity_in_links() {
     use crate::datamodel;
 
-    // Create a model with a lookup table
+    // Create a model with a lookup table. The flow scales the lookup result
+    // by a positive CONSTANT (not by `water` itself): with `water` appearing
+    // in both factors of a product, the partial `L(w) + w*L'(w)` is
+    // sign-indefinite without value reasoning, so the sound answer would be
+    // Unknown -- this test isolates the table-monotonicity propagation.
     let mut model_vars = vec![
         x_stock("water", "100", &[], &["outflow"], None),
-        x_flow("outflow", "water * lookup(lookup, water)", None),
+        x_flow("outflow", "0.5 * lookup(lookup, water)", None),
     ];
 
     // Create the lookup table auxiliary

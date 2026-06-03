@@ -1510,7 +1510,7 @@ fn loop_score_equation_uses_element_level_from_for_per_element_links() {
     let mut emitted = HashSet::new();
     emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop".to_string());
     emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}rel_pop\u{2192}pop".to_string());
-    let eq = generate_loop_score_equation(&loop_item, &emitted);
+    let eq = generate_loop_score_equation(&loop_item, &emitted, &Default::default());
 
     // Element-level from flows through Bare naming verbatim.
     assert!(
@@ -1627,7 +1627,7 @@ fn loop_score_equation_unsubscripted_to_unchanged() {
     emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births".to_string());
     emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}births\u{2192}pop".to_string());
 
-    let eq = generate_loop_score_equation(&loop_item, &emitted);
+    let eq = generate_loop_score_equation(&loop_item, &emitted, &Default::default());
     assert_eq!(
         eq,
         "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births\" * \
@@ -1710,7 +1710,7 @@ fn loop_score_equation_subscripts_a2a_fixed_index_link_at_visited_element() {
             .to_string(),
     );
 
-    let eq = generate_loop_score_equation(&loop_item, &emitted);
+    let eq = generate_loop_score_equation(&loop_item, &emitted, &Default::default());
     assert_eq!(
         eq,
         "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure\"[boston]",
@@ -1744,7 +1744,7 @@ fn loop_score_equation_strips_from_for_variable_level_a2a_link() {
     emitted
         .insert("$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population".to_string());
 
-    let eq = generate_loop_score_equation(&loop_item, &emitted);
+    let eq = generate_loop_score_equation(&loop_item, &emitted, &Default::default());
     assert_eq!(
         eq, "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population\"[nyc]",
         "variable-level-from A2A link score visited at 'nyc' must resolve via stripped-from \
@@ -1794,7 +1794,7 @@ fn loop_score_equation_cross_element_migration_loop_full() {
     emitted
         .insert("$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population".to_string());
 
-    let eq = generate_loop_score_equation(&loop_item, &emitted);
+    let eq = generate_loop_score_equation(&loop_item, &emitted, &Default::default());
     assert_eq!(
         eq,
         "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure\"[boston] * \
@@ -2779,7 +2779,12 @@ fn loop_score_variables_scalar_loop_yields_scalar_equation() {
     emitted.insert(ls_name("pop", "births"));
     emitted.insert(ls_name("births", "pop"));
 
-    let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &[]);
+    let vars = generate_loop_score_variables(
+        std::slice::from_ref(&loop_item),
+        &emitted,
+        &[],
+        &Default::default(),
+    );
     assert_eq!(vars.len(), 1);
     let (name, equation) = &vars[0];
     assert_eq!(name, "$\u{205A}ltm\u{205A}loop_score\u{205A}r1");
@@ -2822,7 +2827,12 @@ fn loop_score_variables_a2a_without_slot_links_yields_apply_to_all() {
     emitted.insert(ls_name("births", "pop"));
     let dims = vec![dm_named_dimension("region", &["nyc", "boston"])];
 
-    let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &dims);
+    let vars = generate_loop_score_variables(
+        std::slice::from_ref(&loop_item),
+        &emitted,
+        &dims,
+        &Default::default(),
+    );
     assert_eq!(vars.len(), 1);
     let (_, equation) = &vars[0];
     match equation {
@@ -2890,7 +2900,12 @@ fn loop_score_variables_slot_links_yield_arrayed_per_slot_equations() {
     emitted.insert(ls_name("temp[low]", "heat"));
     let dims = vec![dm_named_dimension("scenario", &["det", "low"])];
 
-    let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &dims);
+    let vars = generate_loop_score_variables(
+        std::slice::from_ref(&loop_item),
+        &emitted,
+        &dims,
+        &Default::default(),
+    );
     assert_eq!(vars.len(), 1);
     let (name, equation) = &vars[0];
     assert_eq!(name, "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1");
@@ -2956,7 +2971,12 @@ fn loop_score_variables_missing_slot_scores_zero() {
     // Three declared elements; only `det` has a circuit.
     let dims = vec![dm_named_dimension("scenario", &["det", "low", "high"])];
 
-    let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &dims);
+    let vars = generate_loop_score_variables(
+        std::slice::from_ref(&loop_item),
+        &emitted,
+        &dims,
+        &Default::default(),
+    );
     let (_, equation) = &vars[0];
     match equation {
         Equation::Arrayed(_, elements, _, _) => {
@@ -3016,7 +3036,12 @@ fn loop_score_variables_multi_dim_slot_tuples() {
         dm_named_dimension("age", &["young", "old"]),
     ];
 
-    let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &dims);
+    let vars = generate_loop_score_variables(
+        std::slice::from_ref(&loop_item),
+        &emitted,
+        &dims,
+        &Default::default(),
+    );
     let (_, equation) = &vars[0];
     match equation {
         Equation::Arrayed(_, elements, _, _) => {
@@ -3079,7 +3104,12 @@ fn loop_score_variables_prefer_apply_to_all_when_all_links_bare() {
     emitted.insert(ls_name("births", "pop"));
     let dims = vec![dm_named_dimension("region", &["nyc", "boston"])];
 
-    let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &dims);
+    let vars = generate_loop_score_variables(
+        std::slice::from_ref(&loop_item),
+        &emitted,
+        &dims,
+        &Default::default(),
+    );
     let (_, equation) = &vars[0];
     match equation {
         Equation::ApplyToAll(eq_dims, text) => {

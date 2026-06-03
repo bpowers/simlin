@@ -310,10 +310,20 @@ fn expand_pin_on_element_graph(
         ));
     }
 
-    // Step 3: Johnson + instance filtering.
-    let (names, circuits) = sub_graph
-        .find_indexed_circuits_with_limit(usize::MAX)
-        .expect("usize::MAX cannot exhaust the enumeration budget");
+    // Step 3: Johnson + instance filtering. The SCC guard above bounds node
+    // count but not density; a dense element-level expansion can hold more
+    // elementary circuits than is tractable to enumerate (see
+    // `MAX_LTM_CIRCUITS`), so the budget turns that into an invalid pin
+    // instead of an OOM.
+    let Ok((names, circuits)) =
+        sub_graph.find_indexed_circuits_with_limit(crate::ltm::ltm_circuit_budget())
+    else {
+        return Err(format!(
+            "cannot be scored: its element-level expansion contains more than {} \
+             elementary circuits, exceeding the tractable enumeration budget",
+            crate::ltm::ltm_circuit_budget()
+        ));
+    };
     let matching: Vec<Vec<u32>> = circuits
         .into_iter()
         .filter(|circuit| {
@@ -339,6 +349,7 @@ fn expand_pin_on_element_graph(
     let filtered = LoopCircuitsResult {
         names,
         circuits: matching,
+        truncated: false,
     };
     let (loops, _truncated_aggs) = build_element_level_loops(
         &filtered,

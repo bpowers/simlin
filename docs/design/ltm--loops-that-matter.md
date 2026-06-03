@@ -103,7 +103,11 @@ and average absolute score for ranking.
    port and uses `enumerate_module_pathways()` to find internal pathways, then
    collects internal stocks along those pathways (namespaced with the module
    instance name, e.g. `smooth·smoothed`)
-5. Loops are deduplicated by sorted node set (`deduplicate_loops`)
+5. Loops are deduplicated by **canonical edge-sequence rotation** (issue
+   #308): rotations of the same directed cycle collapse, while two distinct
+   directed cycles over the same node set (e.g. the arms-race three-party
+   pair `A -> B -> C -> A` vs `A -> C -> B -> A`) are retained as separate
+   loops
 6. Deterministic IDs are assigned by sorting loops by their content key
    (`assign_loop_ids`)
 7. `model_ltm_variables` generates synthetic variables for all links
@@ -319,27 +323,76 @@ stock's contribution.
 
 ### Module Links
 
-The `link_score_equation_text` tracked function in `db.rs` handles three
-module link cases:
+`module_link_score_equation` in `db.rs` is the single source of truth for a
+module-involved link's equation, shared verbatim by the `(from, to)`-keyed
+`link_score_equation_text` and the per-shape `link_score_equation_text_shaped`
+(a module link's equation does not depend on the reference `RefShape`, so the
+two twins delegate to the same helper and can never drift). It handles three
+cases, each preferring a faithful link score and only falling back to the
+signed unit transfer when nothing better exists:
 
-- **Variable-to-module-input** (`!from_is_module && to_is_module`): Uses composite
-  link score reference when the module has internal causal pathways (determined by
-  `module_input_pathways_from_edges`). The link score variable references the
-  module's internal composite via interpunct notation (e.g.,
-  `module·$⁚ltm⁚composite⁚port`). Falls back to the black-box transfer-function
-  formula (`generate_module_link_score_equation`) for modules without causal
-  pathways.
+- **Variable-to-module-input** (`!from_is_module && to_is_module`): When the
+  target module's sub-model emits a composite link score for the port the edge
+  feeds (a DynamicModule with an input→output pathway), the link score IS that
+  composite, referenced via interpunct notation `module·$⁚ltm⁚composite⁚port`.
+  This is the module's internal transfer -- exactly the macro treatment
+  (ref §6). When the sub-model exposes no composite (a passthrough), the link
+  score is the **signed unit transfer** (below) against the module's *output*
+  ref `module·port` -- a readable scalar, never the bare module name.
 
-- **Module-output-to-variable** (`from_is_module && !to_is_module`): Uses the
-  standard ceteris-paribus formula (`generate_link_score_equation_for_link`). The
-  `build_partial_equation` function is module-ref-aware: `normalize_module_ref()`
-  strips interpunct suffixes so that module output references (e.g.,
-  `$⁚s⁚0⁚smth1·output`) are correctly excluded from `PREVIOUS()` wrapping while
-  other dependencies are held at their previous values.
+- **Module-output-to-variable** (`from_is_module && !to_is_module`): The
+  dependent's equation references the module output via `module·port`, so a
+  real ceteris-paribus partial is available -- the link score is that exact
+  partial (`generate_link_score_equation_for_link` on the located output ref).
+  `build_partial_equation` is module-ref-aware: `normalize_module_ref()`
+  strips interpunct suffixes so module output references (e.g.
+  `$⁚s⁚0⁚smth1·output`) are excluded from `PREVIOUS()` wrapping while other
+  dependencies are held at their previous values. Falls back to the signed
+  unit transfer only if the output reference cannot be located in the target
+  AST. (Before GH #675 this arm used the gain `Δto/Δ(module·output)`, which is
+  why a single-input downstream that should score ±1 instead scored the gain.)
 
-- **Module-to-module** (`from_is_module && to_is_module`): Uses the black-box
-  transfer-function formula (`generate_module_link_score_equation`) since modules
-  have no user-visible equation for ceteris-paribus analysis.
+- **Module-to-module** (`from_is_module && to_is_module`): `from`'s output is
+  wired into `to`'s input port. The edge source in the parent graph is the
+  normalized module node `from`, but `to`'s `ModuleInput::src` is the
+  module-qualified `from·output`, so the match is by
+  `normalize_module_ref(src) == from`, not raw equality. When `to`'s sub-model
+  exposes a composite for that port, the link score IS `to`'s composite for
+  the port (the macro treatment again -- the wiring from `from`'s output to
+  `to`'s input port is an identity, so the loop product equals the
+  fully-expanded model's). Otherwise it is the signed unit transfer between
+  the two modules' output refs.
+
+**Composites resolve in both modes (GH #548 / #675).** Since GH #548,
+`build_submodel_metadata` lays out a sub-model's LTM synthetic vars (composites
+included) in the parent's flattened offset map whenever `ltm_enabled`, which
+holds in *both* exhaustive and discovery mode. An empirical probe confirmed a
+SMOOTH composite resolving to a nonzero value in a discovery run. Discovery
+mode therefore uses the *same* composite reference exhaustive mode does -- the
+pre-#675 discovery-only gain variant (`Δ(module·output)/Δfrom`, justified by a
+since-stale "cross-module refs don't resolve in discovery" assumption) is gone.
+`module_composite_ports` reads the sub-model's actual `model_ltm_variables`
+output to decide whether a composite exists for a port, rather than guessing
+from the module's stock count.
+
+**Signed unit-transfer fallback (GH #675).** The residual genuine black-box
+case -- no composite (a passthrough exposes none) and no ceteris-paribus
+partial (the endpoint is a module with no parent-visible equation) -- uses
+`black_box_unit_transfer_equation`: `0` at `INITIAL_TIME`, `0` when either
+endpoint is unchanged, else `SIGN(Δto)·SIGN(Δfrom)`. This is a *link score*,
+not the gain `dz/dx` (ref §3.3): for a single-input black box `z = F(x)` all
+of `Δz` is attributable to `x`, so `|Δ_x(z)/Δ(z)| = 1` and only the sign
+remains -- the unit transfer is exact. For a stateful/multi-input box it is
+the perfect-mixing-spirit approximation (ref §6): polarity exact, magnitude
+approximated as `1`. Crucially it preserves the **isolated-loop ±1 invariant**
+(Appendix B): an isolated feedback loop routed through a passthrough-module
+chain (including a module→module link) has raw loop score exactly ±1 regardless
+of the module gains, because a link score normalizes the gain away whereas the
+old `Δto/Δfrom` gain made the loop score scale with the product of the gains.
+References are always readable scalars (`module·port`), never the bare module
+name -- a bare module name is not a scalar-readable variable, so the prior
+formula's bare-name references stubbed the fragment to a constant 0 (which
+zeroed every loop through such a module).
 
 ## Module Boundary Handling
 
@@ -356,8 +409,81 @@ Modules are classified by `classify_module_for_ltm()` in `ltm.rs`:
   analyzed to avoid infinite recursion.
 - **DynamicModule** -- has internal stocks (SMOOTH, DELAY, TREND, user-defined
   modules with stocks). Gets composite link scores and internal graph construction.
-- **Passthrough** -- no internal stocks; treated as black box with a transfer
-  score formula.
+- **Passthrough** -- no internal stocks. `classify_module_for_ltm` drives only
+  the legacy `CausalGraph`'s recursive internal-graph build (dynamic modules
+  only). It does NOT decide whether a composite is exposed: a passthrough whose
+  internals form an aux chain from input to output still emits pathway/composite
+  vars (its chain is a pure expression LTM scores exactly), so a link into its
+  input port references the composite just like a dynamic module. The signed
+  unit-transfer fallback (see Module Links) now fires only for a *pathway-less*
+  module -- one whose output does not depend on its input at all.
+
+#### Passthrough composites and per-exit-port loop scoring (PR #684)
+
+`model_ltm_variables` no longer suppresses LTM vars for a stockless sub-model
+that has parent-visible input→output pathways: the stock-free early return now
+fires only when the model has neither stocks nor input-port pathways (so a
+stock-free *root* model -- with no parent reading `module·var`, hence no output
+ports -- still emits nothing). A passthrough therefore emits the same
+`$⁚ltm⁚path⁚{port}⁚{idx}` / `$⁚ltm⁚composite⁚{port}` vars a dynamic module does.
+
+The composite alone is, however, the WRONG score for a loop through a
+*multi-output* module: the composite max-abs-selects across ALL of the module's
+pathways. Consider a passthrough exposing `pos = input·0.02` and
+`neg = -input`, with the feedback loop reading only `m·pos` and a side variable
+reading `m·neg`. A single-dependency link score is just `(Δz)/|Δz| = SIGN(Δz)`,
+so the `0.02` coefficient cancels and BOTH pathways have magnitude exactly 1 in
+the degenerate normalized sense. The composite's `if ABS(path0) >= ABS(path1)`
+selection is therefore comparing 1 against 1: it falls through to the
+`>=` first-index TIE-BREAK, which picks `path0` -- and `path0` is `neg`, whose
+sign opposes `pos`, flipping the loop's polarity. Composites cannot fix this
+because the candidates always tie at magnitude 1, so max-abs can never recover
+the loop's actual port: it just returns whichever pathway is enumerated first.
+
+So in **exhaustive** mode the loop-score equation overrides each `x → m` module
+link with a **per-exit-port pathway selection**. The exit port is read off the
+NEXT loop link `m → y` (the unique `m·port` `y` reads, or `y`'s matching
+`ModuleInput.src` when `y` is itself a module); the entry port is `m`'s
+`ModuleInput` whose normalized `src` is `x`. The parent recomputes the
+sub-model's pathway map with the SAME salsa-cached inputs the sub-model's own
+emission uses (`model_causal_edges` + the sorted `find_model_output_ports`), so
+the recomputed pathway indices match the emitted `$⁚ltm⁚path⁚{entry}⁚{idx}`
+vars index-for-index. The override is an alias synthetic var
+`$⁚ltm⁚link_score⁚{x}→{m}⁚via⁚{exit}` whose equation is:
+
+- the single matching pathway ref `m·$⁚ltm⁚path⁚{entry}⁚{idx}` when exactly one
+  pathway ends at the exit port;
+- a max-abs selection over the matching refs when several do (the accumulator
+  helpers are named with a `⁚viaacc⁚` infix so they sort -- and therefore
+  evaluate -- before the alias within the `link_score` category);
+- `"0"` when no pathway connects entry to exit (truthful: no causal transfer --
+  but pathway-budget truncation, GH #649, can also produce this, signalled by
+  the existing `pathways_truncated` Warning).
+
+The alias references SUB-model pathway vars (`m·…`), which the parent evaluates
+when it runs module `m` -- before the parent's appended `link_score` fragments,
+exactly as the existing composite reference resolves at the current step
+(verified by an end-to-end simulation assertion, not by reasoning alone). The
+override is threaded into the loop-score equation builder as a side-table keyed
+by `(loop_id, link_index)`; `Loop.links` is NOT rewritten (loop IDs derive from
+the link sequence and the FFI's id→score correspondence depends on it).
+
+**Discovery-mode asymmetry**: discovery mode emits NO loop-score vars (loops are
+ranked post-simulation by the strongest-path search), so there is nothing to
+override. The base `input → m` link score there is the composite (after this PR)
+-- the paper-faithful per-edge approximation. The per-exit-port refinement is an
+exhaustive-mode-only exactness fix.
+
+**Deterministic output-port ordering (GH #680)**: `find_model_output_ports`
+sorts its result. The merge-order of the `HashSet` it previously returned was
+process-nondeterministic; both the sub-model's pathway-index assignment and the
+parent's recomputation must agree on that order, so the sort is a prerequisite
+for the index-for-index identity above (and closes #680).
+
+**Residual gap**: pinned loops (`LOOPSCORE`) pass an empty override map, so a pin
+whose cycle traverses a multi-output module still scores its input→module link
+against the arbitrary-port base fallback. Pins through single-output modules
+(the common case) are unaffected.
 
 ### Unified Module LTM Treatment
 
@@ -376,8 +502,8 @@ score is the "LTM interface" of a module -- the parent model's link score for
    the module node itself (`normalize_module_ref`). This ensures the module
    participates correctly in loop detection.
 
-2. **Internal instrumentation**: For each DynamicModule model,
-   `model_ltm_variables` generates:
+2. **Internal instrumentation**: For each model with input→output pathways
+   (DynamicModule or passthrough), `model_ltm_variables` generates:
    - Internal link score variables with the `$⁚ltm⁚link_score⁚` prefix for all
      causal links within the module
    - Pathway score variables (`$⁚ltm⁚path⁚{port}⁚{index}`) for each pathway,
@@ -441,12 +567,29 @@ AST (`Ast<Expr2>`) at compile time. The recursive analysis
   (checked via `expr_references_var`), uses the other operand's polarity
 - **Subtraction**: Left operand preserves polarity; right operand flips. Same
   independence check as addition.
-- **Multiplication**: Combines polarities (positive * negative = negative). When
-  one operand has unknown polarity, checks if the other is a positive or negative
-  constant (`is_positive_constant` / `is_negative_constant`) or a variable with
-  a constant equation (`is_positive_variable` / `is_negative_variable`)
-- **Division**: Numerator preserves polarity; denominator flips. Same independence
-  check as addition/subtraction.
+- **Multiplication**: When one operand is independent of `from_var`, its VALUE
+  sign decides: a positive or negative constant (`is_positive_constant` /
+  `is_negative_constant`) or a variable with a constant equation
+  (`is_positive_variable` / `is_negative_variable`) preserves or flips the
+  other operand's polarity. When BOTH operands depend on `from_var`, the
+  product rule `d(f*g)/dx = f'g + fg'` mixes operand VALUES into the sign,
+  so plain sign composition is unsound (it labeled logistic growth
+  `pop*(1 - pop/K)` a definite Negative while the true partial flips at
+  K/2). The rule: agreeing derivative signs AND both operands
+  positive-by-convention (bare variable references, positive constants, or
+  positive-constant variables -- NOT compound expressions like `1 - pop/K`)
+  propagate the shared polarity (covers `pop*pop/capacity`); everything else
+  is `Unknown`.
+- **Division**: When the independent operand's value sign is provable, it is
+  used exactly (`-5/y` is Positive -- `d(n/y)/dy = -n/y^2` -- and `x/-5` is
+  Negative; the pre-fix rules flipped/passed unconditionally and got both
+  wrong). For a NON-constant independent operand the conventional SD
+  positive-value assumption applies (numerator passes polarity through,
+  denominator flips), documented as a labeling convention rather than a
+  proof -- `share = pop/total` reads as `total -> share` Negative on every SD
+  diagram even though `pop > 0` is unprovable. Both-sides-dependent division
+  mirrors multiplication: opposing derivative signs with
+  positive-by-convention operands propagate, else `Unknown`.
 - **Unary negation and NOT**: Flip polarity
 - **IF-THEN-ELSE**: Returns the common polarity if both branches agree, `Unknown`
   otherwise
@@ -458,9 +601,13 @@ AST (`Ast<Expr2>`) at compile time. The recursive analysis
   argument's polarity. The strict-monotonicity test uses a y-range-relative
   epsilon, `max(EPSILON, range_rel * (y_max - y_min))` (#492), so a near-flat
   arm with imported numeric noise (`...12.0001, 12.0000, 12.0002...`) no longer
-  flips an otherwise-monotone curve to `Unknown`; the residual nuance is that
-  it compares the y-delta `dy`, not the slope `dy/dx`, so a curve with
-  non-uniform x-spacing can still misclassify (GH #536).
+  flips an otherwise-monotone curve to `Unknown`. Comparing the y-delta `dy`
+  rather than the slope `dy/dx` is correct for the sign question: a
+  piecewise-linear interpolation between y-points that increase consecutively
+  is monotone regardless of x-spacing (slope magnitude varies, its sign does
+  not), so non-uniform x-spacing cannot misclassify a valid table -- the only
+  exposure is a table whose x-points are themselves non-monotone, which is
+  malformed input (GH #536 is narrower than its title suggests).
 - **Per-element graphical functions** (#502): when an *arrayed* source feeds an
   *arrayed* per-element graphical-function target -- each element of the target
   has its own lookup `Table` (the per-element `tables` list on `Variable::Var`) --
@@ -560,25 +707,37 @@ they reduced full 251-step discovery to under a second:
   sibling loops whose entry path is weaker (the paper's Figure 7 failure
   mode). The expansion cap inverts the trade-off: work is bounded at
   `cap * SCC_edges` traversals per (stock, step) regardless of score
-  distribution, and small components (the common case after SCC restriction)
-  get effectively exhaustive enumeration -- every elementary cycle through
-  the stock is found, strictly more complete than the paper's heuristic.
+  distribution, and components where the cap does not bind get genuinely
+  exhaustive enumeration -- every elementary cycle through the stock is
+  found, strictly more complete than the paper's heuristic *in that regime*.
+  The non-binding regime covers sparse components and dense ones up to
+  roughly 7 nodes; empirically the cap already binds on a complete digraph
+  of 8 nodes (~10% of its 16k elementary cycles missed), so dense components
+  in the 8+ node range are heuristic, not exhaustive.
 
 ### Heuristic Nature
 
-For small per-step components the search is effectively exhaustive (the
-expansion cap doesn't bind), so every elementary cycle through each stock is
+For per-step components where the cap does not bind (sparse, or dense up to
+~K7) the search is exhaustive: every elementary cycle through each stock is
 found -- including the paper's Figure 7 case, where the original `best_score`
 pruning missed the strongest loop (`test_figure_7_paper` documents this).
 
-For large components the expansion cap binds and the algorithm is heuristic:
-loops whose every entry path is reached only after the per-node budgets are
-consumed can be missed. The mitigations mirror the paper's: (a) running the
-search at every timestep with different link scores (and therefore different
-edge orderings) tends to discover loops missed at other timesteps, and (b)
-per-stock budget resets mean different starting stocks can discover different
-loops. The papers' empirical evaluation shows that missed loops are
-consistently "siblings" of found loops, differing by only a few links.
+When the cap binds the algorithm is heuristic: loops whose every entry path
+is reached only after the per-node budgets are consumed can be missed.
+Because each node's edges are explored in descending |score| order, the
+exploration priority is the *first edge's* score -- and a loop's strength is
+a product over all its links, NOT monotone in its first edge, so a strong
+loop entered only via a weak first edge can be dropped while a weaker loop
+entered via a strong edge is kept (the cap's own analogue of the paper's
+Figure 7 failure mode; an adversarial 4-node example: `a->w (10), a->x
+(0.01), w->x (0.0001), x->a (1)` with cap 1 keeps the 0.001-scoring loop
+through `w` and misses the 0.01-scoring direct loop). The mitigations mirror
+the paper's: (a) running the search at every timestep with different link
+scores (and therefore different edge orderings) tends to discover loops
+missed at other timesteps, and (b) per-stock budget resets mean different
+starting stocks can discover different loops. The papers' empirical
+evaluation shows that missed loops are consistently "siblings" of found
+loops, differing by only a few links.
 
 ### Ranking and Filtering (`rank_and_filter`)
 
@@ -820,8 +979,10 @@ Two kinds of agg:
     case (`result_dims` equal `target`'s iterated dims); the strict-prefix
     *broadcast* case (`SUM(matrix[D1, *])` inside an A2A body over `D1 × D2`,
     so the agg is over `D1` but the target is over `D1 × D2`) over-subscribes
-    the agg into the cross-product -- the loop score degrades to 0 there, GH
-    #528.
+    the agg into the cross-product -- the degradation is fail-LOUD: the
+    over-subscripted fragment does not compile, so
+    `model_ltm_fragment_diagnostics` emits a per-variable `Warning` and the
+    loop score degrades to 0 (GH #528).
 
   A loop running through the inlined reducer therefore traverses
   `… → from[<row>] → $⁚ltm⁚agg⁚{n}[<slot>] → to[e] → …`, and the loop-score
@@ -1087,8 +1248,24 @@ emits no per-loop score variables at all.
    `r{n}`/`b{n}`/`u{n}` namespace.
 
 A pin that fails any step (unordered set, no stock, oversized expansion SCC,
-no element-level instantiation) is reported in `PinnedLoopsResult::invalid`
-and surfaced as a compilation `Warning` -- never silently scored 0.
+expansion past the `MAX_LTM_CIRCUITS` budget, no element-level instantiation)
+is reported in `PinnedLoopsResult::invalid` and surfaced as a compilation
+`Warning` -- never silently scored 0.
+
+**Sibling-cycle limitation.** A pin names a variable *set*, and
+`order_variable_cycle` resolves it to the lexicographically-first Hamiltonian
+cycle over that set. A set that admits two distinct directed cycles -- the
+three-party arms-race pair `A -> B -> C -> A` vs `A -> C -> B -> A`, both
+over the same variables -- can therefore only pin one direction (the
+lex-first); the other is not expressible through the pin API and is silently
+not the one scored. The enumerator finds and scores both directions in
+exhaustive mode (canonical-rotation dedup keeps them distinct), so this
+gap bites only in discovery mode or when the user expects the *other*
+direction's score. Tracked as a known limitation; resolving it requires
+extending the pin primitive to carry cycle order. Relatedly, a pin whose
+only stock is module-internal is rejected by the has-stock validation
+(which checks parent-level stocks only) even though the enumerator finds
+the equivalent loop.
 
 In exhaustive mode, a scored pin loop whose variable-cycle rotation matches an
 enumerated loop is skipped (the enumerated loop already carries a correct
@@ -1194,6 +1371,18 @@ cases remain deliberate carve-outs:
    post-simulation -- divergence 5 below -- removed that factor from
    augmentation cost.) Auto-flip emits a `CompilationDiagnostic` at
    `Warning` severity so callers can surface the fallback to users.
+
+   The node-count gates alone do not bound enumeration cost -- elementary-
+   circuit count is super-exponential in SCC *density*, not node count (a
+   near-complete 14-node digraph holds ~119M circuits and OOMs uncapped
+   Johnson while passing both 50-node gates) -- so every production Johnson
+   run additionally carries a circuit budget, `MAX_LTM_CIRCUITS` (100,000,
+   defined alongside `MAX_LTM_SCC_NODES`). Exhausting it marks the
+   `LoopCircuitsResult`/`TieredCircuitsResult` as `truncated`, which the
+   shared `model_ltm_mode` gate treats exactly like an oversized SCC: the
+   model flips to discovery with its own `Warning`. A pinned loop whose
+   element-level expansion exceeds the budget becomes an invalid pin
+   (reported, never silently scored).
 
 3. **Module handling**: The papers describe composite link scores for macros
    (DELAY, SMOOTH) but do not discuss module boundaries as an implementation

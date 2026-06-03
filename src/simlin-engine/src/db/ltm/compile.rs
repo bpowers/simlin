@@ -97,9 +97,7 @@ pub fn link_score_equation_text_shaped<'db>(
 ) -> Option<crate::db::LtmSyntheticVar> {
     use crate::common::{Canonical, Ident};
     use crate::db::LtmSyntheticVar;
-    use crate::db::{
-        black_box_delta_ratio_equation, find_model_output_ports_for_module, model_causal_edges,
-    };
+    use crate::db::module_link_score_equation;
 
     let from_name = link_id.link_from(db);
     let to_name = link_id.link_to(db);
@@ -115,58 +113,25 @@ pub fn link_score_equation_text_shaped<'db>(
     let to_is_module = to_var.is_module();
 
     // Module-involved links: shape doesn't change the equation (modules
-    // are scalar nodes in the causal graph; their composite-reference and
-    // black-box delta-ratio formulas don't reach into the AST). Reuse the
-    // legacy formulas, but key the synthetic variable by the shape-driven
-    // name so the emission loop's per-shape map works.
+    // are scalar nodes in the causal graph; the composite-reference /
+    // ceteris-paribus / unit-transfer formulas don't reach into the AST).
+    // Delegate to the shared helper so this twin and the (from, to)-keyed
+    // `link_score_equation_text` stay byte-identical; key the synthetic
+    // variable by the shape-driven name so the emission loop's per-shape
+    // map works.
     if from_is_module || to_is_module {
-        let is_discovery = project.ltm_discovery_mode(db);
-        let equation = if !from_is_module && to_is_module {
-            if let crate::variable::Variable::Module { inputs, .. } = &to_var {
-                if let Some(input) = inputs.iter().find(|i| i.src == from_ident) {
-                    if is_discovery {
-                        let edges = model_causal_edges(db, model, project);
-                        let output_ports = find_model_output_ports_for_module(edges, to_name);
-                        let output_ref = output_ports
-                            .first()
-                            .map(|port| format!("{}\u{00B7}{}", to_ident.as_str(), port))
-                            .unwrap_or_else(|| format!("{}\u{00B7}output", to_ident.as_str()));
-                        black_box_delta_ratio_equation(from_ident.as_str(), &output_ref)
-                    } else {
-                        format!(
-                            "\"{module}\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}{port}\"",
-                            module = to_ident.as_str(),
-                            port = input.dst.as_str(),
-                        )
-                    }
-                } else {
-                    black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
-                }
-            } else {
-                black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
-            }
-        } else if from_is_module && !to_is_module {
-            let module_output_ref: Option<String> = to_var
-                .ast()
-                .map(|ast| crate::variable::identifier_set(ast, &[], None))
-                .and_then(|deps| {
-                    let prefix = format!("{}\u{00B7}", from_ident.as_str());
-                    deps.into_iter()
-                        .find(|d| d.as_str().starts_with(&prefix))
-                        .map(|d| d.to_string())
-                });
-            if let Some(output_ref) = module_output_ref {
-                black_box_delta_ratio_equation(&output_ref, to_ident.as_str())
-            } else {
-                black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
-            }
-        } else {
-            black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
-        };
-
-        return Some(LtmSyntheticVar {
+        return module_link_score_equation(
+            db,
+            model,
+            project,
+            from_name,
+            to_name,
+            from_var.as_ref(),
+            &to_var,
+        )
+        .map(|equation| LtmSyntheticVar {
             name: var_name,
-            equation: datamodel::Equation::Scalar(equation),
+            equation,
             dimensions: vec![],
             compile_directly: false,
         });

@@ -31,6 +31,13 @@ use crate::db::{
 /// maps to this model (via `dynamic_modules`), then `internal_var` is
 /// an output port. The result is passed to `enumerate_pathways_to_outputs`
 /// so that composite scores are generated for the correct output ports.
+///
+/// The returned `Vec` is sorted (GH #680): the source set is a `HashSet`,
+/// so without the sort the iteration order is process-nondeterministic.
+/// Pathway indices (`$⁚ltm⁚path⁚{port}⁚{idx}`) span outputs in this order,
+/// and the parent's per-exit-port pathway selection (PR #684) recomputes
+/// the same pathway map and must agree index-for-index with the sub-model's
+/// own emission -- which only holds when both sort identically here.
 pub(super) fn find_model_output_ports(
     db: &dyn Db,
     model: SourceModel,
@@ -104,7 +111,35 @@ pub(super) fn find_model_output_ports(
         }
     }
 
-    output_ports.into_iter().collect()
+    let mut output_ports: Vec<Ident<Canonical>> = output_ports.into_iter().collect();
+    output_ports.sort();
+    output_ports
+}
+
+/// Decide a sub-model's LTM output ports the way BOTH the sub-model's own
+/// emission and the parent's per-exit-port override recompute must decide
+/// them, so the two derivations are byte-identical by construction.
+///
+/// The pathway indices the sub-model emits as `$⁚ltm⁚path⁚{port}⁚{idx}` are
+/// referenced cross-module by index in the parent's
+/// `$⁚ltm⁚link_score⁚{x}→{m}⁚via⁚{exit}` override alias. The override and the
+/// emission must therefore agree on the output-port set (and its order, hence
+/// the sort inside `find_model_output_ports`) -- if they ever diverged, the
+/// parent would alias a pathway var the sub-model never emitted (or emitted at
+/// a different index). Funneling both sites through this one decision makes the
+/// stdlib special-case (`output` convention) and the user-model port scan
+/// impossible to skew apart.
+pub(super) fn sub_model_output_ports(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> Vec<Ident<Canonical>> {
+    // Stdlib models are always read through the `output` convention, so their
+    // single LTM output port is `output` rather than a scanned port name.
+    if model.name(db).starts_with("stdlib\u{205A}") {
+        return vec![Ident::new("output")];
+    }
+    find_model_output_ports(db, model, project)
 }
 
 /// Whether the edge `from -> to` is a *partial reduce*: `from` is arrayed,

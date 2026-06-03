@@ -748,6 +748,14 @@ pub struct LoopCircuitsResult {
     /// Each circuit is a deduplicated sequence of indices into `names`.
     /// Circuits are emitted in the enumerator's deterministic order.
     pub circuits: Vec<Vec<u32>>,
+    /// `true` when enumeration was abandoned because it would have emitted
+    /// more than [`crate::ltm::MAX_LTM_CIRCUITS`] elementary circuits (a
+    /// dense SCC defeats the node-count gate -- circuit count is
+    /// super-exponential in density, not node count). `names`/`circuits`
+    /// are empty in that case: the LTM mode gate flips the model to
+    /// discovery, so a partial circuit list would never be consumed and
+    /// keeping it would only pin memory.
+    pub truncated: bool,
 }
 
 impl LoopCircuitsResult {
@@ -1538,6 +1546,13 @@ pub fn model_element_causal_edges(
 ///
 /// Depends on `model_causal_edges`, so loop detection is cached when
 /// the edge structure hasn't changed (even if equation text changed).
+///
+/// Enumeration is bounded by [`crate::ltm::MAX_LTM_CIRCUITS`]: a dense SCC
+/// well under [`crate::ltm::MAX_LTM_SCC_NODES`] nodes can still contain
+/// hundreds of millions of elementary circuits (count is super-exponential
+/// in density), which uncapped Johnson would OOM on before any node-count
+/// gate could fire. On truncation the result carries `truncated = true`
+/// with empty circuits; `model_ltm_mode` flips such models to discovery.
 #[salsa::tracked(returns(ref))]
 pub fn model_loop_circuits(
     db: &dyn Db,
@@ -1546,10 +1561,18 @@ pub fn model_loop_circuits(
 ) -> LoopCircuitsResult {
     let edges_result = model_causal_edges(db, model, project);
     let graph = causal_graph_from_edges(edges_result);
-    let (names, circuits) = graph
-        .find_indexed_circuits_with_limit(usize::MAX)
-        .expect("usize::MAX cannot exhaust the enumeration budget");
-    LoopCircuitsResult { names, circuits }
+    match graph.find_indexed_circuits_with_limit(crate::ltm::ltm_circuit_budget()) {
+        Ok((names, circuits)) => LoopCircuitsResult {
+            names,
+            circuits,
+            truncated: false,
+        },
+        Err(crate::ltm::TruncatedByBudget) => LoopCircuitsResult {
+            names: Vec::new(),
+            circuits: Vec::new(),
+            truncated: true,
+        },
+    }
 }
 
 /// Detect feedback loops with polarity analysis and deterministic IDs.
@@ -1612,9 +1635,27 @@ pub fn model_detected_loops(
         };
     }
 
-    let loops = graph
-        .find_loops_with_limit(usize::MAX)
-        .expect("usize::MAX cannot exhaust the enumeration budget");
+    // The shared `model_ltm_mode` gate (consulted above) flips dense models
+    // to discovery before this point, so the budget should never bind here
+    // -- the module-aware graph has the same parent adjacency the gate's
+    // tiered enumeration measured. The budgeted call is defense-in-depth
+    // for any residual structural divergence between the two graphs: on
+    // truncation, degrade to the same pins-only result the discovery
+    // branch returns rather than OOMing or panicking.
+    let Ok(loops) = graph.find_loops_with_limit(crate::ltm::ltm_circuit_budget()) else {
+        debug_assert!(
+            false,
+            "model_detected_loops: circuit budget bound in exhaustive mode; \
+             model_ltm_mode should have flipped this model to discovery"
+        );
+        return DetectedLoopsResult {
+            loops: pinned
+                .loops
+                .iter()
+                .flat_map(|p| p.loops.iter().map(|l| detected_loop_from_loop(l, &p.name)))
+                .collect(),
+        };
+    };
     // Variable-level canonical rotation of a scored loop, used both to dedup a
     // pin's loops against the enumerated set and to transfer the pin's name
     // onto the surviving enumerated loop it duplicates.
@@ -1872,10 +1913,18 @@ pub fn model_element_loop_circuits(
 ) -> LoopCircuitsResult {
     let element_edges = model_element_causal_edges(db, model, project);
     let graph = causal_graph_from_element_edges(element_edges);
-    let (names, circuits) = graph
-        .find_indexed_circuits_with_limit(usize::MAX)
-        .expect("usize::MAX cannot exhaust the enumeration budget");
-    LoopCircuitsResult { names, circuits }
+    match graph.find_indexed_circuits_with_limit(crate::ltm::ltm_circuit_budget()) {
+        Ok((names, circuits)) => LoopCircuitsResult {
+            names,
+            circuits,
+            truncated: false,
+        },
+        Err(crate::ltm::TruncatedByBudget) => LoopCircuitsResult {
+            names: Vec::new(),
+            circuits: Vec::new(),
+            truncated: true,
+        },
+    }
 }
 
 /// One variable-level cycle classified as fast-path
@@ -1937,6 +1986,14 @@ pub struct TieredCircuitsResult {
     /// cycle classifies as `CrossElementOrMixed`. Callers compare
     /// this against `MAX_LTM_SCC_NODES` to decide auto-flip.
     pub slow_path_largest_scc: usize,
+    /// `true` when either Johnson run (variable-level or slow-path
+    /// element-level) abandoned enumeration at
+    /// [`crate::ltm::MAX_LTM_CIRCUITS`]: the model's cycle structure is
+    /// too dense for exhaustive analysis even though its SCCs pass the
+    /// node-count gates. `fast_path`/`slow_path` are unreliable
+    /// (incomplete) in that case; `model_ltm_mode` flips such models to
+    /// discovery, exactly like an oversized SCC.
+    pub truncated: bool,
 }
 
 /// Tiered loop enumeration: variable-level Johnson first, then
@@ -1964,6 +2021,25 @@ pub fn model_loop_circuits_tiered(
     use std::collections::HashSet;
 
     let var_circuits = model_loop_circuits(db, model, project);
+
+    // Variable-level enumeration blew the circuit budget: the model is too
+    // dense for any exhaustive analysis (see `MAX_LTM_CIRCUITS`). Propagate
+    // the truncation so `model_ltm_mode` flips to discovery; classifying an
+    // empty circuit list below would instead report "no loops", which the
+    // exhaustive pipeline reads as "nothing to score" -- silently wrong.
+    if var_circuits.truncated {
+        return TieredCircuitsResult {
+            fast_path: Vec::new(),
+            slow_path: LoopCircuitsResult {
+                names: Vec::new(),
+                circuits: Vec::new(),
+                truncated: false,
+            },
+            slow_path_largest_scc: 0,
+            truncated: true,
+        };
+    }
+
     let edge_shapes = model_edge_shapes(db, model, project);
     let source_vars = model.variables(db);
 
@@ -2047,6 +2123,7 @@ pub fn model_loop_circuits_tiered(
             LoopCircuitsResult {
                 names: Vec::new(),
                 circuits: Vec::new(),
+                truncated: false,
             },
             0,
         )
@@ -2117,13 +2194,13 @@ pub fn model_loop_circuits_tiered(
                 LoopCircuitsResult {
                     names: Vec::new(),
                     circuits: Vec::new(),
+                    truncated: false,
                 },
                 scc,
             )
-        } else {
-            let (names, circuits) = graph
-                .find_indexed_circuits_with_limit(usize::MAX)
-                .expect("usize::MAX cannot exhaust the enumeration budget");
+        } else if let Ok((names, circuits)) =
+            graph.find_indexed_circuits_with_limit(crate::ltm::ltm_circuit_budget())
+        {
             // Dedup slow-path circuits whose stripped variable-level
             // node sequence matches a fast-path circuit. This drops the
             // per-element reflections of pure-A2A cycles that share
@@ -2171,16 +2248,33 @@ pub fn model_loop_circuits_tiered(
                 LoopCircuitsResult {
                     names,
                     circuits: filtered_circuits,
+                    truncated: false,
+                },
+                scc,
+            )
+        } else {
+            // The slow-path element subgraph passed the SCC node gate but
+            // its circuit count blew the budget (dense ≤50-node element
+            // SCCs exist; see `MAX_LTM_CIRCUITS`). Propagate via the
+            // slow-path `truncated` flag so the mode gate flips to
+            // discovery instead of scoring an incomplete loop set.
+            (
+                LoopCircuitsResult {
+                    names: Vec::new(),
+                    circuits: Vec::new(),
+                    truncated: true,
                 },
                 scc,
             )
         }
     };
 
+    let truncated = slow_path.truncated;
     TieredCircuitsResult {
         fast_path,
         slow_path,
         slow_path_largest_scc,
+        truncated,
     }
 }
 
@@ -2327,6 +2421,23 @@ pub(super) fn reconstruct_single_variable(
 
     // Check explicit variables first
     if let Some(source_var) = source_vars.get(var_name) {
+        // Explicit module instances take the same direct-construction path
+        // as implicit ones (see `reconstruct_implicit_variable`'s doc): the
+        // generic parse+lower path resolves module inputs against
+        // `scope.models`, which is EMPTY here, so `resolve_module_input`
+        // drops every input and the reconstructed `Variable::Module` carries
+        // `inputs: []`. The LTM module link-score generators match the
+        // edge's source against those inputs to pick the composite-reference
+        // (exhaustive) or output-port delta-ratio (discovery) formula; with
+        // the inputs lost they silently fell through to a bare-module-name
+        // delta-ratio whose fragment cannot compile, zeroing every
+        // input→user-module link score.
+        let dm_var = super::datamodel_variable_from_source(db, *source_var);
+        if matches!(dm_var, datamodel::Variable::Module(_)) {
+            return Some(reconstruct_implicit_variable(
+                db, model, dims, &scope, &dm_var,
+            ));
+        }
         let parsed =
             parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
         let lowered = crate::model::lower_variable(&scope, &parsed.variable);
@@ -3033,6 +3144,92 @@ mod tiered_circuits_tests {
             result.slow_path.len(),
             0,
             "pure-A2A model must produce no slow-path circuits"
+        );
+    }
+
+    /// A dense SCC can defeat the node-count gate (`MAX_LTM_SCC_NODES`):
+    /// elementary-circuit count is super-exponential in density, so
+    /// Johnson carries a circuit budget (`MAX_LTM_CIRCUITS`). When it
+    /// trips (here via the test override on a 2-loop model), the tiered
+    /// result must report `truncated` -- with empty circuit lists, NOT a
+    /// partial set that downstream code would read as "all loops" -- and
+    /// the shared mode gate must flip to Discovery so the exhaustive
+    /// pipeline (and `model_detected_loops`) never consumes it.
+    #[test]
+    fn circuit_budget_truncation_propagates_and_flips_mode() {
+        let _guard = crate::ltm::LtmCircuitBudgetGuard::new(1);
+
+        let project = TestProject::new("budget_trip")
+            .stock("s", "100", &["in_f"], &["out_f"], None)
+            .flow("in_f", "s * 0.1", None)
+            .flow("out_f", "s * 0.05", None);
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        let source_project = sync.project;
+
+        let result = model_loop_circuits_tiered(&db, source_model, source_project);
+        assert!(
+            result.truncated,
+            "a 2-circuit model under a budget of 1 must report truncation, got {result:?}"
+        );
+        assert!(
+            result.fast_path.is_empty() && result.slow_path.is_empty(),
+            "truncated tiered result must carry no (unreliable) circuits, got {result:?}"
+        );
+
+        assert_eq!(
+            crate::db::model_ltm_mode(&db, source_model, source_project),
+            crate::db::LtmMode::Discovery,
+            "circuit-budget truncation must flip the shared mode gate to Discovery"
+        );
+
+        // `model_detected_loops` consults the same gate: in discovery mode it
+        // reports pins only (none here), never a partial enumeration.
+        let detected = model_detected_loops(&db, source_model, source_project);
+        assert!(
+            detected.loops.is_empty(),
+            "model_detected_loops must agree with the flipped mode gate, got {:?}",
+            detected.loops
+        );
+    }
+
+    /// End-to-end pin of the dense-SCC OOM fix at the PRODUCTION budget
+    /// (no test override): a near-complete digraph of 10 auxes + flow +
+    /// stock stays far under `MAX_LTM_SCC_NODES` (12-node SCC) but holds
+    /// over a million elementary circuits. Uncapped Johnson allocated
+    /// tens of GB on graphs like this before any gate could fire; with
+    /// `MAX_LTM_CIRCUITS` the enumeration aborts at the budget (bounded
+    /// time and memory) and the model flips to Discovery.
+    #[test]
+    fn dense_scc_under_node_gate_flips_to_discovery_at_production_budget() {
+        let mut project = TestProject::new("dense_scc");
+        const N: usize = 10;
+        for i in 0..N {
+            let others: Vec<String> = (0..N)
+                .filter(|j| *j != i)
+                .map(|j| format!("a_{j}"))
+                .collect();
+            let eqn = format!("{} + s", others.join(" + "));
+            project = project.scalar_aux(&format!("a_{i}"), &eqn);
+        }
+        let project = project
+            .flow("f", "a_0", None)
+            .stock("s", "100", &["f"], &[], None);
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        let source_project = sync.project;
+
+        assert!(
+            model_loop_circuits_tiered(&db, source_model, source_project).truncated,
+            "a 12-node dense SCC must trip the production circuit budget"
+        );
+        assert_eq!(
+            crate::db::model_ltm_mode(&db, source_model, source_project),
+            crate::db::LtmMode::Discovery,
         );
     }
 
