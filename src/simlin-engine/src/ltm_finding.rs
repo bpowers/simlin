@@ -5531,8 +5531,13 @@ mod tests {
     }
 
     /// Compile an arrayed reducer-in-feedback model with LTM discovery enabled,
-    /// simulate it, and run the full discovery pipeline (the same wiring
-    /// `analysis::analyze_model` uses). Returns the `DiscoveryResult`.
+    /// simulate it, and run the full discovery pipeline. Uses the bare
+    /// `causal_graph_from_element_edges` constructor (no module sub-graphs);
+    /// production `analysis::analyze_model` uses the `_with_modules` enriching
+    /// variant instead, but module enrichment is orthogonal to cross-agg
+    /// recovery, and the production wiring is covered end-to-end by
+    /// `discovery_recovers_cross_agg_loops_matches_exhaustive` in
+    /// tests/simulate_ltm.rs. Returns the `DiscoveryResult`.
     ///
     /// `growth[r] = SUM(pop[*]) * 0.05` over `elems`: one scalar synthetic agg,
     /// one petal per element, so the cross-agg recovery (GH #696) is exercised.
