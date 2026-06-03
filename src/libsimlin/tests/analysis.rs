@@ -1983,6 +1983,27 @@ fn discover_loops_returns_loops_periods_and_importance() {
             );
         }
 
+        // Partition metadata: the single-stock model has exactly one cycle
+        // partition, every loop indexes it, and its stock list names the
+        // model's stock.
+        assert_eq!(
+            res.partition_count, 1,
+            "a single-stock model has exactly one cycle partition"
+        );
+        let partitions = std::slice::from_raw_parts(res.partitions, res.partition_count);
+        let stocks = c_string_array(partitions[0].stocks, partitions[0].stock_count);
+        assert_eq!(stocks, vec!["population".to_string()]);
+        assert_eq!(
+            partitions[0].loop_count, res.loop_count,
+            "all returned loops belong to the single partition"
+        );
+        for lp in loops {
+            assert_eq!(
+                lp.partition, 0,
+                "every loop must index the single (dense index 0) partition"
+            );
+        }
+
         simlin_free_discovery_result(result);
         simlin_model_unref(model);
         simlin_project_unref(proj);

@@ -29,7 +29,7 @@ from ._ffi import (
     model_get_var_names,
     string_to_c,
 )
-from .analysis import Analysis, Link, LinkPolarity, Loop, LoopPolarity
+from .analysis import Analysis, Link, LinkPolarity, Loop, LoopPolarity, Partition
 from .errors import ErrorCode, ErrorSeverity, SimlinRuntimeError
 from .json_converter import converter
 from .json_types import (
@@ -738,7 +738,7 @@ class Model:
             check_out_error(err_ptr, "Discover loops")
 
         if result_ptr == ffi.NULL:
-            return Analysis(loops=(), dominant_periods=(), truncated=False)
+            return Analysis(loops=(), dominant_periods=(), truncated=False, partitions=())
 
         try:
             loops: list[Loop] = []
@@ -765,6 +765,7 @@ class Model:
                         polarity=LoopPolarity(c_loop.polarity),
                         behavior_time_series=behavior_ts,
                         name=c_to_string(c_loop.name),
+                        partition=None if c_loop.partition < 0 else int(c_loop.partition),
                     )
                 )
 
@@ -784,10 +785,26 @@ class Model:
                     )
                 )
 
+            partitions: list[Partition] = []
+            for i in range(result_ptr.partition_count):
+                c_partition = result_ptr.partitions[i]
+                stocks = []
+                for j in range(c_partition.stock_count):
+                    stock = c_to_string(c_partition.stocks[j])
+                    if stock:
+                        stocks.append(stock)
+                partitions.append(
+                    Partition(
+                        stocks=tuple(stocks),
+                        loop_count=int(c_partition.loop_count),
+                    )
+                )
+
             return Analysis(
                 loops=tuple(loops),
                 dominant_periods=tuple(periods),
                 truncated=bool(result_ptr.truncated),
+                partitions=tuple(partitions),
             )
         finally:
             lib.simlin_free_discovery_result(result_ptr)

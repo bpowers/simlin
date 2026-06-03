@@ -28,6 +28,12 @@ pub struct LoopSummary {
     /// mean-relative loop ranking and the pinned-loop relative-score path --
     /// unlike a raw `|loop score|`, which is partition-incomparable (GH #543).
     pub importance: Vec<f64>,
+    /// RESULT-SCOPED index into [`ModelAnalysis::partitions`] identifying the
+    /// loop's cycle partition, or `None` for a loop with no parent-level
+    /// partition (a pure module-internal loop).  See
+    /// `ltm_finding::FoundLoop::partition` for the stability caveats (indices
+    /// are dense per result, not durable across runs/edits).
+    pub partition: Option<usize>,
 }
 
 /// Complete analysis results for a model.
@@ -35,6 +41,13 @@ pub struct ModelAnalysis {
     pub model: json::Model,
     pub time: Vec<f64>,
     pub loop_dominance: Vec<LoopSummary>,
+    /// The cycle partitions referenced by `loop_dominance` (indexed by each
+    /// summary's `partition`): a partition's element-level stock names plus
+    /// how many returned loops belong to it.  Loops compete for dominance only
+    /// WITHIN a partition (relative scores are normalized per partition), so
+    /// this is the grouping callers need to present loops
+    /// partition-by-partition.
+    pub partitions: Vec<crate::ltm_finding::DiscoveredPartition>,
     pub dominant_loops_by_period: Vec<DominantPeriod>,
     /// True when loop discovery hit its time budget before finishing, so the
     /// loop fields may be partial. See `discover_loops_with_graph`'s budget.
@@ -111,6 +124,7 @@ pub fn analyze_model(
             model: json_model,
             time: result.time,
             loop_dominance: result.loop_dominance,
+            partitions: result.partitions,
             dominant_loops_by_period: result.dominant_loops_by_period,
             truncated: result.truncated,
         }),
@@ -118,6 +132,7 @@ pub fn analyze_model(
             model: json_model,
             time: vec![],
             loop_dominance: vec![],
+            partitions: vec![],
             dominant_loops_by_period: vec![],
             truncated: false,
         }),
@@ -132,6 +147,7 @@ pub fn analyze_model(
 struct PipelineResult {
     time: Vec<f64>,
     loop_dominance: Vec<LoopSummary>,
+    partitions: Vec<crate::ltm_finding::DiscoveredPartition>,
     dominant_loops_by_period: Vec<DominantPeriod>,
     truncated: bool,
 }
@@ -198,6 +214,7 @@ fn run_ltm_pipeline(
     )
     .ok()?;
     let found_loops = discovery.loops;
+    let partitions = discovery.partitions;
     let truncated = discovery.truncated;
 
     let time = build_time_array(&results);
@@ -218,6 +235,7 @@ fn run_ltm_pipeline(
     Some(PipelineResult {
         time,
         loop_dominance,
+        partitions,
         dominant_loops_by_period,
         truncated,
     })
@@ -351,6 +369,7 @@ fn to_loop_summary(
         polarity,
         variables,
         importance,
+        partition: fl.partition,
     }
 }
 
@@ -666,6 +685,47 @@ mod tests {
             assert!(
                 w[0] >= w[1] - 1e-9,
                 "loops must be sorted by mean |relative importance| descending: {means:?}"
+            );
+        }
+    }
+
+    // ---- partition metadata on the discovery surface ----
+
+    /// `analyze_model` exposes each loop's result-scoped cycle partition and
+    /// the partition list itself.  Logistic growth has one stock
+    /// (`population`), so both loops share partition 0 and the partition list
+    /// holds exactly that one entry with `loop_count == 2`.
+    #[test]
+    fn partition_metadata_is_populated() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let project = load_project(path);
+        let (mut db, sp) = synced_db(&project);
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
+
+        assert_eq!(analysis.loop_dominance.len(), 2);
+        assert_eq!(
+            analysis.partitions.len(),
+            1,
+            "one stock means one cycle partition"
+        );
+        assert_eq!(analysis.partitions[0].loop_count, 2);
+        assert!(
+            analysis.partitions[0]
+                .stocks
+                .iter()
+                .any(|s| s.contains("population")),
+            "the partition's stocks must name the model's stock; got {:?}",
+            analysis.partitions[0].stocks
+        );
+        for summary in &analysis.loop_dominance {
+            assert_eq!(
+                summary.partition,
+                Some(0),
+                "both loops share the single (dense index 0) partition"
             );
         }
     }

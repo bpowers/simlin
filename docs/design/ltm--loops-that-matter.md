@@ -131,9 +131,12 @@ and average absolute score for ranking.
    - Collects unique loop paths across all timesteps
 4. Each discovered path is converted to a `FoundLoop` with signed loop scores
    computed at every timestep from the raw link score results
-5. Loops are ranked by average absolute score, truncated to `MAX_LOOPS` (200),
-   filtered by `MIN_CONTRIBUTION` (0.1%) with partition-aware thresholds, and
-   assigned deterministic IDs (`rank_and_filter`)
+5. Loops are filtered by `MIN_CONTRIBUTION` (0.1%) with partition-aware
+   thresholds, ranked competitive-first by mean partition-relative importance
+   (loops trivially alone in their cycle partition -- relative score +/-1 by
+   construction -- sort after all competing loops), truncated to `MAX_LOOPS`
+   (200), assigned deterministic IDs, and annotated with result-scoped
+   cycle-partition metadata (`rank_and_filter`; see "Ranking and Filtering")
 
 ## Cycle Partitions
 
@@ -743,15 +746,35 @@ loops, differing by only a few links.
 
 After all timesteps are processed:
 
-1. Sort by average absolute score descending
-2. Truncate to `MAX_LOOPS` (200)
-3. Filter by per-timestep relative contribution within partition: retain a loop
+1. Filter by per-timestep relative contribution within partition: retain a loop
    if at any single timestep its absolute score is >= `MIN_CONTRIBUTION` (0.1%)
    of the partition-scoped total at that timestep. This partition-aware filtering
    prevents globally negligible loops that are dominant in their own partition
-   from being incorrectly removed.
+   from being incorrectly removed. Runs BEFORE the cap (GH #310).
+2. Rank **competitive-first** by partition-relative importance: loops that
+   share their cycle partition with at least one other discovered loop come
+   first, ordered by mean |relative loop score| over their active steps
+   (the literature's loop-inclusion measure, ref 13.3, GH #543); loops
+   trivially ALONE in their partition come after all competing loops. A solo
+   loop's relative score is exactly +/-1 at every active step *by
+   construction* (its own |score| is the whole denominator), so its perfect
+   mean carries zero discriminative information -- on real models (C-LEARN)
+   dozens of isolated two-variable stock-decay loops would otherwise pin the
+   top of the ranking above the loops that genuinely compete for dominance
+   in the model's giant component. Never-active (`NaN`) loops sort last.
+3. Truncate to `MAX_LOOPS` (200) in that order, so under cap pressure the
+   zero-information solo loops are dropped before any competing loop.
 4. Assign deterministic polarity-based IDs (`r1`, `b1`, etc.)
-5. Re-sort by score descending for callers
+5. Attach result-scoped cycle-partition metadata: each surviving loop's
+   `FoundLoop::partition` (a dense index assigned in first-appearance order
+   over the ranked list) plus `DiscoveryResult::partitions` (per partition:
+   element-level stock names and returned-loop count). Indices are
+   result-scoped -- the underlying SCC numbering renumbers on unrelated stock
+   adds/renames, so consumers needing durable identity key on the stock-name
+   set. The metadata flows through `analysis::ModelAnalysis::partitions`,
+   the FFI `SimlinDiscoveredPartition`, and pysimlin's
+   `Analysis.partitions` / `Loop.partition` so callers can group loops by
+   feedback subsystem (importance is only comparable within a partition).
 
 ## Array Support
 

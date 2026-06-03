@@ -264,6 +264,27 @@ class Link:
 
 
 @dataclass(frozen=True)
+class Partition:
+    """One cycle partition referenced by a discovery result's loops.
+
+    A cycle partition is a group of stocks connected by feedback (a strongly
+    connected component of the stock-to-stock reachability graph). Relative
+    loop scores are normalized *within* a partition, so loop importance is
+    only comparable between partition-mates -- group loops by
+    :attr:`Loop.partition` to present them partition-by-partition (e.g. lead
+    with the model's giant component).
+    """
+
+    stocks: tuple[str, ...]
+    """The partition's stock names (element-level for arrayed models, e.g.
+    ``population[nyc]``), sorted lexicographically."""
+
+    loop_count: int
+    """Number of loops in the returned loop list that belong to this
+    partition."""
+
+
+@dataclass(frozen=True)
 class Loop:
     """
     Represents a feedback loop.
@@ -302,6 +323,16 @@ class Loop:
     or ``None`` when the loop has no assigned name (every enumerated loop).
     A pinned loop's ``id`` is just ``pin1``/``pin2``/...; this carries the
     label the modeler chose so it can be displayed instead of the bare id."""
+
+    partition: int | None = None
+    """RESULT-SCOPED index into :attr:`Analysis.partitions` naming this loop's
+    cycle partition, or ``None`` -- both for loops with no parent-level
+    partition (pure module-internal loops) and for loop surfaces that don't
+    carry partition metadata (structural ``Model.loops``, ``Run.loops``).
+    Indices are dense, assigned in first-appearance order over the ranked
+    loop list; they identify partitions within ONE analysis result only and
+    are not stable across runs or model edits -- key on
+    :attr:`Partition.stocks` for a durable identity."""
 
     def __str__(self) -> str:
         """Return a human-readable string representation."""
@@ -387,11 +418,24 @@ class Analysis:
     """
 
     loops: tuple[Loop, ...]
-    """Discovered loops, ranked by mean ``abs`` relative importance (descending),
-    each carrying its signed relative-loop-score ``behavior_time_series``."""
+    """Discovered loops, ranked competitive-first: loops that share their
+    cycle partition with at least one other discovered loop come first,
+    ordered by mean ``abs`` relative importance (descending); loops trivially
+    ALONE in their partition -- whose relative score is exactly ``±1`` at
+    every active step *by construction* (e.g. an isolated stock-decay loop)
+    -- come after all competing loops. Each loop carries its signed
+    relative-loop-score ``behavior_time_series`` and its ``partition``
+    index."""
 
     dominant_periods: tuple[DominantPeriod, ...]
     """Intervals where a specific set of loops dominates behavior."""
 
     truncated: bool = False
     """True when the `timeout` elapsed before discovery finished."""
+
+    partitions: tuple[Partition, ...] = ()
+    """The cycle partitions referenced by ``loops`` (each loop's
+    ``partition`` indexes this tuple). Dense, in first-appearance order over
+    the ranked loop list; result-scoped. Group loops by partition to present
+    each feedback subsystem separately -- importance is only comparable
+    within a partition."""
