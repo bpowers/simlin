@@ -179,6 +179,73 @@ class TestLtmBalancingLoop:
             )
 
 
+class TestLtmModuleBoundaryReclassification:
+    """GH #679 regression guard: `Run.loops` already reclassifies an
+    exhaustive-mode loop whose static polarity is Undetermined from its runtime
+    loop-score series (this is pre-existing pysimlin behavior, predating the
+    GH #679 engine work).  This test pins the module-boundary case that GH #679
+    called out -- a loop through a module whose static polarity is Unknown --
+    so the existing Python reclassification cannot silently regress."""
+
+    def test_module_loop_undetermined_structural_reclassifies_to_reinforcing(
+        self,
+    ) -> None:
+        """A loop that runs `s -> SMTH1(s) -> parabola(effect) -> s` is
+        structurally Undetermined (the parabola makes the smoothed-output ->
+        effect link Unknown), but the simulation stays on the rising arm of
+        the parabola so the runtime loop score is single-signed positive.
+
+        `Model.loops` (pre-simulation, structural) reports `U`; `Run.loops`
+        (post-simulation) must report `R`, with the loop id unchanged."""
+        project = Project.new(
+            name="module_parabola",
+            sim_start=0.0,
+            sim_stop=8.0,
+            dt=1.0,
+        )
+        model = project.main_model
+        with model.edit() as (_current, patch):
+            from simlin.json_types import Auxiliary, Flow, Stock
+
+            patch.upsert_stock(
+                Stock(name="s", initial_equation="100", inflows=["growth"], outflows=[])
+            )
+            patch.upsert_aux(Auxiliary(name="smoothed", equation="SMTH1(s, 3)"))
+            # A parabola in the smoothed output: the smoothed value appears
+            # with conflicting signs, so the static analyzer cannot sign the
+            # smoothed -> effect link and the loop is structurally Undetermined.
+            patch.upsert_aux(
+                Auxiliary(
+                    name="effect",
+                    equation="smoothed * (1000 - smoothed) / 100000",
+                )
+            )
+            patch.upsert_flow(Flow(name="growth", equation="effect"))
+
+        # The structural surface (no runtime data) classifies the loop as U.
+        structural = model.loops
+        assert len(structural) == 1, "expected exactly one feedback loop"
+        assert structural[0].polarity == LoopPolarity.UNDETERMINED, (
+            "static polarity through the parabola-consumed module output is "
+            f"Undetermined, got {structural[0].polarity}"
+        )
+        structural_id = structural[0].id
+
+        run = model.run(analyze_loops=True)
+        assert run.ltm_mode == "exhaustive"
+        loops = run.loops
+        assert len(loops) == 1, "expected exactly one behavioral loop"
+        loop = loops[0]
+        assert loop.polarity == LoopPolarity.REINFORCING, (
+            "the runtime loop score is single-signed positive, so the loop must "
+            f"reclassify to Reinforcing, not stay Undetermined; got {loop.polarity}"
+        )
+        assert loop.id == structural_id, (
+            "the loop id must stay stable across runtime reclassification "
+            f"(structural {structural_id} vs behavioral {loop.id})"
+        )
+
+
 class TestLtmUndeterminedPolarity:
     """Test the from_runtime_scores classification method."""
 

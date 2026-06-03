@@ -701,16 +701,73 @@ classified as `Undetermined` (`calculate_polarity`).
 
 ### Runtime Polarity
 
-`LoopPolarity::from_runtime_scores()` in `ltm.rs` classifies polarity based
-on actual simulation results. It filters out NaN and zero values, then:
+`LoopPolarity::from_runtime_scores()` in `ltm/types.rs` classifies polarity
+based on actual simulation results. It filters out NaN and zero values, then:
 - All remaining scores positive -> `Reinforcing`
 - All remaining scores negative -> `Balancing`
-- Mix of positive and negative -> `Undetermined`
+- Mixed signs, one polarity dominant with confidence >=
+  `POLARITY_CONFIDENCE_THRESHOLD` (0.99) -> `MostlyReinforcing` /
+  `MostlyBalancing` ("Rux"/"Bux")
+- Mixed signs below the threshold -> `Undetermined`
 - No valid scores -> `None` (caller falls back to structural polarity)
 
 This catches cases where nonlinear dynamics cause polarity to change during
-simulation (e.g., the yeast alcohol model from the papers). In discovery mode,
-runtime polarity overrides structural polarity when available.
+simulation (e.g., the yeast alcohol model from the papers).
+
+#### Which surfaces reclassify, and which do not (GH #679)
+
+`model_detected_loops` is a *pre-simulation* salsa query, so it can only report
+*structural* polarity. Pervasively for module-heavy models the static polarity
+of a `variable -> module` / `module -> variable` black-box link is `Unknown`,
+so a loop through a module boundary is labelled `Undetermined` (confidence 0.0)
+even when its simulated loop score is single-signed at every active step.
+Runtime reclassification is therefore a *post-simulation* concern, and the
+surfaces handle it differently:
+
+- **Discovery (`analyze_model` / MCP / `simlin_analyze_discover_loops`)**: the
+  `FoundLoop` path in `ltm_finding.rs` derives each loop's polarity directly
+  from `from_runtime_scores` over its discovered strongest-path score series
+  (falling back to the trimmed-chain structural polarity for an all-zero/NaN
+  series). Fully reclassified.
+- **pysimlin `Run.loops`**: reclassifies post-simulation in its own Python
+  `LoopPolarity.from_runtime_scores` mirror, reading `loop_score` slot 0 for
+  each structural loop (this is pre-existing behavior -- it predates GH #679 --
+  now pinned by a regression test for the module-boundary case).
+- **libsimlin / WASM / TS `simlin_analyze_get_loops`**: **intentionally
+  structural-only**. The FFI takes only a `SimlinModel` (no simulation
+  `Results` in hand), folds `MostlyReinforcing`/`MostlyBalancing` to
+  `Reinforcing`/`Balancing`, and drops `polarity_confidence` at the C ABI
+  boundary. Surfacing runtime polarity here requires the FFI plumbing tracked
+  under GH #495; it is **not** delivered by this change. A consumer reading
+  loop polarity from `get_loops` must expect the structural label, not the
+  runtime one.
+
+`db::analysis::reclassify_loops_from_results(loops, results, loop_partitions)`
+is the **canonical in-engine reclassification primitive** -- it reads each
+loop's `$⁚ltm⁚loop_score⁚{id}` slot(s) from a `Results` and applies
+`from_runtime_scores` to overwrite `polarity`/`polarity_confidence`. As of this
+writing it has **no production caller**: it exists so a future sim-bearing Rust
+consumer (e.g. when GH #495's FFI lands) has one correct place to call rather
+than re-deriving the loop-score read. It is exercised by engine tests.
+
+The **loop id never changes** under reclassification. Loop detection and the
+deterministic `r{n}`/`b{n}`/`u{n}` id assignment happen at compile time before
+any simulation, and the FFI id->score correspondence plus salsa caching depend
+on the id being stable: a loop detected as `u1` keeps the id `u1` even when its
+runtime polarity is `Reinforcing`. Only the polarity *field* reflects the
+runtime classification. A loop whose score is never active (every slot/step
+zero or non-finite) keeps its structural polarity -- there is no runtime
+evidence to override it.
+
+**A2A semantics differ across the three sites** and must not be conflated. The
+Rust `reclassify_loops_from_results` helper concatenates *all* element slots of
+an A2A loop into one sample set (so a loop that is reinforcing in one element
+and balancing in another classifies `Undetermined`). pysimlin reads slot 0
+only. Discovery uses one strongest-path scalar series per `FoundLoop`. All
+three share the scalar semantics and agree on a scalar loop; they diverge only
+in how an A2A loop's multiple element slots are reduced to one classification.
+Reconciling that is deferred until a sim-bearing Rust consumer needs the
+all-slots reading.
 
 ## Strongest-Path Algorithm
 

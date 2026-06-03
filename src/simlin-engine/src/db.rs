@@ -142,6 +142,7 @@ pub use analysis::{
     LoopCircuitsResult, TieredCircuitsResult, compute_link_polarities, model_causal_edges,
     model_cycle_partitions, model_detected_loops, model_edge_shapes, model_element_causal_edges,
     model_element_cycle_partitions, model_loop_circuits, model_loop_circuits_tiered,
+    reclassify_loops_from_results,
 };
 
 mod implicit_deps;

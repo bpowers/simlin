@@ -1786,20 +1786,14 @@ pub fn model_detected_loops(
                 // those variants are reserved for callers that classify on
                 // top of a simulated loop-score series via
                 // [`LoopPolarity::from_runtime_scores`].
-                let (polarity, polarity_confidence) = match l.polarity {
-                    crate::ltm::LoopPolarity::Reinforcing => {
-                        (DetectedLoopPolarity::Reinforcing, 1.0)
-                    }
-                    crate::ltm::LoopPolarity::Balancing => (DetectedLoopPolarity::Balancing, 1.0),
-                    crate::ltm::LoopPolarity::MostlyReinforcing => {
-                        (DetectedLoopPolarity::MostlyReinforcing, 1.0)
-                    }
-                    crate::ltm::LoopPolarity::MostlyBalancing => {
-                        (DetectedLoopPolarity::MostlyBalancing, 1.0)
-                    }
-                    crate::ltm::LoopPolarity::Undetermined => {
-                        (DetectedLoopPolarity::Undetermined, 0.0)
-                    }
+                let polarity = detected_polarity_from_ltm(&l.polarity);
+                // Structural confidence is binary: 0.0 for the Undetermined
+                // fallback (an unknown link), 1.0 otherwise. Runtime
+                // reclassification (`reclassify_loops_from_results`) replaces
+                // both fields post-simulation when a loop_score series exists.
+                let polarity_confidence = match polarity {
+                    DetectedLoopPolarity::Undetermined => 0.0,
+                    _ => 1.0,
                 };
                 DetectedLoop {
                     id: l.id,
@@ -1837,14 +1831,10 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
             }
         }
     }
-    let (polarity, polarity_confidence) = match l.polarity {
-        crate::ltm::LoopPolarity::Reinforcing => (DetectedLoopPolarity::Reinforcing, 1.0),
-        crate::ltm::LoopPolarity::Balancing => (DetectedLoopPolarity::Balancing, 1.0),
-        crate::ltm::LoopPolarity::MostlyReinforcing => {
-            (DetectedLoopPolarity::MostlyReinforcing, 1.0)
-        }
-        crate::ltm::LoopPolarity::MostlyBalancing => (DetectedLoopPolarity::MostlyBalancing, 1.0),
-        crate::ltm::LoopPolarity::Undetermined => (DetectedLoopPolarity::Undetermined, 0.0),
+    let polarity = detected_polarity_from_ltm(&l.polarity);
+    let polarity_confidence = match polarity {
+        DetectedLoopPolarity::Undetermined => 0.0,
+        _ => 1.0,
     };
     DetectedLoop {
         id: l.id.clone(),
@@ -1852,6 +1842,133 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
         polarity,
         polarity_confidence,
         name: Some(pin_name.to_string()),
+    }
+}
+
+/// Reclassify a model's detected loops from their simulated `loop_score`
+/// series, mirroring what the discovery `FoundLoop` path already does.
+///
+/// [`model_detected_loops`] is a *pre-simulation* salsa query: it has no
+/// runtime data, so it reports the *structural* polarity (1.0 confidence
+/// when every link is signed, `Undetermined`/0.0 when any link is unknown).
+/// Pervasively for module-heavy models the static polarity of a
+/// `variable -> module` / `module -> variable` black-box link is `Unknown`,
+/// so any loop through a module boundary is labelled `Undetermined` even
+/// when its simulated loop score is unambiguously single-signed at every
+/// active step.
+///
+/// After simulation the per-loop `loop_score` series exists; this helper
+/// reads each loop's `$⁚ltm⁚loop_score⁚{id}` slot(s) out of `results` and
+/// runs [`crate::ltm::LoopPolarity::from_runtime_scores`] over them,
+/// overwriting the loop's `polarity` and `polarity_confidence` with the
+/// runtime classification. The loop **id stays unchanged**: loop detection
+/// and the deterministic `r{n}`/`b{n}`/`u{n}` id assignment happen at
+/// compile time before any simulation, and the FFI id->score correspondence
+/// plus salsa caching depend on the id never changing retroactively. A loop
+/// detected as `u1` keeps the id `u1` even when its runtime polarity is
+/// `Reinforcing` -- only the *polarity field* consumers see reflects the
+/// reclassification.
+///
+/// A loop whose score is never active (every slot/step zero or non-finite, so
+/// `from_runtime_scores` returns `None`, or whose `loop_score` series is
+/// simply absent) keeps its structural polarity and confidence untouched --
+/// there is no runtime evidence to override it.
+///
+/// # Status: in-engine primitive, not yet wired to a shipping Rust surface
+///
+/// This is the canonical in-engine reclassification primitive. As of this
+/// writing it has **no production caller**: the libsimlin / WASM / TS
+/// `simlin_analyze_get_loops` surface takes only a `SimlinModel` (no
+/// simulation `Results` in hand) and is intentionally structural-only -- it
+/// folds `Mostly*` to `R`/`B` and drops the confidence at the FFI boundary
+/// (surfacing runtime polarity there is bundled with the FFI work tracked
+/// under GH #495, which this helper does NOT unblock on the exhaustive path:
+/// the coalescing/confidence-drop happens regardless of how the polarity was
+/// computed). The pysimlin `Run.loops` surface already reclassifies via its
+/// own Python `LoopPolarity.from_runtime_scores` mirror (pre-existing,
+/// predating this helper); the engine `analyze_model` / MCP surface is
+/// discovery-based and reclassifies through the `FoundLoop` path. This helper
+/// exists so a future sim-bearing Rust consumer has one correct place to call
+/// rather than re-deriving the loop-score read.
+///
+/// # A2A semantics differ across the three reclassification sites
+///
+/// `loop_partitions` is the per-loop slot->partition map carried on
+/// `LtmVariablesResult::loop_partitions`; its slot-vector length is the
+/// `loop_score` series' slot count. For an A2A (per-element) loop this helper
+/// **concatenates every element slot's series into one sample set** and
+/// classifies the mixed result: if any element of the loop is balancing while
+/// another is reinforcing the loop classifies `Undetermined` (a deliberate
+/// "the loop's sign is not uniform across the array" reading). This is NOT the
+/// same input construction the other two sites use, so do not claim they
+/// agree:
+/// - **pysimlin `Run.loops`** reads `get_series("$⁚ltm⁚loop_score⁚{id}")`,
+///   which resolves to **slot 0 only** (the dominant/first element), so an
+///   A2A loop is classified from a single element's series.
+/// - **discovery** (`ltm_finding`) classifies each `FoundLoop` from its own
+///   single strongest-path scalar score series.
+///
+/// All three share the *scalar* semantics (`from_runtime_scores`'s NaN/zero
+/// filter; all-positive -> Reinforcing, all-negative -> Balancing, mixed
+/// dominant >= threshold -> Mostly*, otherwise Undetermined) and agree exactly
+/// on a scalar loop; they diverge only in how an A2A loop's multiple element
+/// slots are reduced to one classification. Reconciling that (e.g. teaching
+/// pysimlin to read all element slots via `get_loop_element_count` +
+/// subscripted `get_series`) is deferred until a sim-bearing Rust consumer
+/// actually needs the all-slots reading.
+pub fn reclassify_loops_from_results(
+    loops: &mut [DetectedLoop],
+    results: &crate::Results,
+    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+) {
+    for loop_item in loops.iter_mut() {
+        let Some(&base_off) = results
+            .offsets
+            .get(&crate::ltm_post::loop_score_ident(&loop_item.id))
+        else {
+            // No emitted loop_score series (e.g. discovery mode emits scores
+            // only for pinned loops): nothing to reclassify against.
+            continue;
+        };
+
+        // An A2A loop's loop_score occupies `n_slots` consecutive offsets;
+        // a scalar/cross-element/mixed loop has exactly one. The slot count
+        // comes from the loop's partition vector (1 when absent), matching
+        // `ltm_post`'s `loop_n_slots`.
+        let n_slots = loop_partitions
+            .get(&loop_item.id)
+            .map(|p| p.len().max(1))
+            .unwrap_or(1);
+
+        let mut scores: Vec<f64> = Vec::with_capacity(results.step_count * n_slots);
+        for row in results.iter() {
+            for slot in 0..n_slots {
+                let off = base_off + slot;
+                if off < results.step_size {
+                    scores.push(row[off]);
+                }
+            }
+        }
+
+        if let Some((polarity, confidence)) = crate::ltm::LoopPolarity::from_runtime_scores(&scores)
+        {
+            loop_item.polarity = detected_polarity_from_ltm(&polarity);
+            loop_item.polarity_confidence = confidence;
+        }
+    }
+}
+
+/// Map a `crate::ltm::LoopPolarity` (the runtime classification vocabulary)
+/// onto the FFI-facing [`DetectedLoopPolarity`]. The two enums carry the same
+/// five variants; this is the single conversion point shared by the
+/// structural and runtime-reclassified paths.
+fn detected_polarity_from_ltm(polarity: &crate::ltm::LoopPolarity) -> DetectedLoopPolarity {
+    match polarity {
+        crate::ltm::LoopPolarity::Reinforcing => DetectedLoopPolarity::Reinforcing,
+        crate::ltm::LoopPolarity::Balancing => DetectedLoopPolarity::Balancing,
+        crate::ltm::LoopPolarity::MostlyReinforcing => DetectedLoopPolarity::MostlyReinforcing,
+        crate::ltm::LoopPolarity::MostlyBalancing => DetectedLoopPolarity::MostlyBalancing,
+        crate::ltm::LoopPolarity::Undetermined => DetectedLoopPolarity::Undetermined,
     }
 }
 
@@ -2975,7 +3092,7 @@ mod detected_loops_scc_gate_tests {
 mod polarity_confidence_tests {
     use super::*;
     use crate::db::{SimlinDb, sync_from_datamodel};
-    use crate::ltm::{LoopPolarity, POLARITY_CONFIDENCE_THRESHOLD};
+    use crate::ltm::POLARITY_CONFIDENCE_THRESHOLD;
     use crate::test_common::TestProject;
 
     /// Helper: detect loops for a TestProject and return the result.
@@ -3085,46 +3202,73 @@ mod polarity_confidence_tests {
     /// simulated, runtime classification of single-sign loop scores
     /// is consistent with what an LTM consumer would derive from the
     /// simulated loop_score series for unambiguous loops.
+    /// End-to-end check that `reclassify_loops_from_results` actually
+    /// *changes* a loop's classification, not merely confirms an
+    /// already-determined one.  The fixture carries two structurally
+    /// determined loops (R births, B carrying-capacity) AND one loop whose
+    /// structural polarity is `Undetermined` because its feedback runs through
+    /// a parabola (the stock appears with conflicting signs, so the static
+    /// analyzer concedes `Unknown`), but whose simulated loop score is
+    /// single-signed because the stock stays on the rising arm of the
+    /// parabola.  The helper must flip that loop from `Undetermined` to a
+    /// determined polarity; neutering the helper would leave it `Undetermined`
+    /// and fail the assertion.
     #[test]
-    fn small_simulated_model_surfaces_consistent_confidence() {
+    fn reclassify_changes_undetermined_loop_to_runtime_polarity() {
         use crate::CompiledSimulation;
         use crate::db::{
-            compile_project_incremental, set_project_ltm_enabled, sync_from_datamodel_incremental,
+            compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
+            sync_from_datamodel_incremental,
         };
         use crate::vm::Vm;
 
-        let datamodel_project = TestProject::new("logistic_for_confidence")
-            .with_sim_time(0.0, 30.0, 0.25)
+        let datamodel_project = TestProject::new("mixed_polarity_confidence")
+            .with_sim_time(0.0, 8.0, 1.0)
+            // Two structurally determined loops.
             .stock("population", "10", &["births"], &["deaths"], None)
             .flow("births", "population * birth_rate", None)
             .flow("deaths", "population * population / capacity", None)
             .aux("birth_rate", "0.1", None)
             .aux("capacity", "100", None)
+            // A structurally-Undetermined loop: the tank stock appears with
+            // conflicting signs in `tank_effect` (positive in the first factor,
+            // negative in the second), so the static polarity of the
+            // tank -> tank_effect link is Unknown.  The parabola peaks at
+            // tank == 500; the stock starts at 100 and grows slowly, staying on
+            // the rising arm, so the runtime loop score is single-signed
+            // positive.
+            .stock("tank", "100", &["tank_growth"], &[], None)
+            .aux("tank_effect", "tank * (1000 - tank) / 100000", None)
+            .flow("tank_growth", "tank_effect", None)
             .build_datamodel();
 
-        // Structural detection: r1 (reinforcing) + b1 (carrying capacity).
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
         let source_model = sync.models["main"].source_model;
         let detected = model_detected_loops(&db, source_model, sync.project);
-        assert!(
-            detected.loops.len() >= 2,
-            "expected at least one R loop and one B loop, got {} loops",
-            detected.loops.len()
-        );
-        for loop_item in &detected.loops {
-            assert!(
-                (loop_item.polarity_confidence - 1.0).abs() < f64::EPSILON,
-                "all-known-link loops in this model must have structural confidence 1.0; loop {} got {}",
-                loop_item.id,
-                loop_item.polarity_confidence
-            );
-        }
 
-        // Compile with LTM, simulate, and classify each loop's runtime
-        // score series.  The reinforcing births loop and the balancing
-        // carrying-capacity loop both keep a single sign throughout, so
-        // both should classify with confidence 1.0.
+        // The tank loop is structurally Undetermined (confidence 0.0); the two
+        // population loops are determined (confidence 1.0).
+        let tank_loop_id = detected
+            .loops
+            .iter()
+            .find(|l| {
+                l.polarity == DetectedLoopPolarity::Undetermined
+                    && l.variables.iter().any(|v| v.contains("tank"))
+            })
+            .map(|l| l.id.clone())
+            .expect("the tank loop must be structurally Undetermined");
+        let structural_tank_confidence = detected
+            .loops
+            .iter()
+            .find(|l| l.id == tank_loop_id)
+            .map(|l| l.polarity_confidence)
+            .unwrap();
+        assert!(
+            structural_tank_confidence.abs() < f64::EPSILON,
+            "structural Undetermined loop must carry confidence 0.0, got {structural_tank_confidence}"
+        );
+
         set_project_ltm_enabled(&mut db, sync.project, true);
         let compiled: CompiledSimulation =
             compile_project_incremental(&db, sync.project, "main").unwrap();
@@ -3132,30 +3276,53 @@ mod polarity_confidence_tests {
         vm.run_to_end().unwrap();
         let results = vm.into_results();
 
-        for loop_item in &detected.loops {
-            let var_name = format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{}", loop_item.id);
-            let Some(&offset) = results.offsets.get(var_name.as_str()) else {
+        let loop_partitions = model_ltm_variables(&db, source_model, sync.project)
+            .loop_partitions
+            .clone();
+        let mut reclassified = detected.loops.clone();
+        reclassify_loops_from_results(&mut reclassified, &results, &loop_partitions);
+
+        // The tank loop must flip from Undetermined to Reinforcing (its runtime
+        // loop score is single-signed positive).  This is the assertion that
+        // fails if the helper is neutered.
+        let tank_after = reclassified
+            .iter()
+            .find(|l| l.id == tank_loop_id)
+            .expect("tank loop survives reclassification with the same id");
+        assert_eq!(
+            tank_after.polarity,
+            DetectedLoopPolarity::Reinforcing,
+            "the structurally-Undetermined tank loop has a single-signed positive runtime \
+             score, so reclassification must flip it to Reinforcing"
+        );
+        assert!(
+            tank_after.polarity_confidence >= POLARITY_CONFIDENCE_THRESHOLD,
+            "the reclassified tank loop's confidence {} should clear the {} threshold",
+            tank_after.polarity_confidence,
+            POLARITY_CONFIDENCE_THRESHOLD
+        );
+
+        // The two structurally determined loops keep their single sign.
+        for loop_item in &reclassified {
+            if loop_item.id == tank_loop_id {
                 continue;
-            };
-            let series: Vec<f64> = (0..results.step_count)
-                .map(|step| results.data[step * results.step_size + offset])
-                .collect();
-            if let Some((runtime_polarity, runtime_confidence)) =
-                LoopPolarity::from_runtime_scores(&series)
-            {
-                assert!(
-                    !matches!(runtime_polarity, LoopPolarity::Undetermined),
-                    "simulated single-sign loop {} must not classify as Undetermined",
-                    loop_item.id
-                );
-                assert!(
-                    runtime_confidence >= POLARITY_CONFIDENCE_THRESHOLD,
-                    "loop {} runtime confidence {} should clear the {} threshold",
-                    loop_item.id,
-                    runtime_confidence,
-                    POLARITY_CONFIDENCE_THRESHOLD
-                );
             }
+            let var_name = format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{}", loop_item.id);
+            if !results.offsets.contains_key(var_name.as_str()) {
+                continue;
+            }
+            assert!(
+                !matches!(loop_item.polarity, DetectedLoopPolarity::Undetermined),
+                "simulated single-sign loop {} must not classify as Undetermined",
+                loop_item.id
+            );
+            assert!(
+                loop_item.polarity_confidence >= POLARITY_CONFIDENCE_THRESHOLD,
+                "loop {} runtime confidence {} should clear the {} threshold",
+                loop_item.id,
+                loop_item.polarity_confidence,
+                POLARITY_CONFIDENCE_THRESHOLD
+            );
         }
     }
 }

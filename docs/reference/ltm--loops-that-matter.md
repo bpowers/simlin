@@ -573,6 +573,17 @@ The Ru and Bu designations are assigned when the **polarity confidence value is 
 allows a well-reasoned factual interpretation of diagrams where the polarity-changing
 nature of links is not important over the course of the simulation.
 
+> **Simlin implementation note.** Loop detection (and the deterministic loop-id
+> assignment) happens before simulation, so the structural label is what a pre-simulation
+> surface reports. Whether the *runtime* polarity is surfaced depends on the consumer:
+> discovery (`analyze_model` / MCP) and pysimlin `Run.loops` reclassify from the runtime
+> `loop_score` series while keeping the loop id stable, whereas the libsimlin / WASM / TS
+> `get_loops` surface is structural-only (it has no simulation results in hand and folds
+> Rux/Bux to R/B at the FFI boundary -- surfacing runtime polarity there is tracked under
+> GH #495). See the "Runtime Polarity" section of
+> [the design doc](../design/ltm--loops-that-matter.md) for the per-surface breakdown and
+> the `reclassify_loops_from_results` in-engine primitive.
+
 ---
 
 ## 5. Path Scores and Composite Link Scores
