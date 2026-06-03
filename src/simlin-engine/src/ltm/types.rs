@@ -334,10 +334,16 @@ pub(crate) enum ModuleLtmRole {
     Passthrough,
 }
 
-/// Classify a module model for LTM analysis.
+/// Classify a module model for LTM analysis by internal-stock presence.
 ///
-/// Dynamic modules contain stocks and need composite link scores.
-/// Stateless modules are passthroughs.
+/// `DynamicModule` (has stocks) vs `Passthrough` (stockless). This drives the
+/// legacy `CausalGraph`'s recursive internal-graph construction (only dynamic
+/// modules get an internal sub-graph there). It does NOT decide whether the
+/// module exposes a composite link score: since PR #684, the salsa-path
+/// `model_ltm_variables` emits pathway/composite vars for ANY module with an
+/// input->output pathway, passthroughs included (a passthrough's internals are
+/// a pure aux chain LTM scores exactly). `module_composite_ports` reads the
+/// sub-model's actual emitted vars rather than this classification.
 pub(crate) fn classify_module_for_ltm(module_model: &ModelStage1) -> ModuleLtmRole {
     if module_model
         .variables

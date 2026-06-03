@@ -26,8 +26,9 @@ use crate::datamodel;
 use crate::ltm::strip_subscript;
 
 use super::{
-    Db, SourceModel, SourceProject, SourceVariableKind, compute_layout, model_implicit_var_info,
-    project_datamodel_dims, project_units_context,
+    Db, SourceModel, SourceProject, SourceVariable, SourceVariableKind, compute_layout,
+    model_causal_edges, model_implicit_var_info, project_datamodel_dims, project_units_context,
+    reconstruct_single_variable,
 };
 
 mod compile;
@@ -70,7 +71,7 @@ pub(crate) use loops::{
 use link_scores::{
     emit_agg_to_target_link_scores, emit_link_scores_for_edge, emit_source_to_agg_link_scores,
 };
-use loops::{cross_agg_loop_budget, find_model_output_ports, recover_agg_hop_polarities};
+use loops::{cross_agg_loop_budget, recover_agg_hop_polarities, sub_model_output_ports};
 use parse::parse_ltm_equation;
 
 /// The single integration method the assembled simulation actually runs, when
@@ -227,6 +228,354 @@ fn link_score_edge_endpoints(name: &str) -> Option<(String, String)> {
         strip_subscript(from).to_string(),
         strip_subscript(to).to_string(),
     ))
+}
+
+/// A per-link reference override for the loop-score equation builder, keyed by
+/// `(loop_id, link_index)` -> pre-quoted reference text.
+///
+/// PR #684: the base `input → module` link score (and `module → module`) is a
+/// composite or unit-transfer fallback that picks ONE output port for the
+/// whole module. A *loop* through the module enters at one input port and
+/// exits at one specific output port; scoring it against the wrong port flips
+/// the loop's polarity (a passthrough exposing `pos = input·0.02` and
+/// `neg = -input` whose loop reads only `pos`). The composite cannot fix this
+/// because it max-abs-selects across ALL of the module's pathways (here `neg`,
+/// magnitude 1, beats `pos`, magnitude 0.02). So for each loop link we select
+/// the exact pathway the loop traverses (entry port -> exit port) and override
+/// the loop-score equation's reference to that link.
+type LoopLinkOverrides = HashMap<(String, usize), String>;
+
+/// Result of [`compute_module_link_overrides`].
+struct ModuleLinkOverrides {
+    /// Per-`(loop_id, link_index)` pre-quoted reference text.
+    overrides: LoopLinkOverrides,
+    /// The alias synthetic vars (deduped by name) the overrides reference.
+    alias_vars: Vec<super::LtmSyntheticVar>,
+}
+
+/// Read the output port a (non-module) variable `y` reads off module `m`.
+///
+/// `y`'s equation references the module output via interpunct notation
+/// `m·{port}`; return `{port}`. LTM-internal references (`m·$⁚ltm⁚…`) are
+/// excluded -- the loop traverses a real model output, never a synthetic.
+/// Returns the unique such port, or `None` when `y` reads zero or several
+/// (a multi-output read in one variable is ambiguous and left to the base
+/// link score's fallback).
+fn module_exit_port_for_reader(
+    module_name: &str,
+    reader: &crate::variable::Variable,
+) -> Option<String> {
+    let ast = reader.ast()?;
+    let deps = crate::variable::identifier_set(ast, &[], None);
+    let prefix = format!("{module_name}\u{00B7}");
+    let mut found: Option<String> = None;
+    for dep in deps {
+        let Some(port) = dep.as_str().strip_prefix(&prefix) else {
+            continue;
+        };
+        // Skip the module's synthetic LTM internals (`m·$⁚ltm⁚…`).
+        if port.starts_with('$') {
+            continue;
+        }
+        if found.is_some() {
+            // Two distinct output ports read by the same variable: ambiguous.
+            return None;
+        }
+        found = Some(port.to_string());
+    }
+    found
+}
+
+/// The selection equation + accumulator helpers that pick the pathway with the
+/// largest absolute score among `pathway_refs` (already parent-qualified +
+/// quoted-bare names like `m·$⁚ltm⁚path⁚input_val⁚0`).
+///
+/// Mirrors [`super::generate_max_abs_selection`]'s left fold, but names its
+/// accumulators so they sort into LTM evaluation category 1 (`link_score`)
+/// rather than category 3 (`path`): the accumulators reference SUB-model
+/// pathway vars (`m·…`, current-step once the parent evaluates module `m`) and
+/// the final alias is itself a category-1 var that the loop score (category 2)
+/// reads, so every accumulator MUST evaluate before the alias and before the
+/// loop score. The accumulator infix `⁚viaacc⁚` sorts before the alias's
+/// `⁚via⁚` terminal within category 1 (after `via`, `a` < the `⁚` separator),
+/// independent of the port / variable names. This is why we do NOT reuse
+/// `generate_max_abs_selection` directly here (its `⁚path⁚`-named accumulators
+/// would land in category 3, after the loop score).
+fn max_abs_alias_selection(
+    edge_key: &str,
+    exit_port: &str,
+    pathway_refs: &[String],
+) -> (String, Vec<super::LtmSyntheticVar>) {
+    let select_step = |a: &str, b: &str| -> String {
+        format!("if ABS(\"{a}\") >= ABS(\"{b}\") then \"{a}\" else \"{b}\"")
+    };
+    let acc_name = |i: usize| {
+        format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{edge_key}\u{205A}viaacc\u{205A}{exit_port}\u{205A}{i:06}"
+        )
+    };
+    match pathway_refs {
+        [] => ("0".to_string(), vec![]),
+        [only] => (format!("\"{only}\""), vec![]),
+        [p0, p1] => (select_step(p0, p1), vec![]),
+        [p0, p1, rest @ .., last] => {
+            let mut helpers: Vec<super::LtmSyntheticVar> = Vec::with_capacity(rest.len() + 1);
+            let mut selection = select_step(p0, p1);
+            for next in rest {
+                let acc = acc_name(helpers.len());
+                helpers.push(super::LtmSyntheticVar {
+                    name: acc.clone(),
+                    equation: datamodel::Equation::Scalar(selection),
+                    dimensions: vec![],
+                    // Like the alias, these accumulator names parse as a
+                    // `(from, to)` link score, so they must compile verbatim
+                    // rather than re-derive through the salsa `(from,to)` path.
+                    compile_directly: true,
+                });
+                selection = select_step(&acc, next);
+            }
+            let final_acc = acc_name(helpers.len());
+            helpers.push(super::LtmSyntheticVar {
+                name: final_acc.clone(),
+                equation: datamodel::Equation::Scalar(selection),
+                dimensions: vec![],
+                compile_directly: true,
+            });
+            (select_step(&final_acc, last), helpers)
+        }
+    }
+}
+
+/// Compute per-exit-port pathway-selection overrides for every loop link
+/// `(x → m)` where `m` is a module and the exit port is determinable.
+///
+/// For each such link the parent recomputes the sub-model's pathway map
+/// exactly as the sub-model's own emission does (same salsa-cached
+/// `model_causal_edges` + `sub_model_output_ports`, so the pathway indices
+/// match the emitted `$⁚ltm⁚path⁚{entry}⁚{idx}` vars index-for-index -- this is
+/// why Part S's deterministic output-port sort must land first), then selects
+/// the pathway(s) ending at the exit port the loop traverses:
+///
+/// * exactly one pathway -> reference `m·$⁚ltm⁚path⁚{entry}⁚{idx}` directly;
+/// * several -> a max-abs selection over them (an alias + helpers);
+/// * none -> `"0"` (truthful: no causal transfer entry->exit). NOTE: pathway-
+///   budget truncation (GH #649, surfaced by the `pathways_truncated` Warning)
+///   can also leave the matching pathway out of the recomputed map, producing
+///   `"0"` here. Treat a `pathways_truncated` model's `0` as degraded, not
+///   authoritative.
+///
+/// Each override emits ONE alias synthetic var (deduped by name across loops);
+/// the loop-score equation builder consults the returned `(loop_id, link_index)`
+/// map first via the threaded override.
+#[allow(clippy::too_many_arguments)]
+fn compute_module_link_overrides(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    loops: &[crate::ltm::Loop],
+    edges_result: &super::CausalEdgesResult,
+    source_vars: &HashMap<String, SourceVariable>,
+) -> ModuleLinkOverrides {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::normalize_module_ref;
+
+    let mut overrides: LoopLinkOverrides = HashMap::new();
+    let mut alias_by_name: std::collections::BTreeMap<String, super::LtmSyntheticVar> =
+        std::collections::BTreeMap::new();
+
+    // Resolve a module variable's sub-model name and recompute its pathway map,
+    // cached per-module so repeated links across loops don't re-enumerate.
+    let mut pathway_cache: HashMap<String, Option<crate::ltm::ModulePathways>> = HashMap::new();
+    let mut sub_model_pathways = |module_name: &str| -> Option<crate::ltm::ModulePathways> {
+        if let Some(cached) = pathway_cache.get(module_name) {
+            return cached.clone();
+        }
+        let sub_model_name = edges_result
+            .dynamic_modules
+            .get(module_name)
+            .cloned()
+            .or_else(|| {
+                source_vars
+                    .get(module_name)
+                    .map(|sv| sv.model_name(db).to_string())
+            });
+        let result = sub_model_name.and_then(|name| {
+            let canonical = canonicalize(&name);
+            let sub_model = *project.models(db).get(canonical.as_ref())?;
+            // Same salsa-cached inputs the sub-model's own emission uses, so the
+            // pathway Vec order (and therefore the `{idx}` in the emitted
+            // `$⁚ltm⁚path⁚{port}⁚{idx}` names) is identical index-for-index. The
+            // shared `sub_model_output_ports` is what guarantees the stdlib
+            // `output` convention and the user-model port scan can't skew apart.
+            let output_ports = sub_model_output_ports(db, sub_model, project);
+            if output_ports.is_empty() {
+                return None;
+            }
+            let sub_edges = model_causal_edges(db, sub_model, project);
+            let (pathways, _truncated) =
+                super::module_input_pathways_from_edges(sub_edges, &output_ports);
+            Some(pathways)
+        });
+        pathway_cache.insert(module_name.to_string(), result.clone());
+        result
+    };
+
+    for loop_item in loops {
+        let n = loop_item.links.len();
+        if n == 0 {
+            continue;
+        }
+        for i in 0..n {
+            let link = &loop_item.links[i];
+            let next = &loop_item.links[(i + 1) % n];
+            let from = strip_subscript(link.from.as_str());
+            let module_name = strip_subscript(link.to.as_str());
+
+            // The cycle must be sequential (`link.to == next.from`) for the
+            // exit port read off `next` to belong to this module hop. Loop
+            // links are emitted in traversal order, so this holds, but guard
+            // against a non-sequential link list rather than reading a port
+            // off an unrelated edge.
+            if strip_subscript(next.from.as_str()) != module_name {
+                continue;
+            }
+
+            // `to` must be a module node.
+            let is_module = edges_result.dynamic_modules.contains_key(module_name)
+                || source_vars
+                    .get(module_name)
+                    .is_some_and(|sv| sv.kind(db) == SourceVariableKind::Module);
+            if !is_module {
+                continue;
+            }
+
+            // Entry port: the module's input whose (normalized) src equals
+            // `from` -- the same match `module_link_score_equation` makes.
+            let module_var = reconstruct_single_variable(db, model, project, module_name);
+            let Some(crate::variable::Variable::Module { inputs, .. }) = module_var else {
+                continue;
+            };
+            let from_ident = Ident::<Canonical>::new(from);
+            let entry_port = inputs.iter().find_map(|inp| {
+                if normalize_module_ref(&inp.src) == from_ident {
+                    Some(inp.dst.as_str().to_string())
+                } else {
+                    None
+                }
+            });
+            let Some(entry_port) = entry_port else {
+                continue;
+            };
+
+            // Exit port from the next link `(m → y)`.
+            let y = strip_subscript(next.to.as_str());
+            let exit_port = {
+                let y_is_module = edges_result.dynamic_modules.contains_key(y)
+                    || source_vars
+                        .get(y)
+                        .is_some_and(|sv| sv.kind(db) == SourceVariableKind::Module);
+                if y_is_module {
+                    // `y` is a module: m's output feeds y's input. y's
+                    // ModuleInput src is the qualified `m·{port}`; extract the
+                    // port whose normalized ref is `m`.
+                    let y_var = reconstruct_single_variable(db, model, project, y);
+                    let module_ident = Ident::<Canonical>::new(module_name);
+                    match y_var {
+                        Some(crate::variable::Variable::Module { inputs: y_in, .. }) => {
+                            y_in.iter().find_map(|inp| {
+                                if normalize_module_ref(&inp.src) == module_ident {
+                                    inp.src
+                                        .as_str()
+                                        .split_once('\u{00B7}')
+                                        .map(|(_, port)| port.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    reconstruct_single_variable(db, model, project, y)
+                        .and_then(|y_var| module_exit_port_for_reader(module_name, &y_var))
+                }
+            };
+            let Some(exit_port) = exit_port else {
+                continue;
+            };
+
+            // Recompute the sub-model's pathway map and select the pathway(s)
+            // through `entry_port` that terminate at `exit_port`.
+            let Some(pathways) = sub_model_pathways(module_name) else {
+                continue;
+            };
+            let entry_ident = Ident::<Canonical>::new(&entry_port);
+            let exit_ident = Ident::<Canonical>::new(&exit_port);
+            let Some(port_pathways) = pathways.get(&entry_ident) else {
+                // The sub-model exposes no pathway from this input port at all;
+                // leave the base link score (its unit-transfer fallback) in
+                // place rather than overriding to a wrong `0`.
+                continue;
+            };
+
+            // Parent-qualified pathway references, in the sub-model's emission
+            // index order, for pathways ending at `exit_port`.
+            let matching_refs: Vec<String> = port_pathways
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, path_links)| {
+                    let ends_at_exit = path_links.last().is_some_and(|l| l.to == exit_ident);
+                    if ends_at_exit {
+                        Some(format!(
+                            "{module_name}\u{00B7}$\u{205A}ltm\u{205A}path\u{205A}{}\u{205A}{idx}",
+                            entry_port
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Edge key for stable alias / accumulator naming.
+            let edge_key = format!("{from}\u{2192}{module_name}");
+            let alias_name = format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}{edge_key}\u{205A}via\u{205A}{exit_port}"
+            );
+
+            let (alias_eqn, helpers) = if matching_refs.is_empty() {
+                // No pathway connects entry to exit: no causal transfer (or a
+                // truncated pathway budget -- see the fn doc). Score 0.
+                ("0".to_string(), vec![])
+            } else {
+                max_abs_alias_selection(&edge_key, &exit_port, &matching_refs)
+            };
+
+            for h in helpers {
+                alias_by_name.entry(h.name.clone()).or_insert(h);
+            }
+            alias_by_name
+                .entry(alias_name.clone())
+                .or_insert_with(|| super::LtmSyntheticVar {
+                    name: alias_name.clone(),
+                    equation: datamodel::Equation::Scalar(alias_eqn),
+                    dimensions: vec![],
+                    // Compile the prepared equation verbatim: the name parses as
+                    // a `(from, to)` link score (`s→m⁚via⁚pos` => from="s",
+                    // to="m⁚via⁚pos"), so without this `compile_ltm_synthetic_
+                    // fragment` would route it through the salsa `(from,to)` path
+                    // and re-derive a degenerate ceteris-paribus fragment that
+                    // ignores the pathway-selection equation entirely.
+                    compile_directly: true,
+                });
+
+            overrides.insert((loop_item.id.clone(), i), format!("\"{alias_name}\""));
+        }
+    }
+
+    ModuleLinkOverrides {
+        overrides,
+        alias_vars: alias_by_name.into_values().collect(),
+    }
 }
 
 /// Metadata about implicit variables generated by LTM equation parsing.
@@ -499,9 +848,32 @@ pub fn model_ltm_variables(
     use super::LtmMode;
 
     let edges_result = model_causal_edges(db, model, project);
-    if edges_result.stocks.is_empty() {
-        // A stock-free model has no feedback loops to enumerate, so no
-        // mode flip can occur; report the exhaustive default.
+
+    // Determine output ports for this model and the internal input->output
+    // pathways through them. Stdlib models always use the "output"
+    // convention; for user-defined models the output ports come from which
+    // internal variables are read from parent models via module·var syntax.
+    //
+    // This is computed BEFORE the stock-free early return because a
+    // *passthrough* sub-model (no internal stocks) still has parent-visible
+    // input->output pathways the parent's per-exit-port link score needs
+    // scored (PR #684): its internals are a pure aux chain LTM scores
+    // exactly, so it must emit pathway/composite vars even though it has no
+    // stocks. A genuinely stock-free ROOT model has no parent reading
+    // `module·var`, so `sub_model_output_ports` is empty and
+    // `has_input_ports` is false -- the early return below still fires.
+    let output_ports = sub_model_output_ports(db, model, project);
+    let (pathways, truncated_pathway_ports) = if output_ports.is_empty() {
+        (HashMap::new(), Vec::new())
+    } else {
+        module_input_pathways_from_edges(edges_result, &output_ports)
+    };
+    let has_input_ports = !pathways.is_empty();
+
+    if edges_result.stocks.is_empty() && !has_input_ports {
+        // A stock-free model with no input-port pathways has nothing to
+        // score: no feedback loops to enumerate (so no mode flip can occur)
+        // and no module interface to expose. Report the exhaustive default.
         return LtmVariablesResult {
             vars: vec![],
             loop_partitions: HashMap::new(),
@@ -590,22 +962,8 @@ pub fn model_ltm_variables(
     }
     let mut is_discovery = is_discovery_user || var_auto_flipped;
 
-    // Determine output ports for this model. Stdlib models always use
-    // the "output" convention. For user-defined models, output ports are
-    // determined by which internal variables are referenced from parent
-    // models via module·var syntax.
-    let model_name_str = model.name(db);
-    let output_ports = if model_name_str.starts_with("stdlib\u{205A}") {
-        vec![Ident::new("output")]
-    } else {
-        find_model_output_ports(db, model, project)
-    };
-    let (pathways, truncated_pathway_ports) = if output_ports.is_empty() {
-        (HashMap::new(), Vec::new())
-    } else {
-        module_input_pathways_from_edges(edges_result, &output_ports)
-    };
-    let has_input_ports = !pathways.is_empty();
+    // `output_ports`, `pathways`, and `has_input_ports` were computed before
+    // the stock-free early return above (a passthrough sub-model needs them).
     // GH #649: a module body shaped as a chain of diamonds has exponentially
     // many short internal pathways, each minting one `$⁚ltm⁚path⁚…` synthetic
     // variable. The enumerator caps that count per input port; when it does,
@@ -996,6 +1354,24 @@ pub fn model_ltm_variables(
             loop_partitions.insert(l.id.clone(), parts);
         }
 
+        // Per-exit-port pathway-selection overrides for loop links into a
+        // module (PR #684): a loop entering a module at one input port and
+        // exiting at one output port must be scored against the pathway it
+        // actually traverses, not the module's arbitrary-port composite /
+        // unit-transfer fallback. The alias synthetic vars these overrides
+        // reference are pushed onto `vars` here so they compile and join the
+        // `emitted_link_score_names` set below; the loop-score equation
+        // builder consults the `(loop_id, link_index)` overrides first.
+        let module_overrides = compute_module_link_overrides(
+            db,
+            model,
+            project,
+            detected_loops,
+            edges_result,
+            source_vars,
+        );
+        vars.extend(module_overrides.alias_vars.iter().cloned());
+
         // Build the set of link-score variable names emitted so far so
         // generate_loop_score_equation can resolve each loop link to a
         // name that actually exists. Without this, loops traversing
@@ -1011,6 +1387,7 @@ pub fn model_ltm_variables(
             detected_loops,
             &emitted_link_score_names,
             dm_dims,
+            &module_overrides.overrides,
         );
         for (name, equation) in loop_vars {
             // The equation carries its own dimension shape (Scalar /
@@ -1188,10 +1565,17 @@ pub fn model_ltm_variables(
                     .filter(|v| v.name.contains("\u{205A}link_score\u{205A}"))
                     .map(|v| v.name.clone())
                     .collect();
+                // Pinned loops pass an empty override map for now: the
+                // per-exit-port module-link override (PR #684) is not yet
+                // wired through the pin path. RESIDUAL GAP: a pin whose cycle
+                // traverses a multi-output module still scores its input->module
+                // link against the arbitrary-port base fallback. Pins through
+                // single-output modules (the common case) are unaffected.
                 let pin_loop_vars = crate::ltm_augment::generate_loop_score_variables(
                     std::slice::from_ref(pin_loop),
                     &emitted_link_score_names,
                     dm_dims,
+                    &crate::ltm_augment::LoopLinkOverrides::new(),
                 );
                 for (lname, equation) in pin_loop_vars {
                     let dimensions = parse::ltm_equation_dimensions(&equation).to_vec();

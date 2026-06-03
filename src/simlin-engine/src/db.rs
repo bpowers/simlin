@@ -499,14 +499,23 @@ pub(super) fn find_model_output_ports_for_module(
 ///
 /// The parent's `input -> module` (and `module -> module`) link score can
 /// reference the sub-model's composite only when that composite actually
-/// exists -- a DynamicModule (one with internal stocks and at least one
-/// input->output pathway) generates pathway/composite vars, a passthrough
-/// (stockless) module does not. Referencing a non-existent composite var
-/// silently resolves to a constant 0 (cross-module reads of an absent LTM
-/// var don't fail to compile), which zeroes every loop through the module.
-/// This is the authoritative discriminator: it reads the sub-model's
-/// actual `model_ltm_variables` output rather than guessing from the
-/// module's stock count.
+/// exists. Any model with at least one input->output pathway generates
+/// pathway/composite vars -- both DynamicModules (with internal stocks) and,
+/// since PR #684, passthroughs (stockless, whose internals are a pure aux
+/// chain LTM scores exactly). A module exposes NO composite only when its
+/// output does not depend on its input at all (no internal pathway).
+/// Referencing a non-existent composite var silently resolves to a constant
+/// 0 (cross-module reads of an absent LTM var don't fail to compile), which
+/// would zero every loop through the module. This is the authoritative
+/// discriminator: it reads the sub-model's actual `model_ltm_variables`
+/// output rather than guessing from the module's stock count.
+///
+/// NOTE: the composite max-abs-selects across ALL of the module's pathways,
+/// so it is the WRONG link score for a loop that traverses one specific
+/// output port of a multi-output module. The per-exit-port pathway selection
+/// in `model_ltm_variables` (PR #684) overrides the loop-score reference for
+/// such links; the composite remains the discovery-mode per-edge
+/// approximation (no loop-score vars exist there to override).
 ///
 /// Salsa-cached; the sub-model's `model_ltm_variables` is computed once
 /// per `(sub_model, project)` and reused across every parent edge that
@@ -572,6 +581,16 @@ pub(crate) fn module_link_score_equation(
 
     // Resolve a module variable's parent-visible output reference
     // (`module·port`) -- a readable scalar, unlike the bare module name.
+    //
+    // The `ports.first()` (alphabetically-first parent-read output) choice is
+    // arbitrary, but reaching this fallback is now a near-unreachable residual:
+    // since PR #684 any module with an input->output pathway exposes a
+    // composite (used instead, below), so this unit transfer fires only when
+    // the module's output does not depend on its input at all -- a pathway-less
+    // module whose link score is moot (it transmits no change around the loop).
+    // For a multi-output module that DOES have pathways, the loop's per-link
+    // score is fixed exactly by `model_ltm_variables`'s per-exit-port pathway
+    // selection, not by this port choice.
     let module_output_ref = |module_name: &str| -> String {
         let edges = model_causal_edges(db, model, project);
         let ports = find_model_output_ports_for_module(db, model, project, edges, module_name);

@@ -409,9 +409,81 @@ Modules are classified by `classify_module_for_ltm()` in `ltm.rs`:
   analyzed to avoid infinite recursion.
 - **DynamicModule** -- has internal stocks (SMOOTH, DELAY, TREND, user-defined
   modules with stocks). Gets composite link scores and internal graph construction.
-- **Passthrough** -- no internal stocks; exposes no composite, so a link into
-  its input port (or a module→module link feeding it) uses the signed
-  unit-transfer fallback (see Module Links above).
+- **Passthrough** -- no internal stocks. `classify_module_for_ltm` drives only
+  the legacy `CausalGraph`'s recursive internal-graph build (dynamic modules
+  only). It does NOT decide whether a composite is exposed: a passthrough whose
+  internals form an aux chain from input to output still emits pathway/composite
+  vars (its chain is a pure expression LTM scores exactly), so a link into its
+  input port references the composite just like a dynamic module. The signed
+  unit-transfer fallback (see Module Links) now fires only for a *pathway-less*
+  module -- one whose output does not depend on its input at all.
+
+#### Passthrough composites and per-exit-port loop scoring (PR #684)
+
+`model_ltm_variables` no longer suppresses LTM vars for a stockless sub-model
+that has parent-visible input→output pathways: the stock-free early return now
+fires only when the model has neither stocks nor input-port pathways (so a
+stock-free *root* model -- with no parent reading `module·var`, hence no output
+ports -- still emits nothing). A passthrough therefore emits the same
+`$⁚ltm⁚path⁚{port}⁚{idx}` / `$⁚ltm⁚composite⁚{port}` vars a dynamic module does.
+
+The composite alone is, however, the WRONG score for a loop through a
+*multi-output* module: the composite max-abs-selects across ALL of the module's
+pathways. Consider a passthrough exposing `pos = input·0.02` and
+`neg = -input`, with the feedback loop reading only `m·pos` and a side variable
+reading `m·neg`. A single-dependency link score is just `(Δz)/|Δz| = SIGN(Δz)`,
+so the `0.02` coefficient cancels and BOTH pathways have magnitude exactly 1 in
+the degenerate normalized sense. The composite's `if ABS(path0) >= ABS(path1)`
+selection is therefore comparing 1 against 1: it falls through to the
+`>=` first-index TIE-BREAK, which picks `path0` -- and `path0` is `neg`, whose
+sign opposes `pos`, flipping the loop's polarity. Composites cannot fix this
+because the candidates always tie at magnitude 1, so max-abs can never recover
+the loop's actual port: it just returns whichever pathway is enumerated first.
+
+So in **exhaustive** mode the loop-score equation overrides each `x → m` module
+link with a **per-exit-port pathway selection**. The exit port is read off the
+NEXT loop link `m → y` (the unique `m·port` `y` reads, or `y`'s matching
+`ModuleInput.src` when `y` is itself a module); the entry port is `m`'s
+`ModuleInput` whose normalized `src` is `x`. The parent recomputes the
+sub-model's pathway map with the SAME salsa-cached inputs the sub-model's own
+emission uses (`model_causal_edges` + the sorted `find_model_output_ports`), so
+the recomputed pathway indices match the emitted `$⁚ltm⁚path⁚{entry}⁚{idx}`
+vars index-for-index. The override is an alias synthetic var
+`$⁚ltm⁚link_score⁚{x}→{m}⁚via⁚{exit}` whose equation is:
+
+- the single matching pathway ref `m·$⁚ltm⁚path⁚{entry}⁚{idx}` when exactly one
+  pathway ends at the exit port;
+- a max-abs selection over the matching refs when several do (the accumulator
+  helpers are named with a `⁚viaacc⁚` infix so they sort -- and therefore
+  evaluate -- before the alias within the `link_score` category);
+- `"0"` when no pathway connects entry to exit (truthful: no causal transfer --
+  but pathway-budget truncation, GH #649, can also produce this, signalled by
+  the existing `pathways_truncated` Warning).
+
+The alias references SUB-model pathway vars (`m·…`), which the parent evaluates
+when it runs module `m` -- before the parent's appended `link_score` fragments,
+exactly as the existing composite reference resolves at the current step
+(verified by an end-to-end simulation assertion, not by reasoning alone). The
+override is threaded into the loop-score equation builder as a side-table keyed
+by `(loop_id, link_index)`; `Loop.links` is NOT rewritten (loop IDs derive from
+the link sequence and the FFI's id→score correspondence depends on it).
+
+**Discovery-mode asymmetry**: discovery mode emits NO loop-score vars (loops are
+ranked post-simulation by the strongest-path search), so there is nothing to
+override. The base `input → m` link score there is the composite (after this PR)
+-- the paper-faithful per-edge approximation. The per-exit-port refinement is an
+exhaustive-mode-only exactness fix.
+
+**Deterministic output-port ordering (GH #680)**: `find_model_output_ports`
+sorts its result. The merge-order of the `HashSet` it previously returned was
+process-nondeterministic; both the sub-model's pathway-index assignment and the
+parent's recomputation must agree on that order, so the sort is a prerequisite
+for the index-for-index identity above (and closes #680).
+
+**Residual gap**: pinned loops (`LOOPSCORE`) pass an empty override map, so a pin
+whose cycle traverses a multi-output module still scores its input→module link
+against the arbitrary-port base fallback. Pins through single-output modules
+(the common case) are unaffected.
 
 ### Unified Module LTM Treatment
 
@@ -430,8 +502,8 @@ score is the "LTM interface" of a module -- the parent model's link score for
    the module node itself (`normalize_module_ref`). This ensures the module
    participates correctly in loop detection.
 
-2. **Internal instrumentation**: For each DynamicModule model,
-   `model_ltm_variables` generates:
+2. **Internal instrumentation**: For each model with input→output pathways
+   (DynamicModule or passthrough), `model_ltm_variables` generates:
    - Internal link score variables with the `$⁚ltm⁚link_score⁚` prefix for all
      causal links within the module
    - Pathway score variables (`$⁚ltm⁚path⁚{port}⁚{index}`) for each pathway,

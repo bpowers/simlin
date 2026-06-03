@@ -131,8 +131,10 @@ fn test_ltm_delay_model_compiles() {
 }
 
 /// AC1.7: A model with a passthrough module (no internal stocks) compiles
-/// with LTM enabled without errors. The module itself generates no LTM vars
-/// because it has no feedback loops.
+/// with LTM enabled without errors. Since PR #684 the passthrough sub-model
+/// itself emits pathway/composite LTM vars (its `scaled_output = input_val * 2`
+/// chain is a real input->output pathway); this test only asserts the MAIN
+/// model gets LTM offsets for its feedback loop through the module.
 #[test]
 fn test_ltm_passthrough_module_compiles() {
     use salsa::Setter;
@@ -341,18 +343,22 @@ fn test_discovery_dynamic_module_link_score_uses_composite() {
     );
 }
 
-/// A *passthrough* (stockless) module exposes no composite, so the
-/// genuine black-box fallback fires. That fallback must reference the
-/// module's real OUTPUT port (`custom_passthrough·result`) -- a readable
-/// scalar -- never the bare module name nor a hardcoded `output` port
-/// (`find_model_output_ports_for_module`, cc072973), and it must be the
-/// magnitude-1 signed unit transfer (GH #675), not the gain dz/dx.
+/// A *passthrough* (stockless) module whose output DOES depend on its input
+/// (`result = input * 2`) now exposes a composite (PR #684, Part C: a
+/// passthrough's internals are a pure aux chain LTM scores exactly). The base
+/// `input → module` link score therefore references that composite
+/// (`custom_pt·$⁚ltm⁚composite⁚input`) -- the single-pathway composite IS the
+/// exact path score -- never the bare module name nor a hardcoded `output`
+/// port. The magnitude-1 unit-transfer fallback only fires now when there is
+/// genuinely no internal pathway; that case is covered by
+/// `test_pathless_module_link_score_uses_unit_transfer` below.
 #[test]
-fn test_passthrough_module_link_score_uses_unit_transfer_on_real_output_port() {
+fn test_passthrough_module_link_score_uses_composite_on_real_output_port() {
     use salsa::Setter;
 
     // A passthrough sub-model: `result = input * 2`, output port named
-    // `result` (not the stdlib `output` convention), no internal stock.
+    // `result` (not the stdlib `output` convention), no internal stock, ONE
+    // input->output pathway.
     let project = datamodel::Project {
         name: "passthrough_output_name".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -419,19 +425,125 @@ fn test_passthrough_module_link_score_uses_unit_transfer_on_real_output_port() {
     for discovery in [false, true] {
         source_project.set_ltm_discovery_mode(&mut db).to(discovery);
         let ltm_vars = model_ltm_variables(&db, main_model, source_project);
+        // The BASE link score (not a `⁚via⁚` per-exit-port alias).
+        let base_name = "$\u{205A}ltm\u{205A}link_score\u{205A}level\u{2192}custom_pt";
         let link = ltm_vars
             .vars
             .iter()
-            .find(|v| v.name.contains("level\u{2192}custom_pt"))
-            .expect("must emit the level→custom_pt link score");
+            .find(|v| v.name == base_name)
+            .expect("must emit the base level→custom_pt link score");
+        let eqn_text = match &link.equation {
+            datamodel::Equation::Scalar(text) => text.clone(),
+            other => panic!("module link score should be scalar, got {other:?}"),
+        };
+        assert!(
+            eqn_text.contains("custom_pt\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}input"),
+            "discovery={discovery}: a passthrough with an input->output pathway now exposes a \
+             composite; the base link score must reference it; got: {eqn_text}"
+        );
+        assert!(
+            !eqn_text.contains("custom_pt\u{00B7}output"),
+            "discovery={discovery}: must not reference the hardcoded custom_pt·output port; \
+             got: {eqn_text}"
+        );
+    }
+}
+
+/// A module whose output does NOT depend on its input (`result = 7`, a
+/// constant) has no internal input->output pathway, so it exposes NO
+/// composite. The base `input → module` link score then falls back to the
+/// magnitude-1 signed unit transfer against the module's real output port
+/// (`custom_pt·result`), never the bare module name nor a hardcoded `output`
+/// port (GH #675; PR #684 confines the arbitrary-port fallback to this
+/// genuinely pathway-less residual).
+#[test]
+fn test_pathless_module_link_score_uses_unit_transfer() {
+    use salsa::Setter;
+
+    let project = datamodel::Project {
+        name: "pathless_module".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            x_model(
+                "main",
+                vec![
+                    x_stock("level", "50", &["adjustment"], &[], None),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "scaled".to_string(),
+                        equation: datamodel::Equation::Scalar("custom_pt.result".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    x_aux("gap", "100 - scaled + level", None),
+                    x_flow("adjustment", "gap / 5", None),
+                    x_module("custom_pt", &[("level", "custom_pt.input")], None),
+                ],
+            ),
+            x_model(
+                "custom_pt",
+                vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    // Output ignores the input: NO internal pathway, NO composite.
+                    x_aux("result", "7", None),
+                ],
+            ),
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let (source_project, main_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    for discovery in [false, true] {
+        source_project.set_ltm_discovery_mode(&mut db).to(discovery);
+        let ltm_vars = model_ltm_variables(&db, main_model, source_project);
+        let base_name = "$\u{205A}ltm\u{205A}link_score\u{205A}level\u{2192}custom_pt";
+        let link = ltm_vars.vars.iter().find(|v| v.name == base_name);
+        // In exhaustive mode there may be no loop through the pathless module
+        // (its output is constant), so the base link score is only guaranteed
+        // in discovery mode (which scores every edge). Skip if absent.
+        let Some(link) = link else {
+            assert!(!discovery, "discovery mode must score every edge");
+            continue;
+        };
         let eqn_text = match &link.equation {
             datamodel::Equation::Scalar(text) => text.clone(),
             other => panic!("module link score should be scalar, got {other:?}"),
         };
         assert!(
             eqn_text.contains("custom_pt\u{00B7}result"),
-            "discovery={discovery}: passthrough link score must reference the module's \
-             real output port custom_pt·result; got: {eqn_text}"
+            "discovery={discovery}: pathless link score must reference the module's real \
+             output port custom_pt·result; got: {eqn_text}"
         );
         assert!(
             !eqn_text.contains("custom_pt\u{00B7}output"),
@@ -440,12 +552,12 @@ fn test_passthrough_module_link_score_uses_unit_transfer_on_real_output_port() {
         );
         assert!(
             eqn_text.contains("SIGN("),
-            "discovery={discovery}: the black-box fallback must be the magnitude-1 signed \
-             unit transfer (SIGN(Δto)*SIGN(Δfrom)), not the gain dz/dx; got: {eqn_text}"
+            "discovery={discovery}: the fallback must be the magnitude-1 signed unit transfer; \
+             got: {eqn_text}"
         );
         assert!(
             !eqn_text.contains("composite"),
-            "discovery={discovery}: a passthrough exposes no composite; got: {eqn_text}"
+            "discovery={discovery}: a pathless module exposes no composite; got: {eqn_text}"
         );
     }
 }
@@ -1144,5 +1256,217 @@ fn test_clearn_results_offsets_agree_with_layout() {
         mismatches.is_empty(),
         "results offsets map and compiled layout disagree on {} of {compared} comparable slots",
         mismatches.len(),
+    );
+}
+
+/// The reviewer's example (PR #684 r3344948690): a passthrough sub-model
+/// exposing two parent-visible outputs of opposing sign, `pos = input_val *
+/// 0.02` and `neg = 0 - input_val`. The loop reads `m·pos`; a non-loop
+/// `watcher` reads `m·neg` so `neg` joins the output ports (sorted first).
+fn multi_output_passthrough_project() -> datamodel::Project {
+    let sub_model = x_model(
+        "passthrough",
+        vec![
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "input_val".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    ..datamodel::Compat::default()
+                },
+            }),
+            x_aux("pos", "input_val * 0.02", None),
+            x_aux("neg", "0 - input_val", None),
+        ],
+    );
+
+    let main = x_model(
+        "main",
+        vec![
+            x_stock("s", "100", &["growth"], &[], None),
+            datamodel::Variable::Module(datamodel::Module {
+                ident: "m".to_string(),
+                model_name: "passthrough".to_string(),
+                documentation: String::new(),
+                units: None,
+                references: vec![datamodel::ModuleReference {
+                    src: "s".to_string(),
+                    dst: "m.input_val".to_string(),
+                }],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            x_flow("growth", "m.pos * 0.1", None),
+            x_aux("watcher", "m.neg", None),
+        ],
+    );
+
+    datamodel::Project {
+        name: "multi_output_passthrough".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 8.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main, sub_model],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// Part C: a stockless passthrough sub-model with input->output pathways
+/// must emit pathway (`$⁚ltm⁚path⁚`) and composite (`$⁚ltm⁚composite⁚`)
+/// synthetic vars, even though it has no internal stocks. Before the fix
+/// the stock-free early return in `model_ltm_variables` dropped them all.
+#[test]
+fn test_passthrough_submodel_emits_pathway_and_composite_vars() {
+    use salsa::Setter;
+
+    let project = multi_output_passthrough_project();
+    let mut db = SimlinDb::default();
+    let (source_project, sub_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["passthrough"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let ltm_vars = model_ltm_variables(&db, sub_model, source_project);
+    let has_path = ltm_vars
+        .vars
+        .iter()
+        .any(|v| v.name.contains("\u{205A}path\u{205A}"));
+    let has_composite = ltm_vars
+        .vars
+        .iter()
+        .any(|v| v.name.contains("\u{205A}composite\u{205A}"));
+    assert!(
+        has_path,
+        "stockless passthrough sub-model must emit $⁚ltm⁚path⁚ vars; got: {:?}",
+        ltm_vars.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    assert!(
+        has_composite,
+        "stockless passthrough sub-model must emit $⁚ltm⁚composite⁚ vars; got: {:?}",
+        ltm_vars.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+}
+
+/// Part C: a genuinely stock-free ROOT model (no parent reads its
+/// variables, so `find_model_output_ports` is empty) must still emit no LTM
+/// vars -- the restructured early return only suppresses output when there
+/// are also no input-port pathways.
+#[test]
+fn test_stock_free_root_model_emits_no_ltm_vars() {
+    use salsa::Setter;
+
+    let project = datamodel::Project {
+        name: "stock_free_root".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![x_model(
+            "main",
+            vec![x_aux("a", "1", None), x_aux("b", "a * 2", None)],
+        )],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let (source_project, main_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let ltm_vars = model_ltm_variables(&db, main_model, source_project);
+    assert!(
+        ltm_vars.vars.is_empty(),
+        "a stock-free root model with no input ports must emit no LTM vars; got: {:?}",
+        ltm_vars.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+}
+
+/// Part P: the parent's `s -> m` loop link score must be the per-exit-port
+/// alias that selects the `pos`-terminal pathway the loop actually
+/// traverses -- not the composite (which max-abs-picks `neg`), not the raw
+/// `m·neg` unit transfer. The alias's equation must reference the pathway
+/// var that ends at `pos`.
+#[test]
+fn test_multi_output_loop_link_uses_per_exit_port_alias() {
+    use salsa::Setter;
+
+    let project = multi_output_passthrough_project();
+    let mut db = SimlinDb::default();
+    let (source_project, main_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let ltm_vars = model_ltm_variables(&db, main_model, source_project);
+
+    // The per-exit-port alias for the s->m link via the `pos` exit port.
+    let alias_name = "$\u{205A}ltm\u{205A}link_score\u{205A}s\u{2192}m\u{205A}via\u{205A}pos";
+    let alias = ltm_vars
+        .vars
+        .iter()
+        .find(|v| v.name == alias_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "must emit per-exit-port alias {alias_name}; got: {:?}",
+                ltm_vars.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+            )
+        });
+    let alias_eqn = match &alias.equation {
+        datamodel::Equation::Scalar(text) => text.clone(),
+        other => panic!("alias should be scalar, got {other:?}"),
+    };
+    // The alias must reference one of m's pathway vars (the pos-terminal
+    // one), never the composite or the raw neg output.
+    assert!(
+        alias_eqn.contains("m\u{00B7}$\u{205A}ltm\u{205A}path\u{205A}"),
+        "alias must reference a pathway var of m, got: {alias_eqn}"
+    );
+    assert!(
+        !alias_eqn.contains("composite"),
+        "alias must not reference the composite (which max-abs picks neg), got: {alias_eqn}"
+    );
+    assert!(
+        !alias_eqn.contains("m\u{00B7}neg"),
+        "alias must not reference the raw m·neg output, got: {alias_eqn}"
+    );
+
+    // The loop score equation must reference the alias for its s->m link.
+    let loop_score = ltm_vars
+        .vars
+        .iter()
+        .find(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .expect("must emit a loop_score var");
+    let loop_eqn = match &loop_score.equation {
+        datamodel::Equation::Scalar(text) => text.clone(),
+        other => panic!("loop score should be scalar, got {other:?}"),
+    };
+    assert!(
+        loop_eqn.contains(alias_name),
+        "loop score must reference the per-exit-port alias {alias_name}; got: {loop_eqn}"
     );
 }

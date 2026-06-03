@@ -9583,6 +9583,194 @@ fn two_module_isolated_loop_project(mod_b_gain: f64) -> simlin_engine::datamodel
     }
 }
 
+/// A passthrough sub-model that exposes TWO parent-visible outputs of
+/// opposing polarity: `pos = input_val * 0.02` and `neg = 0 - input_val`.
+/// The feedback loop reads only `m·pos` (`growth = m·pos * 0.1`), while a
+/// non-loop aux `watcher` reads `m·neg`. `neg` sorts before `pos`, so the
+/// old `module_output_ref` unit-transfer fallback scored `s -> m` against
+/// the alphabetically-first port `neg` -- the WRONG output for this loop --
+/// flipping the input->m link sign and therefore the whole loop's polarity.
+///
+/// PR https://github.com/bpowers/simlin/pull/684#discussion_r3344948690.
+///
+/// PRE-FIX: the settled raw loop score is -1 (the arbitrary-port unit
+/// transfer scores against `neg`, whose sign is opposite `pos`). POST-FIX:
+/// the per-exit-port pathway selection scores `s -> m` against the `pos`
+/// pathway the loop actually traverses, so the score is +1.
+fn multi_output_passthrough_loop_project() -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel;
+
+    // Sub-model `m`: a stockless passthrough exposing two outputs of
+    // opposing sign. `input_val` is the input port; `pos` and `neg` are
+    // both read by the parent (so both are output ports).
+    let sub_model = datamodel::Model {
+        name: "passthrough".to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "input_val".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    ..datamodel::Compat::default()
+                },
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "pos".to_string(),
+                equation: datamodel::Equation::Scalar("input_val * 0.02".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "neg".to_string(),
+                equation: datamodel::Equation::Scalar("0 - input_val".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+
+    datamodel::Project {
+        name: "multi_output_passthrough_loop".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 8.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Stock(datamodel::Stock {
+                        ident: "s".to_string(),
+                        equation: datamodel::Equation::Scalar("100".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        inflows: vec!["growth".to_string()],
+                        outflows: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "m".to_string(),
+                        model_name: "passthrough".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "s".to_string(),
+                            dst: "m.input_val".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Flow(datamodel::Flow {
+                        ident: "growth".to_string(),
+                        equation: datamodel::Equation::Scalar("m.pos * 0.1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    // Reads the OTHER (non-loop) output so `neg` becomes a
+                    // parent-visible output port, sorted before `pos`.
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "watcher".to_string(),
+                        equation: datamodel::Equation::Scalar("m.neg".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+            sub_model,
+        ],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// PR #684 review (r3344948690): a multi-output passthrough module's
+/// input->module link must be scored against the output port the loop
+/// actually traverses, not the alphabetically-first one. The loop reads
+/// `m·pos` (positive gain), so its raw loop score is +1; the non-loop
+/// `watcher` reads `m·neg` only to force `neg` into the output-port set.
+///
+/// Pre-fix the settled loop score was -1 (the unit-transfer fallback scored
+/// `s -> m` against `neg`, whose sign opposes `pos`).
+#[test]
+fn multi_output_passthrough_loop_raw_score_is_one() {
+    let project = multi_output_passthrough_loop_project();
+    let (compiled, _loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    let loop_names: Vec<&str> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+        })
+        .map(|k| k.as_str())
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        1,
+        "the multi-output passthrough model has exactly one feedback loop, found {loop_names:?}"
+    );
+    let off_key = results
+        .offsets
+        .keys()
+        .find(|k| k.as_str() == loop_names[0])
+        .unwrap();
+    let off = results.offsets[off_key];
+
+    for step in 3..results.step_count {
+        let value = results.data[step * results.step_size + off];
+        assert!(
+            (value - 1.0).abs() < 1e-6,
+            "settled step {step} loop score is {value}, expected +1. The loop reads m·pos \
+             (positive gain); scoring s->m against the alphabetically-first port m·neg \
+             (opposite sign) flips the loop polarity to -1."
+        );
+    }
+}
+
 /// GROUND TRUTH PROBE / acceptance invariant for GH #675: an isolated
 /// feedback loop routed through a module->module link must have raw loop
 /// score exactly +1 at every settled step, regardless of the gain the

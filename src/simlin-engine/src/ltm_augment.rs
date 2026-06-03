@@ -1444,10 +1444,21 @@ pub(crate) fn link_score_var_name(from: &str, to: &str, shape: &RefShape) -> Str
 /// on dense models (see `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`).
 /// The normalization happens post-simulation in
 /// [`crate::ltm_post::compute_rel_loop_scores`].
+/// Per-link reference overrides for the loop-score equation, keyed by
+/// `(loop_id, link_index)` -> pre-quoted reference text (e.g. a per-exit-port
+/// pathway-selection alias for a module link, PR #684). When a link has an
+/// override, `loop_link_score_ref` uses it verbatim instead of resolving the
+/// link's `(from, to)` to an emitted link-score name. The index is into
+/// `loop_item.links` (the whole-loop cycle); the per-slot `slot_links` path
+/// does not consult overrides (its module-link case degenerates to the scalar
+/// one, which the whole-loop override already covers).
+pub(crate) type LoopLinkOverrides = HashMap<(String, usize), String>;
+
 pub(crate) fn generate_loop_score_variables(
     loops: &[Loop],
     emitted_link_score_names: &HashSet<String>,
     dm_dims: &[datamodel::Dimension],
+    overrides: &LoopLinkOverrides,
 ) -> Vec<(String, datamodel::Equation)> {
     let mut loop_vars = Vec::with_capacity(loops.len());
 
@@ -1469,8 +1480,12 @@ pub(crate) fn generate_loop_score_variables(
 
     for (i, loop_item) in loops.iter().enumerate() {
         let var_name = format!("$⁚ltm⁚loop_score⁚{}", loop_item.id);
-        let equation =
-            generate_dimensioned_loop_score_equation(loop_item, emitted_link_score_names, dm_dims);
+        let equation = generate_dimensioned_loop_score_equation(
+            loop_item,
+            emitted_link_score_names,
+            dm_dims,
+            overrides,
+        );
         loop_score_bytes += equation_text_len(&equation) as u64;
         loop_vars.push((var_name, equation));
         if trace_on && should_trace(i + 1) {
@@ -1535,9 +1550,12 @@ fn generate_dimensioned_loop_score_equation(
     loop_item: &Loop,
     emitted: &HashSet<String>,
     dm_dims: &[datamodel::Dimension],
+    overrides: &LoopLinkOverrides,
 ) -> datamodel::Equation {
     if loop_item.dimensions.is_empty() {
-        return datamodel::Equation::Scalar(generate_loop_score_equation(loop_item, emitted));
+        return datamodel::Equation::Scalar(generate_loop_score_equation(
+            loop_item, emitted, overrides,
+        ));
     }
     // Prefer the compact ApplyToAll form whenever it is correct (every link
     // resolves through a Bare A2A name), regardless of whether per-slot
@@ -1549,7 +1567,7 @@ fn generate_dimensioned_loop_score_equation(
     if loop_item.slot_links.is_empty() || all_links_resolve_bare(loop_item, emitted) {
         return datamodel::Equation::ApplyToAll(
             loop_item.dimensions.clone(),
-            generate_loop_score_equation(loop_item, emitted),
+            generate_loop_score_equation(loop_item, emitted, overrides),
         );
     }
 
@@ -1580,7 +1598,7 @@ fn generate_dimensioned_loop_score_equation(
         .iter()
         .map(|tuple| {
             let text = match by_tuple.get(tuple.as_str()) {
-                Some(links) => generate_link_product(links, emitted),
+                Some(links) => generate_link_product(links, emitted, None),
                 None => "0".to_string(),
             };
             (tuple.clone(), text, None, None)
@@ -2533,8 +2551,13 @@ fn find_fixed_index_emitted_name(
 fn generate_loop_score_equation(
     loop_item: &Loop,
     emitted_link_score_names: &HashSet<String>,
+    overrides: &LoopLinkOverrides,
 ) -> String {
-    generate_link_product(&loop_item.links, emitted_link_score_names)
+    generate_link_product(
+        &loop_item.links,
+        emitted_link_score_names,
+        Some((loop_item.id.as_str(), overrides)),
+    )
 }
 
 /// The product-of-link-score-references text for one link cycle.
@@ -2545,10 +2568,23 @@ fn generate_loop_score_equation(
 fn generate_link_product(
     links: &[crate::ltm::Link],
     emitted_link_score_names: &HashSet<String>,
+    loop_overrides: Option<(&str, &LoopLinkOverrides)>,
 ) -> String {
     let link_score_names: Vec<String> = links
         .iter()
-        .map(|link| loop_link_score_ref(link, emitted_link_score_names))
+        .enumerate()
+        .map(|(i, link)| {
+            // A per-link override (PR #684: a module link's per-exit-port
+            // pathway-selection alias) takes precedence over the link's
+            // (from, to) name resolution. Only the whole-loop path supplies
+            // an override context; the per-slot path passes `None`.
+            if let Some((loop_id, overrides)) = loop_overrides
+                && let Some(reference) = overrides.get(&(loop_id.to_string(), i))
+            {
+                return reference.clone();
+            }
+            loop_link_score_ref(link, emitted_link_score_names)
+        })
         .collect();
 
     if link_score_names.is_empty() {
