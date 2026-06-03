@@ -421,10 +421,11 @@ fn discovery_arms_race_3party() {
     let found = discover_loops_from_path(model_path);
 
     // With per-stock reset, discovery finds all 8 loops: each stock
-    // starts with fresh best_scores, so pairwise and three-way
-    // reinforcing loops are no longer pruned by scores from earlier
-    // stocks' self-loop searches, and the canonical-rotation dedup
-    // retains both directions of the three-way loop as distinct paths.
+    // starts with fresh per-node expansion budgets, so pairwise and
+    // three-way reinforcing loops are not starved by expansions consumed
+    // during earlier stocks' self-loop searches, and the
+    // canonical-rotation dedup retains both directions of the three-way
+    // loop as distinct paths.
     assert_eq!(
         found.len(),
         8,
@@ -473,9 +474,11 @@ fn discovery_decoupled_stocks() {
     let found = discover_loops_from_path(model_path);
 
     // The heuristic finds 2 of 3 loops: the self-loops for each stock.
-    // The cross-stock loop is missed by the within-stock heuristic (the
-    // strong self-loop paths set high best_scores on shared nodes during
-    // each stock's own search, pruning the weaker cross-stock path).
+    // The cross-stock loop is missed because its two cross-links are
+    // never simultaneously nonzero at any saved timestep (stock_1->flow_2
+    // is active only around step 4, stock_2->flow_1 only at steps 6-10),
+    // so the per-step zero-edge-excluded search graph never contains the
+    // full cycle -- the "baton-passing" limitation tracked as GH #699.
     assert_eq!(
         found.len(),
         2,

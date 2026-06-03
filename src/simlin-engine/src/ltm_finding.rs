@@ -203,9 +203,12 @@ impl SearchGraph {
     ///
     /// Zero-score (and NaN) edges are excluded from the graph: a loop through
     /// such a link has loop score exactly 0 at this timestep, so traversing
-    /// it cannot surface a loop that matters here (GH #647). Any loop that
-    /// ever matters has all-nonzero links at the timestep where it does, and
-    /// remains discoverable there.
+    /// it cannot surface a loop that matters here (GH #647). A loop whose
+    /// links are all simultaneously nonzero at some sampled timestep remains
+    /// discoverable there. The caveat: a "baton-passing" loop whose links are
+    /// only ever active at *different* sampled steps (or only between save
+    /// points) is never discoverable -- see `discovery_decoupled_stocks` in
+    /// tests/simulate_ltm.rs for a real example exhaustive mode catches.
     fn from_edges(
         edges: Vec<(Ident<Canonical>, Ident<Canonical>, f64)>,
         stocks: Vec<Ident<Canonical>>,
@@ -1276,9 +1279,11 @@ struct DfsScratch {
     ///
     /// Edges whose |score| is 0 (or NaN) at the current timestep are
     /// excluded: a loop containing such a link has loop score exactly 0 at
-    /// this step, so it cannot be a "loop that matters" here, and any loop
-    /// that ever matters has all-nonzero links at the step where it does --
-    /// where it remains discoverable (GH #647).
+    /// this step, so it cannot be a "loop that matters" here. A loop whose
+    /// links are all simultaneously nonzero at some sampled step remains
+    /// discoverable there (GH #647); a loop whose links are only ever
+    /// active at *different* sampled steps is never discoverable (see
+    /// `SearchGraph::from_edges` for the full caveat).
     step_adj: Vec<Vec<StepEdge>>,
     /// node id -> strongly-connected-component id of the current timestep's
     /// nonzero-score subgraph. Computed once per step by `discover_step`.
@@ -3070,8 +3075,10 @@ mod tests {
 
     /// The flip side of `test_zero_score_edges`: a loop inactive at one step
     /// (zero-score link) is discovered at the step where all its links carry
-    /// nonzero scores. Discovery runs at every timestep, so per-step
-    /// exclusion of inactive edges loses no loop that ever matters.
+    /// nonzero scores. Discovery runs at every sampled timestep, so per-step
+    /// exclusion of inactive edges loses no loop that is ever simultaneously
+    /// active at a sampled step. (Loops whose links are only ever active at
+    /// different steps are missed -- GH #699.)
     #[test]
     fn test_inactive_loop_found_at_active_step() {
         let mut offsets = HashMap::new();

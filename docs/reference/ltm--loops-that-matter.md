@@ -1868,6 +1868,12 @@ acceptable for practical analysis but means the method cannot prove it has found
 important loops. The LOOPSCORE builtin (Section 10) mitigates this by allowing practitioners
 to track specific loops regardless of the discovery algorithm.
 
+A distinct, subtler incompleteness: because discovery searches the per-timestep graph of
+*currently active* (nonzero-score) links, a "baton-passing" loop -- one whose links are each
+active at different times but never all simultaneously nonzero at any sampled timestep -- is
+never discoverable, even though it is a genuine feedback loop that exhaustive enumeration
+reports. The decoupled two-stock model of Section 12.3 exhibits exactly this pattern.
+
 ### 16.5 Cannot Identify Behavior Modes
 
 Unlike EEA, LTM does not decompose behavior into distinct modes (exponential growth,

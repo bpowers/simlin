@@ -471,11 +471,17 @@ override is threaded into the loop-score equation builder as a side-table keyed
 by `(loop_id, link_index)`; `Loop.links` is NOT rewritten (loop IDs derive from
 the link sequence and the FFI's id→score correspondence depends on it).
 
-**Discovery-mode asymmetry**: discovery mode emits NO loop-score vars (loops are
-ranked post-simulation by the strongest-path search), so there is nothing to
-override. The base `input → m` link score there is the composite (after this PR)
--- the paper-faithful per-edge approximation. The per-exit-port refinement is an
-exhaustive-mode-only exactness fix.
+**Discovery-mode asymmetry -- can report the WRONG POLARITY (GH #698)**:
+discovery mode emits NO loop-score vars (loops are ranked post-simulation by
+the strongest-path search), so there is nothing to override. The base
+`input → m` link score there is the composite -- and because single-dependency
+pathways all normalize to magnitude exactly 1, the composite's max-abs
+tie-break picks an arbitrary output port. This is not merely a magnitude
+approximation: a loop through a multi-output module whose ports have opposing
+signs gets the arbitrary port's sign, empirically inverting the loop's
+polarity (+1.0 in exhaustive vs -1.0 in discovery on a `pos = input*0.02` /
+`neg = -input` repro). The per-exit-port refinement is currently an
+exhaustive-mode-only fix.
 
 **Deterministic output-port ordering (GH #680)**: `find_model_output_ports`
 sorts its result. The merge-order of the `HashSet` it previously returned was
@@ -741,6 +747,18 @@ missed at other timesteps, and (b) per-stock budget resets mean different
 starting stocks can discover different loops. The papers' empirical
 evaluation shows that missed loops are consistently "siblings" of found
 loops, differing by only a few links.
+
+Independent of the cap, the per-step zero-edge exclusion has its own
+completeness caveat (GH #699): a "baton-passing" loop whose links are each
+active over time but never all simultaneously nonzero at any *saved*
+timestep is invisible to discovery at every step, even though exhaustive
+mode reports it (`discovery_decoupled_stocks` demonstrates this on
+`test/decoupled_stocks`). Running discovery at saved timesteps rather than
+every dt (divergence 1 below, GH #309) widens the same window: a loop
+active only between save points is never sampled. Neither is a regression
+vs. the published per-step method, but "loses nothing" claims should be
+read as "loses no loop that is ever simultaneously active at a sampled
+step."
 
 ### Ranking and Filtering (`rank_and_filter`)
 
@@ -1211,9 +1229,17 @@ When `ltm_discovery_mode = true`, element-level discovery proceeds as:
 3. The `SearchGraph` is built from these element-level link offsets. Element-level
    stocks (expanded from `model_element_causal_edges`, which routes inlined
    reducers through their `$⁚ltm⁚agg⁚{n}` nodes) serve as DFS starting points.
-4. Discovered element-level loops are grouped and classified identically to
-   exhaustive mode via `build_element_level_loops`; the synthetic agg nodes are
-   trimmed from each reported `FoundLoop`'s node sequence.
+4. Each discovered path becomes its own `FoundLoop`; the synthetic agg nodes
+   are trimmed from its node sequence by `trim_synthetic_aggs_from_loop_links`.
+   Discovery does NOT flow through `build_element_level_loops`, and in
+   particular `recover_cross_agg_loops` never runs: a cross-element loop
+   through an inlined reducer visits the agg node more than once, so it is
+   non-elementary in the element graph and the discovery DFS (whose
+   `visiting` set forbids any node revisit) is structurally unable to find
+   it. Discovery therefore silently drops ALL cross-element reducer loops --
+   only the single-petal (elementary) loops through an agg survive. Tracked
+   as GH #696; the bite is worst exactly when a reducer-in-feedback model
+   over a large dimension auto-flips to discovery.
 
 ### Per-Slot Loop Score Equations
 
@@ -1428,13 +1454,23 @@ cases remain deliberate carve-outs:
    synthesized compile-time equations, avoiding O(P^2) equation-text growth on
    models with very large same-partition loop sets (e.g. WRLD3).
 
-6. **Flow-to-stock numerator timing**: The flow-to-stock link score numerator uses
-   `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` rather than `flow - PREVIOUS(flow)`.
-   In Euler integration, the flow at t-1 drove the stock change from t-1 to t, so
-   `PREVIOUS(flow)` aligns the numerator and denominator to the same causal interval.
-   This produces results shifted by one DT compared to reference SD software
-   (Stella/iThink). The integration test (`tests/simulate_ltm.rs`) compensates by
-   shifting reference timestamps forward by DT when loading golden data.
+6. **Flow-to-stock numerator timing and `time_step` scaling**: The flow-to-stock
+   link score numerator uses `time_step * (PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow)))`
+   rather than the published bare `flow - PREVIOUS(flow)`. Two deliberate changes:
+   - *1-DT shift*: in Euler integration, the flow at t-1 drove the stock change
+     from t-1 to t, so `PREVIOUS(flow)` aligns the numerator and denominator to
+     the same causal interval. This produces results shifted by one DT compared
+     to reference SD software (Stella/iThink). The integration test
+     (`tests/simulate_ltm.rs`) compensates by shifting reference timestamps
+     forward by DT when loading golden data.
+   - *`time_step` factor*: the denominator (second-order stock change) is
+     `dt * (netflow(t-dt) - netflow(t-2dt))` in Euler, carrying one `dt` that the
+     raw flow delta in the numerator lacks; without the factor every
+     flow-to-stock link score is `1/dt` too large and the error compounds once
+     per stock in a loop. The published Eq. 3 omits the factor because every
+     worked example in the papers uses dt=1. Verified empirically: at dt=0.25
+     an isolated loop scores +1.0 with the factor (4.0 without), and at dt=1
+     the paper's Table 3 values (1.25 / -0.25) reproduce exactly.
 
 7. **Ceteris-paribus via AST transformation**: The papers describe re-evaluating
    equations with current values of one input and previous values of all others.
