@@ -143,6 +143,35 @@ pub struct FoundLoop {
     /// per-partition per-timestep denominators are known; empty until then and
     /// for the no-score-data path.  Length matches `scores` when populated.
     pub rel_scores: Vec<f64>,
+    /// RESULT-SCOPED cycle-partition index into [`DiscoveryResult::partitions`],
+    /// or `None` for a loop whose stocks resolve to no parent-level partition
+    /// (a pure module-internal loop).  Indices are dense and assigned in
+    /// first-appearance order over the final ranked loop list -- they identify
+    /// partitions *within one discovery result only* and are NOT stable across
+    /// runs or model edits (the underlying SCC numbering renumbers when stocks
+    /// are added or renamed).  Consumers that need a durable identity should
+    /// key on the partition's stock-name set instead.  Filled by
+    /// `attach_partition_metadata` at the end of ranking.
+    pub partition: Option<usize>,
+}
+
+/// One cycle partition referenced by a discovery result's loops.
+///
+/// A cycle partition is a group of stocks connected by feedback (a strongly
+/// connected component of the stock-to-stock reachability graph; ref section
+/// 8).  Relative loop scores are normalized *within* a partition, so a loop's
+/// importance is only comparable to its partition-mates' -- this metadata lets
+/// callers group, filter, or present loops partition-by-partition (e.g. lead
+/// with the model's giant component).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+pub struct DiscoveredPartition {
+    /// The partition's stock names (element-level for arrayed models, e.g.
+    /// `population[nyc]`), sorted lexicographically.
+    pub stocks: Vec<String>,
+    /// Number of loops in the RETURNED loop list that belong to this
+    /// partition (post-filter, post-cap -- the count a caller can verify
+    /// against the `loops` it received, not the discovered-but-dropped total).
+    pub loop_count: usize,
 }
 
 /// The outcome of a strongest-path discovery run.
@@ -160,6 +189,10 @@ pub struct FoundLoop {
 pub struct DiscoveryResult {
     /// Loops discovered (ranked, filtered, and ID-assigned).
     pub loops: Vec<FoundLoop>,
+    /// The cycle partitions referenced by `loops`, indexed by each loop's
+    /// `FoundLoop::partition`.  Dense, in first-appearance order over the
+    /// ranked loop list; result-scoped (see `FoundLoop::partition`).
+    pub partitions: Vec<DiscoveredPartition>,
     /// Whether the time budget elapsed before discovery finished.
     pub truncated: bool,
 }
@@ -1880,6 +1913,7 @@ pub fn discover_loops_with_graph(
     if link_offsets.is_empty() {
         return Ok(DiscoveryResult {
             loops: Vec::new(),
+            partitions: Vec::new(),
             truncated: false,
         });
     }
@@ -1893,6 +1927,7 @@ pub fn discover_loops_with_graph(
     if stocks.is_empty() {
         return Ok(DiscoveryResult {
             loops: Vec::new(),
+            partitions: Vec::new(),
             truncated: false,
         });
     }
@@ -1953,6 +1988,7 @@ pub fn discover_loops_with_graph(
     if all_paths.is_empty() {
         return Ok(DiscoveryResult {
             loops: Vec::new(),
+            partitions: Vec::new(),
             truncated,
         });
     }
@@ -2062,6 +2098,8 @@ pub fn discover_loops_with_graph(
             avg_abs_score,
             // Filled in once partition denominators are known (rank_truncate_and_id).
             rel_scores: Vec::new(),
+            // Filled in by attach_partition_metadata at the end of ranking.
+            partition: None,
         });
     }
 
@@ -2099,10 +2137,11 @@ pub fn discover_loops_with_graph(
     let mut found_loops = deduped;
 
     let partitions = causal_graph.compute_cycle_partitions();
-    rank_and_filter(&mut found_loops, &partitions);
+    let partition_meta = rank_and_filter(&mut found_loops, &partitions);
 
     Ok(DiscoveryResult {
         loops: found_loops,
+        partitions: partition_meta,
         truncated,
     })
 }
@@ -2157,35 +2196,57 @@ fn mean_relative_contribution(fl: &FoundLoop, totals: &[f64]) -> f64 {
 /// `mean_rel` is the **mean magnitude of the loop's relative loop score** over
 /// the steps where it is active -- `mean_t(|score[t]| / partition_total[t])`,
 /// the literature's loop-inclusion measure ("average magnitude of the relative
-/// loop score across the simulation period"; docs/reference 13.3). The
-/// secondary `key` is the loop's content-derived sort key (canonical edge
+/// loop score across the simulation period"; docs/reference 13.3).
+///
+/// `competing` is whether the loop shares its cycle partition with at least
+/// one other DISCOVERED loop.  A loop that is trivially alone in its partition
+/// has relative score exactly `±1` at every active step *by construction*
+/// (its own `|score|` is the whole denominator), so its `mean_rel` of `1.0`
+/// carries zero discriminative information -- on large real models (C-LEARN)
+/// dozens of isolated two-variable stock-decay loops would otherwise pin the
+/// top of the ranking above the loops that genuinely compete for dominance.
+/// Competing loops therefore rank before solo loops regardless of `mean_rel`.
+///
+/// The secondary `key` is the loop's content-derived sort key (canonical edge
 /// sequence) for deterministic tie-breaking; it never falls back to input
 /// order.
 struct RelativeImportance {
     mean_rel: f64,
+    competing: bool,
     key: (String, Vec<String>),
 }
 
-/// Order two loops by descending relative importance, with content-based
-/// tie-breaking. A `NaN` `mean_rel` (a loop that was never active in a
-/// non-degenerate partition) sorts last so it cannot displace a real loop
-/// from the cap.
+/// Order two loops for ranking: active loops before never-active (`NaN`)
+/// ones, competing loops before trivially-isolated (solo-partition) ones,
+/// then descending mean relative importance, then content-based tie-breaking.
+///
+/// The competing-first demotion is deliberate (see [`RelativeImportance`]):
+/// a solo loop's `mean_rel` is `1.0` by construction, so comparing it against
+/// competing loops' shares is a degenerate cross-partition comparison the
+/// papers warn against (ref section 8).  Among competing loops the
+/// paper-aligned mean-relative statistic is untouched.  A `NaN` `mean_rel`
+/// (a loop never active in a non-degenerate partition) sorts last -- below
+/// even solo loops, which at least transmitted something -- so it cannot
+/// displace a real loop from the cap.
 fn cmp_relative_importance(a: &RelativeImportance, b: &RelativeImportance) -> std::cmp::Ordering {
-    // Descending by mean_rel; NaN treated as the smallest so it sinks to the
-    // bottom regardless of operand order.
-    let by_score = match (a.mean_rel.is_nan(), b.mean_rel.is_nan()) {
-        (true, true) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Greater, // a is "smaller" -> sorts after b
-        (false, true) => std::cmp::Ordering::Less,
-        (false, false) => b
-            .mean_rel
-            .partial_cmp(&a.mean_rel)
-            .unwrap_or(std::cmp::Ordering::Equal),
-    };
-    by_score.then_with(|| a.key.cmp(&b.key))
+    // Active (non-NaN) first.
+    let by_nan = a.mean_rel.is_nan().cmp(&b.mean_rel.is_nan());
+    // Competing (true) before solo (false).
+    let by_competing = b.competing.cmp(&a.competing);
+    // Descending by mean_rel (both finite or both NaN here).
+    let by_score = b
+        .mean_rel
+        .partial_cmp(&a.mean_rel)
+        .unwrap_or(std::cmp::Ordering::Equal);
+    by_nan
+        .then(by_competing)
+        .then(by_score)
+        .then_with(|| a.key.cmp(&b.key))
 }
 
-/// Rank, filter, truncate, and assign IDs to discovered loops.
+/// Rank, filter, truncate, assign IDs, and attach partition metadata to
+/// discovered loops.  Returns the result-scoped partition list (see
+/// [`DiscoveredPartition`]).
 ///
 /// Pipeline (GH #543, GH #310):
 /// 1. Compute per-partition per-timestep totals (the sum of `|loop_score_j|`
@@ -2197,15 +2258,25 @@ fn cmp_relative_importance(a: &RelativeImportance, b: &RelativeImportance) -> st
 ///    semantics, unchanged) -- BEFORE any global cap, so a loop dominant in a
 ///    small partition but globally low-magnitude is no longer dropped by a
 ///    truncate-before-filter (GH #310).
-/// 4. Rank by the partition-relative key (descending), then truncate to
-///    `MAX_LOOPS`. Ranking on the relative key rather than raw `avg_abs_score`
-///    fixes the magnitude bias (GH #543): a partition-dominant low-magnitude
-///    loop now outranks a non-dominant high-magnitude loop in a busier
-///    partition, both in truncation and in the caller-facing ordering.
+/// 4. Rank competitive-first: loops that share their partition with at least
+///    one other discovered loop come first, ordered by the partition-relative
+///    key (descending); loops trivially ALONE in their partition -- whose
+///    relative score is `±1` at every active step by construction, carrying
+///    zero discriminative information -- come after ALL competing loops (see
+///    [`RelativeImportance`]).  Then truncate to `MAX_LOOPS` in that order,
+///    so under cap pressure the zero-information solo loops are dropped
+///    before any competing loop.  Ranking on the relative key rather than raw
+///    `avg_abs_score` fixes the magnitude bias (GH #543): a partition-dominant
+///    low-magnitude loop still outranks a non-dominant high-magnitude loop in
+///    a busier partition, both in truncation and in the caller-facing
+///    ordering -- provided both face competition.
 /// 5. Assign deterministic polarity-based IDs (r1, b1, ...) -- the assigner is
 ///    order-independent (it sorts by a content key internally).
 /// 6. Re-sort by the relative key so callers get loops ranked by
 ///    partition-relative importance.
+/// 7. Attach result-scoped partition metadata: each surviving loop's
+///    `partition` index (dense, first-appearance order) and the partition
+///    list itself (stocks + returned-loop count).
 ///
 /// **Ranking key choice (mean vs peak).** The retention filter (step 3) uses
 /// the *peak* per-timestep relative contribution -- "did this loop ever
@@ -2244,7 +2315,10 @@ fn cmp_relative_importance(a: &RelativeImportance, b: &RelativeImportance) -> st
 /// stocks are element-specific. The logic is partition-naming-agnostic -- it
 /// compares each loop's score to the total within its partition regardless of
 /// granularity.
-fn rank_and_filter(found_loops: &mut Vec<FoundLoop>, partitions: &CyclePartitions) {
+fn rank_and_filter(
+    found_loops: &mut Vec<FoundLoop>,
+    partitions: &CyclePartitions,
+) -> Vec<DiscoveredPartition> {
     let step_count = found_loops.first().map_or(0, |l| l.scores.len());
     debug_assert!(
         found_loops.iter().all(|l| l.scores.len() == step_count),
@@ -2266,6 +2340,21 @@ fn rank_and_filter(found_loops: &mut Vec<FoundLoop>, partitions: &CyclePartition
     };
     let loop_partitions: Vec<Option<usize>> = found_loops.iter().map(slot0).collect();
 
+    // Group loops by partition over the FULL discovered set (before retention
+    // or cap).  Drives both the relative-score denominators below and the
+    // competing-vs-solo classification: a loop is "competing" iff its
+    // partition holds at least one other discovered loop, the same population
+    // its denominator sums over -- so "solo" means exactly "its relative
+    // score is ±1 by construction".
+    let mut partition_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+    for (i, &partition) in loop_partitions.iter().enumerate() {
+        partition_groups.entry(partition).or_default().push(i);
+    }
+    let competing: Vec<bool> = loop_partitions
+        .iter()
+        .map(|p| partition_groups[p].len() >= 2)
+        .collect();
+
     // Per-partition per-timestep totals: Σ|score_j[t]| over the partition's
     // loops, NaN excluded (an undefined score is not signal; matches GH #542's
     // denom_summand). Inf is kept -- a real divergence at a dominance
@@ -2274,10 +2363,6 @@ fn rank_and_filter(found_loops: &mut Vec<FoundLoop>, partitions: &CyclePartition
     // order of GH #310 used to compute totals over only the top-200 survivors).
     let mut partition_totals: HashMap<Option<usize>, Vec<f64>> = HashMap::new();
     if step_count > 0 {
-        let mut partition_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-        for (i, &partition) in loop_partitions.iter().enumerate() {
-            partition_groups.entry(partition).or_default().push(i);
-        }
         for (&partition, indices) in &partition_groups {
             let mut totals = vec![0.0; step_count];
             for &idx in indices {
@@ -2303,13 +2388,18 @@ fn rank_and_filter(found_loops: &mut Vec<FoundLoop>, partitions: &CyclePartition
                 !score.is_nan() && totals[i] > 0.0 && score.abs() / totals[i] >= MIN_CONTRIBUTION
             });
         }
-        // Partitions of the surviving loops, in the same order `retain` will
-        // leave them, so the relative-importance pass below indexes the right
-        // partition for each loop.
+        // Partitions and competing flags of the surviving loops, in the same
+        // order `retain` will leave them, so the relative-importance pass
+        // below indexes the right partition for each loop.
         let retained_partitions: Vec<Option<usize>> = loop_partitions
             .iter()
             .zip(&keep)
             .filter_map(|(&p, &k)| k.then_some(p))
+            .collect();
+        let retained_competing: Vec<bool> = competing
+            .iter()
+            .zip(&keep)
+            .filter_map(|(&c, &k)| k.then_some(c))
             .collect();
 
         // retain() visits in index order; drive it off the precomputed mask.
@@ -2317,7 +2407,12 @@ fn rank_and_filter(found_loops: &mut Vec<FoundLoop>, partitions: &CyclePartition
         found_loops.retain(|_| *keep_iter.next().unwrap());
         debug_assert_eq!(retained_partitions.len(), found_loops.len());
 
-        rank_truncate_and_id(found_loops, &retained_partitions, &partition_totals);
+        rank_truncate_and_id(
+            found_loops,
+            &retained_partitions,
+            &retained_competing,
+            &partition_totals,
+        );
     } else {
         // No score data: nothing to rank relative to; just assign IDs over the
         // (cap-respecting) set. `partition_for_loop` still resolves, but with no
@@ -2327,6 +2422,53 @@ fn rank_and_filter(found_loops: &mut Vec<FoundLoop>, partitions: &CyclePartition
         assign_loop_ids(found_loops);
         found_loops.sort_by_cached_key(|fl| loop_sort_key(&fl.loop_info));
     }
+
+    // Attach result-scoped partition metadata over the FINAL loop list (both
+    // paths): partition indices are dense, in first-appearance order, so a
+    // caller's `loops[0].partition` is always `Some(0)` or `None` and the
+    // partition list is exactly the partitions the returned loops live in.
+    attach_partition_metadata(found_loops, partitions)
+}
+
+/// Resolve each surviving loop's cycle partition, remap the engine-internal
+/// partition indices to dense result-scoped ones (first-appearance order over
+/// the final ranked list), set `FoundLoop::partition`, and build the
+/// [`DiscoveredPartition`] list.
+///
+/// Runs over the final (filtered, capped, ranked) loops, so
+/// `DiscoveredPartition::loop_count` counts exactly the loops a caller
+/// receives.  Loops with no parent-level partition (pure module-internal
+/// loops) keep `partition == None` and contribute no partition entry.
+fn attach_partition_metadata(
+    found_loops: &mut [FoundLoop],
+    partitions: &CyclePartitions,
+) -> Vec<DiscoveredPartition> {
+    let mut dense_for_internal: HashMap<usize, usize> = HashMap::new();
+    let mut meta: Vec<DiscoveredPartition> = Vec::new();
+    for fl in found_loops.iter_mut() {
+        // Discovered loops are always scalar (see `rank_and_filter`'s slot0
+        // note), so the length-1 collapse is exact here too.
+        let internal = partitions
+            .partition_for_loop(&fl.loop_info, &[])
+            .first()
+            .copied()
+            .flatten();
+        fl.partition = internal.map(|internal_idx| {
+            let dense = *dense_for_internal.entry(internal_idx).or_insert_with(|| {
+                meta.push(DiscoveredPartition {
+                    stocks: partitions.partitions[internal_idx]
+                        .iter()
+                        .map(|s| s.as_str().to_string())
+                        .collect(),
+                    loop_count: 0,
+                });
+                meta.len() - 1
+            });
+            meta[dense].loop_count += 1;
+            dense
+        });
+    }
+    meta
 }
 
 /// The SIGNED per-timestep partition-relative loop score series for one loop.
@@ -2349,16 +2491,19 @@ fn signed_relative_scores(fl: &FoundLoop, totals: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// Rank the retained loops by partition-relative importance, truncate to the
-/// (possibly test-overridden) cap, assign IDs, and leave the loops in the
-/// relative-importance ordering callers consume.
+/// Rank the retained loops competitive-first by partition-relative importance
+/// (see [`cmp_relative_importance`]), truncate to the (possibly
+/// test-overridden) cap, assign IDs, and leave the loops in the ranking order
+/// callers consume.
 ///
-/// `loop_partitions[i]` is the cycle partition of `found_loops[i]` and
-/// `partition_totals` the per-partition per-timestep denominator -- both as
-/// built by `rank_and_filter` over the full discovered set.
+/// `loop_partitions[i]` is the cycle partition of `found_loops[i]`,
+/// `competing[i]` whether that partition holds at least one other discovered
+/// loop, and `partition_totals` the per-partition per-timestep denominator --
+/// all as built by `rank_and_filter` over the full discovered set.
 fn rank_truncate_and_id(
     found_loops: &mut Vec<FoundLoop>,
     loop_partitions: &[Option<usize>],
+    competing: &[bool],
     partition_totals: &HashMap<Option<usize>, Vec<f64>>,
 ) {
     // Pair each loop with its partition-relative importance statistic, then sort
@@ -2380,7 +2525,14 @@ fn rank_truncate_and_id(
             let mean_rel = mean_relative_contribution(&fl, totals);
             let key = loop_sort_key(&fl.loop_info);
             fl.rel_scores = signed_relative_scores(&fl, totals);
-            (RelativeImportance { mean_rel, key }, fl)
+            (
+                RelativeImportance {
+                    mean_rel,
+                    competing: competing[idx],
+                    key,
+                },
+                fl,
+            )
         })
         .collect();
 
@@ -3601,6 +3753,7 @@ mod tests {
                 scores: vec![],
                 avg_abs_score: 1.0,
                 rel_scores: vec![],
+                partition: None,
             },
             FoundLoop {
                 loop_info: Loop {
@@ -3625,6 +3778,7 @@ mod tests {
                 scores: vec![],
                 avg_abs_score: 0.5,
                 rel_scores: vec![],
+                partition: None,
             },
         ];
 
@@ -3766,6 +3920,7 @@ mod tests {
             scores,
             avg_abs_score,
             rel_scores: vec![],
+            partition: None,
         }
     }
 
@@ -4157,7 +4312,7 @@ mod tests {
             .collect(),
         };
 
-        rank_and_filter(&mut loops, &partitions);
+        let partition_meta = rank_and_filter(&mut loops, &partitions);
 
         // All 3 loops should be retained: Chicago's loop is 100% of its
         // partition's total, even though globally it's tiny.
@@ -4167,18 +4322,40 @@ mod tests {
             "Element-level loop dominant in its partition should be retained"
         );
 
-        // Ordering is now partition-RELATIVE, not raw magnitude (GH #543).
-        // Chicago is the sole loop in partition 1, so its relative
-        // contribution is 1.0 -- it ranks above NYC (500/(500+400) = 0.556)
-        // and Boston (400/900 = 0.444), which share partition 0. Before the
-        // GH #543 fix this asserted the raw-magnitude order 500 > 400 > 0.01.
+        // Ordering is partition-RELATIVE among competing loops (GH #543),
+        // with trivially-isolated loops demoted below them.  NYC
+        // (500/(500+400) = 0.556) ranks above Boston (400/900 = 0.444); the
+        // Chicago loop is ALONE in its partition, so its 1.0 relative score
+        // is degenerate (±1 by construction) and it sorts after the
+        // competing pair despite the larger mean-rel.
+        assert_eq!(loops[0].avg_abs_score, 500.0);
+        assert_eq!(loops[1].avg_abs_score, 400.0);
         assert!(
-            (loops[0].avg_abs_score - 0.01).abs() < 1e-10,
-            "Chicago (partition-dominant, rel 1.0) ranks first; got {}",
-            loops[0].avg_abs_score
+            (loops[2].avg_abs_score - 0.01).abs() < 1e-10,
+            "Chicago (solo-partition, rel 1.0 by construction) ranks last; got {}",
+            loops[2].avg_abs_score
         );
-        assert_eq!(loops[1].avg_abs_score, 500.0);
-        assert_eq!(loops[2].avg_abs_score, 400.0);
+
+        // Partition metadata: dense, first-appearance order. Partition 0 is
+        // the NYC/Boston SCC (two element-level stocks, two returned loops);
+        // partition 1 is Chicago's singleton.
+        assert_eq!(partition_meta.len(), 2);
+        assert_eq!(
+            partition_meta[0].stocks,
+            vec![
+                "population[boston]".to_string(),
+                "population[nyc]".to_string()
+            ]
+        );
+        assert_eq!(partition_meta[0].loop_count, 2);
+        assert_eq!(
+            partition_meta[1].stocks,
+            vec!["population[chicago]".to_string()]
+        );
+        assert_eq!(partition_meta[1].loop_count, 1);
+        assert_eq!(loops[0].partition, Some(0));
+        assert_eq!(loops[1].partition, Some(0));
+        assert_eq!(loops[2].partition, Some(1));
     }
 
     /// Build a two-partition CyclePartitions where each partition holds the
@@ -4201,18 +4378,17 @@ mod tests {
 
     /// GH #543: ranking must be partition-RELATIVE, not raw magnitude.
     ///
-    /// Partition A is high-magnitude and holds a dominant loop (a_big) AND a
-    /// non-dominant loop (a_small). Partition B is low-magnitude and holds a
-    /// single dominant loop (b_only). The partition-B-dominant loop (relative
-    /// contribution 1.0) must rank ABOVE partition-A's non-dominant loop
-    /// (a_small's relative contribution is small), even though a_small's raw
-    /// magnitude is far larger. This assertion is RED against the old
-    /// raw-`avg_abs_score` ranking, which would put a_small (magnitude 300)
-    /// above b_only (magnitude 1).
+    /// Partition A is high-magnitude and holds a dominant loop (a_big, rel
+    /// 0.7) and a non-dominant loop (a_small, rel 0.3). Partition B is
+    /// low-magnitude and holds a dominant loop (b_dom, rel ~0.91) plus a
+    /// minor one (b_min, rel ~0.09). The partition-B-dominant loop must rank
+    /// ABOVE both partition-A loops even though its raw magnitude (0.5) is
+    /// ~1000x smaller -- the relative key, not the raw `avg_abs_score`,
+    /// drives the order.
     #[test]
     fn test_rank_and_filter_543_partition_relative_ranking() {
         // Partition A: a_big = 700, a_small = 300 -> rels 0.7 and 0.3.
-        // Partition B: b_only = 1 alone -> rel 1.0.
+        // Partition B: b_dom = 0.5, b_min = 0.05 -> rels ~0.909 and ~0.091.
         let mut loops = vec![
             make_found_loop(
                 &[("a_big_x", "a_big_y"), ("a_big_y", "a_big_x")],
@@ -4227,6 +4403,61 @@ mod tests {
                 300.0,
             ),
             make_found_loop(
+                &[("b_dom_x", "b_dom_y"), ("b_dom_y", "b_dom_x")],
+                &["stock_b"],
+                LoopPolarity::Reinforcing,
+                0.5,
+            ),
+            make_found_loop(
+                &[("b_min_x", "b_min_y"), ("b_min_y", "b_min_x")],
+                &["stock_b"],
+                LoopPolarity::Reinforcing,
+                0.05,
+            ),
+        ];
+
+        let partitions = two_partitions(&["stock_a"], &["stock_b"]);
+        rank_and_filter(&mut loops, &partitions);
+
+        let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
+        // Relative ranking: b_dom (0.909) > a_big (0.7) > a_small (0.3) >
+        // b_min (0.091).
+        assert_eq!(loops.len(), 4, "all four loops clear MIN_CONTRIBUTION");
+        assert_eq!(
+            order[0], 0.5,
+            "partition-B-dominant loop (rel ~0.91) must rank first, not the high-magnitude loops"
+        );
+        assert_eq!(order[1], 700.0, "a_big (rel 0.7) is second");
+        assert_eq!(order[2], 300.0, "a_small (rel 0.3) is third");
+        assert_eq!(order[3], 0.05, "b_min (rel ~0.09) is last");
+    }
+
+    /// A loop trivially ALONE in its cycle partition has relative score
+    /// exactly ±1 at every active step by construction -- zero discriminative
+    /// information -- so it must sort AFTER every competing loop, regardless
+    /// of the competing loops' (necessarily smaller) shares.  This is the
+    /// C-LEARN failure mode: dozens of isolated two-variable gas-uptake loops
+    /// pinned the top of the discovery ranking above the carbon-climate core
+    /// where loops genuinely compete.
+    #[test]
+    fn test_rank_and_filter_demotes_trivially_isolated_loops() {
+        let mut loops = vec![
+            // The "core": two competing loops in partition A.
+            make_found_loop(
+                &[("a_big_x", "a_big_y"), ("a_big_y", "a_big_x")],
+                &["stock_a"],
+                LoopPolarity::Reinforcing,
+                700.0,
+            ),
+            make_found_loop(
+                &[("a_small_x", "a_small_y"), ("a_small_y", "a_small_x")],
+                &["stock_a"],
+                LoopPolarity::Balancing,
+                300.0,
+            ),
+            // A trivially-isolated stock-decay loop: alone in partition B,
+            // rel 1.0 by construction.
+            make_found_loop(
                 &[("b_only_x", "b_only_y"), ("b_only_y", "b_only_x")],
                 &["stock_b"],
                 LoopPolarity::Reinforcing,
@@ -4235,25 +4466,26 @@ mod tests {
         ];
 
         let partitions = two_partitions(&["stock_a"], &["stock_b"]);
-        rank_and_filter(&mut loops, &partitions);
+        let partition_meta = rank_and_filter(&mut loops, &partitions);
 
-        let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
-        // Relative order: a_big (0.7) > b_only (1.0)? No -- 1.0 > 0.7 > 0.3.
-        // So the full relative ranking is b_only (1.0), a_big (0.7), a_small (0.3).
         assert_eq!(loops.len(), 3, "all three loops clear MIN_CONTRIBUTION");
+        let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
         assert_eq!(
-            order[0], 1.0,
-            "partition-B-dominant loop (rel 1.0) must rank first, not the high-magnitude loops"
+            order,
+            vec![700.0, 300.0, 1.0],
+            "competing loops rank by share; the solo-partition loop sorts after ALL of them"
         );
-        assert_eq!(order[1], 700.0, "a_big (rel 0.7) is second");
-        assert_eq!(order[2], 300.0, "a_small (rel 0.3) is last");
 
-        // Direct statement of the issue: the partition-B-dominant loop ranks
-        // ABOVE partition-A's non-dominant loop a_small.
-        let pos = |mag: f64| order.iter().position(|&v| v == mag).unwrap();
-        assert!(
-            pos(1.0) < pos(300.0),
-            "partition-B-dominant loop must outrank partition-A's non-dominant loop (GH #543)"
+        // Partition metadata reflects the final order: partition 0 is the
+        // competitive one (first appearance), partition 1 the singleton.
+        assert_eq!(partition_meta.len(), 2);
+        assert_eq!(partition_meta[0].stocks, vec!["stock_a".to_string()]);
+        assert_eq!(partition_meta[0].loop_count, 2);
+        assert_eq!(partition_meta[1].stocks, vec!["stock_b".to_string()]);
+        assert_eq!(partition_meta[1].loop_count, 1);
+        assert_eq!(
+            loops.iter().map(|l| l.partition).collect::<Vec<_>>(),
+            vec![Some(0), Some(0), Some(1)]
         );
     }
 
@@ -4261,7 +4493,7 @@ mod tests {
     /// low-magnitude loop must be RETAINED over the higher-magnitude
     /// non-dominant loop in a busier partition. RED against the old code,
     /// which truncated by raw `avg_abs_score` and would keep a_small (300)
-    /// while dropping b_only (1).
+    /// while dropping b_dom (0.5).
     #[test]
     fn test_rank_and_filter_543_truncation_keeps_partition_dominant() {
         let mut loops = vec![
@@ -4278,26 +4510,32 @@ mod tests {
                 300.0,
             ),
             make_found_loop(
-                &[("b_only_x", "b_only_y"), ("b_only_y", "b_only_x")],
+                &[("b_dom_x", "b_dom_y"), ("b_dom_y", "b_dom_x")],
                 &["stock_b"],
                 LoopPolarity::Reinforcing,
-                1.0,
+                0.5,
+            ),
+            make_found_loop(
+                &[("b_min_x", "b_min_y"), ("b_min_y", "b_min_x")],
+                &["stock_b"],
+                LoopPolarity::Reinforcing,
+                0.05,
             ),
         ];
 
         let partitions = two_partitions(&["stock_a"], &["stock_b"]);
         // Test-only cap of 2: only the two highest relative-importance loops
-        // survive. Those are b_only (rel 1.0) and a_big (rel 0.7); a_small
-        // (rel 0.3) is dropped. Under the OLD raw-magnitude truncation the
-        // survivors would have been a_big (700) and a_small (300), dropping
-        // the partition-dominant b_only.
+        // survive. Those are b_dom (rel ~0.91) and a_big (rel 0.7); a_small
+        // (rel 0.3) and b_min (rel ~0.09) are dropped. Under the OLD
+        // raw-magnitude truncation the survivors would have been a_big (700)
+        // and a_small (300), dropping the partition-dominant b_dom.
         let _guard = MaxLoopsGuard::new(2);
         rank_and_filter(&mut loops, &partitions);
 
         assert_eq!(loops.len(), 2, "cap of 2 retains exactly two loops");
         let mags: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
         assert!(
-            mags.contains(&1.0),
+            mags.contains(&0.5),
             "partition-dominant low-magnitude loop must survive the cap (GH #543); got {mags:?}"
         );
         assert!(
@@ -4306,15 +4544,86 @@ mod tests {
         );
     }
 
+    /// Under cap pressure, trivially-isolated (solo-partition) loops are
+    /// dropped BEFORE any competing loop -- they are the zero-information
+    /// entries.  Among the solos, the content key breaks the tie
+    /// deterministically.
+    #[test]
+    fn test_rank_and_filter_truncation_drops_solo_loops_first() {
+        let mut loops = vec![
+            // Two competing loops in partition A with small shares.
+            make_found_loop(
+                &[("a_big_x", "a_big_y"), ("a_big_y", "a_big_x")],
+                &["stock_a"],
+                LoopPolarity::Reinforcing,
+                7.0,
+            ),
+            make_found_loop(
+                &[("a_small_x", "a_small_y"), ("a_small_y", "a_small_x")],
+                &["stock_a"],
+                LoopPolarity::Reinforcing,
+                3.0,
+            ),
+            // Two solo loops, each alone in its own partition (rel 1.0 each).
+            make_found_loop(
+                &[("b_only_x", "b_only_y"), ("b_only_y", "b_only_x")],
+                &["stock_b"],
+                LoopPolarity::Reinforcing,
+                100.0,
+            ),
+            make_found_loop(
+                &[("c_only_x", "c_only_y"), ("c_only_y", "c_only_x")],
+                &["stock_c"],
+                LoopPolarity::Reinforcing,
+                100.0,
+            ),
+        ];
+
+        let stock_b = Ident::new("stock_b");
+        let stock_c = Ident::new("stock_c");
+        let stock_a = Ident::new("stock_a");
+        let partitions = CyclePartitions {
+            partitions: vec![
+                vec![stock_a.clone()],
+                vec![stock_b.clone()],
+                vec![stock_c.clone()],
+            ],
+            stock_partition: vec![(stock_a, 0), (stock_b, 1), (stock_c, 2)]
+                .into_iter()
+                .collect(),
+        };
+
+        // Cap of 3: both competing loops survive (rel 0.7 and 0.3) plus ONE
+        // solo loop (content-key tiebreak picks b before c); the other solo
+        // is dropped even though its raw magnitude (100) dwarfs the
+        // competing loops'.
+        let _guard = MaxLoopsGuard::new(3);
+        let partition_meta = rank_and_filter(&mut loops, &partitions);
+
+        assert_eq!(loops.len(), 3, "cap of 3 retains exactly three loops");
+        let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
+        assert_eq!(order[0], 7.0, "competing loops first");
+        assert_eq!(order[1], 3.0);
+        assert_eq!(order[2], 100.0, "one solo loop fills the last slot");
+        assert!(
+            loops[2].loop_info.links[0].from.as_str().starts_with("b_"),
+            "content-key tiebreak among equal solos must pick b_only deterministically"
+        );
+        // Only the partitions of RETURNED loops appear in the metadata.
+        assert_eq!(partition_meta.len(), 2);
+        assert_eq!(partition_meta[1].stocks, vec!["stock_b".to_string()]);
+    }
+
     /// GH #310: a partition-dominant loop globally ranked BELOW the cap must
     /// survive, because the partition-aware retention filter runs before the
     /// global truncation. RED against the old truncate-before-filter order.
     ///
-    /// Build several high-magnitude loops in partition A plus one tiny
-    /// partition-B-dominant loop. With a tiny cap and the OLD order
-    /// (truncate-by-magnitude THEN filter), the partition-B loop -- globally
-    /// the lowest magnitude -- is truncated away before the partition scope
-    /// ever sees it. With the new order it is retained: it is 100% of its
+    /// Build several high-magnitude loops in partition A plus a tiny
+    /// partition-B pair whose dominant loop has globally negligible
+    /// magnitude. With a tiny cap and the OLD order (truncate-by-magnitude
+    /// THEN filter), the partition-B-dominant loop -- globally among the
+    /// lowest magnitudes -- is truncated away before the partition scope ever
+    /// sees it. With the new order it is retained: it is ~91% of its
     /// partition and the relative ranking floats it to the top.
     #[test]
     fn test_rank_and_filter_310_partition_dominant_survives_cap() {
@@ -4337,21 +4646,27 @@ mod tests {
                 LoopPolarity::Reinforcing,
                 700.0,
             ),
-            // Globally the smallest magnitude, but the sole loop in partition B.
+            // Globally tiny magnitudes, but b_dom dominates partition B.
             make_found_loop(
-                &[("bx", "by"), ("by", "bx")],
+                &[("b_dom_x", "b_dom_y"), ("b_dom_y", "b_dom_x")],
                 &["stock_b"],
                 LoopPolarity::Reinforcing,
                 0.5,
+            ),
+            make_found_loop(
+                &[("b_min_x", "b_min_y"), ("b_min_y", "b_min_x")],
+                &["stock_b"],
+                LoopPolarity::Reinforcing,
+                0.05,
             ),
         ];
 
         let partitions = two_partitions(&["stock_a"], &["stock_b"]);
         // Cap of 1: only the single most partition-relatively-important loop
-        // survives. That is the partition-B-dominant loop (rel 1.0), NOT any
-        // partition-A loop (each rel < 1.0 since they share partition A). Under
-        // the OLD truncate-before-filter the survivor would have been a1
-        // (magnitude 900) and the partition-B loop would never have been seen.
+        // survives. That is the partition-B-dominant loop (rel ~0.91), NOT
+        // any partition-A loop (a1's rel is 900/2400 = 0.375). Under the OLD
+        // truncate-before-filter the survivor would have been a1 (magnitude
+        // 900) and the partition-B loop would never have been seen.
         let _guard = MaxLoopsGuard::new(1);
         rank_and_filter(&mut loops, &partitions);
 
@@ -4398,18 +4713,56 @@ mod tests {
         rank_and_filter(&mut order_a, &partitions);
         rank_and_filter(&mut order_b, &partitions);
 
-        // Same final ordering (by magnitude proxy), same ids, same retained set.
-        let proj = |loops: &[FoundLoop]| -> Vec<(f64, String)> {
+        // Same final ordering (by magnitude proxy), same ids, same partition
+        // assignment, same retained set.
+        let proj = |loops: &[FoundLoop]| -> Vec<(f64, String, Option<usize>)> {
             loops
                 .iter()
-                .map(|l| (l.avg_abs_score, l.loop_info.id.clone()))
+                .map(|l| (l.avg_abs_score, l.loop_info.id.clone(), l.partition))
                 .collect()
         };
         assert_eq!(
             proj(&order_a),
             proj(&order_b),
-            "permuted input must yield identical ordering and ids"
+            "permuted input must yield identical ordering, ids, and partitions"
         );
+    }
+
+    /// The no-score-data path (zero timesteps) still attaches partition
+    /// metadata: partitions are structural, not score-derived.
+    #[test]
+    fn test_rank_and_filter_no_scores_still_attaches_partitions() {
+        let mut loops = vec![
+            make_found_loop_with_scores(
+                &[("ax", "ay"), ("ay", "ax")],
+                &["stock_a"],
+                LoopPolarity::Reinforcing,
+                0.0,
+                vec![],
+            ),
+            make_found_loop_with_scores(
+                &[("bx", "by"), ("by", "bx")],
+                &["stock_b"],
+                LoopPolarity::Reinforcing,
+                0.0,
+                vec![],
+            ),
+        ];
+
+        let partitions = two_partitions(&["stock_a"], &["stock_b"]);
+        let partition_meta = rank_and_filter(&mut loops, &partitions);
+
+        assert_eq!(loops.len(), 2);
+        assert_eq!(partition_meta.len(), 2);
+        assert!(
+            loops.iter().all(|l| l.partition.is_some()),
+            "every loop must carry its partition even with no score data"
+        );
+        // Dense first-appearance indexing holds on this path too.
+        assert_eq!(loops[0].partition, Some(0));
+        assert_eq!(loops[1].partition, Some(1));
+        assert_eq!(partition_meta[0].loop_count, 1);
+        assert_eq!(partition_meta[1].loop_count, 1);
     }
 
     // --- IndexedSearch vs. SearchGraph equivalence oracle ---

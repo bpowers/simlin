@@ -549,6 +549,18 @@ pub(crate) unsafe fn drop_dominant_periods_vec(periods: &mut Vec<ffi::SimlinDomi
     }
 }
 
+pub(crate) unsafe fn drop_discovered_partition(partition: &mut ffi::SimlinDiscoveredPartition) {
+    drop_c_string_array(partition.stocks, partition.stock_count);
+}
+
+pub(crate) unsafe fn drop_discovered_partitions_vec(
+    partitions: &mut Vec<ffi::SimlinDiscoveredPartition>,
+) {
+    for mut partition in partitions.drain(..) {
+        drop_discovered_partition(&mut partition);
+    }
+}
+
 pub(crate) fn build_simlin_error(
     code: SimlinErrorCode,
     details: &[ErrorDetailData],

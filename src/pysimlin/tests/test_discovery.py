@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 import simlin
-from simlin import Analysis, DominantPeriod, Loop
+from simlin import Analysis, DominantPeriod, Loop, Partition
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -128,6 +128,32 @@ class TestAnalyzeDiscovery:
         analysis = logistic_model.analyze(timeout=60.0)
         assert not analysis.truncated
         assert len(analysis.loops) > 0
+
+    def test_partition_metadata(self, logistic_model: simlin.Model) -> None:
+        # Logistic growth has one stock (population), so both discovered loops
+        # share a single cycle partition: Analysis.partitions holds one entry
+        # (with the stock name and a loop_count matching the returned loops),
+        # and every loop's partition indexes it.
+        analysis = logistic_model.analyze()
+        assert len(analysis.loops) == 2
+
+        assert len(analysis.partitions) == 1, "one stock means one cycle partition"
+        partition = analysis.partitions[0]
+        assert isinstance(partition, Partition)
+        assert any("population" in s for s in partition.stocks), (
+            f"the partition's stocks must name the model's stock: {partition.stocks}"
+        )
+        assert partition.loop_count == len(analysis.loops)
+        for loop in analysis.loops:
+            assert loop.partition == 0, (
+                f"loop {loop.id} must index the single (dense index 0) partition"
+            )
+
+    def test_structural_loops_have_no_partition(self, logistic_model: simlin.Model) -> None:
+        # The structural Model.loops surface doesn't carry partition metadata;
+        # the field defaults to None there.
+        for loop in logistic_model.loops:
+            assert loop.partition is None
 
 
 class TestAnalyzeOptIn:

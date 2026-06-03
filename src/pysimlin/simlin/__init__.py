@@ -17,6 +17,7 @@ from .analysis import (
     Loop,
     LoopPolarity,
     LtmMode,
+    Partition,
 )
 from .errors import (
     ErrorCode,
@@ -133,6 +134,7 @@ __all__ = [
     "LtmMode",
     "Model",
     "ModelIssue",
+    "Partition",
     "Project",
     "Run",
     "Sim",

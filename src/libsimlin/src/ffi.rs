@@ -172,6 +172,28 @@ pub struct SimlinDiscoveredLoop {
     /// (pysimlin `set_loop_name`), or NULL when the loop has no assigned
     /// name.  Owned `c_char` buffer freed with the loop.
     pub name: *mut c_char,
+    /// RESULT-SCOPED index into `SimlinDiscoveryResult.partitions` naming the
+    /// loop's cycle partition, or -1 for a loop whose stocks resolve to no
+    /// parent-level partition (a pure module-internal loop).  Indices are
+    /// dense, assigned in first-appearance order over the ranked loop list;
+    /// they identify partitions within ONE discovery result only and are not
+    /// stable across runs or model edits.
+    pub partition: i32,
+}
+
+/// One cycle partition referenced by a discovery result's loops: a group of
+/// stocks connected by feedback, within which relative loop scores are
+/// normalized and therefore comparable.  Lets callers group/filter loops
+/// partition-by-partition (e.g. lead with the model's giant component).
+#[repr(C)]
+pub struct SimlinDiscoveredPartition {
+    /// The partition's stock names (element-level for arrayed models),
+    /// sorted lexicographically.  `stock_count` entries.
+    pub stocks: *mut *mut c_char,
+    pub stock_count: usize,
+    /// Number of loops in the returned loop list that belong to this
+    /// partition.
+    pub loop_count: usize,
 }
 
 /// A time interval during which a specific set of loops dominates behavior.
@@ -202,6 +224,11 @@ pub struct SimlinDiscoveryResult {
     pub loop_count: usize,
     pub periods: *mut SimlinDominantPeriod,
     pub period_count: usize,
+    /// The cycle partitions referenced by `loops` (each loop's `partition`
+    /// indexes this array).  Dense, in first-appearance order over the
+    /// ranked loop list; result-scoped.
+    pub partitions: *mut SimlinDiscoveredPartition,
+    pub partition_count: usize,
     /// Non-zero when discovery hit its `budget_ms` before finishing.
     pub truncated: bool,
 }

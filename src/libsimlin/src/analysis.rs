@@ -16,16 +16,17 @@ use std::os::raw::{c_char, c_double};
 use std::ptr;
 
 use crate::ffi::{
-    SimlinDiscoveredLoop, SimlinDiscoveryResult, SimlinDominantPeriod, SimlinLink,
-    SimlinLinkPolarity, SimlinLinks, SimlinLoop, SimlinLoopPolarity, SimlinLoops, SimlinLtmMode,
+    SimlinDiscoveredLoop, SimlinDiscoveredPartition, SimlinDiscoveryResult, SimlinDominantPeriod,
+    SimlinLink, SimlinLinkPolarity, SimlinLinks, SimlinLoop, SimlinLoopPolarity, SimlinLoops,
+    SimlinLtmMode,
 };
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
 use crate::{
     clear_out_error, drop_c_string, drop_c_string_array, drop_discovered_loop,
-    drop_discovered_loops_vec, drop_dominant_periods_vec, drop_link, drop_links_vec, drop_loop,
-    drop_loops_vec, require_model, require_sim, store_anyhow_error, store_error, SimlinErrorCode,
-    SimlinModel, SimlinSim,
+    drop_discovered_loops_vec, drop_discovered_partition, drop_discovered_partitions_vec,
+    drop_dominant_periods_vec, drop_link, drop_links_vec, drop_loop, drop_loops_vec, require_model,
+    require_sim, store_anyhow_error, store_error, SimlinErrorCode, SimlinModel, SimlinSim,
 };
 
 /// Backend-agnostic per-link result emitted by [`analyze_links_core`].
@@ -668,6 +669,32 @@ unsafe fn discovery_to_ffi(
             importance,
             importance_len,
             name,
+            partition: summary
+                .partition
+                .map_or(-1, |p| i32::try_from(p).unwrap_or(-1)),
+        });
+    }
+
+    let mut c_partitions: Vec<SimlinDiscoveredPartition> =
+        Vec::with_capacity(analysis.partitions.len());
+    for partition in &analysis.partitions {
+        let (stocks, stock_count) = match strings_to_c_array(&partition.stocks) {
+            Ok(v) => v,
+            Err(()) => {
+                drop_discovered_partitions_vec(&mut c_partitions);
+                drop_discovered_loops_vec(&mut c_loops);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("partition stock name contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+        c_partitions.push(SimlinDiscoveredPartition {
+            stocks,
+            stock_count,
+            loop_count: partition.loop_count,
         });
     }
 
@@ -679,6 +706,7 @@ unsafe fn discovery_to_ffi(
             Ok(v) => v,
             Err(()) => {
                 drop_dominant_periods_vec(&mut c_periods);
+                drop_discovered_partitions_vec(&mut c_partitions);
                 drop_discovered_loops_vec(&mut c_loops);
                 store_error(
                     out_error,
@@ -699,12 +727,15 @@ unsafe fn discovery_to_ffi(
 
     let (loops, loop_count) = vec_into_raw_parts(c_loops);
     let (periods, period_count) = vec_into_raw_parts(c_periods);
+    let (partitions, partition_count) = vec_into_raw_parts(c_partitions);
 
     Box::into_raw(Box::new(SimlinDiscoveryResult {
         loops,
         loop_count,
         periods,
         period_count,
+        partitions,
+        partition_count,
         truncated: analysis.truncated,
     }))
 }
@@ -738,6 +769,17 @@ pub unsafe extern "C" fn simlin_free_discovery_result(result: *mut SimlinDiscove
         let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
             result.periods,
             result.period_count,
+        ));
+    }
+    if !result.partitions.is_null() && result.partition_count > 0 {
+        let partition_slice =
+            std::slice::from_raw_parts_mut(result.partitions, result.partition_count);
+        for partition in partition_slice.iter_mut() {
+            drop_discovered_partition(partition);
+        }
+        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            result.partitions,
+            result.partition_count,
         ));
     }
 }

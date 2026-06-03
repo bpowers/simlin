@@ -276,39 +276,76 @@ In discovery mode the engine runs the LTM strongest-path search (Eberlein & Scho
 the link scores at every saved timestep: a Dijkstra-like DFS from every stock, following the
 highest-|score| links, collecting the feedback loops that are actually *doing something* at each
 instant. `model.analyze()` is the explicit, timeout-guarded entry point.
+
+Two things come back: the discovered loops, and the **cycle partitions** they live in -- groups of
+stocks connected by feedback, the unit within which loop shares are normalized and therefore
+comparable. Start with the partitions, because they are the map of the model's feedback anatomy:
 """)
 
 code("""
 analysis = model.analyze(timeout=120.0)
 
-print(f"discovered {len(analysis.loops)} loops "
-      f"(truncated by timeout: {analysis.truncated})\\n")
+print(f"discovered {len(analysis.loops)} loops across {len(analysis.partitions)} cycle "
+      f"partitions (truncated by timeout: {analysis.truncated})\\n")
 
-print(f"{'rank':>4} {'id':>5} {'pol':>4} {'vars':>5} {'mean |rel score|':>17}   path")
-for rank, loop in enumerate(analysis.loops[:18], 1):
+print(f"{'part':>4} {'loops':>6} {'stocks':>7}   members")
+for idx, part in enumerate(analysis.partitions[:6]):
+    members = ", ".join(part.stocks[:3])
+    if len(part.stocks) > 3:
+        members += f", ... ({len(part.stocks)} total)"
+    print(f"{idx:>4} {part.loop_count:>6} {len(part.stocks):>7}   {members}")
+print("   ... and "
+      f"{sum(1 for p in analysis.partitions if p.loop_count == 1)} single-loop partitions")
+""")
+
+md("""
+The partitioning splits C-LEARN's feedback structure cleanly in two: **three giant components**
+(the coupled carbon-cycle + energy-balance core -- 15 stocks, ~47 competing loops each, one copy
+per element of the `scenario` sensitivity dimension) and a dozen **isolated single-stock
+partitions**, one per minor greenhouse gas (each HFC stock decaying through its own little uptake
+loop, connected to nothing).
+
+That split matters for reading the loop ranking. A loop *alone* in its partition always scores
+exactly ±1 -- it trivially explains 100% of whatever its one-stock subsystem does, which carries
+zero information. The engine therefore ranks **competitive loops first** (ordered by their mean
+share of partition activity) and sends the trivially-isolated loops to the bottom of the list:
+""")
+
+code("""
+print(f"{'rank':>4} {'id':>5} {'pol':>4} {'part':>5} {'mean |rel score|':>17}   path")
+for rank, loop in enumerate(analysis.loops[:12], 1):
     imp = loop.average_importance()
     path = " -> ".join(v.split("[")[0] for v in loop.variables[:3])
     if len(loop.variables) > 3:
         path += " -> ..."
-    print(f"{rank:>4} {loop.id:>5} {str(loop.polarity):>4} {len(loop.variables):>5} "
+    print(f"{rank:>4} {loop.id:>5} {str(loop.polarity):>4} {str(loop.partition):>5} "
+          f"{imp:>17.3f}   {path}")
+
+print("    ...")
+for rank, loop in list(enumerate(analysis.loops, 1))[-3:]:
+    imp = loop.average_importance()
+    path = " -> ".join(v.split("[")[0] for v in loop.variables[:2])
+    print(f"{rank:>4} {loop.id:>5} {str(loop.polarity):>4} {str(loop.partition):>5} "
           f"{imp:>17.3f}   {path}")
 """)
 
 md("""
-A loop's **relative loop score** at an instant is its share of all loop activity in its *cycle
-partition* (a group of stocks connected by feedback), signed by polarity: `+` reinforcing, `-`
-balancing. The ranking above is by mean |relative score|.
+A loop's **relative loop score** at an instant is its share of all loop activity in its cycle
+partition, signed by polarity: `+` reinforcing, `-` balancing. The ranking above is mean
+|relative score| among loops that face competition; the `part` column says which subsystem each
+loop belongs to (`loop.partition` indexes `analysis.partitions`).
 
-Reading it takes one piece of context: **a loop alone in its partition always scores ±1** -- it
-explains 100% of whatever its little subsystem does. That is why the top of the list is a parade
-of two-variable gas-uptake loops (`hfc[...] -> hfc_uptake[...]`): each HFC stock decays in its own
-isolated partition, trivially "dominated" by its only loop. Correct, just not interesting.
+The top of the list is the **coupled carbon-climate core**, three times over -- once per scenario
+element, ranks interleaved because the three copies are near-identical: ocean carbon buffering
+(`c_in_mixed_layer -> flux_atm_to_ocean`), the CO2-forcing-temperature loops through
+`c_in_atmosphere`, the biomass revolving door. A ~20% share in a 47-loop partition is a loop that
+genuinely matters. Discovery found that core without being told anything about climate.
 
-The interesting structure starts where partitions are crowded: the loops through
-`c_in_atmosphere`, `c_in_biomass`, and `heat_in_atmosphere_and_upper_ocean` -- the coupled
-carbon-climate core, where a dozen loops compete and a 30% share means something. Discovery found
-that core without being told anything about climate; per scenario element, even (note the
-`[deterministic]` / `[high_2xco2_sensitivity]` subscripts).
+The bottom of the list is the parade of two-variable gas-uptake loops (`pfc -> pfc_uptake`,
+`sf6 -> sf6_uptake`): each scores a "perfect" share of its own isolated partition, which is
+precisely why they are ranked last -- a 100% share with no competitors is a tautology, not a
+finding. (They remain in the list, and their partitions in `analysis.partitions`, because an
+isolated subsystem can still be worth *tracking* -- just not at the top of a dominance ranking.)
 """)
 
 # ============================================================================
@@ -854,6 +891,15 @@ specific and fixable -- several were fixed in the engine while this notebook was
   isolated HFC-uptake loop showed "importance 72", the climate core "17,000"), and inconsistent
   with both the engine's own ranking and the pinned-loop path. The importance series is now the
   signed *relative* loop score in [-1, 1], and dominant periods are computed from it.
+* **Singleton-partition loops pinned the top of discovery rankings (engine + FFI + pysimlin).**
+  A loop alone in its cycle partition scores exactly ±1.0 at every active step *by construction*
+  -- its own |score| is the whole normalization denominator -- so an earlier draft of section 4
+  opened with a parade of trivially-"dominant" two-variable gas-uptake loops while the
+  carbon-climate core was buried below them. Discovery now ranks **competitive loops first**
+  (loops that share a partition with at least one other discovered loop, ordered by mean
+  |relative score|) and sends the zero-information isolated loops to the bottom; cycle partitions
+  themselves became first-class API (`analysis.partitions`, `loop.partition`) so callers can
+  group loops by feedback subsystem -- the section 4 anatomy table.
 
 ### Observations for future work
 
@@ -865,9 +911,6 @@ specific and fixable -- several were fixed in the engine while this notebook was
 * **`PATHSCORE` remains the one missing piece of the papers' toolkit.** Link scores compose along
   paths (section 9 builds products by hand); a `get_path_score(["a", "b", "c"])` helper would
   round out parity with the Stella builtins.
-* **Singleton-partition loops pin the top of discovery rankings** at ±1.0 by construction (every
-  isolated stock-decay loop "dominates" its own partition). Correct per the method, but the API
-  could expose the partition (or its loop count) on each loop so callers can group or filter.
 * **Arrayed pins default to an argmax-abs aggregate across elements** in
   `get_relative_loop_score(id)` and `run.loops`. Documented, and per-element access works
   (`element="deterministic"`), but summed |shares| only equal 1 *per element*, so the aggregate
