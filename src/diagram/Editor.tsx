@@ -76,6 +76,7 @@ import { UpdateCloudAndFlow } from './drawing/Flow';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 import { preserveLiveView } from './merge-live-view';
+import { advanceProjectHistory } from './project-history';
 import { type ModuleStackEntry, currentModelName, pushModule, popModule, navigateToLevel, isStdlibModel } from './module-navigation';
 import { countModelInstances } from './module-details-utils';
 import { BreadcrumbBar } from './BreadcrumbBar';
@@ -520,7 +521,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     await this.refreshCachedErrors();
   }
 
-  async updateProject(serializedProject: Readonly<Uint8Array>, scheduleSave = true) {
+  async updateProject(
+    serializedProject: Readonly<Uint8Array>,
+    opts: { scheduleSave?: boolean; recordHistory?: boolean } = {},
+  ) {
+    const { scheduleSave = true, recordHistory = true } = opts;
     if (this.state.projectHistory.length > 0) {
       const current = this.state.projectHistory[this.state.projectOffset];
       if (uint8ArraysEqual(serializedProject, current)) {
@@ -549,18 +554,29 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // the visible "pan jumps back and forth" effect.
     activeProject = preserveLiveView(activeProject, this.state.activeProject, this.state.modelName);
 
-    const priorHistory = this.state.projectHistory.slice();
-
     // fractionally increase the version -- the server will only send back integer versions,
     // but this will ensure we can use a simple version check in the Canvas to invalidate caches.
     const projectVersion = this.state.projectVersion + 0.01;
 
-    this.setState({
-      projectHistory: [serializedProject, ...priorHistory].slice(0, MaxUndoSize),
-      activeProject,
-      projectVersion,
-      projectOffset: 0,
-    });
+    if (recordHistory) {
+      const nextHistory = advanceProjectHistory(
+        { projectHistory: this.state.projectHistory, projectOffset: this.state.projectOffset },
+        serializedProject,
+        MaxUndoSize,
+      );
+      this.setState({
+        projectHistory: nextHistory.projectHistory,
+        projectOffset: nextHistory.projectOffset,
+        activeProject,
+        projectVersion,
+      });
+    } else {
+      // View-only updates (pan/zoom) refresh the rendered project but must
+      // not consume undo slots or move the undo cursor: viewBox/zoom are
+      // serialized into the protobuf, so recording them would let a single
+      // momentum flick evict every real edit from the small history buffer.
+      this.setState({ activeProject, projectVersion });
+    }
     if (scheduleSave) {
       this.scheduleSave();
     }
@@ -1602,7 +1618,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         return;
       }
 
-      await this.updateProject(await engine.serializeProtobuf(), false);
+      await this.updateProject(await engine.serializeProtobuf(), { scheduleSave: false, recordHistory: false });
     } else {
       // there exists a race where we need to center/update the viewBox when
       // displaying a newly imported model, but the async wasm stuff doesn't
