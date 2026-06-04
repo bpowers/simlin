@@ -169,6 +169,49 @@ impl CompiledSimulation {
         self.modules.get(&self.root).map_or(0, |m| m.n_slots)
     }
 
+    /// Absolute data-buffer offsets written by the root module's run-invariant
+    /// flow prefix (GH #712, time-invariant hoisting). These are the slots whose
+    /// value, by the classifier's verdict, must be bit-constant across every
+    /// saved step. The soundness oracle test asserts exactly that. Returns an
+    /// empty vector when no flow variable is run-invariant.
+    ///
+    /// The invariant prefix is `root.compiled_flows.code[0..flows_invariant_
+    /// opcode_len]`; its `AssignCurr`/`AssignConstCurr`/`BinOpAssignCurr` target
+    /// offsets are the written slots (the prefix is pre-fusion, so these are the
+    /// only assign-to-curr opcode forms present). The root module's slots are
+    /// already absolute (it carries the +IMPLICIT_VAR_COUNT shift), so no base
+    /// offset is added.
+    pub fn invariant_flow_offsets(&self) -> Vec<usize> {
+        let Some(module) = self.modules.get(&self.root) else {
+            return Vec::new();
+        };
+        let len = module.flows_invariant_opcode_len;
+        if len == 0 {
+            return Vec::new();
+        }
+        let prefix = &module.compiled_flows.code[..len.min(module.compiled_flows.code.len())];
+        let mut offsets: Vec<usize> = prefix
+            .iter()
+            .filter_map(|op| match op {
+                Opcode::AssignCurr { off }
+                | Opcode::AssignConstCurr { off, .. }
+                | Opcode::BinOpAssignCurr { off, .. } => Some(*off as usize),
+                _ => None,
+            })
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        offsets
+    }
+
+    /// The root module's invariant flow-prefix opcode length (GH #712). 0 when
+    /// no flow variable is run-invariant. Exposed for the partition test.
+    pub fn flows_invariant_opcode_len(&self) -> usize {
+        self.modules
+            .get(&self.root)
+            .map_or(0, |m| m.flows_invariant_opcode_len)
+    }
+
     pub fn is_constant_offset(&self, off: usize) -> bool {
         self.cached_constant_info.contains_key(&off)
     }

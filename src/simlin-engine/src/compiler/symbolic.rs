@@ -311,6 +311,11 @@ pub(crate) struct SymbolicCompiledModule {
     pub temp_offsets: Vec<usize>,
     pub temp_total_size: usize,
     pub dim_lists: Vec<(u8, [u16; 4])>,
+    /// Opcode length of the run-invariant prefix of `compiled_flows.code`
+    /// (GH #712). Carried symbolically so `resolve_module` (opcode-count-
+    /// preserving) can copy it straight onto the resolved `CompiledModule`.
+    /// `0` when no flow variable is run-invariant.
+    pub flows_invariant_opcode_len: usize,
 }
 
 // ============================================================================
@@ -898,6 +903,9 @@ pub(crate) fn symbolize_module(
         temp_offsets: ctx.temp_offsets.clone(),
         temp_total_size: ctx.temp_total_size,
         dim_lists: ctx.dim_lists.clone(),
+        // The symbolize<->resolve roundtrip is opcode-count-preserving, so the
+        // invariant-prefix boundary index is identical in both forms (GH #712).
+        flows_invariant_opcode_len: module.flows_invariant_opcode_len,
     })
 }
 
@@ -1358,6 +1366,10 @@ pub(crate) fn resolve_module(
         compiled_initials: Arc::new(compiled_initials),
         compiled_flows: Arc::new(compiled_flows),
         compiled_stocks: Arc::new(compiled_stocks),
+        // `resolve_bytecode` is opcode-count-preserving and `resolve_module`
+        // does no fusion, so the symbolic prefix boundary is the concrete
+        // prefix boundary (GH #712).
+        flows_invariant_opcode_len: sym.flows_invariant_opcode_len,
     })
 }
 

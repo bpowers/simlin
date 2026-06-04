@@ -7,6 +7,7 @@ pub mod context;
 pub mod dimensions;
 pub mod expr;
 pub(crate) mod fold;
+pub(crate) mod invariance;
 pub mod pretty;
 pub mod subscript;
 pub(crate) mod symbolic;

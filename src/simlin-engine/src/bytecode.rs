@@ -4809,4 +4809,15 @@ pub struct CompiledModule {
     pub(crate) compiled_initials: Arc<Vec<CompiledInitial>>,
     pub(crate) compiled_flows: Arc<ByteCode>,
     pub(crate) compiled_stocks: Arc<ByteCode>,
+    /// Opcode length of the run-invariant prefix of `compiled_flows.code`
+    /// (time-invariant variable hoisting, GH #712). The flow runlist is
+    /// partitioned so every run-invariant variable's bytecode precedes every
+    /// dynamic variable's, and this is the boundary opcode index. `0` when no
+    /// flow variable is run-invariant (every submodule, and any root model with
+    /// no invariant flow var). Recorded on the **pre-fusion** resolved bytecode;
+    /// the boundary is fusion-proof (no `fuse_three_address` window crosses a
+    /// fragment boundary -- see the design note), so it stays a clean index. B1
+    /// only records it; B2 uses it to run the invariant prefix once per
+    /// `run_to`.
+    pub(crate) flows_invariant_opcode_len: usize,
 }

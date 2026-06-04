@@ -2001,6 +2001,331 @@ fn simulates_wrld3_03() {
     assert_eq!(vdf_results.step_count, results.step_count);
 }
 
+// ============================================================================
+// Time-invariant hoisting soundness oracle (GH #712, stage B1)
+// ============================================================================
+//
+// The oracle asserts the core safety property of the classifier: EVERY slot
+// written by the root module's run-invariant flow prefix
+// (`CompiledSimulation::invariant_flow_offsets`) holds a bit-constant value
+// across every saved step. A false positive in the classifier (a variable that
+// actually varies but was classified invariant) produces a non-constant column
+// here and trips the oracle. Bit-exact comparison (`f64::to_bits`) catches even
+// a sub-ULP wobble and handles `-0.0`/NaN correctly.
+
+/// Run the oracle on a datamodel project. Returns
+/// `(invariant_offset_count, violation_count)`: the number of distinct slots the
+/// invariant prefix writes, and how many of them are NOT bit-constant across all
+/// saved steps. A sound classifier yields `violations == 0`.
+fn invariance_oracle(datamodel: &simlin_engine::datamodel::Project) -> (usize, usize) {
+    let compiled = compile_vm(datamodel);
+    // Snapshot the invariant offsets before `Vm::new` consumes the sim.
+    let invariant_offsets = compiled.invariant_flow_offsets();
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let step_size = results.step_size;
+    let step_count = results.step_count;
+
+    let mut violations = 0usize;
+    for &off in &invariant_offsets {
+        assert!(
+            off < step_size,
+            "invariant offset {off} out of range (step_size {step_size})"
+        );
+        // First saved step's value; compare every subsequent step bit-for-bit.
+        let first = results.data[off].to_bits();
+        let constant =
+            (0..step_count).all(|step| results.data[step * step_size + off].to_bits() == first);
+        if !constant {
+            violations += 1;
+            // Surface the offending column for debugging.
+            let series: Vec<f64> = (0..step_count.min(8))
+                .map(|step| results.data[step * step_size + off])
+                .collect();
+            eprintln!("invariance VIOLATION at offset {off}: first 8 saved values = {series:?}");
+        }
+    }
+    (invariant_offsets.len(), violations)
+}
+
+/// Assert the oracle finds zero violations on a corpus model loaded from XMILE.
+fn assert_invariance_sound(xmile_path: &str) {
+    let f = File::open(xmile_path).unwrap_or_else(|e| panic!("open {xmile_path}: {e}"));
+    let mut f = BufReader::new(f);
+    let datamodel =
+        xmile::project_from_reader(&mut f).unwrap_or_else(|e| panic!("parse {xmile_path}: {e}"));
+    let (n_invariant, violations) = invariance_oracle(&datamodel);
+    assert_eq!(
+        violations, 0,
+        "{xmile_path}: {violations} of {n_invariant} invariant-classified slots VARY across steps"
+    );
+}
+
+// ── Hand-built oracle cases (TestProject) ───────────────────────────────────
+//
+// These are end-to-end: build a tiny model, compile, simulate, and assert every
+// slot the classifier hoisted is actually bit-constant. They double as
+// classifier-correctness tests through the production salsa pipeline.
+
+/// A bare constant aux is hoisted and stays constant.
+#[test]
+fn oracle_constant_aux_is_invariant() {
+    let datamodel = simlin_engine::test_common::TestProject::new("c")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .aux("k", "42", None)
+        .aux("derived", "k * 2 + 1", None)
+        .stock("level", "0", &["inflow"], &[], None)
+        .flow("inflow", "derived", None)
+        .build_datamodel();
+    let (n_invariant, violations) = invariance_oracle(&datamodel);
+    assert_eq!(
+        violations, 0,
+        "{violations} of {n_invariant} hoisted slots vary"
+    );
+    // `k` and `derived` are const-derived -> at least 2 slots must be hoisted.
+    assert!(
+        n_invariant >= 2,
+        "expected the constant chain to be hoisted, got {n_invariant} slots"
+    );
+}
+
+/// A TIME-dependent aux is NOT hoisted (and the model stays correct).
+#[test]
+fn oracle_time_dependent_aux_not_hoisted() {
+    let datamodel = simlin_engine::test_common::TestProject::new("t")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .aux("k", "42", None)
+        .aux("ramping", "TIME * 2", None)
+        .stock("level", "0", &["inflow"], &[], None)
+        .flow("inflow", "ramping + k", None)
+        .build_datamodel();
+    let (_n_invariant, violations) = invariance_oracle(&datamodel);
+    // The oracle must be clean: `ramping` (and `inflow`, which reads it) must NOT
+    // be hoisted. If the classifier wrongly hoisted `ramping`, its varying column
+    // would trip the oracle.
+    assert_eq!(violations, 0);
+}
+
+/// A stock-derived aux is NOT hoisted.
+#[test]
+fn oracle_stock_derived_aux_not_hoisted() {
+    let datamodel = simlin_engine::test_common::TestProject::new("s")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("level", "0", &["inflow"], &[], None)
+        .flow("inflow", "1", None)
+        .aux("reads_stock", "level + 1", None)
+        .build_datamodel();
+    let (_n_invariant, violations) = invariance_oracle(&datamodel);
+    assert_eq!(violations, 0);
+}
+
+/// Pure math builtins of a constant (SQRT/EXP/SIN) are hoisted; a math builtin
+/// of TIME is not. The combined model must stay correct.
+#[test]
+fn oracle_pure_builtins_of_constant_are_invariant() {
+    let datamodel = simlin_engine::test_common::TestProject::new("mb")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .aux("k", "16", None)
+        .aux("pure", "SQRT(k) + EXP(0) + SIN(k)", None)
+        .aux("timed", "SQRT(TIME + 1)", None)
+        .stock("level", "0", &["inflow"], &[], None)
+        .flow("inflow", "pure + timed", None)
+        .build_datamodel();
+    let (n_invariant, violations) = invariance_oracle(&datamodel);
+    assert_eq!(
+        violations, 0,
+        "{violations} of {n_invariant} hoisted slots vary"
+    );
+    // `k` and `pure` are const-derived; `timed` and `inflow` are not.
+    assert!(
+        n_invariant >= 2,
+        "expected the pure-builtin chain to be hoisted, got {n_invariant}"
+    );
+}
+
+/// INIT(stock) of a stock is hoisted (the init buffer is frozen).
+#[test]
+fn oracle_init_of_stock_is_invariant() {
+    let datamodel = simlin_engine::test_common::TestProject::new("init")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("level", "7", &["inflow"], &[], None)
+        .flow("inflow", "1", None)
+        .aux("init_level", "INIT(level)", None)
+        .build_datamodel();
+    let (n_invariant, violations) = invariance_oracle(&datamodel);
+    assert_eq!(
+        violations, 0,
+        "{violations} of {n_invariant} hoisted slots vary"
+    );
+    // `init_level` reads INIT(level) -> hoistable even though `level` varies.
+    assert!(
+        n_invariant >= 1,
+        "expected INIT(stock) to be hoisted, got {n_invariant}"
+    );
+}
+
+// ── Corpus oracle (normal tests) ────────────────────────────────────────────
+//
+// A representative spread of corpus models: constants, lookups, arrays, modules,
+// trig/math builtins. The oracle runs the real salsa compile path and the VM, so
+// it guards the production classifier + partition against any regression.
+
+#[test]
+fn oracle_corpus_teacup() {
+    assert_invariance_sound("../../test/test-models/samples/teacup/teacup.xmile");
+}
+
+#[test]
+fn oracle_corpus_constant_expressions() {
+    assert_invariance_sound(
+        "../../test/test-models/tests/constant_expressions/test_constant_expressions.xmile",
+    );
+}
+
+#[test]
+fn oracle_corpus_lookups_inline() {
+    assert_invariance_sound(
+        "../../test/test-models/tests/lookups_inline/test_lookups_inline.xmile",
+    );
+}
+
+#[test]
+fn oracle_corpus_subscript_2d() {
+    assert_invariance_sound(
+        "../../test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
+    );
+}
+
+#[test]
+fn oracle_corpus_modules() {
+    assert_invariance_sound(
+        "../../test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
+    );
+}
+
+#[test]
+fn oracle_corpus_trig() {
+    assert_invariance_sound("../../test/test-models/tests/trig/test_trig.xmile");
+}
+
+#[test]
+fn oracle_corpus_sir() {
+    assert_invariance_sound("../../test/test-models/samples/SIR/SIR.xmile");
+}
+
+// ── Partition-order test ────────────────────────────────────────────────────
+
+/// The flow runlist is partitioned [invariant..., dynamic...]: every slot the
+/// invariant prefix writes belongs to a run-invariant variable, and no dynamic
+/// variable's slot appears in the prefix. The split index
+/// (`flows_invariant_opcode_len`) lands exactly at the prefix/suffix boundary:
+/// the prefix writes exactly the invariant variables' slots and the
+/// invariant-classified offsets equal the prefix-written offsets.
+#[test]
+fn partition_places_invariant_vars_before_dynamic() {
+    use simlin_engine::common::{Canonical, Ident};
+
+    // `k` and `derived` are constant-derived (invariant); `ramping` is
+    // TIME-dependent and `from_stock` reads the stock (both dynamic).
+    let datamodel = simlin_engine::test_common::TestProject::new("p")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .aux("k", "10", None)
+        .aux("derived", "k * 3", None)
+        .aux("ramping", "TIME + 1", None)
+        .aux("from_stock", "level + 1", None)
+        .stock("level", "0", &["inflow"], &[], None)
+        .flow("inflow", "ramping + from_stock + derived", None)
+        .build_datamodel();
+
+    let compiled = compile_vm(&datamodel);
+    let split = compiled.flows_invariant_opcode_len();
+    let invariant_offsets = compiled.invariant_flow_offsets();
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    let off = |name: &str| -> usize {
+        results.offsets[&Ident::<Canonical>::from_unchecked(name.to_string())]
+    };
+
+    // A non-trivial invariant prefix exists.
+    assert!(split > 0, "expected a non-empty invariant prefix");
+
+    // The prefix writes `k` and `derived` (invariant) but NOT `ramping`,
+    // `from_stock`, or `inflow` (dynamic).
+    assert!(
+        invariant_offsets.contains(&off("k")),
+        "k should be in the invariant prefix"
+    );
+    assert!(
+        invariant_offsets.contains(&off("derived")),
+        "derived should be in the invariant prefix"
+    );
+    for dynamic in ["ramping", "from_stock", "inflow"] {
+        assert!(
+            !invariant_offsets.contains(&off(dynamic)),
+            "{dynamic} (dynamic) must NOT be in the invariant prefix"
+        );
+    }
+
+    // Every invariant-classified slot is bit-constant across all saved steps.
+    let step_size = results.step_size;
+    for &o in &invariant_offsets {
+        let first = results.data[o].to_bits();
+        assert!(
+            (0..results.step_count).all(|s| results.data[s * step_size + o].to_bits() == first),
+            "invariant slot {o} varies across steps"
+        );
+    }
+}
+
+/// Heavy soundness oracle on C-LEARN: assert ZERO of the invariant-classified
+/// slots vary, and report the count for comparison against the prototype's
+/// 678/1368. `#[ignore]`d for runtime class (C-LEARN is ~53k lines).
+///
+/// Run with: cargo test --release -- --ignored oracle_clearn
+#[test]
+#[ignore]
+fn oracle_clearn() {
+    let datamodel = clearn_datamodel();
+    let (n_invariant, violations) = invariance_oracle(&datamodel);
+    eprintln!("C-LEARN: {n_invariant} invariant-classified slots, {violations} violations");
+    assert_eq!(
+        violations, 0,
+        "C-LEARN: {violations} of {n_invariant} invariant slots VARY across steps"
+    );
+    assert!(
+        n_invariant > 0,
+        "C-LEARN: expected a non-trivial invariant set, got 0"
+    );
+}
+
+/// Heavy soundness oracle on WORLD3-03.
+///
+/// Run with: cargo test --release -- --ignored oracle_wrld3
+#[test]
+#[ignore]
+fn oracle_wrld3() {
+    let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+    let datamodel =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+    let (n_invariant, violations) = invariance_oracle(&datamodel);
+    eprintln!("WORLD3-03: {n_invariant} invariant-classified slots, {violations} violations");
+    assert_eq!(
+        violations, 0,
+        "WORLD3-03: {violations} of {n_invariant} invariant slots VARY across steps"
+    );
+    assert!(
+        n_invariant > 0,
+        "WORLD3-03: expected a non-trivial invariant set, got 0"
+    );
+}
+
 /// Time of the saved chunk nearest the middle of `[start, stop]`, derived from a
 /// model's compiled [`Specs`]. The blob/VM save cadence is
 /// `effective_save_step = max(save_step, dt)` (mirroring `Specs::from`), and

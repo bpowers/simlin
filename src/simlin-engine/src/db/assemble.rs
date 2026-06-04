@@ -1225,9 +1225,22 @@ pub fn assemble_module<'db>(
         .flat_map(|(idx, scc)| scc.members.iter().map(move |m| (m.as_str(), idx)))
         .collect();
 
-    // Collect fragments for each phase, tracking missing variables
+    // Collect fragments for each phase, tracking missing variables.
+    //
+    // Flow fragments carry a run-invariance flag (GH #712). The fragments are
+    // collected in runlist (topological) order; after collection they are
+    // stably partitioned so every invariant fragment precedes every dynamic
+    // one, and the invariant prefix's opcode length is recorded as the split
+    // boundary. Only ordinary source flow variables (in `flows_invariant`) are
+    // invariant; SCC-combined, LTM, and implicit-helper fragments are always
+    // dynamic (variant), so they keep `false`.
+    let flows_invariant = if is_root {
+        model_flows_invariant(db, model, project, is_root, module_inputs)
+    } else {
+        std::sync::Arc::new(std::collections::BTreeSet::new())
+    };
     let mut initial_frags: Vec<(String, &crate::compiler::symbolic::PerVarBytecodes)> = Vec::new();
-    let mut flow_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();
+    let mut flow_frags: Vec<(bool, &crate::compiler::symbolic::PerVarBytecodes)> = Vec::new();
     let mut stock_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();
     let mut missing_vars: Vec<String> = Vec::new();
 
@@ -1277,15 +1290,18 @@ pub fn assemble_module<'db>(
             // fragment is subsumed by the SCC's combined dt fragment.
             // Push the combined fragment once, at the first member of
             // this SCC encountered in the flows runlist; skip the rest.
+            // An SCC reads co-member current values within the dt phase, so it
+            // is conservatively dynamic (`false`).
             if injected_flow_sccs.insert(scc_idx) {
-                flow_frags.push(combined);
+                flow_frags.push((false, combined));
             }
             continue;
         }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.flow_bytecodes
         {
-            flow_frags.push(bc);
+            let invariant = flows_invariant.contains(var_name);
+            flow_frags.push((invariant, bc));
         } else if !is_module_input(var_name) {
             missing_vars.push(var_name.clone());
         }
@@ -1311,7 +1327,8 @@ pub fn assemble_module<'db>(
         if let Some(result) = all_fragments.get(ltm_name)
             && let Some(ref bc) = result.fragment.flow_bytecodes
         {
-            flow_frags.push(bc);
+            // LTM synthetic vars use PREVIOUS -> always dynamic.
+            flow_frags.push((false, bc));
         }
     }
 
@@ -1328,7 +1345,8 @@ pub fn assemble_module<'db>(
                     initial_frags.push((im_name.clone(), bc));
                 }
                 if let Some(ref bc) = result.fragment.flow_bytecodes {
-                    flow_frags.push(bc);
+                    // LTM implicit helpers (PREVIOUS instances) -> dynamic.
+                    flow_frags.push((false, bc));
                 }
                 if let Some(ref bc) = result.fragment.stock_bytecodes {
                     stock_frags.push(bc);
@@ -1344,6 +1362,53 @@ pub fn assemble_module<'db>(
         );
         return Err(msg);
     }
+
+    // ── Run-invariant flow partition (GH #712) ─────────────────────────
+    //
+    // Stably partition the flow fragments so every run-invariant fragment
+    // precedes every dynamic one, preserving each group's original relative
+    // (topological) order. This is a valid topological order: the invariant
+    // subgraph is closed under its dependencies (an invariant var cannot
+    // depend on a dynamic var, by construction), so no reader is moved ahead
+    // of a dependency. The split boundary is the invariant prefix's opcode
+    // length in the concatenated flow stream.
+    //
+    // `concatenate_fragments_with_gf` is opcode-count-preserving: it strips
+    // each fragment's single trailing `Ret` and copies every remaining opcode
+    // 1:1, appending one terminal `Ret`. So the prefix opcode length is
+    // exactly the sum of the invariant fragments' Ret-stripped code lengths.
+    // `resolve_module` (symbolic -> concrete) is likewise 1:1 and does no
+    // fusion, so this count is the boundary in the final `compiled_flows.code`.
+    // The boundary is fusion-proof at `Vm::new` (no `fuse_three_address` window
+    // crosses a fragment boundary -- every fragment ends in an `Assign*`, and
+    // no window starts with or uses an `Assign*` as a combiner); see the design
+    // note `docs/design-plans/2026-06-04-time-invariant-hoisting.md`.
+    let ret_stripped_len = |frag: &crate::compiler::symbolic::PerVarBytecodes| -> usize {
+        let code = &frag.symbolic.code;
+        if code.last() == Some(&crate::compiler::symbolic::SymbolicOpcode::Ret) {
+            code.len() - 1
+        } else {
+            code.len()
+        }
+    };
+    // Stable partition: invariant first, dynamic after, each in original order.
+    let mut invariant_flow_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();
+    let mut dynamic_flow_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();
+    for &(is_invariant, bc) in &flow_frags {
+        if is_invariant {
+            invariant_flow_frags.push(bc);
+        } else {
+            dynamic_flow_frags.push(bc);
+        }
+    }
+    let flows_invariant_opcode_len: usize = invariant_flow_frags
+        .iter()
+        .map(|bc| ret_stripped_len(bc))
+        .sum();
+    let flow_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = invariant_flow_frags
+        .into_iter()
+        .chain(dynamic_flow_frags)
+        .collect();
 
     // Compute context resource base offsets for each phase so that flows
     // and stocks reference the same resource namespace as the all-phases
@@ -1512,6 +1577,7 @@ pub fn assemble_module<'db>(
         temp_offsets: merged.temp_offsets,
         temp_total_size: merged.temp_total_size,
         dim_lists: merged.dim_lists,
+        flows_invariant_opcode_len,
     };
 
     // Resolve symbolic -> concrete offsets. The CompiledModule stays a pure,
