@@ -51,11 +51,22 @@ class UserInfoSingleton {
   private fetch(): void {
     const resultPromise = fetch('/api/user', { credentials: 'same-origin' });
     const worker = async (): Promise<[User | undefined, number]> => {
-      const response = await resultPromise;
-      const status = response.status;
-      const user = status >= 200 && status < 400 ? await response.json() : undefined;
+      try {
+        const response = await resultPromise;
+        const status = response.status;
+        const user = status >= 200 && status < 400 ? await response.json() : undefined;
 
-      return [user, status];
+        return [user, status];
+      } catch (err) {
+        // A network-level failure means "we don't know the user"; callers
+        // already treat a non-2xx status as not-authenticated, so report
+        // status 0 the same way. Catching here also matters because the
+        // promise can sit unconsumed until the next get() (invalidate()
+        // fires a fetch nothing immediately awaits) -- a rejection would
+        // surface later as an unhandled rejection.
+        console.error('fetching /api/user failed:', err);
+        return [undefined, 0];
+      }
     };
     this.resultPromise = worker();
   }
@@ -266,8 +277,17 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
     } catch (err) {
       console.error('logout: firebase signOut failed:', err);
     }
-    await userInfo.invalidate();
+    // Drop the local user BEFORE refreshing the cached /api/user info: the
+    // UI must return to the login screen even if the refresh fails, and
+    // invalidate() can rethrow a pending request's rejection (it awaits any
+    // in-flight fetch), which would otherwise escape Home's fire-and-forget
+    // call as an unhandled rejection.
     this.setState({ user: undefined, isNewUser: undefined, firebaseIdToken: null });
+    try {
+      await userInfo.invalidate();
+    } catch (err) {
+      console.error('logout: refreshing cached user info failed:', err);
+    }
   };
 
   getBaseURL(): string {
