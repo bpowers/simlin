@@ -411,14 +411,24 @@ re-derivation. (b) is broader but touches many call sites.
 5. **R3 superinstructions** — incremental dispatch wins, low risk.
 6. **C2 / C3** — only if incremental-compile latency still bites after A+B.
 
-Larger run-side swings identified during round 2, unprioritized and
-unmeasured (file/see issues):
+Larger run-side swings identified during round 2 — all three were taken to
+a data verdict in round 3 (2026-06-04):
 
-- **Lazy `If`** — `SetCond`/`If` evaluate BOTH branches every step (3,046
-  `If` sites on C-LEARN, ~10% of opcodes counting the condition chains).
-  Skipping the untaken branch needs forward jumps (codegen + stack-depth
-  validation + peephole/fusion jump maps + wasmgen parity): a real design
-  effort.
+- **Lazy `If` (#711) — measured NO-GO.** `SetCond`/`If` evaluate BOTH
+  branches every evaluation; skipping the untaken branch needs forward jumps
+  (codegen + stack-depth join validation + peephole/fusion jump maps +
+  symbolic layer + wasmgen). A census (temporary VM dispatch counters + a
+  stack-effect branch-span reconstruction over the fused stream) measured
+  C-LEARN at exactly **30,524 executed dispatches/step**, of which lazy-If
+  would skip 4,859 (**15.9%**) — but 93% of the skipped opcodes are cheap
+  scalar loads/binops, so the *instruction* share is only **~1.5%** (~35k of
+  ~2.4M instr/step): below the ~4% layout-noise measurement floor, at the
+  highest complexity of the three candidates. WORLD3: 3.25% dispatch share.
+  Notably **69.8% of the skippable dispatches sit behind constant
+  conditions** (1,300 of 1,679 flow `If` sites take the same branch for the
+  whole run) — a compile-time / #712-family observation, not a runtime-jump
+  one. Revisit only on a mispredict-bound core or alongside a
+  threaded-dispatch rewrite (#601).
 - **Time-invariant hoisting** (#712) — constants are re-assigned and
   constant-derived auxes re-computed every step; a "constant phase" computed
   once per `run_to` (re-run after `set_value`) could skip them. **Stage B1
@@ -442,7 +452,7 @@ unmeasured (file/see issues):
   across multiple interleaved rounds before believing it. Stage B2 (run the
   invariant prefix once per `run_to`; snapshot + copy-forward into each saved
   chunk; re-run after `set_value`; wasmgen keeps the single reordered program)
-  is the actual hoist and is not yet done.
-- **Lookup last-segment memo** (#602) — C-LEARN's year-indexed tables are
-  evaluated at slowly-advancing TIME; remembering the last segment per GF
-  would skip most binary searches.
+  was implemented, gate-green — and did NOT clear the keep bar: see negative
+  result #3 above (preserved on `experiment-712-b2-execution`).
+- **Lookup last-segment memo** (#602) — implemented, then reverted: see
+  negative result #2 above (gross win 0.5%, soundness cost ~7%).
