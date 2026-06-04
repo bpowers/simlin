@@ -22,3 +22,23 @@ node_modules
 /src/server/public
 /src/server/config
 /src/app/firebase.json
+
+# Untracked scratch directories. .gcloudignore does NOT import .gitignore
+# (intentionally, so that gitignored build output like src/*/lib and
+# src/engine/core/libsimlin.wasm still uploads), so these never-tracked dirs
+# would otherwise be uploaded and blow past GAE Standard's 10,000-file/version
+# cap. Each path below is verified to hold zero git-tracked files; excluding
+# them cannot affect any source or build output. Root-anchored for precision.
+/third_party/
+/.venv/
+/.venv-pysimlin/
+/env/
+/.hypothesis/
+/.pytest_cache/
+/simlin/
+/playwright-report/
+/test-results/
+/src/pysimlin/venv/
+/src/pysimlin/.venv/
+/src/pysimlin/build/
+/src/pysimlin/dist/

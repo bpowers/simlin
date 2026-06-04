@@ -14,6 +14,44 @@ use crate::datamodel::{
 };
 use crate::project_io;
 
+/// Repair a pre-#559 2022-era stored identifier so it survives the
+/// salsa-boundary re-canonicalization unchanged (issue #690).
+///
+/// The 2022 XMILE reader stored *canonical* identifiers in `project_io`, and
+/// that era's `canonicalize` left a literal period as a raw ASCII `.`. So a
+/// quoted-literal-period name like `"Goal 1.5 for Temperature"` was persisted
+/// in an ident field as `goal_1.5_for_temperature`. HEAD instead stores
+/// display names and canonicalizes at the salsa boundary, where `canonicalize`
+/// maps a raw unquoted `.` to the `·` (U+00B7) *module-hierarchy separator*.
+/// Re-canonicalizing such a stored ident therefore corrupts it
+/// (`goal_1·5_for_temperature`), and `model.rs` then splits the `·` into a
+/// phantom submodule path that fails to resolve (`DoesNotExist` ->
+/// `NotSimulatable`).
+///
+/// In a stored `project_io` IDENT field a raw `.` can ONLY be a literal-period
+/// artifact: a genuine module separator is already stored as `·` (module
+/// separators originate in equation TEXT, which is stored verbatim and
+/// canonicalized at parse time, never in an ident field). So mapping the raw
+/// `.` to the canonical-stable literal-period sentinel U+2024 (the same form a
+/// quoted reference canonicalizes to today, see `LITERAL_PERIOD_SENTINEL` in
+/// `common.rs`) is unambiguous and makes the stored ident -- and every quoted
+/// equation reference to it -- resolve. It is idempotent (the sentinel form
+/// has no raw `.`, so a second application is a no-op) and a no-op on the
+/// common case (and on empty idents).
+///
+/// IMPORTANT: this is applied ONLY to ident-typed fields, NEVER to equation
+/// text / documentation / units / graphical-function data, and NEVER to a
+/// `ModuleReference` `src`/`dst`, where a raw `.` IS the genuine module/self
+/// separator (`hares.area` -> `hares·area`, `self.bar` -> `self·bar`) and so
+/// must keep its `·` mapping.
+fn migrate_stored_ident(s: String) -> String {
+    if s.contains('.') {
+        s.replace('.', "\u{2024}")
+    } else {
+        s
+    }
+}
+
 impl From<Dt> for project_io::Dt {
     fn from(dt: Dt) -> Self {
         match dt {
@@ -411,13 +449,29 @@ fn extract_legacy_initial_equation(eqn: &project_io::variable::Equation) -> Opti
 
 impl From<project_io::variable::Equation> for Equation {
     fn from(eqn: project_io::variable::Equation) -> Self {
+        // `dimension_names` and each element's `subscript` are STRUCTURED ident
+        // references (dimension/element names), not free equation text, and are
+        // matched symmetrically through `canonicalize` against the dimension
+        // DECLARATION (`get_dimensions` in variable.rs). They must be migrated
+        // exactly like the declaration so a pre-#559 raw-`.` literal period
+        // resolves on both sides (#690); migrating only one side yields
+        // `fig·_3 != fig‥_3` -> `BadDimensionName` / a 0.0 element fallback. The
+        // equation/initial-equation strings ARE free text and stay untouched.
+        // A multi-dim subscript is the comma-joined element-name list the xmile
+        // reader stores; every `.` in it is a literal period within a leaf name
+        // (commas separate names), so migrating the whole string is correct and
+        // preserves the commas.
         match eqn.equation.unwrap() {
             project_io::variable::equation::Equation::Scalar(scalar) => {
                 Equation::Scalar(scalar.equation)
             }
-            project_io::variable::equation::Equation::ApplyToAll(a2a) => {
-                Equation::ApplyToAll(a2a.dimension_names, a2a.equation)
-            }
+            project_io::variable::equation::Equation::ApplyToAll(a2a) => Equation::ApplyToAll(
+                a2a.dimension_names
+                    .into_iter()
+                    .map(migrate_stored_ident)
+                    .collect(),
+                a2a.equation,
+            ),
             project_io::variable::equation::Equation::Arrayed(arrayed) => {
                 // Infer from default_equation presence for legacy protos
                 // that predate the has_except_default field.
@@ -425,13 +479,17 @@ impl From<project_io::variable::Equation> for Equation {
                     .has_except_default
                     .unwrap_or(arrayed.default_equation.is_some());
                 Equation::Arrayed(
-                    arrayed.dimension_names,
+                    arrayed
+                        .dimension_names
+                        .into_iter()
+                        .map(migrate_stored_ident)
+                        .collect(),
                     arrayed
                         .elements
                         .into_iter()
                         .map(|e| {
                             (
-                                e.subscript,
+                                migrate_stored_ident(e.subscript),
                                 e.equation,
                                 e.initial_equation,
                                 e.gf.map(GraphicalFunction::from),
@@ -635,7 +693,10 @@ impl From<project_io::variable::Stock> for Stock {
             stock.visibility,
         );
         Stock {
-            ident: stock.ident,
+            // ident-typed fields: migrate a pre-#559 raw-`.` literal period to
+            // the sentinel so re-canonicalization can't mistake it for `·`
+            // (#690). inflows/outflows are flow variable names (idents).
+            ident: migrate_stored_ident(stock.ident),
             equation: stock.equation.unwrap().into(),
             documentation: stock.documentation,
             units: if stock.units.is_empty() {
@@ -643,8 +704,16 @@ impl From<project_io::variable::Stock> for Stock {
             } else {
                 Some(stock.units)
             },
-            inflows: stock.inflows,
-            outflows: stock.outflows,
+            inflows: stock
+                .inflows
+                .into_iter()
+                .map(migrate_stored_ident)
+                .collect(),
+            outflows: stock
+                .outflows
+                .into_iter()
+                .map(migrate_stored_ident)
+                .collect(),
             compat,
             ai_state: None,
             uid: if stock.uid == 0 {
@@ -780,7 +849,9 @@ impl From<project_io::variable::Flow> for Flow {
             flow.visibility,
         );
         Flow {
-            ident: flow.ident,
+            // ident-typed field: migrate a pre-#559 raw-`.` literal period to
+            // the sentinel so re-canonicalization can't mistake it for `·` (#690).
+            ident: migrate_stored_ident(flow.ident),
             equation: flow.equation.unwrap().into(),
             documentation: flow.documentation,
             units: if flow.units.is_empty() {
@@ -877,7 +948,9 @@ impl From<project_io::variable::Aux> for Aux {
             aux.visibility,
         );
         Aux {
-            ident: aux.ident,
+            // ident-typed field: migrate a pre-#559 raw-`.` literal period to
+            // the sentinel so re-canonicalization can't mistake it for `·` (#690).
+            ident: migrate_stored_ident(aux.ident),
             equation: aux.equation.unwrap().into(),
             documentation: aux.documentation,
             units: if aux.units.is_empty() {
@@ -940,6 +1013,109 @@ fn test_aux_roundtrip() {
         let expected = expected.clone();
         let actual = Aux::from(project_io::variable::Aux::from(expected.clone()));
         assert_eq!(expected, actual);
+    }
+}
+
+/// Regression for issue #690: a 2022-era blob stored a quoted-literal-period
+/// name (e.g. `"Goal 1.5 for Temperature"`) as the *then*-canonical ident
+/// `goal_1.5_for_temperature` -- a raw ASCII `.`. On deserialize the ident
+/// field must be migrated to the literal-period sentinel (U+2024) form so the
+/// salsa-boundary re-canonicalization does NOT mistake the period for the `·`
+/// module separator (which would split it into a phantom submodule path and
+/// fail with `DoesNotExist`/`NotSimulatable`). The resulting datamodel ident
+/// must contain neither a raw `.` nor a `·`.
+#[test]
+fn test_aux_ident_literal_period_migrated_on_deserialize() {
+    let proto = project_io::variable::Aux {
+        ident: "goal_1.5_for_temperature".to_string(),
+        equation: Some(project_io::variable::Equation {
+            equation: Some(project_io::variable::equation::Equation::Scalar(
+                project_io::variable::ScalarEquation {
+                    equation: "1.5".to_string(),
+                    initial_equation: None,
+                },
+            )),
+        }),
+        ..Default::default()
+    };
+    let aux = Aux::from(proto);
+    assert_eq!(aux.ident, "goal_1\u{2024}5_for_temperature");
+    assert!(
+        !aux.ident.contains('.'),
+        "migrated ident still has a raw `.`: {:?}",
+        aux.ident
+    );
+    assert!(
+        !aux.ident.contains('·'),
+        "migrated ident mis-mapped the literal period to the `·` module \
+         separator: {:?}",
+        aux.ident
+    );
+    // The equation text (a scalar literal `1.5`) is NOT an ident field and
+    // must be left byte-for-byte untouched by the migration.
+    match aux.equation {
+        Equation::Scalar(eqn) => assert_eq!(eqn, "1.5"),
+        other => panic!("expected scalar equation, got {other:?}"),
+    }
+}
+
+/// Regression for issue #690 (symmetry): the structured dimension/element
+/// REFERENCE fields inside an Equation -- `ApplyToAll`/`Arrayed`
+/// `dimension_names` and each element's `subscript` -- must be migrated the
+/// same way the matching DECLARATION (`Dimension.name`/elements) is. These are
+/// structured ident lists (not free equation text), stored by 2022 in raw-`.`
+/// canonical form and matched symmetrically through `canonicalize` on both
+/// sides (`get_dimensions` in variable.rs compares `canonicalize(reference) ==
+/// canonicalize(dim.name())`). Migrating only the declaration would corrupt the
+/// reference asymmetrically (`fig·_3 != fig‥_3`) and yield `BadDimensionName`.
+#[test]
+fn test_equation_dimension_and_subscript_references_migrated_on_deserialize() {
+    // ApplyToAll dimension_names reference.
+    let a2a = Equation::from(project_io::variable::Equation {
+        equation: Some(project_io::variable::equation::Equation::ApplyToAll(
+            project_io::variable::ApplyToAllEquation {
+                dimension_names: vec!["fig._3".to_string()],
+                equation: "1".to_string(),
+                initial_equation: None,
+            },
+        )),
+    });
+    match a2a {
+        Equation::ApplyToAll(dims, _) => {
+            assert_eq!(dims, vec!["fig\u{2024}_3".to_string()]);
+            assert!(!dims[0].contains('.') && !dims[0].contains('·'));
+        }
+        other => panic!("expected ApplyToAll, got {other:?}"),
+    }
+
+    // Arrayed dimension_names + per-element subscript references. The subscript
+    // is the comma-joined element-name list the xmile reader stores; every `.`
+    // in it is a literal period within a leaf element name (commas separate
+    // names), so migrating the whole string is correct and commas are kept.
+    let arrayed = Equation::from(project_io::variable::Equation {
+        equation: Some(project_io::variable::equation::Equation::Arrayed(
+            project_io::variable::ArrayedEquation {
+                dimension_names: vec!["fig._3".to_string()],
+                elements: vec![project_io::variable::arrayed_equation::Element {
+                    subscript: "elem_1.5".to_string(),
+                    equation: "1.5".to_string(),
+                    initial_equation: None,
+                    gf: None,
+                }],
+                has_except_default: None,
+                default_equation: None,
+            },
+        )),
+    });
+    match arrayed {
+        Equation::Arrayed(dims, elements, _, _) => {
+            assert_eq!(dims, vec!["fig\u{2024}_3".to_string()]);
+            assert_eq!(elements[0].0, "elem_1\u{2024}5");
+            assert!(!elements[0].0.contains('.') && !elements[0].0.contains('·'));
+            // Equation text within the element is NOT migrated.
+            assert_eq!(elements[0].1, "1.5");
+        }
+        other => panic!("expected Arrayed, got {other:?}"),
     }
 }
 
@@ -1007,8 +1183,13 @@ impl From<project_io::variable::Module> for Module {
             module.visibility,
         );
         Module {
-            ident: module.ident,
-            model_name: module.model_name,
+            // ident-typed fields: migrate a pre-#559 raw-`.` literal period to
+            // the sentinel so re-canonicalization can't mistake it for `·`
+            // (#690). NOTE: `references` (ModuleReference src/dst) are NOT
+            // migrated -- a raw `.` there is the genuine module/self separator
+            // (`hares.area` -> `hares·area`), which the parser maps to `·`.
+            ident: migrate_stored_ident(module.ident),
+            model_name: migrate_stored_ident(module.model_name),
             documentation: module.documentation,
             units: if module.units.is_empty() {
                 None
@@ -2022,10 +2203,21 @@ impl From<MacroSpec> for project_io::MacroSpec {
 
 impl From<project_io::MacroSpec> for MacroSpec {
     fn from(macro_spec: project_io::MacroSpec) -> Self {
+        // parameters / primary_output / additional_outputs are variable idents
+        // of the macro body: migrate a pre-#559 raw-`.` literal period to the
+        // sentinel so re-canonicalization can't mistake it for `·` (#690).
         MacroSpec {
-            parameters: macro_spec.parameters,
-            primary_output: macro_spec.primary_output,
-            additional_outputs: macro_spec.additional_outputs,
+            parameters: macro_spec
+                .parameters
+                .into_iter()
+                .map(migrate_stored_ident)
+                .collect(),
+            primary_output: migrate_stored_ident(macro_spec.primary_output),
+            additional_outputs: macro_spec
+                .additional_outputs
+                .into_iter()
+                .map(migrate_stored_ident)
+                .collect(),
         }
     }
 }
@@ -2098,7 +2290,9 @@ impl From<project_io::Model> for Model {
         variables.sort_by_cached_key(|a| canonicalize(a.get_ident()).into_owned());
 
         Model {
-            name: model.name,
+            // ident-typed field: migrate a pre-#559 raw-`.` literal period to
+            // the sentinel so re-canonicalization can't mistake it for `·` (#690).
+            name: migrate_stored_ident(model.name),
             sim_specs: None,
             variables,
             views: model.views.into_iter().map(View::from).collect(),
@@ -2298,48 +2492,68 @@ impl From<Dimension> for project_io::Dimension {
 
 impl From<project_io::Dimension> for Dimension {
     fn from(dimension: project_io::Dimension) -> Self {
+        // Dimension and element names are leaf idents: migrate a pre-#559
+        // raw-`.` literal period to the sentinel so re-canonicalization can't
+        // mistake it for the `·` module separator (#690).
         let elements = if let Some(dim) = dimension.dimension {
             match dim {
-                project_io::dimension::Dimension::Elements(elements) => {
-                    DimensionElements::Named(elements.elements)
-                }
+                project_io::dimension::Dimension::Elements(elements) => DimensionElements::Named(
+                    elements
+                        .elements
+                        .into_iter()
+                        .map(migrate_stored_ident)
+                        .collect(),
+                ),
                 project_io::dimension::Dimension::Size(size) => {
                     DimensionElements::Indexed(size.size)
                 }
             }
         } else {
             // originally we ignored dimensions with only indexes -- treat that as a fallback
-            DimensionElements::Named(dimension.obsolete_elements)
+            DimensionElements::Named(
+                dimension
+                    .obsolete_elements
+                    .into_iter()
+                    .map(migrate_stored_ident)
+                    .collect(),
+            )
         };
 
         // Prefer the new `mappings` repeated field; fall back to the legacy
-        // `maps_to` scalar for backward compatibility with old protos.
+        // `maps_to` scalar for backward compatibility with old protos. The
+        // mapping target is a dimension ident and the element-map endpoints are
+        // element idents, so all are migrated like the dimension name above.
         let mappings = if !dimension.mappings.is_empty() {
             dimension
                 .mappings
                 .into_iter()
                 .map(|m| DimensionMapping {
-                    target: m.target,
+                    target: migrate_stored_ident(m.target),
                     element_map: m
                         .entries
                         .into_iter()
-                        .map(|e| (e.from_element, e.to_element))
+                        .map(|e| {
+                            (
+                                migrate_stored_ident(e.from_element),
+                                migrate_stored_ident(e.to_element),
+                            )
+                        })
                         .collect(),
                 })
                 .collect()
         } else if let Some(target) = dimension.maps_to {
             vec![DimensionMapping {
-                target,
+                target: migrate_stored_ident(target),
                 element_map: vec![],
             }]
         } else {
             vec![]
         };
 
-        let parent = dimension.parent;
+        let parent = dimension.parent.map(migrate_stored_ident);
 
         Dimension {
-            name: dimension.name,
+            name: migrate_stored_ident(dimension.name),
             elements,
             mappings,
             parent,
@@ -2499,6 +2713,241 @@ fn make_test_project(variables: Vec<Variable>, dimensions: Vec<Dimension>) -> Pr
         source: Default::default(),
         ai_information: None,
     }
+}
+
+/// End-to-end regression for issue #690. A 2022-era blob stored a
+/// quoted-literal-period variable name as its *then*-canonical ident with a
+/// raw `.` (`goal_1.5_for_temperature`), and stored equation references to it
+/// as the quoted display form (`"Goal 1.5 for Temperature"`). At HEAD, without
+/// load-time ident migration, deserializing the blob and compiling it silently
+/// fails to simulate: the salsa-boundary re-canonicalization turns the stored
+/// ident's raw `.` into the `·` module separator, which `model.rs` splits into
+/// a phantom submodule path -> `DoesNotExist` -> `NotSimulatable`.
+///
+/// The fix migrates the raw-`.` ident field to the literal-period sentinel on
+/// deserialize, so both the period-named variable AND its quoted referrer
+/// (which canonicalizes to the same sentinel form) resolve, and the model
+/// compiles and simulates. This test drives the *real* protobuf-deserialize
+/// path (`Project::from(project_io::Project)`) that the migration lives on.
+#[test]
+fn test_quoted_period_ident_simulates_after_deserialize_690() {
+    use crate::test_common::TestProject;
+
+    // The variable's stored ident is the pre-#559 2022 canonical form with a
+    // raw `.`; its referrer uses the quoted display form, exactly as a 2022
+    // XMILE blob would have persisted them.
+    let stored_ident = "goal_1.5_for_temperature";
+    let datamodel = make_test_project(
+        vec![
+            Variable::Aux(Aux {
+                ident: stored_ident.to_string(),
+                equation: Equation::Scalar("1.5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            Variable::Aux(Aux {
+                ident: "referrer".to_string(),
+                equation: Equation::Scalar("\"Goal 1.5 for Temperature\" * 2".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        vec![],
+    );
+
+    // Round-trip through protobuf: this is where the load-time ident migration
+    // fires (and where a 2022 blob enters the engine).
+    let reloaded = deserialize(serialize(&datamodel).unwrap());
+
+    // Sanity: the stored ident's raw `.` was migrated to the sentinel, not the
+    // `·` module separator.
+    let main = reloaded.get_model("main").unwrap();
+    let migrated_ident = main
+        .variables
+        .iter()
+        .map(|v| v.get_ident())
+        .find(|id| id.contains('\u{2024}'))
+        .expect("period-named ident should be migrated to the sentinel form");
+    assert_eq!(migrated_ident, "goal_1\u{2024}5_for_temperature");
+    assert!(!migrated_ident.contains('.'));
+    assert!(!migrated_ident.contains('·'));
+
+    // The whole point of #690: it must COMPILE and SIMULATE with no
+    // DoesNotExist/NotSimulatable error, and the period-named variable must
+    // produce its expected value (1.5), with the referrer reading it (3.0).
+    let project = TestProject::from_datamodel(reloaded);
+    project.assert_compiles_incremental();
+    project.assert_vm_scalar_result("goal_1\u{2024}5_for_temperature", 1.5);
+    project.assert_vm_scalar_result("referrer", 3.0);
+}
+
+/// The migration is idempotent and round-trip stable (#690 step 5): once a
+/// blob is loaded (its ident is now the sentinel form), serializing it back to
+/// protobuf and re-loading is a fixed point. The sentinel survives the
+/// round-trip and a second `migrate_stored_ident` is a no-op (the sentinel
+/// form has no raw `.`), so the model still compiles and simulates identically.
+#[test]
+fn test_quoted_period_ident_deserialize_is_idempotent_690() {
+    use crate::test_common::TestProject;
+
+    let datamodel = make_test_project(
+        vec![Variable::Aux(Aux {
+            ident: "goal_1.5_for_temperature".to_string(),
+            equation: Equation::Scalar("1.5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: Compat::default(),
+            ai_state: None,
+            uid: None,
+        })],
+        vec![],
+    );
+
+    // First load migrates the raw `.` to the sentinel.
+    let once = deserialize(serialize(&datamodel).unwrap());
+    // Re-serialize the migrated model and load it again: a fixed point.
+    let twice = deserialize(serialize(&once).unwrap());
+    assert_eq!(once, twice, "deserialize is not idempotent after migration");
+
+    let migrated = once.get_model("main").unwrap().variables[0].get_ident();
+    assert_eq!(migrated, "goal_1\u{2024}5_for_temperature");
+
+    // Still simulates after the second round-trip.
+    let project = TestProject::from_datamodel(twice);
+    project.assert_vm_scalar_result("goal_1\u{2024}5_for_temperature", 1.5);
+}
+
+/// Guardrail for the `ModuleReference` carve-out (#690): a raw `.` in a stored
+/// `src`/`dst` is the genuine module/self separator, not a literal period, so
+/// it must NOT be migrated to the sentinel. `hares.area` -> stays `hares.area`
+/// in the datamodel (the parser later canonicalizes it to `hares·area`).
+/// Migrating it would break module input resolution.
+#[test]
+fn test_module_reference_src_dst_not_migrated_690() {
+    let proto = project_io::variable::module::Reference {
+        src: ".area".to_string(),
+        dst: "hares.area".to_string(),
+    };
+    let mod_ref = ModuleReference::from(proto);
+    // Preserved verbatim -- the period is NOT rewritten to the sentinel.
+    assert_eq!(mod_ref.src, ".area");
+    assert_eq!(mod_ref.dst, "hares.area");
+    assert!(!mod_ref.src.contains('\u{2024}'));
+    assert!(!mod_ref.dst.contains('\u{2024}'));
+}
+
+/// End-to-end regression for issue #690 (dimension-name symmetry): a 2022 model
+/// with a literal-period DIMENSION name "Fig. 3" (stored canonical `fig._3`)
+/// plus an Apply-to-All variable over it. The dimension DECLARATION and the
+/// equation's `dimension_names` REFERENCE must migrate consistently, or
+/// `get_dimensions` (variable.rs) sees `canonicalize(declaration)=fig‥_3 !=
+/// canonicalize(reference)=fig·_3` and fails with `BadDimensionName`.
+#[test]
+fn test_period_dimension_name_simulates_after_deserialize_690() {
+    use crate::test_common::TestProject;
+
+    // 2022 canonical stored form of the dimension "Fig. 3" and its elements.
+    let dim_name = "fig._3";
+    let datamodel = make_test_project(
+        vec![Variable::Aux(Aux {
+            ident: "arr".to_string(),
+            // Apply-to-All over the period-named dimension: the reference must
+            // migrate symmetrically with the declaration below.
+            equation: Equation::ApplyToAll(vec![dim_name.to_string()], "7".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: Compat::default(),
+            ai_state: None,
+            uid: None,
+        })],
+        vec![Dimension {
+            name: dim_name.to_string(),
+            elements: DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![],
+            parent: None,
+        }],
+    );
+
+    let reloaded = deserialize(serialize(&datamodel).unwrap());
+
+    // Both the dimension declaration and the A2A reference migrated to the
+    // sentinel, so they still match.
+    assert_eq!(reloaded.dimensions[0].name, "fig\u{2024}_3");
+    match &reloaded.get_model("main").unwrap().variables[0] {
+        Variable::Aux(a) => match &a.equation {
+            Equation::ApplyToAll(dims, _) => assert_eq!(dims[0], "fig\u{2024}_3"),
+            other => panic!("expected ApplyToAll, got {other:?}"),
+        },
+        other => panic!("expected Aux, got {other:?}"),
+    }
+
+    let project = TestProject::from_datamodel(reloaded);
+    project.assert_compiles_incremental();
+    // Each element of the A2A is 7 (no BadDimensionName).
+    project.assert_vm_scalar_result("arr[a1]", 7.0);
+    project.assert_vm_scalar_result("arr[a2]", 7.0);
+}
+
+/// End-to-end regression for issue #690 (element-subscript symmetry): a 2022
+/// model with a literal-period ELEMENT "Fig. 3" (stored canonical `fig._3`)
+/// referenced by a per-element `Arrayed` `subscript`. The element DECLARATION
+/// and the per-element `subscript` REFERENCE must migrate consistently, or the
+/// per-element equation never binds to the migrated element slot and that
+/// element silently falls back to the default value (the reviewer saw 0.0).
+#[test]
+fn test_period_element_subscript_resolves_after_deserialize_690() {
+    use crate::test_common::TestProject;
+
+    // Dimension whose second element "Fig. 3" is stored canonical as `fig._3`.
+    let datamodel = make_test_project(
+        vec![Variable::Aux(Aux {
+            ident: "arr".to_string(),
+            // Per-element equations keyed by element subscript; the period-named
+            // element's subscript is the 2022 canonical raw-`.` form. A default
+            // of 0 makes a binding failure observable as 0.0.
+            equation: Equation::Arrayed(
+                vec!["dim".to_string()],
+                vec![
+                    ("a1".to_string(), "10".to_string(), None, None),
+                    ("fig._3".to_string(), "42".to_string(), None, None),
+                ],
+                Some("0".to_string()),
+                false,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: Compat::default(),
+            ai_state: None,
+            uid: None,
+        })],
+        vec![Dimension {
+            name: "dim".to_string(),
+            elements: DimensionElements::Named(vec!["a1".to_string(), "fig._3".to_string()]),
+            mappings: vec![],
+            parent: None,
+        }],
+    );
+
+    let reloaded = deserialize(serialize(&datamodel).unwrap());
+
+    let project = TestProject::from_datamodel(reloaded);
+    project.assert_compiles_incremental();
+    // The period-named element resolves to its per-element value (42), NOT the
+    // 0.0 default -- proving the subscript reference migrated to match the
+    // migrated element declaration.
+    project.assert_vm_scalar_result("arr[fig\u{2024}_3]", 42.0);
+    project.assert_vm_scalar_result("arr[a1]", 10.0);
 }
 
 #[test]
