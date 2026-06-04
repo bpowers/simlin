@@ -60,6 +60,14 @@
   max-width: 100%;
 }
 
+/* Raw equation text shown while the engine LaTeX loads (or when the engine
+   can't produce LaTeX). Plain text, never routed through KaTeX. */
+.eqnPlain {
+  font-family: 'Roboto Mono', monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .unitsEditor {
   background-color: rgba(245, 245, 245);
   border-radius: 4px;
