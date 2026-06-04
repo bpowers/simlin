@@ -52,6 +52,27 @@ jest.mock(
     // eslint-disable-next-line react/display-name
     const Pass = (name: string) => (props: { children?: React.ReactNode }) =>
       React.createElement('div', { 'data-component': name }, props.children);
+    // A TextField stub with a real <input> (so tests can type into it via
+    // its label) that renders helperText so error messages are queryable.
+    const TextField = ({
+      label,
+      value,
+      onChange,
+      helperText,
+    }: {
+      label?: string;
+      value?: string;
+      onChange?: (e: unknown) => void;
+      helperText?: string;
+    } & Record<string, unknown>) =>
+      React.createElement(
+        'div',
+        null,
+        React.createElement('input', { 'aria-label': label, value: value ?? '', onChange }),
+        helperText ? React.createElement('p', null, helperText) : null,
+      );
+    const TextLink = ({ children, onClick }: { children?: React.ReactNode; onClick?: () => void }) =>
+      React.createElement('a', { onClick, role: 'link' }, children);
     return {
       AppleIcon: () => null,
       EmailIcon: () => null,
@@ -60,8 +81,8 @@ jest.mock(
       Card: Pass('Card'),
       CardActions: Pass('CardActions'),
       CardContent: Pass('CardContent'),
-      TextLink: Pass('TextLink'),
-      TextField: Pass('TextField'),
+      TextLink,
+      TextField,
     };
   },
   { virtual: true },
@@ -82,6 +103,8 @@ import { Login } from '../Login';
 
 const firebaseAuth = jest.requireMock('@firebase/auth') as {
   signInWithRedirect: jest.Mock;
+  fetchSignInMethodsForEmail: jest.Mock;
+  sendPasswordResetEmail: jest.Mock;
 };
 
 function makeAuth() {
@@ -164,5 +187,63 @@ describe('Login showProviderRedirect flow', () => {
     });
     expect(screen.queryByText('Sign in with Google')).not.toBeNull();
     expect(screen.getByRole('alert').textContent).toMatch(/popup blocked by browser/i);
+  });
+});
+
+describe('Login email-flow error handling', () => {
+  beforeEach(() => {
+    firebaseAuth.fetchSignInMethodsForEmail.mockReset();
+    firebaseAuth.sendPasswordResetEmail.mockReset();
+  });
+
+  test('a rejected fetchSignInMethodsForEmail surfaces a visible error', async () => {
+    firebaseAuth.fetchSignInMethodsForEmail.mockRejectedValueOnce(new Error('too many requests'));
+
+    render(<Login disabled={false} auth={makeAuth()} />);
+    fireEvent.click(screen.getByText('Sign in with email'));
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'a@example.com' } });
+    fireEvent.click(screen.getByText('Next'));
+
+    await waitFor(() => {
+      expect(screen.queryByText(/too many requests/i)).not.toBeNull();
+    });
+  });
+
+  test('a rejected sendPasswordResetEmail keeps the recovery card with a visible error', async () => {
+    firebaseAuth.fetchSignInMethodsForEmail.mockResolvedValueOnce(['password']);
+    firebaseAuth.sendPasswordResetEmail.mockRejectedValueOnce(new Error('quota exceeded'));
+
+    render(<Login disabled={false} auth={makeAuth()} />);
+    fireEvent.click(screen.getByText('Sign in with email'));
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'a@example.com' } });
+    fireEvent.click(screen.getByText('Next'));
+    await waitFor(() => {
+      expect(screen.queryByText('Trouble signing in?')).not.toBeNull();
+    });
+
+    fireEvent.click(screen.getByText('Trouble signing in?'));
+    fireEvent.click(screen.getByText('Send'));
+
+    await waitFor(() => {
+      // Still on the recovery card (it did NOT advance to the password form)
+      // and the failure is visible.
+      expect(screen.queryByText('Recover password')).not.toBeNull();
+      expect(screen.queryByText(/quota exceeded/i)).not.toBeNull();
+    });
+  });
+
+  test('editing the email field clears a stale email error', async () => {
+    render(<Login disabled={false} auth={makeAuth()} />);
+    fireEvent.click(screen.getByText('Sign in with email'));
+
+    // Submit with an empty email to produce a validation error.
+    fireEvent.click(screen.getByText('Next'));
+    await waitFor(() => {
+      expect(screen.queryByText(/Enter your email address/i)).not.toBeNull();
+    });
+
+    // Typing into the field must clear the stale message.
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'a' } });
+    expect(screen.queryByText(/Enter your email address/i)).toBeNull();
   });
 });
