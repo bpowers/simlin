@@ -7,8 +7,8 @@
 //! Submodule layout:
 //!
 //! - [`types`]: public LTM vocabulary -- `LinkPolarity`, `Link`, `Loop`,
-//!   `LoopPolarity`, `TruncatedByBudget`, `ModuleLtmRole`, plus the
-//!   small `classify_module_for_ltm` / `normalize_module_ref` helpers.
+//!   `LoopPolarity`, `TruncatedByBudget`, plus the small `normalize_module_ref`
+//!   helper.
 //! - [`partitions`]: stock-to-stock SCC grouping. Provides
 //!   `CyclePartitions` and the generic Tarjan SCC used by
 //!   `compute_cycle_partitions`.

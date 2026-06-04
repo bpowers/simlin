@@ -52,6 +52,13 @@ pub(crate) use link_scores::emit_ltm_partial_equation_warning;
 #[cfg(test)]
 pub(crate) use link_scores::ltm_partial_equation_warning_message;
 pub(crate) use loops::build_loops_from_tiered;
+// The cross-element-through-aggregate petal-stitching core, shared by the
+// exhaustive recovery (`recover_cross_agg_loops`) and discovery
+// (`ltm_finding`, GH #696) so both enumerate exactly the same cross-agg loops.
+pub(crate) use loops::sub_model_output_ports;
+pub(crate) use loops::{
+    StitchPetal, collect_agg_petals, cross_agg_loop_budget, stitch_cross_agg_petals,
+};
 pub(crate) use parse::scalarize_ltm_equation;
 pub(crate) use pinned::model_pinned_loops;
 
@@ -71,7 +78,7 @@ pub(crate) use loops::{
 use link_scores::{
     emit_agg_to_target_link_scores, emit_link_scores_for_edge, emit_source_to_agg_link_scores,
 };
-use loops::{cross_agg_loop_budget, recover_agg_hop_polarities, sub_model_output_ports};
+use loops::recover_agg_hop_polarities;
 use parse::parse_ltm_equation;
 
 /// The single integration method the assembled simulation actually runs, when
@@ -450,22 +457,29 @@ fn compute_module_link_overrides(
             }
 
             // Entry port: the module's input whose (normalized) src equals
-            // `from` -- the same match `module_link_score_equation` makes.
+            // `from` -- the same match `module_link_score_equation` makes. When
+            // `from` feeds MORE THAN ONE input port of the module, the collapsed
+            // `from -> module` edge is genuinely ambiguous (no single entry
+            // pathway to override against), so skip it and leave the base link
+            // score (its composite reference) in place -- mirroring
+            // `module_exit_port_for_reader`'s multi-match -> None semantics and
+            // the discovery-side `recompute_module_input_edge_series` (GH #698 /
+            // PR #705 r3353459409).
             let module_var = reconstruct_single_variable(db, model, project, module_name);
             let Some(crate::variable::Variable::Module { inputs, .. }) = module_var else {
                 continue;
             };
             let from_ident = Ident::<Canonical>::new(from);
-            let entry_port = inputs.iter().find_map(|inp| {
-                if normalize_module_ref(&inp.src) == from_ident {
-                    Some(inp.dst.as_str().to_string())
-                } else {
-                    None
-                }
-            });
-            let Some(entry_port) = entry_port else {
+            let mut matching = inputs
+                .iter()
+                .filter(|inp| normalize_module_ref(&inp.src) == from_ident);
+            let Some(entry_port) = matching.next().map(|inp| inp.dst.as_str().to_string()) else {
                 continue;
             };
+            if matching.next().is_some() {
+                // A second input port is also fed by `from`: ambiguous entry.
+                continue;
+            }
 
             // Exit port from the next link `(m → y)`.
             let y = strip_subscript(next.to.as_str());
@@ -475,23 +489,41 @@ fn compute_module_link_overrides(
                         .get(y)
                         .is_some_and(|sv| sv.kind(db) == SourceVariableKind::Module);
                 if y_is_module {
-                    // `y` is a module: m's output feeds y's input. y's
-                    // ModuleInput src is the qualified `m·{port}`; extract the
-                    // port whose normalized ref is `m`.
+                    // `y` is a module: m's output feeds y's input port(s). y's
+                    // ModuleInput src is the qualified `m·{port}`; the exit port
+                    // is the `{port}` whose normalized ref is `m`. If `y` reads
+                    // TWO DISTINCT output ports of `m` on different inputs, the
+                    // collapsed `m -> y` edge has no unique exit port -- decline
+                    // (ambiguous) and leave the base link score in place,
+                    // mirroring `module_exit_port_for_reader`'s multi-match ->
+                    // None semantics and the discovery-side
+                    // `recompute_module_input_edge_series` (GH #698 / PR #705
+                    // r3353597299). Two inputs naming the SAME `m·port` are NOT
+                    // ambiguous: a unique distinct port is fine.
                     let y_var = reconstruct_single_variable(db, model, project, y);
                     let module_ident = Ident::<Canonical>::new(module_name);
                     match y_var {
                         Some(crate::variable::Variable::Module { inputs: y_in, .. }) => {
-                            y_in.iter().find_map(|inp| {
-                                if normalize_module_ref(&inp.src) == module_ident {
-                                    inp.src
-                                        .as_str()
-                                        .split_once('\u{00B7}')
-                                        .map(|(_, port)| port.to_string())
-                                } else {
-                                    None
+                            let mut exit: Option<String> = None;
+                            let mut ambiguous = false;
+                            for inp in &y_in {
+                                if normalize_module_ref(&inp.src) != module_ident {
+                                    continue;
                                 }
-                            })
+                                let Some((_, port)) = inp.src.as_str().split_once('\u{00B7}')
+                                else {
+                                    continue;
+                                };
+                                match &exit {
+                                    Some(prev) if prev != port => {
+                                        ambiguous = true;
+                                        break;
+                                    }
+                                    Some(_) => {}
+                                    None => exit = Some(port.to_string()),
+                                }
+                            }
+                            if ambiguous { None } else { exit }
                         }
                         _ => None,
                     }

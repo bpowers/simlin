@@ -21,8 +21,9 @@ use simlin_engine::db::{
     causal_graph_from_element_edges, compile_project_incremental, model_causal_edges,
     model_cycle_partitions, model_detected_loops, model_element_causal_edges,
     model_element_cycle_partitions, model_loop_circuits, model_loop_circuits_tiered,
-    model_ltm_variables, project_datamodel_dims, set_project_ltm_discovery_mode,
-    set_project_ltm_enabled, sync_from_datamodel, sync_from_datamodel_incremental,
+    model_ltm_variables, project_datamodel_dims, reclassify_loops_from_results,
+    set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel,
+    sync_from_datamodel_incremental,
 };
 use simlin_engine::xmile;
 use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm_finding, ltm_post};
@@ -421,10 +422,11 @@ fn discovery_arms_race_3party() {
     let found = discover_loops_from_path(model_path);
 
     // With per-stock reset, discovery finds all 8 loops: each stock
-    // starts with fresh best_scores, so pairwise and three-way
-    // reinforcing loops are no longer pruned by scores from earlier
-    // stocks' self-loop searches, and the canonical-rotation dedup
-    // retains both directions of the three-way loop as distinct paths.
+    // starts with fresh per-node expansion budgets, so pairwise and
+    // three-way reinforcing loops are not starved by expansions consumed
+    // during earlier stocks' self-loop searches, and the
+    // canonical-rotation dedup retains both directions of the three-way
+    // loop as distinct paths.
     assert_eq!(
         found.len(),
         8,
@@ -473,9 +475,11 @@ fn discovery_decoupled_stocks() {
     let found = discover_loops_from_path(model_path);
 
     // The heuristic finds 2 of 3 loops: the self-loops for each stock.
-    // The cross-stock loop is missed by the within-stock heuristic (the
-    // strong self-loop paths set high best_scores on shared nodes during
-    // each stock's own search, pruning the weaker cross-stock path).
+    // The cross-stock loop is missed because its two cross-links are
+    // never simultaneously nonzero at any saved timestep (stock_1->flow_2
+    // is active only around step 4, stock_2->flow_1 only at steps 6-10),
+    // so the per-step zero-edge-excluded search graph never contains the
+    // full cycle -- the "baton-passing" limitation tracked as GH #699.
     assert_eq!(
         found.len(),
         2,
@@ -4625,6 +4629,9 @@ fn discover_loops_element_level(
     // Get LTM variable metadata and project dimensions for A2A expansion
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let dm_dims = project_datamodel_dims(&db, sync.project);
+    // The emission-derived per-sub-model output-port set the per-exit-port
+    // recompute needs (GH #698), built through the exact production decision.
+    let sub_model_ports = simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
 
     ltm_finding::discover_loops_with_graph(
         &results,
@@ -4632,6 +4639,7 @@ fn discover_loops_element_level(
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        &sub_model_ports,
         None,
     )
     .expect("discover_loops_with_graph should succeed")
@@ -8215,12 +8223,14 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
         element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let dm_dims = project_datamodel_dims(&db, sync.project);
+    let sub_model_ports = simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
     let found = ltm_finding::discover_loops_with_graph(
         &results,
         &causal_graph,
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        &sub_model_ports,
         None,
     )
     .expect("discover_loops_with_graph should succeed")
@@ -9181,6 +9191,262 @@ fn test_four_petal_cyclic_orderings_share_loop_score_series() {
     }
 }
 
+/// Build the canonical reducer-in-feedback repro for GH #696:
+/// `growth[r] = SUM(pop[*]) * 0.05` over `n` elements, each `growth[r]` an
+/// inflow to `pop[r]`. The whole-extent `SUM(pop[*])` is hoisted into one
+/// scalar synthetic agg, and every element forms a single petal
+/// (`pop[e] -> agg -> growth[e] -> pop[e]`). Heterogeneous initials keep the
+/// per-element link scores distinct so loops don't degenerate to zero.
+fn build_reducer_feedback_model(name: &str, elems: &[&str]) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+    datamodel::Project {
+        name: name.to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 6.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            elems.iter().map(|s| s.to_string()).collect(),
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        elems
+                            .iter()
+                            .enumerate()
+                            .map(|(i, e)| {
+                                // 1000, 300, 100, ... -- distinct per element.
+                                let init = (1000.0 / 3f64.powi(i as i32)).round();
+                                (e.to_string(), format!("{init}"), None, None)
+                            })
+                            .collect(),
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["growth".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "growth".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "SUM(pop[*]) * 0.05".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// GH #696: discovery mode must recover the cross-element loops that traverse a
+/// hoisted reducer more than once -- not just the single-petal loops.
+///
+/// On the 3-element `growth[r] = SUM(pop[*]) * 0.05` repro, exhaustive mode
+/// emits 7 cross-element loops (3 single-petal + 3 disjoint-pair + 1 triple).
+/// Before the fix, discovery (the production `analyze_model` path) returned
+/// only the 3 single-petal loops because its DFS `visiting` set forbids
+/// revisiting the synthetic agg node. This cross-validates the discovered loop
+/// set against exhaustive on the SAME model: same count, and -- for the
+/// loops that traverse the agg -- a per-element loop-score series equal to the
+/// exhaustive loop_score variables (to within FP reassociation).
+#[test]
+fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
+    let elems = ["a", "b", "c"];
+    let project = build_reducer_feedback_model("reducer_feedback_3", &elems);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // --- Exhaustive mode: enumerate the cross-element loop_score variables ---
+    // and their simulated series. Every loop here traverses the (scalar) agg.
+    let (exhaustive_loop_count, exhaustive_score_set) = {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let source_model = sync.models["main"].source_model;
+        let ltm = model_ltm_variables(&db, source_model, sync.project);
+        let loop_vars: Vec<&simlin_engine::db::LtmSyntheticVar> = ltm
+            .vars
+            .iter()
+            .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+            .collect();
+        assert_eq!(
+            loop_vars.len(),
+            7,
+            "exhaustive must emit 3 single-petal + 3 disjoint-pair + 1 triple = 7 \
+             cross-element loops through the reducer; got {:?}",
+            loop_vars
+                .iter()
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main").expect("exhaustive compile");
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().expect("exhaustive simulate");
+        let results = vm.into_results();
+        // Capture each loop's |score| series as a roundable fingerprint so we
+        // can match discovery's stitched loops against exhaustive's by value
+        // (the two enumerate the same loops but assign different ids).
+        let mut set: std::collections::HashSet<Vec<i64>> = std::collections::HashSet::new();
+        for v in &loop_vars {
+            let off = *results
+                .offsets
+                .get(&Ident::<Canonical>::new(&v.name))
+                .expect("exhaustive loop_score offset");
+            let fingerprint: Vec<i64> = (0..results.step_count)
+                .map(|step| {
+                    let x = results.data[step * results.step_size + off];
+                    if x.is_finite() {
+                        (x.abs() * 1e9).round() as i64
+                    } else {
+                        i64::MIN
+                    }
+                })
+                .collect();
+            set.insert(fingerprint);
+        }
+        (loop_vars.len(), set)
+    };
+
+    // --- Discovery mode through the PRODUCTION analyze_model path ---
+    let (mut db, sp) = {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        (db, sync.project)
+    };
+    let analysis = simlin_engine::analysis::analyze_model(&project, &mut db, sp, "main", None)
+        .expect("analyze_model");
+
+    // Every discovered loop traverses the reducer (the only feedback in this
+    // model runs pop -> agg -> growth -> pop), so the discovered count must
+    // equal the exhaustive cross-element loop count.
+    assert_eq!(
+        analysis.loop_dominance.len(),
+        exhaustive_loop_count,
+        "discovery must recover all {exhaustive_loop_count} cross-element reducer loops; \
+         got {} loops: {:?}. GH #696.",
+        analysis.loop_dominance.len(),
+        analysis
+            .loop_dominance
+            .iter()
+            .map(|l| &l.variables)
+            .collect::<Vec<_>>()
+    );
+
+    // The reported loops never surface the synthetic agg node.
+    for l in &analysis.loop_dominance {
+        assert!(
+            l.variables
+                .iter()
+                .all(|v| !v.contains("\u{205A}agg\u{205A}")),
+            "discovery must trim the synthetic agg from reported loops; got {:?}",
+            l.variables
+        );
+    }
+
+    // There must be loops of three distinct sizes: single-petal (2 vars),
+    // disjoint-pair (4 vars), and triple (6 vars) -- the structural signature
+    // of cross-agg recovery, not just single petals.
+    let sizes: std::collections::HashSet<usize> = analysis
+        .loop_dominance
+        .iter()
+        .map(|l| l.variables.len())
+        .collect();
+    assert!(
+        sizes.contains(&2) && sizes.contains(&4) && sizes.contains(&6),
+        "discovery must recover single-petal (2), pair (4), and triple (6) loops; got sizes {sizes:?}. GH #696."
+    );
+
+    // Cross-validate the score series. Discovery's `importance` is normalized,
+    // so instead re-derive each discovered loop's raw |loop score| series from
+    // its variables and confirm the fingerprint set matches exhaustive's. Use
+    // discovery's own raw loop score: re-run discovery with the helper that
+    // exposes raw FoundLoop scores.
+    let raw = {
+        let mut db2 = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db2, &project, None);
+        set_project_ltm_enabled(&mut db2, sync.project, true);
+        set_project_ltm_discovery_mode(&mut db2, sync.project, true);
+        let source_model = sync.models["main"].source_model;
+        let compiled = compile_project_incremental(&db2, sync.project, "main").unwrap();
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+        let element_edges = model_element_causal_edges(&db2, source_model, sync.project);
+        // This model has no modules, so the bare element-edge graph suffices
+        // (the production analyze_model path uses the module-enriched
+        // constructor for GH #698, irrelevant here).
+        let causal_graph = causal_graph_from_element_edges(element_edges);
+        let stocks: Vec<Ident<Canonical>> = element_edges
+            .stocks
+            .iter()
+            .map(|s| Ident::new(s.as_str()))
+            .collect();
+        let ltm = model_ltm_variables(&db2, source_model, sync.project);
+        let dm_dims = project_datamodel_dims(&db2, sync.project);
+        // No modules in this model, so the per-exit-port recompute never fires;
+        // an empty output-port map is correct.
+        ltm_finding::discover_loops_with_graph(
+            &results,
+            &causal_graph,
+            &stocks,
+            &ltm.vars,
+            dm_dims,
+            &ltm_finding::SubModelOutputPorts::new(),
+            None,
+        )
+        .expect("discovery")
+    };
+    let mut discovery_score_set: std::collections::HashSet<Vec<i64>> =
+        std::collections::HashSet::new();
+    for fl in &raw.loops {
+        let fingerprint: Vec<i64> = fl
+            .scores
+            .iter()
+            .map(|(_, x)| {
+                if x.is_finite() {
+                    (x.abs() * 1e9).round() as i64
+                } else {
+                    i64::MIN
+                }
+            })
+            .collect();
+        discovery_score_set.insert(fingerprint);
+    }
+    assert_eq!(
+        discovery_score_set, exhaustive_score_set,
+        "discovery's recovered loop-score series must match exhaustive's set (GH #696); \
+         agg={agg}"
+    );
+}
+
 /// Enabling LTM must not change (or break) the model's own simulation:
 /// C-LEARN compiled with `ltm_enabled` + discovery mode (the production
 /// `analyze_model` configuration) must produce the SAME values for every
@@ -9426,12 +9692,14 @@ fn test_lookup_table_link_score_is_nonzero() {
         element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let dm_dims = project_datamodel_dims(&db, sync.project);
+    let sub_model_ports = simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
     let found = ltm_finding::discover_loops_with_graph(
         &results,
         &causal_graph,
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        &sub_model_ports,
         None,
     )
     .expect("discovery should succeed")
@@ -9769,6 +10037,359 @@ fn multi_output_passthrough_loop_raw_score_is_one() {
              (opposite sign) flips the loop polarity to -1."
         );
     }
+}
+
+/// GH #698: discovery mode must agree with exhaustive mode on the SIGN of a
+/// loop that traverses a multi-output module. The loop reads `m·pos`
+/// (positive gain), so the raw loop score is +1 (reinforcing). Before the
+/// fix, discovery scored the `s -> m` edge against the module's composite,
+/// which max-abs-selects across BOTH output ports; single-dependency
+/// pathways all normalize to magnitude 1, so the `>=` tie-break picked the
+/// first-enumerated port (`neg`), inverting the discovered loop to -1.
+#[test]
+fn discovery_multi_output_loop_polarity_matches_exhaustive() {
+    let project = multi_output_passthrough_loop_project();
+
+    // Exhaustive: the raw loop score settles to +1 (verified directly by
+    // `multi_output_passthrough_loop_raw_score_is_one`; recomputed here so
+    // the two modes are compared on the SAME compiled fixture).
+    let (compiled, _loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("exhaustive simulation should run");
+    let exhaustive_results = vm.into_results();
+    let exhaustive_loop_key = exhaustive_results
+        .offsets
+        .keys()
+        .find(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+        })
+        .expect("exhaustive mode must emit a loop score")
+        .clone();
+    let exhaustive_off = exhaustive_results.offsets[&exhaustive_loop_key];
+    let last = exhaustive_results.step_count - 1;
+    let exhaustive_settled =
+        exhaustive_results.data[last * exhaustive_results.step_size + exhaustive_off];
+    assert!(
+        exhaustive_settled > 0.0,
+        "exhaustive settled loop score should be positive (reinforcing), got {exhaustive_settled}"
+    );
+
+    // Discovery: run the strongest-path search and find the loop through the
+    // module. Its settled signed score must have the same sign exhaustive
+    // reports, not the inverted one the composite tie-break produced.
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("discovery simulation should run");
+    let discovery_results = vm.into_results();
+
+    let proj = Project::from(project);
+    let found = ltm_finding::discover_loops(&discovery_results, &proj)
+        .expect("discover_loops should succeed");
+    assert!(
+        !found.is_empty(),
+        "discovery should find the feedback loop through the multi-output module"
+    );
+
+    // The single feedback loop traverses `s -> m -> growth -> s`.
+    let loop_through_m = found
+        .iter()
+        .find(|fl| {
+            fl.loop_info
+                .links
+                .iter()
+                .any(|l| l.from.as_str() == "m" || l.to.as_str() == "m")
+        })
+        .expect("a discovered loop must traverse module m");
+
+    let (_, settled_score) = *loop_through_m
+        .scores
+        .iter()
+        .rev()
+        .find(|(_, s)| !s.is_nan() && *s != 0.0)
+        .expect("loop should have a non-zero settled score");
+
+    assert!(
+        settled_score > 0.0,
+        "discovery settled loop score is {settled_score}; exhaustive is {exhaustive_settled} \
+         (positive/reinforcing). The discovery composite tie-break selected the wrong output \
+         port (m·neg) and inverted the loop polarity. GH #698."
+    );
+}
+
+/// A stockless passthrough module (`out = input_val`) whose output the parent
+/// consumes through a parabola (`effect = m.out * (1000 - m.out) / 100000`).
+/// The module output appears with conflicting signs in the parabola, so the
+/// static polarity analyzer cannot sign the `m -> effect` link and the loop is
+/// structurally `Undetermined`. The simulation, however, stays entirely on the
+/// rising arm of the parabola (s grows from 100, slowly, staying well below the
+/// vertex at 500), so the runtime loop score is single-signed (+1, reinforcing)
+/// at every active step.
+fn parabola_through_module_loop_project() -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel;
+
+    let passthrough = datamodel::Model {
+        name: "passthrough".to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "input_val".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    ..datamodel::Compat::default()
+                },
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "out".to_string(),
+                equation: datamodel::Equation::Scalar("input_val".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+
+    datamodel::Project {
+        name: "parabola_through_module_loop".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 8.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Stock(datamodel::Stock {
+                        ident: "s".to_string(),
+                        equation: datamodel::Equation::Scalar("100".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        inflows: vec!["growth".to_string()],
+                        outflows: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "m".to_string(),
+                        model_name: "passthrough".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "s".to_string(),
+                            dst: "m.input_val".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    // `effect` is a quadratic (parabola) in the module output:
+                    // `m.out * (1000 - m.out) / 100000`. The module output
+                    // appears with conflicting signs (positive in the first
+                    // factor, negative in the second), so the static polarity
+                    // analyzer cannot sign the m -> effect link -- it is
+                    // Unknown, making the whole loop structurally Undetermined.
+                    // The sim, however, stays entirely on the rising arm of the
+                    // parabola (s grows from 100, slowly, staying well below the
+                    // vertex at 500), so the runtime loop score is +1
+                    // (reinforcing) at every active step.
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "effect".to_string(),
+                        equation: datamodel::Equation::Scalar(
+                            "m.out * (1000 - m.out) / 100000".to_string(),
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Flow(datamodel::Flow {
+                        ident: "growth".to_string(),
+                        equation: datamodel::Equation::Scalar("effect".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+            passthrough,
+        ],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// GH #679: exhaustive-mode loops must get runtime polarity reclassification.
+///
+/// `model_detected_loops` is a pre-simulation query, so the loop through the
+/// multi-output passthrough module is labelled structurally `Undetermined`
+/// (the `s -> m` and `m·pos -> growth` black-box links have Unknown static
+/// polarity). The simulated loop score is +1 at every settled step, so after
+/// running `reclassify_loops_from_results` the consumer-visible polarity must
+/// be Reinforcing -- exactly what discovery mode already reports for this
+/// fixture (`discovery_multi_output_loop_polarity_matches_exhaustive`).
+#[test]
+fn exhaustive_module_loop_polarity_reclassified_from_runtime() {
+    let project = parabola_through_module_loop_project();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    assert_eq!(
+        detected.loops.len(),
+        1,
+        "the parabola-through-module model has exactly one feedback loop"
+    );
+    // Baseline: the structural label is Undetermined because the parent
+    // consumes the module output through a graphical function, whose static
+    // polarity the analyzer cannot determine.
+    assert_eq!(
+        detected.loops[0].polarity,
+        DetectedLoopPolarity::Undetermined,
+        "structural polarity through a parabola-consumed module output is Undetermined"
+    );
+
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    let mut loops = detected.loops.clone();
+    let id_before = loops[0].id.clone();
+    reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
+
+    assert_eq!(
+        loops[0].polarity,
+        DetectedLoopPolarity::Reinforcing,
+        "the loop reads m·pos (positive gain); its runtime loop score is +1, \
+         so it must reclassify to Reinforcing, not stay Undetermined"
+    );
+    assert_eq!(
+        loops[0].id, id_before,
+        "the loop id must stay stable across reclassification (the FFI id->score \
+         correspondence and salsa caching depend on it)"
+    );
+    assert!(
+        (loops[0].polarity_confidence - 1.0).abs() < 1e-9,
+        "a single-signed runtime score has confidence 1.0, got {}",
+        loops[0].polarity_confidence
+    );
+}
+
+/// GH #679: a loop whose simulated score is never active -- a `loop_score`
+/// series that is PRESENT but every entry is zero or non-finite -- must keep
+/// its structural polarity, because `from_runtime_scores` returns `None` (no
+/// valid samples) and there is no runtime evidence to override the structural
+/// label. This deliberately builds a present-but-all-zero/NaN series so the
+/// reclassifier reaches the `from_runtime_scores` -> `None` -> keep-structural
+/// branch, rather than short-circuiting at the missing-offset early-continue.
+#[test]
+fn exhaustive_never_active_loop_keeps_structural_polarity() {
+    use simlin_engine::common::{Canonical, Ident};
+
+    let datamodel_project = TestProject::new("goal_seeking")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("goal", "100", None)
+        .stock("level", "50", &["adjustment"], &[], None)
+        .aux("gap", "goal - level", None)
+        .flow("adjustment", "gap / 5", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    assert!(
+        !detected.loops.is_empty(),
+        "the goal-seeking model has a balancing loop"
+    );
+    let structural: Vec<_> = detected
+        .loops
+        .iter()
+        .map(|l| (l.id.clone(), l.polarity, l.polarity_confidence))
+        .collect();
+
+    // Build a Results that DOES carry a loop_score series for every detected
+    // loop, but every value is zero or NaN. `reclassify_loops_from_results`
+    // therefore finds the offset (passing the early-continue), collects the
+    // all-invalid samples, and `from_runtime_scores` returns `None` -- the
+    // branch that must leave the structural classification untouched.
+    let step_count = 4;
+    let step_size = detected.loops.len();
+    let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+    for (i, loop_item) in detected.loops.iter().enumerate() {
+        let name = format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{}", loop_item.id);
+        offsets.insert(Ident::<Canonical>::from_unchecked(name), i);
+    }
+    // Alternate zero and NaN so both filtered-out cases are exercised.
+    let mut data = vec![0.0_f64; step_count * step_size];
+    for (idx, slot) in data.iter_mut().enumerate() {
+        if idx % 2 == 1 {
+            *slot = f64::NAN;
+        }
+    }
+    let all_inactive = Results {
+        offsets,
+        data: data.into_boxed_slice(),
+        step_size,
+        step_count,
+        specs: simlin_engine::SimSpecs::from(&datamodel_project.sim_specs),
+        is_vensim: false,
+    };
+
+    // Every loop is scalar here, so each occupies one slot.
+    let loop_partitions: HashMap<String, Vec<Option<usize>>> = detected
+        .loops
+        .iter()
+        .map(|l| (l.id.clone(), vec![Some(0)]))
+        .collect();
+
+    let mut loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut loops, &all_inactive, &loop_partitions);
+
+    let after: Vec<_> = loops
+        .iter()
+        .map(|l| (l.id.clone(), l.polarity, l.polarity_confidence))
+        .collect();
+    assert_eq!(
+        structural, after,
+        "a loop whose runtime score is present but all-zero/NaN must keep its \
+         structural polarity (from_runtime_scores returns None)"
+    );
 }
 
 /// GROUND TRUTH PROBE / acceptance invariant for GH #675: an isolated

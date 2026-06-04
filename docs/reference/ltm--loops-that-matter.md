@@ -573,6 +573,17 @@ The Ru and Bu designations are assigned when the **polarity confidence value is 
 allows a well-reasoned factual interpretation of diagrams where the polarity-changing
 nature of links is not important over the course of the simulation.
 
+> **Simlin implementation note.** Loop detection (and the deterministic loop-id
+> assignment) happens before simulation, so the structural label is what a pre-simulation
+> surface reports. Whether the *runtime* polarity is surfaced depends on the consumer:
+> discovery (`analyze_model` / MCP) and pysimlin `Run.loops` reclassify from the runtime
+> `loop_score` series while keeping the loop id stable, whereas the libsimlin / WASM / TS
+> `get_loops` surface is structural-only (it has no simulation results in hand and folds
+> Rux/Bux to R/B at the FFI boundary -- surfacing runtime polarity there is tracked under
+> GH #495). See the "Runtime Polarity" section of
+> [the design doc](../design/ltm--loops-that-matter.md) for the per-surface breakdown and
+> the `reclassify_loops_from_results` in-engine primitive.
+
 ---
 
 ## 5. Path Scores and Composite Link Scores
@@ -1868,6 +1879,12 @@ acceptable for practical analysis but means the method cannot prove it has found
 important loops. The LOOPSCORE builtin (Section 10) mitigates this by allowing practitioners
 to track specific loops regardless of the discovery algorithm.
 
+A distinct, subtler incompleteness: because discovery searches the per-timestep graph of
+*currently active* (nonzero-score) links, a "baton-passing" loop -- one whose links are each
+active at different times but never all simultaneously nonzero at any sampled timestep -- is
+never discoverable, even though it is a genuine feedback loop that exhaustive enumeration
+reports. The decoupled two-stock model of Section 12.3 exhibits exactly this pattern.
+
 ### 16.5 Cannot Identify Behavior Modes
 
 Unlike EEA, LTM does not decompose behavior into distinct modes (exponential growth,
@@ -1909,10 +1926,13 @@ variable. Its link scores use a delta-ratio approximation rather than an analyti
 
 A feedback loop that runs through an inlined reducer and visits several distinct array
 elements (a "cross-element through-aggregate" loop) is reconstructed from the loop's pieces
-rather than enumerated directly. For a reducer in a feedback loop over a *very large*
-dimension, the number of such reconstructed loops is capped, so the reported cross-element
-loop list may be incomplete. When this happens, a warning is emitted naming the affected
-reducer.
+rather than enumerated directly, in **both** exhaustive and discovery mode -- the two share
+the same reconstruction, so discovery no longer silently drops these loops the way it did
+before this was fixed. For a reducer in a feedback loop over a *very large* dimension, the
+number of such reconstructed loops is capped, so the reported cross-element loop list may be
+incomplete. When this happens, exhaustive mode emits a warning naming the affected reducer;
+discovery (which reconstructs after simulation, where there is no diagnostic channel) instead
+sets a "recovery truncated" flag on its result.
 
 ---
 

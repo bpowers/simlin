@@ -130,7 +130,11 @@ and average absolute score for ranking.
    - Runs the strongest-path DFS (`find_strongest_loops`)
    - Collects unique loop paths across all timesteps
 4. Each discovered path is converted to a `FoundLoop` with signed loop scores
-   computed at every timestep from the raw link score results
+   computed at every timestep from the raw link score results. A loop edge
+   `x → m` into a multi-output module is recomputed against the pathway ending
+   at the exit port the loop traverses (the per-exit-port recompute, GH #698 --
+   see "Passthrough composites and per-exit-port loop scoring"), so discovery
+   and exhaustive agree on the loop's polarity
 5. Loops are filtered by `MIN_CONTRIBUTION` (0.1%) with partition-aware
    thresholds, ranked competitive-first by mean partition-relative importance
    (loops trivially alone in their cycle partition -- relative score +/-1 by
@@ -406,20 +410,32 @@ internal pathway at each timestep.
 
 ### Module Classification
 
-Modules are classified by `classify_module_for_ltm()` in `ltm.rs`:
+Modules fall into three LTM roles:
 
 - **Infrastructure** (`PREVIOUS`, `INIT`) -- used BY link score equations; never
   analyzed to avoid infinite recursion.
 - **DynamicModule** -- has internal stocks (SMOOTH, DELAY, TREND, user-defined
   modules with stocks). Gets composite link scores and internal graph construction.
-- **Passthrough** -- no internal stocks. `classify_module_for_ltm` drives only
-  the legacy `CausalGraph`'s recursive internal-graph build (dynamic modules
-  only). It does NOT decide whether a composite is exposed: a passthrough whose
-  internals form an aux chain from input to output still emits pathway/composite
-  vars (its chain is a pure expression LTM scores exactly), so a link into its
-  input port references the composite just like a dynamic module. The signed
-  unit-transfer fallback (see Module Links) now fires only for a *pathway-less*
-  module -- one whose output does not depend on its input at all.
+- **Passthrough** -- no internal stocks. A passthrough whose internals form an
+  aux chain from input to output still emits pathway/composite vars (its chain
+  is a pure expression LTM scores exactly), so a link into its input port
+  references the composite just like a dynamic module. The signed unit-transfer
+  fallback (see Module Links) now fires only for a *pathway-less* module -- one
+  whose output does not depend on its input at all.
+
+The `CausalGraph` builders that carry module data (`CausalGraph::from_model`
+and the shared `db::analysis::model_variables_and_module_graphs` used by
+`causal_graph_with_modules` and the element-level
+`causal_graph_from_element_edges_with_modules`) build a recursive internal
+sub-graph for **every** referenced sub-model -- DynamicModule and passthrough
+alike -- since the discovery-mode per-exit-port pathway recompute (GH #698)
+needs the passthrough's sub-graph too. (Before GH #698 only DynamicModules got a
+sub-graph, gated by a now-removed `classify_module_for_ltm` stock check; a
+pathless module's sub-graph enumerates no pathways, so building it is harmless.)
+The bare `causal_graph_from_element_edges` constructor still leaves `variables`
+/ `module_graphs` empty -- it is used where module data is not needed; the
+production discovery path (`analyze_model`) uses the `_with_modules` enriching
+variant.
 
 #### Passthrough composites and per-exit-port loop scoring (PR #684)
 
@@ -447,7 +463,18 @@ So in **exhaustive** mode the loop-score equation overrides each `x → m` modul
 link with a **per-exit-port pathway selection**. The exit port is read off the
 NEXT loop link `m → y` (the unique `m·port` `y` reads, or `y`'s matching
 `ModuleInput.src` when `y` is itself a module); the entry port is `m`'s
-`ModuleInput` whose normalized `src` is `x`. The parent recomputes the
+`ModuleInput` whose normalized `src` is `x`. Both are *unique-match* lookups:
+the port is ambiguous, and the override is skipped, if (a) `x` feeds two input
+ports of `m` (`x → m.a` AND `x → m.b` collapse to one `x → m` edge -- PR #705
+r3353459409); (b) a non-module reader `y` reads two distinct `m·port`s; or (c)
+`y` is itself a module reading two distinct output ports of `m` on different
+inputs (`m·early → y.p` AND `m·late → y.q` collapse to one `m → y` edge -- PR
+#705 r3353597299). Two of `y`'s inputs naming the SAME `m·port` are NOT
+ambiguous (a unique distinct port). On any ambiguity the base composite link
+score (a documented first-matched-port approximation) stands rather than the
+recompute arbitrarily picking the first matching port. The discovery recompute
+`recompute_module_input_edge_series` applies the identical ambiguous
+entry/exit fallback. The parent recomputes the
 sub-model's pathway map with the SAME salsa-cached inputs the sub-model's own
 emission uses (`model_causal_edges` + the sorted `find_model_output_ports`), so
 the recomputed pathway indices match the emitted `$⁚ltm⁚path⁚{entry}⁚{idx}`
@@ -471,11 +498,91 @@ override is threaded into the loop-score equation builder as a side-table keyed
 by `(loop_id, link_index)`; `Loop.links` is NOT rewritten (loop IDs derive from
 the link sequence and the FFI's id→score correspondence depends on it).
 
-**Discovery-mode asymmetry**: discovery mode emits NO loop-score vars (loops are
-ranked post-simulation by the strongest-path search), so there is nothing to
-override. The base `input → m` link score there is the composite (after this PR)
--- the paper-faithful per-edge approximation. The per-exit-port refinement is an
-exhaustive-mode-only exactness fix.
+**Discovery-mode per-exit-port recompute (GH #698)**: discovery mode emits NO
+loop-score vars (loops are ranked post-simulation by the strongest-path
+search), so there is no loop-score *equation* to override. The DFS still uses
+the composite for edge ordering and zero-exclusion (a zero composite implies
+all pathways zero, so no loop is lost). But the **post-simulation score
+recompute** -- which converts each discovered path into a `FoundLoop` by
+multiplying the per-step signed link scores -- now applies the SAME
+per-exit-port selection the exhaustive override applies: for a loop edge
+`x → m` whose next edge `m → y` identifies the exit port (the `m·port` `y`
+reads, or `y`'s matching `ModuleInput.src` when `y` is itself a module), it
+recomputes that edge's series by max-abs-selecting over the sub-model's
+`m·$⁚ltm⁚path⁚{entry}⁚{idx}` pathway scores that *end at the exit port*,
+instead of reading the composite's offset. The pathway indices are recovered
+from the module's recursively-built sub-graph
+(`enumerate_pathways_to_outputs_with_truncation`) over the **same project-wide
+sorted output-port set the sub-model emitted against**. That set is NOT
+re-derived parent-scoped inside the recompute (a parent-scoped scan of the
+analyzed model alone would shift every pathway index whenever ANOTHER project
+model -- or a nested instantiation -- reads an additional output port sorting
+before the loop's port, and then the recompute would read the wrong pathway,
+re-introducing the wrong-signed edge; GH #698 / PR #705 r3353097150). Instead
+`discover_loops_with_graph` takes a `SubModelOutputPorts` map keyed by
+sub-model canonical name; `analyze_model` builds it from the SAME emission
+decision (`db::ltm::sub_model_output_ports`, including the `stdlib⁚`-prefixed
+short-circuit to exactly `["output"]`) via the public
+`analysis::build_sub_model_output_ports`, so the recompute and emission are
+identity-by-construction. The db-less `discover_loops(&Results, &Project)`
+convenience path reconstructs the same set with the same project-wide-union +
+stdlib-output semantics (`project_sub_model_output_ports`). This is
+`recompute_module_input_edge_series` in `ltm_finding.rs`; it falls back to the
+base composite offset whenever the entry or exit port is indeterminate (e.g. an
+ambiguous multi-output reader), the sub-model is absent from the map, or no
+pathway connects entry to exit, so single-output modules (SMOOTH, DELAY, …) and
+pathless modules are unaffected.
+
+Recovering the pathway indices required the discovery `CausalGraph` to carry
+module sub-graphs + the variable map. **The production analysis path builds the
+discovery graph from element-level edges** (`analyze_model` →
+`model_element_causal_edges` → `causal_graph_from_element_edges`), and that bare
+constructor leaves `variables` / `module_graphs` EMPTY. So `analyze_model` now
+uses `causal_graph_from_element_edges_with_modules`, which enriches the
+element-level graph with the same `(variables, module_graphs)` pair
+`causal_graph_with_modules` builds (the shared `model_variables_and_module_graphs`
+in `db/analysis.rs`). Both that helper and `CausalGraph::from_model` (the
+`discover_loops` convenience path) build a sub-graph for **every** referenced
+sub-model, not only stockful `DynamicModule`s: a stockless passthrough emits
+pathway vars (PR #684) but otherwise has no sub-graph to consult; a pathless
+module's sub-graph enumerates no pathways and is harmless. (This is why the
+prior `classify_module_for_ltm` stock gate on sub-graph construction is gone.)
+The element-level module nodes are keyed by the bare module instance name --
+the same key `module_graphs` and the module `Variable` use -- so the recompute's
+lookups resolve. `reconstruct_model_variables` reconstructs a module instance
+through `reconstruct_implicit_variable` (not the generic parse+lower path, which
+resolves inputs against an empty `scope.models` and so drops them), so the
+recompute can read a module's entry/exit ports off its preserved `ModuleInput`s
+-- the same fix `reconstruct_single_variable` already applied for the exhaustive
+override.
+
+Because the discovery graph is element-level, an arrayed loop's non-module
+nodes carry element subscripts (`s[nyc] → m → growth[nyc]`).
+`recompute_module_input_edge_series` therefore `strip_subscript`s `link.from`
+(entry match vs the bare `ModuleInput.src`), `link.to`/`next.from` (module node
++ sequentiality guard), and `next.to` (exit-reader lookup in the bare-keyed
+variable map) before each name comparison -- mirroring the exhaustive twin,
+which strips `link.from`/`link.to`/`next.from`/`next.to` (PR #705 r3353758167).
+The pathway vars stay namespaced by the bare module instance (`m·$⁚ltm⁚path…`),
+so they are looked up with the stripped module name. This is currently latent
+parity defense: an arrayed loop through a multi-output module is not yet
+discoverable end-to-end, because a scalar module output feeding an arrayed
+reader (`growth[Region] = m·pos`) emits a single scalar constant-0 link score
+that drops the loop in discovery (the scalar-module-output → arrayed-reader
+link-score gap, tracked as GH #716); the unit-level
+`recompute_strips_element_subscripts_before_port_match` exercises the matching
+code directly, and `analyze_model_arrayed_module_loop_blocked_by_scalar_output_gap`
+pins the current masked end-to-end state.
+
+Before this fix, discovery read the composite's offset for the `x → m` edge;
+because single-dependency pathways all normalize to magnitude exactly 1, the
+composite's max-abs tie-break picked an arbitrary output port, and a loop
+through a multi-output module whose ports have opposing signs got the arbitrary
+port's sign -- empirically inverting the loop's polarity (+1.0 in exhaustive vs
+-1.0 in discovery on a `pos = input*0.02` / `neg = -input` repro). The
+cross-mode regression guard is
+`discovery_multi_output_loop_polarity_matches_exhaustive` in
+`tests/simulate_ltm.rs`.
 
 **Deterministic output-port ordering (GH #680)**: `find_model_output_ports`
 sorts its result. The merge-order of the `HashSet` it previously returned was
@@ -633,16 +740,73 @@ classified as `Undetermined` (`calculate_polarity`).
 
 ### Runtime Polarity
 
-`LoopPolarity::from_runtime_scores()` in `ltm.rs` classifies polarity based
-on actual simulation results. It filters out NaN and zero values, then:
+`LoopPolarity::from_runtime_scores()` in `ltm/types.rs` classifies polarity
+based on actual simulation results. It filters out NaN and zero values, then:
 - All remaining scores positive -> `Reinforcing`
 - All remaining scores negative -> `Balancing`
-- Mix of positive and negative -> `Undetermined`
+- Mixed signs, one polarity dominant with confidence >=
+  `POLARITY_CONFIDENCE_THRESHOLD` (0.99) -> `MostlyReinforcing` /
+  `MostlyBalancing` ("Rux"/"Bux")
+- Mixed signs below the threshold -> `Undetermined`
 - No valid scores -> `None` (caller falls back to structural polarity)
 
 This catches cases where nonlinear dynamics cause polarity to change during
-simulation (e.g., the yeast alcohol model from the papers). In discovery mode,
-runtime polarity overrides structural polarity when available.
+simulation (e.g., the yeast alcohol model from the papers).
+
+#### Which surfaces reclassify, and which do not (GH #679)
+
+`model_detected_loops` is a *pre-simulation* salsa query, so it can only report
+*structural* polarity. Pervasively for module-heavy models the static polarity
+of a `variable -> module` / `module -> variable` black-box link is `Unknown`,
+so a loop through a module boundary is labelled `Undetermined` (confidence 0.0)
+even when its simulated loop score is single-signed at every active step.
+Runtime reclassification is therefore a *post-simulation* concern, and the
+surfaces handle it differently:
+
+- **Discovery (`analyze_model` / MCP / `simlin_analyze_discover_loops`)**: the
+  `FoundLoop` path in `ltm_finding.rs` derives each loop's polarity directly
+  from `from_runtime_scores` over its discovered strongest-path score series
+  (falling back to the trimmed-chain structural polarity for an all-zero/NaN
+  series). Fully reclassified.
+- **pysimlin `Run.loops`**: reclassifies post-simulation in its own Python
+  `LoopPolarity.from_runtime_scores` mirror, reading `loop_score` slot 0 for
+  each structural loop (this is pre-existing behavior -- it predates GH #679 --
+  now pinned by a regression test for the module-boundary case).
+- **libsimlin / WASM / TS `simlin_analyze_get_loops`**: **intentionally
+  structural-only**. The FFI takes only a `SimlinModel` (no simulation
+  `Results` in hand), folds `MostlyReinforcing`/`MostlyBalancing` to
+  `Reinforcing`/`Balancing`, and drops `polarity_confidence` at the C ABI
+  boundary. Surfacing runtime polarity here requires the FFI plumbing tracked
+  under GH #495; it is **not** delivered by this change. A consumer reading
+  loop polarity from `get_loops` must expect the structural label, not the
+  runtime one.
+
+`db::analysis::reclassify_loops_from_results(loops, results, loop_partitions)`
+is the **canonical in-engine reclassification primitive** -- it reads each
+loop's `$⁚ltm⁚loop_score⁚{id}` slot(s) from a `Results` and applies
+`from_runtime_scores` to overwrite `polarity`/`polarity_confidence`. As of this
+writing it has **no production caller**: it exists so a future sim-bearing Rust
+consumer (e.g. when GH #495's FFI lands) has one correct place to call rather
+than re-deriving the loop-score read. It is exercised by engine tests.
+
+The **loop id never changes** under reclassification. Loop detection and the
+deterministic `r{n}`/`b{n}`/`u{n}` id assignment happen at compile time before
+any simulation, and the FFI id->score correspondence plus salsa caching depend
+on the id being stable: a loop detected as `u1` keeps the id `u1` even when its
+runtime polarity is `Reinforcing`. Only the polarity *field* reflects the
+runtime classification. A loop whose score is never active (every slot/step
+zero or non-finite) keeps its structural polarity -- there is no runtime
+evidence to override it.
+
+**A2A semantics differ across the three sites** and must not be conflated. The
+Rust `reclassify_loops_from_results` helper concatenates *all* element slots of
+an A2A loop into one sample set (so a loop that is reinforcing in one element
+and balancing in another classifies `Undetermined`). pysimlin reads slot 0
+only. Discovery uses one strongest-path scalar series per `FoundLoop`. All
+three share the scalar semantics and agree on a scalar loop; they diverge only
+in how an A2A loop's multiple element slots are reduced to one classification.
+Reconciling that is deferred until a sim-bearing Rust consumer needs the
+all-slots reading.
 
 ## Strongest-Path Algorithm
 
@@ -741,6 +905,18 @@ missed at other timesteps, and (b) per-stock budget resets mean different
 starting stocks can discover different loops. The papers' empirical
 evaluation shows that missed loops are consistently "siblings" of found
 loops, differing by only a few links.
+
+Independent of the cap, the per-step zero-edge exclusion has its own
+completeness caveat (GH #699): a "baton-passing" loop whose links are each
+active over time but never all simultaneously nonzero at any *saved*
+timestep is invisible to discovery at every step, even though exhaustive
+mode reports it (`discovery_decoupled_stocks` demonstrates this on
+`test/decoupled_stocks`). Running discovery at saved timesteps rather than
+every dt (divergence 1 below, GH #309) widens the same window: a loop
+active only between save points is never sampled. Neither is a regression
+vs. the published per-step method, but "loses nothing" claims should be
+read as "loses no loop that is ever simultaneously active at a sampled
+step."
 
 ### Ranking and Filtering (`rank_and_filter`)
 
@@ -1168,10 +1344,12 @@ synthetic agg node (`… → from[<row>] → $⁚ltm⁚agg⁚{n}[<slot>] → to[
 the agg is trimmed from the *reported* node sequence but its two link-score
 halves are factored into the loop score (see "Aggregate Nodes").
 
-**Cross-agg loop recovery** (#515). A cross-element feedback loop *through* an
-inlined reducer visits the (subscript-free, or for an arrayed agg
-`[<slot>]`-subscripted) agg node more than once, so Johnson never emits it
-directly. `recover_cross_agg_loops` reconstructs it from the agg-touching
+**Cross-agg loop recovery** (#515 exhaustive, #696 discovery). A cross-element
+feedback loop *through* an inlined reducer visits the (subscript-free, or for an
+arrayed agg `[<slot>]`-subscripted) agg node more than once, so neither Johnson
+(exhaustive) nor the strongest-path DFS (discovery) emits it directly -- both
+enumerate only elementary circuits. The recovery is shared: the combinatorial
+core `stitch_cross_agg_petals` reconstructs the loop from the agg-touching
 elementary "petals" (`agg → … → agg`), stitching pairwise-disjoint petal
 subsets of size ≥ 2 in every distinct *cyclic ordering*: `cyclic_orderings(m)`
 pins index 0 to kill rotations and skips mirror reversals (`1` for m = 2,
@@ -1182,11 +1360,20 @@ by a deterministic petal priority (fewest internal nodes first, then a stable
 joined-name tiebreaker -- makes truncation reproducible), a soft per-agg petal
 cap (`MAX_AGG_PETALS = 8`, bounding the `2^k` subset enumeration), and a
 model-wide loop-count budget (`MAX_CROSS_AGG_LOOPS = 256`, threaded as
-`agg_loop_budget`, `#[cfg(test)]`-overridable via `AggLoopBudgetGuard`).
-Clipping sets `LtmVariablesResult::agg_recovery_truncated` and accumulates a
-`Warning` (mirroring the auto-flip-to-discovery gate), naming the truncated
-aggs. `recover_agg_hop_polarities` then patches the (variable-graph-invisible,
-hence `Unknown`) agg hops for monotone reducers (GH #516).
+`agg_loop_budget` / `cross_agg_loop_budget()`, `#[cfg(test)]`-overridable via
+`AggLoopBudgetGuard`). The two modes differ only in how they feed the core and
+build the result: exhaustive's `recover_cross_agg_loops` extracts petals from
+Johnson's circuit strings (via `collect_agg_petals`) and turns each stitched
+sequence into a `Loop`, setting `LtmVariablesResult::agg_recovery_truncated` on
+clipping and accumulating a `Warning` (mirroring the auto-flip-to-discovery
+gate), naming the truncated aggs; discovery's `discover_loops_with_graph`
+extracts petals from the discovered element paths, appends the stitched
+sequences back into `all_paths` (so they flow through the identical FoundLoop /
+score / trim / rank pipeline), and sets `DiscoveryResult::agg_recovery_truncated`
+(post-simulation, so a flag rather than a salsa `Warning`).
+`recover_agg_hop_polarities` then patches the (variable-graph-invisible, hence
+`Unknown`) agg hops for monotone reducers in the exhaustive path (GH #516);
+discovery derives polarity from the runtime score series directly.
 
 ### Discovery Mode
 
@@ -1211,9 +1398,34 @@ When `ltm_discovery_mode = true`, element-level discovery proceeds as:
 3. The `SearchGraph` is built from these element-level link offsets. Element-level
    stocks (expanded from `model_element_causal_edges`, which routes inlined
    reducers through their `$⁚ltm⁚agg⁚{n}` nodes) serve as DFS starting points.
-4. Discovered element-level loops are grouped and classified identically to
-   exhaustive mode via `build_element_level_loops`; the synthetic agg nodes are
-   trimmed from each reported `FoundLoop`'s node sequence.
+4. Each discovered path becomes its own `FoundLoop`; the synthetic agg nodes
+   are trimmed from its node sequence by `trim_synthetic_aggs_from_loop_links`.
+   The discovery DFS only emits *elementary* element-graph circuits, so a
+   cross-element loop through an inlined reducer -- which visits the agg node
+   more than once and is therefore non-elementary (the `visiting` set forbids
+   any node revisit) -- is structurally unreachable by the search. Discovery
+   recovers these by stitching, exactly as exhaustive mode does (GH #696):
+   after the per-step sweep, `discover_loops_with_graph` treats each discovered
+   single-agg path as a *petal* and feeds them to the SHARED combinatorial core
+   `stitch_cross_agg_petals` (`src/db/ltm/loops.rs`) -- the same petal priority,
+   pairwise-disjoint-internal-node rule, `MAX_AGG_PETALS` / `cyclic_orderings`
+   enumeration, and `cross_agg_loop_budget()` that `recover_cross_agg_loops`
+   uses, so discovery recovers exactly the loops exhaustive does. The stitched
+   element-level node sequences are appended to `all_paths` (deduped by
+   canonical rotation against the elementary ones) and flow through the
+   identical FoundLoop construction / score-product / trim / rank pipeline; a
+   stitched loop's edge multiset is the union of its petals' disjoint edges, so
+   its per-step loop score is the product of the petals' link scores --
+   identical to how any discovered loop is scored. When the loop-count budget
+   clips recovery, `DiscoveryResult::agg_recovery_truncated` is set (the
+   discovery-mode analogue of `LtmVariablesResult::agg_recovery_truncated`),
+   surfaced through `analysis::ModelAnalysis::agg_recovery_truncated`. Because
+   the recovery is post-simulation there is no salsa diagnostic accumulator to
+   emit a `Warning` into, so the flag is the signal. (The shared core is narrow
+   in the same way exhaustive's is: a petal is a circuit touching exactly one
+   agg once, so a single discovered path that already visits two distinct aggs
+   is a complete loop, not a petal -- it is emitted by the DFS directly when it
+   happens to be elementary.)
 
 ### Per-Slot Loop Score Equations
 
@@ -1428,13 +1640,23 @@ cases remain deliberate carve-outs:
    synthesized compile-time equations, avoiding O(P^2) equation-text growth on
    models with very large same-partition loop sets (e.g. WRLD3).
 
-6. **Flow-to-stock numerator timing**: The flow-to-stock link score numerator uses
-   `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` rather than `flow - PREVIOUS(flow)`.
-   In Euler integration, the flow at t-1 drove the stock change from t-1 to t, so
-   `PREVIOUS(flow)` aligns the numerator and denominator to the same causal interval.
-   This produces results shifted by one DT compared to reference SD software
-   (Stella/iThink). The integration test (`tests/simulate_ltm.rs`) compensates by
-   shifting reference timestamps forward by DT when loading golden data.
+6. **Flow-to-stock numerator timing and `time_step` scaling**: The flow-to-stock
+   link score numerator uses `time_step * (PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow)))`
+   rather than the published bare `flow - PREVIOUS(flow)`. Two deliberate changes:
+   - *1-DT shift*: in Euler integration, the flow at t-1 drove the stock change
+     from t-1 to t, so `PREVIOUS(flow)` aligns the numerator and denominator to
+     the same causal interval. This produces results shifted by one DT compared
+     to reference SD software (Stella/iThink). The integration test
+     (`tests/simulate_ltm.rs`) compensates by shifting reference timestamps
+     forward by DT when loading golden data.
+   - *`time_step` factor*: the denominator (second-order stock change) is
+     `dt * (netflow(t-dt) - netflow(t-2dt))` in Euler, carrying one `dt` that the
+     raw flow delta in the numerator lacks; without the factor every
+     flow-to-stock link score is `1/dt` too large and the error compounds once
+     per stock in a loop. The published Eq. 3 omits the factor because every
+     worked example in the papers uses dt=1. Verified empirically: at dt=0.25
+     an isolated loop scores +1.0 with the factor (4.0 without), and at dt=1
+     the paper's Table 3 values (1.25 / -0.25) reproduce exactly.
 
 7. **Ceteris-paribus via AST transformation**: The papers describe re-evaluating
    equations with current values of one input and previous values of all others.

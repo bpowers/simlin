@@ -2,13 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Public LTM data types: link/loop polarity, link, loop, module role,
-//! and the truncation marker. These are the user-visible vocabulary the
-//! rest of the LTM submodules build on.
+//! Public LTM data types: link/loop polarity, link, loop, and the
+//! truncation marker. These are the user-visible vocabulary the rest of the
+//! LTM submodules build on.
 
 use crate::common::{Canonical, Ident};
-use crate::model::ModelStage1;
-use crate::variable::Variable;
 
 /// Marker returned by circuit-enumeration helpers when the DFS bailed
 /// out because it would have exceeded the caller-supplied `max_circuits`
@@ -321,38 +319,6 @@ impl LoopPolarity {
             LoopPolarity::MostlyBalancing => "Bux",
             LoopPolarity::Undetermined => "U",
         }
-    }
-}
-
-/// Classification of a module's role in LTM analysis.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModuleLtmRole {
-    /// Has internal stocks (SMOOTH, DELAY, TREND, user-defined modules with stocks)
-    DynamicModule,
-    /// No internal stocks -- pure passthrough
-    Passthrough,
-}
-
-/// Classify a module model for LTM analysis by internal-stock presence.
-///
-/// `DynamicModule` (has stocks) vs `Passthrough` (stockless). This drives the
-/// legacy `CausalGraph`'s recursive internal-graph construction (only dynamic
-/// modules get an internal sub-graph there). It does NOT decide whether the
-/// module exposes a composite link score: since PR #684, the salsa-path
-/// `model_ltm_variables` emits pathway/composite vars for ANY module with an
-/// input->output pathway, passthroughs included (a passthrough's internals are
-/// a pure aux chain LTM scores exactly). `module_composite_ports` reads the
-/// sub-model's actual emitted vars rather than this classification.
-pub(crate) fn classify_module_for_ltm(module_model: &ModelStage1) -> ModuleLtmRole {
-    if module_model
-        .variables
-        .values()
-        .any(|v| matches!(v, Variable::Stock { .. }))
-    {
-        ModuleLtmRole::DynamicModule
-    } else {
-        ModuleLtmRole::Passthrough
     }
 }
 

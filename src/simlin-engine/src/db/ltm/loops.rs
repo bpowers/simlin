@@ -129,7 +129,15 @@ pub(super) fn find_model_output_ports(
 /// a different index). Funneling both sites through this one decision makes the
 /// stdlib special-case (`output` convention) and the user-model port scan
 /// impossible to skew apart.
-pub(super) fn sub_model_output_ports(
+///
+/// This is also the authoritative source for the discovery-mode per-exit-port
+/// recompute (GH #698 / PR #705): `analyze_model` builds a
+/// `{sub_model -> ports}` map from this same decision and threads it into
+/// `discover_loops_with_graph`, so the discovery recompute enumerates pathway
+/// indices against the IDENTICAL project-wide sorted port set the sub-model
+/// emitted against -- never a parent-scoped re-derivation that could shift the
+/// indices when another project model reads an additional output port.
+pub(crate) fn sub_model_output_ports(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
@@ -1111,7 +1119,7 @@ thread_local! {
 /// `model_ltm_variables` invocation.  Returns [`MAX_CROSS_AGG_LOOPS`] in
 /// production builds; in `#[cfg(test)]` builds an active
 /// [`AggLoopBudgetGuard`] override takes precedence.
-pub(super) fn cross_agg_loop_budget() -> usize {
+pub(crate) fn cross_agg_loop_budget() -> usize {
     #[cfg(test)]
     {
         if let Some(b) = AGG_LOOP_BUDGET_OVERRIDE.with(|c| c.get()) {
@@ -1216,17 +1224,148 @@ fn heaps_permutations(k: usize, a: &mut [usize], out: &mut Vec<Vec<usize>>) {
     }
 }
 
-/// One agg petal: the element-level node sequence rotated to start at the
-/// aggregate node (`[A, x_1, ..., x_m]`), plus its internal node set
-/// `{x_1..x_m}`. `A` is the *element-level* agg node -- for an arrayed
-/// synthetic agg that means the subscripted `$⁚ltm⁚agg⁚{n}[<elem>]` (so two
-/// petals through `agg[a]` vs `agg[b]` go through *different* nodes and are
-/// correctly never combined; `is_synthetic_agg_name` recognizes both the
-/// bare and the subscripted form via its prefix check).
-struct AggPetal<'a> {
+/// A single agg petal for the mode-agnostic stitching core
+/// [`stitch_cross_agg_petals`]: the node sequence rotated to start at the
+/// aggregate node (`[A, x_1, ..., x_m]`) plus its internal node set.
+///
+/// Generic over the node representation so both the exhaustive path (which
+/// works on `&str` circuit nodes) and the discovery path (which works on owned
+/// `Ident<Canonical>` element nodes) feed the *same* combinatorial enumerator
+/// -- the only way to guarantee discovery recovers exactly the loops exhaustive
+/// does (GH #696). `K` is the agg-grouping key (a `&str` agg name in either
+/// mode); the petals are pre-grouped by it so the stitcher never re-decides
+/// which agg a petal belongs to. `A` is the *element-level* agg node -- for an
+/// arrayed synthetic agg that means the subscripted `$⁚ltm⁚agg⁚{n}[<elem>]`
+/// (so petals through `agg[a]` vs `agg[b]` go through *different* nodes and are
+/// correctly never combined; `is_synthetic_agg_name` recognizes both forms).
+pub(crate) struct StitchPetal<T> {
     /// `[agg, x_1, ..., x_m]` -- the agg followed by the m internal nodes.
-    nodes: Vec<&'a str>,
-    internal: std::collections::HashSet<&'a str>,
+    pub(crate) nodes: Vec<T>,
+    /// `{x_1, ..., x_m}` -- the internal (non-agg) nodes; two petals are
+    /// disjoint iff these sets do not overlap.
+    pub(crate) internal: HashSet<T>,
+}
+
+/// The mode-agnostic combinatorial core of cross-element-through-aggregate loop
+/// recovery (GH #515 for exhaustive, GH #696 for discovery): given each
+/// synthetic agg's pairwise-distinct petals, enumerate the cross-agg loops as
+/// stitched node sequences, under a model-wide loop-count budget.
+///
+/// For each agg with `≥ 2` petals: sort the petals by the deterministic
+/// priority (fewest internal nodes first, then a stable joined-name
+/// tiebreaker), keep the smallest [`MAX_AGG_PETALS`] (clipping flags the agg as
+/// truncated), then walk pairwise-disjoint petal subsets of size `≥ 2`
+/// smallest-cardinality-first; for each subset emit every distinct
+/// [`cyclic_orderings`] as one stitched sequence `[A, p1_x..., A, p2_x..., ...]`
+/// (the caller turns each sequence into its own loop -- `build_element_…_links`
+/// /`circuit_to_links` reconstitutes the `... → A → p1_x → A → p2_x → ... → A`
+/// cycle). A running count is checked against `budget`; once hit, enumeration
+/// stops and every not-yet-enumerated agg with `≥ 2` petals is reported as
+/// truncated. The deterministic agg/petal/subset/ordering walk makes the
+/// *truncated* output reproducible rather than HashMap-iteration dependent.
+///
+/// Returns the stitched node sequences (each starting at an agg) and the
+/// (sorted, deduped) keys of the aggs whose enumeration was clipped. The
+/// agg-key `K` is supplied via a sorted `Vec<(K, Vec<StitchPetal<T>>)>` so the
+/// enumeration order is the caller's responsibility to make deterministic
+/// (both modes sort the keys before calling).
+///
+/// Pure: no db, no I/O. The only shared invariant with the exhaustive path is
+/// the petal priority / subset / ordering walk, which now lives here once.
+pub(crate) fn stitch_cross_agg_petals<T, K>(
+    petals_by_agg: Vec<(K, Vec<StitchPetal<T>>)>,
+    budget: usize,
+) -> (Vec<Vec<T>>, Vec<K>)
+where
+    T: Clone + Eq + std::hash::Hash + Ord,
+    K: Clone + Ord,
+{
+    let mut stitched: Vec<Vec<T>> = Vec::new();
+    let mut truncated: std::collections::BTreeSet<K> = std::collections::BTreeSet::new();
+    let mut emitted: usize = 0;
+    // The (key, petal-count) of every agg, kept so that if the global budget
+    // fires mid-enumeration we can fold every *later* agg that had >= 2 petals
+    // (and so could have contributed loops) into `truncated`.
+    let petal_counts: Vec<(K, usize)> = petals_by_agg
+        .iter()
+        .map(|(k, p)| (k.clone(), p.len()))
+        .collect();
+    // If the global budget fires mid-enumeration, every agg after the one we
+    // were on is un-enumerated; this records that position so they can be
+    // folded into `truncated` afterward.
+    let mut budget_clip_idx: Option<usize> = None;
+    'outer: for (agg_idx, (_agg, mut petals)) in petals_by_agg.into_iter().enumerate() {
+        if petals.len() < 2 {
+            continue;
+        }
+        // Deterministic priority: fewest internal nodes first (smaller petals
+        // combine into more loops), then a stable tiebreaker (the petal's node
+        // sequence). After dedup-on-internal-set the petals have distinct
+        // `internal` sets and hence distinct `nodes` sequences, so this is a
+        // total order.
+        petals.sort_by(|a, b| {
+            a.internal
+                .len()
+                .cmp(&b.internal.len())
+                .then_with(|| a.nodes.cmp(&b.nodes))
+        });
+        if petals.len() > MAX_AGG_PETALS {
+            // Drop the larger petals; the recovered set for this agg is now
+            // incomplete. Conservatively flags truncation whenever the soft
+            // petal cap drops >= 1 petal (over-reporting incompleteness is the
+            // safe direction).
+            petals.truncate(MAX_AGG_PETALS);
+            truncated.insert(_agg.clone());
+        }
+        let k = petals.len();
+
+        // Walk the 2^k subset masks smallest-cardinality-first (so the few-
+        // petal loops -- which survive a tight budget -- come out first), and
+        // within each cardinality in increasing mask order. `k ≤ MAX_AGG_PETALS`
+        // keeps `1u32 << k` small.
+        let mut masks: Vec<u32> = (0u32..(1u32 << k)).collect();
+        masks.sort_by_key(|&m| (m.count_ones(), m));
+        for mask in masks {
+            if mask.count_ones() < 2 {
+                continue;
+            }
+            let chosen: Vec<usize> = (0..k).filter(|&i| (mask >> i) & 1 == 1).collect();
+            // Pairwise-disjoint internal node sets.
+            let mut union: HashSet<&T> = HashSet::new();
+            if chosen
+                .iter()
+                .any(|&i| !petals[i].internal.iter().all(|n| union.insert(n)))
+            {
+                continue;
+            }
+            let m = chosen.len();
+            for ord in cyclic_orderings(m) {
+                let seq: Vec<T> = ord
+                    .iter()
+                    .flat_map(|&j| petals[chosen[j]].nodes.iter().cloned())
+                    .collect();
+                stitched.push(seq);
+                emitted += 1;
+                if emitted >= budget {
+                    truncated.insert(_agg.clone());
+                    budget_clip_idx = Some(agg_idx);
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    // The global budget clipped mid-enumeration: every agg sorted after the
+    // clip point is un-enumerated. Report those that had >= 2 petals (an agg
+    // with < 2 petals would have been skipped regardless of budget).
+    if let Some(clip_idx) = budget_clip_idx {
+        for (key, count) in petal_counts.into_iter().skip(clip_idx + 1) {
+            if count >= 2 {
+                truncated.insert(key);
+            }
+        }
+    }
+    (stitched, truncated.into_iter().collect())
 }
 
 /// Reconstruct the cross-element loops that traverse a synthetic aggregate
@@ -1284,167 +1423,102 @@ fn recover_cross_agg_loops(
     use crate::common::{Canonical, Ident};
     use crate::ltm::{LinkPolarity, Loop, LoopPolarity};
 
-    // agg name -> its (deduped) petals.
-    let mut petals_by_agg: HashMap<&str, Vec<AggPetal>> = HashMap::new();
-    for circuit in circuit_strs {
-        // Synthetic agg nodes in this circuit (bare or subscripted).
-        let aggs: Vec<&str> = circuit
+    // agg name -> its (deduped) petals (built as `&str`, then handed to the
+    // shared stitching core).
+    let petals_by_agg = collect_agg_petals(circuit_strs, |n| n);
+
+    // Deterministic agg iteration order so the budget clips reproducibly.
+    let mut sorted: Vec<(&str, Vec<StitchPetal<&str>>)> = petals_by_agg.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+
+    let (stitched, truncated) = stitch_cross_agg_petals(sorted, agg_loop_budget);
+
+    let mut recovered: Vec<Loop> = Vec::with_capacity(stitched.len());
+    for seq in stitched {
+        let var_level_nodes: Vec<Ident<Canonical>> =
+            seq.iter().map(|n| Ident::new(strip_subscript(n))).collect();
+        let var_links = var_graph.circuit_to_links(&var_level_nodes);
+        let links = build_element_subscripted_links(&seq, &var_links, source_vars, db, project);
+        let stocks: Vec<Ident<Canonical>> = seq
             .iter()
-            .copied()
+            .filter(|n| var_graph.stocks.contains(&Ident::new(strip_subscript(n))))
+            .map(|n| Ident::new(n))
+            .collect();
+        let polarity = if links.iter().any(|l| l.polarity == LinkPolarity::Unknown) {
+            LoopPolarity::Undetermined
+        } else {
+            let neg = links
+                .iter()
+                .filter(|l| l.polarity == LinkPolarity::Negative)
+                .count();
+            if neg % 2 == 0 {
+                LoopPolarity::Reinforcing
+            } else {
+                LoopPolarity::Balancing
+            }
+        };
+        recovered.push(Loop {
+            id: String::new(),
+            links,
+            stocks,
+            polarity,
+            // Cross-element loops visit fixed elements -- scalar loop score.
+            dimensions: vec![],
+            slot_links: vec![],
+        });
+    }
+
+    let truncated_aggs: Vec<String> = truncated.into_iter().map(|s| s.to_string()).collect();
+    (recovered, truncated_aggs)
+}
+
+/// Group elementary circuits' single-agg petals by their agg, deduped on the
+/// rotation-invariant internal node set.
+///
+/// A circuit that visits exactly one synthetic agg node (Johnson / the
+/// discovery DFS emit simple cycles, so "one agg in the node list" means
+/// "visited once") is a *petal*: rotate it so the agg is first, and the rest
+/// is the petal's internal nodes. A circuit touching zero or two-plus distinct
+/// aggs is not a petal (the latter is already a complete cross-agg loop).
+///
+/// `node_str` projects a circuit node `T` to its `&str` name so
+/// `is_synthetic_agg_name` (and the agg-key grouping) can run uniformly over
+/// both the exhaustive `&str` circuits and the discovery `Ident<Canonical>`
+/// paths. The returned petals carry the original `T` nodes.
+pub(crate) fn collect_agg_petals<'a, T, F>(
+    circuits: &'a [Vec<T>],
+    node_str: F,
+) -> HashMap<&'a str, Vec<StitchPetal<T>>>
+where
+    T: Clone + Eq + std::hash::Hash,
+    F: Fn(&'a T) -> &'a str,
+{
+    let mut petals_by_agg: HashMap<&'a str, Vec<StitchPetal<T>>> = HashMap::new();
+    for circuit in circuits {
+        let aggs: Vec<&'a str> = circuit
+            .iter()
+            .map(&node_str)
             .filter(|n| crate::ltm_agg::is_synthetic_agg_name(n))
             .collect();
-        // Only build petals from a circuit that touches exactly one agg, once
-        // (Johnson emits simple cycles, so "one agg in the node list" already
-        // means "visited once"; a circuit through two distinct agg nodes --
-        // `agg[a]` and `agg[b]` -- is a complete loop on its own, not a petal).
         if aggs.len() != 1 {
             continue;
         }
         let agg = aggs[0];
-        let Some(pos) = circuit.iter().position(|n| *n == agg) else {
+        let Some(pos) = circuit.iter().position(|n| node_str(n) == agg) else {
             continue;
         };
         let n = circuit.len();
-        // Rotate so the agg is first; the rest is the petal's internal nodes.
-        let nodes: Vec<&str> = (0..n).map(|j| circuit[(pos + j) % n]).collect();
-        let internal: std::collections::HashSet<&str> = nodes[1..].iter().copied().collect();
+        let nodes: Vec<T> = (0..n).map(|j| circuit[(pos + j) % n].clone()).collect();
+        let internal: HashSet<T> = nodes[1..].iter().cloned().collect();
         let entry = petals_by_agg.entry(agg).or_default();
         // Dedup on the internal set (Johnson can emit rotations of the same
         // simple cycle in some graphs; the internal set is rotation-invariant).
         if entry.iter().any(|p| p.internal == internal) {
             continue;
         }
-        entry.push(AggPetal { nodes, internal });
+        entry.push(StitchPetal { nodes, internal });
     }
-
-    let mut recovered: Vec<Loop> = Vec::new();
-    // Names of aggs whose enumeration was clipped (by the soft petal cap or by
-    // the global budget firing during/before them). A BTreeSet so the result
-    // is deterministic-sorted and deduped regardless of insertion order.
-    let mut truncated_aggs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut emitted: usize = 0;
-    // Deterministic agg iteration order so the budget clips reproducibly.
-    let mut aggs: Vec<&str> = petals_by_agg.keys().copied().collect();
-    aggs.sort();
-    // If the global budget fires mid-enumeration, every agg sorted after the
-    // one we were on is un-enumerated; this records that position so they can
-    // be folded into `truncated_aggs` afterward.
-    let mut budget_clip_idx: Option<usize> = None;
-    'outer: for (agg_idx, agg) in aggs.iter().enumerate() {
-        let mut petals: Vec<&AggPetal> = petals_by_agg[*agg].iter().collect();
-        if petals.len() < 2 {
-            continue;
-        }
-        // Deterministic priority: fewest internal nodes first (smaller petals
-        // combine into more loops), then a stable tiebreaker (the petal's
-        // node sequence joined). After dedup-on-internal-set the petals have
-        // distinct `internal` sets and hence distinct `nodes` sequences, so
-        // this key is a total order.
-        petals.sort_by_cached_key(|p| (p.internal.len(), p.nodes.join("\u{0}")));
-        if petals.len() > MAX_AGG_PETALS {
-            // Drop the larger petals; the recovered set for this agg is now
-            // incomplete, so report it. Conservatively flags truncation
-            // whenever the soft petal cap drops >= 1 petal, even if those
-            // petals would have contributed no disjoint-pair loop (every
-            // dropped petal's internal nodes overlap a kept petal) --
-            // over-reporting incompleteness is the safe direction, and
-            // checking would mean running the disjoint-subset enumeration the
-            // cap exists to bound.
-            petals.truncate(MAX_AGG_PETALS);
-            truncated_aggs.insert((*agg).to_string());
-        }
-        let k = petals.len();
-
-        // Walk the 2^k subset masks smallest-cardinality-first (so the few-
-        // petal loops -- which survive a tight budget -- come out first), and
-        // within each cardinality in increasing mask order (which, given the
-        // priority sort above, visits the smallest-internal petals first).
-        // `k ≤ MAX_AGG_PETALS` keeps `1u32 << k` small.
-        let mut masks: Vec<u32> = (0u32..(1u32 << k)).collect();
-        masks.sort_by_key(|&m| (m.count_ones(), m));
-        for mask in masks {
-            if mask.count_ones() < 2 {
-                continue;
-            }
-            let chosen: Vec<usize> = (0..k).filter(|&i| (mask >> i) & 1 == 1).collect();
-            // Pairwise-disjoint internal node sets.
-            let mut union: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            if chosen
-                .iter()
-                .any(|&i| !petals[i].internal.iter().all(|n| union.insert(n)))
-            {
-                continue;
-            }
-            // Each distinct cyclic ordering of the chosen petals is its own
-            // directed cycle (a different edge *sequence*; per #308 that is a
-            // distinct loop) -- but all of them share the same edge *multiset*
-            // (every petal always contributes its same `A → first_internal →
-            // ... → last_internal → A` edges, since the sequence is cyclic),
-            // so they share a `loop_score`. For m = 2 there is exactly one
-            // ordering, equal to the pre-#515 per-subset output.
-            let m = chosen.len();
-            for ord in cyclic_orderings(m) {
-                let seq: Vec<&str> = ord
-                    .iter()
-                    .flat_map(|&j| petals[chosen[j]].nodes.iter().copied())
-                    .collect();
-                let var_level_nodes: Vec<Ident<Canonical>> =
-                    seq.iter().map(|n| Ident::new(strip_subscript(n))).collect();
-                let var_links = var_graph.circuit_to_links(&var_level_nodes);
-                let links =
-                    build_element_subscripted_links(&seq, &var_links, source_vars, db, project);
-                let stocks: Vec<Ident<Canonical>> = seq
-                    .iter()
-                    .filter(|n| var_graph.stocks.contains(&Ident::new(strip_subscript(n))))
-                    .map(|n| Ident::new(n))
-                    .collect();
-                let polarity = if links.iter().any(|l| l.polarity == LinkPolarity::Unknown) {
-                    LoopPolarity::Undetermined
-                } else {
-                    let neg = links
-                        .iter()
-                        .filter(|l| l.polarity == LinkPolarity::Negative)
-                        .count();
-                    if neg % 2 == 0 {
-                        LoopPolarity::Reinforcing
-                    } else {
-                        LoopPolarity::Balancing
-                    }
-                };
-                recovered.push(Loop {
-                    id: String::new(),
-                    links,
-                    stocks,
-                    polarity,
-                    // Cross-element loops visit fixed elements -- scalar loop score.
-                    dimensions: vec![],
-                    slot_links: vec![],
-                });
-                emitted += 1;
-                if emitted >= agg_loop_budget {
-                    // This agg's enumeration was clipped; the ones sorted
-                    // after it never ran (handled below).
-                    truncated_aggs.insert((*agg).to_string());
-                    budget_clip_idx = Some(agg_idx);
-                    break 'outer;
-                }
-            }
-        }
-    }
-
-    // The global budget clipped mid-enumeration: every agg sorted after the
-    // clip point is un-enumerated. Report those that had >= 2 petals (and so
-    // could have contributed loops); an agg with < 2 petals would have been
-    // skipped regardless of budget, so it is not "truncated".
-    if let Some(clip_idx) = budget_clip_idx {
-        for agg in &aggs[clip_idx + 1..] {
-            if petals_by_agg[*agg].len() >= 2 {
-                truncated_aggs.insert((*agg).to_string());
-            }
-        }
-    }
-
-    (recovered, truncated_aggs.into_iter().collect())
+    petals_by_agg
 }
 
 /// Recover the polarity of synthetic-aggregate-node hops in `loops` (GH #516).

@@ -565,6 +565,7 @@ fn assert_discovery_matches(model_rel_path: &str) {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        &inputs.sub_model_output_ports,
         None,
     )
     .unwrap_or_else(|e| panic!("[{model_rel_path}] VM discovery returned Err: {e:?}"))
@@ -576,6 +577,7 @@ fn assert_discovery_matches(model_rel_path: &str) {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        &inputs.sub_model_output_ports,
         None,
     )
     .unwrap_or_else(|e| panic!("[{model_rel_path}] wasm discovery returned Err: {e:?}"))
@@ -715,6 +717,7 @@ fn discovery_matches_helper(project: &datamodel::Project, label: &str) {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        &inputs.sub_model_output_ports,
         None,
     )
     .unwrap_or_else(|e| panic!("[{label}] VM discovery returned Err: {e:?}"))
@@ -725,6 +728,7 @@ fn discovery_matches_helper(project: &datamodel::Project, label: &str) {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        &inputs.sub_model_output_ports,
         None,
     )
     .unwrap_or_else(|e| panic!("[{label}] wasm discovery returned Err: {e:?}"))
