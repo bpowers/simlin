@@ -60,10 +60,12 @@ variant is a compile error rather than a silent misclassification.
 
 1. **Module-OUTPUT reads via plain LoadVar offsets.** A parent variable that
    reads `submodule·output` reads a slot inside the module instance's slot
-   range; that slot changes every step. The offset classifier rejects any offset
-   that resolves to a slot owned by a module instance (or, in the salsa
-   per-fragment path, any dependency name that is a module-kind variable or a
-   `submodel·subvar` qualified name).
+   range; that slot changes every step. This is prevented by variant-by-omission
+   plus the bare module-instance kind check: in the salsa per-fragment path, any
+   dependency whose `VarInfo.is_module` flag is set is classified variant; the
+   pre-computed `dep_names` set fed to the topological check does not include
+   module-kind deps in the invariant set, so a variable reading a module output
+   is automatically variant.
 
 2. **Arrayed whole-array reads via views of a variant array.** A
    `StaticSubscript`/view read whose base offset belongs to a variant array is
@@ -164,14 +166,17 @@ Two fusion passes touch flow bytecode:
   of `compiled_flows`. Its fusion windows always START with a `Load*` opcode
   (`LoadVar`/`LoadConstant`/`LoadGlobalVar`) and end with an `Op2`/`BinOpAssign`
   combiner; no window starts with, or uses as a combiner, an `Assign*`-family
-  opcode. Every flow fragment ends in the variable's final `Assign*` write (the
-  opcode immediately before the stripped `Ret`). The opcode at the prefix
-  boundary `k` (the last opcode of the invariant prefix) is therefore an
-  `Assign*`. A fusion window crossing the boundary would have to start at
-  `code[k-1]` or `code[k]`: `code[k]` is `Assign*` (no window starts there), and
-  a window starting at `code[k-1]` would need `code[k]` as its second-position
-  `Load*` (3-window) or combiner (2-window) — but `code[k]` is `Assign*`, neither
-  a `Load*` nor a valid combiner. So no fusion window crosses the boundary.
+  opcode. The last invariant-prefix fragment ends in an `Assign*` write (the
+  opcode immediately before the stripped `Ret`). Invariant vars are never module
+  calls; module-call fragments end in `EvalModule`, but such vars are classified
+  variant by the `is_module` kind check and never appear in the invariant
+  prefix. The opcode at the prefix boundary `k` (the last opcode of the
+  invariant prefix) is therefore an `Assign*`. A fusion window crossing the
+  boundary would have to start at `code[k-1]` or `code[k]`: `code[k]` is
+  `Assign*` (no window starts there), and a window starting at `code[k-1]`
+  would need `code[k]` as its second-position `Load*` (3-window) or combiner
+  (2-window) — but `code[k]` is `Assign*`, neither a `Load*` nor a valid
+  combiner. So no fusion window crosses the boundary.
 
 Consequence for B1: `flows_invariant_opcode_len` is recorded on the **pre-fusion**
 resolved `compiled_flows` (the salsa artifact). B2 either makes

@@ -47,6 +47,11 @@ pub(crate) enum OffsetClass {
     Invariant,
     /// The offset resolves to a variant source (dynamic var, stock, module
     /// instance slot, or a time-global other than DT/INITIAL/FINAL).
+    ///
+    /// In production, `compute_flow_invariance_support` always returns
+    /// `Invariant` (to check structural purity only), so `Variant` is only
+    /// constructed in tests and by external callers building real callbacks.
+    #[allow(dead_code)]
     Variant,
 }
 

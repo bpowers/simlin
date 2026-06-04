@@ -371,10 +371,302 @@ pub(crate) fn build_submodel_metadata<'arena>(
     all_metadata.insert(sub_model_name, sub_metadata);
 }
 
+/// Pre-computed invariance data for the flow phase, stored on
+/// `VarFragmentResult` so `model_flows_invariant` can run its topological
+/// fixpoint pass without re-calling `lower_var_fragment` (the compile-time
+/// regression fix, GH #712).
+///
+/// `locally_pure`: the variable's flow-phase expression is invariant assuming
+/// every dependency is invariant — i.e., no `TIME`/`PULSE`/`RAMP`/`STEP`/
+/// `PREVIOUS`/`EvalModule`/`ModuleInput` appears anywhere in the AST. If
+/// `false`, the variable is definitely variant regardless of deps.
+///
+/// `dep_names`: the canonical names of every dependency whose offset is
+/// referenced in the flow-phase expression (excluding the variable's own
+/// offset, which is a self-reference). `model_flows_invariant` checks that
+/// all of these are in the accumulated invariant set.
+///
+/// Together, `locally_pure && dep_names ⊆ invariant` is exactly the
+/// per-variable verdict the topological pass needs, with no re-lowering.
+#[derive(Clone, Debug, PartialEq, salsa::Update)]
+pub(crate) struct FlowInvarianceSupport {
+    pub locally_pure: bool,
+    pub dep_names: std::sync::Arc<std::collections::BTreeSet<String>>,
+}
+
 /// Result of per-variable compilation: symbolic bytecodes for each phase.
 #[derive(Clone, Debug, PartialEq, salsa::Update)]
 pub(crate) struct VarFragmentResult {
     pub fragment: crate::compiler::symbolic::CompiledVarFragment,
+    /// Invariance support for the flow phase. `None` when the variable has
+    /// no flow phase (not in the flows runlist) or when the noninitial
+    /// lowering failed. Used by `model_flows_invariant` to avoid re-lowering.
+    pub flow_invariance: Option<FlowInvarianceSupport>,
+}
+
+/// Walk `exprs` and push every base slot offset referenced by a `Var`,
+/// `Subscript`, or `StaticSubscript` node into `out`.
+///
+/// This is NOT the same as calling `exprs_are_invariant`: it collects offsets
+/// without returning a verdict. It is used by `compute_flow_invariance_support`
+/// to determine which mini-layout entries are actually referenced in the *flow*
+/// expression (as opposed to the init expression, which also contributes to
+/// the mini-layout but must not pollute the dep_names set).
+///
+/// The walk is exhaustive over every `Expr`/`BuiltinFn` variant.
+fn collect_expr_offsets(exprs: &[crate::compiler::Expr], out: &mut HashSet<usize>) {
+    use crate::builtins::BuiltinFn;
+    use crate::compiler::Expr;
+    use crate::compiler::expr::SubscriptIndex;
+
+    fn walk(expr: &Expr, out: &mut HashSet<usize>) {
+        match expr {
+            // Leaf: referenced slot.
+            Expr::Var(off, _)
+            | Expr::Subscript(off, _, _, _)
+            | Expr::StaticSubscript(off, _, _) => {
+                out.insert(*off);
+                // For Subscript, also walk the index expressions (they may
+                // reference other slots).
+                if let Expr::Subscript(_, indices, _, _) = expr {
+                    for idx in indices {
+                        match idx {
+                            SubscriptIndex::Single(e) => walk(e, out),
+                            SubscriptIndex::Range(s, e) => {
+                                walk(s, out);
+                                walk(e, out);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // No slot reference in these leaves.
+            Expr::Const(_, _)
+            | Expr::Dt(_)
+            | Expr::TempArray(_, _, _)
+            | Expr::TempArrayElement(_, _, _, _)
+            | Expr::ModuleInput(_, _) => {}
+
+            // Compound expressions: recurse into subexpressions.
+            Expr::Op2(_, l, r, _) => {
+                walk(l, out);
+                walk(r, out);
+            }
+            Expr::Op1(_, operand, _) => walk(operand, out),
+            Expr::If(cond, t, f, _) => {
+                walk(cond, out);
+                walk(t, out);
+                walk(f, out);
+            }
+            Expr::AssignCurr(_, rhs) | Expr::AssignNext(_, rhs) => walk(rhs, out),
+            Expr::AssignTemp(_, rhs, _) => walk(rhs, out),
+
+            // Module evaluation: walk the argument expressions.
+            Expr::EvalModule(_, _, _, args) => {
+                for arg in args {
+                    walk(arg, out);
+                }
+            }
+
+            // Builtins: walk every argument expression.
+            Expr::App(builtin, _) => match builtin {
+                BuiltinFn::Inf
+                | BuiltinFn::Pi
+                | BuiltinFn::Time
+                | BuiltinFn::TimeStep
+                | BuiltinFn::StartTime
+                | BuiltinFn::FinalTime
+                | BuiltinFn::IsModuleInput(_, _) => {}
+
+                BuiltinFn::Lookup(table, index, _)
+                | BuiltinFn::LookupForward(table, index, _)
+                | BuiltinFn::LookupBackward(table, index, _) => {
+                    walk(table, out);
+                    walk(index, out);
+                }
+
+                // Init(a): the initial-values buffer is frozen after the
+                // initials phase -- `INIT(dynamic_var)` is run-invariant
+                // regardless of what `a` references. Do NOT recurse into `a`
+                // (mirroring `builtin_is_invariant` which returns `true`
+                // without walking the argument).
+                BuiltinFn::Init(_) => {}
+
+                // Previous is already variant (caught by locally_pure), but
+                // we still avoid recursing into its argument so the walk stays
+                // consistent with the invariance classifier's treatment.
+                BuiltinFn::Previous(_, _) => {}
+
+                BuiltinFn::Abs(a)
+                | BuiltinFn::Arccos(a)
+                | BuiltinFn::Arcsin(a)
+                | BuiltinFn::Arctan(a)
+                | BuiltinFn::Cos(a)
+                | BuiltinFn::Exp(a)
+                | BuiltinFn::Int(a)
+                | BuiltinFn::Ln(a)
+                | BuiltinFn::Log10(a)
+                | BuiltinFn::Sign(a)
+                | BuiltinFn::Sin(a)
+                | BuiltinFn::Sqrt(a)
+                | BuiltinFn::Tan(a)
+                | BuiltinFn::Size(a)
+                | BuiltinFn::Stddev(a)
+                | BuiltinFn::Sum(a) => walk(a, out),
+
+                BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
+                    walk(a, out);
+                    if let Some(b) = b {
+                        walk(b, out);
+                    }
+                }
+                BuiltinFn::SafeDiv(a, b, c) => {
+                    walk(a, out);
+                    walk(b, out);
+                    if let Some(c) = c {
+                        walk(c, out);
+                    }
+                }
+                BuiltinFn::Step(a, b) | BuiltinFn::Quantum(a, b) => {
+                    walk(a, out);
+                    walk(b, out);
+                }
+                BuiltinFn::Pulse(a, b, c) => {
+                    walk(a, out);
+                    walk(b, out);
+                    if let Some(c) = c {
+                        walk(c, out);
+                    }
+                }
+                BuiltinFn::Ramp(a, b, c) => {
+                    walk(a, out);
+                    walk(b, out);
+                    if let Some(c) = c {
+                        walk(c, out);
+                    }
+                }
+                BuiltinFn::Sshape(a, b, c) => {
+                    walk(a, out);
+                    walk(b, out);
+                    walk(c, out);
+                }
+                BuiltinFn::Mean(args) => {
+                    for arg in args {
+                        walk(arg, out);
+                    }
+                }
+                BuiltinFn::Rank(a, b)
+                | BuiltinFn::VectorElmMap(a, b)
+                | BuiltinFn::VectorSortOrder(a, b) => {
+                    walk(a, out);
+                    walk(b, out);
+                }
+                BuiltinFn::AllocateAvailable(a, b, c) => {
+                    walk(a, out);
+                    walk(b, out);
+                    walk(c, out);
+                }
+                BuiltinFn::VectorSelect(a, b, c, d, e)
+                | BuiltinFn::AllocateByPriority(a, b, c, d, e) => {
+                    walk(a, out);
+                    walk(b, out);
+                    walk(c, out);
+                    walk(d, out);
+                    walk(e, out);
+                }
+            },
+        }
+    }
+
+    for expr in exprs {
+        walk(expr, out);
+    }
+}
+
+/// Compute `FlowInvarianceSupport` for a variable's flow phase, for use by
+/// `model_flows_invariant` (GH #712).
+///
+/// `locally_pure` is determined by running `exprs_are_invariant` with a
+/// callback that always returns `Invariant` (so only TIME/PULSE/etc. in the
+/// expression can make it `false`).
+///
+/// `dep_names` is determined by walking the *flow* expression (`flow_var.ast`)
+/// to collect every slot offset actually referenced there, then reverse-mapping
+/// each offset through the mini-layout to the owning variable name. This is
+/// precise: it considers only flow-expression references, not init-only deps
+/// that happen to share the same mini-layout but are never read at dt time.
+/// Using all mini-layout keys would over-approximate: a variable `v` with `y =
+/// INIT(k)` in its init equation would include `k` in dep_names even though `k`
+/// does not appear in `v`'s flow expression, causing `k` being variant to
+/// incorrectly classify `v` as variant too.
+///
+/// Returns `None` if `flow_var` is an `Err` (noninitial lowering failed) or
+/// the expression list is empty.
+pub(crate) fn compute_flow_invariance_support(
+    flow_var: &Result<crate::compiler::Var, crate::common::Error>,
+    offsets: &PerVarOffsetMap,
+    model_name_ident: &Ident<Canonical>,
+    var_ident_canonical: &Ident<Canonical>,
+) -> Option<FlowInvarianceSupport> {
+    use crate::compiler::invariance::{OffsetClass, exprs_are_invariant};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    let flow_var = match flow_var {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    if flow_var.ast.is_empty() {
+        return None;
+    }
+
+    // Structural purity check: does the expression contain any variant
+    // builtins (TIME, PULSE, RAMP, STEP, PREVIOUS, EvalModule, ModuleInput)?
+    // All offset lookups return Invariant so only the builtin arms matter.
+    let locally_pure = exprs_are_invariant(&flow_var.ast, &|_off| OffsetClass::Invariant);
+
+    // Build the reverse-lookup: offset -> variable name from the mini-layout.
+    // An offset belongs to the variable whose range [base, base+size) contains it.
+    let model_offsets = offsets.get(model_name_ident);
+
+    // Walk the flow expression to collect only the offsets actually referenced
+    // there (not init-only deps that also appear in the mini-layout).
+    let mut referenced_offsets: HashSet<usize> = HashSet::new();
+    collect_expr_offsets(&flow_var.ast, &mut referenced_offsets);
+
+    // Resolve each referenced offset to its owning variable name, excluding the
+    // variable itself (its own slot is offset 0 in the mini-layout, never a dep).
+    let var_name_str = var_ident_canonical.as_str();
+    let dep_names: BTreeSet<String> = match model_offsets {
+        None => BTreeSet::new(),
+        Some(mo) => {
+            // Build an (offset, name) list from the mini-layout for range lookup.
+            let ranges: Vec<(&Ident<Canonical>, usize, usize)> = mo
+                .iter()
+                .map(|(name, &(base, size))| (name, base, size))
+                .collect();
+
+            referenced_offsets
+                .iter()
+                .filter_map(|&off| {
+                    // Find the mini-layout entry whose [base, base+size) contains
+                    // this offset.
+                    ranges
+                        .iter()
+                        .find(|(_, base, size)| off >= *base && off < *base + *size)
+                        .map(|(name, _, _)| name.as_str())
+                        .filter(|name| *name != var_name_str)
+                        .map(|name| name.to_string())
+                })
+                .collect()
+        }
+    };
+
+    Some(FlowInvarianceSupport {
+        locally_pure,
+        dep_names: Arc::new(dep_names),
+    })
 }
 
 /// `model_name -> (var_name -> (offset, size))`: the per-variable mini-
@@ -1234,11 +1526,9 @@ pub fn assemble_module<'db>(
     // boundary. Only ordinary source flow variables (in `flows_invariant`) are
     // invariant; SCC-combined, LTM, and implicit-helper fragments are always
     // dynamic (variant), so they keep `false`.
-    let flows_invariant = if is_root {
-        model_flows_invariant(db, model, project, is_root, module_inputs)
-    } else {
-        std::sync::Arc::new(std::collections::BTreeSet::new())
-    };
+    // `model_flows_invariant` guards internally (returns empty for
+    // non-root); call it unconditionally so the check lives in one place.
+    let flows_invariant = model_flows_invariant(db, model, project, is_root, module_inputs);
     let mut initial_frags: Vec<(String, &crate::compiler::symbolic::PerVarBytecodes)> = Vec::new();
     let mut flow_frags: Vec<(bool, &crate::compiler::symbolic::PerVarBytecodes)> = Vec::new();
     let mut stock_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();

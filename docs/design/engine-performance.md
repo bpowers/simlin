@@ -401,14 +401,20 @@ unmeasured (file/see issues):
   of the root flow phase, oracle-verified bit-constant with 0 violations;
   WORLD3: 78) and reordered into a contiguous flow-runlist prefix, with the
   prefix opcode length recorded on `CompiledModule`. B1 still runs the whole
-  program every step, so it should be perf-neutral -- but the interleaved A/B
-  (3 rounds, freshly-built `clearn_profile` binaries, identical model) measured
-  the *reordered* binary a **consistent ~9.5 ms faster** (145.0 -> 135.5 ms),
-  not neutral: clustering the invariant (constant-slot-writing) fragments into
-  one prefix improves the per-step memory-access locality of the throughput-
-  bound run. Stage B2 (run the invariant prefix once per `run_to`; snapshot +
-  copy-forward into each saved chunk; re-run after `set_value`; wasmgen keeps
-  the single reordered program) is the actual hoist and is not yet done.
+  program every step, so it is **perf-neutral** as expected -- two independent
+  interleaved A/Bs (manager + reviewer, the reviewer's with
+  `CLEARN_RUN_ITERS=200` over 5 rounds) measured ~135.5 ms vs ~136.3 ms,
+  delta ≤0.8 ms, within noise. An earlier single-run comparison (3 rounds)
+  appeared to show a ~9.5 ms gain (145.0 -> 135.5 ms), but that delta came
+  from an anomalously slow base binary, not the source change: build-to-build
+  binary-layout and cold-start variance can reach several ms for identical
+  source, and whichever binary runs cold typically looks slower. **Methodology
+  lesson**: interleaved A/B controls machine conditions but not binary-layout
+  luck — warm both binaries before timing and require the delta to reproduce
+  across multiple interleaved rounds before believing it. Stage B2 (run the
+  invariant prefix once per `run_to`; snapshot + copy-forward into each saved
+  chunk; re-run after `set_value`; wasmgen keeps the single reordered program)
+  is the actual hoist and is not yet done.
 - **Lookup last-segment memo** (#602) — C-LEARN's year-indexed tables are
   evaluated at slowly-advancing TIME; remembering the last segment per GF
   would skip most binary searches.

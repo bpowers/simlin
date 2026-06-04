@@ -177,10 +177,21 @@ impl CompiledSimulation {
     ///
     /// The invariant prefix is `root.compiled_flows.code[0..flows_invariant_
     /// opcode_len]`; its `AssignCurr`/`AssignConstCurr`/`BinOpAssignCurr` target
-    /// offsets are the written slots (the prefix is pre-fusion, so these are the
-    /// only assign-to-curr opcode forms present). The root module's slots are
-    /// already absolute (it carries the +IMPLICIT_VAR_COUNT shift), so no base
-    /// offset is added.
+    /// offsets are the written slots. The root module's slots are already
+    /// absolute (it carries the +IMPLICIT_VAR_COUNT shift), so no base offset
+    /// is added.
+    ///
+    /// **Safety contract**: this reads `CompiledSimulation.modules`, which holds
+    /// the PRE-`fuse_three_address` bytecode (the salsa-cached artifact). This
+    /// is intentional and required for correctness: `fuse_three_address` runs
+    /// on the `Vm`'s private execution copy and replaces `AssignCurr`-family
+    /// opcodes with fused forms (`BinVarVar`, etc.) that do NOT appear here.
+    /// If this function were ever pointed at fused bytecode, the assignment
+    /// scan would miss fused writes and return an incomplete offset set,
+    /// silently weakening the oracle. The contract is maintained by the
+    /// `Vm::new` code that builds `ResolvedModule`s by cloning `compiled_flows`
+    /// out of this `CompiledSimulation` and fusing the clone separately.
+    #[doc(hidden)] // test-support: used by the oracle in tests/integration/simulate.rs
     pub fn invariant_flow_offsets(&self) -> Vec<usize> {
         let Some(module) = self.modules.get(&self.root) else {
             return Vec::new();
@@ -206,6 +217,7 @@ impl CompiledSimulation {
 
     /// The root module's invariant flow-prefix opcode length (GH #712). 0 when
     /// no flow variable is run-invariant. Exposed for the partition test.
+    #[doc(hidden)] // test-support: used by the oracle in tests/integration/simulate.rs
     pub fn flows_invariant_opcode_len(&self) -> usize {
         self.modules
             .get(&self.root)

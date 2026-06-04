@@ -37,13 +37,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::common::{Canonical, Ident};
-use crate::compiler::invariance::{OffsetClass, exprs_are_invariant};
 use crate::db::dep_graph::build_var_info;
-use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
 use crate::db::{
-    Db, ModuleInputSet, SourceModel, SourceProject, canonical_module_input_set,
-    model_dependency_graph, model_module_map, project_converted_dimensions,
-    project_dimensions_context,
+    Db, ModuleInputSet, SourceModel, SourceProject, compile_var_fragment, model_dependency_graph,
 };
 
 /// The set of a module's flow-phase variables that are run-invariant, by
@@ -63,7 +59,9 @@ pub(crate) fn model_flows_invariant<'db>(
     module_inputs: ModuleInputSet<'db>,
 ) -> Arc<BTreeSet<String>> {
     // Only the root module is hoisted (B1/B2 scope). A submodule's entire flow
-    // program stays dynamic.
+    // program stays dynamic. This is the single authoritative guard; the
+    // external caller (`assemble_module`) calls us unconditionally and relies
+    // on this check.
     if !is_root {
         return Arc::new(BTreeSet::new());
     }
@@ -85,16 +83,9 @@ pub(crate) fn model_flows_invariant<'db>(
         .flat_map(|scc| scc.members.iter().map(|m| m.as_str()))
         .collect();
 
-    // Lowering context, built byte-identically to `compile_var_fragment`.
-    let dim_context = project_dimensions_context(db, project);
-    let converted_dims = project_converted_dimensions(db, project);
-    let model_name_ident = Ident::new(model.name(db));
-    let inputs = canonical_module_input_set(module_input_names);
-    let module_models = model_module_map(db, model, project).clone();
-
     // Map a source-variable name to its `SourceVariable` (only explicit source
-    // vars can be lowered through `lower_var_fragment`; implicit/LTM/synthetic
-    // helpers are not classified and stay variant by omission).
+    // vars have `compile_var_fragment` entries; implicit/LTM/synthetic helpers
+    // are absent and stay variant by omission).
     let source_vars = model.variables(db);
 
     // The accumulated verdict, threaded through the topological pass.
@@ -122,62 +113,31 @@ pub(crate) fn model_flows_invariant<'db>(
             continue;
         };
 
-        let lowered = lower_var_fragment(
-            db,
-            *svar,
-            model,
-            project,
-            module_input_names,
-            converted_dims,
-            dim_context,
-            &model_name_ident,
-            &module_models,
-            &inputs,
-        );
-
-        let LoweredVarFragment::Lowered {
-            per_phase_lowered,
-            offsets,
-            ..
-        } = lowered
-        else {
-            // The variable failed to lower; it will not compile a flow fragment
-            // either, so leave it out of the invariant set (variant by
-            // omission).
+        // Use the already-cached `compile_var_fragment` result (a salsa cache
+        // hit -- `assemble_module` triggers compilation before this query
+        // runs) rather than re-calling `lower_var_fragment`. The
+        // `flow_invariance` field was pre-computed there at no extra cost.
+        let Some(result) = compile_var_fragment(db, *svar, model, project, module_inputs) else {
+            // Compilation failed; treat as variant by omission.
+            continue;
+        };
+        let Some(inv_support) = &result.flow_invariance else {
+            // Variable is not in the flows runlist or noninitial lowering failed.
             continue;
         };
 
-        // The flow phase uses the non-initial lowering.
-        let Ok(flow_var) = per_phase_lowered.noninitial else {
-            continue;
-        };
-
-        // Invert this variable's mini-layout (`model_name -> name -> (off,
-        // size)`) into an offset-range -> dependency-name resolver. The
-        // mini-layout has `var_name` at offset 0 and each dependency at a
-        // sequential range; a referenced offset that lands in a dependency's
-        // range resolves to that dependency.
-        let model_offsets = offsets.get(&model_name_ident);
-        let classify_offset = |off: usize| -> OffsetClass {
-            let Some(model_offsets) = model_offsets else {
-                return OffsetClass::Variant;
-            };
-            // Find the dependency whose [base, base+size) range contains `off`.
-            let owner = model_offsets
+        // A variable is invariant iff:
+        // (1) its own expression contains no TIME/PULSE/etc. (locally_pure),
+        // (2) every dep it references is already classified invariant.
+        //
+        // Stock and module deps are never in `invariant` (the loop skips
+        // adding them), so the transitive variant propagation is automatic.
+        if inv_support.locally_pure
+            && inv_support
+                .dep_names
                 .iter()
-                .find(|(_, (base, size))| off >= *base && off < *base + *size)
-                .map(|(name, _)| name);
-            let Some(owner) = owner else {
-                // No owner -- a reference into an implicit-global slot or an
-                // out-of-mini-layout offset. Treat as variant defensively
-                // (DT/INITIAL/FINAL reach the lowered Expr as builtins, not as
-                // `Var` offsets, so this arm should not fire for them).
-                return OffsetClass::Variant;
-            };
-            classify_dependency(owner, var_name, &invariant, &var_info)
-        };
-
-        if exprs_are_invariant(&flow_var.ast, &classify_offset) {
+                .all(|dep| invariant.contains(dep.as_str()))
+        {
             invariant.insert(var_name.clone());
         }
     }
@@ -185,47 +145,11 @@ pub(crate) fn model_flows_invariant<'db>(
     Arc::new(invariant)
 }
 
-/// Verdict for a dependency named `owner` referenced by variable `reader`.
-///
-/// `owner == reader` is the variable's self-reference (its own mini-slot at
-/// offset 0); a self-reference within the flow statement list is the temp/
-/// element write-then-read pattern, which is intra-statement and invariant
-/// (the producing assignment carries the real verdict, already walked). Any
-/// other dependency is invariant iff it is in the accumulated `invariant` set
-/// AND is not a stock / module / table-only var.
-fn classify_dependency(
-    owner: &Ident<Canonical>,
-    reader: &str,
-    invariant: &BTreeSet<String>,
-    var_info: &rustc_hash::FxHashMap<Ident<Canonical>, crate::db::dep_graph::VarInfo>,
-) -> OffsetClass {
-    // Self-reference: the variable's own slots. A flow-phase self-read is a
-    // temp/element forward reference within the same statement list; it
-    // contributes no external variance.
-    if owner.as_str() == reader {
-        return OffsetClass::Invariant;
-    }
-
-    // A stock / module / table-only owner is variant (a stock changes per step;
-    // a module instance's slots change per step). `table_only` should not be a
-    // flow-runlist dependency by offset, but classify it conservatively.
-    if let Some(info) = var_info.get(owner)
-        && (info.is_stock || info.is_module)
-    {
-        return OffsetClass::Variant;
-    }
-
-    if invariant.contains(owner.as_str()) {
-        OffsetClass::Invariant
-    } else {
-        OffsetClass::Variant
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compiler::Expr;
+    use crate::compiler::invariance::{OffsetClass, exprs_are_invariant};
     use crate::datamodel;
     use crate::db::{ModuleInputSet, SimlinDb, sync_from_datamodel};
     use crate::test_common::TestProject;
