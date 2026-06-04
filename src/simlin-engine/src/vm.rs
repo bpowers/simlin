@@ -258,7 +258,20 @@ struct ResolvedModule {
     ident: Ident<Canonical>,
     context: Arc<ByteCodeContext>,
     initials: Arc<Vec<CompiledInitial>>,
-    flows: Arc<ByteCode>,
+    /// The run-invariant prefix of the module's flow program (time-invariant
+    /// hoisting, GH #712 B2). Split off `compiled_flows` at
+    /// `CompiledModule.flows_invariant_opcode_len` and fused independently. The
+    /// VM runs this **once per `run_to`** (`Vm::run_to`'s invariant snapshot),
+    /// not per step. Empty for every submodule and any root model with no
+    /// run-invariant flow var (split len 0). Both flow halves carry the FULL
+    /// literal table (a clone of the unsplit program's), so every `LiteralId`
+    /// stays valid in either half and a `set_value` constant override mutates
+    /// both halves at the same `literal_id`.
+    flows_invariant: Arc<ByteCode>,
+    /// The dynamic suffix of the module's flow program -- everything the VM
+    /// re-evaluates every step. For a submodule (or a no-invariant root) this is
+    /// the whole flow program, identical to the pre-B2 `flows`.
+    flows_dynamic: Arc<ByteCode>,
     stocks: Arc<ByteCode>,
     child_targets: Vec<u32>,
 }
@@ -282,6 +295,18 @@ pub(crate) enum StepPart {
     Initials,
     Flows,
     Stocks,
+}
+
+/// Re-seed the hoisted run-invariant slots into `curr` (GH #712 B2). Pulled out
+/// of `run_to` as a free function so its body is compiled once rather than
+/// inlined at each of the four call sites, keeping `run_to`'s giant `#[inline(
+/// never)]` body from growing (which perturbs the inliner's codegen of the hot
+/// loop). `#[inline(always)]` so a no-op (empty `offsets`) call vanishes.
+#[inline(always)]
+fn scatter_invariant(offsets: &[usize], values: &[f64], curr: &mut [f64]) {
+    for &off in offsets {
+        curr[off] = values[off];
+    }
 }
 
 // helper to borrow two non-overlapping chunk slices by index
@@ -344,6 +369,19 @@ pub struct Vm {
     // returns the fallback during the initial timestep even when
     // RK stages advance TIME away from INITIAL_TIME.
     prev_values_valid: bool,
+    // Root-relative slot offsets written by the run-invariant flow prefix
+    // (time-invariant hoisting, GH #712 B2). Extracted at Vm::new from the
+    // PRE-fusion prefix bytecode. The root module's slots are already absolute,
+    // so these double as absolute data-buffer offsets. Empty when no flow var
+    // is run-invariant. The per-step scatter re-seeds exactly these slots.
+    invariant_offsets: Vec<usize>,
+    // Snapshot of the invariant prefix's output, captured once per `run_to`
+    // right after evaluating the invariant program. Indexed by absolute slot
+    // offset; only the `invariant_offsets` entries are meaningful. Sized
+    // n_slots so the per-step scatter is a plain `curr[off] = invariant_values
+    // [off]`. Allocated once at Vm::new (the scatter and snapshot never
+    // allocate, preserving the zero-alloc run gate).
+    invariant_values: Box<[f64]>,
 }
 
 #[derive(Clone)]
@@ -427,6 +465,31 @@ struct EvalState<'a> {
 }
 
 impl CompiledSlicedSimulation {
+    /// Split a module's flow `ByteCode` into the run-invariant prefix
+    /// (`code[0..split]`) and the dynamic suffix (`code[split..]`), each a
+    /// standalone `ByteCode`. BOTH halves clone the full literal table so every
+    /// `LiteralId` in either half resolves and a constant override hits the same
+    /// `literal_id` in both. `split == 0` yields an empty invariant half and a
+    /// dynamic half identical to the input (the submodule / no-invariant case).
+    ///
+    /// The split point is a statement boundary (B1's fusion-boundary argument:
+    /// the prefix's last opcode is an `Assign*`-family write), so slicing here
+    /// before fusing each half is equivalent to fusing the whole program and
+    /// slicing. `split` is clamped defensively, but a value past the program
+    /// length would indicate a B1 bug.
+    fn split_flows(flows: &ByteCode, split: usize) -> (ByteCode, ByteCode) {
+        let split = split.min(flows.code.len());
+        let invariant = ByteCode {
+            literals: flows.literals.clone(),
+            code: flows.code[..split].to_vec(),
+        };
+        let dynamic = ByteCode {
+            literals: flows.literals.clone(),
+            code: flows.code[split..].to_vec(),
+        };
+        (invariant, dynamic)
+    }
+
     /// Build the indexed module table from the keyed `CompiledModule` map,
     /// resolving every module declaration's `(model_name, input_set)` key to a
     /// child index so the hot eval loop never reconstructs or hashes a key.
@@ -456,6 +519,25 @@ impl CompiledSlicedSimulation {
                         key_to_idx[&child_key]
                     })
                     .collect();
+                // Split the flow program into its run-invariant prefix and its
+                // dynamic suffix at `flows_invariant_opcode_len` (time-invariant
+                // hoisting, GH #712 B2). The prefix runs once per `run_to`; the
+                // suffix runs every step. The split point is a statement
+                // boundary by B1's fusion-boundary argument (the prefix's last
+                // fragment ends in an `Assign*`-family opcode), so fusing each
+                // half independently is equivalent to fusing the whole and
+                // slicing -- no fusion window crosses the boundary. Submodules
+                // (and any root with no invariant flow var) carry len 0, so the
+                // invariant half is empty and the dynamic half is the whole
+                // program -- identical to the pre-B2 single `flows`.
+                //
+                // BOTH halves keep the full literal table (clone), so existing
+                // `LiteralId`s resolve in either half; this is what lets
+                // `write_literal`/`read_literal` address a constant override at
+                // the same `literal_id` in both.
+                let (flows_invariant, flows_dynamic) =
+                    Self::split_flows(&m.compiled_flows, m.flows_invariant_opcode_len);
+
                 // 3-address fusion (R2): fold leaf operand loads into the
                 // binary ops of the per-timestep flows/stocks programs. Done
                 // on the Vm's execution copy (not the cached CompiledModule,
@@ -465,15 +547,18 @@ impl CompiledSlicedSimulation {
                 // linear and cheap relative to a simulation run. Initials run
                 // once and their AssignCurr targets are read elsewhere, so they
                 // are left unfused.
-                let mut flows = m.compiled_flows.clone();
+                let mut flows_invariant = Arc::new(flows_invariant);
+                let mut flows_dynamic = Arc::new(flows_dynamic);
                 let mut stocks = m.compiled_stocks.clone();
-                Arc::make_mut(&mut flows).fuse_three_address();
+                Arc::make_mut(&mut flows_invariant).fuse_three_address();
+                Arc::make_mut(&mut flows_dynamic).fuse_three_address();
                 Arc::make_mut(&mut stocks).fuse_three_address();
                 ResolvedModule {
                     ident: m.ident.clone(),
                     context: m.context.clone(),
                     initials: m.compiled_initials.clone(),
-                    flows,
+                    flows_invariant,
+                    flows_dynamic,
                     stocks,
                     child_targets,
                 }
@@ -667,7 +752,38 @@ impl Vm {
         };
         let rk_scratch = vec![0.0; stock_offsets.len() * 2];
 
+        // Time-invariant hoisting (GH #712 B2): the root module's run-invariant
+        // flow offsets, read from the PRE-fusion bytecode in `sim` (the salsa
+        // artifact). `invariant_flow_offsets` is documented to require the
+        // unsplit/unfused bytecode -- it scans `AssignCurr`/`AssignConstCurr`/
+        // `BinOpAssignCurr` targets, which fusion would rewrite -- and `sim`
+        // still holds exactly that. Must be captured before `build` consumes the
+        // module map into the fused execution copy.
+        let invariant_offsets = sim.invariant_flow_offsets();
+
+        // Defense-in-depth validation of B1's classifier (debug builds): the
+        // invariant prefix must contain no time-/state-dependent opcode. If B1
+        // ever misclassified a variant variable into the prefix, running it once
+        // per `run_to` (instead of every step) would silently freeze a value
+        // that should change. Panic loudly at construction rather than
+        // misexecute. Also sanity-check that splitting each flow half at the
+        // boundary leaves a self-consistent stack program (`max_stack_depth`
+        // panics via checked_sub if the split landed mid-expression -- that
+        // would indicate a B1 fusion-boundary bug).
+        Self::validate_invariant_prefix(&sim);
+
         let sliced_sim = CompiledSlicedSimulation::build(&sim.modules, &sim.root);
+
+        // `max_stack_depth` walks each post-split half; it panics on a mid-
+        // expression split (a B1 bug). Run on the root's halves (the only module
+        // that can have a non-trivial split). Computed for its panic side
+        // effect; the depth is already validated < STACK_CAPACITY by
+        // `ByteCodeBuilder::finish` on the unsplit program.
+        {
+            let root = &sliced_sim.modules[sliced_sim.root_idx];
+            let _ = root.flows_invariant.max_stack_depth();
+            let _ = root.flows_dynamic.max_stack_depth();
+        }
 
         Ok(Vm {
             specs: sim.specs,
@@ -692,8 +808,57 @@ impl Vm {
             stock_offsets,
             rk_scratch,
             prev_values_valid: false,
+            invariant_offsets,
+            invariant_values: vec![0.0; n_slots].into_boxed_slice(),
         })
     }
+
+    /// Defense-in-depth validation of B1's run-invariance classifier (GH #712).
+    /// The invariant flow prefix is evaluated once per `run_to` instead of every
+    /// step, so it MUST NOT contain any opcode whose value can change across the
+    /// run: module evaluations/inputs (`EvalModule`/`LoadModuleInput`), the
+    /// previous-step read (`LoadPrev`), a TIME global load
+    /// (`LoadGlobalVar(TIME_OFF)`), or the time-dependent builtins
+    /// (`Apply{Pulse|Ramp|Step}`). B1's classifier guarantees their absence; this
+    /// walk asserts it. A violation means B1 misclassified a variant variable
+    /// into the prefix -- which would silently freeze a value that should change
+    /// -- so panicking at construction is correct (never silently misexecute).
+    /// Walks the PRE-fusion prefix (`sim` holds it) so the opcode shapes are the
+    /// classifier's own. Debug builds only: the cost is a linear scan and the
+    /// invariant holds by construction in release.
+    #[cfg(debug_assertions)]
+    fn validate_invariant_prefix(sim: &CompiledSimulation) {
+        let Some(root) = sim.modules.get(&sim.root) else {
+            return;
+        };
+        let len = root
+            .flows_invariant_opcode_len
+            .min(root.compiled_flows.code.len());
+        for op in &root.compiled_flows.code[..len] {
+            let forbidden = match op {
+                Opcode::EvalModule { .. } => Some("EvalModule"),
+                Opcode::LoadModuleInput { .. } => Some("LoadModuleInput"),
+                Opcode::LoadPrev { .. } => Some("LoadPrev"),
+                Opcode::LoadGlobalVar { off } if *off as usize == TIME_OFF => {
+                    Some("LoadGlobalVar(TIME)")
+                }
+                Opcode::Apply { func } if apply_is_time_dependent(*func) => Some("Apply(time)"),
+                _ => None,
+            };
+            if let Some(name) = forbidden {
+                panic!(
+                    "GH #712 B1 invariant-prefix invariant violated: time-/state-dependent \
+                     opcode {name} found in the run-invariant flow prefix. The classifier \
+                     misclassified a variant variable as run-invariant; hoisting it would \
+                     freeze a value that must change."
+                );
+            }
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline(always)]
+    fn validate_invariant_prefix(_sim: &CompiledSimulation) {}
 
     pub fn run_to_end(&mut self) -> Result<()> {
         let end = self.specs.stop;
@@ -727,6 +892,14 @@ impl Vm {
         let stock_offsets: &[usize] = &self.stock_offsets;
         let (saved, accum) = self.rk_scratch.split_at_mut(n_stocks);
 
+        // Time-invariant hoisting (GH #712 B2). Bound as disjoint-field locals
+        // so the per-step scatter (reads both) and the one-shot snapshot (writes
+        // `invariant_values`) don't conflict with `state`'s field borrows. Empty
+        // when nothing is hoisted (the no-invariant / submodule-only case),
+        // making every B2 step a no-op.
+        let invariant_offsets: &[usize] = &self.invariant_offsets;
+        let invariant_values: &mut [f64] = &mut self.invariant_values;
+
         let mut state = EvalState {
             stack: &mut self.stack,
             temp_storage: &mut self.temp_storage,
@@ -740,6 +913,36 @@ impl Vm {
             // segmented run_to() calls don't reset it.
             use_prev_fallback: !self.prev_values_valid,
         };
+
+        // Evaluate the run-invariant flow prefix ONCE per `run_to` (the hoist)
+        // and snapshot the slots it writes (GH #712 B2). This runs on EVERY
+        // `run_to` call -- that is what absorbs a `set_value` override applied
+        // between two `run_to`s with ZERO dirty-tracking: the override mutated
+        // the prefix's literals (see `write_literal`), so re-running the whole
+        // prefix here re-derives every dependent invariant value. The snapshot
+        // is the scatter source; the per-step scatter below re-seeds these slots
+        // into `curr` before each dynamic step (the chunk machinery clobbers
+        // them). Allocation-free: `eval_bytecode` is the alloc-free hot path and
+        // both `invariant_offsets`/`invariant_values` are preallocated.
+        if !invariant_offsets.is_empty() {
+            let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
+            let root = &self.sliced_sim.modules[root_idx];
+            Self::eval_bytecode(
+                &self.sliced_sim,
+                &mut state,
+                &root.context,
+                &root.flows_invariant,
+                StepPart::Flows,
+                0,
+                root_idx,
+                &[],
+                curr,
+                next,
+            );
+            for &off in invariant_offsets {
+                invariant_values[off] = curr[off];
+            }
+        }
 
         // Macro for the save/advance logic shared by all integration methods.
         // Placed here because it captures local variables from run_to.
@@ -767,6 +970,23 @@ impl Vm {
             }};
         }
 
+        // Re-seed the hoisted invariant slots into `curr` before the dynamic
+        // flows run (GH #712 B2). The chunk machinery clobbers `curr`'s aux
+        // slots every step -- a non-save step does `curr.copy_from_slice(next)`
+        // (and `next`'s invariant slots are stale), and a save step advances to
+        // a fresh chunk whose aux slots were never written -- so the invariant
+        // prefix's one-shot output must be scattered back in each iteration. The
+        // scatter runs BEFORE `eval_step`/the RK stages so the dynamic flows and
+        // the stock phase read the correct invariant values, and BEFORE the
+        // `prev_values` snapshot so `PREVIOUS(invariant_var)` is unchanged. No-op
+        // (and skips the loop entirely) when nothing is hoisted. Allocation-free:
+        // a straight indexed copy over preallocated buffers.
+        macro_rules! scatter_invariant {
+            ($curr:expr) => {{
+                scatter_invariant(invariant_offsets, invariant_values, $curr);
+            }};
+        }
+
         match self.specs.method {
             Method::Euler => loop {
                 let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
@@ -774,6 +994,7 @@ impl Vm {
                     break;
                 }
 
+                scatter_invariant!(curr);
                 Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
                 state.prev_values.copy_from_slice(curr);
                 state.use_prev_fallback = false;
@@ -791,6 +1012,12 @@ impl Vm {
                     }
 
                     let saved_time = curr[TIME_OFF];
+
+                    // Scatter once per step before stage 1 (GH #712 B2). The RK
+                    // stages only mutate stock slots and dynamic flow outputs, so
+                    // the invariant slots survive across stages -- a single
+                    // re-seed per step is correct.
+                    scatter_invariant!(curr);
 
                     // Stage 1: evaluate at (t, y)
                     Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
@@ -868,6 +1095,10 @@ impl Vm {
 
                     let saved_time = curr[TIME_OFF];
 
+                    // Scatter once per step before stage 1 (GH #712 B2); see the
+                    // RK4 arm. Stages only mutate stock + dynamic-flow slots.
+                    scatter_invariant!(curr);
+
                     // Stage 1: evaluate at (t, y)
                     Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
                     for (i, &off) in stock_offsets.iter().enumerate() {
@@ -938,6 +1169,13 @@ impl Vm {
         // and matches the pre-#625 graceful clamp.
         if self.curr_chunk != self.next_chunk {
             let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
+            // Scatter the hoisted invariant slots into this resting chunk before
+            // the re-eval (GH #712 B2): the loop broke before this iteration's
+            // scatter, so the chunk's invariant slots are stale. The re-eval runs
+            // only the DYNAMIC flow half, which reads these slots; seeding them
+            // also makes the resting chunk presentation-correct for a mid-run
+            // `get_value_now` of an invariant var.
+            scatter_invariant!(curr);
             Self::eval(
                 &self.sliced_sim,
                 &mut state,
@@ -1020,6 +1258,13 @@ impl Vm {
     }
 
     /// Read the current value of a literal at a bytecode location.
+    ///
+    /// For a `StepPart::Flows` location the flow program is split into an
+    /// invariant prefix and a dynamic suffix (time-invariant hoisting, GH #712
+    /// B2). Both halves carry the same full literal table and `write_literal`
+    /// keeps them identical at every `literal_id`, so reading either is correct;
+    /// we read the dynamic half (always non-empty for any module that has flow
+    /// bytecode at all).
     fn read_literal(&self, loc: &BytecodeLocation) -> f64 {
         match loc {
             BytecodeLocation::FlowOrStock {
@@ -1029,7 +1274,7 @@ impl Vm {
             } => {
                 let module = &self.sliced_sim.modules[self.module_idx_for(module_key)];
                 let bytecode = match part {
-                    StepPart::Flows => &module.flows,
+                    StepPart::Flows => &module.flows_dynamic,
                     StepPart::Stocks => &module.stocks,
                     StepPart::Initials => unreachable!(),
                 };
@@ -1048,6 +1293,15 @@ impl Vm {
 
     /// Write a value to the literal at a bytecode location, using Arc::make_mut
     /// for copy-on-write semantics on shared bytecode.
+    ///
+    /// A `StepPart::Flows` write mutates BOTH flow halves (invariant prefix and
+    /// dynamic suffix) at the same `literal_id` (time-invariant hoisting, GH
+    /// #712 B2). The constant override (`set_value`) must take effect regardless
+    /// of which half consumes the literal: an invariant constant's
+    /// `AssignConstCurr` lives in the prefix, but the same `literal_id` may also
+    /// be referenced from the dynamic suffix (and the constant-info scan that
+    /// found this location ran over the unsplit program). Keeping both halves
+    /// identical also lets `read_literal` read either.
     fn write_literal(&mut self, loc: &BytecodeLocation, value: f64) {
         match loc {
             BytecodeLocation::FlowOrStock {
@@ -1057,12 +1311,18 @@ impl Vm {
             } => {
                 let idx = self.module_idx_for(module_key);
                 let module = &mut self.sliced_sim.modules[idx];
-                let bytecode = match part {
-                    StepPart::Flows => &mut module.flows,
-                    StepPart::Stocks => &mut module.stocks,
+                match part {
+                    StepPart::Flows => {
+                        Arc::make_mut(&mut module.flows_invariant).literals[*literal_id as usize] =
+                            value;
+                        Arc::make_mut(&mut module.flows_dynamic).literals[*literal_id as usize] =
+                            value;
+                    }
+                    StepPart::Stocks => {
+                        Arc::make_mut(&mut module.stocks).literals[*literal_id as usize] = value;
+                    }
                     StepPart::Initials => unreachable!(),
-                };
-                Arc::make_mut(bytecode).literals[*literal_id as usize] = value;
+                }
             }
             BytecodeLocation::Initial {
                 module_key,
@@ -1085,6 +1345,13 @@ impl Vm {
     /// across all chunk slots. The `did_initials` flag (reset to false here)
     /// prevents `run_to()` from executing on stale data -- it returns early
     /// if `run_initials()` has not been called since the last reset.
+    ///
+    /// The hoisted-invariant snapshot (`invariant_values`, GH #712 B2) needs no
+    /// handling here: the next `run_to` unconditionally re-evaluates the
+    /// invariant prefix and re-snapshots into `invariant_values` at its entry
+    /// (right after `run_initials`), so any stale snapshot is overwritten before
+    /// it is ever read by the per-step scatter. `invariant_offsets` is immutable
+    /// (a property of the compiled program) and likewise needs no reset.
     pub fn reset(&mut self) {
         self.curr_chunk = 0;
         self.next_chunk = 1;
@@ -1346,8 +1613,12 @@ impl Vm {
         next: &mut [f64],
     ) {
         let module = &sliced_sim.modules[module_idx];
+        // `StepPart::Flows` runs the DYNAMIC half (time-invariant hoisting, GH
+        // #712 B2): the invariant prefix is evaluated once per `run_to` in
+        // `run_to`, not here. For a submodule (or no-invariant root) the dynamic
+        // half is the whole flow program, so this is unchanged.
         let bytecode = match part {
-            StepPart::Flows => &module.flows,
+            StepPart::Flows => &module.flows_dynamic,
             StepPart::Stocks => &module.stocks,
             StepPart::Initials => unreachable!("initials are evaluated via eval_initials"),
         };
@@ -3027,7 +3298,8 @@ impl Vm {
             eprintln!("\n\nCOMPILED MODULE: {:?}", module_key);
 
             let module = &self.sliced_sim.modules[idx];
-            let flows_bc = &module.flows;
+            let flows_invariant_bc = &module.flows_invariant;
+            let flows_dynamic_bc = &module.flows_dynamic;
             let stocks_bc = &module.stocks;
 
             for ci in module.initials.iter() {
@@ -3045,12 +3317,17 @@ impl Vm {
             }
 
             eprintln!("\nflows literals:");
-            for (i, lit) in flows_bc.literals.iter().enumerate() {
+            for (i, lit) in flows_dynamic_bc.literals.iter().enumerate() {
                 eprintln!("\t{i}: {lit}");
             }
 
-            eprintln!("\nflows bytecode:");
-            for op in flows_bc.code.iter() {
+            eprintln!("\nflows invariant-prefix bytecode (GH #712 B2):");
+            for op in flows_invariant_bc.code.iter() {
+                eprintln!("\t{op:?}");
+            }
+
+            eprintln!("\nflows dynamic bytecode:");
+            for op in flows_dynamic_bc.code.iter() {
                 eprintln!("\t{op:?}");
             }
 
@@ -3065,6 +3342,15 @@ impl Vm {
             }
         }
     }
+}
+
+/// Whether a builtin's value depends on the current TIME/DT even with constant
+/// arguments (`PULSE`/`RAMP`/`STEP`). Used by the GH #712 B2 invariant-prefix
+/// validation walk to assert no time-dependent builtin was hoisted -- it mirrors
+/// the classifier's hard-variant set in `compiler::invariance`.
+#[cfg(debug_assertions)]
+fn apply_is_time_dependent(func: BuiltinId) -> bool {
+    matches!(func, BuiltinId::Pulse | BuiltinId::Ramp | BuiltinId::Step)
 }
 
 #[inline(always)]
@@ -3808,6 +4094,10 @@ mod vm_reset_and_run_initials_tests;
 mod set_value_tests;
 
 #[cfg(test)]
+#[path = "vm_invariant_tests.rs"]
+mod vm_invariant_tests;
+
+#[cfg(test)]
 mod stack_tests {
     use super::*;
 
@@ -3923,9 +4213,18 @@ mod superinstruction_tests {
     }
 
     /// Helper: collect all opcodes from the flow bytecode of the root module.
+    /// The flow program is split into an invariant prefix and a dynamic suffix
+    /// (GH #712 B2); concatenating both halves reconstructs the full per-Vm
+    /// fused flow stream these fusion tests inspect (the split is at a statement
+    /// boundary, so prefix++suffix is the same fused program a pre-B2 Vm held).
     fn flow_opcodes(vm: &Vm) -> Vec<&Opcode> {
-        let bc = &vm.sliced_sim.modules[vm.sliced_sim.root_idx].flows;
-        bc.code.iter().collect()
+        let module = &vm.sliced_sim.modules[vm.sliced_sim.root_idx];
+        module
+            .flows_invariant
+            .code
+            .iter()
+            .chain(module.flows_dynamic.code.iter())
+            .collect()
     }
 
     /// Helper: collect all opcodes from the stock bytecode of the root module.
