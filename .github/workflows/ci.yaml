@@ -375,6 +375,8 @@ jobs:
 
       # The smoke test lives in the consolidated `integration` harness;
       # `smoke::` filters to just its tests (all `#[ignore]`d, hence
-      # `--ignored`).
+      # `--ignored`). The run command is quoted because a plain YAML scalar
+      # ending in `:` parses as a mapping key, which made the whole workflow
+      # file invalid (every CI run since failed at startup with zero jobs).
       - name: Run smoke test
-        run: cargo test -p simlin-serve --release --test integration -- --ignored --nocapture smoke::
+        run: 'cargo test -p simlin-serve --release --test integration -- --ignored --nocapture smoke::'
