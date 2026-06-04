@@ -195,6 +195,13 @@ interface EditorState {
   flowStillBeingCreated: boolean;
   drawerOpen: boolean;
   projectVersion: number;
+  // Incremented exactly when project *content* changes (real edits and
+  // undo/redo) -- not on view-only updates or save-version bookkeeping.
+  // Used to key the details panels, which seed their Slate editors from
+  // props in their constructors and rely on key-driven remounts to refresh;
+  // keying them on projectVersion remounted an open panel on every pan
+  // frame and autosave completion, discarding in-progress edits.
+  projectGeneration: number;
   snapshotBlob: Blob | undefined;
   variableDetailsActiveTab: number;
   cachedErrors: CachedErrorDetails;
@@ -304,6 +311,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       flowStillBeingCreated: false,
       drawerOpen: false,
       projectVersion: props.initialProjectVersion,
+      projectGeneration: 0,
       snapshotBlob: undefined,
       variableDetailsActiveTab: 0,
       cachedErrors: {
@@ -569,6 +577,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         projectOffset: nextHistory.projectOffset,
         activeProject,
         projectVersion,
+        projectGeneration: this.state.projectGeneration + 1,
       });
     } else {
       // View-only updates (pan/zoom) refresh the rendered project but must
@@ -2538,7 +2547,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return (
         <div className={styles.varDetails}>
           <ModuleDetails
-            key={`md-${this.state.projectVersion}-${this.state.projectOffset}-${ident}`}
+            key={`md-${this.state.projectGeneration}-${ident}`}
             variable={variable}
             viewElement={namedElement}
             project={defined(this.project())}
@@ -2560,7 +2569,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     return (
       <div className={styles.varDetails}>
         <VariableDetails
-          key={`vd-${this.state.projectVersion}-${this.state.projectOffset}-${ident}`}
+          key={`vd-${this.state.projectGeneration}-${ident}`}
           variable={variable}
           viewElement={namedElement}
           getLatexEquation={this.getLatexEquation}
@@ -2850,7 +2859,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     projectOffset = Math.max(projectOffset, 0);
     const serializedProject = defined(this.state.projectHistory[projectOffset]);
     const projectVersion = this.state.projectVersion + 0.01;
-    this.setState({ projectOffset, projectVersion });
+    // Undo/redo restores different project content, so the details panels
+    // must remount to re-seed from the restored variables.
+    this.setState({ projectOffset, projectVersion, projectGeneration: this.state.projectGeneration + 1 });
 
     this.undoRedoTimer = setTimeout(async () => {
       this.undoRedoTimer = null;
