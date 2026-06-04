@@ -283,6 +283,23 @@ structurally less work per element) measured a consistent ~5 ms *regression*
 unproven until measured; structural arguments do not survive contact with
 the inliner.
 
+**Negative result #2: the #602 lookup last-segment memo (implemented,
+reverted).** A per-(module, GF) hint that validates the previous binary-search
+lower bound in O(1) measured only ~0.7 ms gross (137.4 -> 136.7; the ~8-deep
+search over C-LEARN's 229-point tables is already well-predicted at a
+slowly-advancing index). Adversarial review then found the hint diverges from
+`lookup` on unsorted-x tables -- which ARE reachable, no import path validates
+x ordering (GH #715) -- so soundness required gating the hint on a per-table
+sortedness check. Every sound formulation (sentinel checked inside
+`lookup_with_hint`, or hoisted to the dispatch arm) measured a consistent
++9..15 ms regression: one extra branch + call edge in `eval_bytecode`'s
+`Lookup` arm perturbed the giant function's codegen (instructions +1.5%,
+cycles +6.4%, branches *down*, IPC 4.34 -> 4.13). Net: gross win 0.5%,
+soundness cost ~7% -- reverted wholesale. Lesson on top of #604: the
+interleaved-A/B-worktree protocol caught a sub-agent's "machine variation"
+rationalization; never accept a perf delta explanation without an
+interleaved A/B on freshly built binaries.
+
 ### R4. `RuntimeView` allocation + `flat_offset` (~20% of post-win run)
 
 `PushVarView`/`PushTempView` rebuild `SmallVec`s (dims, strides, dim_ids) on every

@@ -289,20 +289,6 @@ pub struct Vm {
     // returns the fallback during the initial timestep even when
     // RK stages advance TIME away from INITIAL_TIME.
     prev_values_valid: bool,
-    // Per-graphical-function "last segment" memo for scalar Interpolate-mode
-    // LOOKUPs (GH #602). Indexed by (module_idx, gf_idx), where module_idx is
-    // the index into sliced_sim.modules and gf_idx = base_gf + element_offset
-    // indexes that module's context.graphical_functions. Each entry is either:
-    //   - 0..LOOKUP_HINT_DISABLED-1: the binary-search lower bound from the last
-    //     LOOKUP into that table (0 = "not yet seeded"; valid hints require h > 0).
-    //     Sorted tables are initialized to 0 at Vm::new so the first lookup seeds
-    //     the hint via the binary-search path.
-    //   - LOOKUP_HINT_DISABLED: the table's x-values are not non-decreasing;
-    //     lookup_with_hint permanently delegates to lookup for this slot and never
-    //     overwrites the sentinel. See lookup_with_hint / table_x_is_sorted.
-    // A stale valid hint is only ever a miss or a still-valid hint (never a wrong
-    // result for sorted tables), so reset() does not clear the memo.
-    lookup_memo: Vec<Vec<u32>>,
 }
 
 #[derive(Clone)]
@@ -383,10 +369,6 @@ struct EvalState<'a> {
     // reading prev_values. True until the first prev_values snapshot
     // has been taken, then false for the rest of the simulation.
     use_prev_fallback: bool,
-    // Per-graphical-function "last segment" hint, indexed by
-    // (module_idx, gf_idx); see Vm::lookup_memo. Threaded mutably so the scalar
-    // Interpolate-mode Lookup opcode can validate/update the hint in O(1).
-    lookup_memo: &'a mut Vec<Vec<u32>>,
 }
 
 impl CompiledSlicedSimulation {
@@ -632,32 +614,6 @@ impl Vm {
 
         let sliced_sim = CompiledSlicedSimulation::build(&sim.modules, &sim.root);
 
-        // One per-table hint slot for every graphical function of every module,
-        // addressed as lookup_memo[module_idx][gf_idx]. Sorted tables are
-        // initialized to 0 (never a valid hint: lookup_with_hint requires 0 < h,
-        // so the first lookup necessarily takes the binary-search path and seeds
-        // the hint). Unsorted tables are initialized to LOOKUP_HINT_DISABLED so
-        // lookup_with_hint delegates to the lookup oracle for those tables
-        // permanently -- the hint uniqueness argument requires sorted x-values
-        // and no import path validates or sorts them (GH #602 review).
-        let lookup_memo: Vec<Vec<u32>> = sliced_sim
-            .modules
-            .iter()
-            .map(|m| {
-                m.context
-                    .graphical_functions
-                    .iter()
-                    .map(|table| {
-                        if table_x_is_sorted(table) {
-                            0u32
-                        } else {
-                            LOOKUP_HINT_DISABLED
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
-
         Ok(Vm {
             specs: sim.specs,
             offsets: sim.offsets,
@@ -681,7 +637,6 @@ impl Vm {
             stock_offsets,
             rk_scratch,
             prev_values_valid: false,
-            lookup_memo,
         })
     }
 
@@ -729,7 +684,6 @@ impl Vm {
             // prev_values snapshot is taken.  Tracked in Vm so that
             // segmented run_to() calls don't reset it.
             use_prev_fallback: !self.prev_values_valid,
-            lookup_memo: &mut self.lookup_memo,
         };
 
         // Macro for the save/advance logic shared by all integration methods.
@@ -1201,7 +1155,6 @@ impl Vm {
             prev_values: &mut self.prev_values,
             // prev_values hasn't been populated yet during initials.
             use_prev_fallback: true,
-            lookup_memo: &mut self.lookup_memo,
         };
 
         Self::eval_initials(
@@ -1386,7 +1339,6 @@ impl Vm {
         let initial_values = state.initial_values;
         let mut prev_values = &mut *state.prev_values;
         let use_prev_fallback = state.use_prev_fallback;
-        let mut lookup_memo = &mut *state.lookup_memo;
 
         let mut condition = false;
         let mut subscript_index: SmallVec<[(u16, u16); 4]> = SmallVec::new();
@@ -1497,7 +1449,6 @@ impl Vm {
                         initial_values,
                         prev_values,
                         use_prev_fallback,
-                        lookup_memo,
                     };
                     // Resolve the child module by precomputed index instead of
                     // reconstructing + SipHashing a (model_name, input_set) key.
@@ -1539,7 +1490,6 @@ impl Vm {
                         initial_values: _,
                         prev_values: pv,
                         use_prev_fallback: _,
-                        lookup_memo: lm,
                     } = child_state;
                     stack = s;
                     temp_storage = ts;
@@ -1547,7 +1497,6 @@ impl Vm {
                     iter_stack = is_;
                     broadcast_stack = bs;
                     prev_values = pv;
-                    lookup_memo = lm;
                 }
                 Opcode::AssignCurr { off } => {
                     curr[module_off + *off as usize] = stack.pop();
@@ -1830,18 +1779,7 @@ impl Vm {
                         let gf_idx = (*base_gf as usize) + (element_offset as usize);
                         let gf = &context.graphical_functions[gf_idx];
                         let result = match mode {
-                            // Interpolate is the hot, ~780k-eval/run path on
-                            // C-LEARN's slowly-advancing year-indexed tables; the
-                            // per-(module, gf) hint skips most binary searches.
-                            // It is a pure optimization: lookup_with_hint returns
-                            // the exact f64 lookup() would (GH #602). Forward and
-                            // Backward stay unhinted -- they are rare and not the
-                            // perf target.
-                            LookupMode::Interpolate => lookup_with_hint(
-                                gf,
-                                lookup_index,
-                                &mut lookup_memo[module_idx][gf_idx],
-                            ),
+                            LookupMode::Interpolate => lookup(gf, lookup_index),
                             LookupMode::Forward => lookup_forward(gf, lookup_index),
                             LookupMode::Backward => lookup_backward(gf, lookup_index),
                         };
@@ -3233,28 +3171,6 @@ pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
         }
     }
 
-    lookup_tail(table, low, index)
-}
-
-/// The shared interpolation tail of `lookup` / `lookup_with_hint`: given the
-/// binary-search lower bound `low` (the smallest `i` with `table[i].0 >= index`),
-/// either snap to `table[low]` on an exact hit or linearly interpolate between
-/// `table[low-1]` and `table[low]`.
-///
-/// Both callers reach this with an identical `low`, so the result is identical
-/// by construction -- the whole point of factoring it out: the hint path and the
-/// binary-search path cannot diverge in the tail. The early returns
-/// (empty/NaN/below-first/above-last) run before any caller computes `low`.
-///
-/// `low` bounds: the binary-search loop invariant `low <= high <= len` combined
-/// with the post-loop guarantee `table[low].0 >= index` (or `low == len`, which
-/// the above-last guard prevents) gives `low ∈ [0, len-1]`. The `low > 0`
-/// precondition for the interpolation branch follows from the below-first guard:
-/// once we reach this function, `index >= table[0].0`, so the exact-match arm is
-/// taken for `low == 0` and the interpolation arm (which dereferences `low - 1`)
-/// only runs when `low >= 1`.
-#[inline(always)]
-fn lookup_tail(table: &[(f64, f64)], low: usize, index: f64) -> f64 {
     let i = low;
     if crate::float::approx_eq(table[i].0, index) {
         table[i].1
@@ -3264,126 +3180,6 @@ fn lookup_tail(table: &[(f64, f64)], low: usize, index: f64) -> f64 {
         // y = m*x + b
         (index - table[i - 1].0) * slope + table[i - 1].1
     }
-}
-
-/// Sentinel value stored in `lookup_memo` for tables whose x-values are not
-/// non-decreasing (unsorted). The uniqueness argument for hint-validity requires
-/// the table to be sorted; an unsorted table's hint is permanently disabled so
-/// `lookup_with_hint` always delegates to the `lookup` oracle for that table,
-/// preserving bit-exact parity with the wasm backend (which also runs `lookup`).
-///
-/// `u32::MAX` cannot be a valid hint because `lookup_with_hint` requires `h > 0`
-/// and `h < size`, and a table can have at most `u32::MAX - 1` elements before
-/// the index would overflow a `u32`. Any NaN x-value in the table also
-/// compares false in the `windows(2).all(|w| w[0].0 <= w[1].0)` sortedness
-/// check, so tables with NaN x-values are correctly classified unsorted.
-pub(crate) const LOOKUP_HINT_DISABLED: u32 = u32::MAX;
-
-/// `lookup` with a per-table "last segment" hint (GH #602). Identical to
-/// `lookup` for every `(table, index)` -- proved in two cases:
-///
-/// **Case 1: sorted table (non-decreasing x).** The hint is a pure optimization
-/// that lets a sequence of lookups at a slowly-advancing index (the C-LEARN
-/// year-indexed graphical functions, evaluated ~780k times/run) skip the O(log
-/// n) binary search and validate the previously-found segment in O(1).
-///
-/// The early returns (empty / NaN / below-first / above-last) are copied
-/// verbatim from `lookup` and run BEFORE any hint logic, so the hint never
-/// affects them. After those guards, `index` is in `[table[0].0,
-/// table[size-1].0]` and the interior `low` (the smallest `i` with
-/// `table[i].0 >= index`) is in `[0, size - 1]`.
-///
-/// Hint-validity uniqueness argument: a hint `h` is valid iff
-/// `0 < h < table.len() && table[h-1].0 < index && index <= table[h].0`. For a
-/// sorted (non-decreasing-x) table:
-/// - `table[h-1].0 < index` ⇒ the smallest `i` with `table[i].0 >= index` is
-///   strictly greater than `h-1`, i.e. `>= h`;
-/// - `index <= table[h].0` ⇒ `table[h].0 >= index`, so that smallest `i` is
-///   `<= h`.
-///
-/// Together they pin `low == h` exactly -- the hint reproduces the binary
-/// search's lower bound, so the shared `lookup_tail` runs on an identical `low`
-/// and returns the bit-identical f64.
-///
-/// On a hint miss the normal binary search runs and the found `low` is stored
-/// back into `*hint` for the next call.
-///
-/// **Case 2: unsorted table (hint == `LOOKUP_HINT_DISABLED`).** `Vm::new`
-/// classifies each table's x-sequence at construction time and stores
-/// `LOOKUP_HINT_DISABLED` for any table that fails the non-decreasing check.
-/// When the sentinel is present, this function immediately delegates to `lookup`
-/// verbatim and leaves the hint unchanged (the miss path is bypassed entirely, so
-/// it can never overwrite the sentinel and re-enable itself). This guarantees
-/// bit-exact parity with `lookup` and the wasm backend for unsorted tables.
-#[inline(never)]
-pub(crate) fn lookup_with_hint(table: &[(f64, f64)], index: f64, hint: &mut u32) -> f64 {
-    // Case 2: unsorted table -- permanently disabled hint; delegate to the
-    // lookup oracle and leave the sentinel untouched.
-    if *hint == LOOKUP_HINT_DISABLED {
-        return lookup(table, index);
-    }
-
-    if table.is_empty() {
-        return f64::NAN;
-    }
-
-    if index.is_nan() {
-        // things get wonky below if we try to binary search for NaN
-        return f64::NAN;
-    }
-
-    // check if index is below the start of the table
-    {
-        let (x, y) = table[0];
-        if index < x {
-            return y;
-        }
-    }
-
-    let size = table.len();
-    {
-        let (x, y) = table[size - 1];
-        if index > x {
-            return y;
-        }
-    }
-
-    // O(1) hint validation: if the remembered segment `h` still uniquely
-    // identifies the binary search's lower bound for this index, skip the
-    // search entirely. See the uniqueness argument in the doc comment above.
-    let h = *hint as usize;
-    if h > 0 && h < size && table[h - 1].0 < index && index <= table[h].0 {
-        return lookup_tail(table, h, index);
-    }
-
-    // Hint miss: fall back to the identical binary search `lookup` runs.
-    let mut low = 0;
-    let mut high = size;
-    while low < high {
-        let mid = low + (high - low) / 2;
-        if table[mid].0 < index {
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
-    }
-
-    // Store the found segment so the next (likely nearby) index hits the fast
-    // path. A stale hint is only ever a miss or a still-valid hint, never a
-    // wrong result, so this is unconditionally safe to persist.
-    // NOTE: this branch is only reached when *hint != LOOKUP_HINT_DISABLED
-    // (checked above), so the sentinel is never overwritten here.
-    *hint = low as u32;
-
-    lookup_tail(table, low, index)
-}
-
-/// Returns true iff `table`'s x-values are non-decreasing (the sortedness
-/// requirement for hint-validity in `lookup_with_hint`). Any NaN x-value
-/// compares false in the `<=` test, so a table with NaN x-values is correctly
-/// classified as unsorted, which disables the hint for that table.
-pub(crate) fn table_x_is_sorted(table: &[(f64, f64)]) -> bool {
-    table.windows(2).all(|w| w[0].0 <= w[1].0)
 }
 
 /// Step function lookup that returns the y-value of the next point >= x.
@@ -3604,10 +3400,6 @@ mod lookup_tests {
         assert!(lookup(&table, f64::NAN).is_nan());
     }
 }
-
-#[cfg(test)]
-#[path = "vm_lookup_hint_tests.rs"]
-mod lookup_hint_tests;
 
 #[cfg(test)]
 mod apply_tests {
