@@ -289,6 +289,17 @@ pub struct Vm {
     // returns the fallback during the initial timestep even when
     // RK stages advance TIME away from INITIAL_TIME.
     prev_values_valid: bool,
+    // Per-graphical-function "last segment" memo for scalar Interpolate-mode
+    // LOOKUPs (GH #602). Indexed by (module_idx, gf_idx), where module_idx is
+    // the index into sliced_sim.modules and gf_idx = base_gf + element_offset
+    // indexes that module's context.graphical_functions. Each entry remembers
+    // the binary-search lower bound the last LOOKUP into that table found, so a
+    // sequence of lookups at a slowly-advancing index (C-LEARN's year-indexed
+    // tables) validates the segment in O(1) instead of re-running the search.
+    // The memo is a pure HINT: a stale entry is only ever a miss or a still-valid
+    // hint, never a wrong result (see lookup_with_hint), so reset() does not
+    // clear it.
+    lookup_memo: Vec<Vec<u32>>,
 }
 
 #[derive(Clone)]
@@ -369,6 +380,10 @@ struct EvalState<'a> {
     // reading prev_values. True until the first prev_values snapshot
     // has been taken, then false for the rest of the simulation.
     use_prev_fallback: bool,
+    // Per-graphical-function "last segment" hint, indexed by
+    // (module_idx, gf_idx); see Vm::lookup_memo. Threaded mutably so the scalar
+    // Interpolate-mode Lookup opcode can validate/update the hint in O(1).
+    lookup_memo: &'a mut Vec<Vec<u32>>,
 }
 
 impl CompiledSlicedSimulation {
@@ -614,6 +629,17 @@ impl Vm {
 
         let sliced_sim = CompiledSlicedSimulation::build(&sim.modules, &sim.root);
 
+        // One per-table hint slot for every graphical function of every module,
+        // addressed as lookup_memo[module_idx][gf_idx]. Initialized to 0, which
+        // is never a valid hint (lookup_with_hint requires 0 < h), so the first
+        // lookup into each table necessarily takes the binary-search path and
+        // seeds the hint.
+        let lookup_memo: Vec<Vec<u32>> = sliced_sim
+            .modules
+            .iter()
+            .map(|m| vec![0u32; m.context.graphical_functions.len()])
+            .collect();
+
         Ok(Vm {
             specs: sim.specs,
             offsets: sim.offsets,
@@ -637,6 +663,7 @@ impl Vm {
             stock_offsets,
             rk_scratch,
             prev_values_valid: false,
+            lookup_memo,
         })
     }
 
@@ -684,6 +711,7 @@ impl Vm {
             // prev_values snapshot is taken.  Tracked in Vm so that
             // segmented run_to() calls don't reset it.
             use_prev_fallback: !self.prev_values_valid,
+            lookup_memo: &mut self.lookup_memo,
         };
 
         // Macro for the save/advance logic shared by all integration methods.
@@ -1155,6 +1183,7 @@ impl Vm {
             prev_values: &mut self.prev_values,
             // prev_values hasn't been populated yet during initials.
             use_prev_fallback: true,
+            lookup_memo: &mut self.lookup_memo,
         };
 
         Self::eval_initials(
@@ -1339,6 +1368,7 @@ impl Vm {
         let initial_values = state.initial_values;
         let mut prev_values = &mut *state.prev_values;
         let use_prev_fallback = state.use_prev_fallback;
+        let mut lookup_memo = &mut *state.lookup_memo;
 
         let mut condition = false;
         let mut subscript_index: SmallVec<[(u16, u16); 4]> = SmallVec::new();
@@ -1449,6 +1479,7 @@ impl Vm {
                         initial_values,
                         prev_values,
                         use_prev_fallback,
+                        lookup_memo,
                     };
                     // Resolve the child module by precomputed index instead of
                     // reconstructing + SipHashing a (model_name, input_set) key.
@@ -1490,6 +1521,7 @@ impl Vm {
                         initial_values: _,
                         prev_values: pv,
                         use_prev_fallback: _,
+                        lookup_memo: lm,
                     } = child_state;
                     stack = s;
                     temp_storage = ts;
@@ -1497,6 +1529,7 @@ impl Vm {
                     iter_stack = is_;
                     broadcast_stack = bs;
                     prev_values = pv;
+                    lookup_memo = lm;
                 }
                 Opcode::AssignCurr { off } => {
                     curr[module_off + *off as usize] = stack.pop();
@@ -1779,7 +1812,18 @@ impl Vm {
                         let gf_idx = (*base_gf as usize) + (element_offset as usize);
                         let gf = &context.graphical_functions[gf_idx];
                         let result = match mode {
-                            LookupMode::Interpolate => lookup(gf, lookup_index),
+                            // Interpolate is the hot, ~780k-eval/run path on
+                            // C-LEARN's slowly-advancing year-indexed tables; the
+                            // per-(module, gf) hint skips most binary searches.
+                            // It is a pure optimization: lookup_with_hint returns
+                            // the exact f64 lookup() would (GH #602). Forward and
+                            // Backward stay unhinted -- they are rare and not the
+                            // perf target.
+                            LookupMode::Interpolate => lookup_with_hint(
+                                gf,
+                                lookup_index,
+                                &mut lookup_memo[module_idx][gf_idx],
+                            ),
                             LookupMode::Forward => lookup_forward(gf, lookup_index),
                             LookupMode::Backward => lookup_backward(gf, lookup_index),
                         };
@@ -3171,6 +3215,24 @@ pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
         }
     }
 
+    lookup_tail(table, low, index)
+}
+
+/// The shared interpolation tail of `lookup` / `lookup_with_hint`: given the
+/// binary-search lower bound `low` (the smallest `i` with `table[i].0 >= index`),
+/// either snap to `table[low]` on an exact hit or linearly interpolate between
+/// `table[low-1]` and `table[low]`.
+///
+/// Both callers reach this with an identical `low`, so the result is identical
+/// by construction -- the whole point of factoring it out: the hint path and the
+/// binary-search path cannot diverge in the tail. The early returns
+/// (empty/NaN/below-first/above-last) run before any caller computes `low`, so
+/// `low` is always in `[0, table.len() - 1]` and `low - 1` is in bounds whenever
+/// the interpolation branch is taken (it is taken only when `table[low].0 !=
+/// index`, which for a below-first-guarded `index >= table[0].0` implies
+/// `low > 0`).
+#[inline(always)]
+fn lookup_tail(table: &[(f64, f64)], low: usize, index: f64) -> f64 {
     let i = low;
     if crate::float::approx_eq(table[i].0, index) {
         table[i].1
@@ -3180,6 +3242,91 @@ pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
         // y = m*x + b
         (index - table[i - 1].0) * slope + table[i - 1].1
     }
+}
+
+/// `lookup` with a per-table "last segment" hint (GH #602). Behaviourally
+/// identical to `lookup` for every `(table, index)` -- the hint is a pure
+/// optimization HINT that lets a sequence of lookups at a slowly-advancing index
+/// (the C-LEARN year-indexed graphical functions, evaluated ~780k times/run at a
+/// monotonically-advancing TIME) skip the O(log n) binary search and validate
+/// the previously-found segment in O(1).
+///
+/// The early returns (empty / NaN / below-first / above-last) are copied
+/// verbatim from `lookup` and run BEFORE any hint logic, so the hint never
+/// affects them. After those guards, `index` is in `[table[0].0,
+/// table[size-1].0]` and the interior `low` (the smallest `i` with
+/// `table[i].0 >= index`) is in `[0, size - 1]`.
+///
+/// Hint-validity uniqueness argument: a hint `h` is valid iff
+/// `0 < h < table.len() && table[h-1].0 < index && index <= table[h].0`. For a
+/// sorted (non-decreasing-x) table:
+/// - `table[h-1].0 < index` ⇒ the smallest `i` with `table[i].0 >= index` is
+///   strictly greater than `h-1`, i.e. `>= h`;
+/// - `index <= table[h].0` ⇒ `table[h].0 >= index`, so that smallest `i` is
+///   `<= h`.
+///
+/// Together they pin `low == h` exactly -- the hint reproduces the binary
+/// search's lower bound, so the shared `lookup_tail` runs on an identical `low`
+/// and returns the bit-identical f64. The `0 < h` requirement excludes the
+/// `low == 0` case (which only occurs for `index == table[0].0` exactly, given
+/// the below-first guard); that case simply misses the hint and re-searches --
+/// correctness is unaffected, only a rare missed fast path.
+///
+/// On a hint miss the normal binary search runs and the found `low` is stored
+/// back into `*hint` for the next call.
+#[inline(never)]
+pub(crate) fn lookup_with_hint(table: &[(f64, f64)], index: f64, hint: &mut u32) -> f64 {
+    if table.is_empty() {
+        return f64::NAN;
+    }
+
+    if index.is_nan() {
+        // things get wonky below if we try to binary search for NaN
+        return f64::NAN;
+    }
+
+    // check if index is below the start of the table
+    {
+        let (x, y) = table[0];
+        if index < x {
+            return y;
+        }
+    }
+
+    let size = table.len();
+    {
+        let (x, y) = table[size - 1];
+        if index > x {
+            return y;
+        }
+    }
+
+    // O(1) hint validation: if the remembered segment `h` still uniquely
+    // identifies the binary search's lower bound for this index, skip the
+    // search entirely. See the uniqueness argument in the doc comment above.
+    let h = *hint as usize;
+    if h > 0 && h < size && table[h - 1].0 < index && index <= table[h].0 {
+        return lookup_tail(table, h, index);
+    }
+
+    // Hint miss: fall back to the identical binary search `lookup` runs.
+    let mut low = 0;
+    let mut high = size;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if table[mid].0 < index {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+
+    // Store the found segment so the next (likely nearby) index hits the fast
+    // path. A stale hint is only ever a miss or a still-valid hint, never a
+    // wrong result, so this is unconditionally safe to persist.
+    *hint = low as u32;
+
+    lookup_tail(table, low, index)
 }
 
 /// Step function lookup that returns the y-value of the next point >= x.
@@ -3398,6 +3545,220 @@ mod lookup_tests {
         assert_eq!(2.0, lookup(&table, 5.0));
         // NaN index: NaN result.
         assert!(lookup(&table, f64::NAN).is_nan());
+    }
+}
+
+#[cfg(test)]
+mod lookup_hint_tests {
+    use super::*;
+
+    /// Re-derive the binary-search lower bound `low` independently of any hint:
+    /// the smallest `i` such that `table[i].0 >= index`, computed only on the
+    /// interior path (after the empty/NaN/below-first/above-last guards). Used
+    /// by the proptest to assert the hint equals the search's lower bound after
+    /// an interior-path call. Returns `None` when an early return fired (so the
+    /// hint is not updated).
+    fn interior_low(table: &[(f64, f64)], index: f64) -> Option<usize> {
+        if table.is_empty() || index.is_nan() {
+            return None;
+        }
+        if index < table[0].0 {
+            return None;
+        }
+        let size = table.len();
+        if index > table[size - 1].0 {
+            return None;
+        }
+        let mut low = 0;
+        let mut high = size;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if table[mid].0 < index {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        Some(low)
+    }
+
+    /// The hinted lookup must return EXACTLY what `lookup` returns for every
+    /// (table, index), regardless of the hint's prior value. This is the
+    /// bit-identity contract.
+    #[test]
+    fn hint_is_bit_identical_across_hints() {
+        let table = vec![(0.0, 0.0), (1.0, 10.0), (2.0, 20.0), (3.0, 30.0)];
+        let indices = [-1.0, 0.0, 0.5, 1.0, 1.5, 2.0, 2.99, 3.0, 5.0];
+        // Try every possible starting hint (including out-of-range/stale ones).
+        for start_hint in 0u32..=(table.len() as u32 + 2) {
+            for &idx in &indices {
+                let mut hint = start_hint;
+                let hinted = lookup_with_hint(&table, idx, &mut hint);
+                let plain = lookup(&table, idx);
+                assert_eq!(
+                    hinted.to_bits(),
+                    plain.to_bits(),
+                    "mismatch idx={idx} start_hint={start_hint}"
+                );
+            }
+        }
+    }
+
+    /// hint == 0 is never a valid hint (the shortcut requires 0 < h), so a 0
+    /// hint always misses and falls back to binary search.
+    #[test]
+    fn hint_zero_edge_case() {
+        let table = vec![(0.0, 0.0), (1.0, 10.0), (2.0, 20.0)];
+        let mut hint = 0;
+        // index exactly at the first breakpoint => low == 0, which the hint
+        // shortcut never matches; the miss path stores low (0) back.
+        assert_eq!(lookup_with_hint(&table, 0.0, &mut hint), 0.0);
+        assert_eq!(hint, 0);
+        // A subsequent interior lookup correctly updates the hint to its low.
+        assert_eq!(lookup_with_hint(&table, 1.5, &mut hint), 15.0);
+        assert_eq!(hint, 2);
+    }
+
+    /// hint == len-1 (the last interior segment) is valid for an index in the
+    /// final segment and reused on the next call.
+    #[test]
+    fn hint_last_segment_edge_case() {
+        let table = vec![(0.0, 0.0), (1.0, 10.0), (2.0, 20.0)];
+        let mut hint = 0;
+        assert_eq!(lookup_with_hint(&table, 1.5, &mut hint), 15.0);
+        assert_eq!(hint, 2); // last interior segment
+        // Re-use the same segment: validity is table[1].0 < 1.7 <= table[2].0.
+        assert_eq!(lookup_with_hint(&table, 1.7, &mut hint), 17.0);
+        assert_eq!(hint, 2);
+    }
+
+    /// A hint pointing into a duplicate-x plateau must still produce the
+    /// bit-identical value of `lookup` (which resolves the plateau via its own
+    /// binary search lower bound + approx_eq snap).
+    #[test]
+    fn hint_duplicate_x_plateau() {
+        // Plateau: x == 1.0 repeated. lookup's binary search lower bound is the
+        // first of the duplicates; approx_eq then snaps to table[low].1.
+        let table = vec![(0.0, 0.0), (1.0, 10.0), (1.0, 11.0), (2.0, 20.0)];
+        for start_hint in 0u32..=5 {
+            let mut hint = start_hint;
+            let hinted = lookup_with_hint(&table, 1.0, &mut hint);
+            let plain = lookup(&table, 1.0);
+            assert_eq!(hinted.to_bits(), plain.to_bits(), "start_hint={start_hint}");
+        }
+    }
+
+    /// index exactly equal to table[h].0 and table[h-1].0 boundary behavior.
+    #[test]
+    fn hint_index_exactly_on_breakpoints() {
+        let table = vec![(0.0, 0.0), (1.0, 10.0), (2.0, 20.0)];
+        // index == table[h].0 (upper boundary of segment h): hint h is valid
+        // because table[h-1].0 < index <= table[h].0.
+        let mut hint = 2;
+        assert_eq!(lookup_with_hint(&table, 2.0, &mut hint), 20.0);
+        // index == table[h-1].0 (lower boundary): hint h is INVALID
+        // (table[h-1].0 < index is false), so it misses and re-searches; the
+        // correct lower bound for index == table[1].0 is low == 1.
+        let mut hint = 2;
+        assert_eq!(lookup_with_hint(&table, 1.0, &mut hint), 10.0);
+        assert_eq!(hint, 1);
+    }
+
+    /// Size-1 and size-2 tables: every index lands in an early return for
+    /// size-1 (index == the sole x snaps; otherwise below-first/above-last),
+    /// so the hint never updates.
+    #[test]
+    fn hint_tiny_tables() {
+        let one = vec![(5.0, 50.0)];
+        let mut hint = 7;
+        assert_eq!(
+            lookup_with_hint(&one, 5.0, &mut hint).to_bits(),
+            lookup(&one, 5.0).to_bits()
+        );
+        assert_eq!(
+            lookup_with_hint(&one, 4.0, &mut hint).to_bits(),
+            lookup(&one, 4.0).to_bits()
+        );
+        assert_eq!(
+            lookup_with_hint(&one, 6.0, &mut hint).to_bits(),
+            lookup(&one, 6.0).to_bits()
+        );
+
+        let two = vec![(0.0, 0.0), (10.0, 100.0)];
+        let mut hint = 0;
+        assert_eq!(lookup_with_hint(&two, 5.0, &mut hint), 50.0);
+        assert_eq!(hint, 1);
+        assert_eq!(lookup_with_hint(&two, 7.0, &mut hint), 70.0);
+        assert_eq!(hint, 1);
+    }
+
+    use proptest::prelude::*;
+
+    /// Generate a sorted (non-decreasing-x) table including duplicate x values
+    /// and plateaus, sizes 1..=12.
+    fn sorted_table_strategy() -> impl Strategy<Value = Vec<(f64, f64)>> {
+        prop::collection::vec((0i32..8, -20i32..20), 1..13).prop_map(|pairs| {
+            // Sort by x to get a non-decreasing-x table (duplicates allowed:
+            // the small x-domain (0..8) over up to 12 points guarantees them).
+            let mut pairs = pairs;
+            pairs.sort_by_key(|&(x, _)| x);
+            pairs
+                .into_iter()
+                .map(|(x, y)| (x as f64, y as f64))
+                .collect()
+        })
+    }
+
+    /// Generate an index sequence mixing slowly-increasing, decreasing, and
+    /// random values, including out-of-range and exact-breakpoint hits.
+    fn index_sequence_strategy() -> impl Strategy<Value = Vec<f64>> {
+        prop::collection::vec(
+            prop_oneof![
+                // exact integer breakpoints + out-of-range (covers below-first,
+                // above-last, exact-hit)
+                (-2i32..10).prop_map(|x| x as f64),
+                // half-step interior indices (interpolation path)
+                (-4i32..20).prop_map(|x| x as f64 / 2.0),
+            ],
+            1..40,
+        )
+    }
+
+    proptest! {
+        /// Carrying a hint across calls, the hinted lookup is bit-for-bit
+        /// identical to `lookup` for every call, AND after each call the hint
+        /// equals the binary search's lower bound whenever the interior path
+        /// was taken (an early return leaves the hint unchanged).
+        #[test]
+        fn hint_matches_lookup_and_tracks_low(
+            table in sorted_table_strategy(),
+            indices in index_sequence_strategy(),
+        ) {
+            let mut hint: u32 = 0;
+            for &idx in &indices {
+                let hint_before = hint;
+                let hinted = lookup_with_hint(&table, idx, &mut hint);
+                let plain = lookup(&table, idx);
+                // Bit-identical (handles NaN, +/-0.0, etc.).
+                prop_assert_eq!(
+                    hinted.to_bits(),
+                    plain.to_bits(),
+                    "idx={} table={:?}",
+                    idx,
+                    table
+                );
+                match interior_low(&table, idx) {
+                    Some(low) => {
+                        // Interior path: hint must equal the search lower bound.
+                        prop_assert_eq!(hint as usize, low, "idx={} table={:?}", idx, table);
+                    }
+                    None => {
+                        // Early return: hint left unchanged.
+                        prop_assert_eq!(hint, hint_before, "idx={} table={:?}", idx, table);
+                    }
+                }
+            }
+        }
     }
 }
 
