@@ -463,7 +463,14 @@ So in **exhaustive** mode the loop-score equation overrides each `x → m` modul
 link with a **per-exit-port pathway selection**. The exit port is read off the
 NEXT loop link `m → y` (the unique `m·port` `y` reads, or `y`'s matching
 `ModuleInput.src` when `y` is itself a module); the entry port is `m`'s
-`ModuleInput` whose normalized `src` is `x`. The parent recomputes the
+`ModuleInput` whose normalized `src` is `x`. Both are *unique-match* lookups:
+if `y` reads two output ports, or if `x` feeds two input ports of `m`
+(`x → m.a` AND `x → m.b` collapse to one `x → m` edge), the port is ambiguous
+and the override is skipped -- the base composite link score (a documented
+first-matched-port approximation) stands rather than the recompute arbitrarily
+picking the first matching port (GH #698 / PR #705 r3353459409). The discovery
+recompute `recompute_module_input_edge_series` applies the identical
+ambiguous-entry fallback. The parent recomputes the
 sub-model's pathway map with the SAME salsa-cached inputs the sub-model's own
 emission uses (`model_causal_edges` + the sorted `find_model_output_ports`), so
 the recomputed pathway indices match the emitted `$⁚ltm⁚path⁚{entry}⁚{idx}`

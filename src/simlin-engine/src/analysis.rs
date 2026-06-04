@@ -1276,4 +1276,182 @@ mod tests {
             loop_through_modules.polarity, loop_through_modules.variables
         );
     }
+
+    /// An aux input port (`can_be_module_input`) seeded to 0.
+    fn input_port(ident: &str) -> datamodel::Variable {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                can_be_module_input: true,
+                ..datamodel::Compat::default()
+            },
+        })
+    }
+
+    /// GH #698 / PR #705 r3353459409: when one parent variable `x` is wired to
+    /// MORE THAN ONE input port of module `m` (`x -> m.a` AND `x -> m.b`), the
+    /// collapsed causal edge is just `x -> m` and the entry port is genuinely
+    /// ambiguous. The per-exit-port recompute must treat that as ambiguous and
+    /// fall back to the base composite link score (the documented pre-existing
+    /// approximation), mirroring the exit-port helper's multi-match -> None
+    /// semantics -- NOT silently pick the first matching input port and
+    /// recompute against its (possibly wrong-signed) pathway.
+    ///
+    /// `dual_input` sub-model: input ports `a` (first reference) and `b`,
+    /// outputs `early = a` (sorts first) and `late = 0 - a`. The loop reads
+    /// `m·late`; a side var reads `m·early` so both are output ports. With the
+    /// first-match bug the recompute would (a) pick entry port `a` and (b)
+    /// recompute the `x -> m` edge against the `late` pathway (sign -),
+    /// diverging from the base composite for port `a`, which max-abs-selects
+    /// across `a`'s pathways and tie-breaks to the first sorted output `early`
+    /// (sign +). The fix makes the recompute decline (ambiguous entry), so the
+    /// loop keeps the base composite -- the SAME score exhaustive mode reports
+    /// for the same edge. We assert discovery and exhaustive AGREE on the
+    /// loop's polarity (both fall back identically).
+    fn dual_input_feed_project() -> datamodel::Project {
+        use crate::testutils::{x_aux, x_flow, x_model, x_stock};
+
+        let dual = x_model(
+            "dual_input",
+            vec![
+                input_port("a"),
+                input_port("b"),
+                x_aux("early", "a", None),
+                x_aux("late", "0 - a", None),
+            ],
+        );
+
+        datamodel::Project {
+            name: "dual_input_feed".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 8.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                x_model(
+                    "main",
+                    vec![
+                        x_stock("s", "100", &["growth"], &[], None),
+                        // x = s feeds BOTH input ports of m -- ambiguous entry.
+                        module_instance("m", "dual_input", &[("s", "m.a"), ("s", "m.b")]),
+                        x_flow("growth", "m.late * 0.1", None),
+                        x_aux("watcher", "m.early", None),
+                    ],
+                ),
+                dual,
+            ],
+            source: None,
+            ai_information: None,
+        }
+    }
+
+    /// The settled value of one `$⁚ltm⁚link_score⁚{name}` series, compiled in
+    /// the given LTM mode. The base `s→m` link score is the composite for the
+    /// (first-matched) input port -- the documented fallback the ambiguous-entry
+    /// recompute must leave in place.
+    fn settled_link_score(project: &datamodel::Project, discovery: bool, name: &str) -> f64 {
+        let mut db = SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, project, None);
+        crate::db::set_project_ltm_enabled(&mut db, sync.project, true);
+        if discovery {
+            crate::db::set_project_ltm_discovery_mode(&mut db, sync.project, true);
+        }
+        let compiled =
+            crate::db::compile_project_incremental(&db, sync.project, "main").expect("compile");
+        let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+        vm.run_to_end().expect("run");
+        let results = vm.into_results();
+        let off = results.offsets[&crate::common::Ident::new(name)];
+        let last = results.step_count - 1;
+        results.data[last * results.step_size + off]
+    }
+
+    #[test]
+    fn analyze_model_ambiguous_entry_port_falls_back_to_composite() {
+        let project = dual_input_feed_project();
+        let base_link = "$\u{205A}ltm\u{205A}link_score\u{205A}s\u{2192}m";
+
+        // The base `s→m` link score is the composite for port `a`, which
+        // max-abs-selects across `a`'s pathways and tie-breaks to the first
+        // sorted output (`early`, +1) -- NOT the loop's `late` exit port (-1).
+        // The ambiguous-entry recompute must leave this in place; a first-match
+        // recompute against the `late` pathway would flip it to -1.
+        let base = settled_link_score(&project, true, base_link);
+        assert!(
+            base > 0.0,
+            "fixture precondition: base s→m composite must be +1 (port a, early tie-break), got {base}"
+        );
+
+        // Discovery via the production analyze_model path.
+        let (mut db, sp) = synced_db(&project);
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
+        let loop_through_m = analysis
+            .loop_dominance
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "m"))
+            .expect("a discovered loop must traverse module m");
+        let discovery_sign = loop_through_m
+            .importance
+            .iter()
+            .rev()
+            .find(|s| s.is_finite() && **s != 0.0)
+            .copied()
+            .expect("loop must have a finite non-zero importance");
+
+        // s feeds BOTH m.a and m.b, so the `s -> m` entry port is ambiguous.
+        // The recompute must decline and leave the base composite (+) in place,
+        // so the loop is reinforcing -- not the `late`-pathway sign (-) a
+        // first-match recompute would substitute. m·late·0.1 -> s and
+        // s -> m·a -> late are the only other (positive) edges, so the loop
+        // sign follows the s→m edge.
+        assert!(
+            discovery_sign > 0.0,
+            "discovery loop sign {discovery_sign} must follow the base composite (+) on an \
+             ambiguous multi-input-feed edge; a first-match recompute against the `late` \
+             pathway wrongly flipped it. PR #705 r3353459409 / GH #698."
+        );
+
+        // Exhaustive must agree (its twin override also declines on ambiguity).
+        let exhaustive_loop = {
+            let mut db = SimlinDb::default();
+            let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+            crate::db::set_project_ltm_enabled(&mut db, sync.project, true);
+            let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+                .expect("exhaustive compile");
+            let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+            vm.run_to_end().expect("run");
+            let results = vm.into_results();
+            let loop_key = results
+                .offsets
+                .keys()
+                .find(|k| {
+                    k.as_str()
+                        .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+                })
+                .expect("exhaustive mode must emit a loop score")
+                .clone();
+            let off = results.offsets[&loop_key];
+            let last = results.step_count - 1;
+            results.data[last * results.step_size + off]
+        };
+        assert!(
+            exhaustive_loop > 0.0,
+            "exhaustive loop score {exhaustive_loop} must also follow the base composite (+); the \
+             exhaustive per-exit-port override must decline on the same ambiguous entry. \
+             PR #705 r3353459409 / GH #698."
+        );
+    }
 }

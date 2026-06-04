@@ -457,22 +457,29 @@ fn compute_module_link_overrides(
             }
 
             // Entry port: the module's input whose (normalized) src equals
-            // `from` -- the same match `module_link_score_equation` makes.
+            // `from` -- the same match `module_link_score_equation` makes. When
+            // `from` feeds MORE THAN ONE input port of the module, the collapsed
+            // `from -> module` edge is genuinely ambiguous (no single entry
+            // pathway to override against), so skip it and leave the base link
+            // score (its composite reference) in place -- mirroring
+            // `module_exit_port_for_reader`'s multi-match -> None semantics and
+            // the discovery-side `recompute_module_input_edge_series` (GH #698 /
+            // PR #705 r3353459409).
             let module_var = reconstruct_single_variable(db, model, project, module_name);
             let Some(crate::variable::Variable::Module { inputs, .. }) = module_var else {
                 continue;
             };
             let from_ident = Ident::<Canonical>::new(from);
-            let entry_port = inputs.iter().find_map(|inp| {
-                if normalize_module_ref(&inp.src) == from_ident {
-                    Some(inp.dst.as_str().to_string())
-                } else {
-                    None
-                }
-            });
-            let Some(entry_port) = entry_port else {
+            let mut matching = inputs
+                .iter()
+                .filter(|inp| normalize_module_ref(&inp.src) == from_ident);
+            let Some(entry_port) = matching.next().map(|inp| inp.dst.as_str().to_string()) else {
                 continue;
             };
+            if matching.next().is_some() {
+                // A second input port is also fed by `from`: ambiguous entry.
+                continue;
+            }
 
             // Exit port from the next link `(m → y)`.
             let y = strip_subscript(next.to.as_str());

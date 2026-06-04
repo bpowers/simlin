@@ -2050,8 +2050,12 @@ fn discovery_module_exit_port(
 /// `m → y` identifies the exit port. Returns the recomputed signed series, or
 /// `None` to leave the base (composite) series in place when:
 /// * `m` is not a module instance with a recursively-built sub-graph;
-/// * the entry or exit port cannot be determined (the base composite is the
-///   honest fallback -- e.g. an ambiguous multi-output reader);
+/// * the entry port is ambiguous -- `x` feeds MORE THAN ONE input port of `m`,
+///   so the collapsed `x → m` edge has no single entry pathway to recompute
+///   against (the base composite, itself a documented first-matched-port
+///   approximation, is the honest fallback; mirrors the exit-port helper's and
+///   the exhaustive twin's multi-match → ambiguous semantics);
+/// * the exit port cannot be determined (e.g. an ambiguous multi-output reader);
 /// * the sub-model's pathway map yields no pathway from entry to exit.
 ///
 /// The pathway selection mirrors `db::ltm::compute_module_link_overrides`: the
@@ -2080,17 +2084,27 @@ fn recompute_module_input_edge_series(
     let module_graph = causal_graph.module_graph(module_name)?;
 
     // Entry port: `m`'s ModuleInput whose normalized src is `x` (== link.from).
+    // When `x` feeds MORE THAN ONE input port of `m` (`x -> m.a` AND `x -> m.b`)
+    // the collapsed `x -> m` edge is genuinely ambiguous: there is no single
+    // entry pathway to recompute against. Decline (return `None`) so the loop
+    // keeps the base composite link score -- the documented pre-existing
+    // approximation -- rather than silently picking the first matching port and
+    // recomputing against its (possibly wrong-signed) pathway. This mirrors the
+    // multi-match -> ambiguous semantics of `discovery_module_exit_port` and the
+    // exhaustive twin `compute_module_link_overrides` (GH #698 / PR #705
+    // r3353459409).
     let module_var = causal_graph.variables().get(module_name)?;
     let Variable::Module { inputs, .. } = module_var else {
         return None;
     };
-    let entry_port = inputs.iter().find_map(|inp| {
-        if normalize_module_ref(&inp.src) == link.from {
-            Some(inp.dst.clone())
-        } else {
-            None
-        }
-    })?;
+    let mut matching = inputs
+        .iter()
+        .filter(|inp| normalize_module_ref(&inp.src) == link.from);
+    let entry_port = matching.next()?.dst.clone();
+    if matching.next().is_some() {
+        // A second input port is also fed by `x`: ambiguous entry, fall back.
+        return None;
+    }
 
     // Exit port from the next link `m → y`.
     let next = &links[(edge_idx + 1) % n];
