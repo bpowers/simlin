@@ -1,6 +1,7 @@
 # Engine performance: profile and optimization opportunities
 
-Status: analysis + first clear wins landed. 2026-05-19.
+Status: analysis + two rounds of wins landed. Round 1 2026-05-19; round 2
+(constant folding + linear-run fast paths, below) 2026-06-03.
 
 This documents an empirical CPU/memory profile of **compiling and simulating the
 C-LEARN hero model** (the largest model we have: ~53k MDL lines / 1.4 MB, 934
@@ -237,6 +238,51 @@ Portable options:
 - Revisit explicit tail-call dispatch if/when `become` stabilizes.
 - R2 (register VM) reduces dispatch count more than any dispatch-mechanism change.
 
+### Round 2 wins (2026-06-03, measured on Apple M-series / Asahi)
+
+Baseline on this machine: C-LEARN `run_to_end` 151 ms (1000 Euler steps),
+WORLD3-03 1.3 ms. Note the machine difference from the round-1 numbers: on
+this core the run is throughput-bound (IPC ~4.5, branch-miss rate ~1.0%), not
+mispredict-bound like the Ryzen profile above -- but the lever is the same
+(less executed work per step).
+
+**Constant folding (`compiler::fold`, run −2%, bytecode −5%).** The flow
+program re-evaluated every `literal op literal` subtree per step -- 792
+`BinConstConst` sites on C-LEARN, including one per negative literal (unary
+minus lowers to `0 - x`). A fold pass in `Var::new` (the chokepoint both the
+monolithic and salsa lowering paths funnel through) collapses constant-only
+subtrees at compile time, computing results with the VM's own
+`eval_op2`/`is_truthy` so folds are bit-identical by construction. Only
+IEEE-exact ops fold; `^` (libm `powf`) and transcendental builtins stay
+runtime so compiled artifacts (and the wasm blob) remain platform-
+deterministic. Folding also cascades into deeper 3-address fusion
+(`BinVarConst` 726 -> 1034). WORLD3 has no foldable sites (unchanged).
+
+**Linear-run fast paths (run −7%).** `RuntimeView::dense_linear_start()` --
+"no sparse mappings, strides are row-major for the current dims", i.e.
+`is_contiguous` minus the `offset == 0` requirement -- keys three fast paths:
+`offset_for_iter_index` (direct `start + k`), the `BeginIter` precompute
+decision (offset slices no longer precompute a `Vec` of offsets), and a
+slice-fold fast path in `reduce_view` (same row-major order, bit-identical
+reductions). `vector_elm_map` (168 sites on C-LEARN, the largest
+`flat_offset` caller at ~4% of the run) hoists the offset view's addressing
+out of its per-element loop. `RuntimeView::same_shape()` replaces the
+SmallVec `PartialEq` in `LoadIterViewTop`/`LoadIterViewAt` (an out-of-line
+memcmp per element per site, ~2% of the run) with a branchless ≤4-wide
+compare.
+
+**Cumulative round 2: C-LEARN run 151 -> ~137 ms (−9%).** Both rounds
+together (vs. the 342 ms pre-round-1 baseline, different machine): the
+per-step program shrank from 34,673 to ~23,000 dispatched opcodes.
+
+**Negative result (reinforces #604).** Rewriting `vector_elm_map`'s
+strict-slice base as a precomputed affine dot product (provably equivalent,
+structurally less work per element) measured a consistent ~5 ms *regression*
+-- enlarging the function perturbed the codegen of the giant inlined
+`eval_bytecode`. Treat every eval-loop-adjacent "improvement" as
+unproven until measured; structural arguments do not survive contact with
+the inliner.
+
 ### R4. `RuntimeView` allocation + `flat_offset` (~20% of post-win run)
 
 `PushVarView`/`PushTempView` rebuild `SmallVec`s (dims, strides, dim_ids) on every
@@ -311,8 +357,29 @@ re-derivation. (b) is broader but touches many call sites.
 3. ~~**R2 (3-address binop fusion)**~~ — DONE. Flow opcodes −23.5%, run −6.8% on
    C-LEARN; a late `fuse_three_address` pass at Vm::new (the `CompiledSimulation`
    stays symbolizable). A full register VM would cut more but is a large rewrite.
-4. **R4 (RuntimeView)** — now the largest remaining run lever for arrayed models;
-   the ~10% `flat_offset` cost is a per-element `SmallVec` rebuild + sparse
-   search, not bounds checks.
+4. ~~**R4 (RuntimeView)**~~ — largely DONE via round 2's `dense_linear_start`
+   fast paths (`flat_offset` 8.2% -> ~4% of a smaller run); the residual is
+   the strict-slice `vector_elm_map` base and `offset_for_iter_index`'s
+   decompose path for shape-equal non-linear views (a per-loop access-plan
+   cache is the next idea there — and see the round-2 negative result before
+   attempting it).
 5. **R3 superinstructions** — incremental dispatch wins, low risk.
 6. **C2 / C3** — only if incremental-compile latency still bites after A+B.
+
+Larger run-side swings identified during round 2, unprioritized and
+unmeasured (file/see issues):
+
+- **Lazy `If`** — `SetCond`/`If` evaluate BOTH branches every step (3,046
+  `If` sites on C-LEARN, ~10% of opcodes counting the condition chains).
+  Skipping the untaken branch needs forward jumps (codegen + stack-depth
+  validation + peephole/fusion jump maps + wasmgen parity): a real design
+  effort.
+- **Time-invariant hoisting** — constants are re-assigned and
+  constant-derived auxes re-computed every step; a "constant phase" computed
+  once per `run_to` (re-run after `set_value`) could skip them. Needs a
+  measurement of what fraction of the per-step program is time-invariant,
+  and care with results presentation (each saved chunk must still carry the
+  values).
+- **Lookup last-segment memo** (#602) — C-LEARN's year-indexed tables are
+  evaluated at slowly-advancing TIME; remembering the last segment per GF
+  would skip most binary searches.
