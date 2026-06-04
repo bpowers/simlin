@@ -300,6 +300,34 @@ interleaved-A/B-worktree protocol caught a sub-agent's "machine variation"
 rationalization; never accept a perf delta explanation without an
 interleaved A/B on freshly built binaries.
 
+**Negative result #3: #712 B2 invariant-prefix execution (implemented,
+preserved on `experiment-712-b2-execution`, not merged).** Stage B1 (the
+classifier + runlist partition, KEPT -- behavior- and perf-neutral, +0.56%
+compile) showed 45.4% of C-LEARN's root flow opcodes write run-invariant
+slots. The B2 execution stage (split at `flows_invariant_opcode_len`,
+invariant prefix evaluated once per `run_to`, per-step scatter of 868 slots
+from a snapshot) is complete and gate-green -- VDF byte-exactness, wasm
+parity, zero-alloc all hold -- but did not clear the keep bar:
+
+- **The static-opcode share was a bad proxy.** Removing ~45% of the root
+  flow stream's static opcodes from per-step execution removed only **−1.3%
+  of executed instructions**: C-LEARN's per-step work is dominated by module
+  evaluations and per-element array/iteration loops (which re-execute their
+  opcodes many times), not the root scalar stream the prefix lives in.
+- **The wall-clock effect is below the build-layout noise floor.** Two
+  independent build pairs measured opposite signs (+3.5% vs −1.0% on
+  C-LEARN): two builds of the *same base source* differed by ~6 ms (135.9
+  vs 142.2). Interleaved A/B controls machine conditions, but each *build*
+  samples a ±2-4% binary-layout lottery; an effect of ~1% cannot be
+  resolved by one build pair. World3 trended slightly negative both times.
+- Branch-misses fell 8.4%, so a mispredict-bound core (the round-1 Ryzen)
+  might see a real win -- that is the retry condition recorded on GH #712.
+
+Methodology consequence for future rounds: for effects under ~3%, either
+compare layout-stable counters (instructions/branch-misses via `perf stat`)
+or A/B multiple independent builds per side; a single worktree build pair is
+only conclusive for effects that exceed ~4%.
+
 ### R4. `RuntimeView` allocation + `flat_offset` (~20% of post-win run)
 
 `PushVarView`/`PushTempView` rebuild `SmallVec`s (dims, strides, dim_ids) on every
