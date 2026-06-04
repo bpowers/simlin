@@ -350,6 +350,8 @@ fn main() {
         println!("  [capped {capped} link-score values to |.|<=1]");
     }
 
+    let sub_model_ports =
+        simlin_engine::analysis::build_sub_model_output_ports(&db, source_project);
     let found = phase("strongest-path discovery DFS", || {
         // `budget: None` runs the full DFS to completion -- this harness exists
         // to time the whole discovery sweep, so it must never truncate.
@@ -359,6 +361,7 @@ fn main() {
             &stocks,
             &ltm_vars.vars,
             dm_dims,
+            &sub_model_ports,
             None,
         )
         .unwrap()

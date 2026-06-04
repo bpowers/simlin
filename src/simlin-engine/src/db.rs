@@ -112,6 +112,7 @@ pub use ltm::{
 // discovery-mode recovery (GH #696).
 pub(crate) use ltm::{
     StitchPetal, collect_agg_petals, cross_agg_loop_budget, stitch_cross_agg_petals,
+    sub_model_output_ports,
 };
 // Test-only: the cross-agg loop-count budget override, so `ltm_finding`'s
 // discovery-mode truncation test can trip the budget with a tiny fixture
@@ -124,7 +125,7 @@ mod analysis;
 pub use analysis::RefShape;
 pub use analysis::causal_graph_from_edges;
 pub use analysis::causal_graph_from_element_edges;
-pub(crate) use analysis::causal_graph_from_element_edges_with_modules;
+pub use analysis::causal_graph_from_element_edges_with_modules;
 pub(crate) use analysis::reconstruct_model_variables;
 use analysis::*;
 // `model_element_loop_circuits` is `#[deprecated]` for LTM consumers (the

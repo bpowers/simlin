@@ -147,6 +147,35 @@ pub fn analyze_model(
     }
 }
 
+/// Build the emission-derived output-port set per sub-model, keyed by canonical
+/// name, for the discovery-mode per-exit-port recompute (GH #698 / PR #705
+/// r3353097150).
+///
+/// Built from the SAME `db::ltm::sub_model_output_ports` decision the emission
+/// side uses, so the recompute enumerates pathway indices against the IDENTICAL
+/// project-wide sorted port set the sub-model emitted its
+/// `$⁚ltm⁚path⁚{port}⁚{idx}` vars against -- a parent-scoped re-derivation would
+/// shift the indices when another project model reads a different output port.
+/// Every project model is a potential sub-model (instantiated in the analyzed
+/// model or nested), so it is computed once for each. Public so the engine's
+/// LTM discovery tests can drive `discover_loops_with_graph` through the exact
+/// production decision rather than reconstructing it.
+pub fn build_sub_model_output_ports(
+    db: &dyn crate::db::Db,
+    source_project: SourceProject,
+) -> crate::ltm_finding::SubModelOutputPorts {
+    source_project
+        .models(db)
+        .iter()
+        .map(|(name, model)| {
+            (
+                crate::common::Ident::new(name.as_ref()),
+                crate::db::sub_model_output_ports(db, *model, source_project),
+            )
+        })
+        .collect()
+}
+
 /// The loop-bearing half of a successful `run_ltm_pipeline` run: the time
 /// array, the discovered loop summaries, the dominant-period intervals, and
 /// whether discovery was truncated by the time budget. Named (rather than a
@@ -222,12 +251,15 @@ fn run_ltm_pipeline(
     let ltm_vars = crate::db::model_ltm_variables(db, source_model, source_project);
     let dm_dims = crate::db::project_datamodel_dims(db, source_project);
 
+    let sub_model_output_ports = build_sub_model_output_ports(db, source_project);
+
     let discovery = crate::ltm_finding::discover_loops_with_graph(
         &results,
         &causal_graph,
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        &sub_model_output_ports,
         budget,
     )
     .ok()?;
@@ -1033,6 +1065,95 @@ mod tests {
         assert!(
             settled > 0.0,
             "discovery settled importance is {settled}; expected positive (reinforcing). GH #698."
+        );
+    }
+
+    /// GH #698 (PR #705 review r3353097150): the per-exit-port pathway-index
+    /// derivation must use the SAME project-wide output-port set the sub-model
+    /// EMITTED its `$⁚ltm⁚path⁚{port}⁚{idx}` vars against -- not a set scanned
+    /// from only the analyzed model's reads.
+    ///
+    /// Sub-model `passthrough` has outputs `neg` (sorts first) and `pos`.
+    /// `main`'s feedback loop reads `m·pos` ONLY -- no read of `m·neg` anywhere
+    /// in `main`. A SECOND project model `other` (never instantiated from
+    /// `main`) instantiates `passthrough` and reads `S·neg`, so the EMISSION
+    /// side (`find_model_output_ports`, scanning ALL project models) sees
+    /// `{neg, pos}` and emits the `pos` pathway at idx 1. A parent-scoped scan
+    /// of `main` alone would see only `{pos}`, enumerate against `[pos]` -> idx
+    /// 0, and read the `neg` pathway score -> the loop polarity inverts to
+    /// balancing. The loop reads `m·pos` (positive gain), so the correct
+    /// polarity is reinforcing.
+    #[test]
+    fn analyze_model_output_ports_match_project_wide_emission() {
+        use crate::testutils::{x_aux, x_flow, x_model, x_stock};
+
+        let project = datamodel::Project {
+            name: "cross_model_port_shift".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 8.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                x_model(
+                    "main",
+                    vec![
+                        x_stock("s", "100", &["growth"], &[], None),
+                        module_instance("m", "passthrough", &[("s", "m.input_val")]),
+                        // The loop reads ONLY m.pos -- no read of m.neg in main.
+                        x_flow("growth", "m.pos * 0.1", None),
+                    ],
+                ),
+                // A second, never-from-main model that reads passthrough's `neg`
+                // output, forcing emission's project-wide port set to {neg, pos}.
+                x_model(
+                    "other",
+                    vec![
+                        x_aux("driver", "5", None),
+                        module_instance("n", "passthrough", &[("driver", "n.input_val")]),
+                        x_aux("sink", "n.neg", None),
+                    ],
+                ),
+                pos_neg_passthrough_model(),
+            ],
+            source: None,
+            ai_information: None,
+        };
+
+        let (mut db, sp) = synced_db(&project);
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
+
+        let loop_through_m = analysis
+            .loop_dominance
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "m"))
+            .expect("a discovered loop must traverse module m");
+
+        assert_eq!(
+            loop_through_m.polarity, "reinforcing",
+            "discovery must report reinforcing for a loop reading m.pos; got {} (vars {:?}). \
+             The discovery output-port set must match the sub-model's project-wide emission \
+             order, else the pathway index shifts and the recompute reads the neg pathway. \
+             GH #698 / PR #705 r3353097150.",
+            loop_through_m.polarity, loop_through_m.variables
+        );
+        let settled = loop_through_m
+            .importance
+            .iter()
+            .rev()
+            .find(|s| s.is_finite() && **s != 0.0)
+            .copied()
+            .expect("loop must have a finite non-zero importance");
+        assert!(
+            settled > 0.0,
+            "discovery settled importance is {settled}; expected positive (reinforcing). \
+             GH #698 / PR #705 r3353097150."
         );
     }
 

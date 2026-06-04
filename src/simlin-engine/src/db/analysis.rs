@@ -1012,7 +1012,7 @@ fn model_variables_and_module_graphs(
 /// classification) names module instances by their bare instance name, the
 /// same key the element-level edges use for a module node, so the recompute's
 /// `module_graph(module_name)` / `variables().get(module_name)` lookups resolve.
-pub(crate) fn causal_graph_from_element_edges_with_modules(
+pub fn causal_graph_from_element_edges_with_modules(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,

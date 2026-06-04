@@ -4629,6 +4629,9 @@ fn discover_loops_element_level(
     // Get LTM variable metadata and project dimensions for A2A expansion
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let dm_dims = project_datamodel_dims(&db, sync.project);
+    // The emission-derived per-sub-model output-port set the per-exit-port
+    // recompute needs (GH #698), built through the exact production decision.
+    let sub_model_ports = simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
 
     ltm_finding::discover_loops_with_graph(
         &results,
@@ -4636,6 +4639,7 @@ fn discover_loops_element_level(
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        &sub_model_ports,
         None,
     )
     .expect("discover_loops_with_graph should succeed")
@@ -8219,12 +8223,14 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
         element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let dm_dims = project_datamodel_dims(&db, sync.project);
+    let sub_model_ports = simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
     let found = ltm_finding::discover_loops_with_graph(
         &results,
         &causal_graph,
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        &sub_model_ports,
         None,
     )
     .expect("discover_loops_with_graph should succeed")
@@ -9405,12 +9411,15 @@ fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
             .collect();
         let ltm = model_ltm_variables(&db2, source_model, sync.project);
         let dm_dims = project_datamodel_dims(&db2, sync.project);
+        // No modules in this model, so the per-exit-port recompute never fires;
+        // an empty output-port map is correct.
         ltm_finding::discover_loops_with_graph(
             &results,
             &causal_graph,
             &stocks,
             &ltm.vars,
             dm_dims,
+            &ltm_finding::SubModelOutputPorts::new(),
             None,
         )
         .expect("discovery")
@@ -9683,12 +9692,14 @@ fn test_lookup_table_link_score_is_nonzero() {
         element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let dm_dims = project_datamodel_dims(&db, sync.project);
+    let sub_model_ports = simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
     let found = ltm_finding::discover_loops_with_graph(
         &results,
         &causal_graph,
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        &sub_model_ports,
         None,
     )
     .expect("discovery should succeed")

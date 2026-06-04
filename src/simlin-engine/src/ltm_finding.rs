@@ -31,6 +31,13 @@ type LinkOffset = ((Ident<Canonical>, Ident<Canonical>), usize);
 /// HashMap for O(1) link offset lookup by (from, to) key.
 type LinkOffsetMap = HashMap<(Ident<Canonical>, Ident<Canonical>), usize>;
 
+/// Per-sub-model emitted LTM output-port set, keyed by the sub-model's
+/// canonical name. The discovery-mode per-exit-port recompute (GH #698) uses
+/// it to enumerate pathway indices against the SAME sorted port set the
+/// sub-model emitted its `$⁚ltm⁚path⁚{port}⁚{idx}` vars against -- see
+/// `recompute_module_input_edge_series` and `discover_loops_with_graph`.
+pub type SubModelOutputPorts = HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>;
+
 // --- Constants (from the paper) ---
 
 /// Maximum loops to retain after discovery (paper uses 200)
@@ -834,9 +841,109 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
         details: Some("No non-implicit model found for loop discovery".to_string()),
     })?;
     let causal_graph = CausalGraph::from_model(main_model, project)?;
+    // The per-exit-port recompute (GH #698) needs each sub-model's emitted
+    // output-port set. The db-backed `analyze_model` path reads it from the
+    // emission query directly; this convenience path has no db, so it
+    // reconstructs the set with the SAME project-wide semantics emission uses
+    // (union of `{instance}·{port}` reads over ALL project models + the stdlib
+    // `output` short-circuit -- see `project_sub_model_output_ports`).
+    let sub_model_ports = project_sub_model_output_ports(project);
     // The convenience path is unbudgeted: it builds the graph from a `Project`
     // and is used by small-model callers that never hit the GH #647 slowness.
-    Ok(discover_loops_with_graph(results, &causal_graph, &stocks, &[], &[], None)?.loops)
+    Ok(discover_loops_with_graph(
+        results,
+        &causal_graph,
+        &stocks,
+        &[],
+        &[],
+        &sub_model_ports,
+        None,
+    )?
+    .loops)
+}
+
+/// Reconstruct each sub-model's emitted LTM output-port set from a compiled
+/// `Project`, mirroring the emission-side `db::ltm::find_model_output_ports`
+/// project-wide semantics for the db-less `discover_loops` convenience path.
+///
+/// Emission scans reads across ALL project models (not just the analyzed one)
+/// and unions the `{instance}·{port}` ports per sub-model, sorted; a stdlib
+/// sub-model short-circuits to exactly `["output"]`. The recompute must use the
+/// IDENTICAL set/order to land on the sub-model's emitted `$⁚ltm⁚path` indices,
+/// so this reproduces that decision rather than scanning the analyzed model
+/// alone (the GH #698 / PR #705 r3353097150 cross-model index-shift bug). The
+/// db-backed `analyze_model` path instead reads `db::ltm::sub_model_output_ports`
+/// directly -- the one authoritative emission decision; this is its db-less
+/// twin, kept in lockstep by the shared "project-wide union + stdlib output"
+/// rule.
+fn project_sub_model_output_ports(project: &Project) -> SubModelOutputPorts {
+    use crate::variable::Variable;
+
+    let mut ports: SubModelOutputPorts = HashMap::new();
+    for model in project.models.values() {
+        // Instance name -> sub-model name, for instances declared in THIS
+        // model (an `instance·port` read only resolves to a same-model
+        // instance).
+        let instance_sub_model: HashMap<&Ident<Canonical>, &Ident<Canonical>> = model
+            .variables
+            .iter()
+            .filter_map(|(name, var)| match var {
+                Variable::Module { model_name, .. } => Some((name, model_name)),
+                _ => None,
+            })
+            .collect();
+        if instance_sub_model.is_empty() {
+            continue;
+        }
+
+        let mut note_read = |dep: &str| {
+            let Some((module_part, port)) = dep.split_once('\u{00B7}') else {
+                return;
+            };
+            if port.starts_with('$') {
+                return;
+            }
+            if let Some(sub_model) = instance_sub_model.get(&Ident::<Canonical>::new(module_part)) {
+                ports
+                    .entry((*sub_model).clone())
+                    .or_default()
+                    .push(Ident::new(port));
+            }
+        };
+
+        for var in model.variables.values() {
+            // A module reads upstream module outputs through its input wiring
+            // (`mod_b`'s `ModuleInput.src == mod_a·pos`); a module has no
+            // equation AST, so its reads come from `inputs`. Non-module reads
+            // come from the equation AST. This mirrors `find_model_output_ports`
+            // scanning `variable_direct_dependencies` (which includes input srcs).
+            if let Variable::Module { inputs, .. } = var {
+                for inp in inputs {
+                    note_read(inp.src.as_str());
+                }
+                continue;
+            }
+            let Some(ast) = var.ast() else { continue };
+            for dep in crate::variable::identifier_set(ast, &[], None) {
+                note_read(dep.as_str());
+            }
+        }
+    }
+
+    // Stdlib sub-models are always read through the `output` convention
+    // regardless of which internal ports a parent happens to reference, and a
+    // stdlib sub-model emits its pathway vars against exactly `["output"]`.
+    // Apply the same short-circuit `db::ltm::sub_model_output_ports` takes, then
+    // dedup + sort each set to the emission order.
+    for (sub_model, port_list) in ports.iter_mut() {
+        if sub_model.as_str().starts_with("stdlib\u{205A}") {
+            *port_list = vec![Ident::new("output")];
+            continue;
+        }
+        port_list.sort();
+        port_list.dedup();
+    }
+    ports
 }
 
 /// Collapse synthetic aggregate nodes out of a discovered loop's link chain.
@@ -1926,87 +2033,6 @@ fn discovery_module_exit_port(
     found
 }
 
-/// The LTM output ports the parent reads off every instance of sub-model
-/// `sub_model_name`, sorted -- the discovery-mode reconstruction of
-/// `db::ltm::sub_model_output_ports`. The sub-model emits its
-/// `$⁚ltm⁚path⁚{port}⁚{idx}` pathway variables by enumerating pathways to this
-/// exact (sorted) port set, so the parent's per-exit-port pathway recompute
-/// below must use the same set in the same order to land on the same indices.
-///
-/// This MUST agree with the exhaustive-side `db::ltm::sub_model_output_ports`,
-/// including its stdlib short-circuit: a `stdlib⁚`-prefixed sub-model is always
-/// read through the `output` convention, so its sole LTM output port is
-/// `output` -- the sub-model EMITS its pathway vars against exactly
-/// `["output"]`. A scan of the parent's reads could otherwise pick up more than
-/// one internal port for a stdlib module chained on several internals (e.g. the
-/// systems-format `available`/`remaining` wiring), yielding a different pathway
-/// index ordering than the sub-model emitted, so the recompute would read the
-/// WRONG pathway var. For a user sub-model the port set is the union of the
-/// `{instance}·{port}` reads over all instances (mirroring
-/// `find_model_output_ports`), sorted.
-fn discovery_sub_model_output_ports(
-    causal_graph: &CausalGraph,
-    sub_model_name: &str,
-) -> Vec<Ident<Canonical>> {
-    use crate::variable::Variable;
-
-    // Stdlib models are always read through the `output` convention, so their
-    // single LTM output port is `output` -- the same short-circuit
-    // `db::ltm::sub_model_output_ports` takes. Keeping the two in lockstep is
-    // what makes the recomputed pathway indices match the emitted ones.
-    if sub_model_name.starts_with("stdlib\u{205A}") {
-        return vec![Ident::new("output")];
-    }
-
-    // Every parent module instance that instantiates this sub-model.
-    let instances: HashSet<&Ident<Canonical>> = causal_graph
-        .variables()
-        .iter()
-        .filter_map(|(name, var)| match var {
-            Variable::Module { model_name, .. } if model_name.as_str() == sub_model_name => {
-                Some(name)
-            }
-            _ => None,
-        })
-        .collect();
-    if instances.is_empty() {
-        return vec![];
-    }
-
-    let mut ports: HashSet<Ident<Canonical>> = HashSet::new();
-    let note_read = |dep: &str, ports: &mut HashSet<Ident<Canonical>>| {
-        let Some((module_part, port)) = dep.split_once('\u{00B7}') else {
-            return;
-        };
-        if port.starts_with('$') {
-            return;
-        }
-        if instances.contains(&Ident::<Canonical>::new(module_part)) {
-            ports.insert(Ident::new(port));
-        }
-    };
-    for (_, var) in causal_graph.variables().iter() {
-        // A module instance reads an upstream module's output through its
-        // input wiring (`mod_b`'s `ModuleInput.src == mod_a·pos`), and a module
-        // has no equation AST, so its reads must come from `inputs`, not
-        // `var.ast()`. This mirrors `find_model_output_ports`, which scans
-        // `variable_direct_dependencies` (those include module-input srcs).
-        if let Variable::Module { inputs, .. } = var {
-            for inp in inputs {
-                note_read(inp.src.as_str(), &mut ports);
-            }
-            continue;
-        }
-        let Some(ast) = var.ast() else { continue };
-        for dep in crate::variable::identifier_set(ast, &[], None) {
-            note_read(dep.as_str(), &mut ports);
-        }
-    }
-    let mut ports: Vec<Ident<Canonical>> = ports.into_iter().collect();
-    ports.sort();
-    ports
-}
-
 /// Recompute a module-input loop edge's link-score series from the sub-model's
 /// per-pathway scores, selecting the pathway(s) that terminate at the exit port
 /// the loop actually traverses (GH #698).
@@ -2039,6 +2065,7 @@ fn recompute_module_input_edge_series(
     links: &[Link],
     edge_idx: usize,
     step_count: usize,
+    sub_model_output_ports: &SubModelOutputPorts,
 ) -> Option<Vec<f64>> {
     use crate::ltm::normalize_module_ref;
     use crate::variable::Variable;
@@ -2094,7 +2121,12 @@ fn recompute_module_input_edge_series(
 
     // Recompute the sub-model's pathway map over the same sorted output-port
     // set the sub-model emitted against, so pathway indices match index-for-
-    // index. The sub-model name comes off the module instance variable.
+    // index. The set comes from the emission-derived map (built by
+    // `analyze_model` via `db::ltm::sub_model_output_ports`, the SAME decision
+    // the sub-model used to emit its `$⁚ltm⁚path⁚{port}⁚{idx}` vars), keyed by
+    // the sub-model's canonical name -- NOT a parent-scoped re-derivation,
+    // which would shift the indices when ANOTHER project model reads a
+    // different output port (GH #698 / PR #705 r3353097150).
     let Variable::Module {
         model_name: sub_model_name,
         ..
@@ -2102,12 +2134,12 @@ fn recompute_module_input_edge_series(
     else {
         return None;
     };
-    let output_ports = discovery_sub_model_output_ports(causal_graph, sub_model_name.as_str());
+    let output_ports = sub_model_output_ports.get(sub_model_name)?;
     if output_ports.is_empty() {
         return None;
     }
     let (pathways, _truncated) =
-        module_graph.enumerate_pathways_to_outputs_with_truncation(&output_ports);
+        module_graph.enumerate_pathways_to_outputs_with_truncation(output_ports);
     let port_pathways = pathways.get(&entry_port)?;
 
     // Result offsets of the `m·$⁚ltm⁚path⁚{entry}⁚{idx}` series whose pathway
@@ -2156,6 +2188,15 @@ fn recompute_module_input_edge_series(
 /// When they are empty (convenience path), all link scores are treated as
 /// scalar.
 ///
+/// `sub_model_output_ports` maps each referenced sub-model's canonical name to
+/// the sorted LTM output-port set it EMITTED its `$⁚ltm⁚path⁚{port}⁚{idx}` vars
+/// against -- the same decision `db::ltm::sub_model_output_ports` makes on the
+/// emission side. The per-exit-port recompute (GH #698) enumerates pathway
+/// indices against this set, so the indices match the emitted vars
+/// index-for-index regardless of which project model the loop lives in. Pass an
+/// empty map to disable the recompute (every module-input edge then keeps its
+/// composite base score, the pre-GH-#698 behavior).
+///
 /// `budget` optionally bounds the wall-clock time spent in the per-timestep DFS
 /// sweep. Expiry is checked both between timesteps and *inside* each step's
 /// DFS (every `DEADLINE_CHECK_INTERVAL` node visits), so even a model whose
@@ -2170,6 +2211,7 @@ pub fn discover_loops_with_graph(
     stocks: &[Ident<Canonical>],
     ltm_vars: &[LtmSyntheticVar],
     dims: &[datamodel::Dimension],
+    sub_model_output_ports: &SubModelOutputPorts,
     budget: Option<Duration>,
 ) -> Result<DiscoveryResult> {
     let link_offsets = parse_link_offsets(results, ltm_vars, dims);
@@ -2353,7 +2395,14 @@ pub fn discover_loops_with_graph(
         // verbatim everywhere this returns `None`.
         let link_override_series: Vec<Option<Vec<f64>>> = (0..links.len())
             .map(|i| {
-                recompute_module_input_edge_series(causal_graph, results, &links, i, step_count)
+                recompute_module_input_edge_series(
+                    causal_graph,
+                    results,
+                    &links,
+                    i,
+                    step_count,
+                    sub_model_output_ports,
+                )
             })
             .collect();
 
@@ -5632,8 +5681,18 @@ mod tests {
         let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
         let dm_dims = crate::db::project_datamodel_dims(&db, sp);
 
-        discover_loops_with_graph(&results, &causal_graph, &stocks, &ltm.vars, dm_dims, None)
-            .unwrap()
+        // These fixtures contain no modules, so the per-exit-port recompute
+        // never fires; an empty output-port map is correct.
+        discover_loops_with_graph(
+            &results,
+            &causal_graph,
+            &stocks,
+            &ltm.vars,
+            dm_dims,
+            &SubModelOutputPorts::new(),
+            None,
+        )
+        .unwrap()
     }
 
     /// GH #696: discovery stitches the per-element petals into cross-element
@@ -5781,9 +5840,17 @@ mod tests {
             .collect();
         let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
         let dm_dims = crate::db::project_datamodel_dims(&db, sp);
-        let result =
-            discover_loops_with_graph(&results, &causal_graph, &stocks, &ltm.vars, dm_dims, None)
-                .unwrap();
+        // These fixtures contain no modules; an empty output-port map is correct.
+        let result = discover_loops_with_graph(
+            &results,
+            &causal_graph,
+            &stocks,
+            &ltm.vars,
+            dm_dims,
+            &SubModelOutputPorts::new(),
+            None,
+        )
+        .unwrap();
 
         assert!(
             !result.agg_recovery_truncated,

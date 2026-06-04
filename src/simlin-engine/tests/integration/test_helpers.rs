@@ -660,6 +660,9 @@ pub struct LtmDiscoveryInputs {
     pub stocks: Vec<Ident<Canonical>>,
     pub ltm_vars: Vec<LtmSyntheticVar>,
     pub dims: Vec<datamodel::Dimension>,
+    /// Emission-derived per-sub-model output-port set the per-exit-port
+    /// recompute needs (GH #698); built through the production decision.
+    pub sub_model_output_ports: simlin_engine::ltm_finding::SubModelOutputPorts,
 }
 
 /// Compile (LTM discovery mode), simulate via the bytecode VM, and
@@ -689,7 +692,7 @@ pub fn ltm_discovery_inputs(
     model_name: &str,
 ) -> LtmDiscoveryInputs {
     use simlin_engine::db::{
-        SimlinDb, causal_graph_from_element_edges, compile_project_incremental,
+        SimlinDb, causal_graph_from_element_edges_with_modules, compile_project_incremental,
         model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
         set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
     };
@@ -712,13 +715,23 @@ pub fn ltm_discovery_inputs(
     // clone them into owned values so the bundle outlives `db`.
     let source_model = sync.models[model_name].source_model;
     let element_edges = model_element_causal_edges(&db, source_model, sync.project);
-    let causal_graph = causal_graph_from_element_edges(element_edges);
+    // Mirror production (`run_ltm_pipeline`): the module-enriched element-level
+    // graph + the emission-derived output-port map, so the per-exit-port
+    // recompute (GH #698) fires identically here.
+    let causal_graph = causal_graph_from_element_edges_with_modules(
+        &db,
+        source_model,
+        sync.project,
+        element_edges,
+    );
     let stocks: Vec<Ident<Canonical>> =
         element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project)
         .vars
         .clone();
     let dims = project_datamodel_dims(&db, sync.project).clone();
+    let sub_model_output_ports =
+        simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
 
     LtmDiscoveryInputs {
         vm_results,
@@ -726,5 +739,6 @@ pub fn ltm_discovery_inputs(
         stocks,
         ltm_vars,
         dims,
+        sub_model_output_ports,
     }
 }

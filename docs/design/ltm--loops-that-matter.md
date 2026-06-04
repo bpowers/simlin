@@ -501,14 +501,24 @@ recomputes that edge's series by max-abs-selecting over the sub-model's
 `m·$⁚ltm⁚path⁚{entry}⁚{idx}` pathway scores that *end at the exit port*,
 instead of reading the composite's offset. The pathway indices are recovered
 from the module's recursively-built sub-graph
-(`enumerate_pathways_to_outputs_with_truncation` over the same sorted
-output-port set the sub-model emitted against -- `discovery_sub_model_output_ports`
-reconstructs that set the way `sub_model_output_ports` decides it, including the
-`stdlib⁚`-prefixed-model short-circuit to exactly `["output"]`), so they match
-the emitted `$⁚ltm⁚path` vars index-for-index -- the same parity guarantee the
-exhaustive override relies on. This is `recompute_module_input_edge_series` in
-`ltm_finding.rs`; it falls back to the base composite offset whenever the entry
-or exit port is indeterminate (e.g. an ambiguous multi-output reader) or no
+(`enumerate_pathways_to_outputs_with_truncation`) over the **same project-wide
+sorted output-port set the sub-model emitted against**. That set is NOT
+re-derived parent-scoped inside the recompute (a parent-scoped scan of the
+analyzed model alone would shift every pathway index whenever ANOTHER project
+model -- or a nested instantiation -- reads an additional output port sorting
+before the loop's port, and then the recompute would read the wrong pathway,
+re-introducing the wrong-signed edge; GH #698 / PR #705 r3353097150). Instead
+`discover_loops_with_graph` takes a `SubModelOutputPorts` map keyed by
+sub-model canonical name; `analyze_model` builds it from the SAME emission
+decision (`db::ltm::sub_model_output_ports`, including the `stdlib⁚`-prefixed
+short-circuit to exactly `["output"]`) via the public
+`analysis::build_sub_model_output_ports`, so the recompute and emission are
+identity-by-construction. The db-less `discover_loops(&Results, &Project)`
+convenience path reconstructs the same set with the same project-wide-union +
+stdlib-output semantics (`project_sub_model_output_ports`). This is
+`recompute_module_input_edge_series` in `ltm_finding.rs`; it falls back to the
+base composite offset whenever the entry or exit port is indeterminate (e.g. an
+ambiguous multi-output reader), the sub-model is absent from the map, or no
 pathway connects entry to exit, so single-output modules (SMOOTH, DELAY, …) and
 pathless modules are unaffected.
 

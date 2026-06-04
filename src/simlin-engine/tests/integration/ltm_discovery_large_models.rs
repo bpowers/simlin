@@ -160,6 +160,7 @@ struct DiscoveryInputs {
     stocks: Vec<Ident<Canonical>>,
     ltm_vars: Vec<LtmSyntheticVar>,
     dims: Vec<datamodel::Dimension>,
+    sub_model_output_ports: simlin_engine::ltm_finding::SubModelOutputPorts,
 }
 
 /// Compile (LTM discovery mode), simulate, and assemble the
@@ -183,6 +184,7 @@ fn discovery_inputs(datamodel_project: &datamodel::Project) -> DiscoveryInputs {
         stocks: shared.stocks,
         ltm_vars: shared.ltm_vars,
         dims: shared.dims,
+        sub_model_output_ports: shared.sub_model_output_ports,
     }
 }
 
@@ -345,6 +347,7 @@ fn world3_discovery_single_timestep() {
         stocks,
         ltm_vars,
         dims,
+        sub_model_output_ports,
     } = inputs;
 
     // A wall-clock regression guard, not a real time budget: discovery on
@@ -361,6 +364,7 @@ fn world3_discovery_single_timestep() {
         &stocks,
         &ltm_vars,
         &dims,
+        &sub_model_output_ports,
         None,
     )
     .expect("discover_loops_with_graph should not error on World3")
@@ -457,6 +461,7 @@ fn discovery_contract_holds_on_tractable_arrayed_model() {
         stocks,
         ltm_vars,
         dims,
+        sub_model_output_ports,
     } = inputs;
 
     let found = ltm_finding::discover_loops_with_graph(
@@ -465,6 +470,7 @@ fn discovery_contract_holds_on_tractable_arrayed_model() {
         &stocks,
         &ltm_vars,
         &dims,
+        &sub_model_output_ports,
         None,
     )
     .expect("discovery on the tractable arrayed fixture should not error")

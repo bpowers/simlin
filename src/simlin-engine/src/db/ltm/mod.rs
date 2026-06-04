@@ -55,6 +55,7 @@ pub(crate) use loops::build_loops_from_tiered;
 // The cross-element-through-aggregate petal-stitching core, shared by the
 // exhaustive recovery (`recover_cross_agg_loops`) and discovery
 // (`ltm_finding`, GH #696) so both enumerate exactly the same cross-agg loops.
+pub(crate) use loops::sub_model_output_ports;
 pub(crate) use loops::{
     StitchPetal, collect_agg_petals, cross_agg_loop_budget, stitch_cross_agg_petals,
 };
@@ -77,7 +78,7 @@ pub(crate) use loops::{
 use link_scores::{
     emit_agg_to_target_link_scores, emit_link_scores_for_edge, emit_source_to_agg_link_scores,
 };
-use loops::{recover_agg_hop_polarities, sub_model_output_ports};
+use loops::recover_agg_hop_polarities;
 use parse::parse_ltm_equation;
 
 /// The single integration method the assembled simulation actually runs, when

@@ -129,7 +129,15 @@ pub(super) fn find_model_output_ports(
 /// a different index). Funneling both sites through this one decision makes the
 /// stdlib special-case (`output` convention) and the user-model port scan
 /// impossible to skew apart.
-pub(super) fn sub_model_output_ports(
+///
+/// This is also the authoritative source for the discovery-mode per-exit-port
+/// recompute (GH #698 / PR #705): `analyze_model` builds a
+/// `{sub_model -> ports}` map from this same decision and threads it into
+/// `discover_loops_with_graph`, so the discovery recompute enumerates pathway
+/// indices against the IDENTICAL project-wide sorted port set the sub-model
+/// emitted against -- never a parent-scoped re-derivation that could shift the
+/// indices when another project model reads an additional output port.
+pub(crate) fn sub_model_output_ports(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
