@@ -24,6 +24,18 @@ export interface GFTable {
   y: Float64Array;
 }
 
+// The x value for point i of a `size`-point table linearly spanning
+// [xMin, xMax]. A single-point table maps to xMin -- the naive
+// `i / (size - 1)` is 0/0 === NaN for size 1, and a NaN x poisons the
+// lookup()-based resampling (every interpolation read returns NaN) and can
+// then be saved into the table.
+export function xAtTableIndex(i: number, size: number, xMin: number, xMax: number): number {
+  if (size <= 1) {
+    return xMin;
+  }
+  return (i / (size - 1)) * (xMax - xMin) + xMin;
+}
+
 function tableFrom(gf: GraphicalFunction): GFTable | undefined {
   const xpts = gf.xPoints;
   const xscale = gf.xScale;
@@ -43,7 +55,7 @@ function tableFrom(gf: GraphicalFunction): GFTable | undefined {
     // either the x points have been explicitly specified, or
     // it is a linear mapping of points between xmin and xmax,
     // inclusive
-    const xVal = xpts ? at(xpts, i) : (i / (size - 1)) * (xmax - xmin) + xmin;
+    const xVal = xpts ? at(xpts, i) : xAtTableIndex(i, size, xmin, xmax);
     xList[i] = xVal;
     yList[i] = at(ypts, i);
   }
@@ -221,7 +233,7 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
     }
 
     for (let i = 0; i < table.size; i++) {
-      newTable.x[i] = (i / (size - 1)) * (xMax - xMin) + xMin;
+      newTable.x[i] = xAtTableIndex(i, size, xMin, xMax);
     }
 
     return newTable;
@@ -283,7 +295,7 @@ export class LookupEditor extends React.PureComponent<LookupEditorProps, LookupE
     }
 
     for (let i = 0; i < size; i++) {
-      const xVal = (i / (size - 1)) * (xMax - xMin) + xMin;
+      const xVal = xAtTableIndex(i, size, xMin, xMax);
       newTable.x[i] = xVal;
       newTable.y[i] = lookup(oldTable, xVal);
     }

@@ -126,7 +126,6 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
             <div className={styles.inputContainer}>
               {startAdornment}
               <input
-                id={inputId}
                 className={styles.standardInput}
                 value={value}
                 onChange={onChange}
@@ -140,6 +139,12 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
                 onKeyPress={onKeyPress}
                 {...rest}
                 {...restInputProps}
+                // After the spreads: restInputProps (downshift's
+                // getInputProps() when used inside Autocomplete) must win for
+                // value/onChange/keyboard handling, but the rendered id has
+                // to stay inputId so <label htmlFor={inputId}> keeps pointing
+                // at this input.
+                id={inputId}
               />
             </div>
           </div>
@@ -170,7 +175,6 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
           <div className={styles.inputContainer}>
             {startAdornment}
             <input
-              id={inputId}
               className={styles.outlinedInput}
               value={value}
               onChange={onChange}
@@ -184,6 +188,9 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
               onKeyPress={onKeyPress}
               {...rest}
               {...restInputProps}
+              // See the standard variant: id must survive the spreads so the
+              // label association holds.
+              id={inputId}
             />
           </div>
         </div>

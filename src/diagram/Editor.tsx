@@ -84,9 +84,42 @@ import { BreadcrumbBar } from './BreadcrumbBar';
 import styles from './Editor.module.css';
 
 const MaxUndoSize = 5;
-// These must stay in sync with --panel-width-sm and --panel-width-lg in theme.css
+// These must stay in sync with --panel-width-sm/-md/-lg in theme.css (and the
+// media-query breakpoints in Editor.module.css).
 const SearchbarWidthSm = 359;
+const SearchbarWidthMd = 420;
 const SearchbarWidthLg = 480;
+
+// The effective right-panel width at the current viewport, mirroring the
+// media queries in Editor.module.css. Used by viewport-centering math, which
+// previously hardcoded one width and was wrong at the other breakpoints.
+function panelWidth(): number {
+  if (typeof window === 'undefined') {
+    return SearchbarWidthSm;
+  }
+  const w = window.innerWidth;
+  if (w >= 1200) {
+    return SearchbarWidthLg;
+  } else if (w >= 900) {
+    return SearchbarWidthMd;
+  }
+  return SearchbarWidthSm;
+}
+
+// Stable no-op handlers for the read-only/embedded Canvas. Canvas is a
+// PureComponent: allocating fresh arrow functions per render would defeat
+// its shallow prop comparison and force a full re-render of every layer on
+// every Editor render.
+const noopRename = (_oldName: string, _newName: string): void => {};
+const noopSetSelection = (_selected: ReadonlySet<UID>): void => {};
+const noopMoveSelection = (_position: Point): void => {};
+const noopMoveFlow = (_e: FlowViewElement, _t: number, _p: Point): void => {};
+const noopMoveLabel = (_u: UID, _s: 'top' | 'left' | 'bottom' | 'right'): void => {};
+const noopAttachLink = (_element: LinkViewElement, _to: string): void => {};
+const noopCreateVariable = (_element: ViewElement): void => {};
+const noop = (): void => {};
+const noopViewBoxChange = (_viewBox: Rect, _zoom: number): void => {};
+const noopDrillIntoModule = (_moduleIdent: string, _targetModelName: string): void => {};
 
 function convertErrorDetails(
   errors: ErrorDetail[],
@@ -1651,7 +1684,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const cy = element.y;
 
     const viewCy = view.viewBox.height / 2 / zoom;
-    const viewCx = (view.viewBox.width - SearchbarWidthSm) / 2 / zoom;
+    const viewCx = (view.viewBox.width - panelWidth()) / 2 / zoom;
 
     const viewBox: Rect = {
       ...view.viewBox,
@@ -1683,22 +1716,18 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // Stdlib models are read-only: disable all mutation handlers while
     // keeping selection, viewbox, and drill-in navigation active.
     const readOnly = embedded || isStdlibModel(this.state.modelName);
-    const onRenameVariable = !readOnly ? this.handleRename : (_oldName: string, _newName: string): void => {};
-    const onSetSelection = !embedded ? this.handleSelection : (_selected: ReadonlySet<UID>): void => {};
-    const onMoveSelection = !readOnly ? this.handleSelectionMove : (_position: Point): void => {};
-    const onMoveFlow = !readOnly ? this.handleFlowAttach : (_e: ViewElement, _t: number, _p: Point): void => {};
-    const onMoveLabel = !readOnly
-      ? this.handleMoveLabel
-      : (_u: UID, _s: 'top' | 'left' | 'bottom' | 'right'): void => {};
-    const onAttachLink = !readOnly ? this.handleLinkAttach : (_element: ViewElement, _to: string): void => {};
-    const onCreateVariable = !readOnly ? this.handleCreateVariable : (_element: ViewElement): void => {};
-    const onClearSelectedTool = !readOnly ? this.handleClearSelectedTool : () => {};
-    const onDeleteSelection = !readOnly ? this.handleSelectionDelete : () => {};
-    const onShowVariableDetails = !readOnly ? this.handleShowVariableDetails : () => {};
-    const onViewBoxChange = !embedded ? this.handleViewBoxChange : () => {};
-    const onDrillIntoModule = !embedded
-      ? this.handleDrillIntoModule
-      : (_moduleIdent: string, _targetModelName: string): void => {};
+    const onRenameVariable = !readOnly ? this.handleRename : noopRename;
+    const onSetSelection = !embedded ? this.handleSelection : noopSetSelection;
+    const onMoveSelection = !readOnly ? this.handleSelectionMove : noopMoveSelection;
+    const onMoveFlow = !readOnly ? this.handleFlowAttach : noopMoveFlow;
+    const onMoveLabel = !readOnly ? this.handleMoveLabel : noopMoveLabel;
+    const onAttachLink = !readOnly ? this.handleLinkAttach : noopAttachLink;
+    const onCreateVariable = !readOnly ? this.handleCreateVariable : noopCreateVariable;
+    const onClearSelectedTool = !readOnly ? this.handleClearSelectedTool : noop;
+    const onDeleteSelection = !readOnly ? this.handleSelectionDelete : noop;
+    const onShowVariableDetails = !readOnly ? this.handleShowVariableDetails : noop;
+    const onViewBoxChange = !embedded ? this.handleViewBoxChange : noopViewBoxChange;
+    const onDrillIntoModule = !embedded ? this.handleDrillIntoModule : noopDrillIntoModule;
 
     return (
       <Canvas
@@ -1851,8 +1880,15 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       selectedTool: isStdlibModel(newModelName) ? undefined : this.state.selectedTool,
     });
     // Refresh errors for the newly active model so warning dots and the
-    // error panel reflect the child model's state immediately.
-    setTimeout(() => void this.refreshCachedErrors());
+    // error panel reflect the child model's state immediately. Guarded on
+    // `unmounted` like every other deferred callback in this class -- the
+    // Editor remounts on route changes and EditorHost path swaps, and these
+    // callbacks call setState / engine methods.
+    setTimeout(() => {
+      if (!this.unmounted) {
+        void this.refreshCachedErrors();
+      }
+    });
   };
 
   handleNavigateBack = (): void => {
@@ -1871,13 +1907,20 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // The parent model's view already exists in the project; we just need to
     // apply the saved viewBox and zoom back onto it.
     setTimeout(async () => {
+      if (this.unmounted) {
+        return;
+      }
       const view = this.getView();
       if (view) {
         await this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
       }
     });
     // Refresh errors for the restored model
-    setTimeout(() => void this.refreshCachedErrors());
+    setTimeout(() => {
+      if (!this.unmounted) {
+        void this.refreshCachedErrors();
+      }
+    });
   };
 
   handleNavigateToLevel = (targetLevel: number): void => {
@@ -1894,13 +1937,20 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
     // Restore the target level's viewport asynchronously
     setTimeout(async () => {
+      if (this.unmounted) {
+        return;
+      }
       const view = this.getView();
       if (view) {
         await this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
       }
     });
     // Refresh errors for the target level's model
-    setTimeout(() => void this.refreshCachedErrors());
+    setTimeout(() => {
+      if (!this.unmounted) {
+        void this.refreshCachedErrors();
+      }
+    });
   };
 
   handleSearchChange = async (_event: React.SyntheticEvent | null, newValue: string | null) => {
@@ -2903,7 +2953,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const view = defined(this.getView());
     const oldViewBox = view.viewBox;
 
-    const widthAdjust = this.state.showDetails ? SearchbarWidthLg : 0;
+    const widthAdjust = this.state.showDetails ? panelWidth() : 0;
 
     const oldViewWidth = (oldViewBox.width - widthAdjust) / view.zoom;
     const oldViewHeight = oldViewBox.height / view.zoom;
