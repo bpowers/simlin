@@ -77,10 +77,22 @@ pub(crate) fn vector_elm_map(
     );
 
     let offset_size = offset_view.size();
+    // Hoist the per-element offset-view addressing: when the offset view is
+    // one dense linear run (the common case -- a whole array or a leading
+    // slice), element i lives at `start + i` and the full index-decompose +
+    // stride dot product (`flat_offset`) is loop-invariant overhead. This was
+    // the single largest `flat_offset` caller on a C-LEARN run (~4% of run
+    // time across 168 VECTOR ELM MAP sites). The multi-dim `off_indices` are
+    // still maintained when the strict-slice base computation needs them.
+    let off_linear = offset_view.dense_linear_start();
+    let need_off_indices = off_linear.is_none() || !source_is_full_array;
     let mut off_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; offset_view.dims.len()];
     let mut src_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; source_view.dims.len()];
     for i in 0..offset_size {
-        let off_flat = offset_view.flat_offset(&off_indices);
+        let off_flat = match off_linear {
+            Some(start) => start + i,
+            None => offset_view.flat_offset(&off_indices),
+        };
         let offset_val = Vm::read_view_element(offset_view, off_flat, curr, temp_storage, context);
 
         // base_i: 0 for a full-array source; else the sliced view's flat
@@ -111,6 +123,8 @@ pub(crate) fn vector_elm_map(
             }
         };
         temp_storage[temp_off + i] = elem;
-        increment_indices(&mut off_indices, &offset_view.dims);
+        if need_off_indices {
+            increment_indices(&mut off_indices, &offset_view.dims);
+        }
     }
 }

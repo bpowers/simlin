@@ -273,22 +273,73 @@ impl RuntimeView {
 
     /// Check if the view is contiguous (no sparse mappings, offset 0, standard strides)
     pub fn is_contiguous(&self) -> bool {
-        if self.offset != 0 || !self.sparse.is_empty() {
-            return false;
-        }
+        self.offset == 0 && self.dense_linear_start().is_some()
+    }
 
+    /// If this view's elements occupy a single dense row-major run -- i.e.
+    /// the k-th element in iteration order lives at flat offset `start + k`
+    /// -- return that starting offset.
+    ///
+    /// This is `is_contiguous` minus the `offset == 0` requirement: an
+    /// offset slice like `arr[2, *]` (or a leading-dimension range
+    /// `arr[1:3, *]`) is one dense run beginning mid-array. The predicate is
+    /// "no sparse mappings, and strides are exactly the row-major strides of
+    /// the *current* dims": any subscript that breaks the run (an inner-dim
+    /// range, a transpose) leaves a stride that no longer matches.
+    ///
+    /// Hot-path significance: the per-element `flat_offset` /
+    /// `offset_for_iter_index` arithmetic (index decompose + stride dot
+    /// product) collapses to `start + k` for these views, so iteration and
+    /// reduction loops over them can be plain linear scans (GH #603).
+    pub fn dense_linear_start(&self) -> Option<usize> {
+        if !self.sparse.is_empty() {
+            return None;
+        }
         let mut expected_stride = 1i32;
         for i in (0..self.dims.len()).rev() {
             if self.strides[i] != expected_stride {
-                return false;
+                return None;
             }
             expected_stride *= self.dims[i] as i32;
         }
-        true
+        Some(self.offset as usize)
+    }
+
+    /// Shape equality (dims + dim_ids) for the per-element iteration fast
+    /// path in `LoadIterViewTop` / `LoadIterViewAt`.
+    ///
+    /// Semantically identical to `self.dims == other.dims && self.dim_ids ==
+    /// other.dim_ids`, but hand-rolled: SmallVec's slice PartialEq lowers to
+    /// an out-of-line memcmp call, which measured ~2% of a C-LEARN run when
+    /// executed once per element per load site. Views carry at most 4 dims,
+    /// so a branchless accumulate compiles to a few inline compares (the
+    /// early-exit-free loop shape also keeps LLVM's loop-idiom recognition
+    /// from converting it back into a bcmp call).
+    #[inline]
+    pub fn same_shape(&self, other: &RuntimeView) -> bool {
+        let n = self.dims.len();
+        if n != other.dims.len() || self.dim_ids.len() != other.dim_ids.len() {
+            return false;
+        }
+        let mut eq = true;
+        for i in 0..n {
+            eq &= self.dims[i] == other.dims[i];
+        }
+        for i in 0..self.dim_ids.len() {
+            eq &= self.dim_ids[i] == other.dim_ids[i];
+        }
+        eq
     }
 
     /// Compute the flat offset for a given multi-dimensional index.
     /// Takes into account strides, offset, and sparse mappings.
+    ///
+    /// `#[inline]`: called per element from the vector-op / iteration loops
+    /// (`vector_elm_map`, `vector_sort_order`, the broadcast path); as an
+    /// out-of-line call the loop pays call overhead plus un-hoisted
+    /// `SmallVec` spill checks on every element, which showed up as several
+    /// percent of a C-LEARN run.
+    #[inline]
     pub fn flat_offset(&self, indices: &[u16]) -> usize {
         debug_assert_eq!(indices.len(), self.dims.len());
 
@@ -439,15 +490,18 @@ impl RuntimeView {
     /// Compute the flat memory offset for a given iteration index.
     /// This converts a flat iteration index (0..size) to multi-dimensional indices,
     /// then uses flat_offset to compute the memory location.
+    /// `#[inline]` for the same per-element-call reason as [`Self::flat_offset`].
+    #[inline]
     pub fn offset_for_iter_index(&self, iter_idx: usize) -> usize {
         if self.dims.is_empty() {
             // Scalar view
             return self.offset as usize;
         }
 
-        // For contiguous views with no sparse mappings, we can compute directly
-        if self.sparse.is_empty() && self.is_contiguous() {
-            return self.offset as usize + iter_idx;
+        // A single dense row-major run (contiguous, or an offset slice like
+        // `arr[2, *]`) resolves directly: element k lives at start + k.
+        if let Some(start) = self.dense_linear_start() {
+            return start + iter_idx;
         }
 
         // Convert flat index to multi-dimensional indices
@@ -2925,6 +2979,132 @@ mod tests {
         assert_eq!(view.sparse[0].dim_index, 0);
         assert_eq!(view.sparse[0].parent_offsets.as_slice(), &[0, 2, 4]);
         assert!(!view.is_contiguous());
+    }
+
+    /// Oracle for the dense-linear-run property: decompose a flat iteration
+    /// index into row-major multi-dim indices and route through the fully
+    /// general `flat_offset`, exactly like `offset_for_iter_index`'s slow path.
+    fn oracle_offset(view: &RuntimeView, iter_idx: usize) -> usize {
+        let mut indices: SmallVec<[u16; 4]> = SmallVec::new();
+        let mut remaining = iter_idx;
+        for &dim in view.dims.iter().rev() {
+            indices.push((remaining % dim as usize) as u16);
+            remaining /= dim as usize;
+        }
+        indices.reverse();
+        view.flat_offset(&indices)
+    }
+
+    /// When `dense_linear_start` claims a view is one dense run, every
+    /// iteration index must resolve to `start + k` -- under both the general
+    /// `flat_offset` decomposition and `offset_for_iter_index`.
+    fn assert_dense_linear(view: &RuntimeView, expected_start: usize) {
+        let start = view
+            .dense_linear_start()
+            .expect("view should be a dense linear run");
+        assert_eq!(start, expected_start);
+        for k in 0..view.size() {
+            assert_eq!(oracle_offset(view, k), start + k, "oracle at k={k}");
+            assert_eq!(
+                view.offset_for_iter_index(k),
+                start + k,
+                "offset_for_iter_index at k={k}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_same_shape_matches_smallvec_eq() {
+        let mk = |dims: &[u16], dim_ids: &[u16]| -> RuntimeView {
+            RuntimeView::for_var(0, SmallVec::from_slice(dims), SmallVec::from_slice(dim_ids))
+        };
+        let cases = [
+            (mk(&[3, 4], &[0, 1]), mk(&[3, 4], &[0, 1])),
+            (mk(&[3, 4], &[0, 1]), mk(&[3, 4], &[0, 2])),
+            (mk(&[3, 4], &[0, 1]), mk(&[4, 3], &[0, 1])),
+            (mk(&[3, 4], &[0, 1]), mk(&[3], &[0])),
+            (mk(&[], &[]), mk(&[], &[])),
+            (mk(&[2], &[5]), mk(&[2], &[5])),
+        ];
+        for (a, b) in &cases {
+            let expected = a.dims == b.dims && a.dim_ids == b.dim_ids;
+            assert_eq!(a.same_shape(b), expected, "{:?} vs {:?}", a.dims, b.dims);
+            assert_eq!(b.same_shape(a), expected);
+        }
+    }
+
+    #[test]
+    fn test_dense_linear_start_contiguous() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
+        let view = RuntimeView::for_var(0, dims, dim_ids);
+        assert_dense_linear(&view, 0);
+    }
+
+    #[test]
+    fn test_dense_linear_start_scalar_after_collapse() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+        view.apply_single_subscript(0, 2);
+        view.apply_single_subscript(0, 1);
+        // arr[2, 1] -> single element at flat 9; empty dims is a 1-element run.
+        assert_eq!(view.dense_linear_start(), Some(9));
+        assert_eq!(view.offset_for_iter_index(0), 9);
+    }
+
+    #[test]
+    fn test_dense_linear_start_row_slice_has_offset() {
+        // arr[1, *] of a 3x4: offset 4, one dense run of 4 -- linear even
+        // though `is_contiguous()` is false (offset != 0).
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+        view.apply_single_subscript(0, 1);
+        assert!(!view.is_contiguous());
+        assert_dense_linear(&view, 4);
+    }
+
+    #[test]
+    fn test_dense_linear_start_leading_range_slice() {
+        // arr[1:3, *] of a 5x4: rows 1..3 are adjacent, one dense run of 8
+        // starting at flat 4.
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5, 4];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+        view.apply_range(0, 1, 3);
+        assert!(!view.is_contiguous());
+        assert_dense_linear(&view, 4);
+    }
+
+    #[test]
+    fn test_dense_linear_start_inner_range_slice_is_not_linear() {
+        // arr[*, 1:3] of a 3x4: each row contributes 2 adjacent elements but
+        // the rows are 4 apart -- NOT one dense run.
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+        view.apply_range(1, 1, 3);
+        assert_eq!(view.dense_linear_start(), None);
+    }
+
+    #[test]
+    fn test_dense_linear_start_transposed_is_not_linear() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+        view.transpose();
+        assert_eq!(view.dense_linear_start(), None);
+    }
+
+    #[test]
+    fn test_dense_linear_start_sparse_is_not_linear() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+        let offsets: SmallVec<[u16; 16]> = smallvec::smallvec![0, 2, 4];
+        view.apply_sparse(0, offsets);
+        assert_eq!(view.dense_linear_start(), None);
     }
 
     #[test]
