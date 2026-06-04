@@ -5,7 +5,7 @@
 import * as React from 'react';
 
 import { LineChart, ChartSeries } from './LineChart';
-import { createEditor, Descendant, Text, Transforms } from 'slate';
+import { createEditor, Descendant, Transforms } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
 import Button from './components/Button';
@@ -27,6 +27,13 @@ import { at } from '@simlin/core/collections';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { CustomElement, FormattedText, CustomEditor } from './drawing/SlateEditor';
 import { caretOffsetForClick, caretOffsetWithinSpan, RenderedGlyph } from './equation-caret';
+import {
+  HighlightRange,
+  applyToAllPrefix,
+  byteOffsetToUtf16,
+  highlightSpansForLines,
+  slatePointForOffset,
+} from './equation-highlight';
 import { LookupEditor } from './LookupEditor';
 import { variableDetailsView } from './variable-details-display';
 import { errorCodeDescription } from '@simlin/engine';
@@ -74,10 +81,16 @@ function scalarEquationFor(variable: Variable): string {
   if (variable.equation.type === 'scalar') {
     return variable.equation.equation;
   } else if (variable.equation.type === 'applyToAll') {
-    return '{apply-to-all:}\n' + variable.equation.equation;
+    return applyToAllPrefix + variable.equation.equation;
   } else {
     return "{ TODO: arrayed variable editing isn't supported yet}";
   }
+}
+
+// Engine error offsets are byte offsets into the raw equation; the displayed
+// string may carry the apply-to-all prefix in front of it.
+function rawEquationStart(displayed: string, isUnits: boolean): number {
+  return !isUnits && displayed.startsWith(applyToAllPrefix) ? applyToAllPrefix.length : 0;
 }
 
 function highlightErrors(
@@ -86,47 +99,33 @@ function highlightErrors(
   unitErrors: readonly UnitError[] | undefined,
   isUnits: boolean,
 ): CustomElement[] {
-  const result = descendantsFromString(s);
+  const rawStart = rawEquationStart(s, isUnits);
+
+  let range: HighlightRange | undefined;
   if (!isUnits && errors && errors.length > 0) {
     const err = at(errors, 0);
-    console.log(err);
     if (err.end > 0) {
-      const children = defined(result[0]).children as Array<Text>;
-      const textChild: string = defined(children[0]).text;
-
-      const beforeText = textChild.substring(0, err.start);
-      const errText = textChild.substring(err.start, err.end);
-      const afterText = textChild.substring(err.end);
-
-      defined(result[0]).children = [{ text: beforeText }, { text: errText, error: true }, { text: afterText }];
+      range = { startByte: err.start, endByte: err.end, kind: 'error' };
     }
   } else if (unitErrors && unitErrors.length > 0) {
     for (const err of unitErrors) {
+      // Consistency errors point into the equation; definition errors point
+      // into the units string. Only apply the range to the field it targets.
       if (isUnits === err.isConsistencyError) {
         continue;
       }
-      const children = defined(result[0]).children as Array<Text>;
-      const textChild: string = defined(children[0]).text;
-      const end = err.end === 0 ? textChild.length : err.end;
-
-      const beforeText = textChild.substring(0, err.start);
-      const errText = textChild.substring(err.start, end);
-      const afterText = textChild.substring(end);
-
-      const highlighted: FormattedText = isUnits ? { text: errText, error: true } : { text: errText, warning: true };
-      defined(result[0]).children = [{ text: beforeText }, highlighted, { text: afterText }];
-
+      // end === 0 is the engine's "to the end of the text" convention;
+      // byteOffsetToUtf16 clamps, so any large value reads as "the end".
+      const endByte = err.end === 0 ? Number.MAX_SAFE_INTEGER : err.end;
+      range = { startByte: err.start, endByte, kind: isUnits ? 'error' : 'warning' };
       break;
     }
   }
 
-  return result;
+  return highlightSpansForLines(s, rawStart, range).map(
+    (children): CustomElement => ({ type: 'equation', children }),
+  );
 }
-
-// LaTeX provided by engine (Ast::to_latex, with \htmlData{eqnloc=…} source
-// annotations). When the engine couldn't produce LaTeX, the preview falls back
-// to rendering the raw equation text (a trivial passthrough, no annotations).
-const passthroughLatex = (s: string) => s;
 
 // KaTeX needs `trust` enabled to honor `\htmlData`. Scope it to that one
 // command so a user identifier that smuggled in a `\href`/`\url`/etc. is still
@@ -192,8 +191,15 @@ function caretOffsetForPreviewClick(
     const isOperatorGap = annotated.dataset.oploc !== undefined;
     const range = parseLocAttr(isOperatorGap ? annotated.dataset.oploc : annotated.dataset.eqnloc);
     if (range) {
+      // eqnloc/oploc carry byte offsets into the raw equation; convert to
+      // UTF-16 indices in the displayed string (which may be prefixed for
+      // apply-to-all equations) before mapping the click.
+      const rawStart = rawEquationStart(equationStr, false);
+      const raw = equationStr.slice(rawStart);
+      const spanStart = rawStart + byteOffsetToUtf16(raw, range[0]);
+      const spanEnd = rawStart + byteOffsetToUtf16(raw, range[1]);
       const glyphs = collectRenderedGlyphs(annotated);
-      return caretOffsetWithinSpan(glyphs, clientX, clientY, equationStr, range[0], range[1], isOperatorGap);
+      return caretOffsetWithinSpan(glyphs, clientX, clientY, equationStr, spanStart, spanEnd, isOperatorGap);
     }
   }
   const glyphs = collectRenderedGlyphs(host);
@@ -387,8 +393,6 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
       initialUnits !== stringFromDescendants(this.state.unitsContents) ||
       initialDocs !== stringFromDescendants(this.state.notesContents);
 
-    const errors = this.props.variable.errors;
-    const unitErrors = this.props.variable.unitErrors;
     const detailsView = variableDetailsView(this.props.variable);
     // Unit errors are non-fatal warnings: the variable still simulates and has
     // data. They are rendered beneath the chart (or alongside equation errors)
@@ -422,31 +426,41 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
       );
     }
 
-    const showPreview = !errors && !unitErrors && !this.state.editingEquation;
+    // Only genuine equation/compile errors force the raw editor open (so the
+    // highlight is visible); non-fatal unit warnings keep the preview, the
+    // same way they keep the chart (see variableDetailsView).
+    const showPreview = detailsView.equationErrors.length === 0 && !this.state.editingEquation;
 
     const equationStr = stringFromDescendants(equationContents);
-    let latexHTML = '';
-    if (showPreview) {
+    let latexHTML: string | undefined;
+    if (showPreview && this.state.latexEquation !== undefined) {
       try {
-        const latex = this.state.latexEquation ?? passthroughLatex(equationStr);
         // `displayMode` so it renders block-style; `trust` (scoped to
-        // \htmlData) so the engine's source-range annotations survive. Long
-        // equations wrap via the .eqnPreview CSS (overflow-wrap: anywhere).
-        latexHTML = katex.renderToString(latex, { throwOnError: false, displayMode: true, trust: katexTrust });
+        // \htmlData) so the engine's source-range annotations survive.
+        latexHTML = katex.renderToString(this.state.latexEquation, {
+          throwOnError: false,
+          displayMode: true,
+          trust: katexTrust,
+        });
       } catch {
-        // fall back to plain text
-        latexHTML = '';
+        latexHTML = undefined;
       }
     }
 
     return (
       <div className={styles.cardContent}>
         {showPreview ? (
-          <div
-            className={styles.eqnPreview}
-            onClick={(e) => this.handlePreviewClick(e, equationStr)}
-            dangerouslySetInnerHTML={{ __html: latexHTML }}
-          />
+          <div className={styles.eqnPreview} onClick={(e) => this.handlePreviewClick(e, equationStr)}>
+            {latexHTML !== undefined ? (
+              <span dangerouslySetInnerHTML={{ __html: latexHTML }} />
+            ) : (
+              // While the engine LaTeX is loading -- or when the engine can't
+              // produce LaTeX at all -- show the raw equation as plain text.
+              // Feeding raw text to katex.renderToString would mangle it:
+              // identifiers like revenue_per_unit render `_` as subscripts.
+              <span className={styles.eqnPlain}>{equationStr}</span>
+            )}
+          </div>
         ) : (
           <Slate
             editor={this.state.equationEditor}
@@ -461,7 +475,10 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
               autoFocus
               onBlur={() => {
                 this.handleEquationSave();
-                if (!this.props.variable.errors && !this.props.variable.unitErrors) {
+                // Stay in editing mode only for genuine equation errors --
+                // the same gating as showPreview; unit warnings render under
+                // the chart and shouldn't pin the raw editor open.
+                if (!this.props.variable.errors || this.props.variable.errors.length === 0) {
                   this.setState({ editingEquation: false });
                 }
               }}
@@ -534,9 +551,13 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
         try {
           const editor = this.state.equationEditor;
           ReactEditor.focus(editor);
+          // The Slate document is one element per line; convert the flat
+          // offset to a (line, column) point so multi-line equations place
+          // the caret on the right line.
+          const point = slatePointForOffset(equationStr, offset);
           Transforms.select(editor, {
-            anchor: { path: [0, 0], offset },
-            focus: { path: [0, 0], offset },
+            anchor: { path: [...point.path], offset: point.offset },
+            focus: { path: [...point.path], offset: point.offset },
           });
         } catch {
           // ignore if selection fails; the user can click to place the caret

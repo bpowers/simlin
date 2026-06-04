@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions } from '../components/Dialog';
 
 describe('Dialog', () => {
@@ -33,6 +33,44 @@ describe('Dialog', () => {
     );
     const content = document.querySelector('.custom-dialog');
     expect(content).not.toBeNull();
+  });
+
+  // Radix's DismissableLayer registers its document-level pointerdown
+  // listener on a deferred timer (to ignore the pointerdown that opened the
+  // layer), so outside clicks must be fired a tick after render.
+  const nextTick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  test('a pointer-down outside dismisses the dialog by default', async () => {
+    const onClose = jest.fn();
+    render(
+      <Dialog open={true} onClose={onClose}>
+        <div>Content</div>
+      </Dialog>,
+    );
+    await nextTick();
+
+    fireEvent.pointerDown(document.body);
+    fireEvent.pointerUp(document.body);
+
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  test('disableBackdropClick blocks outside-click dismissal', async () => {
+    // A dialog like NewUser's mandatory onboarding must be genuinely modal:
+    // blocking Escape but letting a backdrop click through routes onClose
+    // anyway (and in NewUser's case triggered an implicit submit).
+    const onClose = jest.fn();
+    render(
+      <Dialog open={true} onClose={onClose} disableEscapeKeyDown disableBackdropClick>
+        <div>Content</div>
+      </Dialog>,
+    );
+    await nextTick();
+
+    fireEvent.pointerDown(document.body);
+    fireEvent.pointerUp(document.body);
+
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 

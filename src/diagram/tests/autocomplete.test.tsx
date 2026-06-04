@@ -157,3 +157,81 @@ describe('Autocomplete', () => {
     });
   });
 });
+
+describe('Autocomplete dropdown positioning', () => {
+  test('repositions the portaled listbox when an ancestor scrolls while open', async () => {
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot']}
+        onChange={() => {}}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref} data-testid="wrapper">
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    // jsdom has no layout: stub the wrapper's rect and move it between calls,
+    // simulating the input shifting as its scrollable container scrolls.
+    const wrapper = screen.getByTestId('wrapper');
+    const rect = { top: 100, bottom: 120, left: 10, right: 210, width: 200, height: 20, x: 10, y: 100, toJSON: () => ({}) };
+    const rectMock = jest.fn(() => ({ ...rect }) as DOMRect);
+    wrapper.getBoundingClientRect = rectMock;
+
+    // Typing opens the dropdown; the position is computed from the rect.
+    fireEvent.change(screen.getByTestId('autocomplete-input'), { target: { value: 'ap' } });
+    let listbox: HTMLElement | null = null;
+    await waitFor(() => {
+      listbox = document.querySelector('ul[role="listbox"]');
+      expect(listbox).not.toBeNull();
+      expect((listbox as HTMLElement).style.top).toBe('120px');
+    });
+
+    // The container scrolls: the input is now 60px higher on screen. A
+    // capture-phase scroll listener must recompute the portal position.
+    rect.top = 40;
+    rect.bottom = 60;
+    await act(async () => {
+      fireEvent.scroll(document.body);
+    });
+
+    await waitFor(() => {
+      expect((document.querySelector('ul[role="listbox"]') as HTMLElement).style.top).toBe('60px');
+    });
+  });
+
+  test('repositions the portaled listbox on window resize while open', async () => {
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot']}
+        onChange={() => {}}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref} data-testid="wrapper">
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    const wrapper = screen.getByTestId('wrapper');
+    const rect = { top: 100, bottom: 120, left: 10, right: 210, width: 200, height: 20, x: 10, y: 100, toJSON: () => ({}) };
+    wrapper.getBoundingClientRect = jest.fn(() => ({ ...rect }) as DOMRect);
+
+    fireEvent.change(screen.getByTestId('autocomplete-input'), { target: { value: 'ap' } });
+    await waitFor(() => {
+      expect((document.querySelector('ul[role="listbox"]') as HTMLElement).style.top).toBe('120px');
+    });
+
+    rect.left = 50;
+    await act(async () => {
+      fireEvent.resize(window);
+    });
+
+    await waitFor(() => {
+      expect((document.querySelector('ul[role="listbox"]') as HTMLElement).style.left).toBe('50px');
+    });
+  });
+});

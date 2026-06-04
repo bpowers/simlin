@@ -9,6 +9,7 @@ import {
   getAuth,
   connectAuthEmulator,
   onAuthStateChanged,
+  signOut,
   Auth as FirebaseAuth,
   User as FirebaseUser,
 } from '@firebase/auth';
@@ -50,11 +51,22 @@ class UserInfoSingleton {
   private fetch(): void {
     const resultPromise = fetch('/api/user', { credentials: 'same-origin' });
     const worker = async (): Promise<[User | undefined, number]> => {
-      const response = await resultPromise;
-      const status = response.status;
-      const user = status >= 200 && status < 400 ? await response.json() : undefined;
+      try {
+        const response = await resultPromise;
+        const status = response.status;
+        const user = status >= 200 && status < 400 ? await response.json() : undefined;
 
-      return [user, status];
+        return [user, status];
+      } catch (err) {
+        // A network-level failure means "we don't know the user"; callers
+        // already treat a non-2xx status as not-authenticated, so report
+        // status 0 the same way. Catching here also matters because the
+        // promise can sit unconsumed until the next get() (invalidate()
+        // fires a fetch nothing immediately awaits) -- a rejection would
+        // surface later as an unhandled rejection.
+        console.error('fetching /api/user failed:', err);
+        return [undefined, 0];
+      }
     };
     this.resultPromise = worker();
   }
@@ -245,6 +257,39 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
     });
   };
 
+  // Sign the user out: clear the server session cookie, then the Firebase
+  // client auth state, then drop the cached/in-memory user so the top-level
+  // auth gate renders Login again. Each step is best-effort -- even if the
+  // network calls fail we still clear local state rather than leaving the
+  // user stuck "logged in" with no way out.
+  handleLogout = async (): Promise<void> => {
+    try {
+      await fetch(`${this.getBaseURL()}/session`, {
+        credentials: 'same-origin',
+        method: 'DELETE',
+        cache: 'no-cache',
+      });
+    } catch (err) {
+      console.error('logout: clearing the server session failed:', err);
+    }
+    try {
+      await signOut(this.state.auth);
+    } catch (err) {
+      console.error('logout: firebase signOut failed:', err);
+    }
+    // Drop the local user BEFORE refreshing the cached /api/user info: the
+    // UI must return to the login screen even if the refresh fails, and
+    // invalidate() can rethrow a pending request's rejection (it awaits any
+    // in-flight fetch), which would otherwise escape Home's fire-and-forget
+    // call as an unhandled rejection.
+    this.setState({ user: undefined, isNewUser: undefined, firebaseIdToken: null });
+    try {
+      await userInfo.invalidate();
+    } catch (err) {
+      console.error('logout: refreshing cached user info failed:', err);
+    }
+  };
+
   getBaseURL(): string {
     return '';
   }
@@ -268,7 +313,7 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
     const location = useLocation()[0];
 
     const isNewProject = location === '/new';
-    return <Home isNewProject={isNewProject} user={defined(this.state.user)} />;
+    return <Home isNewProject={isNewProject} user={defined(this.state.user)} onLogout={this.handleLogout} />;
   };
 
   render() {

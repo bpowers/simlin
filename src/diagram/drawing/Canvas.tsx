@@ -2102,10 +2102,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
 
     if (isCancel) {
+      // Cancelling the initial name edit of a just-created flow deletes the
+      // flow; the flag itself is reset by clearPointerState (via
+      // pointerStateReset) so a later rename-cancel can't re-trigger this.
       if (this.state.flowStillBeingCreated) {
-        this.setState({
-          flowStillBeingCreated: true,
-        });
         this.props.onDeleteSelection();
       }
       this.clearPointerState();

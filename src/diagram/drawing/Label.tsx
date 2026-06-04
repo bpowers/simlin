@@ -209,7 +209,11 @@ export class Label extends React.PureComponent<LabelPropsFull> {
               dy = `${-(lineSpacing * (linesCount - 1))}px`;
             }
             return (
-              <tspan key={l} x={x} dy={dy}>
+              // Keyed by index, not line text: repeated lines (e.g. a label
+              // edited to "x\nx") would otherwise produce duplicate keys.
+              // Index keys are safe here -- a flat, fully-rebuilt list with
+              // no per-line state.
+              <tspan key={i} x={x} dy={dy}>
                 {l}
               </tspan>
             );

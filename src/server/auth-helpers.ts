@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { Request } from 'express';
+import { Request, Response } from 'express';
 
 /**
  * Information about the authenticated user extracted from the session.
@@ -71,4 +71,21 @@ export function getAuthenticatedUser(req: Request): AuthenticatedUser | undefine
  */
 export function isResourceOwner(authUser: AuthenticatedUser | undefined, ownerId: string): boolean {
   return authUser !== undefined && authUser.userId === ownerId;
+}
+
+/**
+ * DELETE /session handler: terminates the passport login session.
+ *
+ * Sessions live in a seshcookie-encrypted cookie, so there is no server-side
+ * store to purge: passport's req.logout() removes req.session.passport and
+ * regenerates the session (the compat shim in app.ts resets req.session to a
+ * fresh object), and seshcookie's response hook rewrites the Set-Cookie with
+ * the now-unauthenticated session. The handler must always respond -- the
+ * previous TODO stub never wrote a response, so a client awaiting the fetch
+ * hung indefinitely.
+ */
+export function handleSessionDelete(req: Request, res: Response): void {
+  req.logout((err?: Error) => {
+    res.sendStatus(err ? 500 : 200);
+  });
 }

@@ -28,26 +28,30 @@ export class ErrorDetails extends React.PureComponent<ErrorDetailsProps> {
         modelErrors.length > 0
       )
     ) {
-      errors.push(<div className={styles.list}>simulation error: {errorCodeDescription(simError.code)}</div>);
+      errors.push(
+        <div key="sim" className={styles.list}>
+          simulation error: {errorCodeDescription(simError.code)}
+        </div>,
+      );
     }
     if (modelErrors.length > 0) {
-      for (const err of modelErrors) {
+      modelErrors.forEach((err, i) => {
         if (err.code === ErrorCode.VariablesHaveErrors && varErrors.size > 0) {
-          continue;
+          return;
         }
         const details = err.details;
         errors.push(
-          <div className={styles.list}>
+          <div key={`model-${i}-${err.code}`} className={styles.list}>
             model error: {errorCodeDescription(err.code)}
             {details ? `: ${details}` : undefined}
           </div>,
         );
-      }
+      });
     }
     for (const [ident, errs] of varErrors) {
       for (const err of errs) {
         errors.push(
-          <div className={styles.list}>
+          <div key={`var-${ident}-${err.code}-${err.start}`} className={styles.list}>
             variable "{ident}" error: {errorCodeDescription(err.code)}
           </div>,
         );
@@ -57,7 +61,7 @@ export class ErrorDetails extends React.PureComponent<ErrorDetailsProps> {
       for (const err of errs) {
         const details = err.details;
         errors.push(
-          <div className={styles.list}>
+          <div key={`unit-${ident}-${err.code}-${err.start}`} className={styles.list}>
             variable "{ident}" unit error: {errorCodeDescription(err.code)}
             {details ? `: ${details}` : undefined}
           </div>,

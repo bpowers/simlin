@@ -111,14 +111,17 @@ export class Login extends React.Component<LoginProps, LoginState> {
   emailLoginClick = () => {
     this.setState({ emailLoginFlow: 'showEmail' });
   };
+  // Editing a field clears its stale error: once the user starts correcting
+  // the value, keeping the old red message would be misleading (it described
+  // the previous submission, not the text on screen).
   onFullNameChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-    this.setState({ fullName: event.target.value });
+    this.setState({ fullName: event.target.value, fullNameError: undefined });
   };
   onPasswordChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-    this.setState({ password: event.target.value });
+    this.setState({ password: event.target.value, passwordError: undefined });
   };
   onEmailChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-    this.setState({ email: event.target.value });
+    this.setState({ email: event.target.value, emailError: undefined });
   };
   onEmailCancel = () => {
     this.setState({ emailLoginFlow: undefined });
@@ -130,7 +133,19 @@ export class Login extends React.Component<LoginProps, LoginState> {
       return;
     }
 
-    const methods = await fetchSignInMethodsForEmail(this.props.auth, email);
+    // fetchSignInMethodsForEmail rejects on network errors, rate limiting,
+    // and Firebase's email-enumeration protection; the sibling auth handlers
+    // all surface failures, so this one must too (it used to escape as an
+    // unhandled rejection and the form just sat there).
+    let methods: string[];
+    try {
+      methods = await fetchSignInMethodsForEmail(this.props.auth, email);
+    } catch (err) {
+      this.setState({
+        emailError: err instanceof Error ? err.message : 'unable to look up that email address; try again',
+      });
+      return;
+    }
     if (methods.includes('password')) {
       this.setState({ emailLoginFlow: 'showPassword' });
     } else if (methods.length === 0) {
@@ -157,7 +172,16 @@ export class Login extends React.Component<LoginProps, LoginState> {
       return;
     }
 
-    await sendPasswordResetEmail(this.props.auth, email);
+    try {
+      await sendPasswordResetEmail(this.props.auth, email);
+    } catch (err) {
+      // Stay on the recovery card with a visible error rather than advancing
+      // as if the reset email had been sent.
+      this.setState({
+        emailError: err instanceof Error ? err.message : 'sending the recovery email failed; try again',
+      });
+      return;
+    }
 
     this.setState({
       emailLoginFlow: 'showPassword',

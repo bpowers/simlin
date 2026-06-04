@@ -20,9 +20,6 @@ import { jsFormatNumber as ff } from '../render-common';
 
 import styles from './Flow.module.css';
 
-const atan2 = Math.atan2;
-const PI = Math.PI;
-
 type Side = 'left' | 'right' | 'top' | 'bottom';
 
 /**
@@ -1521,6 +1518,54 @@ export function UpdateFlow(
   return [flowEl, []];
 }
 
+/**
+ * Pull a cloud-terminated flow's endpoint back by `radius` along the
+ * direction of the final segment, so the arrowhead lands on the cloud's
+ * edge rather than at its center. The retraction follows the segment's unit
+ * vector: for orthogonal segments this matches a single-axis shift, while a
+ * diagonal segment retracts by exactly `radius` (applying independent x and
+ * y shifts would over-retract by sqrt(2)*radius). A zero-length final
+ * segment is returned unchanged.
+ */
+export function retractFinalPointIntoCloud(pts: readonly Point[], radius: number): readonly Point[] {
+  const lastPt = at(pts, pts.length - 1);
+  const prevPt = at(pts, pts.length - 2);
+  const dx = lastPt.x - prevPt.x;
+  const dy = lastPt.y - prevPt.y;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len === 0) {
+    return pts;
+  }
+  return arrayWith(pts, pts.length - 1, {
+    ...lastPt,
+    x: lastPt.x - (radius * dx) / len,
+    y: lastPt.y - (radius * dy) / len,
+  });
+}
+
+/**
+ * Direction, in degrees [0, 360), of the last non-degenerate segment ending
+ * at the flow's final point. Walks backward past coincident points --
+ * atan2(0, 0) is 0, which would otherwise read a zero-length final segment
+ * as "pointing right". Returns undefined when every point coincides.
+ */
+export function finalSegmentAngle(pts: readonly Point[]): number | undefined {
+  const lastPt = at(pts, pts.length - 1);
+  for (let i = pts.length - 2; i >= 0; i--) {
+    const p = at(pts, i);
+    const dx = lastPt.x - p.x;
+    const dy = lastPt.y - p.y;
+    if (dx !== 0 || dy !== 0) {
+      let theta = (Math.atan2(dy, dx) * 180) / Math.PI;
+      if (theta < 0) {
+        theta += 360;
+      }
+      return theta;
+    }
+  }
+  return undefined;
+}
+
 export function flowBounds(element: FlowViewElement): Rect {
   const cx = element.x;
   const cy = element.y;
@@ -1695,21 +1740,7 @@ export class Flow extends React.PureComponent<FlowProps> {
     }
 
     if (sink.type === 'cloud' && !isMovingArrow) {
-      const x = at(pts, pts.length - 1).x;
-      const y = at(pts, pts.length - 1).y;
-      const prevX = at(pts, pts.length - 2).x;
-      const prevY = at(pts, pts.length - 2).y;
-
-      if (prevX < x) {
-        pts = arrayWith(pts, pts.length - 1, { ...pts[pts.length - 1], x: x - CloudRadius });
-      } else if (prevX > x) {
-        pts = arrayWith(pts, pts.length - 1, { ...pts[pts.length - 1], x: x + CloudRadius });
-      }
-      if (prevY < y) {
-        pts = arrayWith(pts, pts.length - 1, { ...pts[pts.length - 1], y: y - CloudRadius });
-      } else if (prevY > y) {
-        pts = arrayWith(pts, pts.length - 1, { ...pts[pts.length - 1], y: y + CloudRadius });
-      }
+      pts = retractFinalPointIntoCloud(pts, CloudRadius);
     }
 
     const finalAdjust = 7.5;
@@ -1719,13 +1750,12 @@ export class Flow extends React.PureComponent<FlowProps> {
       let x = at(pts, j).x;
       let y = at(pts, j).y;
       if (j === pts.length - 1) {
-        const dx = x - at(pts, j - 1).x;
-        const dy = y - at(pts, j - 1).y;
-        let theta = (atan2(dy, dx) * 180) / PI;
-        if (theta < 0) {
-          theta += 360;
-        }
-        if (theta >= 315 || theta < 45) {
+        // Walk back past coincident points: a degenerate (zero-length) final
+        // segment must not read as "pointing right" via atan2(0, 0) === 0.
+        const theta = finalSegmentAngle(pts);
+        if (theta === undefined) {
+          arrowTheta = 0;
+        } else if (theta >= 315 || theta < 45) {
           x -= finalAdjust;
           arrowTheta = 0;
         } else if (theta >= 45 && theta < 135) {

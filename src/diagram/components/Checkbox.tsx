@@ -29,7 +29,9 @@ export default function Checkbox(props: CheckboxProps): React.ReactElement {
       style={style}
       checked={checked}
       defaultChecked={defaultChecked}
-      onCheckedChange={onChange}
+      // Radix's CheckedState is boolean | 'indeterminate'; normalize so the
+      // (checked: boolean) contract our callers type against actually holds.
+      onCheckedChange={onChange ? (state) => onChange(state === true) : undefined}
       disabled={disabled}
       name={name}
     >

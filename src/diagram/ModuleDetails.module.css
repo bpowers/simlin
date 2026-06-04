@@ -4,6 +4,8 @@
 
 .card {
   width: var(--panel-width-sm);
+  /* Match .searchBar: see VariableDetails.module.css */
+  box-sizing: border-box;
   max-height: calc(100vh - 18px);
   overflow-y: auto;
   scrollbar-gutter: stable;

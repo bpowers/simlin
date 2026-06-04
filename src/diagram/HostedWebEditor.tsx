@@ -174,23 +174,36 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
     window.location.assign(url);
   }
 
+  // Must never reject: the componentDidMount caller is fire-and-forget, so a
+  // thrown error would become an unhandled rejection and leave the editor
+  // permanently blank (render() shows nothing until projectBinary is set and
+  // only serviceErrors produce a message).
   async loadProject(): Promise<void> {
     const base = this.getBaseURL();
     const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
-    const response = await fetch(apiPath);
-    if (response.status >= 400) {
-      this.appendModelError(`unable to load ${apiPath}`);
-      return;
+    try {
+      const response = await fetch(apiPath);
+      if (response.status >= 400) {
+        this.appendModelError(`unable to load ${apiPath}`);
+        return;
+      }
+
+      const projectResponse = (await response.json()) as { pb?: unknown; version?: unknown };
+      if (typeof projectResponse?.pb !== 'string' || typeof projectResponse?.version !== 'number') {
+        this.appendModelError(`malformed project response from ${apiPath}`);
+        return;
+      }
+
+      const projectBinary = toUint8Array(projectResponse.pb);
+
+      this.setState({
+        projectBinary,
+        projectVersion: projectResponse.version,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.appendModelError(`unable to load ${apiPath}: ${msg}`);
     }
-
-    const projectResponse = await response.json();
-
-    const projectBinary = toUint8Array(projectResponse.pb);
-
-    this.setState({
-      projectBinary,
-      projectVersion: defined(projectResponse.version) as number,
-    });
   }
 
   render(): React.ReactNode {

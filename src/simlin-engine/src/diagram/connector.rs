@@ -186,8 +186,12 @@ pub(crate) fn intersect_element_arc(
 
     match element_shape(element) {
         ElementShape::Circle { r } => {
-            // Matches TypeScript: Math.tan(r / circ.r), not atan
-            let off_theta = (r / circ.r).tan();
+            // atan (not tan), mirroring both the Rect branch below and the
+            // TypeScript renderer: a tight arc between nearby elements can
+            // push r/circ.r past tan's pi/2 asymptote, where tan goes huge or
+            // flips sign and swings the arrowhead to the wrong side. atan is
+            // bounded and monotonic for all ratios.
+            let off_theta = (r / circ.r).atan();
             let element_center_theta = (cy - circ.y).atan2(cx - circ.x);
             let theta = element_center_theta + if inv { 1.0 } else { -1.0 } * off_theta;
 
@@ -714,7 +718,7 @@ mod tests {
         let to = make_aux_ve(200.0, 200.0, "b", 2);
 
         let svg = render_connector(&link, &from, &to, &not_arrayed);
-        let expected = "<g><path d=\"M100,100A273.205081,273.205081 0 0,1 200,200\" class=\"simlin-connector-bg\"></path><path d=\"M100,100A273.205081,273.205081 0 0,1 200,200\" class=\"simlin-connector\"></path><g><path d=\"M199.870725,192.278529L188.620725,196.778529A27,27 0 0,1 188.620725,187.778529z\" class=\"simlin-arrowhead-bg\" transform=\"rotate(58.111863,195.370725,192.278529)\"></path><path d=\"M195.370725,192.278529L189.370725,195.278529A18,18 0 0,1 189.370725,189.278529z\" class=\"simlin-arrowhead-link\" transform=\"rotate(58.111863,195.370725,192.278529)\"></path></g></g>";
+        let expected = "<g><path d=\"M100,100A273.205081,273.205081 0 0,1 200,200\" class=\"simlin-connector-bg\"></path><path d=\"M100,100A273.205081,273.205081 0 0,1 200,200\" class=\"simlin-connector\"></path><g><path d=\"M199.874164,192.284057L188.624164,196.784057A27,27 0 0,1 188.624164,187.784057z\" class=\"simlin-arrowhead-bg\" transform=\"rotate(58.113228,195.374164,192.284057)\"></path><path d=\"M195.374164,192.284057L189.374164,195.284057A18,18 0 0,1 189.374164,189.284057z\" class=\"simlin-arrowhead-link\" transform=\"rotate(58.113228,195.374164,192.284057)\"></path></g></g>";
         assert_eq!(svg, expected);
         assert!(svg.starts_with("<g><path d=\"M100,100A"));
     }

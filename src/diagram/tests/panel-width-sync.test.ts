@@ -10,26 +10,33 @@ describe('Panel width constants sync', () => {
     const themeCss = fs.readFileSync(path.join(__dirname, '../theme.css'), 'utf-8');
 
     const smMatch = themeCss.match(/--panel-width-sm:\s*(\d+)px/);
+    const mdMatch = themeCss.match(/--panel-width-md:\s*(\d+)px/);
     const lgMatch = themeCss.match(/--panel-width-lg:\s*(\d+)px/);
 
     expect(smMatch).not.toBeNull();
+    expect(mdMatch).not.toBeNull();
     expect(lgMatch).not.toBeNull();
 
     const cssWidthSm = parseInt(smMatch![1], 10);
+    const cssWidthMd = parseInt(mdMatch![1], 10);
     const cssWidthLg = parseInt(lgMatch![1], 10);
 
     const editorTs = fs.readFileSync(path.join(__dirname, '../Editor.tsx'), 'utf-8');
 
     const tsSmMatch = editorTs.match(/SearchbarWidthSm\s*=\s*(\d+)/);
+    const tsMdMatch = editorTs.match(/SearchbarWidthMd\s*=\s*(\d+)/);
     const tsLgMatch = editorTs.match(/SearchbarWidthLg\s*=\s*(\d+)/);
 
     expect(tsSmMatch).not.toBeNull();
+    expect(tsMdMatch).not.toBeNull();
     expect(tsLgMatch).not.toBeNull();
 
     const tsWidthSm = parseInt(tsSmMatch![1], 10);
+    const tsWidthMd = parseInt(tsMdMatch![1], 10);
     const tsWidthLg = parseInt(tsLgMatch![1], 10);
 
     expect(tsWidthSm).toBe(cssWidthSm);
+    expect(tsWidthMd).toBe(cssWidthMd);
     expect(tsWidthLg).toBe(cssWidthLg);
   });
 });

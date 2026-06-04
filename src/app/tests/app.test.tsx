@@ -21,6 +21,7 @@ jest.mock(
     // Return a fresh unsubscribe stub per call so the lifecycle tests can
     // assert componentWillUnmount tears the subscription down.
     onAuthStateChanged: jest.fn(() => jest.fn()),
+    signOut: jest.fn(async () => {}),
   }),
   { virtual: true },
 );
@@ -78,7 +79,7 @@ import * as React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import { Router } from 'wouter';
 import { memoryLocation } from 'wouter/memory-location';
-import { onAuthStateChanged } from '@firebase/auth';
+import { onAuthStateChanged, signOut } from '@firebase/auth';
 
 import { App, InnerApp } from '../App';
 
@@ -285,5 +286,87 @@ describe('InnerApp.componentDidMount() / componentWillUnmount() lifecycle', () =
     jest.runAllTimers();
 
     expect(getUserInfoSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('InnerApp.handleLogout', () => {
+  beforeEach(() => {
+    fetchMock.mockClear();
+  });
+
+  test('clears the server session, firebase auth state, and the local user', async () => {
+    setLocation('/');
+    const ref = React.createRef<InnerApp>();
+    const { unmount } = render(
+      <Router hook={memoryLocation({ path: '/', static: true }).hook}>
+        <InnerApp ref={ref} />
+      </Router>,
+    );
+    expect(ref.current).not.toBeNull();
+
+    // Seed a signed-in user, as if getUserInfo had succeeded.
+    ref.current!.setState({
+      user: { id: 'alice' } as unknown as import('../User').User,
+      authUnknown: false,
+    });
+    fetchMock.mockClear();
+
+    await ref.current!.handleLogout();
+
+    // The server session must be torn down...
+    const deleteCall = fetchMock.mock.calls.find(
+      (call) => (call as unknown[])[1] && ((call as unknown[])[1] as { method?: string }).method === 'DELETE',
+    );
+    expect(deleteCall).toBeDefined();
+    expect((deleteCall as unknown[])[0]).toBe('/session');
+    // ...the firebase client signed out...
+    expect(signOut).toHaveBeenCalled();
+    // ...and the local user dropped so the auth gate shows Login again.
+    expect(ref.current!.state.user).toBeUndefined();
+
+    unmount();
+  });
+
+  test('still clears the local user when every network step rejects', async () => {
+    // Every step of handleLogout is best-effort: a transient network
+    // failure during DELETE /session or the /api/user cache refresh
+    // (userInfo.invalidate can rethrow a pending request's rejection) must
+    // neither escape as an unhandled rejection from Home's fire-and-forget
+    // call nor leave the UI stuck signed in.
+    setLocation('/');
+    const ref = React.createRef<InnerApp>();
+    const { unmount } = render(
+      <Router hook={memoryLocation({ path: '/', static: true }).hook}>
+        <InnerApp ref={ref} />
+      </Router>,
+    );
+    expect(ref.current).not.toBeNull();
+
+    ref.current!.setState({
+      user: { id: 'alice' } as unknown as import('../User').User,
+      authUnknown: false,
+    });
+
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    fetchMock.mockClear();
+    fetchMock.mockRejectedValue(new Error('network down'));
+
+    let threw: unknown;
+    try {
+      await ref.current!.handleLogout();
+    } catch (e) {
+      threw = e;
+    }
+    // Let any stray microtasks settle (an unhandled rejection would fail
+    // the test via Jest's unhandled-rejection reporting).
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(threw).toBeUndefined();
+    expect(ref.current!.state.user).toBeUndefined();
+
+    consoleSpy.mockRestore();
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async () => ({ status: 401, async json() { return {}; } }) as unknown as Response);
+    unmount();
   });
 });

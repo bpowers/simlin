@@ -75,6 +75,10 @@ export interface PointerStateReset {
   isDragSelecting: false;
   isMovingCanvas: false;
   isEditingName: false;
+  // Cleared here so that once name editing ends (commit or cancel), a later
+  // Escape-cancel of an unrelated rename can't see a stale `true` and delete
+  // that variable via the cancel-of-newly-created-flow path.
+  flowStillBeingCreated: false;
   dragSelectionPoint: undefined;
   inCreation: undefined;
   inCreationCloud: undefined;
@@ -91,6 +95,7 @@ export function pointerStateReset(): PointerStateReset {
     isDragSelecting: false,
     isMovingCanvas: false,
     isEditingName: false,
+    flowStillBeingCreated: false,
     dragSelectionPoint: undefined,
     inCreation: undefined,
     inCreationCloud: undefined,

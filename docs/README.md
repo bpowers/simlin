@@ -18,6 +18,7 @@
 - [dev/typescript.md](dev/typescript.md) -- TypeScript/React development standards
 - [dev/python.md](dev/python.md) -- Python (pysimlin) development standards
 - [dev/workflow.md](dev/workflow.md) -- Problem-solving philosophy and TDD workflow
+- [dev/frontend-audit-2026-06.md](dev/frontend-audit-2026-06.md) -- June 2026 frontend bug audit of src/app and src/diagram: findings, fix status, tracked follow-ups
 
 ## Project Management
 
