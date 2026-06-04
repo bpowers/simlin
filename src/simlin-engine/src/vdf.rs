@@ -2389,7 +2389,7 @@ mod tests {
         // scanner under-counted on edited files (name-parser cap) and
         // over-counted by one elsewhere (a spurious leading word); the
         // deterministic decode matches the header exactly. See the
-        // corpus-wide invariant in tests/vdf_structural_invariants.rs.
+        // corpus-wide invariant in tests/integration/vdf_structural_invariants.rs.
         for path in [
             "../../test/bobby/vdf/econ/risk2.vdf",
             "../../test/metasd/WRLD3-03/SCEN01.VDF",

@@ -114,7 +114,7 @@ export type SeriesCloseResult =
   | { readonly match: false; readonly index: number; readonly expected: number; readonly actual: number };
 
 // VM-vs-wasm parity tolerance for the same salsa-compiled simulation. These are
-// the engine's corpus-wide VM-vs-wasm bounds (src/simlin-engine/tests/test_helpers.rs
+// the engine's corpus-wide VM-vs-wasm bounds (src/simlin-engine/tests/integration/test_helpers.rs
 // `ensure_results`, the comparator the heavy C-LEARN/WORLD3 wasm tests clear),
 // NOT the far tighter teacup-only 1e-9 in tests/wasm-model.test.ts: a large model
 // run to its final time accumulates floating-point reassociation noise far above

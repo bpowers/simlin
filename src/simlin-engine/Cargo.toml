@@ -78,50 +78,11 @@ tempfile = "3"
 wasm-interpreter = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a" }
 checked = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a", features = ["linker", "interop"] }
 
-[[test]]
-name = "simulate"
-required-features = ["file_io"]
-
-[[test]]
-name = "simulate_ltm"
-required-features = ["file_io"]
-
-[[test]]
-name = "simulate_ltm_wasm"
-required-features = ["file_io"]
-
-[[test]]
-name = "simulate_systems"
-required-features = ["file_io"]
-
-[[test]]
-name = "systems_roundtrip"
-required-features = ["file_io"]
-
-# metasd_macros calls load_dat/load_csv in its simulation tier, which are
-# #[cfg(feature = "file_io")]-gated; without this entry Cargo auto-discovers
-# the target unconditionally and `--all-targets` fails to compile when
-# file_io is off (every sibling file_io test below/above is gated the same
-# way).
-[[test]]
-name = "metasd_macros"
-required-features = ["file_io"]
-
-[[test]]
-name = "roundtrip"
-
-[[test]]
-name = "mdl_equivalence"
-
-[[test]]
-name = "json_roundtrip"
-
-[[test]]
-name = "compiler_vector"
-
-[[test]]
-name = "vdf_alias_decoder"
-required-features = ["file_io"]
+# Integration tests are consolidated into the single tests/integration
+# harness (see tests/integration/main.rs for why); feature-gated test
+# modules use #[cfg(feature = ...)] there instead of per-target
+# required-features entries. tests/vm_alloc.rs stays a separate
+# auto-discovered target because it installs a counting global allocator.
 
 # The layout_eval example calls the png_render-gated `render_png` and loads
 # Vensim corpus models that reference external data (file_io). Examples are

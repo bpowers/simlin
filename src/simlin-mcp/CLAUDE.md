@@ -75,9 +75,9 @@ cargo build -p simlin-mcp
 ```
 
 Tests in this crate cover transport, filesystem access, and the npm release workflow:
-- `tests/file_system_access.rs` -- E2E coverage of `FileSystemAccess` (open/save/create + `.mdl` rejection).
-- `tests/stdio_smoke.rs` -- spawns the built binary, exchanges a JSON-RPC `initialize`, asserts the wire surface (server name, capabilities, instructions). The single smoke test replaces the deleted JSON-RPC dispatcher unit tests; rmcp owns those wire mechanics now.
-- `tests/build_npm_packages.rs`, `tests/mcp_release_workflow.rs` -- CI/release validators (independent of the runtime).
+- `tests/integration/file_system_access.rs` -- E2E coverage of `FileSystemAccess` (open/save/create + `.mdl` rejection).
+- `tests/integration/stdio_smoke.rs` -- spawns the built binary, exchanges a JSON-RPC `initialize`, asserts the wire surface (server name, capabilities, instructions). The single smoke test replaces the deleted JSON-RPC dispatcher unit tests; rmcp owns those wire mechanics now.
+- `tests/integration/build_npm_packages.rs`, `tests/integration/mcp_release_workflow.rs` -- CI/release validators (independent of the runtime).
 
 Tool-level behaviour tests (success and validation-error paths for each tool) live in `../simlin-mcp-core/tests/`.
 

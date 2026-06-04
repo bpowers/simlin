@@ -696,7 +696,7 @@ fn test_auto_flip_warning_surfaces_via_collect_model_diagnostics() {
 /// the db lock, via `LtmEnabledGuard`) before collecting diagnostics *iff*
 /// some simulation on the project was created with `enable_ltm = true` -- so
 /// the warning IS reachable for those callers (covered end to end by
-/// `simlin/tests/errors.rs::test_get_errors_surfaces_ltm_auto_flip_warning_after_ltm_sim`).
+/// `simlin/tests/integration/errors.rs::test_get_errors_surfaces_ltm_auto_flip_warning_after_ltm_sim`).
 /// What this test pins is the gate's "off by default" half: keep the original
 /// intent -- never pay LTM cost when nobody asked for LTM -- machine-checkable
 /// here, since that is exactly what makes the FFI's per-project scoping cheap.

@@ -77,21 +77,21 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
 
 ## Tests
 
-Integration tests live in `tests/` (standard Rust layout), organized by FFI module:
+Integration tests live in the single consolidated `tests/integration` harness (one binary instead of one per file; see GH #706 and `tests/integration/main.rs` -- add new integration tests as a `mod` there), organized by FFI module:
 
-- **`tests/project.rs`** - Project lifecycle: open from all formats, get_model, add_model, is_simulatable, error API
-- **`tests/serialization.rs`** - Serialize to protobuf, JSON, XMILE, systems format
-- **`tests/simulation.rs`** - Simulation lifecycle: create, run, set/get values, reset, concurrency
-- **`tests/model.rs`** - Model queries: var count/names/JSON, LaTeX equations, sim specs, links
-- **`tests/patch.rs`** - JSON patch application, error collection, unit warnings, XMILE patches
-- **`tests/incremental.rs`** - Incremental compilation path (patch-then-sim, snapshot isolation)
-- **`tests/analysis.rs`** - Causal analysis: incoming links, loop detection, loop scores
-- **`tests/wasm.rs`** - `simlin_model_compile_to_wasm`: validates and executes the returned blob under the DLR-FT interpreter (a libsimlin dev-dependency), parses the returned layout per its documented wire format, and checks the strided series against the VM via `simlin_sim_get_series`; also asserts a graceful `SimlinError` (no panic) for an unsupported model. `compile_to_wasm_blob_supports_resumable_run` further drives the FFI-compiled blob's resumable ABI (`run_initials`/`run_to`/`set_value`/`reset`, the additive exports) against a VM oracle driven identically through `simlin_sim_run_to`/`simlin_sim_set_value`/`simlin_sim_run_to_end`, confirming the resumable surface survives the FFI compile path and the export set grew purely additively. `compile_to_wasm_unsupported_ltm_model_surfaces_error` exercises the `ltm_enabled=true` path against an intentionally unlowerable LTM model and asserts the `SimlinError` reaches the caller (no silent VM fallback). The from-wasm analysis twins are covered by `links_from_wasm_match_vm` and `rel_loop_score_from_wasm_matches_vm`: each compiles an LTM-enabled wasm blob, runs it under the interpreter to extract the slab, and asserts that `simlin_analyze_links_from_wasm_results` / `simlin_analyze_rel_loop_score_from_wasm_results` agree with their VM-side FFI counterparts on the link set and per-step scores
-- **`tests/rendering.rs`** - SVG and PNG diagram rendering
-- **`tests/diagram.rs`** - Diagram layout sync
-- **`tests/errors.rs`** - Error formatting, error kind mapping, diagnostics
-- **`tests/memory.rs`** - Allocator alignment
-- **`tests/common/mod.rs`** - Shared test helpers (`open_project_from_datamodel`)
+- **`tests/integration/project.rs`** - Project lifecycle: open from all formats, get_model, add_model, is_simulatable, error API
+- **`tests/integration/serialization.rs`** - Serialize to protobuf, JSON, XMILE, systems format
+- **`tests/integration/simulation.rs`** - Simulation lifecycle: create, run, set/get values, reset, concurrency
+- **`tests/integration/model.rs`** - Model queries: var count/names/JSON, LaTeX equations, sim specs, links
+- **`tests/integration/patch.rs`** - JSON patch application, error collection, unit warnings, XMILE patches
+- **`tests/integration/incremental.rs`** - Incremental compilation path (patch-then-sim, snapshot isolation)
+- **`tests/integration/analysis.rs`** - Causal analysis: incoming links, loop detection, loop scores
+- **`tests/integration/wasm.rs`** - `simlin_model_compile_to_wasm`: validates and executes the returned blob under the DLR-FT interpreter (a libsimlin dev-dependency), parses the returned layout per its documented wire format, and checks the strided series against the VM via `simlin_sim_get_series`; also asserts a graceful `SimlinError` (no panic) for an unsupported model. `compile_to_wasm_blob_supports_resumable_run` further drives the FFI-compiled blob's resumable ABI (`run_initials`/`run_to`/`set_value`/`reset`, the additive exports) against a VM oracle driven identically through `simlin_sim_run_to`/`simlin_sim_set_value`/`simlin_sim_run_to_end`, confirming the resumable surface survives the FFI compile path and the export set grew purely additively. `compile_to_wasm_unsupported_ltm_model_surfaces_error` exercises the `ltm_enabled=true` path against an intentionally unlowerable LTM model and asserts the `SimlinError` reaches the caller (no silent VM fallback). The from-wasm analysis twins are covered by `links_from_wasm_match_vm` and `rel_loop_score_from_wasm_matches_vm`: each compiles an LTM-enabled wasm blob, runs it under the interpreter to extract the slab, and asserts that `simlin_analyze_links_from_wasm_results` / `simlin_analyze_rel_loop_score_from_wasm_results` agree with their VM-side FFI counterparts on the link set and per-step scores
+- **`tests/integration/rendering.rs`** - SVG and PNG diagram rendering
+- **`tests/integration/diagram.rs`** - Diagram layout sync
+- **`tests/integration/errors.rs`** - Error formatting, error kind mapping, diagnostics
+- **`tests/integration/memory.rs`** - Allocator alignment
+- **`tests/integration/common/mod.rs`** - Shared test helpers (`open_project_from_datamodel`)
 
 Unit tests (needing `pub(crate)` access) remain inline:
 

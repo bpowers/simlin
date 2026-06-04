@@ -32,7 +32,7 @@ mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
 # Pure-Rust no_std wasm interpreter (the same DLR-FT rev simlin-engine pins),
-# used by the `tests/wasm.rs` integration test to validate and execute the blob
+# used by the `tests/integration/wasm.rs` integration test to validate and execute the blob
 # `simlin_model_compile_to_wasm` returns and check it against the returned
 # layout. Dev-only: dev-dependencies are never built into the cdylib/staticlib
 # or the wasm32 bundle (which uses --no-default-features), so this cannot leak

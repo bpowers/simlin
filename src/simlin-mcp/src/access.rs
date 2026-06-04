@@ -134,7 +134,7 @@ fn has_mdl_extension(path: &Path) -> bool {
 /// from the engine's salsa-backed link-polarity analysis — this matches
 /// the pre-rmcp simlin-mcp behaviour where every save re-derived
 /// relationships rather than trusting whatever was on disk.  The
-/// in-test path used by `simlin-mcp-core/tests/edit_model_e2e.rs` skips
+/// in-test path used by `simlin-mcp-core/tests/integration/edit_model_e2e.rs` skips
 /// this enrichment because it doesn't exercise SD-AI relationships;
 /// production callers go through this function and must keep
 /// relationships in sync with the post-edit model.

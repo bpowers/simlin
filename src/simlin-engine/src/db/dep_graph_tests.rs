@@ -675,7 +675,7 @@ fn consistency_violation_none_for_init_only_resolved_scc_not_dt_instrumented() {
 //   case-3 (NEG) plain scalar -- soundness.
 //   case-4 (NEG) merely references the VEM var -- its OWN lowered `Expr`
 //     has only a `Var` slot read, no `App`; soundness.
-// VEM shapes are the known-good `tests/compiler_vector.rs` fixtures
+// VEM shapes are the known-good `tests/integration/compiler_vector.rs` fixtures
 // (`vector_elm_map(source[*], offsets[*])` and the nested
 // `max(vector_elm_map(...), 15)` hoisting form) so the model compiles and
 // the only thing under test is the membership set.
@@ -1369,7 +1369,7 @@ fn dt_self_recurrence_not_double_resolved_as_init_scc() {
 // cycle is init-ONLY (no dt SCC). This is the empirical confirmation that
 // the chosen fixture shape produces a `phase: Initial` `ResolvedScc` with
 // >= 2 members (the precondition the `init_recurrence.mdl` end-to-end
-// simulation test in `tests/simulate.rs` relies on), and a permanent
+// simulation test in `tests/integration/simulate.rs` relies on), and a permanent
 // regression guard at the datamodel/verdict level.
 
 /// Two arrayed stocks `cs[t]` / `ecs[t]` over a 3-element named dimension

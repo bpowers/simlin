@@ -12,7 +12,7 @@
 //! Format-aware write paths for the save handler.
 //!
 //! XMILE in-place writes use `simlin_engine::to_xmile` (byte-stable for
-//! round-trips, see `simlin-engine/tests/simulate.rs`) plus the
+//! round-trips, see `simlin-engine/tests/integration/simulate.rs`) plus the
 //! `simlin_engine::io::atomic_write` primitive (sibling tempfile + rename).
 //! `.sd.json` writes use `serde_json::to_string_pretty` for git-friendly
 //! line-oriented diffs.

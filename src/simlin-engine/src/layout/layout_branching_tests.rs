@@ -107,7 +107,7 @@ fn assert_no_stock_overlap(view: &datamodel::StockFlow) {
 
 /// Every stock-attached flow endpoint must lie ON that stock's boundary
 /// rectangle (within a small tolerance). Mirrors the corpus-level tripwire test
-/// in `tests/layout.rs`; repeated here so the unit tests catch a detached
+/// in `tests/integration/layout.rs`; repeated here so the unit tests catch a detached
 /// branch flow without needing the corpus models.
 fn assert_flow_endpoints_attached(view: &datamodel::StockFlow) {
     use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};

@@ -56,7 +56,7 @@ use simlin_engine::layout::metrics::{LayoutMetrics, MetricWeights, compute_layou
 use simlin_engine::{datamodel, open_vensim, open_xmile};
 
 /// The model name the layout pipeline and renderer operate on. `Project::get_model`
-/// maps "main" to the single/main model (matching `tests/layout.rs`).
+/// maps "main" to the single/main model (matching `tests/integration/layout.rs`).
 const MAIN_MODEL: &str = "main";
 
 /// Default number of seeds to sample per model when `LAYOUT_EVAL_SEEDS` is unset.

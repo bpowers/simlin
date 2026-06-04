@@ -45,7 +45,7 @@ The library is generic over a concrete `A: ProjectAccess` (not `dyn`) so rmcp's 
 cargo test -p simlin-mcp-core
 ```
 
-Tests are split between unit tests (in-source `#[cfg(test)] mod tests`) and integration tests under `tests/`:
+Tests are split between unit tests (in-source `#[cfg(test)] mod tests`) and integration tests in the single consolidated `tests/integration` harness (one binary instead of one per file; see GH #706 -- add new integration tests as a `mod` in `tests/integration/main.rs`):
 - `create_model_e2e.rs`, `edit_model_e2e.rs`, `read_model_e2e.rs` -- per-tool E2E coverage against `TestFileSystemAccess`.
 - `server.rs` -- `SimlinMcpServer` happy paths for `get_info`, `list_resources`, and `read_resource`.
 - `tool_dispatch.rs` -- end-to-end rmcp tool dispatch over an in-memory transport.

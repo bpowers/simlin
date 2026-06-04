@@ -373,5 +373,8 @@ jobs:
           SIMLIN_SERVE_BUILD_WEB: "1"
         run: cargo build -p simlin-serve --release
 
+      # The smoke test lives in the consolidated `integration` harness;
+      # `smoke::` filters to just its tests (all `#[ignore]`d, hence
+      # `--ignored`).
       - name: Run smoke test
-        run: cargo test -p simlin-serve --release --test smoke -- --ignored --nocapture
+        run: cargo test -p simlin-serve --release --test integration -- --ignored --nocapture smoke::

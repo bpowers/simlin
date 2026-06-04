@@ -100,7 +100,7 @@ pnpm --filter @simlin/serve-web run test # SPA unit tests
 pnpm --filter @simlin/serve-web run lint
 ```
 
-Integration tests live in `tests/` and cover discovery, registry, watcher behaviour, save validation, MCP tool dispatch, MCP notifications, dual-port smoke, end-to-end MCP-to-browser propagation, and the npm release workflow.
+Integration tests live in the single consolidated `tests/integration` harness (one binary instead of one per file; see GH #706 -- add new integration tests as a `mod` in `tests/integration/main.rs`; shared fixtures stay in `tests/fixtures/`) and cover discovery, registry, watcher behaviour, save validation, MCP tool dispatch, MCP notifications, dual-port smoke, end-to-end MCP-to-browser propagation, and the npm release workflow.
 
 ## Security and Threat Model
 

@@ -482,7 +482,7 @@ fn layout_at_seed(project: &datamodel::Project, seed: u64) -> datamodel::StockFl
 /// distribution. Here the seed is held fixed and the layout must be exactly
 /// repeatable; there the seed sweeps and may produce the same result on models
 /// where semantic initial placement already determines the stable layout.
-/// The integration test `tests/layout.rs` already asserts `view1 == view2` for
+/// The integration test `tests/integration/layout.rs` already asserts `view1 == view2` for
 /// `generate_layout`; this focused in-crate test covers the
 /// `generate_layout_with_config` + explicit-seed Rung-0 path.
 #[test]

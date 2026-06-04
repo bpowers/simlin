@@ -10,6 +10,17 @@
 - Do NOT write one-off Rust files compiled with `rustc` to test hypotheses. Write unit tests close to the source of the problem instead -- they serve as both verification and documentation.
 - Tests should err on the side of brittleness: if a required test file is missing, fail loudly rather than skipping.
 
+### One integration-test harness per crate
+
+Add new integration tests as a `mod` in the crate's `tests/integration/main.rs`, NOT as a new top-level `tests/*.rs` file. Cargo builds every top-level `tests/*.rs` file as its own binary that statically links the crate's full dependency graph (~40-110MB each in debug). Beyond the link time and disk cost, macOS imposes a first-exec security scan on every freshly built binary -- roughly 1-3s per binary, proportional to size, and serialized system-wide -- so per-file test binaries made fresh `cargo test` runs pay minutes of scan wait and blew the pre-commit cap (GH #706; consolidating 80 binaries down to ~11 cut a fresh-link workspace test run from ~290s to ~85s on macOS).
+
+Conventions inside a harness:
+
+- Feature-gated modules use `#[cfg(feature = ...)]` on the `mod` declaration in `main.rs` (equivalent to the old per-target `required-features`, without skipping the whole harness).
+- A test that mutates process-global state (e.g. installs a `#[global_allocator]`, like `simlin-engine/tests/vm_alloc.rs`) is the one valid reason for a separate top-level `tests/*.rs` binary; document why in the file.
+- Tests from different former files now share one process and interleave on libtest threads -- don't add tests that set env vars, change the working directory, or bind fixed ports.
+- Run one module's tests with a name filter: `cargo test -p <crate> --test integration -- <module>::`.
+
 ### Test time budgets
 
 Individual tests should finish in a few seconds on a debug build. Target is under 2s per test; 5s is the soft ceiling. Slow tests compound: we have thousands of them and they run on every pre-commit and every CI push.
