@@ -391,12 +391,24 @@ unmeasured (file/see issues):
   Skipping the untaken branch needs forward jumps (codegen + stack-depth
   validation + peephole/fusion jump maps + wasmgen parity): a real design
   effort.
-- **Time-invariant hoisting** — constants are re-assigned and
+- **Time-invariant hoisting** (#712) — constants are re-assigned and
   constant-derived auxes re-computed every step; a "constant phase" computed
-  once per `run_to` (re-run after `set_value`) could skip them. Needs a
-  measurement of what fraction of the per-step program is time-invariant,
-  and care with results presentation (each saved chunk must still carry the
-  values).
+  once per `run_to` (re-run after `set_value`) could skip them. **Stage B1
+  landed** (classification + flow-runlist partition + split metadata,
+  behavior-neutral; see
+  [the design note](/docs/design-plans/2026-06-04-time-invariant-hoisting.md)):
+  the run-invariant flow vars are classified (C-LEARN: 868 invariant slots
+  of the root flow phase, oracle-verified bit-constant with 0 violations;
+  WORLD3: 78) and reordered into a contiguous flow-runlist prefix, with the
+  prefix opcode length recorded on `CompiledModule`. B1 still runs the whole
+  program every step, so it should be perf-neutral -- but the interleaved A/B
+  (3 rounds, freshly-built `clearn_profile` binaries, identical model) measured
+  the *reordered* binary a **consistent ~9.5 ms faster** (145.0 -> 135.5 ms),
+  not neutral: clustering the invariant (constant-slot-writing) fragments into
+  one prefix improves the per-step memory-access locality of the throughput-
+  bound run. Stage B2 (run the invariant prefix once per `run_to`; snapshot +
+  copy-forward into each saved chunk; re-run after `set_value`; wasmgen keeps
+  the single reordered program) is the actual hoist and is not yet done.
 - **Lookup last-segment memo** (#602) — C-LEARN's year-indexed tables are
   evaluated at slowly-advancing TIME; remembering the last segment per GF
   would skip most binary searches.
