@@ -92,6 +92,12 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
       this.setState({
         errorMsg: 'Simlin requires a non-empty username',
       });
+    } else if (!this.state.agreedToTerms) {
+      // Enter (and previously a backdrop click) routes here too -- it must
+      // not bypass the agreed-to-terms gate that disables the Submit button.
+      this.setState({
+        errorMsg: 'Please agree to the Terms and Privacy Policy to continue',
+      });
     } else {
       setTimeout(this.setUsername);
     }
@@ -115,7 +121,13 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
     );
     return (
       <div>
-        <Dialog open={true} disableEscapeKeyDown={true} onClose={this.handleClose} aria-labelledby="form-dialog-title">
+        <Dialog
+          open={true}
+          disableEscapeKeyDown={true}
+          disableBackdropClick={true}
+          onClose={this.handleClose}
+          aria-labelledby="form-dialog-title"
+        >
           <DialogTitle id="form-dialog-title">Welcome!</DialogTitle>
           <DialogContent>
             <DialogContentText>Please choose a username (think of this like a GitHub username).</DialogContentText>

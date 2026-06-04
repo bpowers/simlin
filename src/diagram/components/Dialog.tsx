@@ -12,6 +12,11 @@ export interface DialogProps {
   open: boolean;
   onClose?: () => void;
   disableEscapeKeyDown?: boolean;
+  // Block dismissal via clicks/interaction outside the dialog. A truly modal
+  // dialog (e.g. mandatory onboarding) needs this in addition to
+  // disableEscapeKeyDown -- Radix otherwise treats a backdrop click as a
+  // close request and routes it to onClose.
+  disableBackdropClick?: boolean;
   'aria-labelledby'?: string;
   className?: string;
   style?: React.CSSProperties;
@@ -19,7 +24,7 @@ export interface DialogProps {
 }
 
 export function Dialog(props: DialogProps): React.ReactElement {
-  const { open, onClose, disableEscapeKeyDown, className, style, children } = props;
+  const { open, onClose, disableEscapeKeyDown, disableBackdropClick, className, style, children } = props;
   const ariaLabelledBy = props['aria-labelledby'];
 
   return (
@@ -39,6 +44,16 @@ export function Dialog(props: DialogProps): React.ReactElement {
           aria-labelledby={ariaLabelledBy}
           onEscapeKeyDown={(event) => {
             if (disableEscapeKeyDown) {
+              event.preventDefault();
+            }
+          }}
+          onPointerDownOutside={(event) => {
+            if (disableBackdropClick) {
+              event.preventDefault();
+            }
+          }}
+          onInteractOutside={(event) => {
+            if (disableBackdropClick) {
               event.preventDefault();
             }
           }}
