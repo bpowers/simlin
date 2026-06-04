@@ -91,8 +91,13 @@ pub(crate) fn is_truthy(n: f64) -> bool {
     !is_false
 }
 
+/// The single authority for binary-op runtime semantics. `pub(crate)` because
+/// the compiler's constant-folding pass (`compiler::fold`) calls it to compute
+/// folded literals -- folding MUST be bit-identical to what this interpreter
+/// would have produced, and calling the interpreter's own function guarantees
+/// that by construction.
 #[inline(always)]
-fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
+pub(crate) fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
     match op {
         Op2::Add => l + r,
         Op2::Sub => l - r,
