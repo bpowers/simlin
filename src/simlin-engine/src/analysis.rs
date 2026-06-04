@@ -1609,4 +1609,112 @@ mod tests {
              PR #705 r3353597299 / GH #698."
         );
     }
+
+    /// DOCUMENTATION of current end-to-end behavior (NOT the regression guard
+    /// for the subscript fix -- that is the unit-level
+    /// `recompute_strips_element_subscripts_before_port_match` in
+    /// `ltm_finding.rs`, which exercises the matching code directly).
+    ///
+    /// An arrayed loop through a multi-output module currently does NOT form in
+    /// discovery: the scalar module output `m·pos` feeding an arrayed reader
+    /// (`growth[Region] = m·pos * 0.1`) emits a single SCALAR
+    /// `$⁚ltm⁚link_score⁚m→growth = 0` rather than per-element `m→growth[e]`
+    /// scores, so the loop product is 0 and discovery drops it. That upstream
+    /// emission gap (the scalar-module-output -> arrayed-reader link-score gap)
+    /// is tracked as GH #716; until it is fixed, the per-exit-port recompute's
+    /// element-subscript handling (PR #705 r3353758167) is latent defense that
+    /// no end-to-end arrayed module loop can reach. This test pins the current
+    /// "no module loop discovered" state so that closing #716 (which should
+    /// flip this assertion to a reinforcing module loop) is a deliberate,
+    /// reviewed change rather than a silent one.
+    #[test]
+    fn analyze_model_arrayed_module_loop_blocked_by_scalar_output_gap() {
+        use crate::testutils::x_aux;
+
+        let region = datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["nyc".to_string(), "boston".to_string()],
+        );
+        let project = datamodel::Project {
+            name: "arrayed_module_loop_masked".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 8.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![region],
+            units: vec![],
+            models: vec![
+                datamodel::Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: vec![
+                        datamodel::Variable::Stock(datamodel::Stock {
+                            ident: "s".to_string(),
+                            equation: datamodel::Equation::ApplyToAll(
+                                vec!["Region".to_string()],
+                                "100".to_string(),
+                            ),
+                            documentation: String::new(),
+                            units: None,
+                            inflows: vec!["growth".to_string()],
+                            outflows: vec![],
+                            ai_state: None,
+                            uid: None,
+                            compat: datamodel::Compat::default(),
+                        }),
+                        // Scalar feeder for the module's scalar input port (an
+                        // arrayed source cannot wire straight into one).
+                        x_aux("total", "SUM(s[*])", None),
+                        module_instance("m", "passthrough", &[("total", "m.input_val")]),
+                        datamodel::Variable::Flow(datamodel::Flow {
+                            ident: "growth".to_string(),
+                            equation: datamodel::Equation::ApplyToAll(
+                                vec!["Region".to_string()],
+                                "m.pos * 0.1".to_string(),
+                            ),
+                            documentation: String::new(),
+                            units: None,
+                            gf: None,
+                            ai_state: None,
+                            uid: None,
+                            compat: datamodel::Compat::default(),
+                        }),
+                        x_aux("watcher", "m.neg", None),
+                    ],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                    macro_spec: None,
+                },
+                pos_neg_passthrough_model(),
+            ],
+            source: None,
+            ai_information: None,
+        };
+
+        let (mut db, sp) = synced_db(&project);
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
+        let module_loops = analysis
+            .loop_dominance
+            .iter()
+            .filter(|l| l.variables.iter().any(|v| v == "m"))
+            .count();
+        assert_eq!(
+            module_loops,
+            0,
+            "documents the GH #716 masking: an arrayed loop through a multi-output module is not \
+             discovered today because `m -> growth[e]` scores a scalar 0. When #716 is fixed this \
+             should flip to a discovered reinforcing module loop -- update deliberately. Found: {:?}",
+            analysis
+                .loop_dominance
+                .iter()
+                .map(|l| &l.variables)
+                .collect::<Vec<_>>()
+        );
+    }
 }

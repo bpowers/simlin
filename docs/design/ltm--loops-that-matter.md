@@ -556,6 +556,24 @@ recompute can read a module's entry/exit ports off its preserved `ModuleInput`s
 -- the same fix `reconstruct_single_variable` already applied for the exhaustive
 override.
 
+Because the discovery graph is element-level, an arrayed loop's non-module
+nodes carry element subscripts (`s[nyc] → m → growth[nyc]`).
+`recompute_module_input_edge_series` therefore `strip_subscript`s `link.from`
+(entry match vs the bare `ModuleInput.src`), `link.to`/`next.from` (module node
++ sequentiality guard), and `next.to` (exit-reader lookup in the bare-keyed
+variable map) before each name comparison -- mirroring the exhaustive twin,
+which strips `link.from`/`link.to`/`next.from`/`next.to` (PR #705 r3353758167).
+The pathway vars stay namespaced by the bare module instance (`m·$⁚ltm⁚path…`),
+so they are looked up with the stripped module name. This is currently latent
+parity defense: an arrayed loop through a multi-output module is not yet
+discoverable end-to-end, because a scalar module output feeding an arrayed
+reader (`growth[Region] = m·pos`) emits a single scalar constant-0 link score
+that drops the loop in discovery (the scalar-module-output → arrayed-reader
+link-score gap, tracked as GH #716); the unit-level
+`recompute_strips_element_subscripts_before_port_match` exercises the matching
+code directly, and `analyze_model_arrayed_module_loop_blocked_by_scalar_output_gap`
+pins the current masked end-to-end state.
+
 Before this fix, discovery read the composite's offset for the `x → m` edge;
 because single-dependency pathways all normalize to magnitude exactly 1, the
 composite's max-abs tie-break picked an arbitrary output port, and a loop
