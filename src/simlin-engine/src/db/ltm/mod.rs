@@ -489,23 +489,41 @@ fn compute_module_link_overrides(
                         .get(y)
                         .is_some_and(|sv| sv.kind(db) == SourceVariableKind::Module);
                 if y_is_module {
-                    // `y` is a module: m's output feeds y's input. y's
-                    // ModuleInput src is the qualified `m·{port}`; extract the
-                    // port whose normalized ref is `m`.
+                    // `y` is a module: m's output feeds y's input port(s). y's
+                    // ModuleInput src is the qualified `m·{port}`; the exit port
+                    // is the `{port}` whose normalized ref is `m`. If `y` reads
+                    // TWO DISTINCT output ports of `m` on different inputs, the
+                    // collapsed `m -> y` edge has no unique exit port -- decline
+                    // (ambiguous) and leave the base link score in place,
+                    // mirroring `module_exit_port_for_reader`'s multi-match ->
+                    // None semantics and the discovery-side
+                    // `recompute_module_input_edge_series` (GH #698 / PR #705
+                    // r3353597299). Two inputs naming the SAME `m·port` are NOT
+                    // ambiguous: a unique distinct port is fine.
                     let y_var = reconstruct_single_variable(db, model, project, y);
                     let module_ident = Ident::<Canonical>::new(module_name);
                     match y_var {
                         Some(crate::variable::Variable::Module { inputs: y_in, .. }) => {
-                            y_in.iter().find_map(|inp| {
-                                if normalize_module_ref(&inp.src) == module_ident {
-                                    inp.src
-                                        .as_str()
-                                        .split_once('\u{00B7}')
-                                        .map(|(_, port)| port.to_string())
-                                } else {
-                                    None
+                            let mut exit: Option<String> = None;
+                            let mut ambiguous = false;
+                            for inp in &y_in {
+                                if normalize_module_ref(&inp.src) != module_ident {
+                                    continue;
                                 }
-                            })
+                                let Some((_, port)) = inp.src.as_str().split_once('\u{00B7}')
+                                else {
+                                    continue;
+                                };
+                                match &exit {
+                                    Some(prev) if prev != port => {
+                                        ambiguous = true;
+                                        break;
+                                    }
+                                    Some(_) => {}
+                                    None => exit = Some(port.to_string()),
+                                }
+                            }
+                            if ambiguous { None } else { exit }
                         }
                         _ => None,
                     }

@@ -464,13 +464,17 @@ link with a **per-exit-port pathway selection**. The exit port is read off the
 NEXT loop link `m → y` (the unique `m·port` `y` reads, or `y`'s matching
 `ModuleInput.src` when `y` is itself a module); the entry port is `m`'s
 `ModuleInput` whose normalized `src` is `x`. Both are *unique-match* lookups:
-if `y` reads two output ports, or if `x` feeds two input ports of `m`
-(`x → m.a` AND `x → m.b` collapse to one `x → m` edge), the port is ambiguous
-and the override is skipped -- the base composite link score (a documented
-first-matched-port approximation) stands rather than the recompute arbitrarily
-picking the first matching port (GH #698 / PR #705 r3353459409). The discovery
-recompute `recompute_module_input_edge_series` applies the identical
-ambiguous-entry fallback. The parent recomputes the
+the port is ambiguous, and the override is skipped, if (a) `x` feeds two input
+ports of `m` (`x → m.a` AND `x → m.b` collapse to one `x → m` edge -- PR #705
+r3353459409); (b) a non-module reader `y` reads two distinct `m·port`s; or (c)
+`y` is itself a module reading two distinct output ports of `m` on different
+inputs (`m·early → y.p` AND `m·late → y.q` collapse to one `m → y` edge -- PR
+#705 r3353597299). Two of `y`'s inputs naming the SAME `m·port` are NOT
+ambiguous (a unique distinct port). On any ambiguity the base composite link
+score (a documented first-matched-port approximation) stands rather than the
+recompute arbitrarily picking the first matching port. The discovery recompute
+`recompute_module_input_edge_series` applies the identical ambiguous
+entry/exit fallback. The parent recomputes the
 sub-model's pathway map with the SAME salsa-cached inputs the sub-model's own
 emission uses (`model_causal_edges` + the sorted `find_model_output_ports`), so
 the recomputed pathway indices match the emitted `$⁚ltm⁚path⁚{entry}⁚{idx}`

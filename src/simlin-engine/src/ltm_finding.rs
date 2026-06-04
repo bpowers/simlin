@@ -2055,7 +2055,11 @@ fn discovery_module_exit_port(
 ///   against (the base composite, itself a documented first-matched-port
 ///   approximation, is the honest fallback; mirrors the exit-port helper's and
 ///   the exhaustive twin's multi-match → ambiguous semantics);
-/// * the exit port cannot be determined (e.g. an ambiguous multi-output reader);
+/// * the exit port is ambiguous -- a non-module reader `y` reads two distinct
+///   `m·port`s, or a module reader `y` reads two distinct output ports of `m`
+///   on different inputs (`m·early → y.p` AND `m·late → y.q` collapse to one
+///   `m → y` edge); two of `y`'s inputs naming the SAME `m·port` are NOT
+///   ambiguous (a unique distinct port);
 /// * the sub-model's pathway map yields no pathway from entry to exit.
 ///
 /// The pathway selection mirrors `db::ltm::compute_module_link_overrides`: the
@@ -2117,19 +2121,33 @@ fn recompute_module_input_edge_series(
     let y = &next.to;
     let y_var = causal_graph.variables().get(y)?;
     let exit_port = match y_var {
-        // `y` is itself a module: m's output feeds y's input port. y's
-        // ModuleInput src is the qualified `m·{port}`; extract the port whose
-        // normalized ref is `m`.
-        Variable::Module { inputs: y_in, .. } => y_in.iter().find_map(|inp| {
-            if normalize_module_ref(&inp.src) == *module_name {
-                inp.src
-                    .as_str()
-                    .split_once('\u{00B7}')
-                    .map(|(_, port)| Ident::new(port))
-            } else {
-                None
+        // `y` is itself a module: m's output feeds y's input port(s). y's
+        // ModuleInput src is the qualified `m·{port}`; the exit port is the
+        // `{port}` whose normalized ref is `m`. If `y` reads TWO DISTINCT
+        // output ports of `m` on different inputs (`m·early -> y.p` AND
+        // `m·late -> y.q`), the collapsed `m -> y` edge has no unique exit
+        // port -- decline (ambiguous) and fall back to the base composite,
+        // mirroring the non-module `discovery_module_exit_port` arm and the
+        // exhaustive twin (GH #698 / PR #705 r3353597299). Two inputs naming
+        // the SAME `m·port` are NOT ambiguous: a unique distinct port is fine.
+        Variable::Module { inputs: y_in, .. } => {
+            let mut exit: Option<Ident<Canonical>> = None;
+            for inp in y_in {
+                if normalize_module_ref(&inp.src) != *module_name {
+                    continue;
+                }
+                let Some((_, port)) = inp.src.as_str().split_once('\u{00B7}') else {
+                    continue;
+                };
+                let port = Ident::<Canonical>::new(port);
+                match &exit {
+                    Some(prev) if *prev != port => return None, // two distinct ports
+                    Some(_) => {}                               // same port repeated: fine
+                    None => exit = Some(port),
+                }
             }
-        }),
+            exit
+        }
         _ => discovery_module_exit_port(module_name, y_var),
     }?;
 

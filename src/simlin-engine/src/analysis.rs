@@ -1454,4 +1454,159 @@ mod tests {
              PR #705 r3353459409 / GH #698."
         );
     }
+
+    /// GH #698 / PR #705 r3353597299: the module->module EXIT arm of the
+    /// per-exit-port recompute. When the next loop node `y` is itself a module
+    /// reading MORE THAN ONE distinct output port of the upstream module `m`
+    /// (`m·early -> y.p` AND `m·late -> y.q`), the collapsed `m -> y` edge does
+    /// not identify a unique exit port. The recompute must treat that as
+    /// ambiguous and fall back to the base composite -- NOT first-match a
+    /// distinct port and recompute the `x -> m` edge against its (possibly
+    /// wrong-signed) pathway.
+    ///
+    /// `producer` sub-model: input `in`, outputs `early = in` (+, sorts first)
+    /// and `late = 0 - in` (-). `consumer` sub-model: inputs `p`, `q`, output
+    /// `out = p * 0.5 + q` (so `out = -0.5*in + in = +0.5*in`, a live,
+    /// non-canceling reinforcing transfer -- a plain `p + q` would cancel to a
+    /// dead loop with all-zero link scores). The parent loop is
+    /// `level -> mp(producer) -> mc(consumer) -> inflow -> level`, with mc
+    /// wired `mp·late -> mc.p` (FIRST) and `mp·early -> mc.q`. With the
+    /// first-match bug the exit arm picks port `late` (-) and recomputes
+    /// `level -> mp` against the `late` pathway, flipping the loop to balancing;
+    /// the base composite for `mp`'s `in` port tie-breaks to the first sorted
+    /// output `early` (+), so the correct fallback is reinforcing.
+    fn module_to_module_multi_exit_project() -> datamodel::Project {
+        use crate::testutils::{x_aux, x_flow, x_model, x_stock};
+
+        let producer = x_model(
+            "producer",
+            vec![
+                input_port("in"),
+                x_aux("early", "in", None),
+                x_aux("late", "0 - in", None),
+            ],
+        );
+        let consumer = x_model(
+            "consumer",
+            vec![
+                input_port("p"),
+                input_port("q"),
+                x_aux("out", "p * 0.5 + q", None),
+            ],
+        );
+
+        datamodel::Project {
+            name: "module_to_module_multi_exit".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 8.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                x_model(
+                    "main",
+                    vec![
+                        x_stock("level", "100", &["inflow"], &[], None),
+                        module_instance("mp", "producer", &[("level", "mp.in")]),
+                        // mc reads TWO distinct output ports of mp -- the
+                        // `mp -> mc` exit port is ambiguous. `late` is listed
+                        // first so first-match would pick the (-) port.
+                        module_instance(
+                            "mc",
+                            "consumer",
+                            &[("mp.late", "mc.p"), ("mp.early", "mc.q")],
+                        ),
+                        x_flow("inflow", "mc.out * 0.1", None),
+                    ],
+                ),
+                producer,
+                consumer,
+            ],
+            source: None,
+            ai_information: None,
+        }
+    }
+
+    #[test]
+    fn analyze_model_ambiguous_module_exit_port_falls_back_to_composite() {
+        let project = module_to_module_multi_exit_project();
+        let base_link = "$\u{205A}ltm\u{205A}link_score\u{205A}level\u{2192}mp";
+
+        // Base `level→mp` link score is mp's `in`-port composite, which
+        // tie-breaks to the first sorted output (`early`, +1) -- not the loop's
+        // ambiguous `late`/`early` mp->mc exit.
+        let base = settled_link_score(&project, true, base_link);
+        assert!(
+            base > 0.0,
+            "fixture precondition: base level→mp composite must be +1 (in port, early tie-break), got {base}"
+        );
+
+        let (mut db, sp) = synced_db(&project);
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
+        let loop_through_modules = analysis
+            .loop_dominance
+            .iter()
+            .find(|l| {
+                l.variables.iter().any(|v| v == "mp") && l.variables.iter().any(|v| v == "mc")
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "a discovered loop must traverse both modules; loops: {:?}",
+                    analysis
+                        .loop_dominance
+                        .iter()
+                        .map(|l| &l.variables)
+                        .collect::<Vec<_>>()
+                )
+            });
+        let discovery_sign = loop_through_modules
+            .importance
+            .iter()
+            .rev()
+            .find(|s| s.is_finite() && **s != 0.0)
+            .copied()
+            .expect("loop must have a finite non-zero importance");
+        assert!(
+            discovery_sign > 0.0,
+            "discovery loop sign {discovery_sign} must follow the base composite (+) when the \
+             mp->mc exit port is ambiguous (mc reads two distinct mp ports); a first-match \
+             recompute against the `late` pathway wrongly flipped it. PR #705 r3353597299."
+        );
+
+        // Exhaustive must agree (its twin override also declines on ambiguity).
+        let exhaustive_loop = {
+            let mut db = SimlinDb::default();
+            let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+            crate::db::set_project_ltm_enabled(&mut db, sync.project, true);
+            let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+                .expect("exhaustive compile");
+            let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+            vm.run_to_end().expect("run");
+            let results = vm.into_results();
+            let loop_key = results
+                .offsets
+                .keys()
+                .find(|k| {
+                    k.as_str()
+                        .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+                })
+                .expect("exhaustive mode must emit a loop score")
+                .clone();
+            let off = results.offsets[&loop_key];
+            let last = results.step_count - 1;
+            results.data[last * results.step_size + off]
+        };
+        assert!(
+            exhaustive_loop > 0.0,
+            "exhaustive loop score {exhaustive_loop} must also follow the base composite (+); the \
+             exhaustive override must decline on the ambiguous module->module exit port. \
+             PR #705 r3353597299 / GH #698."
+        );
+    }
 }
