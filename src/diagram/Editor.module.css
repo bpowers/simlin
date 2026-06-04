@@ -57,6 +57,10 @@
   right: 8px;
   height: 48px;
   width: var(--panel-width-sm);
+  /* Explicit border-box: the global reset is not reliably present in every
+     host bundle, and without it the 8px horizontal padding makes this box
+     16px wider than the details card it must align with. */
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -84,6 +88,7 @@
   right: 8px;
   height: 48px;
   width: var(--panel-width-sm);
+  box-sizing: border-box;
 }
 
 .varDetails {

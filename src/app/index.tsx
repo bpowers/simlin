@@ -4,6 +4,11 @@
 
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
+// The reset must be imported explicitly: it is a side-effect import inside
+// @simlin/diagram's index, which production tree-shaking has been observed to
+// drop from the emitted CSS bundle -- silently losing the universal
+// box-sizing: border-box and body defaults app-wide.
+import '@simlin/diagram/reset.css';
 import 'katex/dist/katex.min.css';
 import '@simlin/diagram/theme.css';
 

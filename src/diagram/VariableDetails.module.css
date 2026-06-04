@@ -1,5 +1,8 @@
 .card {
   width: var(--panel-width-sm);
+  /* Match .searchBar: both must compute as border-box so their edges align
+     regardless of whether the global reset is present in the host bundle. */
+  box-sizing: border-box;
   max-height: calc(100vh - 18px);
   overflow-y: auto;
   scrollbar-gutter: stable;
@@ -44,6 +47,16 @@
   transition: opacity 120ms ease-in-out;
   display: flex;
   align-items: center;
+  /* Fallback for genuinely unbreakable content (one very long identifier):
+     scroll horizontally instead of spilling past the card's right edge. */
+  overflow-x: auto;
+}
+
+/* Flex items default to min-width: auto and refuse to shrink below their
+   content size, which would push wide KaTeX output past the card edge
+   instead of letting it wrap/scroll. */
+.eqnPreview > * {
+  min-width: 0;
 }
 
 .eqnPreview :global(.katex-display) {
@@ -58,6 +71,15 @@
   overflow-wrap: anywhere;
   word-break: break-word;
   max-width: 100%;
+}
+
+/* KaTeX packs math into inline-block .base spans that carry
+   white-space: nowrap from katex.css -- atomic boxes that overflow-wrap on
+   an ancestor cannot break inside. Allow line breaks within them so long
+   equations wrap at the card edge. */
+.eqnPreview :global(.katex .base) {
+  white-space: normal;
+  width: auto;
 }
 
 /* Raw equation text shown while the engine LaTeX loads (or when the engine
