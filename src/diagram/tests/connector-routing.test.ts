@@ -758,3 +758,39 @@ describe('Connector routing', () => {
     });
   });
 });
+
+describe('intersectElementArc aux branch (tan asymptote hazard)', () => {
+  const aux = (x: number, y: number): AuxViewElement => ({
+    type: 'aux',
+    uid: 1,
+    name: 'a',
+    ident: 'a',
+    var: undefined,
+    x,
+    y,
+    labelSide: 'right',
+    isZeroRadius: false,
+  });
+
+  it('keeps the angular offset on the same side for tight arcs as for wide ones', () => {
+    // For a wide arc, offθ = atan-ish(AuxRadius / circ.r) is small and
+    // positive; with inv=false the intersection sits at a slightly negative
+    // angle (below the +x axis here). A tight arc (circ.r = 3, so
+    // AuxRadius/circ.r = 3 -- past tan's π/2 asymptote where tan(3) < 0)
+    // must stay on the same side rather than flipping above the axis.
+    const wide = intersectElementArc(aux(100, 0), { x: 0, y: 0, r: 100 }, false);
+    expect(wide.y).toBeLessThan(0);
+
+    const tight = intersectElementArc(aux(3, 0), { x: 0, y: 0, r: 3 }, false);
+    expect(tight.y).toBeLessThan(0);
+  });
+
+  it('bounds the angular offset below a quarter turn even at extreme ratios', () => {
+    // AuxRadius/circ.r = 9: tan(9 rad) is ~ -0.45 (wrapped); atan(9) ≈ 1.46.
+    // The intersection must stay within (-π/2, 0) of the element-center
+    // angle -- i.e. x must remain positive for an element on the +x axis.
+    const p = intersectElementArc(aux(1, 0), { x: 0, y: 0, r: 1 }, false);
+    expect(p.x).toBeGreaterThan(0);
+    expect(p.y).toBeLessThan(0);
+  });
+});

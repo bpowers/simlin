@@ -20,21 +20,22 @@ pub fn render_flow(element: &view_element::Flow, sink: &ViewElement, is_arrayed:
         return String::new();
     }
 
-    // If sink is a Cloud, adjust the last point inward by CloudRadius
+    // If sink is a Cloud, pull the last point back by CLOUD_RADIUS along the
+    // final segment's direction so the arrowhead lands on the cloud's edge.
+    // The retraction follows the segment's unit vector (matching the
+    // TypeScript renderer): independent per-axis shifts would over-retract a
+    // diagonal segment by sqrt(2)*CLOUD_RADIUS. A zero-length final segment
+    // is left unchanged.
     if let ViewElement::Cloud(_) = sink {
         let last_idx = pts.len() - 1;
         let (x, y) = pts[last_idx];
         let (prev_x, prev_y) = pts[last_idx - 1];
-
-        if prev_x < x {
-            pts[last_idx].0 = x - CLOUD_RADIUS;
-        } else if prev_x > x {
-            pts[last_idx].0 = x + CLOUD_RADIUS;
-        }
-        if prev_y < y {
-            pts[last_idx].1 = y - CLOUD_RADIUS;
-        } else if prev_y > y {
-            pts[last_idx].1 = y + CLOUD_RADIUS;
+        let dx = x - prev_x;
+        let dy = y - prev_y;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len > 0.0 {
+            pts[last_idx].0 = x - (CLOUD_RADIUS * dx) / len;
+            pts[last_idx].1 = y - (CLOUD_RADIUS * dy) / len;
         }
     }
 
@@ -45,26 +46,40 @@ pub fn render_flow(element: &view_element::Flow, sink: &ViewElement, is_arrayed:
     for j in 0..pts.len() {
         let (mut x, mut y) = pts[j];
         if j == pts.len() - 1 {
-            let (prev_x, prev_y) = pts[j - 1];
-            let dx = x - prev_x;
-            let dy = y - prev_y;
-            let mut theta = dy.atan2(dx) * 180.0 / PI;
-            if theta < 0.0 {
-                theta += 360.0;
+            // Walk back past coincident points: a degenerate (zero-length)
+            // final segment must not read as "pointing right" via
+            // atan2(0, 0) == 0 (matches the TypeScript renderer).
+            let mut theta_opt: Option<f64> = None;
+            for i in (0..j).rev() {
+                let (px, py) = pts[i];
+                let dx = x - px;
+                let dy = y - py;
+                if dx != 0.0 || dy != 0.0 {
+                    let mut theta = dy.atan2(dx) * 180.0 / PI;
+                    if theta < 0.0 {
+                        theta += 360.0;
+                    }
+                    theta_opt = Some(theta);
+                    break;
+                }
             }
 
-            if !(45.0..315.0).contains(&theta) {
-                x -= final_adjust;
-                arrow_theta = 0.0;
-            } else if (45.0..135.0).contains(&theta) {
-                y -= final_adjust;
-                arrow_theta = 90.0;
-            } else if (135.0..225.0).contains(&theta) {
-                x += final_adjust;
-                arrow_theta = 180.0;
+            if let Some(theta) = theta_opt {
+                if !(45.0..315.0).contains(&theta) {
+                    x -= final_adjust;
+                    arrow_theta = 0.0;
+                } else if (45.0..135.0).contains(&theta) {
+                    y -= final_adjust;
+                    arrow_theta = 90.0;
+                } else if (135.0..225.0).contains(&theta) {
+                    x += final_adjust;
+                    arrow_theta = 180.0;
+                } else {
+                    y += final_adjust;
+                    arrow_theta = 270.0;
+                }
             } else {
-                y += final_adjust;
-                arrow_theta = 270.0;
+                arrow_theta = 0.0;
             }
         }
 

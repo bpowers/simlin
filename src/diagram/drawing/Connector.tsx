@@ -223,7 +223,11 @@ export function intersectElementArc(element: ViewElement, circ: Circle, inv: boo
     r = 0;
   }
 
-  const offθ = tan(r / circ.r);
+  // atan (not tan), mirroring the stock/module branch above: a tight arc
+  // between nearby elements can push r/circ.r past tan's π/2 asymptote,
+  // where tan goes huge or flips sign and swings the arrowhead to the wrong
+  // side. atan is bounded and monotonic for all ratios.
+  const offθ = Math.atan(r / circ.r);
   const elementCenterθ = atan2(cy - circ.y, cx - circ.x);
 
   return {
