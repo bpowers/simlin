@@ -23,6 +23,11 @@
   cursor: pointer;
   font-family: "Roboto", "Helvetica", "Arial", sans-serif;
   font-size: 1rem;
+  /* The listbox is sized to the input; ellipsize long variable names rather
+     than letting them widen or wrap the row. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .optionHighlighted {

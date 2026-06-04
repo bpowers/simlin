@@ -78,8 +78,8 @@ export default function Autocomplete(props: AutocompleteProps) {
     },
   });
 
-  React.useEffect(() => {
-    if (isOpen && wrapperRef.current) {
+  const updateDropdownPosition = React.useCallback(() => {
+    if (wrapperRef.current) {
       const rect = wrapperRef.current.getBoundingClientRect();
       setDropdownPosition({
         top: rect.bottom + window.scrollY,
@@ -87,7 +87,24 @@ export default function Autocomplete(props: AutocompleteProps) {
         width: rect.width,
       });
     }
-  }, [isOpen]);
+  }, []);
+
+  React.useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    updateDropdownPosition();
+    // The listbox is portaled to document.body, so it doesn't move with the
+    // input. Recompute while open: capture-phase scroll catches scrolls of
+    // any ancestor (e.g. the scrollable details panel hosting the wiring
+    // table), not just the window.
+    window.addEventListener('scroll', updateDropdownPosition, true);
+    window.addEventListener('resize', updateDropdownPosition);
+    return () => {
+      window.removeEventListener('scroll', updateDropdownPosition, true);
+      window.removeEventListener('resize', updateDropdownPosition);
+    };
+  }, [isOpen, updateDropdownPosition]);
 
   const inputProps = getInputProps() as React.InputHTMLAttributes<HTMLInputElement>;
   const params: AutocompleteRenderInputParams = {
