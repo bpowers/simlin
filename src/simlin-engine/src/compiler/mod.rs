@@ -6,6 +6,8 @@ mod codegen;
 pub mod context;
 pub mod dimensions;
 pub mod expr;
+pub(crate) mod fold;
+pub(crate) mod invariance;
 pub mod pretty;
 pub mod subscript;
 pub(crate) mod symbolic;
@@ -838,6 +840,13 @@ impl Var {
                 }
             }
         };
+        // Fold constant subtrees once at compile time so the per-timestep
+        // programs never re-evaluate `literal op literal` (including the
+        // `0 - x` form every negative literal lowers to). Runs here -- the
+        // single chokepoint every lowering path (monolithic Module::compile
+        // and the salsa per-variable fragment path) funnels through -- so both
+        // backends (VM and wasmgen) see the folded form.
+        let ast = ast.into_iter().map(fold::fold_constants).collect();
         Ok(Var {
             ident: Ident::new(var.ident()),
             ast,

@@ -179,18 +179,34 @@ pub fn compile_var_fragment<'db>(
     // AssignCurr in the flows phase to propagate the parent-provided value
     // each timestep (matching the monolithic path's `instantiation.contains(id)
     // || !var.is_stock()` filter).
-    let flow_bytecodes =
-        if (!is_stock || is_module_input) && dep_graph.runlist_flows.contains(&var_ident_str) {
-            match &per_phase_lowered.noninitial {
-                Ok(var_result) => compile_phase(&var_result.ast),
-                Err(err) => {
-                    accumulate_var_compile_error(err);
-                    None
-                }
+    let in_flows_runlist =
+        (!is_stock || is_module_input) && dep_graph.runlist_flows.contains(&var_ident_str);
+    let flow_bytecodes = if in_flows_runlist {
+        match &per_phase_lowered.noninitial {
+            Ok(var_result) => compile_phase(&var_result.ast),
+            Err(err) => {
+                accumulate_var_compile_error(err);
+                None
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
+
+    // Pre-compute flow invariance support for `model_flows_invariant` (GH
+    // #712). Stored on the salsa-cached result so the topological fixpoint
+    // pass in `model_flows_invariant` can read it without re-calling
+    // `lower_var_fragment`. Only meaningful for vars in the flows runlist.
+    let flow_invariance = if in_flows_runlist {
+        crate::db::assemble::compute_flow_invariance_support(
+            &per_phase_lowered.noninitial,
+            &offsets,
+            &model_name_ident,
+            &var_ident_canonical,
+        )
+    } else {
+        None
+    };
 
     // Stock phase: stocks and modules get compiled with is_initial=false
     let stock_bytecodes =
@@ -213,6 +229,7 @@ pub fn compile_var_fragment<'db>(
             flow_bytecodes,
             stock_bytecodes,
         },
+        flow_invariance,
     })
 }
 
@@ -416,6 +433,9 @@ pub(crate) fn compile_implicit_var_fragment(
             flow_bytecodes,
             stock_bytecodes,
         },
+        // Implicit helpers (SMOOTH/DELAY/TREND) are always dynamic; the
+        // run-invariance analysis only applies to explicit source variables.
+        flow_invariance: None,
     })
 }
 

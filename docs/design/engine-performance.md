@@ -1,6 +1,7 @@
 # Engine performance: profile and optimization opportunities
 
-Status: analysis + first clear wins landed. 2026-05-19.
+Status: analysis + two rounds of wins landed. Round 1 2026-05-19; round 2
+(constant folding + linear-run fast paths, below) 2026-06-03.
 
 This documents an empirical CPU/memory profile of **compiling and simulating the
 C-LEARN hero model** (the largest model we have: ~53k MDL lines / 1.4 MB, 934
@@ -237,6 +238,96 @@ Portable options:
 - Revisit explicit tail-call dispatch if/when `become` stabilizes.
 - R2 (register VM) reduces dispatch count more than any dispatch-mechanism change.
 
+### Round 2 wins (2026-06-03, measured on Apple M-series / Asahi)
+
+Baseline on this machine: C-LEARN `run_to_end` 151 ms (1000 Euler steps),
+WORLD3-03 1.3 ms. Note the machine difference from the round-1 numbers: on
+this core the run is throughput-bound (IPC ~4.5, branch-miss rate ~1.0%), not
+mispredict-bound like the Ryzen profile above -- but the lever is the same
+(less executed work per step).
+
+**Constant folding (`compiler::fold`, run −2%, bytecode −5%).** The flow
+program re-evaluated every `literal op literal` subtree per step -- 792
+`BinConstConst` sites on C-LEARN, including one per negative literal (unary
+minus lowers to `0 - x`). A fold pass in `Var::new` (the chokepoint both the
+monolithic and salsa lowering paths funnel through) collapses constant-only
+subtrees at compile time, computing results with the VM's own
+`eval_op2`/`is_truthy` so folds are bit-identical by construction. Only
+IEEE-exact ops fold; `^` (libm `powf`) and transcendental builtins stay
+runtime so compiled artifacts (and the wasm blob) remain platform-
+deterministic. Folding also cascades into deeper 3-address fusion
+(`BinVarConst` 726 -> 1034). WORLD3 has no foldable sites (unchanged).
+
+**Linear-run fast paths (run −7%).** `RuntimeView::dense_linear_start()` --
+"no sparse mappings, strides are row-major for the current dims", i.e.
+`is_contiguous` minus the `offset == 0` requirement -- keys three fast paths:
+`offset_for_iter_index` (direct `start + k`), the `BeginIter` precompute
+decision (offset slices no longer precompute a `Vec` of offsets), and a
+slice-fold fast path in `reduce_view` (same row-major order, bit-identical
+reductions). `vector_elm_map` (168 sites on C-LEARN, the largest
+`flat_offset` caller at ~4% of the run) hoists the offset view's addressing
+out of its per-element loop. `RuntimeView::same_shape()` replaces the
+SmallVec `PartialEq` in `LoadIterViewTop`/`LoadIterViewAt` (an out-of-line
+memcmp per element per site, ~2% of the run) with a branchless ≤4-wide
+compare.
+
+**Cumulative round 2: C-LEARN run 151 -> ~137 ms (−9%).** Both rounds
+together (vs. the 342 ms pre-round-1 baseline, different machine): the
+per-step program shrank from 34,673 to ~23,000 dispatched opcodes.
+
+**Negative result (reinforces #604).** Rewriting `vector_elm_map`'s
+strict-slice base as a precomputed affine dot product (provably equivalent,
+structurally less work per element) measured a consistent ~5 ms *regression*
+-- enlarging the function perturbed the codegen of the giant inlined
+`eval_bytecode`. Treat every eval-loop-adjacent "improvement" as
+unproven until measured; structural arguments do not survive contact with
+the inliner.
+
+**Negative result #2: the #602 lookup last-segment memo (implemented,
+reverted).** A per-(module, GF) hint that validates the previous binary-search
+lower bound in O(1) measured only ~0.7 ms gross (137.4 -> 136.7; the ~8-deep
+search over C-LEARN's 229-point tables is already well-predicted at a
+slowly-advancing index). Adversarial review then found the hint diverges from
+`lookup` on unsorted-x tables -- which ARE reachable, no import path validates
+x ordering (GH #715) -- so soundness required gating the hint on a per-table
+sortedness check. Every sound formulation (sentinel checked inside
+`lookup_with_hint`, or hoisted to the dispatch arm) measured a consistent
++9..15 ms regression: one extra branch + call edge in `eval_bytecode`'s
+`Lookup` arm perturbed the giant function's codegen (instructions +1.5%,
+cycles +6.4%, branches *down*, IPC 4.34 -> 4.13). Net: gross win 0.5%,
+soundness cost ~7% -- reverted wholesale. Lesson on top of #604: the
+interleaved-A/B-worktree protocol caught a sub-agent's "machine variation"
+rationalization; never accept a perf delta explanation without an
+interleaved A/B on freshly built binaries.
+
+**Negative result #3: #712 B2 invariant-prefix execution (implemented,
+preserved on `experiment-712-b2-execution`, not merged).** Stage B1 (the
+classifier + runlist partition, KEPT -- behavior- and perf-neutral, +0.56%
+compile) showed 45.4% of C-LEARN's root flow opcodes write run-invariant
+slots. The B2 execution stage (split at `flows_invariant_opcode_len`,
+invariant prefix evaluated once per `run_to`, per-step scatter of 868 slots
+from a snapshot) is complete and gate-green -- VDF byte-exactness, wasm
+parity, zero-alloc all hold -- but did not clear the keep bar:
+
+- **The static-opcode share was a bad proxy.** Removing ~45% of the root
+  flow stream's static opcodes from per-step execution removed only **−1.3%
+  of executed instructions**: C-LEARN's per-step work is dominated by module
+  evaluations and per-element array/iteration loops (which re-execute their
+  opcodes many times), not the root scalar stream the prefix lives in.
+- **The wall-clock effect is below the build-layout noise floor.** Two
+  independent build pairs measured opposite signs (+3.5% vs −1.0% on
+  C-LEARN): two builds of the *same base source* differed by ~6 ms (135.9
+  vs 142.2). Interleaved A/B controls machine conditions, but each *build*
+  samples a ±2-4% binary-layout lottery; an effect of ~1% cannot be
+  resolved by one build pair. World3 trended slightly negative both times.
+- Branch-misses fell 8.4%, so a mispredict-bound core (the round-1 Ryzen)
+  might see a real win -- that is the retry condition recorded on GH #712.
+
+Methodology consequence for future rounds: for effects under ~3%, either
+compare layout-stable counters (instructions/branch-misses via `perf stat`)
+or A/B multiple independent builds per side; a single worktree build pair is
+only conclusive for effects that exceed ~4%.
+
 ### R4. `RuntimeView` allocation + `flat_offset` (~20% of post-win run)
 
 `PushVarView`/`PushTempView` rebuild `SmallVec`s (dims, strides, dim_ids) on every
@@ -311,8 +402,57 @@ re-derivation. (b) is broader but touches many call sites.
 3. ~~**R2 (3-address binop fusion)**~~ — DONE. Flow opcodes −23.5%, run −6.8% on
    C-LEARN; a late `fuse_three_address` pass at Vm::new (the `CompiledSimulation`
    stays symbolizable). A full register VM would cut more but is a large rewrite.
-4. **R4 (RuntimeView)** — now the largest remaining run lever for arrayed models;
-   the ~10% `flat_offset` cost is a per-element `SmallVec` rebuild + sparse
-   search, not bounds checks.
+4. ~~**R4 (RuntimeView)**~~ — largely DONE via round 2's `dense_linear_start`
+   fast paths (`flat_offset` 8.2% -> ~4% of a smaller run); the residual is
+   the strict-slice `vector_elm_map` base and `offset_for_iter_index`'s
+   decompose path for shape-equal non-linear views (a per-loop access-plan
+   cache is the next idea there — and see the round-2 negative result before
+   attempting it).
 5. **R3 superinstructions** — incremental dispatch wins, low risk.
 6. **C2 / C3** — only if incremental-compile latency still bites after A+B.
+
+Larger run-side swings identified during round 2 — all three were taken to
+a data verdict in round 3 (2026-06-04):
+
+- **Lazy `If` (#711) — measured NO-GO.** `SetCond`/`If` evaluate BOTH
+  branches every evaluation; skipping the untaken branch needs forward jumps
+  (codegen + stack-depth join validation + peephole/fusion jump maps +
+  symbolic layer + wasmgen). A census (temporary VM dispatch counters + a
+  stack-effect branch-span reconstruction over the fused stream) measured
+  C-LEARN at exactly **30,524 executed dispatches/step**, of which lazy-If
+  would skip 4,859 (**15.9%**) — but 93% of the skipped opcodes are cheap
+  scalar loads/binops, so the *instruction* share is only **~1.5%** (~35k of
+  ~2.4M instr/step): below the ~4% layout-noise measurement floor, at the
+  highest complexity of the three candidates. WORLD3: 3.25% dispatch share.
+  Notably **69.8% of the skippable dispatches sit behind constant
+  conditions** (1,300 of 1,679 flow `If` sites take the same branch for the
+  whole run) — a compile-time / #712-family observation, not a runtime-jump
+  one. Revisit only on a mispredict-bound core or alongside a
+  threaded-dispatch rewrite (#601).
+- **Time-invariant hoisting** (#712) — constants are re-assigned and
+  constant-derived auxes re-computed every step; a "constant phase" computed
+  once per `run_to` (re-run after `set_value`) could skip them. **Stage B1
+  landed** (classification + flow-runlist partition + split metadata,
+  behavior-neutral; see
+  [the design note](/docs/design-plans/2026-06-04-time-invariant-hoisting.md)):
+  the run-invariant flow vars are classified (C-LEARN: 868 invariant slots
+  of the root flow phase, oracle-verified bit-constant with 0 violations;
+  WORLD3: 78) and reordered into a contiguous flow-runlist prefix, with the
+  prefix opcode length recorded on `CompiledModule`. B1 still runs the whole
+  program every step, so it is **perf-neutral** as expected -- two independent
+  interleaved A/Bs (manager + reviewer, the reviewer's with
+  `CLEARN_RUN_ITERS=200` over 5 rounds) measured ~135.5 ms vs ~136.3 ms,
+  delta ≤0.8 ms, within noise. An earlier single-run comparison (3 rounds)
+  appeared to show a ~9.5 ms gain (145.0 -> 135.5 ms), but that delta came
+  from an anomalously slow base binary, not the source change: build-to-build
+  binary-layout and cold-start variance can reach several ms for identical
+  source, and whichever binary runs cold typically looks slower. **Methodology
+  lesson**: interleaved A/B controls machine conditions but not binary-layout
+  luck — warm both binaries before timing and require the delta to reproduce
+  across multiple interleaved rounds before believing it. Stage B2 (run the
+  invariant prefix once per `run_to`; snapshot + copy-forward into each saved
+  chunk; re-run after `set_value`; wasmgen keeps the single reordered program)
+  was implemented, gate-green — and did NOT clear the keep bar: see negative
+  result #3 above (preserved on `experiment-712-b2-execution`).
+- **Lookup last-segment memo** (#602) — implemented, then reverted: see
+  negative result #2 above (gross win 0.5%, soundness cost ~7%).

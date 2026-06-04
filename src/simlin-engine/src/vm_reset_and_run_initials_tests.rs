@@ -107,7 +107,7 @@ fn run_to_past_final_time_does_not_panic() {
 
 /// End-to-end guard for the global-operand and two-constant fused binops
 /// (the R2 extension capturing the leaf-operand loads the original fusion
-/// missed). All operators are Sub or Div (non-commutative) so a swapped
+/// missed). All operators are Sub, Div, or Exp (non-commutative) so a swapped
 /// operand encoding in any new fused form is a loud failure, not a silent
 /// miscompile. Each global appears as a leaf operand of a *pushing*
 /// subexpression (the outer `- c` is the assigning op) so the fusion emits
@@ -115,6 +115,11 @@ fn run_to_past_final_time_does_not_panic() {
 /// assign. The opcode each equation produces is pinned by a sibling
 /// `bytecode_profile().fused_histogram` assertion so the test cannot pass
 /// vacuously through the un-fused path.
+///
+/// `cc` uses `^` because compile-time constant folding (`compiler::fold`)
+/// collapses every other `literal op literal` pair before codegen -- `^` is
+/// the one operator folding deliberately leaves at runtime (platform-libm
+/// `powf`), so it is the only way a `BinConstConst` still reaches the VM.
 ///
 /// At step 0: TIME=10, DT=2 (the sim start time and dt -- both globals,
 /// loaded via LoadGlobalVar), b=5, c=2, e=1.
@@ -130,7 +135,7 @@ fn test_fused_global_and_const_binops_preserve_operand_order() {
         .aux("gc", "(TIME - 3) - c", None) // BinGlobalConst(Sub)
         .aux("cg", "(3 / DT) - c", None) // BinConstGlobal(Div)
         .aux("gg", "(TIME - DT) - c", None) // BinGlobalGlobal(Sub)
-        .aux("cc", "(7 - 3) - c", None) // BinConstConst(Sub)
+        .aux("cc", "(7 ^ 3) - c", None) // BinConstConst(Exp) -- `^` survives folding
         .aux("sg", "((b - c) / DT) - e", None); // BinVarVar then BinStackGlobal(Div)
 
     let compiled = build_compiled(&tp);
@@ -169,7 +174,7 @@ fn test_fused_global_and_const_binops_preserve_operand_order() {
     assert_eq!(val("gc"), 5.0, "(TIME - 3) - c = (10 - 3) - 2");
     assert_eq!(val("cg"), -0.5, "(3 / DT) - c = (3 / 2) - 2");
     assert_eq!(val("gg"), 6.0, "(TIME - DT) - c = (10 - 2) - 2");
-    assert_eq!(val("cc"), 2.0, "(7 - 3) - c = (7 - 3) - 2");
+    assert_eq!(val("cc"), 341.0, "(7 ^ 3) - c = 343 - 2");
     assert_eq!(val("sg"), 0.5, "((b - c) / DT) - e = ((5 - 2) / 2) - 1");
 }
 

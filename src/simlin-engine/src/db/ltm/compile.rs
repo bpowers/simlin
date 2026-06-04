@@ -1011,6 +1011,9 @@ pub(crate) fn compile_ltm_equation_fragment(
             flow_bytecodes,
             stock_bytecodes: None,
         },
+        // LTM synthetic vars use PREVIOUS -- always dynamic; not classified
+        // for run-invariance.
+        flow_invariance: None,
     })
 }
 
@@ -1867,5 +1870,8 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
             flow_bytecodes,
             stock_bytecodes,
         },
+        // LTM implicit helpers are always dynamic; not classified for
+        // run-invariance.
+        flow_invariance: None,
     })
 }

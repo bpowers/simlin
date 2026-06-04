@@ -91,8 +91,13 @@ pub(crate) fn is_truthy(n: f64) -> bool {
     !is_false
 }
 
+/// The single authority for binary-op runtime semantics. `pub(crate)` because
+/// the compiler's constant-folding pass (`compiler::fold`) calls it to compute
+/// folded literals -- folding MUST be bit-identical to what this interpreter
+/// would have produced, and calling the interpreter's own function guarantees
+/// that by construction.
 #[inline(always)]
-fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
+pub(crate) fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
     match op {
         Op2::Add => l + r,
         Op2::Sub => l - r,
@@ -162,6 +167,61 @@ impl CompiledSimulation {
 
     pub fn n_slots(&self) -> usize {
         self.modules.get(&self.root).map_or(0, |m| m.n_slots)
+    }
+
+    /// Absolute data-buffer offsets written by the root module's run-invariant
+    /// flow prefix (GH #712, time-invariant hoisting). These are the slots whose
+    /// value, by the classifier's verdict, must be bit-constant across every
+    /// saved step. The soundness oracle test asserts exactly that. Returns an
+    /// empty vector when no flow variable is run-invariant.
+    ///
+    /// The invariant prefix is `root.compiled_flows.code[0..flows_invariant_
+    /// opcode_len]`; its `AssignCurr`/`AssignConstCurr`/`BinOpAssignCurr` target
+    /// offsets are the written slots. The root module's slots are already
+    /// absolute (it carries the +IMPLICIT_VAR_COUNT shift), so no base offset
+    /// is added.
+    ///
+    /// **Safety contract**: this reads `CompiledSimulation.modules`, which holds
+    /// the PRE-`fuse_three_address` bytecode (the salsa-cached artifact). This
+    /// is intentional and required for correctness: `fuse_three_address` runs
+    /// on the `Vm`'s private execution copy and replaces `AssignCurr`-family
+    /// opcodes with fused forms (`BinVarVar`, etc.) that do NOT appear here.
+    /// If this function were ever pointed at fused bytecode, the assignment
+    /// scan would miss fused writes and return an incomplete offset set,
+    /// silently weakening the oracle. The contract is maintained by the
+    /// `Vm::new` code that builds `ResolvedModule`s by cloning `compiled_flows`
+    /// out of this `CompiledSimulation` and fusing the clone separately.
+    #[doc(hidden)] // test-support: used by the oracle in tests/integration/simulate.rs
+    pub fn invariant_flow_offsets(&self) -> Vec<usize> {
+        let Some(module) = self.modules.get(&self.root) else {
+            return Vec::new();
+        };
+        let len = module.flows_invariant_opcode_len;
+        if len == 0 {
+            return Vec::new();
+        }
+        let prefix = &module.compiled_flows.code[..len.min(module.compiled_flows.code.len())];
+        let mut offsets: Vec<usize> = prefix
+            .iter()
+            .filter_map(|op| match op {
+                Opcode::AssignCurr { off }
+                | Opcode::AssignConstCurr { off, .. }
+                | Opcode::BinOpAssignCurr { off, .. } => Some(*off as usize),
+                _ => None,
+            })
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        offsets
+    }
+
+    /// The root module's invariant flow-prefix opcode length (GH #712). 0 when
+    /// no flow variable is run-invariant. Exposed for the partition test.
+    #[doc(hidden)] // test-support: used by the oracle in tests/integration/simulate.rs
+    pub fn flows_invariant_opcode_len(&self) -> usize {
+        self.modules
+            .get(&self.root)
+            .map_or(0, |m| m.flows_invariant_opcode_len)
     }
 
     pub fn is_constant_offset(&self, off: usize) -> bool {
@@ -1932,9 +1992,12 @@ impl Vm {
                     let view = view_stack.last().unwrap();
                     let size = view.size();
 
-                    // Pre-compute flat offsets for iteration
-                    let flat_offsets = if view.sparse.is_empty() && view.is_contiguous() {
-                        // Contiguous: can iterate directly
+                    // Pre-compute flat offsets for iteration. A dense linear
+                    // run (contiguous, or an offset slice like `arr[2, *]`)
+                    // needs no precompute: LoadIterElement's direct path
+                    // computes `view.offset + current`, which is exactly
+                    // `dense_linear_start() + current`.
+                    let flat_offsets = if view.dense_linear_start().is_some() {
                         None
                     } else {
                         // Need to pre-compute all flat offsets
@@ -1974,7 +2037,8 @@ impl Vm {
                         let flat_off = if let Some(ref offsets) = iter_state.flat_offsets {
                             offsets[iter_state.current]
                         } else {
-                            // Contiguous: flat offset = base_off + offset + current
+                            // Dense linear run: flat offset = dense_linear_start()
+                            // + current, and dense_linear_start() == view.offset.
                             view.offset as usize + iter_state.current
                         };
 
@@ -2017,9 +2081,7 @@ impl Vm {
                         let iter_view = &view_stack[iter_state.view_stack_idx];
 
                         // Fast path: if dimensions match exactly, use simple offset calculation
-                        let result = if source_view.dims == iter_view.dims
-                            && source_view.dim_ids == iter_view.dim_ids
-                        {
+                        let result = if source_view.same_shape(iter_view) {
                             // Bounds check: if source is smaller than iteration, return NaN
                             if iter_state.current >= source_view.size() {
                                 None
@@ -2133,9 +2195,7 @@ impl Vm {
                         let iter_view = &view_stack[iter_state.view_stack_idx];
 
                         // Fast path: if dimensions match exactly, use simple offset calculation
-                        let result = if source_view.dims == iter_view.dims
-                            && source_view.dim_ids == iter_view.dim_ids
-                        {
+                        let result = if source_view.same_shape(iter_view) {
                             // Bounds check: if source is smaller than iteration, return NaN
                             if iter_state.current >= source_view.size() {
                                 None
@@ -2868,6 +2928,27 @@ impl Vm {
         }
 
         let size = view.size();
+
+        // Dense linear run (the overwhelmingly common case: whole arrays and
+        // leading-dimension slices): fold over the backing slice directly,
+        // skipping the per-element index decompose + stride dot product and
+        // the per-element temp/curr branch. Iteration order is identical to
+        // the general path (row-major == ascending flat offset for a linear
+        // run), so FP reduction results are bit-identical.
+        if let Some(start) = view.dense_linear_start() {
+            let base = if view.is_temp {
+                context.temp_offsets[view.base_off as usize]
+            } else {
+                view.base_off as usize
+            };
+            let data: &[f64] = if view.is_temp { temp_storage } else { curr };
+            let mut acc = init;
+            for &value in &data[base + start..base + start + size] {
+                acc = f(acc, value);
+            }
+            return acc;
+        }
+
         let dims = &view.dims;
         let n_dims = dims.len();
 
@@ -5345,6 +5426,55 @@ mod empty_view_reduce_tests {
         let ctx = empty_context();
         let result = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
         assert!(result.is_nan());
+    }
+
+    // -- reduce over an offset row-slice: a dense linear run that is NOT
+    // `is_contiguous()` (offset != 0). Pins the dense-linear fast path to the
+    // same elements (and the same left-to-right fold order) as the general
+    // index-decompose path. --
+    #[test]
+    fn reduce_view_offset_row_slice() {
+        // A 3x4 array at base 2 of curr; view = arr[1, *] (flat 4..8).
+        let curr: Vec<f64> = (0..16).map(|i| i as f64).collect();
+        let temp: [f64; 0] = [];
+        let ctx = empty_context();
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
+        let dim_ids: SmallVec<[u16; 4]> = smallvec::smallvec![0, 1];
+        let mut view = RuntimeView::for_var(2, dims, dim_ids);
+        view.apply_single_subscript(0, 1);
+        assert!(!view.is_contiguous(), "offset slice must not be contiguous");
+
+        // elements are curr[2 + 4 .. 2 + 8] = [6, 7, 8, 9]
+        let sum = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
+        assert_eq!(sum, 30.0);
+        let max = Vm::reduce_view(
+            &temp,
+            &view,
+            &curr,
+            &ctx,
+            |acc, v| if v > acc { v } else { acc },
+            f64::NEG_INFINITY,
+        );
+        assert_eq!(max, 9.0);
+    }
+
+    // -- reduce over an inner-dimension range slice: NOT a dense linear run,
+    // must keep taking the general per-element path. --
+    #[test]
+    fn reduce_view_inner_range_slice() {
+        // A 3x4 array at base 0; view = arr[*, 1:3) -> columns 1,2 of each row.
+        let curr: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let temp: [f64; 0] = [];
+        let ctx = empty_context();
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
+        let dim_ids: SmallVec<[u16; 4]> = smallvec::smallvec![0, 1];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+        view.apply_range(1, 1, 3);
+        assert_eq!(view.dense_linear_start(), None);
+
+        // elements: 1,2, 5,6, 9,10
+        let sum = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
+        assert_eq!(sum, 33.0);
     }
 
     // -- SUM: returns 0.0 for empty views (additive identity) (AC2.2) --

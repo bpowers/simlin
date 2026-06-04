@@ -1655,6 +1655,14 @@ impl<'module> Compiler<'module> {
             compiled_initials,
             compiled_flows,
             compiled_stocks,
+            // The flow-runlist invariant/dynamic partition is decided at module
+            // assembly (the salsa `assemble_module` path, where the whole
+            // root-model runlist is available), NOT here: `Compiler::compile`
+            // runs both per single-variable fragment (split is trivially 0) and
+            // on the test-only monolithic whole-model `Module`. So this is
+            // always 0; the production split is installed by `resolve_module`
+            // from the assembled `SymbolicCompiledModule` (GH #712).
+            flows_invariant_opcode_len: 0,
         })
     }
 }

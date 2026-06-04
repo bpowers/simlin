@@ -40,6 +40,8 @@ use std::collections::BTreeSet;
 mod dep_graph;
 #[cfg(test)]
 mod element_graph_proptest;
+mod invariance;
+pub(crate) use invariance::model_flows_invariant;
 mod ltm_ir;
 mod macro_registry;
 mod units;
