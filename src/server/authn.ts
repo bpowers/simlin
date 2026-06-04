@@ -11,6 +11,7 @@ import * as logger from 'winston';
 import * as admin from 'firebase-admin';
 
 import { Application } from './application';
+import { handleSessionDelete } from './auth-helpers';
 import { Table } from './models/table';
 import { User } from './schemas/user_pb';
 
@@ -235,7 +236,5 @@ export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void =>
     res.sendStatus(200);
   });
 
-  app.delete('/session', (_req: Request, _res: Response): void => {
-    console.log(`TODO: unset cookie`);
-  });
+  app.delete('/session', handleSessionDelete);
 };

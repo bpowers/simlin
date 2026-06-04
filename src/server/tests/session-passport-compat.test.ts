@@ -9,6 +9,8 @@ import { Strategy as BaseStrategy } from 'passport-strategy';
 import { seshcookie } from 'seshcookie';
 import http from 'http';
 
+import { handleSessionDelete } from '../auth-helpers';
+
 type SessionCallback = (err?: Error) => void;
 type SessionWithCompat = Record<string, unknown> & {
   regenerate?: (cb: SessionCallback) => void;
@@ -69,6 +71,8 @@ function createTestApp(options?: { addSessionCompat?: boolean }): express.Expres
   app.post('/login', passport.authenticate('test'), (_req, res) => {
     res.status(200).json({ ok: true });
   });
+
+  app.delete('/session', handleSessionDelete);
 
   app.get('/check', (req, res) => {
     if (req.session?.passport?.user) {
@@ -147,6 +151,35 @@ describe('seshcookie + passport session compatibility', () => {
       const checkRes = await request(server, 'GET', '/check', { cookie: cookieHeader });
       expect(checkRes.status).toBe(200);
       expect((checkRes.body as { user?: TestSessionUser }).user).toEqual({ id: 'test-user' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('DELETE /session logs the user out and clears the session cookie', async () => {
+    const app = createTestApp({ addSessionCompat: true });
+    const server = app.listen(0);
+    try {
+      const loginRes = await request(server, 'POST', '/login');
+      expect(loginRes.status).toBe(200);
+      const loginCookies = loginRes.headers['set-cookie'];
+      const loginCookie = Array.isArray(loginCookies) ? loginCookies.join('; ') : String(loginCookies);
+
+      // Sanity: the session authenticates before logout.
+      const before = await request(server, 'GET', '/check', { cookie: loginCookie });
+      expect(before.status).toBe(200);
+
+      // Logout must respond (the old handler hung: it never wrote a
+      // response) and must rewrite the seshcookie session cookie without
+      // the passport user.
+      const logoutRes = await request(server, 'DELETE', '/session', { cookie: loginCookie });
+      expect(logoutRes.status).toBe(200);
+      const logoutCookies = logoutRes.headers['set-cookie'];
+      expect(logoutCookies).toBeDefined();
+      const logoutCookie = Array.isArray(logoutCookies) ? logoutCookies.join('; ') : String(logoutCookies);
+
+      const after = await request(server, 'GET', '/check', { cookie: logoutCookie });
+      expect(after.status).toBe(401);
     } finally {
       server.close();
     }

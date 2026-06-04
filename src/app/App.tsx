@@ -9,6 +9,7 @@ import {
   getAuth,
   connectAuthEmulator,
   onAuthStateChanged,
+  signOut,
   Auth as FirebaseAuth,
   User as FirebaseUser,
 } from '@firebase/auth';
@@ -245,6 +246,30 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
     });
   };
 
+  // Sign the user out: clear the server session cookie, then the Firebase
+  // client auth state, then drop the cached/in-memory user so the top-level
+  // auth gate renders Login again. Each step is best-effort -- even if the
+  // network calls fail we still clear local state rather than leaving the
+  // user stuck "logged in" with no way out.
+  handleLogout = async (): Promise<void> => {
+    try {
+      await fetch(`${this.getBaseURL()}/session`, {
+        credentials: 'same-origin',
+        method: 'DELETE',
+        cache: 'no-cache',
+      });
+    } catch (err) {
+      console.error('logout: clearing the server session failed:', err);
+    }
+    try {
+      await signOut(this.state.auth);
+    } catch (err) {
+      console.error('logout: firebase signOut failed:', err);
+    }
+    await userInfo.invalidate();
+    this.setState({ user: undefined, isNewUser: undefined, firebaseIdToken: null });
+  };
+
   getBaseURL(): string {
     return '';
   }
@@ -268,7 +293,7 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
     const location = useLocation()[0];
 
     const isNewProject = location === '/new';
-    return <Home isNewProject={isNewProject} user={defined(this.state.user)} />;
+    return <Home isNewProject={isNewProject} user={defined(this.state.user)} onLogout={this.handleLogout} />;
   };
 
   render() {

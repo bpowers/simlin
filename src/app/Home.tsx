@@ -37,6 +37,7 @@ interface HomeProps {
   user: User;
   isNewProject: boolean;
   onNewProjectDone?: () => void;
+  onLogout: () => void;
 }
 
 const AnchorOrigin = {
@@ -47,6 +48,13 @@ const AnchorOrigin = {
 class Home extends React.Component<HomeProps, HomeState> {
   state: HomeState;
 
+  // Pending setTimeout(0) handle for the deferred getProjects(), plus an
+  // unmount flag: the fetch can resolve after a route change unmounts Home,
+  // and a StrictMode-discarded render-phase instance must never fire the
+  // request at all (it never reaches componentDidMount).
+  private getProjectsTimer: ReturnType<typeof setTimeout> | null = null;
+  private unmounted = false;
+
   constructor(props: HomeProps) {
     super(props);
 
@@ -54,18 +62,43 @@ class Home extends React.Component<HomeProps, HomeState> {
       anchorEl: undefined,
       projects: [],
     };
+    // getProjects is kicked off in componentDidMount, not here: a constructor
+    // side effect also runs for StrictMode's discarded render-phase instance.
+  }
 
-    setTimeout(this.getProjects);
+  componentDidMount() {
+    this.unmounted = false;
+    this.getProjectsTimer = setTimeout(() => {
+      this.getProjectsTimer = null;
+      void this.getProjects();
+    });
+  }
+
+  componentWillUnmount() {
+    this.unmounted = true;
+    if (this.getProjectsTimer !== null) {
+      clearTimeout(this.getProjectsTimer);
+      this.getProjectsTimer = null;
+    }
   }
 
   getProjects = async (): Promise<void> => {
-    const response = await fetch('/api/projects', { credentials: 'same-origin' });
-    const status = response.status;
-    if (!(status >= 200 && status < 400)) {
-      console.log("couldn't fetch projects.");
+    let projects: Project[];
+    try {
+      const response = await fetch('/api/projects', { credentials: 'same-origin' });
+      const status = response.status;
+      if (!(status >= 200 && status < 400)) {
+        console.error(`couldn't fetch projects: HTTP ${status}`);
+        return;
+      }
+      projects = (await response.json()) as Project[];
+    } catch (err) {
+      console.error("couldn't fetch projects:", err);
       return;
     }
-    const projects = (await response.json()) as Project[];
+    if (this.unmounted) {
+      return;
+    }
     this.setState({
       projects,
     });
@@ -75,6 +108,11 @@ class Home extends React.Component<HomeProps, HomeState> {
     this.setState({
       anchorEl: undefined,
     });
+  };
+
+  handleLogout = () => {
+    this.handleClose();
+    this.props.onLogout();
   };
 
   handleMenu = (event: React.MouseEvent<HTMLElement>) => {
@@ -178,7 +216,7 @@ class Home extends React.Component<HomeProps, HomeState> {
                 open={open}
                 onClose={this.handleClose}
               >
-                <MenuItem onClick={this.handleClose}>Logout</MenuItem>
+                <MenuItem onClick={this.handleLogout}>Logout</MenuItem>
               </Menu>
             </div>
           </Toolbar>
