@@ -652,10 +652,24 @@ pub(crate) fn compute_flow_invariance_support(
                 .filter_map(|&off| {
                     // Find the mini-layout entry whose [base, base+size) contains
                     // this offset.
-                    ranges
+                    let owner = ranges
                         .iter()
                         .find(|(_, base, size)| off >= *base && off < *base + *size)
-                        .map(|(name, _, _)| name.as_str())
+                        .map(|(name, _, _)| name.as_str());
+                    // The mini-layout is contiguous over [0, total) and the time
+                    // globals lower via LoadGlobalVar/Dt/App (never Expr::Var),
+                    // so every flow-referenced offset must resolve to an owner.
+                    // A silently dropped offset would make that dependency
+                    // INVISIBLE to the invariance fixpoint -- the
+                    // over-classification direction (stale values once B2 skips
+                    // re-evaluating the invariant prefix) -- so be loud in debug
+                    // builds; the end-to-end bit-constancy oracle is the
+                    // release-build backstop.
+                    debug_assert!(
+                        owner.is_some(),
+                        "flow-referenced offset {off} of '{var_name_str}' resolves to no mini-layout owner"
+                    );
+                    owner
                         .filter(|name| *name != var_name_str)
                         .map(|name| name.to_string())
                 })

@@ -6,13 +6,27 @@
 //!
 //! `model_flows_invariant` decides which of a module's flow-phase variables are
 //! *run-invariant* -- their value is identical at every timestep, so they can be
-//! evaluated once per `run_to` (B2) rather than per step. It is the imperative
-//! shell around the pure classifier (`crate::compiler::invariance`): it lowers
-//! each flow variable through the EXACT production lowering
-//! (`lower_var_fragment` -- the same call `compile_var_fragment` makes, so the
-//! verdict is over the engine's own lowered `Vec<Expr>`), builds the
-//! offset-classification callback from that variable's mini-layout plus the
-//! per-model verdict accumulated so far, and runs the shared classifier.
+//! evaluated once per `run_to` (B2) rather than per step. The per-variable
+//! evidence is precomputed inside the already-cached `compile_var_fragment`
+//! (`assemble::compute_flow_invariance_support`, over the engine's own lowered
+//! `Vec<Expr>` -- no second lowering) and carried on
+//! `VarFragmentResult.flow_invariance` as `FlowInvarianceSupport`:
+//!
+//!  * `locally_pure` -- the shared classifier (`crate::compiler::invariance`)
+//!    run with an all-`Invariant` offset callback, so it flags only variant
+//!    *builtins* (TIME / PULSE / RAMP / STEP / PREVIOUS / EvalModule /
+//!    ModuleInput);
+//!  * `dep_names` -- the variables whose slots the FLOW exprs actually read
+//!    (`collect_expr_offsets` reverse-mapped through the mini-layout; `INIT()`
+//!    arguments are skipped because the init buffer is frozen).
+//!
+//! This query is then just the fixpoint over the dependency graph:
+//! `invariant(v) iff locally_pure(v) && dep_names(v) ⊆ invariant-set`, so the
+//! whole burden of catching variant *dependencies* (stocks, dynamic auxes,
+//! module outputs) rides on `dep_names` -- which is why
+//! `compute_flow_invariance_support` is loud about unresolvable offsets and the
+//! end-to-end bit-constancy oracle (`tests/integration/simulate.rs` `oracle_*`)
+//! pins the production mechanism.
 //!
 //! The flow runlist (`ModelDepGraphResult.runlist_flows`) is a topological
 //! order: every non-stock/non-module dt dependency precedes its reader. So a
