@@ -20,7 +20,7 @@ Status legend: **fixed** (in the PR introducing this doc), **deferred**
 | H5 | Long KaTeX equations overflow the details card: KaTeX `.base` spans are atomic inline-blocks with `white-space: nowrap`, which `overflow-wrap: anywhere` on the ancestor cannot break; `.eqnPreview` is a flex container with `min-width: auto` and no `overflow-x` | `VariableDetails.module.css` | fixed |
 | H6 | `reset.css` (global `box-sizing: border-box`) is absent from the app's compiled CSS bundle, so `.searchBar` (content-box width + `padding: 0 8px`) renders 16px wider than the details `.card`, misaligning their left edges | `Editor.module.css` + bundling | fixed (defensive `box-sizing`); bundling gap tracked |
 | H7 | `HostedWebEditor` initial load rejection is swallowed (network error, non-JSON body, missing `pb`/`version`), leaving a permanently blank editor with no message | `HostedWebEditor.tsx` | fixed |
-| H8 | The account menu's Logout item only closes the menu; no signOut/navigation/fetch is ever invoked, so users cannot sign out. (Server-side `DELETE /session` is itself a stub.) | `app/Home.tsx` | fixed (client side); server stub tracked |
+| H8 | The account menu's Logout item only closes the menu; no signOut/navigation/fetch is ever invoked, so users cannot sign out. (Server-side `DELETE /session` was itself a stub that never responded.) | `app/Home.tsx`, `server/authn.ts` | fixed (client + server) |
 
 ## Medium severity
 
@@ -56,23 +56,26 @@ Status legend: **fixed** (in the PR introducing this doc), **deferred**
 
 ## Deferred / tracked separately
 
-- **reset.css missing from the app CSS bundle**: `src/diagram/index.ts` has a
-  side-effect `import './reset.css'`, but the universal `box-sizing` rule does
-  not survive into `src/app/build/static/css/*`. The panels now declare
-  `box-sizing: border-box` explicitly (defense in depth), but the bundling gap
-  means *all* of reset.css's body/typography defaults are absent app-wide.
-- **Server `DELETE /session` is a stub**: client-side logout (Firebase
-  `signOut`) is wired up, but the session cookie is not invalidated
-  server-side.
-- **Engine round-trip per view-change event**: every wheel tick, momentum
-  animation frame, and pinch update runs `applyPatch` + `serializeProtobuf` +
-  full project JSON re-parse through the WASM engine. Excluding these from
-  undo history (H2) removes the worst symptom; debouncing the persistence is
-  follow-up work.
-- **Dark-mode coverage for the component library** (L14): needs a pass over
-  ~10 CSS modules plus a decision about theming editor chrome.
-- **`Menu` anchor-tracking** (L13): consumer today is short-lived; fix
-  alongside a positioning-library adoption rather than ad hoc.
+- **reset.css missing from the app CSS bundle** (tracked: [#708](https://github.com/bpowers/simlin/issues/708)):
+  `src/diagram/index.ts` has a side-effect `import './reset.css'`, but the
+  universal `box-sizing` rule did not survive into `src/app/build/static/css/*`.
+  An explicit entry-point import restores it (verified in the rebuilt bundle)
+  and the panels declare `box-sizing: border-box` themselves (defense in
+  depth); the underlying tree-shaking behavior is the tracked follow-up.
+- ~~Server `DELETE /session` is a stub~~: fixed in this PR -- the handler now
+  terminates the passport session via `req.logout()` and seshcookie rewrites
+  the cookie (it previously never even wrote a response).
+- **Engine round-trip per view-change event** (tracked: [#707](https://github.com/bpowers/simlin/issues/707)):
+  every wheel tick, momentum animation frame, and pinch update runs
+  `applyPatch` + `serializeProtobuf` + full project JSON re-parse through the
+  WASM engine. Excluding these from undo history (H2) removes the worst
+  symptom; debouncing the persistence is the tracked follow-up.
+- **Dark-mode coverage for the component library** (L14, tracked:
+  [#709](https://github.com/bpowers/simlin/issues/709)): needs a pass over
+  ~16 CSS modules plus a decision about theming editor chrome.
+- **`Menu` anchor-tracking** (L13, tracked:
+  [#710](https://github.com/bpowers/simlin/issues/710)): consumer today is
+  short-lived; fix alongside a positioning-library adoption rather than ad hoc.
 
 ## Verified-and-rejected findings (for the record)
 
