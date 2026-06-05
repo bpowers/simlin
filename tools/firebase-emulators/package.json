@@ -1,0 +1,8 @@
+{
+  "name": "simlin-firebase-emulators",
+  "description": "Standalone, lockfile-pinned firebase-tools install for scripts/start-emulators.sh. Deliberately outside the pnpm workspace: firebase-tools pulls in ~600 packages, and keeping it here means a normal `pnpm install` (and CI) never pays for or trusts that tree -- it is installed on demand, only on machines that run the emulators.",
+  "private": true,
+  "dependencies": {
+    "firebase-tools": "15.5.1"
+  }
+}

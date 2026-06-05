@@ -31,7 +31,6 @@
     "@typescript-eslint/parser": "^8.54.0",
     "eslint": "^9.39.2",
     "eslint-config-prettier": "^10.1.8",
-    "firebase-tools": "^15.5.1",
     "jest": "^30.2.0",
     "prettier": "^3.8.1",
     "ts-jest": "^29.4.6",
