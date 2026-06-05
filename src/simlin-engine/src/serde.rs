@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use float_cmp::approx_eq;
-
 use crate::common::Result;
 use crate::datamodel::{
     Aux, Compat, DataSource, DataSourceKind, Dimension, DimensionElements, DimensionMapping, Dt,
@@ -2062,7 +2060,7 @@ impl From<project_io::View> for View {
             },
             elements: elements.into_iter().map(ViewElement::from).collect(),
             view_box: view_box.map(Rect::from).unwrap_or_default(),
-            zoom: if approx_eq!(f64, zoom, 0.0) {
+            zoom: if crate::float::approx_eq(zoom, 0.0) {
                 1.0
             } else {
                 zoom

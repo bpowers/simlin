@@ -24,8 +24,6 @@ xmutil = ["dep:xmutil"]
 [dependencies]
 unicode-xid = "0.2"
 prost = "0.14"
-float-cmp = "0.10"
-ordered-float = "5"
 smallvec = { version = "1", features = [ "union" ] }
 # Fast, deterministic (fixed-seed) hasher for hot internal maps in the
 # dependency-graph cycle gate. Wasm-safe (no getrandom). FxHash's fixed seed

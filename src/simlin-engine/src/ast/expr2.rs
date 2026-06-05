@@ -1040,10 +1040,10 @@ impl Expr2 {
 /// This is used for array subscripts which must be integer constants.
 #[cfg(test)]
 fn const_int_eval(ast: &Expr2) -> EquationResult<i32> {
-    use float_cmp::approx_eq;
+    use crate::float::approx_eq;
     match ast {
         Expr2::Const(_, n, loc) => {
-            if approx_eq!(f64, *n, n.round()) {
+            if approx_eq(*n, n.round()) {
                 Ok(n.round() as i32)
             } else {
                 eqn_err!(ExpectedInteger, loc.start, loc.end)

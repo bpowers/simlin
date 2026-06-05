@@ -48,8 +48,7 @@
 //!
 //! Equality and truthiness route through a single emitted wasm helper,
 //! `approx_eq(a: f64, b: f64) -> i32`, that reproduces `crate::float::approx_eq`
-//! (`float_cmp` 0.10 defaults) bit-faithfully, so the backend takes the same
-//! branch the VM does. Helper functions are assembled into the module ahead of
+//! bit-faithfully, so the backend takes the same branch the VM does. Helper functions are assembled into the module ahead of
 //! the per-program functions ([`build_helpers`] returns their bodies and a
 //! [`HelperFns`] index registry); `module.rs` places them at function indices
 //! `0..N` and the per-program + `run` functions at `N..`. `emit_bytecode`
@@ -295,7 +294,7 @@ pub(crate) fn f64_const(v: f64) -> Instruction<'static> {
 #[derive(Clone, Copy)]
 pub(crate) struct HelperFns {
     /// `approx_eq(a: f64, b: f64) -> i32` (1 = approximately equal, else 0),
-    /// reproducing `crate::float::approx_eq` (`float_cmp` 0.10 defaults).
+    /// reproducing `crate::float::approx_eq`.
     pub approx_eq: u32,
     /// `mod_euclid(l: f64, r: f64) -> f64`, reproducing `f64::rem_euclid` (the
     /// VM's `Op2::Mod`): a result in `[0, |r|)`. A self-contained helper (rather
@@ -570,10 +569,10 @@ const AE_ABS: u32 = 6; // abs(diff) before saturation
 const AE_LOCAL_COUNT: u32 = 5; // declared i64 locals (indices 2..=6)
 
 /// Build the body of the `approx_eq(a: f64, b: f64) -> i32` helper, reproducing
-/// `crate::float::approx_eq` (`float_cmp` 0.10, `f64`, default margin
-/// `epsilon = f64::EPSILON`, `ulps = 4`) bit-faithfully.
+/// `crate::float::approx_eq` (margin `epsilon = f64::EPSILON`, `ulps = 4`)
+/// bit-faithfully.
 ///
-/// The Rust reference (`float_cmp` `eq.rs`) is the short-circuiting OR of three
+/// The Rust reference (`crate::float`) is the short-circuiting OR of three
 /// total, trap-free checks (exact equality / ±inf, absolute-epsilon, ULP):
 ///
 /// ```text
@@ -654,7 +653,7 @@ fn emit_approx_eq() -> Function {
 
 /// Append the wasm sequence that pushes `ordered(local)` onto the stack, where
 /// `ordered(f) = { let bits = f.to_bits() as i64; if bits < 0 { !bits } else
-/// { bits ^ i64::MIN } }` (float_cmp's sign-magnitude -> monotonic map). `bits`
+/// { bits ^ i64::MIN } }` (`crate::float`'s sign-magnitude -> monotonic map). `bits`
 /// is materialized once into `bits_local` (i64) and reused for the two branch
 /// values and the sign test; `select` chooses between them. `i64::MIN` is the
 /// `1 << 63` sign mask as a signed `i64`, and `!bits` is `bits ^ -1`.

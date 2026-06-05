@@ -89,7 +89,7 @@ pub fn open_systems(contents: &str) -> Result<Project> {
 
 #[cfg(feature = "file_io")]
 pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
-    use float_cmp::approx_eq;
+    use crate::float::approx_eq;
 
     let file = File::open(file_path)?;
 
@@ -172,7 +172,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
             // Advance past data points at or before the current time,
             // keeping the most recent value (sample-and-hold).
             while let Some(&(data_time, value)) = data_iter.peek() {
-                if data_time > t && !approx_eq!(f64, data_time, t) {
+                if data_time > t && !approx_eq(data_time, t) {
                     break;
                 }
                 last_value = value;

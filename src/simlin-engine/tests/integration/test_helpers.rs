@@ -18,10 +18,10 @@
 //! boundary explicit.
 
 use checked::Store;
-use float_cmp::approx_eq;
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::datamodel;
 use simlin_engine::db::LtmSyntheticVar;
+use simlin_engine::float::approx_eq_eps;
 use simlin_engine::ltm::CausalGraph;
 use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_simulation};
 use simlin_engine::{Results, SimSpecs, Vm};
@@ -143,8 +143,8 @@ pub fn ensure_results_excluding(expected: &Results, results: &Results, excluded:
             let off = results.offsets[ident];
             let actual = results_row[off];
 
-            let around_zero = approx_eq!(f64, expected, 0.0, epsilon = 3e-6)
-                && approx_eq!(f64, actual, 0.0, epsilon = 1e-6);
+            let around_zero =
+                approx_eq_eps(expected, 0.0, 3e-6) && approx_eq_eps(actual, 0.0, 1e-6);
 
             if !around_zero {
                 let (exp_cmp, act_cmp, epsilon) = if results.is_vensim || expected_results.is_vensim
@@ -160,7 +160,7 @@ pub fn ensure_results_excluding(expected: &Results, results: &Results, excluded:
                     (expected, actual, 2e-3)
                 };
 
-                if !approx_eq!(f64, exp_cmp, act_cmp, epsilon = epsilon) {
+                if !approx_eq_eps(exp_cmp, act_cmp, epsilon) {
                     eprintln!("step {step}: {ident}: {expected} (expected) != {actual} (actual)");
                     panic!("not equal");
                 }
@@ -412,7 +412,7 @@ pub fn assert_ltm_slabs_match(vm: &Results, wasm: &Results) {
         }
         let max_abs = v.abs().max(w.abs()).max(1.0);
         let epsilon = LTM_SERIES_TOLERANCE * max_abs;
-        if !approx_eq!(f64, v, w, epsilon = epsilon) {
+        if !approx_eq_eps(v, w, epsilon) {
             let step = i / vm.step_size;
             let slot = i % vm.step_size;
             // Recover the canonical name of the diverging slot for a
