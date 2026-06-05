@@ -10,7 +10,7 @@
 
 import express from 'express';
 import cookieParser from 'cookie-parser';
-import { seshcookie } from 'seshcookie';
+import { seshcookie } from '../seshcookie/seshcookie';
 import http from 'http';
 
 import { handleSessionDelete } from '../auth-helpers';

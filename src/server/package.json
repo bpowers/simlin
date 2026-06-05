@@ -17,8 +17,7 @@
     "express": "^5.2.1",
     "firebase-admin": "^13.6.1",
     "google-protobuf": "^4.0.1",
-    "helmet": "^8.1.0",
-    "seshcookie": "^1.2.0"
+    "helmet": "^8.1.0"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.10",

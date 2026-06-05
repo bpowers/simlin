@@ -11,7 +11,7 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
-import { seshcookie } from 'seshcookie';
+import { seshcookie } from './seshcookie/seshcookie';
 
 import { apiRouter } from './api';
 import { defined } from '@simlin/core/common';

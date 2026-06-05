@@ -6,7 +6,9 @@
 const config = {
   preset: 'ts-jest',
   testEnvironment: 'node',
-  testMatch: ['<rootDir>/tests/**/*.test.ts'],
+  // the vendored seshcookie library keeps its tests next to its source
+  // (see seshcookie/seshcookie.ts for provenance)
+  testMatch: ['<rootDir>/tests/**/*.test.ts', '<rootDir>/seshcookie/**/*.test.ts'],
   moduleFileExtensions: ['ts', 'js'],
   moduleNameMapper: {
     '^@simlin/engine/internal/wasm$': '<rootDir>/../engine/lib/internal/wasm.node.js',
