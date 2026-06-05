@@ -1928,6 +1928,28 @@ fn verifies_ai_information_with_modules_and_arrays() {
     verify_ai_information("../../test/ai-information/WithModulesAndArrays.stmx");
 }
 
+/// Extract the raw 32-byte ed25519 key from an OpenSSH public-key blob.
+///
+/// The blob is RFC 4253 wire format: a u32-be length-prefixed "ssh-ed25519"
+/// algorithm tag followed by a u32-be length-prefixed 32-byte key. This is
+/// the only slice of the OpenSSH format these tests need, so parse it
+/// directly rather than depending on the ssh-key crate (whose default
+/// feature set drags in the RSA and NIST P-curve stacks).
+fn ed25519_key_from_openssh(blob: &[u8]) -> [u8; 32] {
+    fn take<'a>(buf: &mut &'a [u8]) -> &'a [u8] {
+        let (len, rest) = buf.split_at(4);
+        let len = u32::from_be_bytes(len.try_into().unwrap()) as usize;
+        let (field, rest) = rest.split_at(len);
+        *buf = rest;
+        field
+    }
+    let mut buf = blob;
+    assert_eq!(take(&mut buf), b"ssh-ed25519", "expected an ed25519 key");
+    let key: [u8; 32] = take(&mut buf).try_into().expect("32-byte ed25519 key");
+    assert!(buf.is_empty(), "trailing bytes in OpenSSH key blob");
+    key
+}
+
 fn verify_ai_information(xmile_path: &str) {
     let known_keys = HashMap::from([(
         "https://iseesystems.com/keys/stella01.txt",
@@ -1953,11 +1975,8 @@ fn verify_ai_information(xmile_path: &str) {
     use base64::{Engine as _, engine::general_purpose};
     let key_bytes = general_purpose::STANDARD.decode(key_bytes_encoded).unwrap();
 
-    let openssh_pubkey = ssh_key::PublicKey::from_bytes(&key_bytes).unwrap();
-    let raw_pubkey = openssh_pubkey.key_data().ed25519().unwrap();
-
-    // OpenSSH format: skip the first 19 bytes to get to the actual 32-byte Ed25519 key
-    let key = ed25519_dalek::VerifyingKey::from_bytes(&raw_pubkey.0).unwrap();
+    let raw_pubkey = ed25519_key_from_openssh(&key_bytes);
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&raw_pubkey).unwrap();
 
     simlin_engine::ai_info::verify(&datamodel_project, &key).unwrap()
 }
