@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import { NextFunction, Request, Response } from 'express';
-import * as logger from 'winston';
+import * as logger from './logger';
 
 import { interceptWriteHeaders } from './headers';
 
@@ -28,10 +28,7 @@ export function requestLogger(req: Request, res: Response, next: NextFunction): 
     const log =
       `API-LINE status=${statusCode} method="${req.method}" path="${req.originalUrl}" duration_ms=${durationMs}` +
       maybeGetUser(req);
-    logger.log({
-      level: 'info',
-      message: log,
-    });
+    logger.info(log);
     headersWritten = true;
   });
 

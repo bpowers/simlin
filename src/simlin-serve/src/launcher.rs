@@ -22,14 +22,48 @@ pub fn build_launch_url(port: u16) -> String {
 /// is staring at the stdout URL print also sees an explanation; we
 /// deliberately do not crash, since the server itself is still healthy and
 /// the user can copy the URL manually.
+///
+/// The launch command is one fixed per-OS invocation rather than a general
+/// URL-opening library: the only argument we ever pass is our own
+/// `http://127.0.0.1:<port>/` URL (no spaces, no shell metacharacters), so
+/// the detection logic libraries add (WSL, Flatpak, `$BROWSER`, ...) is
+/// surface area without benefit here.
 pub fn open_browser(url: &str) -> bool {
-    match open::that(url) {
-        Ok(()) => true,
-        Err(_) => {
-            eprintln!("could not open browser automatically; visit: {url}");
-            false
-        }
+    if launch_browser_command(url) {
+        return true;
     }
+    eprintln!("could not open browser automatically; visit: {url}");
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn launch_browser_command(url: &str) -> bool {
+    spawn_quiet(std::process::Command::new("open").arg(url))
+}
+
+#[cfg(target_os = "windows")]
+fn launch_browser_command(url: &str) -> bool {
+    // `start` is a cmd.exe builtin; the empty string is the window-title
+    // positional that keeps `start` from treating the URL as a title.
+    spawn_quiet(std::process::Command::new("cmd").args(["/C", "start", "", url]))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn launch_browser_command(url: &str) -> bool {
+    spawn_quiet(std::process::Command::new("xdg-open").arg(url))
+}
+
+/// Run the launcher with stdio detached, mapping spawn failure or a non-zero
+/// exit to `false`. Waits for exit: `xdg-open`/`open`/`start` all hand off to
+/// the desktop session and return promptly, and the exit status is the only
+/// failure signal we get (e.g. `xdg-open` without `$DISPLAY`).
+fn spawn_quiet(cmd: &mut std::process::Command) -> bool {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

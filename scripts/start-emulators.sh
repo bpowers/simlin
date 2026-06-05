@@ -126,10 +126,28 @@ check_gcloud() {
     fi
 }
 
-check_firebase() {
-    if ! pnpm --filter @simlin/server exec which firebase >/dev/null 2>&1; then
-        echo "Error: firebase CLI not found in @simlin/server."
-        echo "Run 'pnpm install' to install dependencies."
+# firebase-tools lives in its own lockfile-pinned install under
+# tools/firebase-emulators (outside the pnpm workspace) so that a normal
+# `pnpm install` never pays for its ~600-package dependency tree; it is
+# installed here, on demand, only on machines that run the emulators.
+FIREBASE_TOOLS_DIR="$PROJECT_DIR/tools/firebase-emulators"
+FIREBASE_BIN="$FIREBASE_TOOLS_DIR/node_modules/.bin/firebase"
+
+ensure_firebase() {
+    if [ ! -x "$FIREBASE_BIN" ]; then
+        echo "Installing firebase-tools (one-time, pinned by $FIREBASE_TOOLS_DIR/pnpm-lock.yaml)..."
+        # cd + an explicit --ignore-workspace: from anywhere inside the
+        # repo, pnpm walks up to pnpm-workspace.yaml and would otherwise
+        # perform a workspace install (polluting the main lockfile)
+        # instead of a standalone one against this directory's lockfile.
+        if ! (cd "$FIREBASE_TOOLS_DIR" && pnpm install --frozen-lockfile --ignore-workspace); then
+            echo "Error: failed to install firebase-tools."
+            EXIT_STATUS=1
+            exit 1
+        fi
+    fi
+    if [ ! -x "$FIREBASE_BIN" ]; then
+        echo "Error: firebase CLI not found at $FIREBASE_BIN after install."
         EXIT_STATUS=1
         exit 1
     fi
@@ -140,7 +158,7 @@ main() {
 
     echo "Checking prerequisites..."
     check_gcloud
-    check_firebase
+    ensure_firebase
 
     # Clean up any orphaned emulator processes
     echo "Checking for orphaned emulator processes..."
@@ -164,10 +182,9 @@ main() {
     echo "Firestore emulator ready."
 
     echo "Starting Firebase Auth emulator on port $AUTH_PORT..."
-    # Firebase CLI is installed in @simlin/server, but firebase.json is in src/app.
-    # pnpm --filter overrides the working directory, so we pass --project and
-    # --config explicitly instead of relying on cwd-based config discovery.
-    pnpm --filter @simlin/server exec firebase emulators:start --only auth \
+    # firebase.json is in src/app; pass --project and --config explicitly
+    # instead of relying on cwd-based config discovery.
+    "$FIREBASE_BIN" emulators:start --only auth \
         --project simlin \
         --config "$PROJECT_DIR/src/app/firebase.json" &
     FIREBASE_PID=$!

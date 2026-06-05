@@ -7,20 +7,19 @@ import * as path from 'path';
 import { IncomingMessage, ServerResponse } from 'http';
 
 import * as admin from 'firebase-admin';
-import * as bodyParser from 'body-parser';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
-import favicon from 'serve-favicon';
 import { seshcookie } from 'seshcookie';
-import * as logger from 'winston';
 
 import { apiRouter } from './api';
 import { defined } from '@simlin/core/common';
 import { Application } from './application';
 import { authn } from './authn';
 import authz from './authz';
+import { favicon } from './favicon';
+import * as logger from './logger';
 import { createDatabase } from './models/db';
 import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
@@ -40,13 +39,6 @@ type ContentSecurityPolicyDirectiveValue = string | ContentSecurityPolicyDirecti
 interface ContentSecurityPolicyDirectives {
   [directiveName: string]: Iterable<ContentSecurityPolicyDirectiveValue>;
 }
-
-type SessionCallback = (err?: Error) => void;
-
-type SessionWithCompat = Record<string, unknown> & {
-  regenerate?: (cb: SessionCallback) => void;
-  save?: (cb: SessionCallback) => void;
-};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -122,12 +114,6 @@ class App {
   }
 
   async setup(): Promise<void> {
-    const { combine, timestamp, json } = logger.format;
-    logger.configure({
-      format: combine(timestamp(), json()),
-      transports: [new logger.transports.Console({ level: 'debug' })],
-    });
-
     const oneYearInSeconds = 365 * 24 * 60 * 60;
 
     this.loadConfig();
@@ -144,26 +130,6 @@ class App {
     this.app.use(requestLogger);
     this.app.use(cookieParser());
     this.app.use(seshcookie(this.app.get('authentication').seshcookie));
-
-    // Passport 0.7.0 requires session.regenerate() and session.save()
-    // that seshcookie's plain-object sessions don't provide.
-    this.app.use((req: express.Request, _res: express.Response, next: express.NextFunction) => {
-      const addSessionMethods = (session: SessionWithCompat): void => {
-        session.regenerate = (cb: SessionCallback) => {
-          req.session = {};
-          addSessionMethods(req.session as SessionWithCompat);
-          cb();
-        };
-        session.save = (cb: SessionCallback) => {
-          cb();
-        };
-      };
-      if (!isRecord(req.session)) {
-        req.session = {};
-      }
-      addSessionMethods(req.session as SessionWithCompat);
-      next();
-    });
 
     // etags don't work well on Google App Engine, and we don't have
     // the type of content that is really amenable to etags anyway.
@@ -229,14 +195,15 @@ class App {
       }),
     );
 
-    // support both JSON and x-url-encoded POST bodies
+    // support both JSON and x-url-encoded POST bodies (express 5 ships
+    // these built in; they are the same body-parser implementation)
     this.app.use(
-      bodyParser.json({
+      express.json({
         limit: '10mb',
       }),
     );
     this.app.use(
-      bodyParser.urlencoded({
+      express.urlencoded({
         limit: '10mb',
         extended: false,
       }),

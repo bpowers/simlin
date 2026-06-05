@@ -7,8 +7,6 @@ use std::os::raw::c_char;
 use std::str;
 use std::sync::Mutex;
 
-use lazy_static::lazy_static;
-
 unsafe extern "C" {
     fn xmutil_convert_mdl_to_xmile(
         mdl_source: *const u8,
@@ -23,9 +21,7 @@ unsafe extern "C" {
 }
 
 // xmutil isn't thread-safe, so we need to synchronize calls into it.
-lazy_static! {
-    static ref LOCK: Mutex<()> = Mutex::new(());
-}
+static LOCK: Mutex<()> = Mutex::new(());
 
 pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> (Option<String>, Option<String>) {
     // always grab the lock guard before calling in to _convert_mdl_to_xmile

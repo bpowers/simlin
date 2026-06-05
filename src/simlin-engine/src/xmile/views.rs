@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 
-use float_cmp::approx_eq;
 use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
 
@@ -2200,7 +2199,7 @@ impl From<View> for datamodel::View {
                 zoom: match v.zoom {
                     None => 1.0,
                     Some(zoom) => {
-                        if approx_eq!(f64, zoom, 0.0) {
+                        if crate::float::approx_eq(zoom, 0.0) {
                             1.0
                         } else {
                             zoom

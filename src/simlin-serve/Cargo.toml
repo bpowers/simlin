@@ -30,8 +30,6 @@ simlin-mcp-core = { version = "0.1", path = "../simlin-mcp-core" }
 rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
 schemars = { version = "1", features = ["preserve_order"] }
 rust-embed = "8"
-mime_guess = "2"
-open = "5"
 anyhow = "1"
 loro = "1.11"
 notify-debouncer-full = "0.7"
@@ -47,14 +45,11 @@ serde_yaml = "0.9"
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
 rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-streamable-http-server", "client", "transport-async-rw"] }
+# The smoke test's HTTP client is a thin helper over the hyper legacy
+# connection pool: it only speaks plaintext HTTP/1.1 to a loopback
+# listener, so a full-featured client (and its TLS closure) is
+# deliberately avoided.
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "http1", "client-legacy", "tokio"] }
 http-body-util = "0.1"
 bytes = "1"
-# rustls-tls is required despite this being a loopback-only smoke test:
-# reqwest's default features pull in OpenSSL, which adds a system
-# build-tools dependency the cross-platform CI smoke job (Windows, in
-# particular) doesn't have without extra setup. rustls is pure Rust.
-# `json` enables `Response::json` so the smoke test doesn't have to
-# round-trip JSON bodies through `text()` + `serde_json::from_str`.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

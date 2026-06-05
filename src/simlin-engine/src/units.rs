@@ -6,11 +6,10 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::result::Result as StdResult;
 
-use float_cmp::approx_eq;
-
 use crate::ast::{BinaryOp, Expr0, UnaryOp};
 use crate::common::{EquationError, EquationResult, ErrorCode, UnitError};
 use crate::datamodel::{SimSpecs, Unit, UnitMap};
+use crate::float::approx_eq;
 use crate::lexer::LexerType;
 use crate::{canonicalize, eqn_err};
 
@@ -278,7 +277,7 @@ impl Context {
 fn const_int_eval(ast: &Expr0) -> EquationResult<i32> {
     match ast {
         Expr0::Const(_, n, loc) => {
-            if approx_eq!(f64, *n, n.round()) {
+            if approx_eq(*n, n.round()) {
                 Ok(n.round() as i32)
             } else {
                 eqn_err!(ExpectedInteger, loc.start, loc.end)

@@ -43,7 +43,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::http::{HeaderMap, Method, Request};
+use hyper_util::client::legacy::Client as HyperClient;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -77,6 +82,88 @@ fn workspace_fixture(rel: &str) -> PathBuf {
                 manifest_dir.display()
             ),
         };
+    }
+}
+
+/// Minimal HTTP/1.1 client over the hyper legacy connection pool.
+///
+/// The smoke test only talks plaintext HTTP to a loopback listener, so the
+/// already-present hyper dev-dependencies cover it; depending on a
+/// full-featured client (with its TLS/QUIC closure) for this is the kind of
+/// dev-dependency weight the supply-chain audit flagged.
+struct HttpClient {
+    client: HyperClient<HttpConnector, Full<Bytes>>,
+}
+
+/// A fully-drained HTTP response: status, headers, and UTF-8 body.
+struct HttpResponse {
+    status: u16,
+    headers: HeaderMap,
+    body: String,
+}
+
+impl HttpResponse {
+    fn json(&self) -> Value {
+        serde_json::from_str(&self.body)
+            .unwrap_or_else(|err| panic!("invalid JSON body ({err}): {}", self.body))
+    }
+}
+
+/// Per-request ceiling. Generous relative to loopback latency; exists so a
+/// hung server fails the test with a clear message instead of stalling CI.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl HttpClient {
+    fn new() -> Self {
+        Self {
+            client: HyperClient::builder(TokioExecutor::new()).build_http(),
+        }
+    }
+
+    async fn request(
+        &self,
+        method: Method,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> HttpResponse {
+        let mut req = Request::builder().method(method).uri(url);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let req = req
+            .body(Full::new(Bytes::from(body)))
+            .expect("build request");
+        let resp = tokio::time::timeout(REQUEST_TIMEOUT, self.client.request(req))
+            .await
+            .unwrap_or_else(|_| panic!("request to {url} timed out"))
+            .unwrap_or_else(|err| panic!("request to {url} failed: {err}"));
+        let (parts, body) = resp.into_parts();
+        let collected = tokio::time::timeout(REQUEST_TIMEOUT, body.collect())
+            .await
+            .unwrap_or_else(|_| panic!("body read from {url} timed out"))
+            .unwrap_or_else(|err| panic!("body read from {url} failed: {err}"));
+        HttpResponse {
+            status: parts.status.as_u16(),
+            headers: parts.headers,
+            body: String::from_utf8(collected.to_bytes().to_vec()).expect("utf-8 body"),
+        }
+    }
+
+    async fn get(&self, url: &str) -> HttpResponse {
+        self.request(Method::GET, url, &[], Vec::new()).await
+    }
+
+    async fn post_json(&self, url: &str, headers: &[(&str, &str)], body: &Value) -> HttpResponse {
+        let mut all_headers = vec![("content-type", "application/json")];
+        all_headers.extend_from_slice(headers);
+        self.request(
+            Method::POST,
+            url,
+            &all_headers,
+            serde_json::to_vec(body).expect("serialize body"),
+        )
+        .await
     }
 }
 
@@ -313,29 +400,20 @@ async fn smoke_end_to_end_browser_and_mcp_paths() {
     let (_guard, urls) = spawn_and_collect_urls(&root, Duration::from_secs(20));
 
     let origin = ui_origin(&urls.ui_url);
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .expect("build reqwest client");
+    let http = HttpClient::new();
 
     // ---- 3. /healthz: trivial liveness check ----
-    let resp = http
-        .get(format!("{origin}/healthz"))
-        .send()
-        .await
-        .expect("GET /healthz");
-    assert_eq!(resp.status().as_u16(), 200, "/healthz must return 200");
-    let body = resp.text().await.expect("/healthz body");
-    assert_eq!(body, "ok", "/healthz body must be the literal string 'ok'");
+    let resp = http.get(&format!("{origin}/healthz")).await;
+    assert_eq!(resp.status, 200, "/healthz must return 200");
+    assert_eq!(
+        resp.body, "ok",
+        "/healthz body must be the literal string 'ok'"
+    );
 
     // ---- 4. GET /api/projects: registry lists all four entries ----
-    let resp = http
-        .get(format!("{origin}/api/projects"))
-        .send()
-        .await
-        .expect("GET /api/projects");
-    assert_eq!(resp.status().as_u16(), 200, "/api/projects must return 200");
-    let listing: Value = resp.json().await.expect("/api/projects body");
+    let resp = http.get(&format!("{origin}/api/projects")).await;
+    assert_eq!(resp.status, 200, "/api/projects must return 200");
+    let listing: Value = resp.json();
     let projects = listing["projects"]
         .as_array()
         .expect("projects array")
@@ -358,12 +436,10 @@ async fn smoke_end_to_end_browser_and_mcp_paths() {
 
     // ---- 5. GET /api/projects/teacup.xmile: full read path ----
     let resp = http
-        .get(format!("{origin}/api/projects/teacup.xmile"))
-        .send()
-        .await
-        .expect("GET teacup.xmile");
-    assert_eq!(resp.status().as_u16(), 200);
-    let payload: Value = resp.json().await.expect("teacup.xmile body");
+        .get(&format!("{origin}/api/projects/teacup.xmile"))
+        .await;
+    assert_eq!(resp.status, 200);
+    let payload: Value = resp.json();
     let initial_version = payload["version"].as_u64().expect("version");
     let json_str = payload["json"].as_str().expect("json field").to_string();
     let mut project: Value = serde_json::from_str(&json_str).expect("nested json");
@@ -403,20 +479,18 @@ async fn smoke_end_to_end_browser_and_mcp_paths() {
         "version": initial_version,
     });
     let resp = http
-        .post(format!("{origin}/api/projects/teacup.xmile"))
-        .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-        .body(serde_json::to_vec(&save_body).expect("serialize save"))
-        .send()
-        .await
-        .expect("POST save");
+        .post_json(
+            &format!("{origin}/api/projects/teacup.xmile"),
+            &[],
+            &save_body,
+        )
+        .await;
     assert_eq!(
-        resp.status().as_u16(),
-        200,
+        resp.status, 200,
         "save must return 200, got {}: {}",
-        resp.status(),
-        resp.text().await.unwrap_or_default()
+        resp.status, resp.body
     );
-    let save_resp: Value = resp.json().await.expect("save body");
+    let save_resp: Value = resp.json();
     let new_version = save_resp["version"].as_u64().expect("new version");
     assert_eq!(
         new_version,
@@ -426,12 +500,10 @@ async fn smoke_end_to_end_browser_and_mcp_paths() {
 
     // ---- 7. GET again: confirm the in-memory doc reflects the edit ----
     let resp = http
-        .get(format!("{origin}/api/projects/teacup.xmile"))
-        .send()
-        .await
-        .expect("GET teacup.xmile after save");
-    assert_eq!(resp.status().as_u16(), 200);
-    let after: Value = resp.json().await.expect("after body");
+        .get(&format!("{origin}/api/projects/teacup.xmile"))
+        .await;
+    assert_eq!(resp.status, 200);
+    let after: Value = resp.json();
     assert_eq!(
         after["version"].as_u64(),
         Some(new_version),
@@ -537,27 +609,25 @@ async fn smoke_end_to_end_browser_and_mcp_paths() {
 /// body as a string. SSE text bodies parse correctly without a streaming
 /// reader because each tool call writes a single event-stream frame and
 /// closes the response.
-async fn mcp_post(http: &reqwest::Client, mcp_url: &str, session_id: &str, body: &Value) -> String {
+async fn mcp_post(http: &HttpClient, mcp_url: &str, session_id: &str, body: &Value) -> String {
     let resp = http
-        .post(mcp_url)
-        .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-        .header(
-            ACCEPT,
-            HeaderValue::from_static("application/json, text/event-stream"),
+        .post_json(
+            mcp_url,
+            &[
+                ("accept", "application/json, text/event-stream"),
+                ("mcp-session-id", session_id),
+                ("Mcp-Protocol-Version", "2025-06-18"),
+            ],
+            body,
         )
-        .header("mcp-session-id", session_id)
-        .header("Mcp-Protocol-Version", "2025-06-18")
-        .body(serde_json::to_vec(body).expect("serialize mcp body"))
-        .send()
-        .await
-        .expect("MCP POST");
-    let status = resp.status();
-    let text = resp.text().await.expect("MCP body text");
+        .await;
     assert!(
-        status.is_success(),
-        "MCP POST must return 2xx, got {status}: {text}"
+        (200..300).contains(&resp.status),
+        "MCP POST must return 2xx, got {}: {}",
+        resp.status,
+        resp.body
     );
-    text
+    resp.body
 }
 
 /// Initialize an MCP session and return the assigned session id. The
@@ -565,7 +635,7 @@ async fn mcp_post(http: &reqwest::Client, mcp_url: &str, session_id: &str, body:
 /// request *and* the `notifications/initialized` notification before
 /// any tool call, even when the test runs against a tempdir-isolated
 /// instance.
-async fn open_mcp_session(http: &reqwest::Client, mcp_url: &str) -> String {
+async fn open_mcp_session(http: &HttpClient, mcp_url: &str) -> String {
     let init_body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -577,47 +647,36 @@ async fn open_mcp_session(http: &reqwest::Client, mcp_url: &str) -> String {
         }
     });
     let resp = http
-        .post(mcp_url)
-        .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-        .header(
-            ACCEPT,
-            HeaderValue::from_static("application/json, text/event-stream"),
+        .post_json(
+            mcp_url,
+            &[("accept", "application/json, text/event-stream")],
+            &init_body,
         )
-        .body(serde_json::to_vec(&init_body).expect("serialize init"))
-        .send()
-        .await
-        .expect("POST initialize");
-    assert_eq!(resp.status().as_u16(), 200, "initialize must return 200");
+        .await;
+    assert_eq!(resp.status, 200, "initialize must return 200");
     let session_id = resp
-        .headers()
+        .headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .expect("server must assign mcp-session-id on initialize");
-    let _ = resp.text().await;
 
     let initialized = json!({
         "jsonrpc": "2.0",
         "method": "notifications/initialized"
     });
     let resp = http
-        .post(mcp_url)
-        .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-        .header(
-            ACCEPT,
-            HeaderValue::from_static("application/json, text/event-stream"),
+        .post_json(
+            mcp_url,
+            &[
+                ("accept", "application/json, text/event-stream"),
+                ("mcp-session-id", &session_id),
+                ("Mcp-Protocol-Version", "2025-06-18"),
+            ],
+            &initialized,
         )
-        .header("mcp-session-id", session_id.clone())
-        .header("Mcp-Protocol-Version", "2025-06-18")
-        .body(serde_json::to_vec(&initialized).expect("serialize initialized"))
-        .send()
-        .await
-        .expect("POST initialized");
-    assert_eq!(
-        resp.status().as_u16(),
-        202,
-        "initialized notification must return 202"
-    );
+        .await;
+    assert_eq!(resp.status, 202, "initialized notification must return 202");
 
     session_id
 }

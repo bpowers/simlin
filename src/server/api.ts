@@ -4,7 +4,7 @@
 
 import { Request, Response, Router } from 'express';
 import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
-import * as logger from 'winston';
+import * as logger from './logger';
 
 import { Application } from './application';
 import { Database } from './models/db-interfaces';

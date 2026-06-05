@@ -4,7 +4,7 @@
 
 import { parse as parseToml } from '@iarna/toml';
 import { promises as fs } from 'fs';
-import * as logger from 'winston';
+import * as logger from './logger';
 
 import { Database } from './models/db-interfaces';
 import { Table } from './models/table';

@@ -83,12 +83,34 @@ pub async fn static_handler(uri: Uri) -> Response {
     }
 }
 
+/// Content-Type for an embedded asset path, by extension (matched
+/// case-insensitively). The SPA bundle is a closed set we control (today:
+/// html/js/css/wasm, plus the common asset types a future bundle might add),
+/// so a lookup table is strictly more auditable than a general-purpose mime
+/// database. Unknown extensions get the octet-stream default, same as the
+/// mime_guess fallback this replaced.
+pub(crate) fn content_type_for_path(path: &str) -> &'static str {
+    let ext = path.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+    match ext.to_ascii_lowercase().as_str() {
+        "html" => "text/html",
+        "js" | "mjs" => "text/javascript",
+        "css" => "text/css",
+        "wasm" => "application/wasm",
+        "json" | "map" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "ico" => "image/x-icon",
+        "txt" => "text/plain",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
 fn embedded_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
-    let mime = mime_guess::from_path(path).first_or_octet_stream();
     let body = Body::from(file.data.into_owned());
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime.as_ref())
+        .header(header::CONTENT_TYPE, content_type_for_path(path))
         .body(body)
         .unwrap_or_else(|_| {
             (StatusCode::INTERNAL_SERVER_ERROR, "static response error").into_response()
@@ -107,6 +129,38 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("web/dist/index.html")
             .is_file()
+    }
+
+    #[test]
+    fn content_type_covers_every_extension_in_the_bundle() {
+        // The four extensions the current SPA build emits; if the bundler
+        // starts emitting a new type, add it to the table above.
+        assert_eq!(content_type_for_path("index.html"), "text/html");
+        assert_eq!(
+            content_type_for_path("assets/index-Bf3Qa.js"),
+            "text/javascript"
+        );
+        assert_eq!(content_type_for_path("assets/index-D4x.css"), "text/css");
+        assert_eq!(
+            content_type_for_path("assets/libsimlin-Cm9.wasm"),
+            "application/wasm"
+        );
+    }
+
+    #[test]
+    fn content_type_is_case_insensitive_and_defaults_to_octet_stream() {
+        assert_eq!(content_type_for_path("LOGO.PNG"), "image/png");
+        assert_eq!(content_type_for_path("favicon.ico"), "image/x-icon");
+        assert_eq!(
+            content_type_for_path("data.bin"),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            content_type_for_path("no-extension"),
+            "application/octet-stream"
+        );
+        // a trailing dot means an empty extension, not a panic
+        assert_eq!(content_type_for_path("weird."), "application/octet-stream");
     }
 
     #[test]

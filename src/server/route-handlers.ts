@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import { NextFunction, Request, Response } from 'express';
-import * as logger from 'winston';
+import * as logger from './logger';
 
 import { getAuthenticatedUser, isResourceOwner } from './auth-helpers';
 

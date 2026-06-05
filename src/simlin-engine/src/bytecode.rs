@@ -8,7 +8,6 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use crate::common::{Canonical, Ident};
-use ordered_float::OrderedFloat;
 
 // ============================================================================
 // Type Aliases
@@ -1797,12 +1796,15 @@ impl ByteCode {
 #[derive(Clone, Default)]
 pub struct ByteCodeBuilder {
     bytecode: ByteCode,
-    interned_literals: HashMap<OrderedFloat<f64>, LiteralId>,
+    // keyed on the literal's bit pattern: interning only needs Eq + Hash, and
+    // bit-exact deduplication is the right semantic for codegen (it never
+    // conflates distinct values; at worst -0.0 and 0.0 get separate slots)
+    interned_literals: HashMap<u64, LiteralId>,
 }
 
 impl ByteCodeBuilder {
     pub(crate) fn intern_literal(&mut self, lit: f64) -> LiteralId {
-        let key = OrderedFloat(lit);
+        let key = lit.to_bits();
         if self.interned_literals.contains_key(&key) {
             return self.interned_literals[&key];
         }
