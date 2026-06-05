@@ -2,6 +2,15 @@
 
 TypeScript API for interacting with the WASM-compiled simulation engine. Promise-based; in the browser, WASM runs in a Web Worker to avoid jank.
 
+## WASM artifacts
+
+`build.sh` produces two wasm binaries in `core/` (each with a `.raw` sibling, build.sh's wasm-opt change-detection cache):
+
+- `libsimlin.wasm` -- full build (libsimlin default features, including `png_render`). Loaded by Node via `wasm.node.ts`; `src/server`'s model-preview pipeline calls `Project.renderPng`, which needs the `simlin_project_render_png` export.
+- `libsimlin-browser.wasm` -- slim `--no-default-features` build, imported by `wasm.browser.ts` and bundled into SPAs. Omits the PNG rasterization stack (resvg + text shaping + embedded font, ~28% of the full binary); calling `Project.renderPng` against it throws a descriptive error from `src/internal/import-export.ts`. SVG rendering (pure string generation) remains available.
+
+`tests/wasm-artifacts.test.ts` pins this contract (export presence/absence and the size delta); `scripts/verify-deploy-build.sh` re-checks it on the assembled deploy. Both files ship in the npm package; the GAE deploy excludes the browser artifact from the upload (`.gcloudignore`) because rsbuild bundles a hashed copy into the SPA's static assets.
+
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
 For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 

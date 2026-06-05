@@ -1169,6 +1169,10 @@ void simlin_project_render_svg(SimlinProject *project,
 // other is derived from the aspect ratio. When both are non-zero, `width`
 // takes precedence and `height` is derived from the aspect ratio.
 //
+// Only available with the `png_render` feature (on by default; the browser
+// wasm artifact is built without it to keep the resvg/text-shaping stack
+// out of the bundle browsers download).
+//
 // Caller must free output with `simlin_free`.
 //
 // # Safety

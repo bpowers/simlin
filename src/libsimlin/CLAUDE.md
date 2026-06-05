@@ -47,6 +47,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
 
 - **`src/serialization.rs`** - Export projects:
   - `simlin_project_serialize_{protobuf,json,xmile,systems,svg}()`
+  - `simlin_project_render_svg()` and (behind the `png_render` feature, on by default) `simlin_project_render_png()`. The browser wasm bundle is built `--no-default-features` to drop the PNG rasterization stack (resvg + text shaping + an embedded font, ~28% of the optimized binary); native consumers (pysimlin, CGo, the server's full wasm artifact) keep it. cbindgen emits the function into `simlin.h` unconditionally -- the header documents the full native API.
 
 ### Analysis
 

@@ -23,6 +23,15 @@ node_modules
 /src/server/config
 /src/app/firebase.json
 
+# Engine WASM: the GAE image carries exactly one copy of each artifact.
+# The full build stays at src/engine/core/libsimlin.wasm (the server loads
+# it via node_modules/@simlin/engine). The browser build is excluded here
+# because rsbuild already bundled a hashed copy into public/static/wasm/;
+# uploading the source artifact too would ship it twice. The .raw files are
+# build.sh's wasm-opt change-detection cache and never load at runtime.
+/src/engine/core/libsimlin-browser.wasm
+/src/engine/core/*.raw
+
 # Untracked scratch directories. .gcloudignore does NOT import .gitignore
 # (intentionally, so that gitignored build output like src/*/lib and
 # src/engine/core/libsimlin.wasm still uploads), so these never-tracked dirs

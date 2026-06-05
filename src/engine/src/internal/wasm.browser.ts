@@ -7,8 +7,11 @@
 // Import WASM as a module - with asyncWebAssembly enabled in the bundler,
 // this import is handled automatically.
 // The bundler loads the WASM, instantiates it, and returns the exports.
+// The browser artifact is the slim build (no png_render: the resvg/text
+// shaping stack is ~28% of the full binary and only Node-side PNG previews
+// use it); Node loads the full libsimlin.wasm via wasm.node.ts instead.
 // @ts-expect-error TypeScript doesn't understand .wasm imports
-import * as wasmModule from '../../core/libsimlin.wasm';
+import * as wasmModule from '../../core/libsimlin-browser.wasm';
 
 export type WasmSource = string | URL | ArrayBuffer | Uint8Array;
 export type WasmSourceProvider = WasmSource | (() => WasmSource | Promise<WasmSource>);

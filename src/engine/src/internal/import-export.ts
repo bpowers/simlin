@@ -188,15 +188,22 @@ export function simlin_project_render_png(
   height: number,
 ): Uint8Array {
   const exports = getExports();
-  const renderFn = exports.simlin_project_render_png as (
-    proj: number,
-    name: number,
-    width: number,
-    height: number,
-    outBuf: number,
-    outLen: number,
-    outErr: number,
-  ) => void;
+  const renderFn = exports.simlin_project_render_png as
+    | ((
+        proj: number,
+        name: number,
+        width: number,
+        height: number,
+        outBuf: number,
+        outLen: number,
+        outErr: number,
+      ) => void)
+    | undefined;
+  // The browser wasm artifact is built without png_render (the rasterization
+  // stack is ~28% of the binary); only the full artifact Node loads has it.
+  if (typeof renderFn !== 'function') {
+    throw new Error('PNG rendering is not available in this build of libsimlin (browser builds omit png_render)');
+  }
 
   const namePtr = stringToWasm(modelName);
   const outBufPtr = allocOutPtr();

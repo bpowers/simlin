@@ -98,10 +98,14 @@ if [ -f public/static/js/sd-component.js ]; then
     fi
 fi
 
-# 5. A hashed WASM blob exists somewhere under public/static/wasm/.
-#    rsbuild emits the engine WASM via Rspack's asset module with a
-#    content hash. The exact filename varies; the directory should
-#    contain at least one *.wasm.
+# 5. A hashed WASM blob exists somewhere under public/static/wasm/, and it
+#    is the SLIM browser artifact. rsbuild emits the engine WASM via
+#    Rspack's asset module with a content hash; the exact filename varies.
+#    The browser bundle must come from libsimlin-browser.wasm (built
+#    --no-default-features, no png_render): the rasterization stack is
+#    ~28% of the full binary and shipping it to browsers is pure dead
+#    weight. The export name appears as a literal string in the wasm
+#    export section, so a binary grep is a reliable presence check.
 if [ ! -d public/static/wasm ]; then
     fail "public/static/wasm/ directory missing"
 else
@@ -110,13 +114,22 @@ else
         fail "no *.wasm files found under public/static/wasm/"
     else
         pass "public/static/wasm/ contains $wasm_count WASM file(s)"
+        while IFS= read -r wasm_file; do
+            if LC_ALL=C grep -q 'simlin_project_render_png' "$wasm_file"; then
+                fail "$wasm_file exports simlin_project_render_png -- the browser bundle picked up the full WASM instead of libsimlin-browser.wasm"
+            else
+                pass "$wasm_file is the slim browser artifact (no png_render)"
+            fi
+        done < <(find public/static/wasm -name '*.wasm' -type f)
     fi
 fi
 
-# 6. The engine package's source WASM was built. The server runtime
-#    loads this via require('@simlin/engine'); a missing or empty WASM
-#    means the Rust+WASM step was skipped or failed silently.
-#    ~1MB minimum is well under any real build (release WASM is ~5MB;
+# 6. The engine package's source WASM was built, and it is the FULL
+#    artifact. The server runtime loads this via require('@simlin/engine')
+#    and its model-preview pipeline calls simlin_project_render_png; a
+#    slim WASM here would 500 every preview render. A missing or empty
+#    WASM means the Rust+WASM step was skipped or failed silently.
+#    ~1MB minimum is well under any real build (release WASM is ~6MB;
 #    DISABLE_WASM_OPT bumps it to ~12MB).
 if [ ! -f src/engine/core/libsimlin.wasm ]; then
     fail "src/engine/core/libsimlin.wasm missing (engine WASM build skipped?)"
@@ -124,8 +137,10 @@ else
     size=$(wc -c < src/engine/core/libsimlin.wasm)
     if [ "$size" -lt 1000000 ]; then
         fail "src/engine/core/libsimlin.wasm is too small ($size bytes; expected >1MB)"
+    elif ! LC_ALL=C grep -q 'simlin_project_render_png' src/engine/core/libsimlin.wasm; then
+        fail "src/engine/core/libsimlin.wasm lacks the simlin_project_render_png export (server PNG previews would break) -- was it built --no-default-features?"
     else
-        pass "src/engine/core/libsimlin.wasm exists ($size bytes)"
+        pass "src/engine/core/libsimlin.wasm exists and is the full artifact ($size bytes)"
     fi
 fi
 

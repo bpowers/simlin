@@ -479,6 +479,10 @@ pub unsafe extern "C" fn simlin_project_render_svg(
 /// other is derived from the aspect ratio. When both are non-zero, `width`
 /// takes precedence and `height` is derived from the aspect ratio.
 ///
+/// Only available with the `png_render` feature (on by default; the browser
+/// wasm artifact is built without it to keep the resvg/text-shaping stack
+/// out of the bundle browsers download).
+///
 /// Caller must free output with `simlin_free`.
 ///
 /// # Safety
@@ -486,6 +490,7 @@ pub unsafe extern "C" fn simlin_project_render_svg(
 /// - `model_name` must be a valid null-terminated UTF-8 string
 /// - `out_buffer` and `out_len` must be valid pointers
 /// - `out_error` may be null
+#[cfg(feature = "png_render")]
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_render_png(
     project: *mut SimlinProject,
