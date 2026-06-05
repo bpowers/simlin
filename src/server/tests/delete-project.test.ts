@@ -87,7 +87,7 @@ function mockRequest(opts: { username?: string; projectName?: string; userId?: s
   const authed = opts.userId !== undefined;
   return {
     params: { username, projectName },
-    // passport stores { id } in the session; the deserialized User (with
+    // login stores { id } in the session; the deserialized User (with
     // getId()) lives on req.user. getAuthenticatedUser() requires both.
     session: authed ? { passport: { user: { id: opts.userId } } } : undefined,
     user: authed ? { getId: () => opts.userId } : undefined,
@@ -109,8 +109,7 @@ describe('createDeleteProjectHandler', () => {
   });
 
   it('still returns 200 when preview deletion fails', async () => {
-    // (route-handlers logs a winston warning here on purpose; winston's
-    // module-level methods are non-configurable so we can't silence it.)
+    // (route-handlers logs a warning line here on purpose.)
     const { deps, projectDeleteCalls } = mockDeps({
       project: mockProject('alice/climate'),
       previewDeleteRejects: true,

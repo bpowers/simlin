@@ -2,90 +2,18 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { randomUUID } from 'node:crypto';
+
 import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
-import { Request, Response } from 'express';
-import { Strategy as BaseStrategy } from 'passport-strategy';
-import passport from 'passport';
-import { v4 as uuidV4 } from 'uuid';
-import * as logger from 'winston';
+import { NextFunction, Request, Response } from 'express';
 import * as admin from 'firebase-admin';
 
 import { Application } from './application';
 import { handleSessionDelete } from './auth-helpers';
+import * as logger from './logger';
+import { sessionAuth, setSessionUser } from './session-auth';
 import { Table } from './models/table';
 import { User } from './schemas/user_pb';
-
-interface StrategyOptions {}
-
-interface SerializedSessionUser {
-  id: string;
-}
-
-type VerifyDone = (error: Error | null, user?: unknown) => void;
-
-interface VerifyFunction {
-  (firestoreIdToken: string, done: VerifyDone): Promise<void>;
-}
-
-function toError(error: unknown): Error {
-  if (error instanceof Error) {
-    return error;
-  }
-  if (typeof error === 'string') {
-    return new Error(error);
-  }
-  if (typeof error === 'object' && error !== null) {
-    const message = (error as Record<string, unknown>).message;
-    if (typeof message === 'string') {
-      return new Error(message);
-    }
-  }
-  return new Error(String(error));
-}
-
-function isSerializedSessionUser(value: unknown): value is SerializedSessionUser {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof (value as Record<string, unknown>).id === 'string'
-  );
-}
-
-class FirestoreAuthStrategy extends BaseStrategy implements passport.Strategy {
-  readonly name: 'firestore-auth';
-  private readonly verify: VerifyFunction;
-
-  constructor(options: StrategyOptions, verify: VerifyFunction) {
-    super();
-    this.name = 'firestore-auth';
-    this.verify = verify;
-  }
-
-  authenticate(req: Request, _options?: unknown): void {
-    if (!req.body || !req.body.idToken) {
-      this.error(new Error('no idToken in body'));
-      return;
-    }
-
-    const idToken = req.body.idToken as string;
-
-    const verified: VerifyDone = (error, user): void => {
-      if (error) {
-        return this.error(error);
-      }
-      if (!user) {
-        return this.fail(401);
-      }
-      this.success(user as User);
-    };
-
-    this.verify(idToken, verified)
-      .then(() => {})
-      .catch((err) => {
-        this.error(toError(err));
-      });
-  }
-}
 
 async function getOrCreateUserFromProfile(
   users: Table<User>,
@@ -134,7 +62,7 @@ async function getOrCreateUserFromProfile(
       created.fromDate(new Date());
 
       user = new User();
-      user.setId(`temp-${uuidV4()}`);
+      user.setId(`temp-${randomUUID()}`);
       user.setEmail(email);
       user.setDisplayName(displayName);
       user.setProvider('google');
@@ -185,55 +113,36 @@ async function getOrCreateUserFromProfile(
 }
 
 export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void => {
-  // const config = app.get('authentication');
+  app.use(sessionAuth(app.db.user));
 
-  passport.use(
-    new FirestoreAuthStrategy({}, async (firestoreIdToken: string, done: VerifyDone) => {
-      const [user, err] = await getOrCreateUserFromProfile(app.db.user, firebaseAuthn, firestoreIdToken);
-      if (err !== undefined) {
-        logger.error(err);
-        done(err);
-      } else if (user) {
-        done(null, user);
-      } else {
-        throw new Error('unreachable');
-      }
-    }),
-  );
-
-  passport.serializeUser((rawUser, done) => {
-    if (!(rawUser instanceof User)) {
-      done(new Error('serializeUser expected a User instance'));
-      return;
-    }
-    const user = rawUser;
-    console.log(`serialize user: ${user.getId()}`);
-    const serializedUser: SerializedSessionUser = {
-      id: user.getId(),
-    };
-    done(null, serializedUser);
-  });
-
-  passport.deserializeUser(async (user, done) => {
-    if (!isSerializedSessionUser(user)) {
-      done(new Error(`no or incorrectly serialized User: ${String(user)}`));
+  // login: exchange a Firebase idToken for an authenticated session
+  // cookie. Failures are 500s, matching the status the previous
+  // passport strategy's error() path produced.
+  app.post('/session', (req: Request, res: Response, next: NextFunction): void => {
+    const body: unknown = req.body;
+    const idToken =
+      typeof body === 'object' && body !== null ? (body as Record<string, unknown>).idToken : undefined;
+    if (typeof idToken !== 'string' || idToken === '') {
+      logger.error('no idToken in body');
+      res.sendStatus(500);
       return;
     }
 
-    const userModel = await app.db.user.findOne(user.id);
-    if (!userModel) {
-      logger.info(`couldn't find user '${user.id}' in DB`);
-      done(null, null);
-      return;
-    }
-    done(null, userModel);
-  });
-
-  app.use(passport.initialize());
-  app.use(passport.session());
-
-  app.post('/session', passport.authenticate('firestore-auth', {}), (req: Request, res: Response): void => {
-    res.sendStatus(200);
+    getOrCreateUserFromProfile(app.db.user, firebaseAuthn, idToken)
+      .then(([user, err]) => {
+        if (err !== undefined || !user) {
+          logger.error(err ?? 'no user from profile');
+          res.sendStatus(500);
+          return;
+        }
+        logger.info(`session login for user: ${user.getId()}`);
+        setSessionUser(req, user.getId());
+        req.user = user;
+        res.sendStatus(200);
+      })
+      .catch((err: unknown) => {
+        next(err);
+      });
   });
 
   app.delete('/session', handleSessionDelete);

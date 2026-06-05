@@ -12,7 +12,8 @@ export interface AuthenticatedUser {
 }
 
 /**
- * Interface for the deserialized user object set by passport on req.user.
+ * Interface for the deserialized user object set on req.user by the
+ * sessionAuth middleware.
  */
 interface UserRecord {
   getId(): string;
@@ -29,10 +30,11 @@ function isUserRecord(obj: unknown): obj is UserRecord {
  * This safely checks all levels of the session object to avoid TypeError
  * when accessing properties on undefined/null objects.
  *
- * passport.serializeUser stores { id: userId } in the session, so
- * we check for that field to confirm the session is authenticated.
- * The full user object (with getId(), getEmail(), etc.) is on req.user,
- * populated by passport.deserializeUser.
+ * Login stores { id: userId } under session.passport.user (see
+ * session-auth.ts for why the key keeps its historic name), so we check
+ * for that field to confirm the session is authenticated. The full user
+ * object (with getId(), getEmail(), etc.) is on req.user, populated by
+ * the sessionAuth middleware.
  */
 export function getAuthenticatedUser(req: Request): AuthenticatedUser | undefined {
   if (!req.session) {
@@ -74,18 +76,16 @@ export function isResourceOwner(authUser: AuthenticatedUser | undefined, ownerId
 }
 
 /**
- * DELETE /session handler: terminates the passport login session.
+ * DELETE /session handler: terminates the login session.
  *
- * Sessions live in a seshcookie-encrypted cookie, so there is no server-side
- * store to purge: passport's req.logout() removes req.session.passport and
- * regenerates the session (the compat shim in app.ts resets req.session to a
- * fresh object), and seshcookie's response hook rewrites the Set-Cookie with
- * the now-unauthenticated session. The handler must always respond -- the
- * previous TODO stub never wrote a response, so a client awaiting the fetch
- * hung indefinitely.
+ * Sessions live in a seshcookie-encrypted cookie, so there is no
+ * server-side store to purge: replacing req.session with a fresh object
+ * drops the authenticated state, and seshcookie's response hook rewrites
+ * the Set-Cookie with the now-unauthenticated session. The handler must
+ * always respond -- an earlier version never wrote a response, so a
+ * client awaiting the fetch hung indefinitely.
  */
 export function handleSessionDelete(req: Request, res: Response): void {
-  req.logout((err?: Error) => {
-    res.sendStatus(err ? 500 : 200);
-  });
+  req.session = {};
+  res.sendStatus(200);
 }
