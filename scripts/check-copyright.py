@@ -49,13 +49,6 @@ SKIP_DIRS = frozenset({
     ".git", "playwright-report", "test-results",
 })
 
-# Vendored third-party code keeps its upstream copyright and license (each
-# directory carries its own LICENSE file); requiring the Simlin header there
-# would misstate the files' provenance.
-VENDORED_DIRS = (
-    "src/server/seshcookie",
-)
-
 
 def should_skip_file(path: Path) -> bool:
     """Return True for generated files that should not have copyright headers."""
@@ -77,10 +70,8 @@ def find_source_files(repo_root: Path) -> list[Path]:
 
     for search_root in search_roots:
         for path in sorted(search_root.rglob("*")):
-            rel = path.relative_to(repo_root)
-            if any(part in SKIP_DIRS for part in rel.parts):
-                continue
-            if any(rel.as_posix().startswith(v + "/") for v in VENDORED_DIRS):
+            rel_parts = path.relative_to(repo_root).parts
+            if any(part in SKIP_DIRS for part in rel_parts):
                 continue
             if path.is_file() and not should_skip_file(path):
                 if path.suffix in (".rs", ".ts", ".tsx"):

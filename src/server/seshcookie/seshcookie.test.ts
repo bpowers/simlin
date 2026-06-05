@@ -1,10 +1,12 @@
-// Copyright 2018 Bobby Powers. Licensed under the ISC license (see
-// LICENSE in this directory).
-//
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
 // Vendored from https://github.com/bpowers/seshcookie-js at commit
-// 46aef15d1bb267dd17a680b5dbf657c12fbddad1, with the node:test runner
-// imports adapted to jest's globals (before/after -> beforeAll/afterAll);
-// the node:assert assertions are unchanged.
+// 46aef15d1bb267dd17a680b5dbf657c12fbddad1 (relicensed from ISC with
+// the author's permission; see seshcookie.ts), with the node:test
+// runner imports adapted to jest's globals (before/after ->
+// beforeAll/afterAll); the node:assert assertions are unchanged.
 
 import * as assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';

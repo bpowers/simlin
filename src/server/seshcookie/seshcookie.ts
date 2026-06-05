@@ -1,11 +1,14 @@
-// Copyright 2018 Bobby Powers. Licensed under the ISC license (see
-// LICENSE in this directory).
-//
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
 // Vendored from https://github.com/bpowers/seshcookie-js at commit
 // 46aef15d1bb267dd17a680b5dbf657c12fbddad1 ("make framework-agnostic
-// with zero dependencies"). simlin is the only consumer of seshcookie,
-// so the library lives here instead of going through an npm publish
-// cycle; keep diffs against upstream minimal so the two stay easy to
+// with zero dependencies"), relicensed from ISC to Apache-2.0 with the
+// explicit permission of its sole author (Bobby Powers, also the
+// Simlin author). simlin is the only consumer of seshcookie, so the
+// library lives here instead of going through an npm publish cycle;
+// keep diffs against upstream minimal so the two stay easy to
 // reconcile.
 
 import * as crypto from 'crypto';
