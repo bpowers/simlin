@@ -3767,7 +3767,6 @@ dependencies = [
  "mimalloc",
  "sha2",
  "simlin-engine",
- "stringreader",
  "tempfile",
 ]
 
@@ -3785,7 +3784,6 @@ dependencies = [
  "ed25519-dalek",
  "float-cmp 0.10.0",
  "jsonschema",
- "lazy_static",
  "ordered-float",
  "proptest",
  "prost",
@@ -4022,12 +4020,6 @@ checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
 dependencies = [
  "float-cmp 0.9.0",
 ]
-
-[[package]]
-name = "stringreader"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "913e7b03d63752f6cdd2df77da36749d82669904798fe8944b9ec3d23f159905"
 
 [[package]]
 name = "strsim"
@@ -5144,7 +5136,6 @@ name = "xmutil"
 version = "1.1.0"
 dependencies = [
  "cc",
- "lazy_static",
 ]
 
 [[package]]

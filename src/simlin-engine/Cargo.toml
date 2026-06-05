@@ -22,7 +22,6 @@ png_render = ["dep:resvg"]
 xmutil = ["dep:xmutil"]
 
 [dependencies]
-lazy_static = "1"
 unicode-xid = "0.2"
 prost = "0.14"
 float-cmp = "0.10"
