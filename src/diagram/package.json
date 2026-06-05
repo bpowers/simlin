@@ -55,7 +55,6 @@
     "@simlin/engine": "workspace:^",
     "clsx": "^2.1.1",
     "downshift": "^9.2.0",
-    "js-base64": "^3.7.8",
     "katex": "^0.16.28",
     "slate": "^0.123.0",
     "slate-dom": "^0.123.0",

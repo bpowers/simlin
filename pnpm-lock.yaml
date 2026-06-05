@@ -35,9 +35,6 @@ importers:
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
-      js-base64:
-        specifier: ^3.7.8
-        version: 3.7.8
       katex:
         specifier: ^0.16.28
         version: 0.16.45
@@ -184,9 +181,6 @@ importers:
       downshift:
         specifier: ^9.2.0
         version: 9.3.2(react@19.2.6)
-      js-base64:
-        specifier: ^3.7.8
-        version: 3.7.8
       katex:
         specifier: ^0.16.28
         version: 0.16.45
@@ -460,9 +454,6 @@ importers:
       eslint:
         specifier: ^9.0.0
         version: 9.39.4(jiti@2.7.0)
-      js-base64:
-        specifier: ^3.7.7
-        version: 3.7.8
       prettier:
         specifier: ^3.8.1
         version: 3.8.3
@@ -5211,9 +5202,6 @@ packages:
 
   jose@6.2.3:
     resolution: {integrity: sha512-YYVDInQKFJfR/xa3ojUTl8c2KoTwiL1R5Wg9YCydwH0x0B9grbzlg5HC7mMjCtUJjbQ/YnGEZIhI5tCgfTb4Hw==}
-
-  js-base64@3.7.8:
-    resolution: {integrity: sha512-hNngCeKxIUQiEUN3GPJOkz4wF/YvdUdbNL9hsBcMQTkKzboD7T/q3OYOuuPZLUE6dBxSGpwhk5mwuDud7JVAow==}
 
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
@@ -13297,8 +13285,6 @@ snapshots:
   jose@4.15.9: {}
 
   jose@6.2.3: {}
-
-  js-base64@3.7.8: {}
 
   js-tokens@4.0.0: {}
 

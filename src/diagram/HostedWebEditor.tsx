@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import { fromUint8Array, toUint8Array } from 'js-base64';
+import { fromUint8Array, toUint8Array } from '@simlin/core/base64';
 
 import { baseURL, defined } from '@simlin/core/common';
 import { first } from '@simlin/core/collections';

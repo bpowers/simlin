@@ -13,7 +13,7 @@
 // permanently blank (render() returns an empty <div/> until projectBinary is
 // set, and serviceErrors stayed empty so no message ever appeared).
 
-import { fromUint8Array } from 'js-base64';
+import { fromUint8Array } from '@simlin/core/base64';
 
 import { HostedWebEditor } from '../HostedWebEditor';
 

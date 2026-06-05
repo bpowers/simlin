@@ -4,7 +4,7 @@
 
 import React from 'react';
 import { renderToString } from 'react-dom/server';
-import { toUint8Array } from 'js-base64';
+import { toUint8Array } from '@simlin/core/base64';
 
 import './theme.css';
 
