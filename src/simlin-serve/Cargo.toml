@@ -30,8 +30,6 @@ simlin-mcp-core = { version = "0.1", path = "../simlin-mcp-core" }
 rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
 schemars = { version = "1", features = ["preserve_order"] }
 rust-embed = "8"
-mime_guess = "2"
-open = "5"
 anyhow = "1"
 loro = "1.11"
 notify-debouncer-full = "0.7"
