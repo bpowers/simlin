@@ -49,11 +49,16 @@ pub fn approx_eq(a: f64, b: f64) -> bool {
     ulps.saturating_abs() <= 4
 }
 
-/// [`approx_eq`] with a caller-chosen absolute-difference tolerance in place
-/// of `f64::EPSILON`; the 4-ULP arm is unchanged. Matches `float_cmp`'s
-/// `approx_eq!(f64, a, b, epsilon = e)` (which overrode only the epsilon half
-/// of the default margin). Used by tests comparing simulation results across
-/// backends, where tolerances are looser than machine epsilon.
+/// Absolute-difference equality with a caller-chosen tolerance, plus exact
+/// (bit-identical) equality. Matches `float_cmp`'s
+/// `approx_eq!(f64, a, b, epsilon = e)`: the named-argument macro built its
+/// margin from `Margin::zero()`, so `ulps` was 0 -- there is deliberately NO
+/// few-ULPs fallback here. The simulation-result comparison helpers rely on
+/// that: a value beyond the requested tolerance must fail even when only a
+/// few ULPs separate it from the expectation, or 1-4 ULP regressions at
+/// large magnitude would pass silently. The `to_bits` arm is what
+/// `ulps == 0` meant; the only case it adds over `a == b` is
+/// identical-payload NaNs.
 #[inline(always)]
 pub fn approx_eq_eps(a: f64, b: f64, epsilon: f64) -> bool {
     if a == b {
@@ -62,8 +67,7 @@ pub fn approx_eq_eps(a: f64, b: f64, epsilon: f64) -> bool {
     if (a - b).abs() <= epsilon {
         return true;
     }
-    let ulps = ordered_bits(a).wrapping_sub(ordered_bits(b));
-    ulps.saturating_abs() <= 4
+    a.to_bits() == b.to_bits()
 }
 
 /// Map an f64's sign-magnitude bit pattern onto a single continuous integer
@@ -152,11 +156,32 @@ mod tests {
     fn f64_approx_eq_eps_custom_tolerance() {
         assert!(approx_eq_eps(1.0, 1.0 + 1e-7, 1e-6));
         assert!(!approx_eq_eps(1.0, 1.0 + 1e-5, 1e-6));
-        // exact equality and the 4-ULP arm hold regardless of epsilon
+        // exact equality holds regardless of epsilon
         assert!(approx_eq_eps(3.5, 3.5, 0.0));
-        assert!(approx_eq_eps(1e15, (1e15_f64).next_up(), 0.0));
         // NaN never within an absolute tolerance of a real value
         assert!(!approx_eq_eps(f64::NAN, 1.0, 1.0));
+    }
+
+    #[test]
+    fn f64_approx_eq_eps_has_no_ulps_arm() {
+        // float_cmp's named-argument macro built its margin from
+        // Margin::zero(), so `approx_eq!(f64, a, b, epsilon = e)` had
+        // ulps = 0: values beyond the requested tolerance must FAIL even
+        // when only a few ULPs apart, otherwise the cross-backend
+        // simulation-comparison helpers would silently absorb 1-4 ULP
+        // numeric regressions at large magnitude.
+        let a: f64 = 1e15;
+        assert!(!approx_eq_eps(a, a.next_up(), 0.0));
+        assert!(!approx_eq_eps(a, a.next_up(), f64::EPSILON));
+        // a relative tolerance tighter than one relative ULP (~2.2e-16)
+        // must reject a 4-ULP difference; the default-margin arm would
+        // have passed this.
+        let big: f64 = 1e305;
+        let four_ulps = big.next_up().next_up().next_up().next_up();
+        assert!(!approx_eq_eps(big, four_ulps, big * 1e-17));
+        // ulps == 0 means an identical bit pattern: the one case it adds
+        // over `a == b` is identical-payload NaNs.
+        assert!(approx_eq_eps(f64::NAN, f64::NAN, 0.0));
     }
 
     #[test]
