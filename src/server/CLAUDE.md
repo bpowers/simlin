@@ -9,9 +9,12 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 
 - `app.ts` -- Express app setup and routing
 - `api.ts` -- API endpoint handlers
-- `authn.ts` -- Firebase authentication middleware
+- `authn.ts` -- Firebase authentication middleware (login route + session wiring)
 - `authz.ts` -- Authorization logic
 - `auth-helpers.ts` -- Auth utility functions
+- `session-auth.ts` -- Cookie-session helpers: reads/writes the seshcookie-backed session (which keeps the historic `session.passport.user.id` wire shape) and deserializes `req.user` per request
+- `logger.ts` -- Minimal structured logger (one `{level, message, timestamp}` JSON line per entry on stdout)
+- `favicon.ts` -- In-memory favicon middleware
 - `project-creation.ts` -- Project creation logic
 - `new-user.ts` -- New user handling
 - `server-init.ts` -- Server initialization
