@@ -23,6 +23,12 @@ importers:
 
   src/app:
     dependencies:
+      '@firebase/app':
+        specifier: ^0.14.7
+        version: 0.14.12
+      '@firebase/auth':
+        specifier: ^1.12.0
+        version: 1.13.1(@firebase/app@0.14.12)
       '@simlin/core':
         specifier: workspace:*
         version: link:../core
@@ -44,13 +50,10 @@ importers:
       react-dom:
         specifier: ^19.2.4
         version: 19.2.6(react@19.2.6)
+      wouter:
+        specifier: ^3.9.0
+        version: 3.9.0(react@19.2.6)
     devDependencies:
-      '@firebase/app':
-        specifier: ^0.14.7
-        version: 0.14.12
-      '@firebase/auth':
-        specifier: ^1.12.0
-        version: 1.13.1(@firebase/app@0.14.12)
       '@rsbuild/core':
         specifier: ^1.7.3
         version: 1.7.5
@@ -108,9 +111,6 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
-      wouter:
-        specifier: ^3.9.0
-        version: 3.9.0(react@19.2.6)
 
   src/core:
     dependencies:
@@ -369,15 +369,9 @@ importers:
 
   src/simlin-serve/web:
     dependencies:
-      '@simlin/core':
-        specifier: workspace:^
-        version: link:../../core
       '@simlin/diagram':
         specifier: workspace:^
         version: link:../../diagram
-      '@simlin/engine':
-        specifier: workspace:^
-        version: link:../../engine
       react:
         specifier: ^19.2.4
         version: 19.2.6
