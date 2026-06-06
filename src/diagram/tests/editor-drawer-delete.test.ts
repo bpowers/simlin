@@ -23,17 +23,21 @@ type EditorInstance = InstanceType<typeof Editor>;
 function makeEditor(propsOverride: Record<string, unknown> = {}): EditorInstance {
   const editor = Object.create(Editor.prototype) as EditorInstance;
 
+  // getDrawer() reads the active project and model name from the controller
+  // snapshot now, so seed controllerSnapshot rather than the old flat fields.
   editor.state = {
     drawerOpen: false,
-    modelName: 'main',
-    activeProject: {
-      name: 'test-project',
-      models: new Map([['main', { name: 'main' }]]),
-      simSpecs: {
-        start: 0,
-        stop: 100,
-        dt: { isReciprocal: false, value: 1 },
-        timeUnits: 'years',
+    controllerSnapshot: {
+      modelName: 'main',
+      project: {
+        name: 'test-project',
+        models: new Map([['main', { name: 'main' }]]),
+        simSpecs: {
+          start: 0,
+          stop: 100,
+          dt: { isReciprocal: false, value: 1 },
+          timeUnits: 'years',
+        },
       },
     },
   } as unknown as EditorInstance['state'];

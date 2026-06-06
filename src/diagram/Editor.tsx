@@ -13,15 +13,13 @@ import SpeedDial, { CloseReason, SpeedDialAction, SpeedDialIcon } from './compon
 import Button from './components/Button';
 import { canonicalize } from '@simlin/core/canonicalize';
 
-import { Project as EngineProject, SimlinErrorKind, SimlinUnitErrorKind } from '@simlin/engine';
+import { Project as EngineProject } from '@simlin/engine';
 import type {
   JsonProjectPatch,
   JsonModelOperation,
   JsonSimSpecs,
   JsonArrayedEquation,
-  JsonProject,
 } from '@simlin/engine';
-import type { ErrorDetail } from '@simlin/engine';
 import { stockFlowViewToJson } from './view-conversion';
 import {
   Project,
@@ -37,14 +35,7 @@ import {
   FlowViewElement,
   CloudViewElement,
   viewElementType,
-  EquationError,
-  SimError,
-  ModelError,
-  ErrorCode,
   Rect,
-  UnitError,
-  projectFromJson,
-  projectAttachData,
   isNamedViewElement,
   stockToJson,
   flowToJson,
@@ -52,8 +43,8 @@ import {
   moduleToJson,
   type ModuleReference,
 } from '@simlin/core/datamodel';
-import { defined, exists, mapSet, Series, setsEqual, toInt, uint8ArraysEqual } from '@simlin/core/common';
-import { first, getOrThrow, only } from '@simlin/core/collections';
+import { defined, exists, setsEqual } from '@simlin/core/common';
+import { getOrThrow, only } from '@simlin/core/collections';
 
 import { AuxIcon } from './AuxIcon';
 import { Toast } from './ErrorToast';
@@ -74,15 +65,12 @@ import { Point, searchableName } from './drawing/common';
 import { computeFlowAttachment } from './flow-attach';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
-import { preserveLiveView } from './merge-live-view';
-import { advanceProjectHistory } from './project-history';
-import { type ModuleStackEntry, currentModelName, pushModule, popModule, navigateToLevel, isStdlibModel } from './module-navigation';
+import { isStdlibModel } from './module-navigation';
 import { countModelInstances } from './module-details-utils';
 import { BreadcrumbBar } from './BreadcrumbBar';
+import { ProjectController, type ProjectSnapshot, type EngineApi } from './project-controller';
 
 import styles from './Editor.module.css';
-
-const MaxUndoSize = 5;
 // These must stay in sync with --panel-width-sm/-md/-lg in theme.css (and the
 // media-query breakpoints in Editor.module.css).
 const SearchbarWidthSm = 359;
@@ -120,60 +108,6 @@ const noop = (): void => {};
 const noopViewBoxChange = (_viewBox: Rect, _zoom: number): void => {};
 const noopDrillIntoModule = (_moduleIdent: string, _targetModelName: string): void => {};
 
-function convertErrorDetails(
-  errors: ErrorDetail[],
-  modelName: string,
-): {
-  varErrors: ReadonlyMap<string, readonly EquationError[]>;
-  unitErrors: ReadonlyMap<string, readonly UnitError[]>;
-} {
-  const varErrors = new Map<string, EquationError[]>();
-  const unitErrors = new Map<string, UnitError[]>();
-
-  for (const err of errors) {
-    if (err.modelName !== modelName) {
-      continue;
-    }
-
-    const ident = err.variableName;
-    if (!ident) {
-      continue;
-    }
-
-    const isUnitError = err.kind === SimlinErrorKind.Units;
-
-    if (isUnitError) {
-      const unitError: UnitError = {
-        start: err.startOffset ?? 0,
-        end: err.endOffset ?? 0,
-        code: err.code as unknown as ErrorCode,
-        isConsistencyError: err.unitErrorKind === SimlinUnitErrorKind.Consistency,
-        details: err.message ?? undefined,
-      };
-      let existing = unitErrors.get(ident);
-      if (!existing) {
-        existing = [];
-        unitErrors.set(ident, existing);
-      }
-      existing.push(unitError);
-    } else {
-      const eqError: EquationError = {
-        start: err.startOffset ?? 0,
-        end: err.endOffset ?? 0,
-        code: err.code as unknown as ErrorCode,
-      };
-      let existing = varErrors.get(ident);
-      if (!existing) {
-        existing = [];
-        varErrors.set(ident, existing);
-      }
-      existing.push(eqError);
-    }
-  }
-
-  return { varErrors, unitErrors };
-}
-
 // Extends the built-in Error so instances carry a stack trace and satisfy
 // `instanceof Error` (a bare `implements Error` produced a plain object with
 // neither). The explicit name assignment survives minification, where the
@@ -206,44 +140,33 @@ function getErrorDetails(error: unknown): ErrorDetailsLike {
   return {};
 }
 
-interface CachedErrorDetails {
-  varErrors: ReadonlyMap<string, readonly EquationError[]>;
-  unitErrors: ReadonlyMap<string, readonly UnitError[]>;
-  simError: SimError | undefined;
-  modelErrors: readonly ModelError[];
-}
-
+// Editor state is now split in two: the project/engine coordination state
+// lives in the ProjectController and is mirrored here as a single immutable
+// `controllerSnapshot` field (replaced wholesale on every controller change,
+// so the PureComponent's shallow compare detects updates by identity). The
+// remaining fields are genuinely Editor-owned UI/presentation state.
 interface EditorState {
+  // The latest immutable snapshot published by the ProjectController. Holds
+  // project, projectVersion, projectGeneration, status, cachedErrors, data,
+  // modelName, modelStack, and the undo/redo predicates.
+  controllerSnapshot: ProjectSnapshot;
+  // Toast-style transient errors. These STAY in the Editor as UI state: the
+  // controller surfaces errors via its onError config callback, which appends
+  // here. The controller never owns presentation state.
   modelErrors: readonly Error[];
-  activeProject: Project | undefined;
-  projectHistory: readonly Readonly<Uint8Array>[];
-  projectOffset: number;
-  modelName: string;
-  modelStack: ReadonlyArray<ModuleStackEntry>;
   dialOpen: boolean;
   dialVisible: boolean;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | 'module' | undefined;
-  data: ReadonlyMap<string, Series>;
   selection: ReadonlySet<UID>;
-  status: 'ok' | 'error' | 'disabled';
   showDetails: 'variable' | 'errors' | undefined;
   flowStillBeingCreated: boolean;
   drawerOpen: boolean;
-  projectVersion: number;
-  // Incremented exactly when project *content* changes (real edits and
-  // undo/redo) -- not on view-only updates or save-version bookkeeping.
-  // Used to key the details panels, which seed their Slate editors from
-  // props in their constructors and rely on key-driven remounts to refresh;
-  // keying them on projectVersion remounted an open panel on every pan
-  // frame and autosave completion, discarding in-progress edits.
-  projectGeneration: number;
   // Object URL for the diagram snapshot image, created once when the
   // snapshot blob is produced (see takeSnapshot) rather than on every
   // render. Held as state so getSnapshot can render it without leaking a
   // fresh URL per render; revoked when replaced, cleared, or on unmount.
   snapshotUrl: string | undefined;
   variableDetailsActiveTab: number;
-  cachedErrors: CachedErrorDetails;
 }
 
 // Discriminated union types for project data formats
@@ -293,10 +216,6 @@ interface EditorPropsBase {
 export type EditorProps = EditorPropsBase & ProjectInputProps;
 
 export class Editor extends React.PureComponent<EditorProps, EditorState> {
-  engineProject?: EngineProject;
-  newEngineShouldPullView = false;
-  newEngineQueuedView?: StockFlowView;
-
   // Stable React keys for snackbar toasts. Keying by `${name}:${message}`
   // collided whenever two distinct errors shared a name and message (e.g.
   // the same engine error raised twice), so React reused one toast's
@@ -316,93 +235,106 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     return key;
   }
 
-  inSave = false;
-  saveQueued = false;
   // Single owner of the live snapshot object URL. State (`snapshotUrl`)
   // only mirrors this for render. Two snapshots completing before the
   // first commit would, if we read the previous URL from state, both see
   // the same stale value and leak one URL; reading and revoking the
   // instance field synchronously in setSnapshotUrl is race-free.
   private liveSnapshotUrl: string | undefined = undefined;
-  // Pending setTimeout(0) handles for componentDidMount's deferred
-  // openInitialProject() and the scheduleSimRun() / scheduleSave() /
-  // handleUndoRedo() dispatches. Held so componentWillUnmount can cancel
-  // them — the Editor remounts on every wouter route change in src/app
-  // and on every EditorHost path swap in src/simlin-serve. If a
-  // componentDidMount or handleUndoRedo callback fires after unmount it
-  // opens an EngineProject on a stale `this` and leaks ~several MB of WASM
-  // linear memory plus salsa caches; if scheduleSimRun / scheduleSave
-  // fire after unmount they touch a disposed engine and may setState on
-  // an unmounted component.
-  private openInitialProjectTimer: ReturnType<typeof setTimeout> | null = null;
-  private simRunTimer: ReturnType<typeof setTimeout> | null = null;
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
-  private undoRedoTimer: ReturnType<typeof setTimeout> | null = null;
-  // Set in componentWillUnmount before any pending callbacks could fire
-  // and re-enter the instance. Each scheduled callback short-circuits
-  // when this is true so a setTimeout already drained from the macrotask
-  // queue at unmount time (clearTimeout no longer reaches it) does not
-  // touch state, open an engine, or call into props.onSave.
-  private unmounted = false;
+
+  // The headless coordination layer. Created in componentDidMount and
+  // disposed in componentWillUnmount. A mount -> unmount -> mount cycle on
+  // the same instance (React 18 StrictMode) therefore creates a *fresh*
+  // controller on the second mount -- the first one was disposed -- so no
+  // unmounted-flag/timer machinery is needed in the Editor anymore: the
+  // controller's own `disposed` latch guards every async continuation it
+  // owns. Undefined between unmount and the next mount (and before the first
+  // mount); the snapshot in state covers render in those windows.
+  private controller: ProjectController | undefined = undefined;
+  private unsubscribe: (() => void) | undefined = undefined;
+  // Tracks the navResetSeq we last reacted to so componentDidUpdate clears
+  // selection exactly once per undo-driven navigation reset.
+  private lastNavResetSeq = 0;
 
   constructor(props: EditorProps) {
     super(props);
 
     this.state = {
-      activeProject: undefined,
-      projectHistory:
-        props.inputFormat === 'protobuf'
-          ? [props.initialProjectBinary]
-          : [],
-      projectOffset: 0,
+      controllerSnapshot: this.makeController(props).getSnapshot(),
       modelErrors: [],
-      modelName: 'main',
-      modelStack: [],
       dialOpen: false,
       dialVisible: true,
       selectedTool: undefined,
-      data: new Map<string, Series>(),
       selection: new Set<number>(),
-      status: 'disabled',
       showDetails: undefined,
       flowStillBeingCreated: false,
       drawerOpen: false,
-      projectVersion: props.initialProjectVersion,
-      projectGeneration: 0,
       snapshotUrl: undefined,
       variableDetailsActiveTab: 0,
-      cachedErrors: {
-        varErrors: new Map<string, readonly EquationError[]>(),
-        unitErrors: new Map<string, readonly UnitError[]>(),
-        simError: undefined,
-        modelErrors: [],
-      },
     };
-    // The deferred initial project load is kicked off in componentDidMount,
-    // not here — see the comment there. Keep this constructor side-effect
-    // free (state setup only).
+    // makeController() above only constructs the controller (side-effect free,
+    // engine not yet opened) so the initial snapshot is available for the
+    // constructor's state seed. The engine open and subscription are kicked
+    // off in componentDidMount -- see there for the StrictMode rationale.
+  }
+
+  // Build a fresh ProjectController wired to this Editor's props. Constructing
+  // a controller is side-effect free (no engine opened); openInitialProject()
+  // is what loads the engine.
+  private makeController(props: EditorProps): ProjectController {
+    const controller = new ProjectController({
+      initialProjectVersion: props.initialProjectVersion,
+      input:
+        props.inputFormat === 'protobuf'
+          ? { format: 'protobuf', data: props.initialProjectBinary }
+          : { format: 'json', data: props.initialProjectJson },
+      // The concrete engine Project/Model/Run structurally satisfy the
+      // controller's EngineApi surface; cast through unknown to bridge the
+      // nominal type difference.
+      openProtobuf: (data) => EngineProject.openProtobuf(data) as unknown as Promise<EngineApi>,
+      openJson: (data) => EngineProject.openJson(data) as unknown as Promise<EngineApi>,
+      save: async (project, currVersion) => {
+        if (props.inputFormat === 'json') {
+          // The controller hands back the format matching inputFormat, so a
+          // 'json' input always produces a JsonProjectData payload here.
+          return await props.onSave({ format: 'json', data: project.data as string }, currVersion);
+        }
+        return await props.onSave({ format: 'protobuf', data: project.data as Uint8Array }, currVersion);
+      },
+      onError: (err) => {
+        // Append to the toast list. setState((prev) => ...) so concurrent
+        // error reports (e.g. two sim-run failures) don't clobber each other.
+        this.setState((prev) => ({ modelErrors: [...prev.modelErrors, err] }));
+      },
+    });
+    this.controller = controller;
+    this.lastNavResetSeq = controller.getSnapshot().navResetSeq;
+    return controller;
   }
 
   componentDidMount() {
     // React 18 StrictMode (dev) drives every committed component through
-    // componentDidMount → componentWillUnmount → componentDidMount on the
-    // *same* instance, without re-running the constructor. That shapes two
-    // things here:
-    //
-    //  - `unmounted` must be (re)set false on every mount. componentWillUnmount
-    //    sets it true; if the only place it were set false were the constructor
-    //    (and the load scheduled there too), the second StrictMode mount would
-    //    leave it stuck true and every scheduled callback would short-circuit.
-    //  - The deferred openInitialProject() must be scheduled here, not in the
-    //    constructor. componentWillUnmount cancels openInitialProjectTimer, so
-    //    a constructor-scheduled timer would be cancelled by the StrictMode
-    //    unmount and never rescheduled — the editor would sit on a blank canvas
-    //    forever (engineProject and state.activeProject never get populated).
-    //    Scheduling here also keeps a StrictMode-discarded *render-phase*
-    //    instance (whose componentWillUnmount never runs, so it can't cancel
-    //    anything) from leaking the timer onto a zombie `this`: such an
-    //    instance never reaches componentDidMount.
-    this.unmounted = false;
+    // componentDidMount -> componentWillUnmount -> componentDidMount on the
+    // *same* instance, without re-running the constructor. componentWillUnmount
+    // disposes the controller; the second mount must therefore create a fresh
+    // one. The constructor's controller is reused on the very first mount and
+    // recreated on every subsequent mount.
+    if (!this.controller) {
+      this.makeController(this.props);
+    }
+    const controller = defined(this.controller);
+
+    // Mirror controller snapshots into one state field. The PureComponent's
+    // shallow compare sees a new snapshot identity and re-renders; an
+    // unchanged snapshot is a no-op. Seed state from the (fresh) snapshot in
+    // case makeController ran just above.
+    this.setState({ controllerSnapshot: controller.getSnapshot() });
+    this.unsubscribe = controller.subscribe(() => {
+      const c = this.controller;
+      if (c) {
+        this.setState({ controllerSnapshot: c.getSnapshot() });
+      }
+    });
 
     if (this.props.readOnlyMode)
       this.setState({
@@ -414,66 +346,36 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     document.addEventListener('keydown', this.handleKeyDown);
 
-    // componentWillUnmount clears this handle, so a StrictMode unmount/remount
-    // becomes schedule → cancel → schedule and the load still happens once.
-    this.openInitialProjectTimer = setTimeout(async () => {
-      this.openInitialProjectTimer = null;
-      // If unmount drained this callback off the macrotask queue before
-      // clearTimeout could cancel it, abort: opening an engine here would
-      // wire it onto a stale `this` that componentWillUnmount cannot reach.
-      if (this.unmounted) {
-        return;
-      }
-      await this.openInitialProject();
-      if (this.unmounted) {
-        // openInitialProject finished against an unmounted instance — the
-        // engine handle is on `this.engineProject`. Dispose it here so the
-        // navigation away from this route does not strand the WASM
-        // allocation (componentWillUnmount has already run).
-        const orphan = this.engineProject;
-        this.engineProject = undefined;
-        if (orphan) {
-          await this.disposeOrphanedEngine(orphan);
-        }
-        return;
-      }
-      this.scheduleSimRun();
+    // Open the engine, then schedule the first sim run. The controller guards
+    // its own dispose-races internally (see ProjectController.dispose), so no
+    // Editor-side timer or unmounted flag is needed here.
+    void controller.openInitialProject().then(() => {
+      this.controller?.scheduleSimRun();
     });
   }
 
   componentWillUnmount() {
     document.removeEventListener('keydown', this.handleKeyDown);
-    // Set the unmount flag BEFORE cancelling timers: any callback that
-    // already drained off the macrotask queue between the unmount tick
-    // starting and clearTimeout reaching it must short-circuit. The
-    // clearTimeout calls below are best-effort optimization on top.
-    this.unmounted = true;
-    if (this.openInitialProjectTimer !== null) {
-      clearTimeout(this.openInitialProjectTimer);
-      this.openInitialProjectTimer = null;
+
+    // Unsubscribe before disposing so a final controller notification can't
+    // setState on an unmounting component, and dispose the controller, which
+    // releases the WASM EngineProject handle (the Editor mounts/unmounts on
+    // every wouter route change in src/app and every EditorHost path swap in
+    // src/simlin-serve; without this every navigation away leaks ~several MB
+    // of WASM linear memory plus salsa caches). dispose() is best-effort and
+    // latches the controller's `disposed` flag so any in-flight open/undo
+    // releases its own engine.
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = undefined;
     }
-    if (this.simRunTimer !== null) {
-      clearTimeout(this.simRunTimer);
-      this.simRunTimer = null;
-    }
-    if (this.saveTimer !== null) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = null;
-    }
-    if (this.undoRedoTimer !== null) {
-      clearTimeout(this.undoRedoTimer);
-      this.undoRedoTimer = null;
-    }
-    // Release the WASM EngineProject handle. The Editor mounts/unmounts
-    // on every wouter route change in src/app and on every EditorHost
-    // path swap in src/simlin-serve, so without this every navigation
-    // away from a project leaks ~several MB of WASM linear memory plus
-    // the engine's salsa caches. Best-effort: a throwing dispose must
-    // not crash the host (see disposeOrphanedEngine).
-    const engine = this.engineProject;
-    this.engineProject = undefined;
-    if (engine) {
-      void this.disposeOrphanedEngine(engine);
+    const controller = this.controller;
+    this.controller = undefined;
+    if (controller) {
+      // dispose() resolves by contract (it swallows engine-teardown errors),
+      // but attach a catch defensively so a rejected teardown can never become
+      // an unhandled rejection that crashes the host.
+      controller.dispose().catch(() => {});
     }
 
     // Revoke any outstanding snapshot object URL so navigating away from a
@@ -494,24 +396,27 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // handleSelection, but also selections cleared by a delete and resets on
     // module drill-in/back. (A normal undo/redo preserves the selection and
     // fires nothing; the selection only resets when the viewed model
-    // disappears from the restored project -- see handleUndoRedo.)
-    // getSelectionIdents reads the already-committed `this.state.selection`,
-    // so no deferral is needed; and componentDidUpdate never fires after
-    // unmount, so a path swap that remounts the Editor cannot leak a
-    // stale-idents callback onto the new instance.
+    // disappears from the restored project -- see the navResetSeq handling
+    // below.) getSelectionIdents reads the already-committed
+    // `this.state.selection`, so no deferral is needed; componentDidUpdate
+    // never fires after unmount.
     if (this.props.onSelectionChanged && !setsEqual(prevState.selection, this.state.selection)) {
       this.props.onSelectionChanged(this.getSelectionIdents());
     }
 
-    // Refresh cached errors when the active model changes (drill-in,
-    // navigate-back, navigate-to-level). The error panel and warning dots
-    // are scoped to the active model, so they must re-derive from the
-    // engine for the newly displayed one. This replaces three per-handler
-    // setTimeout(0) refreshCachedErrors() calls; componentDidUpdate runs
-    // post-commit and never after unmount, so the previous unmounted-guards
-    // are unnecessary here.
-    if (prevState.modelName !== this.state.modelName) {
-      void this.refreshCachedErrors();
+    // When undo/redo restores a project that no longer contains the viewed
+    // model, the controller resets navigation to 'main' and bumps navResetSeq.
+    // Clear the Editor's selection/details/tool UI state for that case only
+    // (an ordinary undo preserves them). Drill-in / back / level manage the
+    // selection through their own handlers, so they do not bump navResetSeq.
+    const navResetSeq = this.state.controllerSnapshot.navResetSeq;
+    if (navResetSeq !== this.lastNavResetSeq) {
+      this.lastNavResetSeq = navResetSeq;
+      this.setState({
+        selection: new Set<UID>(),
+        showDetails: undefined,
+        selectedTool: undefined,
+      });
     }
   }
 
@@ -534,261 +439,79 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   };
 
   private isUndoEnabled(): boolean {
-    return this.state.projectHistory.length > 1 && this.state.projectOffset < this.state.projectHistory.length - 1;
+    return this.state.controllerSnapshot.canUndo;
   }
 
   private isRedoEnabled(): boolean {
-    return this.state.projectOffset > 0;
+    return this.state.controllerSnapshot.canRedo;
   }
 
+  // Delegating accessor for the active data-model Project. Kept public for
+  // tests and the Editor's own render/op-building reads. No external consumer
+  // (HostedWebEditor, simlin-serve's EditorHost) uses it.
   project(): Project | undefined {
-    return this.state.activeProject;
+    return this.state.controllerSnapshot.project;
   }
 
+  // Op-building helpers go through the controller's apply* / view methods, so
+  // they generally don't need the raw engine handle. Retained as a delegating
+  // accessor (returns undefined before the engine opens / after dispose).
   engine(): EngineProject | undefined {
-    return this.engineProject;
+    return this.controller?.getEngine() as EngineProject | undefined;
   }
 
-  scheduleSimRun(): void {
-    // Track only the most recent handle; any earlier pending timer is
-    // covered by the `unmounted` short-circuit below. componentWillUnmount
-    // clearTimeout()s the latest handle as a polite no-op for the
-    // pending tick.
-    this.simRunTimer = setTimeout(() => {
-      this.simRunTimer = null;
-      if (this.unmounted) {
-        return;
-      }
-      const engine = this.engine();
-      if (!engine) {
-        return;
-      }
-      this.loadSim(engine);
-    });
+  // Convenience wrapper for the simple edit handlers: apply a patch and, on
+  // success, refresh from the engine. All engine/save/sim coordination lives
+  // in the controller now. Returns false (without refreshing) on patch failure.
+  private async applyPatchAndRefresh(patch: JsonProjectPatch, label: string): Promise<boolean> {
+    const controller = this.controller;
+    if (!controller) {
+      return false;
+    }
+    return await controller.applyPatch(patch, label);
   }
 
-  async loadSim(engine: EngineProject) {
-    await this.recalculateStatus();
-
-    if (!(await engine.isSimulatable())) {
-      return;
-    }
-    // Sparklines don't need Loops-That-Matter analysis, and LTM compilation
-    // can blow up WASM memory on dense causal graphs (World3: ~1.8M
-    // elementary circuits → `RuntimeError: unreachable` from the allocator).
-    // We ask for a plain simulation first; on any failure we retry with LTM
-    // explicitly disabled so a future default flip cannot starve the UI of
-    // sparkline data.  The first failure is surfaced as a warning-style
-    // entry in `modelErrors` so the error panel still shows the user what
-    // went wrong.
-    const model = await engine.mainModel();
-    let run;
-    try {
-      run = await model.run();
-    } catch (e) {
-      // Normalize to an Error: a raw-string throw would otherwise be stored
-      // and then used as a key in the errorKey WeakMap during render, which
-      // only accepts object keys and would crash the render phase.
-      this.setState({
-        modelErrors: [...this.state.modelErrors, e instanceof Error ? e : new Error(String(e))],
-      });
-      try {
-        run = await model.run({}, { analyzeLtm: false });
-      } catch (e2) {
-        this.setState({
-          modelErrors: [...this.state.modelErrors, e2 instanceof Error ? e2 : new Error(String(e2))],
-        });
-        await this.refreshCachedErrors();
-        return;
-      }
-    }
-    const idents = run.varNames;
-    const time = run.getSeries('time') ?? new Float64Array(0);
-    const data = new Map<string, Series>(
-      idents.map((ident) => {
-        const values = run.getSeries(ident) ?? new Float64Array(0);
-        return [ident, { name: ident, time, values }];
-      }),
-    );
-    const project = defined(this.project());
-    // Simulation data comes from mainModel(), so variable idents are
-    // root-model-scoped. Always attach data to 'main' so root sparklines
-    // stay populated even when a sim runs while viewing a child model.
-    this.setState({
-      activeProject: projectAttachData(project, data, 'main'),
-      data,
-    });
-    // Refresh cached errors after simulation so the error panel reflects
-    // any new simulation errors (e.g. runtime divide-by-zero).
-    await this.refreshCachedErrors();
-  }
-
-  async updateProject(
-    serializedProject: Readonly<Uint8Array>,
-    opts: { scheduleSave?: boolean; recordHistory?: boolean } = {},
-  ) {
-    const { scheduleSave = true, recordHistory = true } = opts;
-    if (this.state.projectHistory.length > 0) {
-      const current = this.state.projectHistory[this.state.projectOffset];
-      if (uint8ArraysEqual(serializedProject, current)) {
-        return;
-      }
-    }
-
-    const engine = this.engineProject;
-    if (!engine) {
-      return;
-    }
-    // Include stdlib model definitions so the editor can display and
-    // navigate into stdlib modules. The save path does NOT pass
-    // includeStdlib, so stdlib models are never persisted.
-    const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
-    let activeProject = await this.updateVariableErrors(projectFromJson(json));
-    if (this.state.data) {
-      activeProject = projectAttachData(activeProject, this.state.data, 'main');
-    }
-    // Preserve the latest optimistic view for the active model. This
-    // updateProject call may have raced with a newer setView() (e.g. the
-    // user kept panning while our engine round-trip was in flight), so the
-    // engine snapshot we just rebuilt is potentially behind. Without this,
-    // the rebuilt activeProject would snap the diagram back to the engine's
-    // older view, then the next engine round-trip would catch up -- producing
-    // the visible "pan jumps back and forth" effect.
-    activeProject = preserveLiveView(activeProject, this.state.activeProject, this.state.modelName);
-
-    // fractionally increase the version -- the server will only send back integer versions,
-    // but this will ensure we can use a simple version check in the Canvas to invalidate caches.
-    const projectVersion = this.state.projectVersion + 0.01;
-
-    if (recordHistory) {
-      const nextHistory = advanceProjectHistory(
-        { projectHistory: this.state.projectHistory, projectOffset: this.state.projectOffset },
-        serializedProject,
-        MaxUndoSize,
-      );
-      this.setState({
-        projectHistory: nextHistory.projectHistory,
-        projectOffset: nextHistory.projectOffset,
-        activeProject,
-        projectVersion,
-        projectGeneration: this.state.projectGeneration + 1,
-      });
-    } else {
-      // View-only updates (pan/zoom) refresh the rendered project but must
-      // not consume undo slots or move the undo cursor: viewBox/zoom are
-      // serialized into the protobuf, so recording them would let a single
-      // momentum flick evict every real edit from the small history buffer.
-      this.setState({ activeProject, projectVersion });
-    }
-    if (scheduleSave) {
-      this.scheduleSave();
-    }
-  }
-
-  scheduleSave(): void {
-    const { projectVersion } = this.state;
-
-    // See scheduleSimRun for why we track only the latest handle.
-    this.saveTimer = setTimeout(async () => {
-      this.saveTimer = null;
-      if (this.unmounted) {
-        return;
-      }
-      await this.save(toInt(projectVersion));
-    });
-  }
-
-  async save(currVersion: number): Promise<void> {
-    if (this.inSave) {
-      this.saveQueued = true;
-      return;
-    }
-
-    this.inSave = true;
-
-    let version: number | undefined;
-    try {
-      const engine = defined(this.engineProject);
-      if (this.props.inputFormat === 'json') {
-        version = await this.props.onSave({ format: 'json', data: await engine.serializeJson() }, currVersion);
-      } else {
-        version = await this.props.onSave({ format: 'protobuf', data: await engine.serializeProtobuf() }, currVersion);
-      }
-      if (version) {
-        this.setState({ projectVersion: version });
-      }
-    } catch (err) {
-      // Normalize to an Error: see loadSim. modelErrors entries are keyed by
-      // the errorKey WeakMap during render, which requires object keys.
-      this.setState({
-        modelErrors: [...this.state.modelErrors, err instanceof Error ? err : new Error(String(err))],
-      });
-    } finally {
-      this.inSave = false;
-      if (this.saveQueued) {
-        this.saveQueued = false;
-        // Use the new server version when available; fall back to
-        // currVersion on error so the queued edit still attempts to flush
-        // rather than being silently dropped.
-        await this.save(version ?? currVersion);
-      }
-    }
-  }
-
-  appendModelError(msg: string) {
+  // Surface a transient error to the toast list. Op-building handlers that
+  // detect a problem before reaching the engine (or that report a synchronous
+  // failure) call this; the controller surfaces its own errors via onError,
+  // which appends to the same list.
+  private appendModelError(msg: string): void {
     this.setState((prevState: EditorState) => ({
       modelErrors: [...prevState.modelErrors, new EditorError(msg)],
     }));
   }
 
-  // Apply a patch (allowing errors so partially-invalid models can be
-  // edited), reporting any failure to the console and the user. Returns
-  // false on failure so callers can bail. This is deliberately split from
-  // refreshFromEngine() so a caller can interleave its own synchronous
-  // state updates between the patch and the (async, serialize-heavy)
-  // engine round-trip -- handleRename relies on that ordering.
-  //
-  // `label` identifies the operation in the console error and the
-  // user-facing fallback message when the engine reports no message.
+  // The active model name lives in the controller snapshot now. Op-building
+  // patches target it so operations work at any module nesting depth.
+  private modelName(): string {
+    return this.state.controllerSnapshot.modelName;
+  }
+
+  // Thin delegating wrappers so the Editor's op-building handlers can keep
+  // their shape. All engine/save/sim/history coordination lives in the
+  // controller. Each is a no-op when no controller is mounted.
   private async applyPatchOrReportError(patch: JsonProjectPatch, label: string): Promise<boolean> {
-    const engine = this.engine();
-    if (!engine) {
+    const controller = this.controller;
+    if (!controller) {
       return false;
     }
-    try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error(`applyPatch error (${label}):`, err.code, err.message, err.details);
-      this.appendModelError(err.message ?? `Unknown error during ${label}`);
-      return false;
-    }
-    return true;
+    return await controller.applyPatchOrReportError(patch, label);
   }
 
-  // Round-trip the engine's serialized state back into `activeProject` and
-  // schedule a re-simulation. Called after a successful patch.
   private async refreshFromEngine(): Promise<void> {
-    const engine = this.engine();
-    if (!engine) {
-      return;
-    }
-    await this.updateProject(await engine.serializeProtobuf());
-    this.scheduleSimRun();
+    await this.controller?.refreshFromEngine();
   }
 
-  // Convenience wrapper for the simple edit handlers: apply a patch and,
-  // on success, refresh from the engine. Returns false (without
-  // refreshing or scheduling a sim run) when the patch throws.
-  // Handlers with genuinely different shapes (optimistic view updates,
-  // selection bookkeeping on error, or interleaved state updates like
-  // handleRename) do NOT use this wrapper.
-  private async applyPatchAndRefresh(patch: JsonProjectPatch, label: string): Promise<boolean> {
-    if (!(await this.applyPatchOrReportError(patch, label))) {
-      return false;
-    }
-    await this.refreshFromEngine();
-    return true;
+  private scheduleSimRun(): void {
+    this.controller?.scheduleSimRun();
+  }
+
+  private async updateView(view: StockFlowView): Promise<void> {
+    await this.controller?.updateView(view);
+  }
+
+  private async queueViewUpdate(view: StockFlowView): Promise<void> {
+    await this.controller?.queueViewUpdate(view);
   }
 
   handleDialClick = (_event: React.MouseEvent<HTMLButtonElement>) => {
@@ -847,7 +570,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     ];
 
     const patch: JsonProjectPatch = {
-      models: [{ name: this.state.modelName, ops }],
+      models: [{ name: this.modelName(), ops }],
     };
 
     if (!(await this.applyPatchOrReportError(patch, 'rename'))) {
@@ -891,7 +614,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const engine = this.engine();
     if (!engine) return undefined;
     try {
-      const model = await engine.getModel(this.state.modelName);
+      const model = await engine.getModel(this.modelName());
       return (await model.getLatexEquation(ident)) ?? undefined;
     } catch {
       return undefined;
@@ -900,7 +623,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   handleSelectionDelete = async () => {
     const selection = this.state.selection;
-    const { modelName } = this.state;
+    const modelName = this.modelName();
     const view = defined(this.getView());
 
     // this will remove the selected elements, clouds, and connectors
@@ -943,8 +666,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
     elements = [...elements, ...clouds];
 
-    const engine = this.engine();
-    if (!engine) {
+    if (!this.controller) {
       return;
     }
 
@@ -970,13 +692,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const patch: JsonProjectPatch = {
         models: [{ name: modelName, ops: deleteOps }],
       };
-      try {
-        await engine.applyPatch(patch, { allowErrors: true });
-      } catch (e: unknown) {
-        const err = getErrorDetails(e);
-        console.error('applyPatch error (delete):', err.code, err.message, err.details);
-        this.appendModelError(err.message ?? 'Unknown error during delete');
-      }
+      // The controller reports any failure via onError; we ignore the boolean
+      // here because the view update below must run regardless (matching the
+      // original, which committed the cloud/view changes even on a delete-op
+      // failure).
+      await this.applyPatchOrReportError(patch, 'delete');
     }
 
     await this.updateView({ ...view, elements, nextUid });
@@ -1027,14 +747,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     // Preserve the original's early return on a missing engine: it bailed
     // before applying ops or updating the view (no setState, no sim run).
-    const engine = this.engine();
-    if (!engine) {
+    if (!this.controller) {
       return;
     }
 
     if (result.ops.length > 0) {
       const patch: JsonProjectPatch = {
-        models: [{ name: this.state.modelName, ops: [...result.ops] }],
+        models: [{ name: this.modelName(), ops: [...result.ops] }],
       };
       // On patch failure, commit the selection/creation flag but DO NOT update
       // the view -- preserving the original behavior exactly.
@@ -1093,41 +812,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     this.setState({ selection });
   };
 
-  async updateView(view: StockFlowView) {
-    // Optimistic update: reflect the new view in state immediately so the
-    // UI never flashes stale positions while the async engine round-trip
-    // (applyPatch + serialize) completes.
-    this.setView(view);
-    this.setState({ projectVersion: this.state.projectVersion + 0.001 });
-
-    const engine = this.engine();
-    if (engine) {
-      const ops: JsonModelOperation[] = [
-        {
-          type: 'upsertView',
-          payload: { index: 0, view: stockFlowViewToJson(view) },
-        },
-      ];
-      const patch: JsonProjectPatch = {
-        models: [{ name: this.state.modelName, ops }],
-      };
-      try {
-        await engine.applyPatch(patch, { allowErrors: true });
-      } catch (e: unknown) {
-        const err = getErrorDetails(e);
-        console.error('applyPatch error (view update):', err.code, err.message, err.details);
-        const msg = err.message ?? 'Unknown error during view update';
-        this.appendModelError(msg);
-        return;
-      }
-      await this.updateProject(await engine.serializeProtobuf());
-    }
-  }
-
   handleCreateVariable = async (element: ViewElement) => {
     const view = defined(this.getView());
-    const engine = this.engine();
-    if (!engine) {
+    if (!this.controller) {
       return;
     }
 
@@ -1182,20 +869,17 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       };
     }
 
-    // AC5.2: patch targets this.state.modelName (not a hardcoded value), so
+    // AC5.2: patch targets this.modelName() (not a hardcoded value), so
     // module creation works at any nesting depth -- navigating into a child
     // model updates modelName, and newly created modules land in that child.
     const patch: JsonProjectPatch = {
-      models: [{ name: this.state.modelName, ops: [op] }],
+      models: [{ name: this.modelName(), ops: [op] }],
     };
 
-    try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error('applyPatch error (variable creation):', err.code, err.message, err.details);
-      this.appendModelError(err.message ?? 'Unknown error during variable creation');
-    }
+    // The controller reports any failure via onError; the view update below
+    // runs regardless, matching the original (which committed the new element
+    // even when the upsert errored).
+    await this.applyPatchOrReportError(patch, 'variable creation');
 
     await this.updateView({ ...view, nextUid, elements });
     this.setState({
@@ -1304,7 +988,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         // oh well
       }
       a.href = url;
-      a.download = `${this.props.name}-${this.state.projectVersion | 0}.stmx`;
+      a.download = `${this.props.name}-${this.state.controllerSnapshot.projectVersion | 0}.stmx`;
       a.click();
       window.URL.revokeObjectURL(url);
     } catch (err: unknown) {
@@ -1321,7 +1005,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
 
-    const model = project.models.get(this.state.modelName);
+    const model = project.models.get(this.modelName());
     if (!model) {
       return;
     }
@@ -1357,7 +1041,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (!project) {
       return;
     }
-    const modelName = this.state.modelName;
+    const modelName = this.modelName();
     return project.models.get(modelName);
   }
 
@@ -1366,61 +1050,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (!project) {
       return;
     }
-    const modelName = this.state.modelName;
+    const modelName = this.modelName();
     const model = project.models.get(modelName);
     if (!model) {
       return;
     }
 
     return model.views[0];
-  }
-
-  setView(view: StockFlowView): void {
-    const project = defined(this.project());
-    const model = defined(project.models.get(this.state.modelName));
-    const views = [...model.views];
-    views[0] = view;
-    const updatedModel = { ...model, views };
-    const activeProject = { ...project, models: mapSet(project.models, this.state.modelName, updatedModel) };
-    this.setState({ activeProject });
-  }
-
-  async queueViewUpdate(view: StockFlowView): Promise<void> {
-    // Optimistic update: same pattern as updateView — reflect the new
-    // viewBox/zoom in state immediately to avoid a frame of flicker.
-    this.setView(view);
-    this.setState({ projectVersion: this.state.projectVersion + 0.001 });
-
-    const engine = this.engine();
-    if (engine) {
-      const ops: JsonModelOperation[] = [
-        {
-          type: 'upsertView',
-          payload: { index: 0, view: stockFlowViewToJson(view) },
-        },
-      ];
-      const patch: JsonProjectPatch = {
-        models: [{ name: this.state.modelName, ops }],
-      };
-      try {
-        await engine.applyPatch(patch, { allowErrors: true });
-      } catch (e: unknown) {
-        const err = getErrorDetails(e);
-        console.error('applyPatch error (queue view update):', err.code, err.message, err.details);
-        const msg = err.message ?? 'Unknown error during view update';
-        this.appendModelError(msg);
-        return;
-      }
-
-      await this.updateProject(await engine.serializeProtobuf(), { scheduleSave: false, recordHistory: false });
-    } else {
-      // there exists a race where we need to center/update the viewBox when
-      // displaying a newly imported model, but the async wasm stuff doesn't
-      // complete before we want to save the viewBox change.  In this case
-      // set a flag we check when finalizing installation of the new engine.
-      this.newEngineShouldPullView = true;
-      this.newEngineQueuedView = view;
-    }
   }
 
   handleViewBoxChange = async (viewBox: Rect, zoom: number) => {
@@ -1467,7 +1103,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     // Stdlib models are read-only: disable all mutation handlers while
     // keeping selection, viewbox, and drill-in navigation active.
-    const readOnly = embedded || isStdlibModel(this.state.modelName);
+    const readOnly = embedded || isStdlibModel(this.modelName());
     const onRenameVariable = !readOnly ? this.handleRename : noopRename;
     const onSetSelection = !embedded ? this.handleSelection : noopSetSelection;
     const onMoveSelection = !readOnly ? this.handleSelectionMove : noopMoveSelection;
@@ -1487,7 +1123,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         project={project}
         model={model}
         view={view}
-        version={this.state.projectVersion}
+        version={this.state.controllerSnapshot.projectVersion}
         selectedTool={readOnly ? undefined : this.state.selectedTool}
         selection={this.state.selection}
         onRenameVariable={onRenameVariable}
@@ -1603,91 +1239,66 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   };
 
   handleDrillIntoModule = (moduleIdent: string, targetModelName: string): void => {
+    const controller = this.controller;
     const view = this.getView();
-    if (!view) {
+    if (!controller || !view) {
       return;
     }
-    // Guard: don't push a nonexistent model onto the navigation stack.
-    // Stdlib models are included in project.models because the editor
-    // passes includeStdlib=true when calling serializeJson().
-    const project = this.project();
-    if (!project || !project.models.has(targetModelName)) {
-      return;
-    }
-    const newStack = pushModule(
-      this.state.modelStack,
-      targetModelName,
+    // The controller owns the navigation stack and the active model; it guards
+    // against drilling into a model the project doesn't contain (undefined
+    // outcome). On success it returns the selection the Editor should adopt
+    // (empty) and drives the model-scoped error refresh internally.
+    const outcome = controller.drillIntoModule(
       moduleIdent,
+      targetModelName,
       this.state.selection,
       view.viewBox,
       view.zoom,
     );
-    const newModelName = currentModelName(newStack);
+    if (!outcome.restoredSelection) {
+      return;
+    }
+    const newModelName = controller.getModelName();
     this.setState({
-      modelStack: newStack,
-      modelName: newModelName,
-      selection: new Set<UID>(),
+      selection: outcome.restoredSelection,
       showDetails: undefined,
       // Clear selected tool when entering a stdlib model (tool palette is hidden)
       selectedTool: isStdlibModel(newModelName) ? undefined : this.state.selectedTool,
     });
-    // The error refresh for the newly active model is driven by
-    // componentDidUpdate's modelName-change trigger -- see there.
   };
 
   handleNavigateBack = (): void => {
-    const { modelStack } = this.state;
-    if (modelStack.length === 0) {
+    const controller = this.controller;
+    if (!controller) {
       return;
     }
-    const result = popModule(modelStack);
-    // Restore the parent model's viewport from the setState callback, which
-    // fires once React has committed the restored modelName/modelStack so
-    // getView() resolves to the parent model's already-existing view. The
-    // callback is scoped to exactly this commit and never runs after
-    // unmount, so the previous setTimeout + unmounted-guard is unnecessary.
-    // Error refresh for the restored model is handled by componentDidUpdate's
-    // modelName-change trigger.
-    this.setState(
-      {
-        modelStack: result.newStack,
-        modelName: result.restoredModelName,
-        selection: result.restoredSelection,
-        showDetails: undefined,
-      },
-      () => {
-        const view = this.getView();
-        if (view) {
-          void this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
-        }
-      },
-    );
+    // The controller restores the parent's viewport internally (its modelName
+    // updates synchronously, so its getView resolves to the restored model
+    // with no setState-callback deferral) and returns the parent's selection
+    // for the Editor to adopt. Undefined outcome means the stack was empty.
+    const outcome = controller.navigateBack();
+    if (!outcome.restoredSelection) {
+      return;
+    }
+    this.setState({
+      selection: outcome.restoredSelection,
+      showDetails: undefined,
+    });
   };
 
   handleNavigateToLevel = (targetLevel: number): void => {
-    const { modelStack } = this.state;
-    if (targetLevel >= modelStack.length) {
+    const controller = this.controller;
+    if (!controller) {
       return;
     }
-    const result = navigateToLevel(modelStack, targetLevel);
-    // Restore the target level's viewport from the setState callback (fires
-    // post-commit, so getView() resolves to the restored model) and let
-    // componentDidUpdate's modelName-change trigger refresh errors. See
-    // handleNavigateBack for why this replaces the prior setTimeouts.
-    this.setState(
-      {
-        modelStack: result.newStack,
-        modelName: result.restoredModelName,
-        selection: result.restoredSelection,
-        showDetails: undefined,
-      },
-      () => {
-        const view = this.getView();
-        if (view) {
-          void this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
-        }
-      },
-    );
+    const outcome = controller.navigateToLevel(targetLevel);
+    if (!outcome.restoredSelection) {
+      return;
+    }
+    this.setState({
+      selection: outcome.restoredSelection,
+      showDetails: undefined,
+    });
   };
 
   handleSearchChange = async (_event: React.SyntheticEvent | null, newValue: string | null) => {
@@ -1700,7 +1311,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // Don't open the mutation-capable details panel for read-only
     // models (stdlib models, embedded mode). The Canvas-level guard
     // at line ~1480 handles double-click, but search bypasses it.
-    const readOnly = this.props.embedded || isStdlibModel(this.state.modelName);
+    const readOnly = this.props.embedded || isStdlibModel(this.modelName());
     this.setState({
       showDetails: readOnly ? undefined : 'variable',
     });
@@ -1738,13 +1349,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       placeholder = undefined;
     }
 
-    const status = this.state.status;
+    const status = this.state.controllerSnapshot.status;
 
     return (
       <div className={styles.searchBar}>
         <BreadcrumbBar
-          modelStack={this.state.modelStack}
-          modelName={this.state.modelName}
+          modelStack={this.state.controllerSnapshot.modelStack}
+          modelName={this.modelName()}
           onBack={this.handleNavigateBack}
           onNavigateToLevel={this.handleNavigateToLevel}
           onShowDrawer={this.handleShowDrawer}
@@ -1888,7 +1499,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
 
     const patch: JsonProjectPatch = {
-      models: [{ name: this.state.modelName, ops: [op] }],
+      models: [{ name: this.modelName(), ops: [op] }],
     };
 
     await this.applyPatchAndRefresh(patch, 'equation update');
@@ -1950,7 +1561,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
 
     const patch: JsonProjectPatch = {
-      models: [{ name: this.state.modelName, ops: [op] }],
+      models: [{ name: this.modelName(), ops: [op] }],
     };
 
     await this.applyPatchAndRefresh(patch, 'table update');
@@ -1977,7 +1588,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     const patch: JsonProjectPatch = {
-      models: [{ name: this.state.modelName, ops: [op] }],
+      models: [{ name: this.modelName(), ops: [op] }],
     };
 
     await this.applyPatchAndRefresh(patch, 'model reference update');
@@ -2004,7 +1615,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     const patch: JsonProjectPatch = {
-      models: [{ name: this.state.modelName, ops: [op] }],
+      models: [{ name: this.modelName(), ops: [op] }],
     };
 
     await this.applyPatchAndRefresh(patch, 'module update');
@@ -2033,7 +1644,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
 
     const patch: JsonProjectPatch = {
-      models: [{ name: this.state.modelName, ops: [op] }],
+      models: [{ name: this.modelName(), ops: [op] }],
     };
 
     await this.applyPatchAndRefresh(patch, 'references update');
@@ -2077,7 +1688,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           ops: [{ type: 'upsertView', payload: { index: 0, view: { elements: [] } } }],
         },
         {
-          name: this.state.modelName,
+          name: this.modelName(),
           ops: [{ type: 'upsertModule', payload: { module: modulePayload } }],
         },
       ],
@@ -2146,7 +1757,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       models: [
         { name: newModelName, ops: variableOps },
         {
-          name: this.state.modelName,
+          name: this.modelName(),
           ops: [{
             type: 'upsertModule',
             payload: { module: dupModulePayload },
@@ -2169,12 +1780,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   }
 
   getErrorDetails() {
-    const { cachedErrors } = this.state;
+    const { cachedErrors } = this.state.controllerSnapshot;
 
     return (
       <div className={styles.varDetails}>
         <ErrorDetails
-          status={this.state.status}
+          status={this.state.controllerSnapshot.status}
           simError={cachedErrors.simError}
           modelErrors={cachedErrors.modelErrors}
           varErrors={cachedErrors.varErrors}
@@ -2187,7 +1798,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   // Shows a thin info banner when inside a module whose model is shared
   // by multiple module instances, or when viewing a stdlib model.
   getSharedModelBanner(): React.ReactNode {
-    const { modelStack, modelName } = this.state;
+    const { modelStack, modelName } = this.state.controllerSnapshot;
     if (modelStack.length === 0) return undefined;
 
     const project = this.project();
@@ -2244,11 +1855,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return (
         <div className={styles.varDetails}>
           <ModuleDetails
-            key={`md-${this.state.projectGeneration}-${ident}`}
+            key={`md-${this.state.controllerSnapshot.projectGeneration}-${ident}`}
             variable={variable}
             viewElement={namedElement}
             project={defined(this.project())}
-            currentModelName={this.state.modelName}
+            currentModelName={this.modelName()}
             onDelete={this.handleVariableDelete}
             onModelReferenceChange={this.handleModuleModelReferenceChange}
             onUnitsDocsChange={this.handleModuleUnitsDocsChange}
@@ -2266,7 +1877,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     return (
       <div className={styles.varDetails}>
         <VariableDetails
-          key={`vd-${this.state.projectGeneration}-${ident}`}
+          key={`vd-${this.state.controllerSnapshot.projectGeneration}-${ident}`}
           variable={variable}
           viewElement={namedElement}
           getLatexEquation={this.getLatexEquation}
@@ -2341,265 +1952,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
-  async refreshCachedErrors(): Promise<CachedErrorDetails | undefined> {
-    const engine = this.engine();
-    if (!engine) {
-      return undefined;
-    }
-
-    const modelName = this.state.modelName;
-    const errors = await engine.getErrors();
-    const { varErrors, unitErrors } = convertErrorDetails(errors, modelName);
-
-    let simError: SimError | undefined;
-    const modelErrors: ModelError[] = [];
-    for (const err of errors) {
-      if (err.modelName && err.modelName !== modelName) {
-        continue;
-      }
-      if (err.kind === SimlinErrorKind.Simulation) {
-        simError = {
-          code: err.code as unknown as ErrorCode,
-          details: err.message ?? undefined,
-        };
-      } else if (!err.variableName) {
-        modelErrors.push({
-          code: err.code as unknown as ErrorCode,
-          details: err.message ?? undefined,
-        });
-      }
-    }
-    const cachedErrors: CachedErrorDetails = { varErrors, unitErrors, simError, modelErrors };
-    this.setState({ cachedErrors });
-    return cachedErrors;
-  }
-
-  async updateVariableErrors(project: Project): Promise<Project> {
-    const cached = await this.refreshCachedErrors();
-    if (!cached) {
-      return project;
-    }
-
-    const modelName = this.state.modelName;
-    const { varErrors, unitErrors } = cached;
-
-    if (varErrors.size > 0) {
-      const model = getOrThrow(project.models, modelName);
-
-      // if all the errors are 'just' that we have no equations,
-      // don't scream "error" at the user -- they are starting from
-      // scratch on a new model and don't expect it to be running yet.
-      if (varErrors.size === model.variables.size && setsEqual(new Set(varErrors.keys()), new Set(model.variables.keys()))) {
-        let foundOtherError = false;
-
-        for (const [, errs] of varErrors) {
-          if (errs.length !== 1 || first(errs).code !== ErrorCode.EmptyEquation) {
-            foundOtherError = true;
-            break;
-          }
-        }
-        if (!foundOtherError) {
-          return { ...project, hasNoEquations: true };
-        }
-      }
-
-      const mutableVars = new Map(model.variables);
-      for (const [ident, errs] of varErrors) {
-        const variable = mutableVars.get(ident);
-        if (variable) {
-          mutableVars.set(ident, { ...variable, errors: errs });
-        }
-      }
-      const updatedModel = { ...model, variables: mutableVars as ReadonlyMap<string, Variable> };
-      project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
-    }
-
-    if (unitErrors.size > 0) {
-      const model = getOrThrow(project.models, modelName);
-      const mutableVars = new Map(model.variables);
-      for (const [ident, errs] of unitErrors) {
-        const variable = mutableVars.get(ident);
-        if (variable) {
-          mutableVars.set(ident, { ...variable, unitErrors: errs });
-        }
-      }
-      const updatedModel = { ...model, variables: mutableVars as ReadonlyMap<string, Variable> };
-      project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
-    }
-
-    return project;
-  }
-
-  // Release an engine handle that we opened but failed to wire into state,
-  // so the WASM allocation doesn't leak. dispose() is best-effort: a
-  // throwing dispose must not mask the original error we're surfacing.
-  private async disposeOrphanedEngine(engine: EngineProject): Promise<void> {
-    try {
-      await engine.dispose();
-    } catch {
-      // ignored: the engine is being abandoned regardless
-    }
-  }
-
-  async openInitialProject(): Promise<void> {
-    let engine: EngineProject;
-    try {
-      if (this.props.inputFormat === 'json') {
-        engine = await EngineProject.openJson(this.props.initialProjectJson);
-      } else {
-        engine = await EngineProject.openProtobuf(this.props.initialProjectBinary as Uint8Array);
-      }
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      this.appendModelError(`opening the project in the engine failed: ${err.message ?? 'Unknown error'}`);
-      return;
-    }
-
-    // The try/catch deliberately extends past the engine open: this method
-    // is invoked from a fire-and-forget setTimeout, so a throw here becomes
-    // an unhandled rejection that the ErrorBoundary cannot catch (boundaries
-    // only catch synchronous render-phase throws). Catching it here also lets
-    // us surface a contextual message ("opening the project failed: ...") and
-    // dispose the orphaned engine, which is strictly better than the
-    // boundary's generic fallback. If serializeJson panics in WASM or
-    // projectFromJson rejects the engine's JSON (e.g. an unknown view element
-    // type), an unguarded throw would otherwise leave the user staring at
-    // editor chrome with a blank canvas and no error message.
-    try {
-      this.engineProject = engine;
-
-      const serializedProject = await engine.serializeProtobuf();
-
-      const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
-      const project = await this.updateVariableErrors(projectFromJson(json));
-
-      this.setState({
-        projectHistory: [serializedProject],
-        activeProject: project,
-      });
-    } catch (e: unknown) {
-      this.engineProject = undefined;
-      await this.disposeOrphanedEngine(engine);
-      const err = getErrorDetails(e);
-      this.appendModelError(`opening the project failed: ${err.message ?? 'Unknown error'}`);
-    }
-  }
-
-  async openEngineProject(serializedProject: Readonly<Uint8Array>): Promise<EngineProject | undefined> {
-    await this.engineProject?.dispose();
-    this.engineProject = undefined;
-
-    let engine: EngineProject;
-    try {
-      engine = await EngineProject.openProtobuf(serializedProject as Uint8Array);
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      this.appendModelError(`opening the project in the engine failed: ${err.message ?? 'Unknown error'}`);
-      return;
-    }
-
-    // See openInitialProject: the steps after a successful engine open can
-    // still throw (serializeJson WASM panic, projectFromJson rejecting an
-    // unknown view element type). These run in an async method, so the
-    // ErrorBoundary (which only catches synchronous render-phase throws)
-    // cannot handle them; catching here also gives a contextual message and
-    // disposes the orphaned engine.
-    try {
-      this.engineProject = engine;
-
-      const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
-      let project = projectFromJson(json);
-
-      if (this.newEngineShouldPullView) {
-        const queuedView = defined(this.newEngineQueuedView);
-        this.newEngineShouldPullView = false;
-        this.newEngineQueuedView = undefined;
-        const model = defined(project.models.get(this.state.modelName));
-        const views = [...model.views];
-        views[0] = queuedView;
-        const updatedModel = { ...model, views };
-        project = { ...project, models: mapSet(project.models, this.state.modelName, updatedModel) };
-        this.queueViewUpdate(queuedView);
-      }
-
-      this.setState({
-        activeProject: await this.updateVariableErrors(project),
-      });
-
-      return engine;
-    } catch (e: unknown) {
-      this.engineProject = undefined;
-      await this.disposeOrphanedEngine(engine);
-      const err = getErrorDetails(e);
-      this.appendModelError(`opening the project failed: ${err.message ?? 'Unknown error'}`);
-      return undefined;
-    }
-  }
-
-  async recalculateStatus() {
-    const project = this.project();
-    const engine = this.engine();
-
-    let status: 'ok' | 'error' | 'disabled';
-    if (!engine || !project || project.hasNoEquations) {
-      status = 'disabled';
-    } else if (!(await engine.isSimulatable())) {
-      status = 'error';
-    } else {
-      status = 'ok';
-    }
-
-    this.setState({
-      status,
-    });
-  }
-
-  handleUndoRedo = (kind: 'undo' | 'redo') => {
-    const delta = kind === 'undo' ? 1 : -1;
-    let projectOffset = this.state.projectOffset + delta;
-    // ensure our offset is always valid
-    projectOffset = Math.min(projectOffset, this.state.projectHistory.length - 1);
-    projectOffset = Math.max(projectOffset, 0);
-    const serializedProject = defined(this.state.projectHistory[projectOffset]);
-    const projectVersion = this.state.projectVersion + 0.01;
-    // Undo/redo restores different project content, so the details panels
-    // must remount to re-seed from the restored variables.
-    this.setState({ projectOffset, projectVersion, projectGeneration: this.state.projectGeneration + 1 });
-
-    this.undoRedoTimer = setTimeout(async () => {
-      this.undoRedoTimer = null;
-      if (this.unmounted) {
-        return;
-      }
-      const engine = await this.openEngineProject(serializedProject);
-      if (this.unmounted) {
-        // openEngineProject opened a fresh engine onto an instance that
-        // componentWillUnmount has already torn down — release it so the
-        // navigation away from this route does not strand the WASM
-        // allocation (componentWillUnmount cleared `this.engineProject`
-        // before this callback ran).
-        this.engineProject = undefined;
-        if (engine) {
-          await this.disposeOrphanedEngine(engine);
-        }
-        return;
-      }
-      // After undo/redo, the restored project may not contain the model
-      // we were viewing (e.g. undo after creating and drilling into a new
-      // submodel). Reset navigation state if the current model is gone.
-      const project = this.project();
-      if (project && this.state.modelStack.length > 0 && !project.models.has(this.state.modelName)) {
-        this.setState({
-          modelStack: [],
-          modelName: 'main',
-          selection: new Set<UID>(),
-          showDetails: undefined,
-          selectedTool: undefined,
-        });
-      }
-      this.scheduleSimRun();
-      this.scheduleSave();
-    });
+  // Undo/redo is fully owned by the controller: it moves the undo cursor,
+  // bumps version/generation synchronously (so the details panels remount),
+  // reopens the engine from the restored snapshot, and -- when the restored
+  // project no longer contains the viewed model -- resets navigation to 'main'
+  // and bumps navResetSeq, which componentDidUpdate observes to clear the
+  // Editor's selection/details/tool UI state.
+  handleUndoRedo = (kind: 'undo' | 'redo'): void => {
+    this.controller?.undoRedo(kind);
   };
 
   handleZoomChange = async (newZoom: number) => {
@@ -2625,12 +1985,22 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     await this.handleViewBoxChange(newViewBox, newZoom);
   };
 
+  // True once componentWillUnmount has cleared the controller. The snapshot
+  // image's decode/toBlob callbacks are genuinely async and can fire after a
+  // route change unmounts the Editor; they bail on this so a setState or a
+  // createObjectURL never runs on a dead instance (the unmount-time revoke
+  // already ran). This replaces the old `unmounted` flag for the UI-only
+  // snapshot path -- engine/save/sim lifecycle is the controller's concern.
+  private isUnmounted(): boolean {
+    return this.controller === undefined;
+  }
+
   takeSnapshot() {
     const project = this.project();
-    if (!project || !this.state.modelName) {
+    const modelName = this.modelName();
+    if (!project || !modelName) {
       return;
     }
-    const { modelName } = this.state;
 
     const [svg, viewbox] = renderSvgToString(project, modelName);
     const osCanvas = document.createElement('canvas');
@@ -2651,7 +2021,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       // before setState/createObjectURL: componentWillUnmount has already run,
       // so a URL created here would never be revoked, and setState on an
       // unmounted component is a no-op warning.
-      if (this.unmounted) {
+      if (this.isUnmounted()) {
         return;
       }
       ctx.drawImage(image, 0, 0, viewbox.width * 4, viewbox.height * 4);
@@ -2661,7 +2031,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         // create the object URL when unmounted -- no URL has been created at
         // this point, and one created here would leak (the unmount-time
         // revoke already ran).
-        if (this.unmounted) {
+        if (this.isUnmounted()) {
           return;
         }
         if (snapshotBlob) {
@@ -2677,7 +2047,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
     image.onerror = () => {
       URL.revokeObjectURL(svgUrl);
-      if (this.unmounted) {
+      if (this.isUnmounted()) {
         return;
       }
       this.setState({
@@ -2735,7 +2105,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const { embedded } = this.props;
     const { dialOpen, dialVisible, selectedTool } = this.state;
 
-    if (embedded || isStdlibModel(this.state.modelName)) {
+    if (embedded || isStdlibModel(this.modelName())) {
       return undefined;
     }
 

@@ -45,14 +45,16 @@ function makeEditor(args: {
   // Replace the React-attached state/setState with a mutable shim so we can
   // observe state assignments without the React reconciler.
   // Object.defineProperty bypasses the readonly typing on `state`.
+  // The active-model state now lives in the controller snapshot, which
+  // componentDidUpdate reads (navResetSeq) -- seed a minimal one.
   Object.defineProperty(editor, 'state', {
     value: {
       ...editor.state,
+      controllerSnapshot: { ...editor.state.controllerSnapshot, modelName: 'main', navResetSeq: 0 },
       selection: new Set<number>(),
       flowStillBeingCreated: false,
       variableDetailsActiveTab: 0,
       showDetails: undefined,
-      modelName: 'main',
     },
     writable: true,
     configurable: true,
@@ -67,9 +69,6 @@ function makeEditor(args: {
   // The real method's wiring (state.selection -> view.elements) is exercised
   // by editor-applyPatch.test.ts and the Canvas integration tests.
   editor.getSelectionIdents = () => args.selectionIdents;
-  // refreshCachedErrors is invoked from componentDidUpdate on a modelName
-  // change; stub it so the selection-focused tests don't need an engine.
-  editor.refreshCachedErrors = jest.fn().mockResolvedValue(undefined) as EditorInstance['refreshCachedErrors'];
 
   return editor;
 }

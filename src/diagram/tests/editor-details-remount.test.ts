@@ -6,154 +6,84 @@
  * Version 2.0, that can be found in the LICENSE file.
  */
 
-// Regression tests for when the variable/module details panels remount.
+// Regression test for the details-panel remount key.
 //
-// The panels seed their Slate editors from props in their constructors, so
-// React remounts (key changes) are the mechanism that refreshes them after
-// the underlying variable changes. The key used to include projectVersion,
-// which bumps +0.001 on every pan/zoom frame and is reset to the server
-// version when an autosave completes -- each of those remounted an open
-// panel, discarding in-progress unsaved edits and refiring the async LaTeX
-// load. The key now uses `projectGeneration`, which must increment exactly
-// when project *content* changes (real edits, undo/redo) and stay put for
-// view-only updates and save-version bookkeeping.
+// The variable/module details panels seed their Slate editors from props in
+// their constructors, so React remounts (key changes) are the mechanism that
+// refreshes them after the underlying variable changes. The key uses
+// `projectGeneration` (not `projectVersion`): projectGeneration increments
+// exactly when project *content* changes (real edits, undo/redo) and stays
+// put for view-only pan/zoom frames and save-version bookkeeping, so an open
+// panel is not remounted -- discarding in-progress edits -- on a pan or an
+// autosave.
+//
+// The *semantics* of projectGeneration (when it does/doesn't increment) now
+// live in and are tested against the ProjectController -- see
+// project-controller.test.ts ("view-only updates never consume undo slots",
+// the applyPatch pipeline generation bump, and the undo generation bump). What
+// remains Editor-specific is that the rendered panel key is derived from the
+// controller snapshot's projectGeneration, which this test pins.
 
-import { projectFromJson } from '@simlin/core/datamodel';
-import type { JsonProject } from '@simlin/engine';
+import * as React from 'react';
+
+import { projectFromJson, type JsonProject } from '@simlin/core/datamodel';
 
 import { Editor } from '../Editor';
+import { VariableDetails } from '../VariableDetails';
 
 type EditorInstance = InstanceType<typeof Editor>;
 
-const validProjectJson = JSON.stringify({
+// A project with a single aux 'x' and a view element selecting it, so
+// getDetails() resolves to a VariableDetails panel we can read the key off.
+const projectJson = JSON.stringify({
   name: 'test',
   simSpecs: { startTime: 0, endTime: 10, dt: '1' },
-  models: [{ name: 'main', stocks: [], flows: [], auxiliaries: [], views: [{ elements: [] }] }],
+  models: [
+    {
+      name: 'main',
+      stocks: [],
+      flows: [],
+      auxiliaries: [{ name: 'x', equation: '1' }],
+      views: [{ elements: [{ type: 'aux', uid: 1, name: 'x', x: 0, y: 0 }] }],
+    },
+  ],
 });
 
-const snap = (n: number): Uint8Array => new Uint8Array([n]);
-
-function makeFakeEngine() {
-  return {
-    serializeProtobuf: jest.fn(async () => snap(9)),
-    serializeJson: jest.fn(async () => validProjectJson),
-    getErrors: jest.fn(async () => []),
-    applyPatch: jest.fn(async () => {}),
-    dispose: jest.fn(async () => {}),
-  };
-}
-
-function makeEditor(engine: ReturnType<typeof makeFakeEngine>): EditorInstance {
+function makeEditor(projectGeneration: number): EditorInstance {
   const editor = Object.create(Editor.prototype) as EditorInstance;
-
-  editor.engineProject = engine as unknown as EditorInstance['engineProject'];
-  editor.newEngineShouldPullView = false;
-  editor.newEngineQueuedView = undefined;
-  editor.inSave = false;
-  editor.saveQueued = false;
+  const project = projectFromJson(JSON.parse(projectJson) as JsonProject);
 
   editor.state = {
-    modelErrors: [],
-    activeProject: projectFromJson(JSON.parse(validProjectJson) as JsonProject),
-    projectHistory: [snap(1)],
-    projectOffset: 0,
-    projectGeneration: 0,
-    modelName: 'main',
-    modelStack: [],
-    data: new Map(),
-    projectVersion: 1,
-    selection: new Set<number>(),
-    cachedErrors: {
-      varErrors: new Map(),
-      unitErrors: new Map(),
-      simError: undefined,
-      modelErrors: [],
+    controllerSnapshot: {
+      project,
+      projectGeneration,
+      modelName: 'main',
     },
+    selection: new Set<number>([1]),
+    showDetails: 'variable',
+    flowStillBeingCreated: false,
+    variableDetailsActiveTab: 0,
   } as unknown as EditorInstance['state'];
 
-  editor.props = {
-    inputFormat: 'json',
-    initialProjectJson: validProjectJson,
-    initialProjectVersion: 1,
-    name: 'test',
-    onSave: async () => 1,
-  } as unknown as EditorInstance['props'];
-
-  editor.setState = (updater: unknown) => {
-    const next = typeof updater === 'function' ? updater(editor.state) : updater;
-    Object.assign(editor.state as object, next);
-  };
-
-  editor.scheduleSave = jest.fn();
-  editor.scheduleSimRun = jest.fn();
+  editor.props = { inputFormat: 'json', name: 'test' } as unknown as EditorInstance['props'];
 
   return editor;
 }
 
-type GenerationState = { projectGeneration: number };
+function detailsKey(editor: EditorInstance): string {
+  const wrapper = editor.getDetails();
+  if (!wrapper || !React.isValidElement(wrapper)) {
+    throw new Error('expected getDetails() to render a panel');
+  }
+  // getDetails() wraps the panel in a div; the panel is its single child.
+  const child = (wrapper.props as { children: React.ReactElement }).children;
+  expect(child.type).toBe(VariableDetails);
+  return String(child.key);
+}
 
-describe('Editor.projectGeneration (details panel remount key)', () => {
-  it('increments on a real edit (history-recording updateProject)', async () => {
-    const editor = makeEditor(makeFakeEngine());
-    const before = (editor.state as unknown as GenerationState).projectGeneration;
-
-    await editor.updateProject(snap(2));
-
-    expect((editor.state as unknown as GenerationState).projectGeneration).toBe(before + 1);
-  });
-
-  it('does NOT increment on a view-only update (pan/zoom)', async () => {
-    const editor = makeEditor(makeFakeEngine());
-    const before = (editor.state as unknown as GenerationState).projectGeneration;
-
-    const view = editor.getView();
-    expect(view).toBeDefined();
-    await editor.queueViewUpdate({ ...view!, zoom: 2 });
-
-    expect((editor.state as unknown as GenerationState).projectGeneration).toBe(before);
-  });
-
-  it('does NOT change when an autosave completes and resets projectVersion', async () => {
-    const engine = makeFakeEngine();
-    const editor = makeEditor(engine);
-    const before = (editor.state as unknown as GenerationState).projectGeneration;
-
-    await editor.save(1);
-
-    expect((editor.state as unknown as GenerationState).projectGeneration).toBe(before);
-  });
-
-  it('increments on undo/redo so the panels pick up restored content', () => {
-    // handleUndoRedo is an arrow-function instance field, so this case uses
-    // `new Editor(props)` (constructor is side-effect free; the deferred
-    // engine reopen is held back by fake timers and a stub).
-    jest.useFakeTimers();
-    try {
-      const editor = new Editor({
-        inputFormat: 'json',
-        initialProjectJson: validProjectJson,
-        initialProjectVersion: 1,
-        name: 'test',
-        onSave: async () => 1,
-      });
-      Object.defineProperty(editor, 'state', {
-        value: { ...editor.state, projectHistory: [snap(2), snap(1)], projectOffset: 0 },
-        writable: true,
-        configurable: true,
-      });
-      editor.setState = ((updater: unknown) => {
-        const next = typeof updater === 'function' ? (updater as (s: unknown) => unknown)(editor.state) : updater;
-        Object.assign(editor.state as object, next);
-      }) as EditorInstance['setState'];
-      // The deferred engine reopen isn't under test here.
-      editor.openEngineProject = jest.fn(async () => undefined);
-      const before = (editor.state as unknown as GenerationState).projectGeneration;
-
-      editor.handleUndoRedo('undo');
-
-      expect((editor.state as unknown as GenerationState).projectGeneration).toBe(before + 1);
-    } finally {
-      jest.useRealTimers();
-    }
+describe('Editor details-panel remount key', () => {
+  it('derives the VariableDetails key from controllerSnapshot.projectGeneration', () => {
+    expect(detailsKey(makeEditor(0))).toBe('vd-0-x');
+    expect(detailsKey(makeEditor(7))).toBe('vd-7-x');
   });
 });
