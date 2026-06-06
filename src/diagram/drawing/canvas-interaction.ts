@@ -283,11 +283,22 @@ export function reduceInteraction(
   event: InteractionEvent,
   ctx: InteractionContext,
 ): InteractionResult {
+  // SHELL-DRIVEN vs MODEL-ONLY (tech-debt #65): of the four down-events, only
+  // `canvasPointerDown` is currently routed through this function by the Canvas
+  // shell (handlePointerDown calls it to pick pan vs drag-select). The
+  // `createToolPointerDown`, `flowToolPointerDown`, and `elementPointerDown`
+  // branches below are the canonical, table-tested model for the in-progress
+  // migration of the shell's boolean CanvasState onto this tagged union; the
+  // shell does NOT yet drive them (handlePointerDown/handleSetSelection build
+  // their concrete state directly, composing only decideMouseDownSelection).
+  // Tests pinning those three branches therefore verify the MODEL, not live
+  // shell behavior -- do not read them as coverage of the shell's tool/element
+  // press paths.
   switch (event.kind) {
     case 'canvasPointerDown': {
-      // Empty-canvas press: pan (touch/shift) or rubber-band drag-select.
-      // Selection is not cleared here -- that happens on pointer-up so a press
-      // that turns into a pan does not flicker the selection away.
+      // [shell-driven] Empty-canvas press: pan (touch/shift) or rubber-band
+      // drag-select. Selection is not cleared here -- that happens on pointer-up
+      // so a press that turns into a pan does not flicker the selection away.
       return {
         state: event.pan ? { mode: 'panning' } : { mode: 'dragSelecting' },
         effects: [],
@@ -295,8 +306,9 @@ export function reduceInteraction(
     }
 
     case 'createToolPointerDown': {
-      // Aux/stock/module creation tool: stage an element (the shell builds the
-      // concrete ViewElement) and enter the editing-on-pointer-up handoff.
+      // [model-only] Aux/stock/module creation tool: stage an element (the shell
+      // builds the concrete ViewElement) and enter the editing-on-pointer-up
+      // handoff.
       return {
         state: { mode: 'editingName', onPointerUp: true, creatingFlow: false },
         effects: [{ kind: 'capturePointer' }],
@@ -304,8 +316,8 @@ export function reduceInteraction(
     }
 
     case 'flowToolPointerDown': {
-      // Flow tool on empty canvas: stage a flow + source cloud and immediately
-      // enter arrowhead-drag so the user drags the sink into place.
+      // [model-only] Flow tool on empty canvas: stage a flow + source cloud and
+      // immediately enter arrowhead-drag so the user drags the sink into place.
       return {
         state: { mode: 'movingEndpoint', endpoint: 'arrow', pointerType: 'mouse', inCreation: true },
         effects: [],
@@ -313,6 +325,7 @@ export function reduceInteraction(
     }
 
     case 'elementPointerDown': {
+      // [model-only] (the shell composes decideMouseDownSelection directly).
       const effects: InteractionEffect[] = [];
 
       // Arrowhead/source press starts an endpoint drag (link reattach or flow

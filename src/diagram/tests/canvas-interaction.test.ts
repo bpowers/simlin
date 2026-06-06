@@ -195,6 +195,28 @@ describe('labelSideForPointer quadrants', () => {
   it('pointer below -> label on the bottom', () => {
     expect(labelSideForPointer(center, { x: 100, y: 200 })).toBe('bottom');
   });
+
+  // Pin the inclusive/exclusive boundary semantics, where the `<` vs `<=`
+  // distinctions live. The predicates are `(-45 < a <= 45) -> left`,
+  // `(45 < a <= 135) -> top`, `(-135 < a <= -45) -> bottom`, else `right`,
+  // with a = atan2(cy - py, cx - px) in degrees. Each boundary belongs to the
+  // quadrant whose comparison is `<=`.
+  it('angle exactly 45deg belongs to left (a <= 45)', () => {
+    // (cy-py)=100, (cx-px)=100 -> atan2(100, 100) = 45
+    expect(labelSideForPointer(center, { x: 0, y: 0 })).toBe('left');
+  });
+  it('angle exactly 135deg belongs to top (a <= 135)', () => {
+    // (cy-py)=100, (cx-px)=-100 -> atan2(100, -100) = 135
+    expect(labelSideForPointer(center, { x: 200, y: 0 })).toBe('top');
+  });
+  it('angle exactly -45deg belongs to bottom (a <= -45)', () => {
+    // (cy-py)=-100, (cx-px)=100 -> atan2(-100, 100) = -45
+    expect(labelSideForPointer(center, { x: 0, y: 200 })).toBe('bottom');
+  });
+  it('angle exactly -135deg belongs to right (else branch: -135 is not > -135)', () => {
+    // (cy-py)=-100, (cx-px)=-100 -> atan2(-100, -100) = -135
+    expect(labelSideForPointer(center, { x: 200, y: 200 })).toBe('right');
+  });
 });
 
 describe('drag-select rectangle membership', () => {
@@ -233,7 +255,11 @@ describe('drag-select rectangle membership', () => {
   });
 });
 
-describe('reduceInteraction: canvas press', () => {
+// The canvas-press branch is shell-driven (handlePointerDown routes through
+// reduceInteraction). The creation-tool, flow-tool, and element-press blocks
+// below pin the MODEL only -- the shell does not yet drive those branches
+// (tech-debt #65) -- so they are not coverage of live shell behavior.
+describe('reduceInteraction: canvas press (shell-driven)', () => {
   it('touch/shift press enters panning, no selection change', () => {
     const r = reduceInteraction(idleState, { kind: 'canvasPointerDown', pan: true }, ctx([1]));
     expect(r.state).toEqual({ mode: 'panning' });
@@ -245,7 +271,7 @@ describe('reduceInteraction: canvas press', () => {
   });
 });
 
-describe('reduceInteraction: creation tools', () => {
+describe('reduceInteraction: creation tools (model-only, not yet shell-driven)', () => {
   it('aux/stock/module tool stages editing-on-pointer-up and captures pointer', () => {
     const r = reduceInteraction(idleState, { kind: 'createToolPointerDown', tool: 'aux' }, ctx([]));
     expect(r.state).toEqual({ mode: 'editingName', onPointerUp: true, creatingFlow: false });
@@ -263,7 +289,7 @@ describe('reduceInteraction: creation tools', () => {
   });
 });
 
-describe('reduceInteraction: element press selection', () => {
+describe('reduceInteraction: element press selection (model-only, not yet shell-driven)', () => {
   it('clicking an unselected element selects it and prepares to move', () => {
     const r = reduceInteraction(
       idleState,
@@ -385,7 +411,7 @@ describe('reduceInteraction: element press selection', () => {
   });
 });
 
-describe('reduceInteraction: endpoint drags', () => {
+describe('reduceInteraction: endpoint drags (model-only, not yet shell-driven)', () => {
   it('arrowhead press enters arrow endpoint drag and captures pointer', () => {
     const r = reduceInteraction(
       idleState,
