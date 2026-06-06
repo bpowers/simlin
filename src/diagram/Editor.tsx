@@ -587,14 +587,17 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     try {
       run = await model.run();
     } catch (e) {
+      // Normalize to an Error: a raw-string throw would otherwise be stored
+      // and then used as a key in the errorKey WeakMap during render, which
+      // only accepts object keys and would crash the render phase.
       this.setState({
-        modelErrors: [...this.state.modelErrors, e as Error],
+        modelErrors: [...this.state.modelErrors, e instanceof Error ? e : new Error(String(e))],
       });
       try {
         run = await model.run({}, { analyzeLtm: false });
       } catch (e2) {
         this.setState({
-          modelErrors: [...this.state.modelErrors, e2 as Error],
+          modelErrors: [...this.state.modelErrors, e2 instanceof Error ? e2 : new Error(String(e2))],
         });
         await this.refreshCachedErrors();
         return;
@@ -716,8 +719,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         this.setState({ projectVersion: version });
       }
     } catch (err) {
+      // Normalize to an Error: see loadSim. modelErrors entries are keyed by
+      // the errorKey WeakMap during render, which requires object keys.
       this.setState({
-        modelErrors: [...this.state.modelErrors, err as Error],
+        modelErrors: [...this.state.modelErrors, err instanceof Error ? err : new Error(String(err))],
       });
     } finally {
       this.inSave = false;
@@ -2970,11 +2975,27 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const image = new Image();
     image.onload = () => {
       // The SVG source URL has served its purpose now that the image is
-      // decoded; revoke it so the intermediate blob isn't retained.
+      // decoded; revoke it so the intermediate blob isn't retained. This must
+      // run even when unmounted so the svg blob isn't stranded.
       URL.revokeObjectURL(svgUrl);
+      // Image decode is async, so this callback can fire after the Editor has
+      // unmounted (e.g. a route change during snapshot generation). Bail
+      // before setState/createObjectURL: componentWillUnmount has already run,
+      // so a URL created here would never be revoked, and setState on an
+      // unmounted component is a no-op warning.
+      if (this.unmounted) {
+        return;
+      }
       ctx.drawImage(image, 0, 0, viewbox.width * 4, viewbox.height * 4);
 
       osCanvas.toBlob((snapshotBlob) => {
+        // toBlob is itself async; re-check the unmount flag. Crucially, do not
+        // create the object URL when unmounted -- no URL has been created at
+        // this point, and one created here would leak (the unmount-time
+        // revoke already ran).
+        if (this.unmounted) {
+          return;
+        }
         if (snapshotBlob) {
           // Create the display URL exactly once here (not per render) and
           // revoke any previous snapshot URL via setSnapshotUrl.
@@ -2988,6 +3009,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     };
     image.onerror = () => {
       URL.revokeObjectURL(svgUrl);
+      if (this.unmounted) {
+        return;
+      }
       this.setState({
         modelErrors: [...this.state.modelErrors, new Error('snapshot creation failed (2).')],
       });
