@@ -35,7 +35,6 @@ import {
   GraphicalFunction,
   LinkViewElement,
   FlowViewElement,
-  StockViewElement,
   CloudViewElement,
   viewElementType,
   EquationError,
@@ -54,7 +53,7 @@ import {
   type ModuleReference,
 } from '@simlin/core/datamodel';
 import { defined, exists, mapSet, Series, setsEqual, toInt, uint8ArraysEqual } from '@simlin/core/common';
-import { first, getOrThrow, last, only } from '@simlin/core/collections';
+import { first, getOrThrow, only } from '@simlin/core/collections';
 
 import { AuxIcon } from './AuxIcon';
 import { Toast } from './ErrorToast';
@@ -70,9 +69,9 @@ import { VariableDetails } from './VariableDetails';
 import { ModuleDetails } from './ModuleDetails';
 import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
-import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
+import { Canvas, inCreationUid } from './drawing/Canvas';
 import { Point, searchableName } from './drawing/common';
-import { UpdateCloudAndFlow } from './drawing/Flow';
+import { computeFlowAttachment } from './flow-attach';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 import { preserveLiveView } from './merge-live-view';
@@ -1005,378 +1004,47 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     inCreation: boolean,
     isSourceAttach?: boolean,
   ) => {
-    let { selection } = this.state;
     const view = defined(this.getView());
+    const model = defined(this.getModel());
 
-    let isCreatingNew = false;
-    let stockDetachingIdent: string | undefined;
-    let stockAttachingIdent: string | undefined;
-    let sourceStockIdent: string | undefined;
-    let sourceStockDetachingIdent: string | undefined;
-    let sourceStockAttachingIdent: string | undefined;
-    let uidToDelete: number | undefined;
-    let updatedCloud: ViewElement | undefined;
-    const newClouds: ViewElement[] = [];
-
-    let nextUid = view.nextUid;
-    const getUid = (uid: number) => {
-      for (const e of view.elements) {
-        if (e.uid === uid) {
-          return e;
-        }
-      }
-      throw new Error(`unknown uid ${uid}`);
-    };
-
-    let elements = view.elements.map((element: ViewElement) => {
-      if (element.uid !== flow.uid) {
-        return element;
-      }
-      if (element.type !== 'flow') {
-        return element;
-      }
-
-      if (isSourceAttach) {
-        // Handle source attachment (first point)
-        const oldFrom = getUid(defined(first(element.points).attachedToUid));
-        let newCloud = false;
-        let updateCloud = false;
-        let from: StockViewElement | CloudViewElement;
-
-        if (targetUid) {
-          if (oldFrom.type === 'cloud') {
-            uidToDelete = oldFrom.uid;
-          }
-          const newTarget = getUid(targetUid);
-          if (newTarget.type !== 'stock' && newTarget.type !== 'cloud') {
-            throw new Error(`new target isn't a stock or cloud (uid ${newTarget.uid})`);
-          }
-          from = newTarget;
-        } else if (oldFrom.type === 'cloud') {
-          updateCloud = true;
-          from = {
-            ...oldFrom,
-            x: oldFrom.x - cursorMoveDelta.x,
-            y: oldFrom.y - cursorMoveDelta.y,
-          };
-        } else {
-          // Detaching from a stock - create a new cloud at the release position.
-          // Use the same approach as the sink path: oldFrom.x - cursorMoveDelta.x/y
-          // This ensures the cloud appears where the user released, not where they started.
-          newCloud = true;
-          from = {
-            type: 'cloud' as const,
-            uid: nextUid++,
-            x: oldFrom.x - cursorMoveDelta.x,
-            y: oldFrom.y - cursorMoveDelta.y,
-            flowUid: flow.uid,
-            isZeroRadius: false,
-            ident: undefined,
-          };
-        }
-
-        if (oldFrom.uid !== from.uid) {
-          if (oldFrom.type === 'stock') {
-            sourceStockDetachingIdent = oldFrom.ident;
-          }
-          if (from.type === 'stock') {
-            sourceStockAttachingIdent = from.ident;
-          }
-        }
-
-        const moveDelta = {
-          x: oldFrom.x - from.x,
-          y: oldFrom.y - from.y,
-        };
-        const points = element.points.map((point) => {
-          if (point.attachedToUid !== oldFrom.uid) {
-            return point;
-          }
-          return { ...point, attachedToUid: from.uid };
-        });
-        from = {
-          ...from,
-          x: oldFrom.x,
-          y: oldFrom.y,
-        } as StockViewElement | CloudViewElement;
-        element = { ...element, points };
-
-        [from, element] = UpdateCloudAndFlow(from, element as FlowViewElement, moveDelta);
-        if (newCloud) {
-          newClouds.push(from);
-        } else if (updateCloud) {
-          updatedCloud = from;
-        }
-
-        return element;
-      }
-
-      // Handle sink attachment (last point) - original behavior
-      const oldTo = getUid(defined(last(element.points).attachedToUid));
-      let newCloud = false;
-      let updateCloud = false;
-      let to: StockViewElement | CloudViewElement;
-      if (targetUid) {
-        if (oldTo.type === 'cloud') {
-          uidToDelete = oldTo.uid;
-        }
-        const newTarget = getUid(targetUid);
-        if (newTarget.type !== 'stock' && newTarget.type !== 'cloud') {
-          throw new Error(`new target isn't a stock or cloud (uid ${newTarget.uid})`);
-        }
-        to = newTarget;
-      } else if (oldTo.type === 'cloud') {
-        updateCloud = true;
-        to = {
-          ...oldTo,
-          x: oldTo.x - cursorMoveDelta.x,
-          y: oldTo.y - cursorMoveDelta.y,
-        };
-      } else {
-        newCloud = true;
-        to = {
-          type: 'cloud' as const,
-          uid: nextUid++,
-          x: oldTo.x - cursorMoveDelta.x,
-          y: oldTo.y - cursorMoveDelta.y,
-          flowUid: flow.uid,
-          isZeroRadius: false,
-          ident: undefined,
-        };
-      }
-
-      if (oldTo.uid !== to.uid) {
-        if (oldTo.type === 'stock') {
-          stockDetachingIdent = oldTo.ident;
-        }
-        if (to.type === 'stock') {
-          stockAttachingIdent = to.ident;
-        }
-      }
-
-      const moveDelta = {
-        x: oldTo.x - to.x,
-        y: oldTo.y - to.y,
-      };
-      const points = element.points.map((point) => {
-        if (point.attachedToUid !== oldTo.uid) {
-          return point;
-        }
-        return { ...point, attachedToUid: to.uid };
-      });
-      to = {
-        ...to,
-        x: oldTo.x,
-        y: oldTo.y,
-      } as StockViewElement | CloudViewElement;
-      element = { ...element, points };
-
-      [to, element] = UpdateCloudAndFlow(to, element as FlowViewElement, moveDelta);
-      if (newCloud) {
-        newClouds.push(to);
-      } else if (updateCloud) {
-        updatedCloud = to;
-      }
-
-      return element;
+    // Pure core: compute the new view (elements + nextUid), the model
+    // operations to apply, and the selection/creation state. See
+    // flow-attach.ts for the source/sink and op-builder deduplication.
+    const result = computeFlowAttachment(view, model.variables, {
+      flow,
+      targetUid,
+      cursorMoveDelta,
+      fauxTargetCenter,
+      inCreation,
+      isSourceAttach: !!isSourceAttach,
     });
-    // we might have updated some clouds
-    elements = elements.map((element: ViewElement) => {
-      if (updatedCloud && updatedCloud.uid === element.uid) {
-        return updatedCloud;
-      }
-      return element;
-    });
-    // if we have something to delete, do it here
-    elements = elements.filter((e) => e.uid !== uidToDelete);
-    if (flow.uid === inCreationUid) {
-      flow = {
-        ...flow,
-        uid: nextUid++,
-      };
-      const firstPt = first(flow.points);
-      const sourceUid = firstPt.attachedToUid;
-      if (sourceUid === inCreationCloudUid) {
-        const newCloud: CloudViewElement = {
-          type: 'cloud',
-          uid: nextUid++,
-          x: firstPt.x,
-          y: firstPt.y,
-          flowUid: flow.uid,
-          isZeroRadius: false,
-          ident: undefined,
-        };
-        elements = [...elements, newCloud];
-        flow = {
-          ...flow,
-          points: flow.points.map((pt) => {
-            if (pt.attachedToUid === inCreationCloudUid) {
-              return { ...pt, attachedToUid: newCloud.uid };
-            }
-            return pt;
-          }),
-        };
-      } else if (sourceUid) {
-        const sourceStock = getUid(sourceUid) as StockViewElement;
-        sourceStockIdent = defined(sourceStock.ident);
-      }
-      const lastPt = last(flow.points);
-      if (lastPt.attachedToUid === fauxCloudTargetUid) {
-        let newCloud = false;
-        let to: StockViewElement | CloudViewElement;
-        if (targetUid) {
-          to = getUid(targetUid) as StockViewElement | CloudViewElement;
-          stockAttachingIdent = defined(to.ident);
-          cursorMoveDelta = {
-            x: 0,
-            y: 0,
-          };
-        } else {
-          to = {
-            type: 'cloud' as const,
-            uid: nextUid++,
-            x: defined(fauxTargetCenter).x,
-            y: defined(fauxTargetCenter).y,
-            flowUid: flow.uid,
-            isZeroRadius: false,
-            ident: undefined,
-          };
-          newCloud = true;
-        }
-        flow = {
-          ...flow,
-          points: flow.points.map((pt) => {
-            if (pt.attachedToUid === fauxCloudTargetUid) {
-              return { ...pt, attachedToUid: to.uid };
-            }
-            return pt;
-          }),
-        };
-        [to, flow] = UpdateCloudAndFlow(to, flow, cursorMoveDelta);
-        if (newCloud) {
-          elements = [...elements, to];
-        }
-      }
-      elements = [...elements, flow];
-      selection = new Set([flow.uid]);
-      isCreatingNew = true;
-    }
-    elements = [...elements, ...newClouds];
 
+    // The pure core only assigns a selection when creating a new flow;
+    // otherwise it returns undefined and the existing selection is preserved.
+    // This matches the original, which seeded `selection` from state and only
+    // reassigned it in the creation path.
+    const selection = result.selection ?? this.state.selection;
+
+    // Preserve the original's early return on a missing engine: it bailed
+    // before applying ops or updating the view (no setState, no sim run).
     const engine = this.engine();
     if (!engine) {
       return;
     }
 
-    const ops: JsonModelOperation[] = [];
-
-    if (isCreatingNew) {
-      ops.push({
-        type: 'upsertFlow',
-        payload: {
-          flow: {
-            name: (flow as NamedViewElement).name,
-            equation: '',
-          },
-        },
-      });
-    }
-
-    if (sourceStockIdent) {
-      const model = defined(this.getModel());
-      const stockVar = model.variables.get(sourceStockIdent);
-      if (stockVar?.type === 'stock') {
-        ops.push({
-          type: 'updateStockFlows',
-          payload: {
-            ident: stockVar.ident,
-            inflows: [...stockVar.inflows],
-            outflows: [...stockVar.outflows, flow.ident],
-          },
-        });
-      }
-    }
-
-    // Handle source stock attaching (outflows)
-    if (sourceStockAttachingIdent) {
-      const model = defined(this.getModel());
-      const stockVar = model.variables.get(sourceStockAttachingIdent);
-      if (stockVar?.type === 'stock') {
-        ops.push({
-          type: 'updateStockFlows',
-          payload: {
-            ident: stockVar.ident,
-            inflows: [...stockVar.inflows],
-            outflows: [...stockVar.outflows, flow.ident],
-          },
-        });
-      }
-    }
-
-    // Handle source stock detaching (outflows)
-    if (sourceStockDetachingIdent) {
-      const model = defined(this.getModel());
-      const stockVar = model.variables.get(sourceStockDetachingIdent);
-      if (stockVar?.type === 'stock') {
-        ops.push({
-          type: 'updateStockFlows',
-          payload: {
-            ident: stockVar.ident,
-            inflows: [...stockVar.inflows],
-            outflows: stockVar.outflows.filter((f) => f !== flow.ident),
-          },
-        });
-      }
-    }
-
-    // Handle sink stock attaching (inflows)
-    if (stockAttachingIdent) {
-      const model = defined(this.getModel());
-      const stockVar = model.variables.get(stockAttachingIdent);
-      if (stockVar?.type === 'stock') {
-        ops.push({
-          type: 'updateStockFlows',
-          payload: {
-            ident: stockVar.ident,
-            inflows: [...stockVar.inflows, flow.ident],
-            outflows: [...stockVar.outflows],
-          },
-        });
-      }
-    }
-
-    // Handle sink stock detaching (inflows)
-    if (stockDetachingIdent) {
-      const model = defined(this.getModel());
-      const stockVar = model.variables.get(stockDetachingIdent);
-      if (stockVar?.type === 'stock') {
-        ops.push({
-          type: 'updateStockFlows',
-          payload: {
-            ident: stockVar.ident,
-            inflows: stockVar.inflows.filter((f) => f !== flow.ident),
-            outflows: [...stockVar.outflows],
-          },
-        });
-      }
-    }
-
-    if (ops.length > 0) {
+    if (result.ops.length > 0) {
       const patch: JsonProjectPatch = {
-        models: [{ name: this.state.modelName, ops }],
+        models: [{ name: this.state.modelName, ops: [...result.ops] }],
       };
-      try {
-        await engine.applyPatch(patch, { allowErrors: true });
-      } catch (e: unknown) {
-        const err = getErrorDetails(e);
-        console.error('applyPatch error (flow attach):', err.code, err.message, err.details);
-        this.appendModelError(err.message ?? 'Unknown error during flow attach');
+      // On patch failure, commit the selection/creation flag but DO NOT update
+      // the view -- preserving the original behavior exactly.
+      if (!(await this.applyPatchOrReportError(patch, 'flow attach'))) {
         this.setState({ selection, flowStillBeingCreated: inCreation });
         return;
       }
     }
 
-    await this.updateView({ ...view, nextUid, elements });
+    await this.updateView({ ...view, nextUid: result.nextUid, elements: [...result.elements] });
     this.setState({
       selection,
       flowStillBeingCreated: inCreation,

@@ -17,6 +17,7 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 - `BreadcrumbBar.tsx` -- Breadcrumb navigation: back arrow + breadcrumb trail when inside a module, hamburger menu at root
 - `ModuleIcon.tsx` -- Module tool icon for the SpeedDial toolbar
 - `group-movement.ts` -- Group manipulation and movement logic
+- `flow-attach.ts` -- Pure functional core for flow attach/reattach/create (`computeFlowAttachment`): the source/sink endpoint and `updateStockFlows` op builders extracted from `Editor.handleFlowAttach`. Returns the new elements, model ops, and selection; the Editor shell applies them.
 - `selection-logic.ts` -- Selection state management
 - `view-conversion.ts` -- View coordinate conversions
 - `arc-utils.ts` -- Arc geometry helpers (`radToDeg`, `degToRad`, arc math)

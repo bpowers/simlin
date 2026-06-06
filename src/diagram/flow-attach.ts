@@ -1,0 +1,452 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+/**
+ * Pure functional core for flow attachment, reattachment, and creation.
+ *
+ * Extracted verbatim (behavior-preserving) from `Editor.handleFlowAttach`,
+ * which is the hairiest interaction path in the editor: it covers flow
+ * creation, endpoint reattachment, and the full cloud lifecycle
+ * (create/update/delete). The imperative shell in Editor.tsx now reads the
+ * live view/model from state, calls `computeFlowAttachment`, applies the
+ * returned ops via the engine, and commits the returned view + selection.
+ *
+ * The two endpoint branches (source = first point, sink = last point) were
+ * near-duplicate ~70-line blocks in the original. They are unified here into a
+ * single `reattachEndpoint` parameterized by `end`. The branches differ only
+ * in:
+ *   - which endpoint of the flow is operated on (first vs last point), and
+ *   - which idents the bookkeeping records (source-side vs sink-side), which
+ *     in turn drive outflows (source) vs inflows (sink) operations.
+ * Everything else -- cloud creation/update/deletion, the move-delta math, the
+ * UpdateCloudAndFlow call -- is byte-identical between the two.
+ *
+ * The four `updateStockFlows` op builders in the original (source attach/detach
+ * touching outflows, sink attach/detach touching inflows) are unified into one
+ * `stockFlowsOp` helper. See `computeFlowAttachment` for the one deliberate
+ * normalization (collapsing exact-duplicate ops).
+ */
+
+import { first, last } from '@simlin/core/collections';
+import { defined } from '@simlin/core/common';
+import {
+  CloudViewElement,
+  FlowViewElement,
+  NamedViewElement,
+  StockFlowView,
+  StockViewElement,
+  UID,
+  Variable,
+  ViewElement,
+} from '@simlin/core/datamodel';
+import type { JsonModelOperation } from '@simlin/engine';
+
+import { UpdateCloudAndFlow } from './drawing/Flow';
+// The drawing-layer Point is a bare {x, y} (no attachedToUid). cursorMoveDelta
+// and fauxTargetCenter are screen-space positions/deltas, not flow points, so
+// they use this type -- matching what Canvas passes to onMoveFlow.
+import type { Point as CanvasPoint } from './drawing/common';
+
+// Sentinel UIDs used by Canvas during flow creation. Duplicated here (rather
+// than imported from Canvas.tsx) so this functional-core module stays free of
+// React/DOM dependencies. They must stay in sync with the exports in
+// drawing/Canvas.tsx.
+export const inCreationUid = -2;
+export const inCreationCloudUid = -4;
+export const fauxCloudTargetUid = -5;
+
+/**
+ * Inputs to `computeFlowAttachment`, mirroring the arguments Canvas passes to
+ * Editor.handleFlowAttach.
+ */
+export interface FlowAttachParams {
+  /** The flow being attached/reattached/created (may carry a sentinel uid). */
+  readonly flow: FlowViewElement;
+  /** UID of the snap target stock/cloud, or 0 when released over empty space. */
+  readonly targetUid: number;
+  /** Pointer delta accumulated during the drag. */
+  readonly cursorMoveDelta: CanvasPoint;
+  /** Center of the faux target, used when a created flow ends in empty space. */
+  readonly fauxTargetCenter: CanvasPoint | undefined;
+  /** Whether the flow is still being created (drives flowStillBeingCreated). */
+  readonly inCreation: boolean;
+  /** True when the dragged endpoint is the source (first point). */
+  readonly isSourceAttach: boolean;
+}
+
+/**
+ * Result of `computeFlowAttachment`: a new view (elements + nextUid), the model
+ * operations to apply, and the selection/creation state to commit. This is a
+ * pure description of the change; the caller performs all side effects.
+ */
+export interface FlowAttachResult {
+  readonly elements: readonly ViewElement[];
+  readonly nextUid: number;
+  readonly ops: readonly JsonModelOperation[];
+  readonly selection: ReadonlySet<UID> | undefined;
+  readonly isCreatingNew: boolean;
+}
+
+/** Mutable bookkeeping threaded through the endpoint reattachment logic. */
+interface AttachState {
+  // Sink-side idents (drive inflows operations).
+  stockDetachingIdent: string | undefined;
+  stockAttachingIdent: string | undefined;
+  // Source-side idents (drive outflows operations).
+  sourceStockIdent: string | undefined;
+  sourceStockDetachingIdent: string | undefined;
+  sourceStockAttachingIdent: string | undefined;
+  // The cloud uid to remove (set when a flow detaches from a cloud).
+  uidToDelete: number | undefined;
+  // A cloud whose position changed (must be substituted back into elements).
+  updatedCloud: ViewElement | undefined;
+  // Newly created clouds to append to the element list.
+  newClouds: ViewElement[];
+  // The next free uid; incremented as clouds/flows are materialized.
+  nextUid: number;
+}
+
+/**
+ * Reattach one endpoint (source = first point, sink = last point) of an
+ * existing flow. Mutates `state` for the cloud/ident bookkeeping and returns
+ * the updated flow element. This preserves the original two-branch behavior
+ * exactly; the only structural change is parameterizing on `end`.
+ */
+function reattachEndpoint(
+  element: FlowViewElement,
+  end: 'source' | 'sink',
+  params: FlowAttachParams,
+  getUid: (uid: number) => ViewElement,
+  state: AttachState,
+): FlowViewElement {
+  const { targetUid, cursorMoveDelta, flow } = params;
+
+  // The endpoint being moved: first point for source, last point for sink.
+  const oldEnd = getUid(defined((end === 'source' ? first : last)(element.points).attachedToUid));
+
+  let newCloud = false;
+  let updateCloud = false;
+  let endpoint: StockViewElement | CloudViewElement;
+
+  if (targetUid) {
+    if (oldEnd.type === 'cloud') {
+      state.uidToDelete = oldEnd.uid;
+    }
+    const newTarget = getUid(targetUid);
+    if (newTarget.type !== 'stock' && newTarget.type !== 'cloud') {
+      throw new Error(`new target isn't a stock or cloud (uid ${newTarget.uid})`);
+    }
+    endpoint = newTarget;
+  } else if (oldEnd.type === 'cloud') {
+    updateCloud = true;
+    endpoint = {
+      ...oldEnd,
+      x: oldEnd.x - cursorMoveDelta.x,
+      y: oldEnd.y - cursorMoveDelta.y,
+    };
+  } else {
+    // Detaching from a stock - create a new cloud at the release position.
+    // oldEnd.x - cursorMoveDelta.x/y places the cloud where the user
+    // released, not where they started.
+    newCloud = true;
+    endpoint = {
+      type: 'cloud' as const,
+      uid: state.nextUid++,
+      x: oldEnd.x - cursorMoveDelta.x,
+      y: oldEnd.y - cursorMoveDelta.y,
+      flowUid: flow.uid,
+      isZeroRadius: false,
+      ident: undefined,
+    };
+  }
+
+  if (oldEnd.uid !== endpoint.uid) {
+    if (oldEnd.type === 'stock') {
+      if (end === 'source') {
+        state.sourceStockDetachingIdent = oldEnd.ident;
+      } else {
+        state.stockDetachingIdent = oldEnd.ident;
+      }
+    }
+    if (endpoint.type === 'stock') {
+      if (end === 'source') {
+        state.sourceStockAttachingIdent = endpoint.ident;
+      } else {
+        state.stockAttachingIdent = endpoint.ident;
+      }
+    }
+  }
+
+  const moveDelta = {
+    x: oldEnd.x - endpoint.x,
+    y: oldEnd.y - endpoint.y,
+  };
+  const points = element.points.map((point) => {
+    if (point.attachedToUid !== oldEnd.uid) {
+      return point;
+    }
+    return { ...point, attachedToUid: endpoint.uid };
+  });
+  endpoint = {
+    ...endpoint,
+    x: oldEnd.x,
+    y: oldEnd.y,
+  } as StockViewElement | CloudViewElement;
+  element = { ...element, points };
+
+  let updatedEndpoint: StockViewElement | CloudViewElement;
+  [updatedEndpoint, element] = UpdateCloudAndFlow(endpoint, element, moveDelta);
+  if (newCloud) {
+    state.newClouds.push(updatedEndpoint);
+  } else if (updateCloud) {
+    state.updatedCloud = updatedEndpoint;
+  }
+
+  return element;
+}
+
+/**
+ * Build a single `updateStockFlows` operation that adds or removes `flowIdent`
+ * from the named stock's inflows or outflows. Returns undefined when the
+ * variable is missing or not a stock (matching the original guard).
+ *
+ * `list`/`action` collapse the four near-identical op builders from the
+ * original (source attach/detach -> outflows add/remove; sink attach/detach
+ * -> inflows add/remove). Every op carries the *full* inflow and outflow lists
+ * because the engine does full replacement on updateStockFlows, so the other
+ * list must be echoed back unchanged.
+ */
+function stockFlowsOp(
+  variables: ReadonlyMap<string, Variable>,
+  stockIdent: string,
+  list: 'inflows' | 'outflows',
+  action: 'add' | 'remove',
+  flowIdent: string,
+): JsonModelOperation | undefined {
+  const stockVar = variables.get(stockIdent);
+  if (stockVar?.type !== 'stock') {
+    return undefined;
+  }
+
+  const mutate = (current: readonly string[]): string[] =>
+    action === 'add' ? [...current, flowIdent] : current.filter((f) => f !== flowIdent);
+
+  return {
+    type: 'updateStockFlows',
+    payload: {
+      ident: stockVar.ident,
+      inflows: list === 'inflows' ? mutate(stockVar.inflows) : [...stockVar.inflows],
+      outflows: list === 'outflows' ? mutate(stockVar.outflows) : [...stockVar.outflows],
+    },
+  };
+}
+
+/**
+ * Compute the full result of a flow attach/reattach/create interaction.
+ *
+ * This is a behavior-preserving extraction of the body of
+ * Editor.handleFlowAttach up to (but not including) the engine round-trip. It
+ * is pure: given the current view, the active model's variables, and the
+ * interaction params, it returns the new elements, the operations to apply,
+ * and the selection/creation state. The caller owns all side effects.
+ *
+ * Throws `unknown uid <n>` (preserved from the original `getUid`) when an
+ * attachment references a uid not present in the view.
+ */
+export function computeFlowAttachment(
+  view: StockFlowView,
+  variables: ReadonlyMap<string, Variable>,
+  params: FlowAttachParams,
+): FlowAttachResult {
+  const { targetUid, fauxTargetCenter, isSourceAttach } = params;
+  // cursorMoveDelta is reassigned in the creation-snapped-to-target path, so
+  // keep a local mutable copy rather than mutating params.
+  let cursorMoveDelta = params.cursorMoveDelta;
+
+  let selection: ReadonlySet<UID> | undefined = undefined;
+  let isCreatingNew = false;
+
+  const getUid = (uid: number): ViewElement => {
+    for (const e of view.elements) {
+      if (e.uid === uid) {
+        return e;
+      }
+    }
+    throw new Error(`unknown uid ${uid}`);
+  };
+
+  const state: AttachState = {
+    stockDetachingIdent: undefined,
+    stockAttachingIdent: undefined,
+    sourceStockIdent: undefined,
+    sourceStockDetachingIdent: undefined,
+    sourceStockAttachingIdent: undefined,
+    uidToDelete: undefined,
+    updatedCloud: undefined,
+    newClouds: [],
+    nextUid: view.nextUid,
+  };
+
+  let flow = params.flow;
+
+  let elements: ViewElement[] = view.elements.map((element: ViewElement) => {
+    if (element.uid !== flow.uid) {
+      return element;
+    }
+    if (element.type !== 'flow') {
+      return element;
+    }
+    return reattachEndpoint(element, isSourceAttach ? 'source' : 'sink', params, getUid, state);
+  });
+
+  // we might have updated some clouds
+  elements = elements.map((element: ViewElement) => {
+    if (state.updatedCloud && state.updatedCloud.uid === element.uid) {
+      return state.updatedCloud;
+    }
+    return element;
+  });
+  // if we have something to delete, do it here
+  elements = elements.filter((e) => e.uid !== state.uidToDelete);
+
+  if (flow.uid === inCreationUid) {
+    flow = {
+      ...flow,
+      uid: state.nextUid++,
+    };
+    const firstPt = first(flow.points);
+    const sourceUid = firstPt.attachedToUid;
+    if (sourceUid === inCreationCloudUid) {
+      const newCloud: CloudViewElement = {
+        type: 'cloud',
+        uid: state.nextUid++,
+        x: firstPt.x,
+        y: firstPt.y,
+        flowUid: flow.uid,
+        isZeroRadius: false,
+        ident: undefined,
+      };
+      elements = [...elements, newCloud];
+      flow = {
+        ...flow,
+        points: flow.points.map((pt) => {
+          if (pt.attachedToUid === inCreationCloudUid) {
+            return { ...pt, attachedToUid: newCloud.uid };
+          }
+          return pt;
+        }),
+      };
+    } else if (sourceUid) {
+      const sourceStock = getUid(sourceUid) as StockViewElement;
+      state.sourceStockIdent = defined(sourceStock.ident);
+    }
+    const lastPt = last(flow.points);
+    if (lastPt.attachedToUid === fauxCloudTargetUid) {
+      let newCloud = false;
+      let to: StockViewElement | CloudViewElement;
+      if (targetUid) {
+        to = getUid(targetUid) as StockViewElement | CloudViewElement;
+        state.stockAttachingIdent = defined(to.ident);
+        cursorMoveDelta = {
+          x: 0,
+          y: 0,
+        };
+      } else {
+        to = {
+          type: 'cloud' as const,
+          uid: state.nextUid++,
+          x: defined(fauxTargetCenter).x,
+          y: defined(fauxTargetCenter).y,
+          flowUid: flow.uid,
+          isZeroRadius: false,
+          ident: undefined,
+        };
+        newCloud = true;
+      }
+      flow = {
+        ...flow,
+        points: flow.points.map((pt) => {
+          if (pt.attachedToUid === fauxCloudTargetUid) {
+            return { ...pt, attachedToUid: to.uid };
+          }
+          return pt;
+        }),
+      };
+      [to, flow] = UpdateCloudAndFlow(to, flow, cursorMoveDelta);
+      if (newCloud) {
+        elements = [...elements, to];
+      }
+    }
+    elements = [...elements, flow];
+    selection = new Set([flow.uid]);
+    isCreatingNew = true;
+  }
+  elements = [...elements, ...state.newClouds];
+
+  // Build the operations. Each updateStockFlows carries the full inflow and
+  // outflow lists because the engine replaces them wholesale.
+  const rawOps: (JsonModelOperation | undefined)[] = [];
+
+  if (isCreatingNew) {
+    rawOps.push({
+      type: 'upsertFlow',
+      payload: {
+        flow: {
+          name: (flow as NamedViewElement).name,
+          equation: '',
+        },
+      },
+    });
+  }
+
+  // Source side -> outflows. sourceStockIdent (creation) and
+  // sourceStockAttachingIdent (reattach) both ADD this flow to outflows and
+  // are computed from the same pre-patch stockVar, so when both are set they
+  // produce identical ops; the dedup pass below collapses the duplicate.
+  if (state.sourceStockIdent) {
+    rawOps.push(stockFlowsOp(variables, state.sourceStockIdent, 'outflows', 'add', flow.ident));
+  }
+  if (state.sourceStockAttachingIdent) {
+    rawOps.push(stockFlowsOp(variables, state.sourceStockAttachingIdent, 'outflows', 'add', flow.ident));
+  }
+  if (state.sourceStockDetachingIdent) {
+    rawOps.push(stockFlowsOp(variables, state.sourceStockDetachingIdent, 'outflows', 'remove', flow.ident));
+  }
+  // Sink side -> inflows.
+  if (state.stockAttachingIdent) {
+    rawOps.push(stockFlowsOp(variables, state.stockAttachingIdent, 'inflows', 'add', flow.ident));
+  }
+  if (state.stockDetachingIdent) {
+    rawOps.push(stockFlowsOp(variables, state.stockDetachingIdent, 'inflows', 'remove', flow.ident));
+  }
+
+  // Drop ops whose variable was missing/non-stock (stockFlowsOp returned
+  // undefined), then collapse exact-duplicate ops. The original emitted two
+  // identical updateStockFlows ops when both sourceStockIdent and
+  // sourceStockAttachingIdent were set; under the engine's full-replacement
+  // semantics the second op rewrites the same content, so collapsing exact
+  // duplicates is a no-op in effect. This is the ONE deliberate normalization
+  // in this extraction -- everything else is byte-identical in effect.
+  const ops: JsonModelOperation[] = [];
+  const seen = new Set<string>();
+  for (const op of rawOps) {
+    if (op === undefined) {
+      continue;
+    }
+    const key = JSON.stringify(op);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    ops.push(op);
+  }
+
+  return {
+    elements,
+    nextUid: state.nextUid,
+    ops,
+    selection,
+    isCreatingNew,
+  };
+}
