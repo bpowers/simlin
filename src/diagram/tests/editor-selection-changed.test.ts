@@ -6,13 +6,21 @@
  * Version 2.0, that can be found in the LICENSE file.
  */
 
-// Verifies the onSelectionChanged prop fires after handleSelection commits
-// state, with the canonical-ident array. Uses `new Editor(props)` to install
-// the arrow-function instance fields (handleSelection lives on the instance,
-// not the prototype, so Object.create wouldn't expose it). The constructor's
-// deferred `openInitialProject()` and other async work is held back by
-// jest.useFakeTimers — none of that machinery is required for the
-// handleSelection -> onSelectionChanged path under test.
+// Verifies the onSelectionChanged prop fires from componentDidUpdate
+// whenever the committed selection changes, with the canonical-ident array.
+//
+// The callback used to be deferred via setTimeout(0) inside handleSelection
+// so React could commit the new selection before getSelectionIdents() read
+// `this.state.selection`. It now fires from componentDidUpdate, which React
+// only invokes *after* the commit -- so the read is already against fresh
+// state and no deferral (or unmount-time timer cancellation) is needed.
+// This also makes the callback fire for selection changes that never went
+// through handleSelection (deletion clearing the selection, module
+// drill-in/back resetting it, undo/redo resets).
+//
+// Uses `new Editor(props)` to install the arrow-function instance fields,
+// then shims state/setState so we can drive componentDidUpdate without the
+// React reconciler.
 
 import { Editor } from '../Editor';
 
@@ -44,6 +52,7 @@ function makeEditor(args: {
       flowStillBeingCreated: false,
       variableDetailsActiveTab: 0,
       showDetails: undefined,
+      modelName: 'main',
     },
     writable: true,
     configurable: true,
@@ -58,19 +67,22 @@ function makeEditor(args: {
   // The real method's wiring (state.selection -> view.elements) is exercised
   // by editor-applyPatch.test.ts and the Canvas integration tests.
   editor.getSelectionIdents = () => args.selectionIdents;
+  // refreshCachedErrors is invoked from componentDidUpdate on a modelName
+  // change; stub it so the selection-focused tests don't need an engine.
+  editor.refreshCachedErrors = jest.fn().mockResolvedValue(undefined) as EditorInstance['refreshCachedErrors'];
 
   return editor;
 }
 
-describe('Editor.handleSelection -> onSelectionChanged', () => {
-  beforeEach(() => {
-    jest.useFakeTimers();
-  });
+// Drive a committed selection change the way React would: mutate state, then
+// invoke componentDidUpdate with the prior state.
+function commitSelection(editor: EditorInstance, selection: ReadonlySet<number>): void {
+  const prevState = { ...editor.state };
+  editor.handleSelection(selection);
+  editor.componentDidUpdate(editor.props, prevState);
+}
 
-  afterEach(() => {
-    jest.useRealTimers();
-  });
-
+describe('Editor componentDidUpdate -> onSelectionChanged', () => {
   it('invokes onSelectionChanged with the canonical idents after the selection commits', () => {
     const callback = jest.fn();
     const editor = makeEditor({
@@ -78,13 +90,7 @@ describe('Editor.handleSelection -> onSelectionChanged', () => {
       selectionIdents: ['teacup_temperature', 'ambient_temperature'],
     });
 
-    editor.handleSelection(new Set<number>([1, 2]));
-
-    // The callback is deferred via setTimeout(0) so the state commit
-    // happens before the host receives the callback.
-    expect(callback).not.toHaveBeenCalled();
-
-    jest.advanceTimersByTime(0);
+    commitSelection(editor, new Set<number>([1, 2]));
 
     expect(callback).toHaveBeenCalledTimes(1);
     expect(callback).toHaveBeenCalledWith(['teacup_temperature', 'ambient_temperature']);
@@ -94,15 +100,35 @@ describe('Editor.handleSelection -> onSelectionChanged', () => {
     const callback = jest.fn();
     const editor = makeEditor({
       onSelectionChanged: callback,
-      selectionIdents: [],
+      selectionIdents: ['x'],
     });
 
-    editor.handleSelection(new Set<number>());
+    // First commit a non-empty selection so clearing it is a real change.
+    commitSelection(editor, new Set<number>([1]));
+    callback.mockClear();
+    editor.getSelectionIdents = () => [];
 
-    jest.advanceTimersByTime(0);
+    commitSelection(editor, new Set<number>());
 
     expect(callback).toHaveBeenCalledTimes(1);
     expect(callback).toHaveBeenCalledWith([]);
+  });
+
+  it('does not fire when the committed selection is unchanged', () => {
+    const callback = jest.fn();
+    const editor = makeEditor({
+      onSelectionChanged: callback,
+      selectionIdents: ['x'],
+    });
+
+    // componentDidUpdate with prevState.selection identical to the current
+    // selection (e.g. an unrelated state change re-rendered the component)
+    // must not re-notify the host.
+    const sameSelection = new Set<number>([1]);
+    Object.assign(editor.state, { selection: sameSelection });
+    editor.componentDidUpdate(editor.props, { ...editor.state, selection: sameSelection });
+
+    expect(callback).not.toHaveBeenCalled();
   });
 
   it('does not throw when onSelectionChanged is omitted', () => {
@@ -112,70 +138,43 @@ describe('Editor.handleSelection -> onSelectionChanged', () => {
     });
 
     expect(() => {
-      editor.handleSelection(new Set<number>([1]));
-    }).not.toThrow();
-
-    // Advancing timers must also not throw — i.e. no scheduled callback
-    // attempted to run on `undefined`.
-    expect(() => {
-      jest.advanceTimersByTime(0);
+      commitSelection(editor, new Set<number>([1]));
     }).not.toThrow();
   });
 
-  it('cancels the deferred callback on unmount so a remount does not see stale idents', () => {
-    // EditorHost keys the Editor by `${path}#${loadGeneration}`, so a path
-    // swap unmounts the current Editor and mounts a fresh one. The
-    // setTimeout(0) deferral must not fire after componentWillUnmount,
-    // or the unmounted Editor's onSelectionChanged callback runs against
-    // a host that has since switched paths — re-introducing the
-    // stale-idents-on-new-path bug the EditorHost-side fix already
-    // closed for the debounce window.
+  it('notifies when the selection is cleared by a non-handleSelection path (e.g. deletion)', () => {
+    // The deliberate semantic improvement: handleSelectionDelete clears the
+    // selection directly via setState, never routing through handleSelection.
+    // componentDidUpdate still observes the committed change and notifies the
+    // host -- previously this case sent no callback at all.
     const callback = jest.fn();
     const editor = makeEditor({
       onSelectionChanged: callback,
-      selectionIdents: ['stale_ident'],
+      selectionIdents: [],
     });
 
-    editor.handleSelection(new Set<number>([1]));
+    // Simulate a prior non-empty selection, then a delete that clears it.
+    Object.assign(editor.state, { selection: new Set<number>([1, 2]) });
+    const prevState = { ...editor.state };
+    Object.assign(editor.state, { selection: new Set<number>() });
+    editor.componentDidUpdate(editor.props, prevState);
 
-    // componentWillUnmount also clears the document keydown listener,
-    // which doesn't exist under @jest-environment node — stub it so we
-    // can call the lifecycle hook without bringing in jsdom.
-    const documentStub = {
-      removeEventListener: () => {},
-      addEventListener: () => {},
-    } as unknown as Document;
-    (globalThis as { document?: Document }).document = documentStub;
-    try {
-      editor.componentWillUnmount();
-    } finally {
-      delete (globalThis as { document?: Document }).document;
-    }
-
-    jest.advanceTimersByTime(0);
-
-    expect(callback).not.toHaveBeenCalled();
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith([]);
   });
 
   it('reads idents at fire time so the host sees the committed state', () => {
-    // React 19's setState is asynchronous — `this.state.selection` is not
-    // updated synchronously when handleSelection's setState call returns.
-    // The deferred setTimeout ensures the callback fires AFTER the state
-    // commit, and getSelectionIdents() inside the deferred closure reads
-    // the fresh state. We verify this contract by mutating the
-    // getSelectionIdents stub between scheduling and firing: the callback
-    // observes the value at fire time.
+    // getSelectionIdents reads the committed state; componentDidUpdate runs
+    // after the commit, so whatever the method returns at that point is what
+    // the host observes.
     const callback = jest.fn();
     const editor = makeEditor({
       onSelectionChanged: callback,
       selectionIdents: ['initial'],
     });
 
-    editor.handleSelection(new Set<number>([1]));
-
     editor.getSelectionIdents = () => ['committed'];
-
-    jest.advanceTimersByTime(0);
+    commitSelection(editor, new Set<number>([1]));
 
     expect(callback).toHaveBeenCalledWith(['committed']);
   });

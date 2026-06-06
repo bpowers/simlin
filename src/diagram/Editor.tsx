@@ -319,13 +319,6 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   inSave = false;
   saveQueued = false;
-  // Pending setTimeout(0) handle for the deferred onSelectionChanged
-  // callback. Held so componentWillUnmount can cancel — without that,
-  // a remount triggered by an EditorHost path swap (which keys the
-  // Editor by `${path}#${loadGeneration}`) would let the prior
-  // instance's callback fire against the new instance, re-introducing
-  // the stale-idents-on-new-path bug.
-  private selectionDeferralTimer: ReturnType<typeof setTimeout> | null = null;
   // Pending setTimeout(0) handles for componentDidMount's deferred
   // openInitialProject() and the scheduleSimRun() / scheduleSave() /
   // handleUndoRedo() dispatches. Held so componentWillUnmount can cancel
@@ -450,10 +443,6 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // starting and clearTimeout reaching it must short-circuit. The
     // clearTimeout calls below are best-effort optimization on top.
     this.unmounted = true;
-    if (this.selectionDeferralTimer !== null) {
-      clearTimeout(this.selectionDeferralTimer);
-      this.selectionDeferralTimer = null;
-    }
     if (this.openInitialProjectTimer !== null) {
       clearTimeout(this.openInitialProjectTimer);
       this.openInitialProjectTimer = null;
@@ -486,6 +475,33 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // project with an open snapshot doesn't strand the blob.
     if (this.state.snapshotUrl) {
       URL.revokeObjectURL(this.state.snapshotUrl);
+    }
+  }
+
+  componentDidUpdate(_prevProps: EditorProps, prevState: EditorState) {
+    // Fire onSelectionChanged whenever the committed selection actually
+    // changed. Driving this from componentDidUpdate (rather than a
+    // setTimeout(0) inside handleSelection) means the host observes *every*
+    // committed selection change -- not just clicks routed through
+    // handleSelection, but also selections cleared by a delete, reset on
+    // module drill-in/back, and undo/redo-induced resets. getSelectionIdents
+    // reads the already-committed `this.state.selection`, so no deferral is
+    // needed; and componentDidUpdate never fires after unmount, so a path
+    // swap that remounts the Editor cannot leak a stale-idents callback onto
+    // the new instance.
+    if (this.props.onSelectionChanged && !setsEqual(prevState.selection, this.state.selection)) {
+      this.props.onSelectionChanged(this.getSelectionIdents());
+    }
+
+    // Refresh cached errors when the active model changes (drill-in,
+    // navigate-back, navigate-to-level). The error panel and warning dots
+    // are scoped to the active model, so they must re-derive from the
+    // engine for the newly displayed one. This replaces three per-handler
+    // setTimeout(0) refreshCachedErrors() calls; componentDidUpdate runs
+    // post-commit and never after unmount, so the previous unmounted-guards
+    // are unnecessary here.
+    if (prevState.modelName !== this.state.modelName) {
+      void this.refreshCachedErrors();
     }
   }
 
@@ -817,28 +833,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (selection.size === 0) {
       this.setState({ showDetails: undefined });
     }
-    // Defer one tick so React commits the new selection before the host
-    // observes the callback. getSelectionIdents reads `this.state.selection`,
-    // which is asynchronous in React 19 — calling it inline here would
-    // return the prior selection. Reading inside the setTimeout closure
-    // guarantees the call happens after the setState commit.
-    //
-    // Track the timer in an instance field so componentWillUnmount can
-    // cancel it; a host that key-swaps the Editor (path change in
-    // EditorHost) must not see this instance's idents land on the new
-    // instance's path. A new selection in the same instance also
-    // supersedes any pending deferral so the host always sees the
-    // latest committed selection.
-    const onSelectionChanged = this.props.onSelectionChanged;
-    if (onSelectionChanged) {
-      if (this.selectionDeferralTimer !== null) {
-        clearTimeout(this.selectionDeferralTimer);
-      }
-      this.selectionDeferralTimer = setTimeout(() => {
-        this.selectionDeferralTimer = null;
-        onSelectionChanged(this.getSelectionIdents());
-      }, 0);
-    }
+    // The host's onSelectionChanged callback is no longer fired here. It is
+    // fired from componentDidUpdate when the committed selection changes,
+    // which covers this path plus every other route that mutates the
+    // selection (delete, module drill-in/back, undo/redo). Reading the
+    // selection there guarantees it observes the committed state without a
+    // setTimeout(0) deferral.
   };
 
   handleShowVariableDetails = () => {
@@ -1920,16 +1920,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       // Clear selected tool when entering a stdlib model (tool palette is hidden)
       selectedTool: isStdlibModel(newModelName) ? undefined : this.state.selectedTool,
     });
-    // Refresh errors for the newly active model so warning dots and the
-    // error panel reflect the child model's state immediately. Guarded on
-    // `unmounted` like every other deferred callback in this class -- the
-    // Editor remounts on route changes and EditorHost path swaps, and these
-    // callbacks call setState / engine methods.
-    setTimeout(() => {
-      if (!this.unmounted) {
-        void this.refreshCachedErrors();
-      }
-    });
+    // The error refresh for the newly active model is driven by
+    // componentDidUpdate's modelName-change trigger -- see there.
   };
 
   handleNavigateBack = (): void => {
@@ -1938,30 +1930,27 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
     const result = popModule(modelStack);
-    this.setState({
-      modelStack: result.newStack,
-      modelName: result.restoredModelName,
-      selection: result.restoredSelection,
-      showDetails: undefined,
-    });
-    // Restore the parent model's viewport asynchronously via queueViewUpdate.
-    // The parent model's view already exists in the project; we just need to
-    // apply the saved viewBox and zoom back onto it.
-    setTimeout(async () => {
-      if (this.unmounted) {
-        return;
-      }
-      const view = this.getView();
-      if (view) {
-        await this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
-      }
-    });
-    // Refresh errors for the restored model
-    setTimeout(() => {
-      if (!this.unmounted) {
-        void this.refreshCachedErrors();
-      }
-    });
+    // Restore the parent model's viewport from the setState callback, which
+    // fires once React has committed the restored modelName/modelStack so
+    // getView() resolves to the parent model's already-existing view. The
+    // callback is scoped to exactly this commit and never runs after
+    // unmount, so the previous setTimeout + unmounted-guard is unnecessary.
+    // Error refresh for the restored model is handled by componentDidUpdate's
+    // modelName-change trigger.
+    this.setState(
+      {
+        modelStack: result.newStack,
+        modelName: result.restoredModelName,
+        selection: result.restoredSelection,
+        showDetails: undefined,
+      },
+      () => {
+        const view = this.getView();
+        if (view) {
+          void this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
+        }
+      },
+    );
   };
 
   handleNavigateToLevel = (targetLevel: number): void => {
@@ -1970,28 +1959,24 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
     const result = navigateToLevel(modelStack, targetLevel);
-    this.setState({
-      modelStack: result.newStack,
-      modelName: result.restoredModelName,
-      selection: result.restoredSelection,
-      showDetails: undefined,
-    });
-    // Restore the target level's viewport asynchronously
-    setTimeout(async () => {
-      if (this.unmounted) {
-        return;
-      }
-      const view = this.getView();
-      if (view) {
-        await this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
-      }
-    });
-    // Refresh errors for the target level's model
-    setTimeout(() => {
-      if (!this.unmounted) {
-        void this.refreshCachedErrors();
-      }
-    });
+    // Restore the target level's viewport from the setState callback (fires
+    // post-commit, so getView() resolves to the restored model) and let
+    // componentDidUpdate's modelName-change trigger refresh errors. See
+    // handleNavigateBack for why this replaces the prior setTimeouts.
+    this.setState(
+      {
+        modelStack: result.newStack,
+        modelName: result.restoredModelName,
+        selection: result.restoredSelection,
+        showDetails: undefined,
+      },
+      () => {
+        const view = this.getView();
+        if (view) {
+          void this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
+        }
+      },
+    );
   };
 
   handleSearchChange = async (_event: React.SyntheticEvent | null, newValue: string | null) => {
@@ -2759,13 +2744,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
 
-    // The try/catch deliberately extends past the engine open: this method is
-    // invoked from a fire-and-forget setTimeout in the constructor, and
-    // src/app / src/diagram have no React error boundary. If serializeJson
-    // panics in WASM or projectFromJson rejects the engine's JSON (e.g. an
-    // unknown view element type), an unguarded throw becomes an unhandled
-    // rejection and the user is left staring at editor chrome with a blank
-    // canvas and no error message.
+    // The try/catch deliberately extends past the engine open: this method
+    // is invoked from a fire-and-forget setTimeout, so a throw here becomes
+    // an unhandled rejection that the ErrorBoundary cannot catch (boundaries
+    // only catch synchronous render-phase throws). Catching it here also lets
+    // us surface a contextual message ("opening the project failed: ...") and
+    // dispose the orphaned engine, which is strictly better than the
+    // boundary's generic fallback. If serializeJson panics in WASM or
+    // projectFromJson rejects the engine's JSON (e.g. an unknown view element
+    // type), an unguarded throw would otherwise leave the user staring at
+    // editor chrome with a blank canvas and no error message.
     try {
       this.engineProject = engine;
 
@@ -2801,7 +2789,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     // See openInitialProject: the steps after a successful engine open can
     // still throw (serializeJson WASM panic, projectFromJson rejecting an
-    // unknown view element type) and there is no error boundary above us.
+    // unknown view element type). These run in an async method, so the
+    // ErrorBoundary (which only catches synchronous render-phase throws)
+    // cannot handle them; catching here also gives a contextual message and
+    // disposes the orphaned engine.
     try {
       this.engineProject = engine;
 

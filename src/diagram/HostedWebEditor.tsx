@@ -10,6 +10,7 @@ import { baseURL, defined } from '@simlin/core/common';
 import { first } from '@simlin/core/collections';
 
 import { Editor, ProtobufProjectData } from './Editor';
+import { ErrorBoundary } from './ErrorBoundary';
 
 import styles from './HostedWebEditor.module.css';
 
@@ -222,16 +223,18 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
 
     return (
       <div className={classNames}>
-        <Editor
-          inputFormat="protobuf"
-          initialProjectBinary={this.state.projectBinary}
-          initialProjectVersion={this.state.projectVersion}
-          name={this.props.projectName}
-          embedded={this.props.embedded}
-          onSave={this.handleSave}
-          onDeleteProject={this.props.readOnlyMode ? undefined : this.handleDelete}
-          readOnlyMode={this.props.readOnlyMode}
-        />
+        <ErrorBoundary>
+          <Editor
+            inputFormat="protobuf"
+            initialProjectBinary={this.state.projectBinary}
+            initialProjectVersion={this.state.projectVersion}
+            name={this.props.projectName}
+            embedded={this.props.embedded}
+            onSave={this.handleSave}
+            onDeleteProject={this.props.readOnlyMode ? undefined : this.handleDelete}
+            readOnlyMode={this.props.readOnlyMode}
+          />
+        </ErrorBoundary>
       </div>
     );
   }

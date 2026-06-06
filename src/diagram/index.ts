@@ -6,6 +6,7 @@ import './reset.css';
 
 export { Editor } from './Editor';
 export type { ProtobufProjectData, JsonProjectData, ProjectData } from './Editor';
+export { ErrorBoundary } from './ErrorBoundary';
 export { renderSvgToString } from './render-common';
 
 // UI Components
