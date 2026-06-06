@@ -16,12 +16,25 @@ import type {
   ProjectControllerConfig,
 } from '../project-controller';
 
-/** A minimal but valid native-format project JSON that projectFromJson accepts. */
+// The engine prefixes injected stdlib model names (e.g. 'stdlib\u{205A}delay1').
+// We mirror that convention so isStdlibModel() recognizes the fake's stdlib
+// model and tests can assert on its presence/absence.
+export const FAKE_STDLIB_MODEL_NAME = 'stdlib\u{205A}delay1';
+
+/**
+ * A minimal but valid native-format project JSON that projectFromJson accepts.
+ *
+ * When `includeStdlib` is true, a recognizable stdlib model is appended,
+ * mirroring the real engine's `serializeJson(format, includeStdlib=true)`
+ * behavior: the display path injects referenced stdlib definitions, the save
+ * path (includeStdlib=false) omits them so they are never persisted.
+ */
 export function validProjectJson(
   overrides: {
     name?: string;
     extraModels?: ReadonlyArray<Record<string, unknown>>;
     mainViewElements?: ReadonlyArray<Record<string, unknown>>;
+    includeStdlib?: boolean;
   } = {},
 ): string {
   const name = overrides.name ?? 'test';
@@ -35,6 +48,15 @@ export function validProjectJson(
     },
     ...(overrides.extraModels ?? []),
   ];
+  if (overrides.includeStdlib) {
+    models.push({
+      name: FAKE_STDLIB_MODEL_NAME,
+      stocks: [],
+      flows: [],
+      auxiliaries: [{ name: 'output', equation: '1' }],
+      views: [{ elements: [] }],
+    });
+  }
   return JSON.stringify({
     name,
     simSpecs: { startTime: 0, endTime: 10, dt: '1' },
@@ -43,9 +65,12 @@ export function validProjectJson(
 }
 
 export interface FakeEngineOptions {
-  // The JSON returned by serializeJson(). May change between calls by passing a
-  // function. Defaults to validProjectJson().
-  json?: string | (() => string);
+  // The JSON returned by serializeJson(includeStdlib). May change between calls
+  // by passing a function, which receives the includeStdlib flag so it can
+  // mirror the engine's display-vs-save distinction. Defaults to
+  // validProjectJson({ includeStdlib }), so the default fake already injects a
+  // stdlib model on the display path and omits it on the save path.
+  json?: string | ((includeStdlib: boolean) => string);
   // The protobuf returned by serializeProtobuf(). Defaults to a 1-byte marker
   // that increments on each call so updateProject() always sees a new snapshot.
   protobuf?: Uint8Array | (() => Uint8Array);
@@ -92,8 +117,12 @@ export function makeFakeEngine(options: FakeEngineOptions = {}): FakeEngine {
   let serializeProtobufCalls = 0;
   let protobufCounter = 100;
 
-  const resolveJson = (): string =>
-    typeof options.json === 'function' ? options.json() : (options.json ?? validProjectJson());
+  const resolveJson = (includeStdlib: boolean): string => {
+    if (typeof options.json === 'function') {
+      return options.json(includeStdlib);
+    }
+    return options.json ?? validProjectJson({ includeStdlib });
+  };
   const resolveProtobuf = (): Uint8Array => {
     if (typeof options.protobuf === 'function') {
       return options.protobuf();
@@ -138,8 +167,8 @@ export function makeFakeEngine(options: FakeEngineOptions = {}): FakeEngine {
       serializeProtobufCalls++;
       return resolveProtobuf();
     },
-    async serializeJson(): Promise<string> {
-      return resolveJson();
+    async serializeJson(_format?: unknown, includeStdlib?: boolean): Promise<string> {
+      return resolveJson(!!includeStdlib);
     },
     async getErrors(): Promise<ErrorDetail[]> {
       return resolveErrors();

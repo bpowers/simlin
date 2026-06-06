@@ -666,7 +666,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
     elements = [...elements, ...clouds];
 
-    if (!this.controller) {
+    // Parity with the pre-refactor `if (!engine) return`: bail before clearing
+    // the selection or running the optimistic view update if the engine hasn't
+    // finished opening yet, so a delete attempted in that brief window cleanly
+    // no-ops instead of mutating UI state against a project that can't apply it.
+    if (!this.controller?.getEngine()) {
       return;
     }
 
@@ -747,7 +751,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     // Preserve the original's early return on a missing engine: it bailed
     // before applying ops or updating the view (no setState, no sim run).
-    if (!this.controller) {
+    if (!this.controller?.getEngine()) {
       return;
     }
 
@@ -814,7 +818,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   handleCreateVariable = async (element: ViewElement) => {
     const view = defined(this.getView());
-    if (!this.controller) {
+    // Parity with the pre-refactor `if (!engine) return`: bail before the
+    // optimistic view update if the engine hasn't finished opening yet, so a
+    // create attempted in that window cleanly no-ops.
+    if (!this.controller?.getEngine()) {
       return;
     }
 

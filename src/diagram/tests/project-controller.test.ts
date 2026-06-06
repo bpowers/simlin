@@ -22,8 +22,10 @@ import {
   makeControllerConfig,
   validProjectJson,
   fakeRun,
+  FAKE_STDLIB_MODEL_NAME,
   type FakeEngine,
 } from './fake-engine';
+import { isStdlibModel } from '../module-navigation';
 
 // Drain the microtask + macrotask queue so deferred setTimeout(0) callbacks
 // (scheduleSave, scheduleSimRun, undoRedo reopen) and their promise chains run.
@@ -348,6 +350,50 @@ describe('ProjectController save queue', () => {
 
     expect(callCount).toBe(2); // thrown save did not strand the queue
     expect(errors.some((e) => e.message.includes('network failure'))).toBe(true);
+    await controller.dispose();
+  });
+
+  it('saves without stdlib models while the display project includes them', async () => {
+    // Invariant: the display/rebuild path serializes with includeStdlib=true so
+    // the editor can navigate into stdlib modules, but the SAVE path serializes
+    // with includeStdlib=false so stdlib definitions are never persisted. Record
+    // the includeStdlib flag the controller passes on each serializeJson call.
+    const calls: boolean[] = [];
+    const engine = makeFakeEngine({
+      json: (includeStdlib) => {
+        calls.push(includeStdlib);
+        return validProjectJson({ includeStdlib });
+      },
+    });
+    const saved: string[] = [];
+    const { config } = makeControllerConfig({
+      engine,
+      format: 'json',
+      save: async (project) => {
+        saved.push(project.data as string);
+        return 2;
+      },
+    });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+
+    // The display project (rebuilt via the includeStdlib=true path) carries the
+    // stdlib model so the editor can drill into it.
+    const displayProject = controller.getSnapshot().project;
+    expect(displayProject?.models.has(FAKE_STDLIB_MODEL_NAME)).toBe(true);
+    expect([...(displayProject?.models.keys() ?? [])].some(isStdlibModel)).toBe(true);
+
+    await controller.save(1);
+
+    // The save path serialized with includeStdlib=false, so its payload omits
+    // the stdlib model -- it is never persisted.
+    expect(saved).toHaveLength(1);
+    const savedModels = (JSON.parse(saved[0]) as { models: Array<{ name: string }> }).models;
+    expect(savedModels.some((m) => isStdlibModel(m.name))).toBe(false);
+    // And the controller did make at least one display-path (true) call and the
+    // save-path (false) call.
+    expect(calls).toContain(true);
+    expect(calls).toContain(false);
     await controller.dispose();
   });
 });
