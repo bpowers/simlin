@@ -49,12 +49,17 @@ import { anyModuleHasModelReference } from '../module-warning';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 import { isDragMovement, shouldShowVariableDetails } from './pointer-utils';
+import { pointerStateReset, resolveSelectionForReattachment } from '../selection-logic';
 import {
-  computeMouseDownSelection,
-  computeMouseUpSelection,
-  pointerStateReset,
-  resolveSelectionForReattachment,
-} from '../selection-logic';
+  computeDragSelection,
+  decideMouseDownSelection,
+  idleState,
+  InteractionContext,
+  isDrag,
+  labelSideForPointer,
+  reduceInteraction,
+  resolveDeferredSelection,
+} from './canvas-interaction';
 
 import styles from './Canvas.module.css';
 
@@ -84,10 +89,6 @@ const fauxCloudTarget: CloudViewElement = {
   isZeroRadius: true,
   ident: undefined,
 };
-
-function radToDeg(r: number): number {
-  return (r * 180) / Math.PI;
-}
 
 // Pure bounds pass over the displayed elements, replacing the side-channel that
 // used to populate this.elementBounds while rendering each element. Mirrors the
@@ -1036,8 +1037,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // without modifier, we deferred the selection change to allow group drag.
     // Now on mouseUp, if no drag occurred, collapse to the single element.
     if (this.deferredSingleSelectUid !== undefined) {
-      const didDrag = isDragMovement(this.state.moveDelta, this.props.view.zoom);
-      const newSel = computeMouseUpSelection(this.deferredSingleSelectUid, didDrag);
+      const didDrag = isDrag(this.state.moveDelta, this.props.view.zoom);
+      const newSel = resolveDeferredSelection(this.deferredSingleSelectUid, didDrag);
       const wasDeferredText = this.deferredIsText;
       this.deferredSingleSelectUid = undefined;
       this.deferredIsText = undefined;
@@ -1221,41 +1222,17 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       const top = Math.min(pointA.y, pointB.y) - canvasOffset.y;
       const bottom = Math.max(pointA.y, pointB.y) - canvasOffset.y;
 
-      // Find all elements within the selection rectangle
-      const selectedElements = new Set<UID>();
-      for (const element of this.derived.displayElements) {
-        // Clouds use center-point containment (no visible bounds to intersect with rect corners)
-        if (element.type === 'cloud') {
-          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
-            selectedElements.add(element.uid);
-          }
-        } else if (element.type === 'aux') {
-          if (
-            auxContains(element, { x: left, y: top }) ||
-            auxContains(element, { x: right, y: top }) ||
-            auxContains(element, { x: left, y: bottom }) ||
-            auxContains(element, { x: right, y: bottom }) ||
-            (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom)
-          ) {
-            selectedElements.add(element.uid);
-          }
-        } else if (element.type === 'stock') {
-          // For stocks, check if center is within rectangle
-          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
-            selectedElements.add(element.uid);
-          }
-        } else if (element.type === 'flow') {
-          // For flows, check if valve center (x, y) is within rectangle
-          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
-            selectedElements.add(element.uid);
-          }
-        } else if (element.type === 'alias' || element.type === 'module') {
-          // For other named elements, check if center is within rectangle
-          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
-            selectedElements.add(element.uid);
-          }
-        }
-      }
+      // Find all elements within the selection rectangle. Each element type's
+      // containment rule lives in canvas-interaction.isInDragSelectRect; auxes
+      // additionally count when any rectangle corner falls inside the aux
+      // circle (a geometry test the shell owns via auxContains).
+      const rect = { left, right, top, bottom };
+      const auxCornerHit = (element: ViewElement): boolean =>
+        auxContains(element as AuxViewElement, { x: left, y: top }) ||
+        auxContains(element as AuxViewElement, { x: right, y: top }) ||
+        auxContains(element as AuxViewElement, { x: left, y: bottom }) ||
+        auxContains(element as AuxViewElement, { x: right, y: bottom });
+      const selectedElements = computeDragSelection(this.derived.displayElements, rect, auxCornerHit);
 
       // Update selection
       this.props.onSetSelection(selectedElements);
@@ -1646,21 +1623,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       y: client.y - delta.y,
     };
 
-    const cx = element.x;
-    const cy = element.y;
-
-    const angle = radToDeg(Math.atan2(cy - pointer.y, cx - pointer.x));
-
-    let side: 'top' | 'left' | 'bottom' | 'right';
-    if (-45 < angle && angle <= 45) {
-      side = 'left';
-    } else if (45 < angle && angle <= 135) {
-      side = 'top';
-    } else if (-135 < angle && angle <= -45) {
-      side = 'bottom';
-    } else {
-      side = 'right';
-    }
+    const side = labelSideForPointer({ x: element.x, y: element.y }, pointer);
 
     this.setState({
       isMovingLabel: true,
@@ -2010,7 +1973,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // check if its the same.
     this.mouseDownPoint = this.getCanvasPoint(e.clientX, e.clientY);
 
-    if (e.pointerType === 'touch' || e.shiftKey) {
+    // Discrete decision: touch / shift-drag pans, everything else rubber-band
+    // drag-selects. Routed through the pure reducer so the pan-vs-select rule
+    // lives in canvas-interaction; the continuous pan offset + momentum stay in
+    // the shell.
+    const pan = e.pointerType === 'touch' || e.shiftKey;
+    const { state: nextState } = reduceInteraction(idleState, { kind: 'canvasPointerDown', pan }, this.interactionContext());
+    if (nextState.mode === 'panning') {
       // Initialize velocity tracking for momentum
       this.velocityTracker.positions = [];
       const canvasOffset = this.getCanvasOffset();
@@ -2032,6 +2001,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       });
     }
   };
+
+  // The read-only environment the pure reducer needs from the shell.
+  interactionContext(canEditName = false): InteractionContext {
+    return { selection: this.props.selection, canEditName };
+  }
 
   handleEditingEnd = (e: React.PointerEvent<HTMLDivElement>): void => {
     e.preventDefault();
@@ -2130,7 +2104,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       this.props.onClearSelectedTool();
 
       const isMultiSelect = e.ctrlKey || e.metaKey || e.shiftKey;
-      const { newSelection, deferSingleSelect } = computeMouseDownSelection(
+      const { newSelection, deferSingleSelect } = decideMouseDownSelection(
         this.props.selection,
         element.uid,
         isMultiSelect,
