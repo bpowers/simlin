@@ -608,3 +608,25 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Owner**: unassigned
 - **Discovered**: C-LEARN residual Phase 5 code review (the AC5.3 missing-data-file diagnostic path exercises it)
 - **Last reviewed**: 2026-05-20
+
+### 65. Canvas boolean CanvasState not yet migrated onto the tagged-union interaction model
+
+- **Component**: diagram (`src/diagram/drawing/Canvas.tsx`, `src/diagram/drawing/canvas-interaction.ts`)
+- **Severity**: medium
+- **Description**: The Phase 3 refactor added `canvas-interaction.ts`, a pure, table-tested model of the Canvas discrete-interaction state machine (tagged-union `InteractionState`, `InteractionEvent`/`InteractionEffect`, `reduceInteraction`, plus pure decision/geometry helpers). The shell (`Canvas.tsx`) now drives the empty-canvas press through `reduceInteraction` and routes its other pure decisions (mouse-down selection, deferred-single-select resolution, label-side quadrants, drag-select membership, click-vs-drag threshold) through the module's helpers. But the React class still represents its runtime mode as the original bag of booleans (`isMovingArrow`, `isMovingSource`, `isMovingCanvas`, `isDragSelecting`, `isPinching`, `isMovingLabel`, `isEditingName`, ...) plus loose instance fields, and `handlePointerDown`/`handleSetSelection`/`handlePointerCancel` are not yet driven end-to-end through `reduceInteraction`. The remaining `reduceInteraction` element/tool branches are therefore canonical-and-tested but not shell-driven.
+- **Suspected fix**: Complete the migration: replace the boolean `CanvasState` modes with a single `InteractionState` field, drive `handlePointerDown`/`handleSetSelection`/`handlePointerCancel` through `reduceInteraction` (applying its effects), and read the union in render instead of the booleans. This was deliberately deferred because doing it with behavior-preservation confidence needs end-to-end gesture-sequence tests that drive the Canvas through the React reconciler (pointer down -> move -> up), which do not yet exist; those tests should be written first. Continuous pinch/pan/momentum physics stay shell-internal by design.
+- **Measure**: `grep -c 'isMovingArrow\|isMovingSource\|isMovingCanvas\|isDragSelecting\|isPinching\|isMovingLabel' src/diagram/drawing/Canvas.tsx` (drops to ~0 reads of the booleans when migrated).
+- **Owner**: unassigned
+- **Discovered**: Phase 3 Canvas refactor (diagram-react-refactor branch)
+- **Last reviewed**: 2026-06-05
+
+### 66. Dead constrain* movement methods on Canvas
+
+- **Component**: diagram (`src/diagram/drawing/Canvas.tsx`)
+- **Severity**: low
+- **Description**: `Canvas.constrainFlowMovement`, `constrainCloudMovement`, and `constrainStockMovement` are defined but never called anywhere in the package (only the generated `lib/`/`lib.browser/` declarations reference them). They predate the unified `applyGroupMovement` (`group-movement.ts`), which now owns live-preview movement geometry. During the Phase 3 render-purity work they were updated to read `this.derived.selectionUpdates` only so they keep compiling; they are otherwise inert.
+- **Suspected fix**: Delete the three methods (and any now-unused helper imports they alone pull in). Left in place during Phase 3 to keep that commit scoped to render purity + the interaction model.
+- **Measure**: `grep -rn 'constrainFlowMovement\|constrainCloudMovement\|constrainStockMovement' src/diagram --include='*.ts' --include='*.tsx' | grep -v '/lib'` returns only the definitions.
+- **Owner**: unassigned
+- **Discovered**: Phase 3 Canvas refactor (diagram-react-refactor branch)
+- **Last reviewed**: 2026-06-05
