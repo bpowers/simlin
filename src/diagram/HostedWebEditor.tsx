@@ -13,11 +13,12 @@ import { Editor, ProtobufProjectData } from './Editor';
 
 import styles from './HostedWebEditor.module.css';
 
-class HostedWebEditorError implements Error {
-  name = 'HostedWebEditorError';
-  message: string;
+// Extends the built-in Error so instances carry a stack trace and satisfy
+// `instanceof Error`. The explicit name assignment survives minification.
+class HostedWebEditorError extends Error {
   constructor(msg: string) {
-    this.message = msg;
+    super(msg);
+    this.name = 'HostedWebEditorError';
   }
 }
 

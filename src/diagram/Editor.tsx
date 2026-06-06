@@ -175,11 +175,14 @@ function convertErrorDetails(
   return { varErrors, unitErrors };
 }
 
-class EditorError implements Error {
-  name = 'EditorError';
-  message: string;
+// Extends the built-in Error so instances carry a stack trace and satisfy
+// `instanceof Error` (a bare `implements Error` produced a plain object with
+// neither). The explicit name assignment survives minification, where the
+// subclass's constructor name is mangled.
+class EditorError extends Error {
   constructor(msg: string) {
-    this.message = msg;
+    super(msg);
+    this.name = 'EditorError';
   }
 }
 
@@ -235,7 +238,11 @@ interface EditorState {
   // keying them on projectVersion remounted an open panel on every pan
   // frame and autosave completion, discarding in-progress edits.
   projectGeneration: number;
-  snapshotBlob: Blob | undefined;
+  // Object URL for the diagram snapshot image, created once when the
+  // snapshot blob is produced (see takeSnapshot) rather than on every
+  // render. Held as state so getSnapshot can render it without leaking a
+  // fresh URL per render; revoked when replaced, cleared, or on unmount.
+  snapshotUrl: string | undefined;
   variableDetailsActiveTab: number;
   cachedErrors: CachedErrorDetails;
 }
@@ -291,6 +298,25 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   newEngineShouldPullView = false;
   newEngineQueuedView?: StockFlowView;
 
+  // Stable React keys for snackbar toasts. Keying by `${name}:${message}`
+  // collided whenever two distinct errors shared a name and message (e.g.
+  // the same engine error raised twice), so React reused one toast's
+  // instance for the other and the auto-hide timer of the first dismissed
+  // the second prematurely. Assigning a monotonically increasing id per
+  // *instance* the first time it is rendered gives every appended error a
+  // unique, render-stable key regardless of message text.
+  private nextErrorKey = 1;
+  private readonly errorKeys = new WeakMap<Error, number>();
+
+  private errorKey(err: Error): number {
+    let key = this.errorKeys.get(err);
+    if (key === undefined) {
+      key = this.nextErrorKey++;
+      this.errorKeys.set(err, key);
+    }
+    return key;
+  }
+
   inSave = false;
   saveQueued = false;
   // Pending setTimeout(0) handle for the deferred onSelectionChanged
@@ -345,7 +371,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       drawerOpen: false,
       projectVersion: props.initialProjectVersion,
       projectGeneration: 0,
-      snapshotBlob: undefined,
+      snapshotUrl: undefined,
       variableDetailsActiveTab: 0,
       cachedErrors: {
         varErrors: new Map<string, readonly EquationError[]>(),
@@ -454,6 +480,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     this.engineProject = undefined;
     if (engine) {
       void this.disposeOrphanedEngine(engine);
+    }
+
+    // Revoke any outstanding snapshot object URL so navigating away from a
+    // project with an open snapshot doesn't strand the blob.
+    if (this.state.snapshotUrl) {
+      URL.revokeObjectURL(this.state.snapshotUrl);
     }
   }
 
@@ -678,6 +710,35 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }));
   }
 
+  // Shared tail for the simple edit handlers: apply a patch (allowing
+  // errors so partially-invalid models can be edited), and on success
+  // round-trip the engine's serialized state back into `activeProject`
+  // and schedule a re-simulation. Returns false (without refreshing the
+  // project or scheduling a sim run) when the patch throws, so callers
+  // that need to bail or perform extra cleanup on failure can.
+  //
+  // `label` identifies the operation in the console error and the
+  // user-facing fallback message when the engine reports no message.
+  // Handlers with genuinely different shapes (optimistic view updates,
+  // selection bookkeeping on error) do NOT use this helper.
+  private async applyPatchAndRefresh(patch: JsonProjectPatch, label: string): Promise<boolean> {
+    const engine = this.engine();
+    if (!engine) {
+      return false;
+    }
+    try {
+      await engine.applyPatch(patch, { allowErrors: true });
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error(`applyPatch error (${label}):`, err.code, err.message, err.details);
+      this.appendModelError(err.message ?? `Unknown error during ${label}`);
+      return false;
+    }
+    await this.updateProject(await engine.serializeProtobuf());
+    this.scheduleSimRun();
+    return true;
+  }
+
   handleDialClick = (_event: React.MouseEvent<HTMLButtonElement>) => {
     this.setState({
       dialOpen: !this.state.dialOpen,
@@ -737,21 +798,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       models: [{ name: this.state.modelName, ops }],
     };
 
-    try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error('applyPatch error (rename):', err.code, err.message, err.details);
-      const msg = err.message ?? 'Unknown error during rename';
-      this.appendModelError(msg);
-      return;
+    // Clear the in-progress flow-creation flag only after a successful
+    // patch, matching the pre-refactor ordering (a failed rename left the
+    // flag untouched).
+    if (await this.applyPatchAndRefresh(patch, 'rename')) {
+      this.setState({
+        flowStillBeingCreated: false,
+      });
     }
-
-    this.setState({
-      flowStillBeingCreated: false,
-    });
-    await this.updateProject(await engine.serializeProtobuf());
-    this.scheduleSimRun();
   };
 
   handleSelection = (selection: ReadonlySet<UID>) => {
@@ -1461,11 +1515,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   };
 
   async applySimSpecChange(updates: Partial<JsonSimSpecs>) {
-    const engine = this.engine();
-    if (!engine) {
-      return;
-    }
-
+    // The engine is re-checked inside applyPatchAndRefresh; here we only
+    // need the project to read the current sim specs.
     const project = this.project();
     if (!project) {
       return;
@@ -1498,17 +1549,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       ],
     };
 
-    try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error('applyPatch error (sim specs):', err.code, err.message, err.details);
-      this.appendModelError(err.message ?? 'Unknown error updating sim specs');
-      return;
-    }
-
-    await this.updateProject(await engine.serializeProtobuf());
-    this.scheduleSimRun();
+    await this.applyPatchAndRefresh(patch, 'sim specs');
   }
 
   handleStartTimeChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1782,7 +1823,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
               variant="warning"
               onClose={this.handleCloseSnackbar}
               message={err.message}
-              key={`${err.name}:${err.message}`}
+              key={this.errorKey(err)}
             />
           ))}
         </div>
@@ -2073,11 +2114,6 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     newUnits: string | undefined,
     newDocs: string | undefined,
   ) => {
-    const engine = this.engine();
-    if (!engine) {
-      return;
-    }
-
     const model = this.getModel();
     if (!model) {
       return;
@@ -2159,25 +2195,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       models: [{ name: this.state.modelName, ops: [op] }],
     };
 
-    try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error('applyPatch error (equation update):', err.code, err.message, err.details);
-      this.appendModelError(err.message ?? 'Unknown error during equation update');
-      return;
-    }
-
-    await this.updateProject(await engine.serializeProtobuf());
-    this.scheduleSimRun();
+    await this.applyPatchAndRefresh(patch, 'equation update');
   };
 
   handleTableChange = async (ident: string, newTable: GraphicalFunction | null) => {
-    const engine = this.engine();
-    if (!engine) {
-      return;
-    }
-
     const model = this.getModel();
     if (!model) {
       return;
@@ -2236,23 +2257,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       models: [{ name: this.state.modelName, ops: [op] }],
     };
 
-    try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error('applyPatch error (table update):', err.code, err.message, err.details);
-      this.appendModelError(err.message ?? 'Unknown error during table update');
-      return;
-    }
-
-    await this.updateProject(await engine.serializeProtobuf());
-    this.scheduleSimRun();
+    await this.applyPatchAndRefresh(patch, 'table update');
   };
 
   // Updates the model reference for a module variable.
   handleModuleModelReferenceChange = async (ident: string, newModelName: string) => {
-    const engine = this.engine();
-    if (!engine) return;
     const model = this.getModel();
     if (!model) return;
     const variable = model.variables.get(ident);
@@ -2275,23 +2284,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       models: [{ name: this.state.modelName, ops: [op] }],
     };
 
-    try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error('applyPatch error (model reference update):', err.code, err.message, err.details);
-      this.appendModelError(err.message ?? 'Unknown error during model reference update');
-      return;
-    }
-
-    await this.updateProject(await engine.serializeProtobuf());
-    this.scheduleSimRun();
+    await this.applyPatchAndRefresh(patch, 'model reference update');
   };
 
   // Updates units and/or documentation for a module variable.
   handleModuleUnitsDocsChange = async (ident: string, newUnits: string | undefined, newDocs: string | undefined) => {
-    const engine = this.engine();
-    if (!engine) return;
     const model = this.getModel();
     if (!model) return;
     const variable = model.variables.get(ident);
@@ -2314,25 +2311,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       models: [{ name: this.state.modelName, ops: [op] }],
     };
 
-    try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error('applyPatch error (module units/docs update):', err.code, err.message, err.details);
-      this.appendModelError(err.message ?? 'Unknown error during module update');
-      return;
-    }
-
-    await this.updateProject(await engine.serializeProtobuf());
-    this.scheduleSimRun();
+    await this.applyPatchAndRefresh(patch, 'module update');
   };
 
   // Updates the input references array for a module variable via upsertModule.
   // The engine does full variable replacement (not merge), so we send the
   // complete module with the new references array.
   handleModuleReferencesChange = async (ident: string, newReferences: ReadonlyArray<ModuleReference>) => {
-    const engine = this.engine();
-    if (!engine) return;
     const model = this.getModel();
     if (!model) return;
     const variable = model.variables.get(ident);
@@ -2355,25 +2340,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       models: [{ name: this.state.modelName, ops: [op] }],
     };
 
-    try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error('applyPatch error (references update):', err.code, err.message, err.details);
-      this.appendModelError(err.message ?? 'Unknown error during references update');
-      return;
-    }
-
-    await this.updateProject(await engine.serializeProtobuf());
-    this.scheduleSimRun();
+    await this.applyPatchAndRefresh(patch, 'references update');
   };
 
   // Creates a new empty model and sets it as the module's reference.
   // The engine processes projectOps before model ops (see patch.rs),
   // so AddModel creates the model before upsertModule references it.
   handleCreateModelForModule = async (moduleIdent: string) => {
-    const engine = this.engine();
-    if (!engine) return;
     const project = this.project();
     if (!project) return;
 
@@ -2414,24 +2387,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       ],
     };
 
-    try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error('applyPatch error (create model for module):', err.code, err.message, err.details);
-      this.appendModelError(err.message ?? 'Unknown error during model creation');
-      return;
-    }
-
-    await this.updateProject(await engine.serializeProtobuf());
-    this.scheduleSimRun();
+    await this.applyPatchAndRefresh(patch, 'model creation');
   };
 
   // Duplicates the source model and sets the copy as the module's reference.
   // Copies all variables and the primary view from the source model.
   handleDuplicateModelForModule = async (moduleIdent: string, sourceModelName: string) => {
-    const engine = this.engine();
-    if (!engine) return;
     const project = this.project();
     if (!project) return;
 
@@ -2498,17 +2459,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       ],
     };
 
-    try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error('applyPatch error (duplicate model):', err.code, err.message, err.details);
-      this.appendModelError(err.message ?? 'Unknown error during model duplication');
-      return;
-    }
-
-    await this.updateProject(await engine.serializeProtobuf());
-    this.scheduleSimRun();
+    await this.applyPatchAndRefresh(patch, 'model duplication');
   };
 
   private getUniqueDuplicateName(baseName: string, project: Project): string {
@@ -2989,11 +2940,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     const image = new Image();
     image.onload = () => {
+      // The SVG source URL has served its purpose now that the image is
+      // decoded; revoke it so the intermediate blob isn't retained.
+      URL.revokeObjectURL(svgUrl);
       ctx.drawImage(image, 0, 0, viewbox.width * 4, viewbox.height * 4);
 
       osCanvas.toBlob((snapshotBlob) => {
         if (snapshotBlob) {
-          this.setState({ snapshotBlob });
+          // Create the display URL exactly once here (not per render) and
+          // revoke any previous snapshot URL via setSnapshotUrl.
+          this.setSnapshotUrl(URL.createObjectURL(snapshotBlob));
         } else {
           this.setState({
             modelErrors: [...this.state.modelErrors, new Error('snapshot creation failed (1).')],
@@ -3002,12 +2958,23 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       });
     };
     image.onerror = () => {
+      URL.revokeObjectURL(svgUrl);
       this.setState({
         modelErrors: [...this.state.modelErrors, new Error('snapshot creation failed (2).')],
       });
     };
 
     image.src = svgUrl;
+  }
+
+  // Replace the current snapshot object URL, revoking the previous one so
+  // the underlying blob can be garbage-collected. Pass undefined to clear.
+  private setSnapshotUrl(url: string | undefined): void {
+    const previous = this.state.snapshotUrl;
+    if (previous && previous !== url) {
+      URL.revokeObjectURL(previous);
+    }
+    this.setState({ snapshotUrl: url });
   }
 
   handleSnapshot = (kind: 'show' | 'close') => {
@@ -3093,16 +3060,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   getSnapshot() {
     const { embedded } = this.props;
-    const { snapshotBlob } = this.state;
+    const { snapshotUrl } = this.state;
 
-    if (embedded || !snapshotBlob) {
+    if (embedded || !snapshotUrl) {
       return undefined;
     }
 
     return (
       <div className={styles.snapshotCard}>
         <div className={styles.snapshotCardContent}>
-          <img src={URL.createObjectURL(snapshotBlob)} className={styles.snapshotImg} alt="diagram snapshot" />
+          <img src={snapshotUrl} className={styles.snapshotImg} alt="diagram snapshot" />
         </div>
         <div className={styles.snapshotCardActions}>
           <Button size="small" color="primary" onClick={this.handleClearSnapshot}>
@@ -3114,7 +3081,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   }
 
   handleClearSnapshot = () => {
-    this.setState({ snapshotBlob: undefined });
+    this.setSnapshotUrl(undefined);
   };
 
   render(): React.ReactNode {
