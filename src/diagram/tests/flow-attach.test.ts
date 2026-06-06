@@ -554,4 +554,129 @@ describe('computeFlowAttachment', () => {
       );
     });
   });
+
+  // These tests assert the exact x/y of cloud placement and flow endpoints so
+  // a future edit to the cloud-placement / UpdateCloudAndFlow math can't pass
+  // silently. They use non-zero deltas where a sign flip would change the
+  // result.
+  describe('coordinate math', () => {
+    it('(a) detach sink to empty space places the cloud at oldEnd - cursorMoveDelta', () => {
+      // Sink stock at (200,100); release delta {-40,0} -> cloud at x = 200 - (-40) = 240.
+      // A sign flip (200 + -40 = 160) would fail this assertion.
+      const srcStock = makeStockEl(1, 'src', 0, 100);
+      const oldSink = makeStockEl(2, 'old_sink', 200, 100, [3]);
+      const flow = makeFlowEl(3, 'f', 100, 100, [
+        { x: 20, y: 100, attachedToUid: 1 },
+        { x: 180, y: 100, attachedToUid: 2 },
+      ]);
+      const view = makeView([srcStock, oldSink, flow], 5);
+      const variables = varsOf(makeStockVar('old_sink', ['f']));
+
+      const result = computeFlowAttachment(
+        view,
+        variables,
+        params({ flow, targetUid: 0, cursorMoveDelta: { x: -40, y: 0 } }),
+      );
+
+      const cloud = result.elements.find((e) => e.type === 'cloud') as CloudViewElement;
+      expect(cloud.x).toBe(240);
+      expect(cloud.y).toBe(100);
+      // The flow's last point now attaches to that cloud at the same position.
+      const outFlow = result.elements.find((e) => e.uid === 3) as FlowViewElement;
+      const lastPt = outFlow.points[outFlow.points.length - 1];
+      expect(lastPt.attachedToUid).toBe(cloud.uid);
+      expect(lastPt.x).toBe(240);
+      expect(lastPt.y).toBe(100);
+    });
+
+    it('(b) creation to empty space places the cloud at fauxTargetCenter', () => {
+      // Source stock at (0,100); faux target center at (280,100), on the same
+      // horizontal axis as the source point so the flow stays straight. With a
+      // zero cursor delta the realized sink cloud lands exactly at the faux
+      // center, and the flow's last point attaches to it there. A regression
+      // that ignored fauxTargetCenter (e.g. placing the cloud at the source)
+      // would put x at 20 instead of 280.
+      const srcStock = makeStockEl(1, 'src', 0, 100);
+      const flow = makeFlowEl(inCreationUid, 'new_flow', 150, 100, [
+        { x: 20, y: 100, attachedToUid: 1 },
+        { x: 280, y: 100, attachedToUid: fauxCloudTargetUid },
+      ]);
+      const view = makeView([srcStock], 5);
+      const variables = varsOf(makeStockVar('src'));
+
+      const result = computeFlowAttachment(
+        view,
+        variables,
+        params({ flow, targetUid: 0, fauxTargetCenter: { x: 280, y: 100 }, inCreation: true }),
+      );
+
+      const cloud = result.elements.find((e) => e.type === 'cloud') as CloudViewElement;
+      expect(cloud.x).toBe(280);
+      expect(cloud.y).toBe(100);
+      // The realized flow's last point attaches to that cloud, at the cloud.
+      const realFlow = result.elements.find((e) => e.type === 'flow') as FlowViewElement;
+      const lastPt = realFlow.points[realFlow.points.length - 1];
+      expect(lastPt.attachedToUid).toBe(cloud.uid);
+      expect(lastPt.x).toBe(280);
+      expect(lastPt.y).toBe(100);
+    });
+
+    it('(c) cloud -> stock reattach reroutes the moved endpoint via UpdateCloudAndFlow', () => {
+      // Flow source attached to a cloud at (0,100); reattach to a stock whose
+      // center is (0,300). moveDelta = oldCloud - stock = (0-0, 100-300) =
+      // (0,-200). The 200px perpendicular move converts the straight flow into
+      // an L-shape: the source endpoint lands on the stock center (0,300), a
+      // corner is introduced at (180,300), and the fixed sink stays at
+      // (180,100). A sign error in the moveDelta math would move the endpoint
+      // the wrong direction and break the asserted geometry.
+      const oldCloud = makeCloudEl(1, 3, 0, 100);
+      const newSrc = makeStockEl(4, 'new_src', 0, 300);
+      const sinkStock = makeStockEl(2, 'sink', 200, 100);
+      const flow = makeFlowEl(3, 'f', 100, 100, [
+        { x: 0, y: 100, attachedToUid: 1 },
+        { x: 180, y: 100, attachedToUid: 2 },
+      ]);
+      const view = makeView([oldCloud, newSrc, sinkStock, flow], 5);
+      const variables = varsOf(makeStockVar('new_src'));
+
+      const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 4, isSourceAttach: true }));
+
+      const outFlow = result.elements.find((e) => e.uid === 3) as FlowViewElement;
+      expect(outFlow.points.map((p) => ({ x: p.x, y: p.y, attachedToUid: p.attachedToUid }))).toEqual([
+        { x: 0, y: 300, attachedToUid: 4 },
+        { x: 180, y: 300, attachedToUid: undefined },
+        { x: 180, y: 100, attachedToUid: 2 },
+      ]);
+    });
+
+    it('(d) L-shaped (3-point) flow reattach reroutes via UpdateCloudAndFlow', () => {
+      // 3-point L-shaped flow: source cloud at (0,100) -> corner (0,300) ->
+      // sink stock at (200,300). Reattach the SOURCE cloud endpoint to a stock
+      // at (0,500), exercising UpdateCloudAndFlow's multi-segment reroute path.
+      // The cloud-adjacent vertical segment keeps x=0, so the source endpoint
+      // slides down to the new stock center (0,500) while the corner (0,300)
+      // and the fixed sink (180,300) are preserved.
+      const oldCloud = makeCloudEl(1, 3, 0, 100);
+      const newSrc = makeStockEl(4, 'new_src', 0, 500);
+      const sinkStock = makeStockEl(2, 'sink', 200, 300);
+      const flow = makeFlowEl(3, 'f', 0, 200, [
+        { x: 0, y: 100, attachedToUid: 1 },
+        { x: 0, y: 300, attachedToUid: undefined },
+        { x: 180, y: 300, attachedToUid: 2 },
+      ]);
+      const view = makeView([oldCloud, newSrc, sinkStock, flow], 5);
+      const variables = varsOf(makeStockVar('new_src'));
+
+      const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 4, isSourceAttach: true }));
+
+      const outFlow = result.elements.find((e) => e.uid === 3) as FlowViewElement;
+      // Source endpoint now attaches to the new stock; the old cloud is gone.
+      expect(result.elements.find((e) => e.uid === 1)).toBeUndefined();
+      expect(outFlow.points.map((p) => ({ x: p.x, y: p.y, attachedToUid: p.attachedToUid }))).toEqual([
+        { x: 0, y: 500, attachedToUid: 4 },
+        { x: 0, y: 300, attachedToUid: undefined },
+        { x: 180, y: 300, attachedToUid: 2 },
+      ]);
+    });
+  });
 });
