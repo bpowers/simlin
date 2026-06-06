@@ -10,14 +10,16 @@ import { baseURL, defined } from '@simlin/core/common';
 import { first } from '@simlin/core/collections';
 
 import { Editor, ProtobufProjectData } from './Editor';
+import { ErrorBoundary } from './ErrorBoundary';
 
 import styles from './HostedWebEditor.module.css';
 
-class HostedWebEditorError implements Error {
-  name = 'HostedWebEditorError';
-  message: string;
+// Extends the built-in Error so instances carry a stack trace and satisfy
+// `instanceof Error`. The explicit name assignment survives minification.
+class HostedWebEditorError extends Error {
   constructor(msg: string) {
-    this.message = msg;
+    super(msg);
+    this.name = 'HostedWebEditorError';
   }
 }
 
@@ -221,16 +223,18 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
 
     return (
       <div className={classNames}>
-        <Editor
-          inputFormat="protobuf"
-          initialProjectBinary={this.state.projectBinary}
-          initialProjectVersion={this.state.projectVersion}
-          name={this.props.projectName}
-          embedded={this.props.embedded}
-          onSave={this.handleSave}
-          onDeleteProject={this.props.readOnlyMode ? undefined : this.handleDelete}
-          readOnlyMode={this.props.readOnlyMode}
-        />
+        <ErrorBoundary resetKey={`${this.props.username}/${this.props.projectName}`}>
+          <Editor
+            inputFormat="protobuf"
+            initialProjectBinary={this.state.projectBinary}
+            initialProjectVersion={this.state.projectVersion}
+            name={this.props.projectName}
+            embedded={this.props.embedded}
+            onSave={this.handleSave}
+            onDeleteProject={this.props.readOnlyMode ? undefined : this.handleDelete}
+            readOnlyMode={this.props.readOnlyMode}
+          />
+        </ErrorBoundary>
       </div>
     );
   }

@@ -49,12 +49,17 @@ import { anyModuleHasModelReference } from '../module-warning';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 import { isDragMovement, shouldShowVariableDetails } from './pointer-utils';
+import { pointerStateReset, resolveSelectionForReattachment } from '../selection-logic';
 import {
-  computeMouseDownSelection,
-  computeMouseUpSelection,
-  pointerStateReset,
-  resolveSelectionForReattachment,
-} from '../selection-logic';
+  computeDragSelection,
+  decideMouseDownSelection,
+  idleState,
+  InteractionContext,
+  isDrag,
+  labelSideForPointer,
+  reduceInteraction,
+  resolveDeferredSelection,
+} from './canvas-interaction';
 
 import styles from './Canvas.module.css';
 
@@ -85,8 +90,49 @@ const fauxCloudTarget: CloudViewElement = {
   ident: undefined,
 };
 
-function radToDeg(r: number): number {
-  return (r * 180) / Math.PI;
+// Pure bounds pass over the displayed elements, replacing the side-channel that
+// used to populate this.elementBounds while rendering each element. Mirrors the
+// per-type bounds calls in the element-rendering methods exactly: only cloud,
+// aux, stock, module, group, and flow contribute bounds (links and aliases do
+// not). Selection-update substitutions are applied first so drag-preview
+// geometry feeds the embedded-mode tight viewBox, matching what buildLayers
+// draws. Returns one entry per contributing element (undefined entries from
+// *Bounds are kept; calcViewBox skips them).
+function computeElementBounds(
+  displayElements: readonly ViewElement[],
+  selectionUpdates: ReadonlyMap<UID, ViewElement>,
+): Array<Rect | undefined> {
+  const bounds: Array<Rect | undefined> = [];
+  for (let element of displayElements) {
+    const updated = selectionUpdates.get(element.uid);
+    if (updated !== undefined) {
+      element = updated;
+    }
+    switch (element.type) {
+      case 'cloud':
+        bounds.push(cloudBounds(element));
+        break;
+      case 'aux':
+        bounds.push(auxBounds(element));
+        break;
+      case 'stock':
+        bounds.push(stockBounds(element));
+        break;
+      case 'module':
+        bounds.push(moduleBounds(element));
+        break;
+      case 'group':
+        bounds.push(groupBounds(element));
+        break;
+      case 'flow':
+        bounds.push(flowBounds(element));
+        break;
+      default:
+        // link, alias: no bounds contribution (matches original render path)
+        break;
+    }
+  }
+  return bounds;
 }
 
 const ZMax = 6;
@@ -124,6 +170,31 @@ interface TrackedPointer {
 // Velocity tracking for momentum
 interface VelocityTracker {
   positions: Array<{ x: number; y: number; timestamp: number }>;
+}
+
+// The result of the single render-phase derivation step (deriveRenderState).
+// Every cached/derived value the render path needs is produced here exactly
+// once at the top of render()/componentDidMount(); the element-rendering
+// methods (connector(), aux(), ...) only *read* these, never recompute or
+// mutate during render. This keeps render() free of mid-render instance-field
+// mutation.
+interface RenderDerivation {
+  // The elements to draw (props.view.elements plus any in-creation element).
+  displayElements: readonly ViewElement[];
+  // UID -> element lookup over displayElements plus the faux drag targets.
+  // Reused at event-time (getElementByUid, handlers) -- see this.elements.
+  elementsByUid: Map<UID, ViewElement>;
+  // Selected elements with live drag/label updates applied (group movement,
+  // label-side, single-link arc suppression). Keyed by UID.
+  selectionUpdates: Map<UID, ViewElement>;
+  // AC1.6: whether any module in the model has a model reference, used to
+  // suppress warning dots while a model is being sketched.
+  hasAnyModuleReference: boolean;
+  // The arc last computed for a single-link arrowhead drag (creation or
+  // reattachment), or undefined when not dragging a link / straight line.
+  // connector() renders this exact value and pointer-up persists it, so the
+  // saved arc always matches the on-screen arc (see "Link drag arc ownership").
+  draggedLinkArc: number | undefined;
 }
 
 interface CanvasState {
@@ -194,15 +265,29 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   mouseDownPoint: Point | undefined;
   selectionCenterOffset: Point | undefined;
   pointerId: number | undefined;
-  elementBounds: Array<Rect | undefined> = [];
   prevSelectedTool: 'stock' | 'flow' | 'aux' | 'link' | 'module' | undefined;
-  // we have to regenerate selectionUpdates when selection !== props.selection
-  selection: ReadonlySet<UID> = new Set<UID>();
+
+  // Cache key for the elements-by-uid lookup map: when props.version is
+  // unchanged we reuse the existing map (and the displayElements array) rather
+  // than rebuilding it. Owned exclusively by deriveRenderState().
   cachedVersion = -Infinity;
-  cachedElements: readonly ViewElement[] = [];
+
+  // UID -> element lookup, populated by deriveRenderState() and intentionally
+  // NOT cleared at the end of render: event handlers (getElementByUid and the
+  // pointer callbacks) read it after render returns. Mirrors derived.elementsByUid.
   elements = new Map<UID, ViewElement>();
-  selectionUpdates = new Map<UID, ViewElement>();
-  computeBounds = false;
+
+  // The most recent render derivation. Written only by deriveRenderState();
+  // read by the element-rendering methods during render and by the pointer
+  // handlers at event time. Seeded with an empty derivation so reads before
+  // the first render are safe.
+  derived: RenderDerivation = {
+    displayElements: [],
+    elementsByUid: this.elements,
+    selectionUpdates: new Map<UID, ViewElement>(),
+    hasAnyModuleReference: false,
+    draggedLinkArc: undefined,
+  };
 
   // Multi-touch tracking for pinch gestures
   activePointers = new Map<number, TrackedPointer>();
@@ -220,16 +305,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   deferredSingleSelectUid: UID | undefined;
   deferredIsText: boolean | undefined;
 
-  // Link drag state (creation and reattachment): tracks the arc shown during
-  // the last render so the persisted value on mouse-up exactly matches the
-  // visual, and stores the pointer type to distinguish mouse from touch.
-  draggedLinkArc: number | undefined;
+  // Link drag state (creation and reattachment): the pointer type distinguishes
+  // mouse from touch (touch links are always straight). The arc shown during
+  // the last render lives in derived.draggedLinkArc so the persisted value on
+  // mouse-up exactly matches the visual.
   dragPointerType: string | undefined;
-
-  // Cached per-render: whether any module in the current model has a model
-  // reference. When false, warning indicators on unconfigured modules are
-  // suppressed (AC1.6 -- new model scenario where user is sketching structure).
-  hasAnyModuleReference = false;
 
   constructor(props: CanvasProps) {
     super(props);
@@ -371,10 +451,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       onSelection: this.handleSetSelection,
     };
 
-    if (this.computeBounds) {
-      this.elementBounds.push(cloudBounds(element));
-    }
-
     return <Cloud key={element.uid} {...props} />;
   }
 
@@ -489,10 +565,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       hasWarning,
     };
 
-    if (this.computeBounds) {
-      this.elementBounds.push(auxBounds(element));
-    }
-
     return <Aux key={element.uid} {...props} />;
   }
 
@@ -512,9 +584,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       hasWarning,
     };
 
-    if (this.computeBounds) {
-      this.elementBounds.push(stockBounds(element));
-    }
     return <Stock key={element.uid} {...props} />;
   }
 
@@ -523,7 +592,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const hasEngineError = variable ? variableHasError(variable) : false;
     // AC1.6: suppress warning when no module in the model has a model reference
     // yet (new model scenario where user is rapidly sketching structure).
-    const hasWarning = hasEngineError && this.hasAnyModuleReference;
+    const hasWarning = hasEngineError && this.derived.hasAnyModuleReference;
     const isSelected = this.isSelected(element);
     const props: ModuleProps = {
       element,
@@ -536,9 +605,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       hasWarning,
     };
 
-    if (this.computeBounds) {
-      this.elementBounds.push(moduleBounds(element));
-    }
     return <Module key={element.uid} {...props} />;
   }
 
@@ -549,9 +615,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       isSelected,
     };
 
-    if (this.computeBounds) {
-      this.elementBounds.push(groupBounds(element));
-    }
     return <Group key={element.uid} {...props} />;
   }
 
@@ -561,26 +624,26 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     // Get the updated element from selectionUpdates if available (arc was already adjusted
     // by applyGroupMovement for group selection cases)
-    const updatedElement = this.selectionUpdates.get(element.uid);
+    const updatedElement = this.derived.selectionUpdates.get(element.uid);
     if (updatedElement !== undefined && updatedElement.type === 'link') {
       element = updatedElement;
     }
 
-    const from = this.selectionUpdates.get(element.fromUid) || this.getElementByUid(element.fromUid);
-    let to = this.selectionUpdates.get(element.toUid) || this.getElementByUid(element.toUid);
+    const from = this.derived.selectionUpdates.get(element.fromUid) || this.getElementByUid(element.fromUid);
+    let to = this.derived.selectionUpdates.get(element.toUid) || this.getElementByUid(element.toUid);
     let isSticky = false;
 
     // Dragging this link's arrowhead — covers both new-link creation and
     // reattaching an existing link.  Unified: straight line when not over
-    // a target, dynamic arc when snapped to a valid target.
+    // a target, dynamic arc when snapped to a valid target. The arc itself is
+    // computed once in deriveRenderState (derived.draggedLinkArc); we only
+    // resolve the visual `to` endpoint here. Reading the derived arc (instead
+    // of recomputing-and-caching it during render) keeps render() free of
+    // instance-field mutation while preserving the guarantee that the rendered
+    // arc equals the value persisted on pointer-up.
     const isDraggingLink = isMovingArrow && isSelected;
     if (isDraggingLink && this.selectionCenterOffset) {
-      const validTarget = this.cachedElements.find((e: ViewElement) => {
-        if (e.type !== 'aux' && e.type !== 'flow' && e.type !== 'module') {
-          return false;
-        }
-        return this.isValidTarget(e) || false;
-      });
+      const validTarget = this.findLinkDragTarget();
       if (validTarget) {
         isSticky = true;
         to = validTarget;
@@ -598,13 +661,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
       const isTouch = this.dragPointerType === 'touch';
       if (isSticky && !isTouch) {
-        const arcPt = this.getArcPoint();
-        const arc = arcPt ? computeLinkCreationArc(from, to, arcPt) : undefined;
-        element = { ...element, arc };
-        this.draggedLinkArc = arc;
+        element = { ...element, arc: this.derived.draggedLinkArc };
       } else {
         element = { ...element, arc: undefined };
-        this.draggedLinkArc = undefined;
       }
     }
 
@@ -622,7 +681,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     if (isSelected && !isSticky && !isDraggingLink) {
       props.arcPoint = this.getArcPoint();
     }
-    // this.elementBounds = this.elementBounds.push(Connector.bounds(props));
     return <Connector key={element.uid} {...props} />;
   }
 
@@ -638,6 +696,53 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       y: off.y - delta.y - canvasOffset.y,
       attachedToUid: undefined,
     };
+  }
+
+  // The element the dragged single link's arrowhead is currently snapped to (a
+  // valid aux/flow/module target under the cursor), or undefined for empty
+  // space. A pure read over the displayed elements; shared by connector()
+  // (visual `to` endpoint) and deriveDraggedLinkArc (arc computation) so both
+  // agree on the snap target within a render.
+  findLinkDragTarget(): ViewElement | undefined {
+    return this.derived.displayElements.find((e: ViewElement) => {
+      if (e.type !== 'aux' && e.type !== 'flow' && e.type !== 'module') {
+        return false;
+      }
+      return this.isValidTarget(e) || false;
+    });
+  }
+
+  // Compute the arc for a single-link arrowhead drag exactly as connector()
+  // renders it: an arc only when snapped to a valid target with a mouse
+  // pointer (touch links are always straight), undefined otherwise. Writes
+  // nothing; called once per render from deriveRenderState so connector() and
+  // the pointer-up persist path read the identical value.
+  deriveDraggedLinkArc(selectionUpdates: ReadonlyMap<UID, ViewElement>): number | undefined {
+    if (!this.state.isMovingArrow || !this.selectionCenterOffset) {
+      return undefined;
+    }
+    if (this.props.selection.size !== 1) {
+      return undefined;
+    }
+    const linkUid = only(this.props.selection);
+    let link = this.elements.get(linkUid);
+    const updated = selectionUpdates.get(linkUid);
+    if (updated !== undefined) {
+      link = updated;
+    }
+    if (link === undefined || link.type !== 'link') {
+      return undefined;
+    }
+    if (this.dragPointerType === 'touch') {
+      return undefined;
+    }
+    const validTarget = this.findLinkDragTarget();
+    if (!validTarget) {
+      return undefined;
+    }
+    const from = selectionUpdates.get(link.fromUid) || this.getElementByUid(link.fromUid);
+    const arcPt = this.getArcPoint();
+    return arcPt ? computeLinkCreationArc(from, validTarget, arcPt) : undefined;
   }
 
   flow(element: FlowViewElement) {
@@ -667,10 +772,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const sink = this.getElementByUid(sinkId);
     if (sink.type !== 'stock' && sink.type !== 'cloud') {
       throw new Error('invariant broken');
-    }
-
-    if (this.computeBounds) {
-      this.elementBounds.push(flowBounds(element));
     }
 
     return (
@@ -713,7 +814,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     if (isMovingSource && this.selectionCenterOffset) {
       // Source movement: find valid target for source end
-      const validTarget = this.cachedElements.find((e: ViewElement) => {
+      const validTarget = this.derived.displayElements.find((e: ViewElement) => {
         // Don't connect to the sink stock
         if (e.type !== 'stock' || e.uid === sinkId) {
           return false;
@@ -749,7 +850,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
 
     if (isMovingArrow && this.selectionCenterOffset) {
-      const validTarget = this.cachedElements.find((e: ViewElement) => {
+      const validTarget = this.derived.displayElements.find((e: ViewElement) => {
         // connecting both the inflow + outflow of a stock to itself wouldn't make sense.
         if (e.type !== 'stock' || e.uid === sourceId) {
           return false;
@@ -800,18 +901,20 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     moveDelta: Point,
   ): [StockViewElement, readonly FlowViewElement[]] {
     const flows = [...stockEl.inflows, ...stockEl.outflows]
-      .map((uid) => (this.selectionUpdates.get(uid) || this.getElementByUid(uid)) as FlowViewElement | undefined)
+      .map((uid) => (this.derived.selectionUpdates.get(uid) || this.getElementByUid(uid)) as FlowViewElement | undefined)
       .filter((element) => element !== undefined)
       .map((element) => defined(element));
 
     return UpdateStockAndFlows(stockEl, flows, moveDelta);
   }
 
-  renderInitAndCache(): readonly ViewElement[] {
-    if (!setsEqual(this.props.selection, this.selection)) {
-      this.selection = this.props.selection;
-    }
-
+  // The single render-phase derivation step. Invoked once at the top of
+  // render() and componentDidMount(); it is the ONLY method permitted to write
+  // the render caches (this.elements, this.cachedVersion, this.derived). Every
+  // element-rendering method below reads this.derived and never recomputes or
+  // mutates a cache mid-render. Returns the produced derivation (also stored on
+  // this.derived for event-time reads).
+  deriveRenderState(): RenderDerivation {
     let displayElements: readonly ViewElement[] = this.props.view.elements;
     if (this.state.inCreation) {
       displayElements = [...displayElements, this.state.inCreation];
@@ -820,17 +923,21 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       displayElements = [...displayElements, this.state.inCreationCloud];
     }
 
+    // Rebuild the uid lookup only when the project version changed. this.elements
+    // is held across renders because event handlers read it after render returns
+    // ("n.b. we don't want to clear this.elements"). The displayElements array
+    // identity must track the same key, so cache both together.
     if (this.props.version !== this.cachedVersion) {
-      this.elements = new Map(displayElements.map((el) => [el.uid, el]));
-      this.elements.set(fauxTarget.uid, fauxTarget);
-      this.elements.set(fauxCloudTarget.uid, fauxCloudTarget);
-      this.cachedElements = displayElements;
+      const elements = new Map<UID, ViewElement>(displayElements.map((el) => [el.uid, el]));
+      elements.set(fauxTarget.uid, fauxTarget);
+      elements.set(fauxCloudTarget.uid, fauxCloudTarget);
+      this.elements = elements;
       this.cachedVersion = this.props.version;
     }
 
-    this.selectionUpdates = Canvas.buildSelectionMap(this.props, this.elements, this.state.inCreation);
+    let selectionUpdates = Canvas.buildSelectionMap(this.props, this.elements, this.state.inCreation);
     if (this.state.labelSide) {
-      this.selectionUpdates = mapValues(this.selectionUpdates, (el) => {
+      selectionUpdates = mapValues(selectionUpdates, (el) => {
         return { ...el, labelSide: defined(this.state.labelSide) } as ViewElement;
       }) as Map<UID, ViewElement>;
     }
@@ -849,10 +956,22 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         segmentIndex: this.state.draggingSegmentIndex,
       });
 
-      this.selectionUpdates = new Map([...this.selectionUpdates, ...updatedElements]);
+      selectionUpdates = new Map([...selectionUpdates, ...updatedElements]);
     }
 
-    return displayElements;
+    const derived: RenderDerivation = {
+      displayElements,
+      elementsByUid: this.elements,
+      selectionUpdates,
+      hasAnyModuleReference: anyModuleHasModelReference(this.props.model.variables),
+      draggedLinkArc: undefined,
+    };
+    // Publish before computing the dragged-link arc: deriveDraggedLinkArc reads
+    // this.derived.displayElements (via findLinkDragTarget) and selectionUpdates.
+    this.derived = derived;
+    derived.draggedLinkArc = this.deriveDraggedLinkArc(selectionUpdates);
+
+    return derived;
   }
 
   clearPointerState(clearSelection = true): void {
@@ -862,7 +981,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     this.deferredSingleSelectUid = undefined;
     this.deferredIsText = undefined;
     this.dragPointerType = undefined;
-    this.draggedLinkArc = undefined;
 
     this.setState(pointerStateReset());
 
@@ -919,8 +1037,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // without modifier, we deferred the selection change to allow group drag.
     // Now on mouseUp, if no drag occurred, collapse to the single element.
     if (this.deferredSingleSelectUid !== undefined) {
-      const didDrag = isDragMovement(this.state.moveDelta, this.props.view.zoom);
-      const newSel = computeMouseUpSelection(this.deferredSingleSelectUid, didDrag);
+      const didDrag = isDrag(this.state.moveDelta, this.props.view.zoom);
+      const newSel = resolveDeferredSelection(this.deferredSingleSelectUid, didDrag);
       const wasDeferredText = this.deferredIsText;
       this.deferredSingleSelectUid = undefined;
       this.deferredIsText = undefined;
@@ -994,16 +1112,17 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         } else {
           const element = this.getElementByUid(only(this.props.selection));
           let foundInvalidTarget = false;
-          const validTarget = this.cachedElements.find((e: ViewElement) => {
+          const validTarget = this.derived.displayElements.find((e: ViewElement) => {
             const isValid = this.isValidTarget(e);
             foundInvalidTarget = foundInvalidTarget || isValid === false;
             return isValid || false;
           });
           if (element.type === 'link' && validTarget) {
-            // Use the arc that was last rendered — cached by connector()
-            // so the saved link matches the visual exactly.  Works for
-            // both new-link creation and existing-link reattachment.
-            const linkToAttach = { ...element, arc: this.draggedLinkArc };
+            // Use the arc that was last rendered — computed once per render in
+            // deriveRenderState (derived.draggedLinkArc) and drawn by connector()
+            // — so the saved link matches the visual exactly. Works for both
+            // new-link creation and existing-link reattachment.
+            const linkToAttach = { ...element, arc: this.derived.draggedLinkArc };
             this.props.onAttachLink(linkToAttach, defined(validTarget.ident));
           } else if (element.type === 'flow') {
             // don't create a flow stacked on top of 2 clouds due to a misclick
@@ -1103,41 +1222,17 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       const top = Math.min(pointA.y, pointB.y) - canvasOffset.y;
       const bottom = Math.max(pointA.y, pointB.y) - canvasOffset.y;
 
-      // Find all elements within the selection rectangle
-      const selectedElements = new Set<UID>();
-      for (const element of this.cachedElements) {
-        // Clouds use center-point containment (no visible bounds to intersect with rect corners)
-        if (element.type === 'cloud') {
-          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
-            selectedElements.add(element.uid);
-          }
-        } else if (element.type === 'aux') {
-          if (
-            auxContains(element, { x: left, y: top }) ||
-            auxContains(element, { x: right, y: top }) ||
-            auxContains(element, { x: left, y: bottom }) ||
-            auxContains(element, { x: right, y: bottom }) ||
-            (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom)
-          ) {
-            selectedElements.add(element.uid);
-          }
-        } else if (element.type === 'stock') {
-          // For stocks, check if center is within rectangle
-          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
-            selectedElements.add(element.uid);
-          }
-        } else if (element.type === 'flow') {
-          // For flows, check if valve center (x, y) is within rectangle
-          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
-            selectedElements.add(element.uid);
-          }
-        } else if (element.type === 'alias' || element.type === 'module') {
-          // For other named elements, check if center is within rectangle
-          if (element.x >= left && element.x <= right && element.y >= top && element.y <= bottom) {
-            selectedElements.add(element.uid);
-          }
-        }
-      }
+      // Find all elements within the selection rectangle. Each element type's
+      // containment rule lives in canvas-interaction.isInDragSelectRect; auxes
+      // additionally count when any rectangle corner falls inside the aux
+      // circle (a geometry test the shell owns via auxContains).
+      const rect = { left, right, top, bottom };
+      const auxCornerHit = (element: ViewElement): boolean =>
+        auxContains(element as AuxViewElement, { x: left, y: top }) ||
+        auxContains(element as AuxViewElement, { x: right, y: top }) ||
+        auxContains(element as AuxViewElement, { x: left, y: bottom }) ||
+        auxContains(element as AuxViewElement, { x: right, y: bottom });
+      const selectedElements = computeDragSelection(this.derived.displayElements, rect, auxCornerHit);
 
       // Update selection
       this.props.onSetSelection(selectedElements);
@@ -1528,21 +1623,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       y: client.y - delta.y,
     };
 
-    const cx = element.x;
-    const cy = element.y;
-
-    const angle = radToDeg(Math.atan2(cy - pointer.y, cx - pointer.x));
-
-    let side: 'top' | 'left' | 'bottom' | 'right';
-    if (-45 < angle && angle <= 45) {
-      side = 'left';
-    } else if (45 < angle && angle <= 135) {
-      side = 'top';
-    } else if (-135 < angle && angle <= -45) {
-      side = 'bottom';
-    } else {
-      side = 'right';
-    }
+    const side = labelSideForPointer({ x: element.x, y: element.y }, pointer);
 
     this.setState({
       isMovingLabel: true,
@@ -1892,7 +1973,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // check if its the same.
     this.mouseDownPoint = this.getCanvasPoint(e.clientX, e.clientY);
 
-    if (e.pointerType === 'touch' || e.shiftKey) {
+    // Discrete decision: touch / shift-drag pans, everything else rubber-band
+    // drag-selects. Routed through the pure reducer so the pan-vs-select rule
+    // lives in canvas-interaction; the continuous pan offset + momentum stay in
+    // the shell.
+    const pan = e.pointerType === 'touch' || e.shiftKey;
+    const { state: nextState } = reduceInteraction(idleState, { kind: 'canvasPointerDown', pan }, this.interactionContext());
+    if (nextState.mode === 'panning') {
       // Initialize velocity tracking for momentum
       this.velocityTracker.positions = [];
       const canvasOffset = this.getCanvasOffset();
@@ -1914,6 +2001,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       });
     }
   };
+
+  // The read-only environment the pure reducer needs from the shell.
+  interactionContext(canEditName = false): InteractionContext {
+    return { selection: this.props.selection, canEditName };
+  }
 
   handleEditingEnd = (e: React.PointerEvent<HTMLDivElement>): void => {
     e.preventDefault();
@@ -1952,7 +2044,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     if (isMovingArrow) {
       this.dragPointerType = e.pointerType;
-      this.draggedLinkArc = undefined;
     }
 
     if (!isEditingName) {
@@ -1966,7 +2057,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       isEditingName = false;
       isMovingArrow = true;
       this.dragPointerType = e.pointerType;
-      this.draggedLinkArc = undefined;
       inCreation = {
         type: 'link',
         uid: inCreationUid,
@@ -2014,7 +2104,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       this.props.onClearSelectedTool();
 
       const isMultiSelect = e.ctrlKey || e.metaKey || e.shiftKey;
-      const { newSelection, deferSingleSelect } = computeMouseDownSelection(
+      const { newSelection, deferSingleSelect } = decideMouseDownSelection(
         this.props.selection,
         element.uid,
         isMultiSelect,
@@ -2138,9 +2228,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   }
 
   buildLayers(displayElements: readonly ViewElement[]): React.ReactElement[][] {
-    // Compute once per render whether any module has a model reference,
-    // used by module() to suppress warnings when all modules are unconfigured.
-    this.hasAnyModuleReference = anyModuleHasModelReference(this.props.model.variables);
+    const selectionUpdates = this.derived.selectionUpdates;
 
     // create different layers for each of the display types so that views compose together nicely
     const zLayers = new Array(ZMax) as React.ReactElement[][];
@@ -2149,8 +2237,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
 
     for (let element of displayElements) {
-      if (this.selectionUpdates.has(element.uid)) {
-        element = getOrThrow(this.selectionUpdates, element.uid);
+      if (selectionUpdates.has(element.uid)) {
+        element = getOrThrow(selectionUpdates, element.uid);
       }
 
       // const ZOrder = Map<'flow' | 'module' | 'stock' | 'aux' | 'link' | 'style' | 'reference' | 'cloud' | 'alias', number>([
@@ -2204,19 +2292,14 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   }
 
   componentDidMount() {
-    const displayElements = this.renderInitAndCache();
+    const derived = this.deriveRenderState();
 
-    this.computeBounds = true;
-    if (this.computeBounds) {
-      this.elementBounds = [];
-    }
-
-    // we are ignoring the result here, because we're calling it for
-    // the side effect of computing individual bounds
-    this.buildLayers(displayElements);
+    // Compute initial diagram bounds via the explicit pure pass (no longer a
+    // side effect of rendering each element).
+    const elementBounds = computeElementBounds(derived.displayElements, derived.selectionUpdates);
 
     let initialBounds: ViewRect | undefined;
-    const bounds = calcViewBox(this.elementBounds);
+    const bounds = calcViewBox(elementBounds);
     if (bounds) {
       const left = Math.floor(bounds.left) - 10;
       const top = Math.floor(bounds.top) - 10;
@@ -2326,9 +2409,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         },
       });
     }
-
-    this.computeBounds = false;
-    this.elementBounds = [];
   }
 
   render() {
@@ -2343,13 +2423,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
     this.prevSelectedTool = selectedTool;
 
-    // phase 1: initialize some data structures we need and potentially
-    // invalidate cached data structures we have
-    const displayElements = this.renderInitAndCache();
-
-    if (embedded) {
-      this.computeBounds = true;
-    }
+    // phase 1: the single render derivation. Produces displayElements, the uid
+    // lookup, selection updates, module-warning flag, and the dragged-link arc.
+    // This is the only place render() mutates instance caches.
+    const derived = this.deriveRenderState();
+    const displayElements = derived.displayElements;
 
     // phase 2: create React components and add them to the appropriate layer
     const zLayers = this.buildLayers(displayElements);
@@ -2401,7 +2479,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     if (embedded) {
       // For embedded/export mode, always calculate tight bounds from elements.
       // The stored view.viewBox represents the editor viewport, not diagram bounds.
-      const bounds = calcViewBox(this.elementBounds);
+      const bounds = calcViewBox(computeElementBounds(displayElements, derived.selectionUpdates));
       if (bounds) {
         const left = Math.floor(bounds.left) - 10;
         const top = Math.floor(bounds.top) - 10;
@@ -2422,13 +2500,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       </div>
     );
 
-    // we don't need these things anymore
-
-    if (this.elementBounds) {
-      this.elementBounds = [];
-    }
-    this.selectionUpdates = new Map<UID, ViewElement>();
-    // n.b. we don't want to clear this.elements as thats used when handling callbacks
+    // n.b. this.elements (and this.derived) are intentionally NOT cleared here:
+    // event handlers read them after render returns (getElementByUid and the
+    // pointer callbacks resolve connector ends / persist the dragged-link arc).
 
     return (
       <div style={{ height: '100%', width: '100%' }} ref={this.svgRef} className={`${styles.canvas} simlin-canvas`}>

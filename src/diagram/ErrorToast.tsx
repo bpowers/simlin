@@ -28,7 +28,13 @@ const variantClass: Record<keyof typeof variantIcon, string> = {
 
 export interface ToastProps {
   message: string;
-  onClose: (msg: string) => void;
+  // Identifies *which* toast is closing. Callers that render several toasts
+  // with identical message text must pass a stable per-toast id and key
+  // their removal on it; otherwise closing one toast (or its auto-hide
+  // timer firing) would ambiguously match every toast with the same text.
+  // Defaults to `message` for callers that never have duplicates.
+  id?: string | number;
+  onClose: (id: string | number) => void;
   variant: keyof typeof variantIcon;
 }
 
@@ -84,7 +90,7 @@ export class Toast extends React.PureComponent<ToastProps, ToastState> {
     }
     this.clearTimer();
     this.setState({ open: false });
-    this.props.onClose(this.props.message);
+    this.props.onClose(this.props.id ?? this.props.message);
   };
 
   handleOpenChange = (open: boolean) => {
@@ -94,8 +100,11 @@ export class Toast extends React.PureComponent<ToastProps, ToastState> {
   };
 
   render() {
-    const { message, variant, ...other } = this.props;
+    // `id` is intentionally pulled out (rest-sibling omission) so our numeric
+    // toast-identity prop is not spread onto the DOM node as an HTML id.
+    const { message, variant, id, ...other } = this.props;
     const Icon = variantIcon[variant];
+    void id;
 
     return (
       <RadixToast.Root open={this.state.open} onOpenChange={this.handleOpenChange}>
