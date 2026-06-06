@@ -223,7 +223,7 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
 
     return (
       <div className={classNames}>
-        <ErrorBoundary>
+        <ErrorBoundary resetKey={`${this.props.username}/${this.props.projectName}`}>
           <Editor
             inputFormat="protobuf"
             initialProjectBinary={this.state.projectBinary}

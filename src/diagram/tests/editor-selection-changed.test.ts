@@ -131,6 +131,28 @@ describe('Editor componentDidUpdate -> onSelectionChanged', () => {
     expect(callback).not.toHaveBeenCalled();
   });
 
+  it('does not fire when prev and current selections have equal content but distinct Set identities', () => {
+    // undo/navigate-back rebuild a fresh Set with the same contents (the
+    // restoredSelection scenario). The guard uses setsEqual, not reference
+    // equality, so a content-identical but distinct Set must not re-notify
+    // the host -- otherwise every undo with a non-empty selection would emit
+    // a spurious callback.
+    const callback = jest.fn();
+    const editor = makeEditor({
+      onSelectionChanged: callback,
+      selectionIdents: ['x'],
+    });
+
+    const prevSelection = new Set<number>([1, 2]);
+    Object.assign(editor.state, { selection: prevSelection });
+    const prevState = { ...editor.state };
+    // A new Set instance with identical contents.
+    Object.assign(editor.state, { selection: new Set<number>([1, 2]) });
+    editor.componentDidUpdate(editor.props, prevState);
+
+    expect(callback).not.toHaveBeenCalled();
+  });
+
   it('does not throw when onSelectionChanged is omitted', () => {
     const editor = makeEditor({
       onSelectionChanged: undefined,

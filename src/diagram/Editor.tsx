@@ -319,6 +319,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   inSave = false;
   saveQueued = false;
+  // Single owner of the live snapshot object URL. State (`snapshotUrl`)
+  // only mirrors this for render. Two snapshots completing before the
+  // first commit would, if we read the previous URL from state, both see
+  // the same stale value and leak one URL; reading and revoking the
+  // instance field synchronously in setSnapshotUrl is race-free.
+  private liveSnapshotUrl: string | undefined = undefined;
   // Pending setTimeout(0) handles for componentDidMount's deferred
   // openInitialProject() and the scheduleSimRun() / scheduleSave() /
   // handleUndoRedo() dispatches. Held so componentWillUnmount can cancel
@@ -472,9 +478,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
 
     // Revoke any outstanding snapshot object URL so navigating away from a
-    // project with an open snapshot doesn't strand the blob.
-    if (this.state.snapshotUrl) {
-      URL.revokeObjectURL(this.state.snapshotUrl);
+    // project with an open snapshot doesn't strand the blob. Read the live
+    // URL from the owning instance field, not state, in case a snapshot
+    // completed without its setState having committed yet.
+    if (this.liveSnapshotUrl) {
+      URL.revokeObjectURL(this.liveSnapshotUrl);
+      this.liveSnapshotUrl = undefined;
     }
   }
 
@@ -483,12 +492,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // changed. Driving this from componentDidUpdate (rather than a
     // setTimeout(0) inside handleSelection) means the host observes *every*
     // committed selection change -- not just clicks routed through
-    // handleSelection, but also selections cleared by a delete, reset on
-    // module drill-in/back, and undo/redo-induced resets. getSelectionIdents
-    // reads the already-committed `this.state.selection`, so no deferral is
-    // needed; and componentDidUpdate never fires after unmount, so a path
-    // swap that remounts the Editor cannot leak a stale-idents callback onto
-    // the new instance.
+    // handleSelection, but also selections cleared by a delete and resets on
+    // module drill-in/back. (A normal undo/redo preserves the selection and
+    // fires nothing; the selection only resets when the viewed model
+    // disappears from the restored project -- see handleUndoRedo.)
+    // getSelectionIdents reads the already-committed `this.state.selection`,
+    // so no deferral is needed; and componentDidUpdate never fires after
+    // unmount, so a path swap that remounts the Editor cannot leak a
+    // stale-idents callback onto the new instance.
     if (this.props.onSelectionChanged && !setsEqual(prevState.selection, this.state.selection)) {
       this.props.onSelectionChanged(this.getSelectionIdents());
     }
@@ -726,18 +737,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }));
   }
 
-  // Shared tail for the simple edit handlers: apply a patch (allowing
-  // errors so partially-invalid models can be edited), and on success
-  // round-trip the engine's serialized state back into `activeProject`
-  // and schedule a re-simulation. Returns false (without refreshing the
-  // project or scheduling a sim run) when the patch throws, so callers
-  // that need to bail or perform extra cleanup on failure can.
+  // Apply a patch (allowing errors so partially-invalid models can be
+  // edited), reporting any failure to the console and the user. Returns
+  // false on failure so callers can bail. This is deliberately split from
+  // refreshFromEngine() so a caller can interleave its own synchronous
+  // state updates between the patch and the (async, serialize-heavy)
+  // engine round-trip -- handleRename relies on that ordering.
   //
   // `label` identifies the operation in the console error and the
   // user-facing fallback message when the engine reports no message.
-  // Handlers with genuinely different shapes (optimistic view updates,
-  // selection bookkeeping on error) do NOT use this helper.
-  private async applyPatchAndRefresh(patch: JsonProjectPatch, label: string): Promise<boolean> {
+  private async applyPatchOrReportError(patch: JsonProjectPatch, label: string): Promise<boolean> {
     const engine = this.engine();
     if (!engine) {
       return false;
@@ -750,8 +759,31 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       this.appendModelError(err.message ?? `Unknown error during ${label}`);
       return false;
     }
+    return true;
+  }
+
+  // Round-trip the engine's serialized state back into `activeProject` and
+  // schedule a re-simulation. Called after a successful patch.
+  private async refreshFromEngine(): Promise<void> {
+    const engine = this.engine();
+    if (!engine) {
+      return;
+    }
     await this.updateProject(await engine.serializeProtobuf());
     this.scheduleSimRun();
+  }
+
+  // Convenience wrapper for the simple edit handlers: apply a patch and,
+  // on success, refresh from the engine. Returns false (without
+  // refreshing or scheduling a sim run) when the patch throws.
+  // Handlers with genuinely different shapes (optimistic view updates,
+  // selection bookkeeping on error, or interleaved state updates like
+  // handleRename) do NOT use this wrapper.
+  private async applyPatchAndRefresh(patch: JsonProjectPatch, label: string): Promise<boolean> {
+    if (!(await this.applyPatchOrReportError(patch, label))) {
+      return false;
+    }
+    await this.refreshFromEngine();
     return true;
   }
 
@@ -814,14 +846,20 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       models: [{ name: this.state.modelName, ops }],
     };
 
-    // Clear the in-progress flow-creation flag only after a successful
-    // patch, matching the pre-refactor ordering (a failed rename left the
-    // flag untouched).
-    if (await this.applyPatchAndRefresh(patch, 'rename')) {
-      this.setState({
-        flowStillBeingCreated: false,
-      });
+    if (!(await this.applyPatchOrReportError(patch, 'rename'))) {
+      // A failed rename leaves flowStillBeingCreated untouched.
+      return;
     }
+
+    // Clear the in-progress flow-creation flag synchronously after the
+    // patch succeeds and BEFORE the engine round-trip in refreshFromEngine.
+    // This matches the pre-refactor ordering: the details panel for a
+    // just-named flow must un-suppress immediately, not wait out the
+    // serialize/JSON/setState round-trip.
+    this.setState({
+      flowStillBeingCreated: false,
+    });
+    await this.refreshFromEngine();
   };
 
   handleSelection = (selection: ReadonlySet<UID>) => {
@@ -1795,9 +1833,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     );
   }
 
-  handleCloseSnackbar = (msg: string) => {
+  // Remove the single error identified by its per-instance toast id (the
+  // same id used as the React key). Filtering by message text instead would
+  // dismiss every error sharing that text -- so a repeated failing edit's
+  // first auto-hide timer would close all of its duplicate toasts at once.
+  handleCloseSnackbar = (id: string | number) => {
     this.setState((prevState) => ({
-      modelErrors: prevState.modelErrors.filter((err) => err.message !== msg),
+      modelErrors: prevState.modelErrors.filter((err) => this.errorKey(err) !== id),
     }));
   };
 
@@ -1818,14 +1860,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         autoHideDuration={6000}
       >
         <div>
-          {this.state.modelErrors.map((err) => (
-            <Toast
-              variant="warning"
-              onClose={this.handleCloseSnackbar}
-              message={err.message}
-              key={this.errorKey(err)}
-            />
-          ))}
+          {this.state.modelErrors.map((err) => {
+            const id = this.errorKey(err);
+            return <Toast variant="warning" id={id} onClose={this.handleCloseSnackbar} message={err.message} key={id} />;
+          })}
         </div>
       </Snackbar>
     );
@@ -2960,11 +2998,15 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   // Replace the current snapshot object URL, revoking the previous one so
   // the underlying blob can be garbage-collected. Pass undefined to clear.
+  // The live URL is owned by the `liveSnapshotUrl` instance field (read and
+  // updated synchronously here, so back-to-back snapshots never both revoke
+  // the same stale value); state only mirrors it for render.
   private setSnapshotUrl(url: string | undefined): void {
-    const previous = this.state.snapshotUrl;
+    const previous = this.liveSnapshotUrl;
     if (previous && previous !== url) {
       URL.revokeObjectURL(previous);
     }
+    this.liveSnapshotUrl = url;
     this.setState({ snapshotUrl: url });
   }
 

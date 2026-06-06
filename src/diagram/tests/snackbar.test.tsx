@@ -330,6 +330,77 @@ describe('Snackbar', () => {
     const content = document.querySelector('[id="client-snackbar"]');
     expect(content).toBeNull();
   });
+
+  test('onClose reports the toast id, not the message, when an id is provided', () => {
+    const onClose = jest.fn();
+    render(
+      <Snackbar open={true} autoHideDuration={3000}>
+        <Toast message="duplicate" id={42} onClose={onClose} variant="warning" />
+      </Snackbar>,
+    );
+
+    act(() => {
+      jest.advanceTimersByTime(3000);
+    });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledWith(42);
+  });
+
+  test('closing one of two identical-message toasts leaves the other (dedup by id)', () => {
+    // Mirrors Editor.getSnackbar / handleCloseSnackbar: two errors with the
+    // SAME message text must be removed independently. Removal keys on a
+    // per-toast id, not the message, so the first toast's auto-hide timer
+    // dismisses only itself.
+    interface Item {
+      id: number;
+      message: string;
+    }
+
+    class DupHost extends React.Component<Record<string, never>, { items: Item[] }> {
+      state = {
+        items: [
+          { id: 1, message: 'same error' },
+          { id: 2, message: 'same error' },
+        ],
+      };
+
+      handleClose = (id: string | number) => {
+        this.setState((prev) => ({ items: prev.items.filter((it) => it.id !== id) }));
+      };
+
+      render() {
+        return (
+          <Snackbar open={this.state.items.length > 0} autoHideDuration={3000}>
+            <div>
+              {this.state.items.map((it) => (
+                <Toast key={it.id} id={it.id} message={it.message} onClose={this.handleClose} variant="warning" />
+              ))}
+            </div>
+          </Snackbar>
+        );
+      }
+    }
+
+    const ref = React.createRef<DupHost>();
+    const { container } = render(<DupHost ref={ref} />);
+
+    // Two toasts initially.
+    expect(document.querySelectorAll('[id="client-snackbar"]').length).toBe(2);
+
+    // Click the FIRST toast's close button only. Under the old
+    // filter-by-message logic this removed both identical-message toasts;
+    // keyed by id it removes only id 1.
+    const closeButtons = container.querySelectorAll('button[aria-label="close"]');
+    expect(closeButtons.length).toBe(2);
+    act(() => {
+      (closeButtons[0] as HTMLButtonElement).click();
+    });
+
+    // Exactly one error remains, and it is id 2 -- NOT both dismissed.
+    expect(ref.current!.state.items).toEqual([{ id: 2, message: 'same error' }]);
+    expect(document.querySelectorAll('[id="client-snackbar"]').length).toBe(1);
+  });
 });
 
 describe('SnackbarContent', () => {
