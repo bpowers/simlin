@@ -38,7 +38,16 @@ import { Alias, AliasProps } from './Alias';
 import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
 import { isCloudOnSourceSide, isCloudOnSinkSide } from './cloud-utils';
-import { calcViewBox, displayName, labelRadii, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
+import {
+  calcViewBox,
+  displayName,
+  labelRadii,
+  plainDeserialize,
+  plainSerialize,
+  Point,
+  Rect,
+  screenToCanvasPoint,
+} from './common';
 import { Connector, ConnectorProps, computeLinkCreationArc } from './Connector';
 import { EditableLabel } from './EditableLabel';
 import { Flow, flowBounds } from './Flow';
@@ -55,6 +64,8 @@ import {
   decideMouseDownSelection,
   idleState,
   InteractionContext,
+  InteractionEffect,
+  InteractionState,
   isDrag,
   labelSideForPointer,
   reduceInteraction,
@@ -198,16 +209,16 @@ interface RenderDerivation {
 }
 
 interface CanvasState {
-  isMovingCanvas: boolean;
-  isDragSelecting: boolean;
-  isEditingName: boolean;
-  isMovingArrow: boolean;
-  isMovingSource: boolean;
-  isMovingLabel: boolean;
-  labelSide: 'right' | 'bottom' | 'left' | 'top' | undefined;
+  // The discrete interaction mode (idle | panning | dragSelecting |
+  // movingSelection | movingEndpoint | movingLabel | editingName | pinching),
+  // modeled as a tagged union in canvas-interaction.ts. Replaces the former bag
+  // of mutually-exclusive booleans (isMovingCanvas/isDragSelecting/...) and the
+  // loose pinch/label/deferred fields. The continuous companions below
+  // (moveDelta, dragSelectionPoint, movingCanvasOffset, the inCreation concrete
+  // elements, and the Slate editingName value) stay outside the union because
+  // they are per-frame physics / DOM-adjacent state, not discrete mode.
+  interaction: InteractionState;
   editingName: Array<Descendant>;
-  editNameOnPointerUp: boolean;
-  flowStillBeingCreated: boolean;
   dragSelectionPoint: Point | undefined;
   moveDelta: Point | undefined;
   movingCanvasOffset: Point | undefined;
@@ -215,15 +226,6 @@ interface CanvasState {
   svgSize: Readonly<{ width: number; height: number }> | undefined;
   inCreation: ViewElement | undefined;
   inCreationCloud: CloudViewElement | undefined;
-  // Multi-touch pinch state
-  isPinching: boolean;
-  initialPinchDistance: number;
-  initialPinchZoom: number;
-  // Store the MODEL coordinates of the point under the initial pinch center.
-  // This is the fixed point that should stay under the user's fingers during zoom.
-  pinchModelPoint: Point | undefined;
-  // Which segment of a flow is being dragged (undefined = valve)
-  draggingSegmentIndex: number | undefined;
 }
 
 export interface CanvasProps {
@@ -299,34 +301,14 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   momentumInitialVelocity: Point | undefined;
   momentumStartOffset: Point | undefined;
 
-  // Deferred selection state for click-in-group-then-drag behavior.
-  // Set on mouseDown when clicking an already-selected element without modifier;
-  // resolved on mouseUp based on whether a drag occurred.
-  deferredSingleSelectUid: UID | undefined;
-  deferredIsText: boolean | undefined;
-
-  // Link drag state (creation and reattachment): the pointer type distinguishes
-  // mouse from touch (touch links are always straight). The arc shown during
-  // the last render lives in derived.draggedLinkArc so the persisted value on
-  // mouse-up exactly matches the visual.
-  dragPointerType: string | undefined;
-
   constructor(props: CanvasProps) {
     super(props);
 
     this.svgRef = React.createRef();
 
     this.state = {
-      isMovingArrow: false,
-      isMovingSource: false,
-      isMovingCanvas: false,
-      isDragSelecting: false,
-      isEditingName: false,
-      isMovingLabel: false,
-      labelSide: undefined,
+      interaction: idleState,
       editingName: [],
-      editNameOnPointerUp: false,
-      flowStillBeingCreated: false,
       dragSelectionPoint: undefined,
       moveDelta: undefined,
       movingCanvasOffset: undefined,
@@ -334,13 +316,73 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       svgSize: undefined,
       inCreation: undefined,
       inCreationCloud: undefined,
-      // Multi-touch pinch state
-      isPinching: false,
-      initialPinchDistance: 0,
-      initialPinchZoom: 1,
-      pinchModelPoint: undefined,
-      draggingSegmentIndex: undefined,
     };
+  }
+
+  // ---- Discrete-interaction-mode accessors --------------------------------
+  // The migration (#65) collapsed the former boolean CanvasState modes onto the
+  // tagged-union state.interaction. These narrow accessors keep the call sites
+  // readable; they are the ONLY places that destructure the union mode, so the
+  // render/handler code below stays mode-agnostic. (Deliberately NOT named
+  // after the deleted booleans so the modes are read through one vocabulary.)
+
+  // Dragging a link/flow arrowhead (sink) endpoint.
+  private get draggingArrowhead(): boolean {
+    const i = this.state.interaction;
+    return i.mode === 'movingEndpoint' && i.endpoint === 'arrow';
+  }
+
+  // Dragging a flow source endpoint.
+  private get draggingSource(): boolean {
+    const i = this.state.interaction;
+    return i.mode === 'movingEndpoint' && i.endpoint === 'source';
+  }
+
+  // Dragging an element's label.
+  private get draggingLabel(): boolean {
+    return this.state.interaction.mode === 'movingLabel';
+  }
+
+  // Editing a name inline (the Slate value lives in state.editingName).
+  private get editingNameMode(): boolean {
+    return this.state.interaction.mode === 'editingName';
+  }
+
+  // The pointer type captured at the start of an endpoint drag, or undefined
+  // when not dragging an endpoint. Drives the touch-is-always-straight link
+  // rule (touch links never get an arc).
+  private get dragPointerType(): string | undefined {
+    const i = this.state.interaction;
+    return i.mode === 'movingEndpoint' ? i.pointerType : undefined;
+  }
+
+  // The flow segment being dragged (undefined = valve / whole element).
+  private get draggingSegmentIndex(): number | undefined {
+    const i = this.state.interaction;
+    return i.mode === 'movingSelection' ? i.segmentIndex : undefined;
+  }
+
+  // The active label-drag side, or undefined when not dragging a label.
+  private get labelSide(): 'right' | 'bottom' | 'left' | 'top' | undefined {
+    const i = this.state.interaction;
+    return i.mode === 'movingLabel' ? i.side : undefined;
+  }
+
+  // Execute the discrete effects a reducer transition emitted, in order.
+  private runEffects(effects: readonly InteractionEffect[], target: Element | undefined, pointerId: number): void {
+    for (const effect of effects) {
+      switch (effect.kind) {
+        case 'setSelection':
+          this.props.onSetSelection(effect.selection);
+          break;
+        case 'clearSelectedTool':
+          this.props.onClearSelectedTool();
+          break;
+        case 'capturePointer':
+          target?.setPointerCapture(pointerId);
+          break;
+      }
+    }
   }
 
   getCanvasOffset(): Readonly<Point> {
@@ -434,9 +476,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     let isHidden = false;
     if (this.isSelected(flow)) {
       try {
-        if (this.state.isMovingArrow && isCloudOnSinkSide(element, flow)) {
+        if (this.draggingArrowhead && isCloudOnSinkSide(element, flow)) {
           isHidden = true;
-        } else if (this.state.isMovingSource && isCloudOnSourceSide(element, flow)) {
+        } else if (this.draggingSource && isCloudOnSourceSide(element, flow)) {
           isHidden = true;
         }
       } catch (e) {
@@ -455,9 +497,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   }
 
   isValidTarget(element: ViewElement): boolean | undefined {
-    const { isMovingArrow, isMovingSource } = this.state;
+    const draggingArrowhead = this.draggingArrowhead;
+    const draggingSource = this.draggingSource;
 
-    if ((!isMovingArrow && !isMovingSource) || !this.selectionCenterOffset) {
+    if ((!draggingArrowhead && !draggingSource) || !this.selectionCenterOffset) {
       return undefined;
     }
 
@@ -513,7 +556,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         return false;
       }
 
-      if (isMovingSource) {
+      if (draggingSource) {
         // For source movement: check if target stock is valid source
         const lastPt = last(arrow.points);
         // Don't allow connecting source and sink to the same stock
@@ -558,7 +601,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       element,
       series,
       isSelected,
-      isEditingName: isSelected && this.state.isEditingName,
+      isEditingName: isSelected && this.editingNameMode,
       isValidTarget: this.isValidTarget(element),
       onSelection: this.handleSetSelection,
       onLabelDrag: this.handleLabelDrag,
@@ -577,7 +620,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       element,
       series,
       isSelected,
-      isEditingName: isSelected && this.state.isEditingName,
+      isEditingName: isSelected && this.editingNameMode,
       isValidTarget: this.isValidTarget(element),
       onSelection: this.handleSetSelection,
       onLabelDrag: this.handleLabelDrag,
@@ -597,7 +640,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const props: ModuleProps = {
       element,
       isSelected,
-      isEditingName: isSelected && this.state.isEditingName,
+      isEditingName: isSelected && this.editingNameMode,
       isValidTarget: this.isValidTarget(element),
       onSelection: this.handleSetSelection,
       onLabelDrag: this.handleLabelDrag,
@@ -619,7 +662,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   }
 
   connector(element: LinkViewElement) {
-    const { isMovingArrow } = this.state;
+    const draggingArrowhead = this.draggingArrowhead;
     const isSelected = this.props.selection.has(element.uid);
 
     // Get the updated element from selectionUpdates if available (arc was already adjusted
@@ -641,7 +684,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // of recomputing-and-caching it during render) keeps render() free of
     // instance-field mutation while preserving the guarantee that the rendered
     // arc equals the value persisted on pointer-up.
-    const isDraggingLink = isMovingArrow && isSelected;
+    const isDraggingLink = draggingArrowhead && isSelected;
     if (isDraggingLink && this.selectionCenterOffset) {
       const validTarget = this.findLinkDragTarget();
       if (validTarget) {
@@ -718,7 +761,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   // nothing; called once per render from deriveRenderState so connector() and
   // the pointer-up persist path read the identical value.
   deriveDraggedLinkArc(selectionUpdates: ReadonlyMap<UID, ViewElement>): number | undefined {
-    if (!this.state.isMovingArrow || !this.selectionCenterOffset) {
+    if (!this.draggingArrowhead || !this.selectionCenterOffset) {
       return undefined;
     }
     if (this.props.selection.size !== 1) {
@@ -748,7 +791,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   flow(element: FlowViewElement) {
     const variable = this.props.model.variables.get(element.ident);
     const hasWarning = variable ? variableHasError(variable) : false;
-    const { isMovingArrow } = this.state;
+    const draggingArrowhead = this.draggingArrowhead;
     const isSelected = this.isSelected(element);
     const series = variable?.data;
 
@@ -784,9 +827,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         embedded={this.props.embedded}
         isSelected={isSelected}
         hasWarning={hasWarning}
-        isMovingArrow={isSelected && isMovingArrow}
-        isMovingSource={isSelected && this.state.isMovingSource}
-        isEditingName={isSelected && this.state.isEditingName}
+        isMovingArrow={isSelected && draggingArrowhead}
+        isMovingSource={isSelected && this.draggingSource}
+        isEditingName={isSelected && this.editingNameMode}
         isValidTarget={this.isValidTarget(element)}
         onSelection={this.handleSetSelection}
         onLabelDrag={this.handleLabelDrag}
@@ -822,9 +865,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
 
     let selectionUpdates = Canvas.buildSelectionMap(this.props, this.elements, this.state.inCreation);
-    if (this.state.labelSide) {
+    const activeLabelSide = this.labelSide;
+    if (activeLabelSide) {
       selectionUpdates = mapValues(selectionUpdates, (el) => {
-        return { ...el, labelSide: defined(this.state.labelSide) } as ViewElement;
+        return { ...el, labelSide: activeLabelSide } as ViewElement;
       }) as Map<UID, ViewElement>;
     }
     if (this.state.moveDelta) {
@@ -833,13 +877,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       // When dragging a single link arrow (creation or reattachment),
       // suppress arcPoint so processLinks doesn't compute a rotation-based
       // arc.  connector() handles arc computation directly.
-      const isDraggingLink = this.state.isMovingArrow && this.props.selection.size === 1;
+      const isDraggingLink = this.draggingArrowhead && this.props.selection.size === 1;
       const { updatedElements } = applyGroupMovement({
         elements: this.elements.values(),
         selection: this.props.selection,
         delta: moveDelta,
         arcPoint: isDraggingLink ? undefined : this.getArcPoint(),
-        segmentIndex: this.state.draggingSegmentIndex,
+        segmentIndex: this.draggingSegmentIndex,
       });
 
       selectionUpdates = new Map([...selectionUpdates, ...updatedElements]);
@@ -864,10 +908,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     this.pointerId = undefined;
     this.mouseDownPoint = undefined;
     this.selectionCenterOffset = undefined;
-    this.deferredSingleSelectUid = undefined;
-    this.deferredIsText = undefined;
-    this.dragPointerType = undefined;
 
+    // The former loose instance fields (deferredSingleSelectUid, deferredIsText,
+    // dragPointerType) now live inside the interaction union, so they are reset
+    // by pointerStateReset()'s `interaction: idle`.
     this.setState(pointerStateReset());
 
     if (clearSelection) {
@@ -889,15 +933,15 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     this.activePointers.delete(e.pointerId);
 
     // Handle end of pinch gesture
-    if (this.state.isPinching) {
+    if (this.state.interaction.mode === 'pinching') {
       // When exiting pinch mode, clear all gesture state for a clean restart.
       // Continuing with a single finger after pinch leads to confusing UX.
-      this.setState({
-        isPinching: false,
-        initialPinchDistance: 0,
-        initialPinchZoom: 1,
-        pinchModelPoint: undefined,
-      });
+      const { state: nextInteraction } = reduceInteraction(
+        this.state.interaction,
+        { kind: 'pinchEnd' },
+        this.interactionContext(),
+      );
+      this.setState({ interaction: nextInteraction });
       this.activePointers.clear();
       this.pointerId = undefined;
       this.mouseDownPoint = undefined;
@@ -912,22 +956,24 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       this.selectionCenterOffset !== undefined,
       this.state.moveDelta,
       this.props.view.zoom,
-      this.state.isMovingArrow,
-      this.state.isMovingSource,
-      this.state.isMovingLabel,
+      this.draggingArrowhead,
+      this.draggingSource,
+      this.draggingLabel,
     );
 
     this.pointerId = undefined;
 
     // Resolve deferred selection: if user clicked an already-selected element
     // without modifier, we deferred the selection change to allow group drag.
-    // Now on mouseUp, if no drag occurred, collapse to the single element.
-    if (this.deferredSingleSelectUid !== undefined) {
+    // Now on mouseUp, if no drag occurred, collapse to the single element. The
+    // deferred fields now live in the movingSelection union variant.
+    const interaction = this.state.interaction;
+    if (interaction.mode === 'movingSelection' && interaction.deferredSingleSelectUid !== undefined) {
       const didDrag = isDrag(this.state.moveDelta, this.props.view.zoom);
-      const newSel = resolveDeferredSelection(this.deferredSingleSelectUid, didDrag);
-      const wasDeferredText = this.deferredIsText;
-      this.deferredSingleSelectUid = undefined;
-      this.deferredIsText = undefined;
+      const newSel = resolveDeferredSelection(interaction.deferredSingleSelectUid, didDrag);
+      const wasDeferredText = interaction.deferredIsText;
+      // Drop the deferred fields by collapsing the movingSelection variant to a
+      // plain one (segmentIndex stays so a drag still moves the right segment).
       if (newSel) {
         this.props.onSetSelection(newSel);
         if (wasDeferredText && newSel.size === 1) {
@@ -941,11 +987,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           }
           const editingName = plainDeserialize('label', displayName(defined((el as NamedViewElement).name)));
           this.setState({
-            isEditingName: true,
+            interaction: { mode: 'editingName', onPointerUp: false, creatingFlow: false },
             editingName,
             moveDelta: undefined,
-            isMovingArrow: false,
-            isMovingSource: false,
           });
           this.selectionCenterOffset = undefined;
           return;
@@ -953,9 +997,9 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       }
     }
 
-    if (this.state.isMovingLabel && this.state.labelSide) {
+    if (interaction.mode === 'movingLabel') {
       const selected = only(this.props.selection);
-      this.props.onMoveLabel(selected, this.state.labelSide);
+      this.props.onMoveLabel(selected, interaction.side);
       this.clearPointerState(false);
       return;
     }
@@ -964,10 +1008,17 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       if (this.state.moveDelta) {
         const arcPoint = this.getArcPoint();
         const delta = this.state.moveDelta;
+        // The mode after committing the move: idle, unless we hand off into name
+        // editing (creation tool, or a just-created flow). Computed once because
+        // every boolean that used to be cleared piecemeal now lives in the union.
+        let nextInteraction: InteractionState = idleState;
 
-        if (this.state.editNameOnPointerUp) {
+        if (interaction.mode === 'editingName' && interaction.onPointerUp) {
           let inCreation = this.state.inCreation;
-          if (inCreation !== undefined && (inCreation.type === 'stock' || inCreation.type === 'aux' || inCreation.type === 'module')) {
+          if (
+            inCreation !== undefined &&
+            (inCreation.type === 'stock' || inCreation.type === 'aux' || inCreation.type === 'module')
+          ) {
             inCreation = {
               ...inCreation,
               x: inCreation.x - delta.x,
@@ -979,8 +1030,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
           const editingName = plainDeserialize('label', displayName(defined((inCreation as NamedViewElement).name)));
           this.setState({
-            isEditingName: true,
-            editNameOnPointerUp: false,
+            interaction: { mode: 'editingName', onPointerUp: false, creatingFlow: false },
             editingName,
             inCreation,
             moveDelta: undefined,
@@ -988,12 +1038,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           this.selectionCenterOffset = undefined;
           // we do weird one off things in this codepath, so exit early
           return;
-        } else if (!this.state.isMovingArrow && !this.state.isMovingSource) {
+        } else if (!this.draggingArrowhead && !this.draggingSource) {
           // A sub-threshold pointer wobble during a click is not a drag: don't
           // nudge the element. shouldShowVariableDetails (which applies the
           // same threshold) will open the details panel for it instead.
           if (isDragMovement(delta, this.props.view.zoom)) {
-            this.props.onMoveSelection(delta, arcPoint, this.state.draggingSegmentIndex);
+            this.props.onMoveSelection(delta, arcPoint, this.draggingSegmentIndex);
           }
         } else {
           const element = this.getElementByUid(only(this.props.selection));
@@ -1018,7 +1068,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
               return;
             }
             const inCreation = !!this.state.inCreation;
-            const isSourceAttach = this.state.isMovingSource;
+            const isSourceAttach = this.draggingSource;
             let fauxTargetCenter: Point | undefined;
             if (element.points[1]?.attachedToUid === fauxCloudTargetUid) {
               const canvasOffset = this.getCanvasOffset();
@@ -1044,32 +1094,31 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
               isSourceAttach,
             );
             if (inCreation) {
-              this.setState({
-                isEditingName: true,
-                editingName: plainDeserialize('label', displayName(defined(element.name))),
-                flowStillBeingCreated: true,
-              });
+              // Hand off into editing the just-created flow's name. creatingFlow
+              // (formerly flowStillBeingCreated) makes a later name-cancel delete
+              // the flow. The editingName Slate value is carried alongside.
+              nextInteraction = { mode: 'editingName', onPointerUp: false, creatingFlow: true };
+              this.setState({ editingName: plainDeserialize('label', displayName(defined(element.name))) });
             }
           } else if (!foundInvalidTarget || this.state.inCreation) {
             this.props.onDeleteSelection();
           }
         }
 
+        // Single coalesced commit: the discrete mode (idle, or the editingName
+        // hand-off computed above) plus the continuous companions that travel
+        // with a move. Replaces the former piecemeal isMovingArrow / isMovingSource
+        // / draggingSegmentIndex clears -- those all collapse into `interaction`.
         this.setState({
+          interaction: nextInteraction,
           moveDelta: undefined,
           inCreation: undefined,
           inCreationCloud: undefined,
-          isMovingArrow: false,
-          isMovingSource: false,
-          draggingSegmentIndex: undefined,
         });
-      } else if (this.state.isMovingArrow || this.state.isMovingSource) {
+      } else if (this.draggingArrowhead || this.draggingSource) {
         // User clicked on flow arrowhead/source (or cloud) but didn't move.
-        // Clear the movement flags so the cloud reappears.
-        this.setState({
-          isMovingArrow: false,
-          isMovingSource: false,
-        });
+        // Clear the movement mode so the cloud reappears.
+        this.setState({ interaction: idleState });
       }
       this.selectionCenterOffset = undefined;
       if (showDetails) {
@@ -1078,7 +1127,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       return;
     }
 
-    if (this.state.isMovingCanvas && this.state.movingCanvasOffset) {
+    if (interaction.mode === 'panning' && this.state.movingCanvasOffset) {
       const newViewBox = {
         ...this.props.view.viewBox,
         x: this.state.movingCanvasOffset.x,
@@ -1097,7 +1146,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
 
     // Handle drag selection
-    if (this.state.isDragSelecting && this.state.dragSelectionPoint) {
+    if (interaction.mode === 'dragSelecting' && this.state.dragSelectionPoint) {
       const pointA = this.mouseDownPoint;
       const pointB = this.state.dragSelectionPoint;
       const canvasOffset = this.getCanvasOffset();
@@ -1126,7 +1175,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       return;
     }
 
-    const clearSelection = !this.state.isMovingCanvas;
+    // A pan must not clear the selection; everything reaching here does. The
+    // panning branch above only cleared movingCanvasOffset, so the mode is still
+    // 'panning' here (mirrors the former `!this.state.isMovingCanvas`).
+    const clearSelection = interaction.mode !== 'panning';
     this.clearPointerState(clearSelection);
   };
 
@@ -1511,10 +1563,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     const side = labelSideForPointer({ x: element.x, y: element.y }, pointer);
 
-    this.setState({
-      isMovingLabel: true,
-      labelSide: side,
-    });
+    const { state: nextInteraction, effects } = reduceInteraction(
+      this.state.interaction,
+      { kind: 'labelDragStart', side },
+      this.interactionContext(),
+    );
+    this.runEffects(effects, e.target as Element | undefined, e.pointerId);
+    this.setState({ interaction: nextInteraction });
   };
 
   handleSelectionMove(e: React.PointerEvent<SVGElement>): void {
@@ -1551,8 +1606,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // Track position for momentum calculation
     this.trackPosition(newOffset.x, newOffset.y);
 
+    // The panning mode was already entered on pointer-down; re-affirm it (it is
+    // the move-guard in handlePointerMove) alongside the continuous offset.
     this.setState({
-      isMovingCanvas: true,
+      interaction: { mode: 'panning' },
       movingCanvasOffset: newOffset,
     });
   }
@@ -1565,7 +1622,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const dragSelectionPoint = this.getCanvasPoint(e.clientX, e.clientY);
 
     this.setState({
-      isDragSelecting: true,
+      interaction: { mode: 'dragSelecting' },
       dragSelectionPoint,
     });
   }
@@ -1586,7 +1643,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     }
 
     // Handle pinch gesture
-    if (this.state.isPinching && this.activePointers.size >= 2) {
+    if (this.state.interaction.mode === 'pinching' && this.activePointers.size >= 2) {
       this.handlePinchMove();
       return;
     }
@@ -1599,27 +1656,28 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     if (this.selectionCenterOffset) {
       this.handleSelectionMove(e);
-    } else if (this.state.isDragSelecting) {
+    } else if (this.state.interaction.mode === 'dragSelecting') {
       this.handleDragSelection(e);
-    } else if (this.state.isMovingCanvas) {
+    } else if (this.state.interaction.mode === 'panning') {
       this.handleMovingCanvas(e);
     }
   };
 
   // Handle pinch-to-zoom gesture movement
   handlePinchMove = (): void => {
-    if (!this.state.isPinching || !this.state.pinchModelPoint) {
+    const interaction = this.state.interaction;
+    if (interaction.mode !== 'pinching') {
       return;
     }
 
     const currentDistance = this.getPinchDistance();
-    if (currentDistance === 0 || this.state.initialPinchDistance === 0) {
+    if (currentDistance === 0 || interaction.initialDistance === 0) {
       return;
     }
 
     // Calculate scale factor
-    const scale = currentDistance / this.state.initialPinchDistance;
-    let newZoom = this.state.initialPinchZoom * scale;
+    const scale = currentDistance / interaction.initialDistance;
+    let newZoom = interaction.initialZoom * scale;
 
     // Clamp zoom level
     newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
@@ -1633,7 +1691,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // under the user's fingers when the pinch started. We want that same
     // model point to remain under the current screen center.
     // newOffset = currentCenterCanvas - pinchModelPoint
-    const modelPoint = this.state.pinchModelPoint;
+    const modelPoint = interaction.modelPoint;
     const newOffset = {
       x: currentCenterCanvas.x - modelPoint.x,
       y: currentCenterCanvas.y - modelPoint.y,
@@ -1714,21 +1772,29 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         y: centerCanvas.y - viewBox.y,
       };
 
+      // Entering pinch mode supersedes any single-finger panning/dragSelecting
+      // mode; the reducer returns the pinching variant carrying the fixed
+      // reference. Clear movingCanvasOffset so exiting pinch can't start momentum.
+      const { state: nextInteraction, effects } = reduceInteraction(
+        this.state.interaction,
+        {
+          kind: 'pinchStart',
+          initialDistance: distance,
+          initialZoom: this.props.view.zoom,
+          modelPoint: pinchModelPoint,
+        },
+        this.interactionContext(),
+      );
+      this.runEffects(effects, e.target as Element | undefined, e.pointerId);
       this.setState({
-        isPinching: true,
-        initialPinchDistance: distance,
-        initialPinchZoom: this.props.view.zoom,
-        pinchModelPoint,
-        isMovingCanvas: false,
-        isDragSelecting: false,
-        // Clear any canvas offset to prevent momentum from starting when exiting pinch
+        interaction: nextInteraction,
         movingCanvasOffset: undefined,
       });
       return;
     }
 
     // If already pinching and a third finger comes in, ignore it
-    if (this.state.isPinching) {
+    if (this.state.interaction.mode === 'pinching') {
       return;
     }
 
@@ -1789,11 +1855,18 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       this.pointerId = e.pointerId;
       this.selectionCenterOffset = client;
 
-      (e.target as Element).setPointerCapture(e.pointerId);
-
+      // The creation-tool press enters the editing-on-pointer-up handoff and
+      // captures the pointer (the capturePointer effect runs setPointerCapture).
+      // The staged element + zero moveDelta are the continuous companions the
+      // shell owns.
+      const { state: nextInteraction, effects } = reduceInteraction(
+        this.state.interaction,
+        { kind: 'createToolPointerDown', tool: selectedTool },
+        this.interactionContext(),
+      );
+      this.runEffects(effects, e.target as Element | undefined, e.pointerId);
       this.setState({
-        isEditingName: false,
-        editNameOnPointerUp: true,
+        interaction: nextInteraction,
         inCreation,
         moveDelta: {
           x: 0,
@@ -1839,9 +1912,17 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
       this.selectionCenterOffset = client;
 
+      // Flow tool on empty canvas: enter arrowhead-drag of the staged flow so the
+      // user drags the sink into place (no pointer capture in this branch, as
+      // before). The staged flow + source cloud are the continuous companions.
+      const { state: nextInteraction, effects } = reduceInteraction(
+        this.state.interaction,
+        { kind: 'flowToolPointerDown', pointerType: e.pointerType },
+        this.interactionContext(),
+      );
+      this.runEffects(effects, e.target as Element | undefined, e.pointerId);
       this.setState({
-        isEditingName: false,
-        isMovingArrow: true,
+        interaction: nextInteraction,
         inCreation,
         inCreationCloud,
         moveDelta: {
@@ -1864,28 +1945,25 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // lives in canvas-interaction; the continuous pan offset + momentum stay in
     // the shell.
     const pan = e.pointerType === 'touch' || e.shiftKey;
-    const { state: nextState } = reduceInteraction(idleState, { kind: 'canvasPointerDown', pan }, this.interactionContext());
-    if (nextState.mode === 'panning') {
+    const { state: nextInteraction, effects } = reduceInteraction(
+      idleState,
+      { kind: 'canvasPointerDown', pan },
+      this.interactionContext(),
+    );
+    this.runEffects(effects, e.target as Element | undefined, e.pointerId);
+    if (nextInteraction.mode === 'panning') {
       // Initialize velocity tracking for momentum
       this.velocityTracker.positions = [];
       const canvasOffset = this.getCanvasOffset();
       this.trackPosition(canvasOffset.x, canvasOffset.y);
-
-      this.setState({
-        isDragSelecting: false,
-        isMovingCanvas: true,
-        inCreation: undefined,
-        inCreationCloud: undefined,
-      });
-    } else {
-      // on mobile, no drag selection
-      this.setState({
-        isDragSelecting: true,
-        isMovingCanvas: false,
-        inCreation: undefined,
-        inCreationCloud: undefined,
-      });
     }
+    // The pan-vs-drag-select mode came from the reducer; the in-creation
+    // companions are cleared regardless (an empty-canvas press stages nothing).
+    this.setState({
+      interaction: nextInteraction,
+      inCreation: undefined,
+      inCreationCloud: undefined,
+    });
   };
 
   // The read-only environment the pure reducer needs from the shell.
@@ -1917,20 +1995,23 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       return;
     }
 
+    // These locals track the discrete outcome the way the pre-migration code did
+    // (mutually-exclusive booleans); they are folded into a single interaction
+    // variant at the end. The shell owns the geometry/hit-testing here (cloud
+    // reattachment, staged tool elements, Slate name deserialize) and composes
+    // the pure selection decisions (decideMouseDownSelection,
+    // resolveSelectionForReattachment); the discrete *mode* it lands in is then
+    // expressed through the tagged union, not loose flags.
     let isEditingName = !!isText;
     let editingName: Array<CustomElement> = [];
-    let isMovingArrow = !!isArrowhead;
-    let isMovingSource = !!isSource;
+    let draggingArrowEndpoint = !!isArrowhead;
+    let draggingSourceEndpoint = !!isSource;
 
     this.pointerId = e.pointerId;
 
     // For multi-selection, use the click point as the offset
     // This ensures smooth dragging from where the user clicked
     this.selectionCenterOffset = this.getCanvasPoint(e.clientX, e.clientY);
-
-    if (isMovingArrow) {
-      this.dragPointerType = e.pointerType;
-    }
 
     if (!isEditingName) {
       (e.target as Element).setPointerCapture(e.pointerId);
@@ -1941,8 +2022,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     if (selectedTool === 'link' && isNamedViewElement(element)) {
       isEditingName = false;
-      isMovingArrow = true;
-      this.dragPointerType = e.pointerType;
+      draggingArrowEndpoint = true;
       inCreation = {
         type: 'link',
         uid: inCreationUid,
@@ -1960,7 +2040,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       element = inCreation;
     } else if (selectedTool === 'flow' && element.type === 'stock') {
       isEditingName = false;
-      isMovingArrow = true;
+      draggingArrowEndpoint = true;
       const startPoint: FlowPoint = {
         x: element.x,
         y: element.y,
@@ -1998,19 +2078,18 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
       if (deferSingleSelect !== undefined) {
         // Element is already in the selection and no modifier -- defer selection
-        // change to mouseUp so that group drag works without dissolving selection
-        this.deferredSingleSelectUid = deferSingleSelect;
-        this.deferredIsText = isText;
-        isEditingName = false;
-
+        // change to mouseUp so that group drag works without dissolving selection.
+        // The deferred fields ride inside the movingSelection variant now.
         this.setState({
-          isEditingName: false,
+          interaction: {
+            mode: 'movingSelection',
+            deferredSingleSelectUid: deferSingleSelect,
+            deferredIsText: !!isText,
+            segmentIndex,
+          },
           editingName,
-          isMovingArrow: false,
-          isMovingSource: false,
           inCreation,
           moveDelta: { x: 0, y: 0 },
-          draggingSegmentIndex: segmentIndex,
         });
         return;
       }
@@ -2029,10 +2108,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         }
         if (flow) {
           if (isCloudOnSourceSide(element, flow)) {
-            isMovingSource = true;
+            draggingSourceEndpoint = true;
             element = flow;
           } else if (isCloudOnSinkSide(element, flow)) {
-            isMovingArrow = true;
+            draggingArrowEndpoint = true;
             element = flow;
           }
         }
@@ -2048,19 +2127,41 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       }
 
       if (newSelection !== undefined) {
-        const enteredReattachment = isMovingSource || isMovingArrow;
+        const enteredReattachment = draggingSourceEndpoint || draggingArrowEndpoint;
         this.props.onSetSelection(resolveSelectionForReattachment(newSelection, enteredReattachment, element.uid));
       }
     }
 
+    // Fold the mutually-exclusive outcome into one interaction variant:
+    //  - an endpoint drag (arrowhead/source, link/flow tool, cloud reattach)
+    //  - inline name editing (double-click on a single named element)
+    //  - otherwise a (potential) selection move, carrying any flow segmentIndex.
+    // pointerType is recorded for every endpoint drag so the touch-is-always-
+    // straight link rule (connector()/deriveDraggedLinkArc) has the real value.
+    let nextInteraction: InteractionState;
+    if (draggingArrowEndpoint || draggingSourceEndpoint) {
+      nextInteraction = {
+        mode: 'movingEndpoint',
+        endpoint: draggingSourceEndpoint ? 'source' : 'arrow',
+        pointerType: e.pointerType,
+        inCreation: inCreation !== undefined,
+      };
+    } else if (isEditingName) {
+      nextInteraction = { mode: 'editingName', onPointerUp: false, creatingFlow: false };
+    } else {
+      nextInteraction = {
+        mode: 'movingSelection',
+        deferredSingleSelectUid: undefined,
+        deferredIsText: false,
+        segmentIndex,
+      };
+    }
+
     this.setState({
-      isEditingName,
+      interaction: nextInteraction,
       editingName,
-      isMovingArrow,
-      isMovingSource,
       inCreation,
       moveDelta: { x: 0, y: 0 },
-      draggingSegmentIndex: segmentIndex,
     });
 
     if (selectedTool === 'link' || selectedTool === 'flow') {
@@ -2073,15 +2174,17 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   };
 
   handleEditingNameDone = (isCancel: boolean) => {
-    if (!this.state.isEditingName) {
+    const interaction = this.state.interaction;
+    if (interaction.mode !== 'editingName') {
       return;
     }
 
     if (isCancel) {
       // Cancelling the initial name edit of a just-created flow deletes the
-      // flow; the flag itself is reset by clearPointerState (via
-      // pointerStateReset) so a later rename-cancel can't re-trigger this.
-      if (this.state.flowStillBeingCreated) {
+      // flow; creatingFlow (formerly flowStillBeingCreated) is reset by
+      // clearPointerState's `interaction: idle` below, so a later rename-cancel
+      // can't re-trigger this.
+      if (interaction.creatingFlow) {
         this.props.onDeleteSelection();
       }
       this.clearPointerState();
@@ -2300,7 +2403,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   render() {
     const { selectedTool, embedded } = this.props;
 
-    let isEditingName = this.state.isEditingName;
+    let isEditingName = this.editingNameMode;
     if (isEditingName && selectedTool !== this.prevSelectedTool) {
       setTimeout(() => {
         this.handleEditingNameDone(false);
@@ -2322,7 +2425,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     let nameEditor;
 
     let dragRect;
-    if (this.state.isDragSelecting && this.mouseDownPoint && this.state.dragSelectionPoint) {
+    if (this.state.interaction.mode === 'dragSelecting' && this.mouseDownPoint && this.state.dragSelectionPoint) {
       const pointA = this.mouseDownPoint;
       const pointB = this.state.dragSelectionPoint;
       const offset = this.getCanvasOffset();

@@ -6,15 +6,21 @@
  * Version 2.0, that can be found in the LICENSE file.
  */
 
-// Regression tests for the `flowStillBeingCreated` state machine in
-// Canvas.handleEditingNameDone. The flag is set when a flow-creation drag
-// finishes and the canvas enters name editing; cancelling that initial name
-// edit deletes the just-created flow. The flag must be cleared once name
-// editing ends (commit OR cancel) -- a stale `true` would make a later
-// Escape-cancel of an unrelated rename delete that variable.
+// Regression tests for the just-created-flow name-edit state machine in
+// Canvas.handleEditingNameDone. Post tagged-union migration (#65) the former
+// `flowStillBeingCreated` flag lives as `interaction.editingName.creatingFlow`:
+// it is set when a flow-creation drag finishes and the canvas enters name
+// editing; cancelling that initial name edit deletes the just-created flow. The
+// flag must be cleared once name editing ends (commit OR cancel) -- a stale
+// `true` would make a later Escape-cancel of an unrelated rename delete that
+// variable. The third scenario below pins exactly that regression and is the
+// reason this file pokes the instance directly rather than going through the
+// gesture harness: it must cross from one editing session into a later,
+// unrelated one and observe that the flag did not leak.
 
 import { Canvas, CanvasProps } from '../drawing/Canvas';
 import { AuxViewElement, FlowViewElement, UID, ViewElement } from '@simlin/core/datamodel';
+import { idleState, type InteractionState } from '../drawing/canvas-interaction';
 import { plainDeserialize } from '../drawing/common';
 
 type CanvasInstance = InstanceType<typeof Canvas>;
@@ -99,22 +105,37 @@ function makeCanvas(elements: ViewElement[]): CanvasHarness {
   return { canvas, onDeleteSelection, onRenameVariable, setSelection };
 }
 
-describe('Canvas.handleEditingNameDone flowStillBeingCreated state machine', () => {
+// The just-created-flow editing state as the post-migration union variant.
+function creatingFlowEditing(): InteractionState {
+  return { mode: 'editingName', onPointerUp: false, creatingFlow: true };
+}
+
+// A plain (non-flow) inline name edit, e.g. a double-click rename.
+function plainEditing(): InteractionState {
+  return { mode: 'editingName', onPointerUp: false, creatingFlow: false };
+}
+
+function creatingFlow(interaction: InteractionState): boolean {
+  return interaction.mode === 'editingName' && interaction.creatingFlow;
+}
+
+describe('Canvas.handleEditingNameDone creatingFlow state machine', () => {
   it('cancelling the initial name edit of a just-created flow deletes it', () => {
     const flow = makeFlow(7, 'New Flow');
     const { canvas, onDeleteSelection, setSelection } = makeCanvas([flow]);
     setSelection([flow.uid]);
 
     canvas.setState({
-      isEditingName: true,
+      interaction: creatingFlowEditing(),
       editingName: plainDeserialize('label', 'New Flow'),
-      flowStillBeingCreated: true,
     });
 
     canvas.handleEditingNameDone(true);
 
     expect(onDeleteSelection).toHaveBeenCalledTimes(1);
-    expect(canvas.state.flowStillBeingCreated).toBe(false);
+    // clearPointerState resets interaction to idle (so creatingFlow is false).
+    expect(canvas.state.interaction).toEqual(idleState);
+    expect(creatingFlow(canvas.state.interaction)).toBe(false);
   });
 
   it('committing the initial flow name clears the flag', () => {
@@ -123,15 +144,15 @@ describe('Canvas.handleEditingNameDone flowStillBeingCreated state machine', () 
     setSelection([flow.uid]);
 
     canvas.setState({
-      isEditingName: true,
+      interaction: creatingFlowEditing(),
       editingName: plainDeserialize('label', 'inflow rate'),
-      flowStillBeingCreated: true,
     });
 
     canvas.handleEditingNameDone(false);
 
     expect(onRenameVariable).toHaveBeenCalledTimes(1);
-    expect(canvas.state.flowStillBeingCreated).toBe(false);
+    expect(canvas.state.interaction).toEqual(idleState);
+    expect(creatingFlow(canvas.state.interaction)).toBe(false);
   });
 
   it('cancelling a later rename of an unrelated variable does NOT delete it', () => {
@@ -142,17 +163,17 @@ describe('Canvas.handleEditingNameDone flowStillBeingCreated state machine', () 
     // 1. The user finishes creating a flow and commits its name.
     setSelection([flow.uid]);
     canvas.setState({
-      isEditingName: true,
+      interaction: creatingFlowEditing(),
       editingName: plainDeserialize('label', 'inflow rate'),
-      flowStillBeingCreated: true,
     });
     canvas.handleEditingNameDone(false);
 
     // 2. Later, the user double-clicks an existing variable to rename it,
-    //    then presses Escape to cancel. That cancel must not delete it.
+    //    then presses Escape to cancel. That cancel must not delete it -- the
+    //    creatingFlow flag must not have leaked from the prior session.
     setSelection([aux.uid]);
     canvas.setState({
-      isEditingName: true,
+      interaction: plainEditing(),
       editingName: plainDeserialize('label', 'Existing Variable'),
     });
     canvas.handleEditingNameDone(true);

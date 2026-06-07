@@ -20,6 +20,16 @@
  * executes the returned InteractionEffects (each effect is a command the shell
  * performs: pointer capture, prop callbacks, starting momentum, ...).
  *
+ * Division of labor: the reducer owns every discrete *mode* transition and
+ * chooses *which* effects fire and *in what order*. The shell owns geometry and
+ * hit-testing: before raising an event it has already resolved the canvas-space
+ * point, the hit element, the drag target, the move delta, and the faux-target
+ * centers, and it passes those pre-resolved results into the event (so an effect
+ * the reducer emits carries a payload the shell merely executes). This keeps the
+ * reducer pure -- it never touches a ViewElement's geometry beyond the explicit
+ * pure helpers (labelSideForPointer, isInDragSelectRect, isDrag) -- while still
+ * driving all of the shell's discrete behavior through reduceInteraction.
+ *
  * Continuous physics (pinch zoom math, pan offset math, momentum frames) stays
  * in the shell and calls props.onViewBoxChange directly; this reducer models
  * only the discrete pinch/pan *mode* transitions, not the per-frame geometry.
@@ -35,11 +45,7 @@ import { UID, ViewElement } from '@simlin/core/datamodel';
 
 import type { Point } from './common';
 import { ClickDragThresholdPx } from './pointer-utils';
-import {
-  computeMouseDownSelection,
-  computeMouseUpSelection,
-  type MouseDownSelectionResult,
-} from '../selection-logic';
+import { computeMouseDownSelection, computeMouseUpSelection, type MouseDownSelectionResult } from '../selection-logic';
 
 export type LabelSideName = 'top' | 'left' | 'bottom' | 'right';
 
@@ -113,6 +119,10 @@ export type InteractionEvent =
       readonly isSource: boolean;
       readonly segmentIndex: number | undefined;
       readonly modifier: boolean; // ctrl/meta/shift -> toggle selection
+      // The raw pointer type ('mouse' | 'touch' | 'pen'). Carried into a
+      // movingEndpoint so the touch-is-always-straight link rule has the real
+      // value (touch links never get an arc).
+      readonly pointerType: string;
     }
   // Pressed on empty canvas. `pan` is true for touch / shift (pan), false
   // otherwise (rubber-band drag-select).
@@ -120,7 +130,20 @@ export type InteractionEvent =
   // Pressed with a creation tool active (aux/stock/module): stage an element.
   | { readonly kind: 'createToolPointerDown'; readonly tool: 'aux' | 'stock' | 'module' }
   // Pressed with the flow tool on empty canvas: stage a flow + its source cloud.
-  | { readonly kind: 'flowToolPointerDown' };
+  | { readonly kind: 'flowToolPointerDown'; readonly pointerType: string }
+  // A second touch point started while a single-finger gesture was active: the
+  // shell has already computed the fixed pinch reference geometry.
+  | {
+      readonly kind: 'pinchStart';
+      readonly initialDistance: number;
+      readonly initialZoom: number;
+      readonly modelPoint: Point;
+    }
+  // The pinch gesture ended (a pinch pointer lifted/cancelled). Returns to idle
+  // -- continuing with a single finger after a pinch is intentionally dropped.
+  | { readonly kind: 'pinchEnd' }
+  // Began dragging an element's label; the shell resolved the quadrant side.
+  | { readonly kind: 'labelDragStart'; readonly side: LabelSideName };
 
 /**
  * Whether a pointer move is far enough to count as a drag rather than the
@@ -227,10 +250,7 @@ export function decideMouseDownSelection(
  * element only when no drag occurred (otherwise the group is preserved).
  * Delegates to selection-logic.computeMouseUpSelection.
  */
-export function resolveDeferredSelection(
-  deferredUid: UID | undefined,
-  didDrag: boolean,
-): ReadonlySet<UID> | undefined {
+export function resolveDeferredSelection(deferredUid: UID | undefined, didDrag: boolean): ReadonlySet<UID> | undefined {
   return computeMouseUpSelection(deferredUid, didDrag);
 }
 
@@ -267,38 +287,37 @@ export interface InteractionResult {
  * a semantic (hit-tested) event, and the read-only context, it returns the next
  * mode and the effects the shell should perform.
  *
- * This models every pointer-down transition out of idle (empty-canvas press,
- * the three creation tools, and element/arrowhead/source presses including the
- * deferred-single-select dance). The shell currently drives the empty-canvas
- * branch through reduceInteraction and the element-press *selection decision*
- * through decideMouseDownSelection; the remaining element/tool branches are the
- * canonical, table-tested model for the in-progress migration of the shell's
- * boolean CanvasState onto this tagged union. The continuous gestures
- * (pan/pinch/momentum) and pointer-move/up resolution stay in the shell, which
- * composes the pure decisions above (resolveDeferredSelection,
- * labelSideForPointer, computeDragSelection, isDrag).
+ * The shell drives every pointer-DOWN and mode-entry transition through here:
+ * the empty-canvas press, the three creation tools, element/arrowhead/source
+ * presses (including the deferred-single-select dance), and the pinch-enter /
+ * pinch-exit / label-drag-start transitions. The shell does the geometry and
+ * hit-testing first and passes the pre-resolved results in (an
+ * `elementPointerDown` already names the hit element and whether it is an
+ * arrowhead/source and the raw pointer type; a `pinchStart` already carries the
+ * fixed pinch reference). The reducer composes the pure selection helpers
+ * (decideMouseDownSelection) and emits the discrete effects the shell executes
+ * (setSelection / clearSelectedTool / capturePointer).
+ *
+ * Pointer-UP RESOLUTION stays in the shell by design: it is dominated by
+ * geometry (which element is under the cursor, the move delta, faux-target
+ * centers, the dragged-link arc) and interleaved branches (a deferred-select
+ * resolution falls through into the generic move-commit path). The shell reads
+ * `state.interaction`, composes the pure helpers exported here
+ * (resolveDeferredSelection, isDrag, computeDragSelection, labelSideForPointer),
+ * and constructs the next InteractionState directly. Continuous physics
+ * (per-frame pan offset, pinch zoom math, momentum frames) is likewise
+ * shell-internal; the reducer only marks the pan/pinch *mode*.
  */
 export function reduceInteraction(
   _state: InteractionState,
   event: InteractionEvent,
   ctx: InteractionContext,
 ): InteractionResult {
-  // SHELL-DRIVEN vs MODEL-ONLY (tech-debt #65): of the four down-events, only
-  // `canvasPointerDown` is currently routed through this function by the Canvas
-  // shell (handlePointerDown calls it to pick pan vs drag-select). The
-  // `createToolPointerDown`, `flowToolPointerDown`, and `elementPointerDown`
-  // branches below are the canonical, table-tested model for the in-progress
-  // migration of the shell's boolean CanvasState onto this tagged union; the
-  // shell does NOT yet drive them (handlePointerDown/handleSetSelection build
-  // their concrete state directly, composing only decideMouseDownSelection).
-  // Tests pinning those three branches therefore verify the MODEL, not live
-  // shell behavior -- do not read them as coverage of the shell's tool/element
-  // press paths.
   switch (event.kind) {
     case 'canvasPointerDown': {
-      // [shell-driven] Empty-canvas press: pan (touch/shift) or rubber-band
-      // drag-select. Selection is not cleared here -- that happens on pointer-up
-      // so a press that turns into a pan does not flicker the selection away.
+      // Empty-canvas press: pan (touch/shift) or rubber-band drag-select.
+      // Selection is not cleared here -- that happens on pointer-up so a press
+      // that turns into a pan does not flicker the selection away.
       return {
         state: event.pan ? { mode: 'panning' } : { mode: 'dragSelecting' },
         effects: [],
@@ -306,9 +325,8 @@ export function reduceInteraction(
     }
 
     case 'createToolPointerDown': {
-      // [model-only] Aux/stock/module creation tool: stage an element (the shell
-      // builds the concrete ViewElement) and enter the editing-on-pointer-up
-      // handoff.
+      // Aux/stock/module creation tool: stage an element (the shell builds the
+      // concrete ViewElement) and enter the editing-on-pointer-up handoff.
       return {
         state: { mode: 'editingName', onPointerUp: true, creatingFlow: false },
         effects: [{ kind: 'capturePointer' }],
@@ -316,16 +334,38 @@ export function reduceInteraction(
     }
 
     case 'flowToolPointerDown': {
-      // [model-only] Flow tool on empty canvas: stage a flow + source cloud and
-      // immediately enter arrowhead-drag so the user drags the sink into place.
+      // Flow tool on empty canvas: stage a flow + source cloud and immediately
+      // enter arrowhead-drag so the user drags the sink into place.
       return {
-        state: { mode: 'movingEndpoint', endpoint: 'arrow', pointerType: 'mouse', inCreation: true },
+        state: { mode: 'movingEndpoint', endpoint: 'arrow', pointerType: event.pointerType, inCreation: true },
         effects: [],
       };
     }
 
+    case 'pinchStart': {
+      // Two-finger pinch began: capture the fixed reference. The shell has
+      // already cleared its single-finger pointer state.
+      return {
+        state: {
+          mode: 'pinching',
+          initialDistance: event.initialDistance,
+          initialZoom: event.initialZoom,
+          modelPoint: event.modelPoint,
+        },
+        effects: [],
+      };
+    }
+
+    case 'pinchEnd': {
+      // A pinch pointer lifted: return to idle for a clean restart.
+      return { state: idleState, effects: [] };
+    }
+
+    case 'labelDragStart': {
+      return { state: { mode: 'movingLabel', side: event.side }, effects: [] };
+    }
+
     case 'elementPointerDown': {
-      // [model-only] (the shell composes decideMouseDownSelection directly).
       const effects: InteractionEffect[] = [];
 
       // Arrowhead/source press starts an endpoint drag (link reattach or flow
@@ -338,7 +378,7 @@ export function reduceInteraction(
           state: {
             mode: 'movingEndpoint',
             endpoint: event.isSource ? 'source' : 'arrow',
-            pointerType: 'mouse',
+            pointerType: event.pointerType,
             inCreation: false,
           },
           effects,

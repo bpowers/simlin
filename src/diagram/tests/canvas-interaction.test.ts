@@ -279,13 +279,45 @@ describe('reduceInteraction: creation tools (model-only, not yet shell-driven)',
   });
 
   it('flow tool enters arrowhead drag of an in-creation flow', () => {
-    const r = reduceInteraction(idleState, { kind: 'flowToolPointerDown' }, ctx([]));
+    const r = reduceInteraction(idleState, { kind: 'flowToolPointerDown', pointerType: 'mouse' }, ctx([]));
     expect(r.state).toEqual({
       mode: 'movingEndpoint',
       endpoint: 'arrow',
       pointerType: 'mouse',
       inCreation: true,
     });
+  });
+});
+
+describe('reduceInteraction: pinch enter/exit (shell-driven)', () => {
+  it('pinchStart captures the fixed pinch reference', () => {
+    const r = reduceInteraction(
+      idleState,
+      { kind: 'pinchStart', initialDistance: 120, initialZoom: 1.5, modelPoint: { x: 10, y: 20 } },
+      ctx([]),
+    );
+    expect(r.state).toEqual({ mode: 'pinching', initialDistance: 120, initialZoom: 1.5, modelPoint: { x: 10, y: 20 } });
+    expect(r.effects).toEqual([]);
+  });
+
+  it('pinchEnd returns to idle for a clean restart', () => {
+    const pinching: InteractionState = {
+      mode: 'pinching',
+      initialDistance: 120,
+      initialZoom: 1.5,
+      modelPoint: { x: 10, y: 20 },
+    };
+    const r = reduceInteraction(pinching, { kind: 'pinchEnd' }, ctx([]));
+    expect(r.state).toEqual({ mode: 'idle' });
+    expect(r.effects).toEqual([]);
+  });
+});
+
+describe('reduceInteraction: label drag start (shell-driven)', () => {
+  it('enters movingLabel with the resolved side', () => {
+    const r = reduceInteraction(idleState, { kind: 'labelDragStart', side: 'left' }, ctx([5]));
+    expect(r.state).toEqual({ mode: 'movingLabel', side: 'left' });
+    expect(r.effects).toEqual([]);
   });
 });
 
@@ -301,6 +333,7 @@ describe('reduceInteraction: element press selection (model-only, not yet shell-
         isSource: false,
         segmentIndex: undefined,
         modifier: false,
+        pointerType: 'mouse',
       },
       ctx([1, 2]),
     );
@@ -326,6 +359,7 @@ describe('reduceInteraction: element press selection (model-only, not yet shell-
         isSource: false,
         segmentIndex: undefined,
         modifier: true,
+        pointerType: 'mouse',
       },
       ctx([1, 2]),
     );
@@ -343,6 +377,7 @@ describe('reduceInteraction: element press selection (model-only, not yet shell-
         isSource: false,
         segmentIndex: undefined,
         modifier: false,
+        pointerType: 'mouse',
       },
       ctx([1, 2, 3]),
     );
@@ -367,6 +402,7 @@ describe('reduceInteraction: element press selection (model-only, not yet shell-
         isSource: false,
         segmentIndex: 1,
         modifier: false,
+        pointerType: 'mouse',
       },
       ctx([]),
     );
@@ -384,6 +420,7 @@ describe('reduceInteraction: element press selection (model-only, not yet shell-
         isSource: false,
         segmentIndex: undefined,
         modifier: false,
+        pointerType: 'mouse',
       },
       ctx([], true),
     );
@@ -404,6 +441,7 @@ describe('reduceInteraction: element press selection (model-only, not yet shell-
         isSource: false,
         segmentIndex: undefined,
         modifier: false,
+        pointerType: 'mouse',
       },
       ctx([], false),
     );
@@ -423,6 +461,7 @@ describe('reduceInteraction: endpoint drags (model-only, not yet shell-driven)',
         isSource: false,
         segmentIndex: undefined,
         modifier: false,
+        pointerType: 'mouse',
       },
       ctx([9]),
     );
@@ -446,6 +485,7 @@ describe('reduceInteraction: endpoint drags (model-only, not yet shell-driven)',
         isSource: true,
         segmentIndex: undefined,
         modifier: false,
+        pointerType: 'mouse',
       },
       ctx([9]),
     );
