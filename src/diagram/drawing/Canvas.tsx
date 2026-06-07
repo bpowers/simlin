@@ -704,19 +704,17 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // render body (and the mount effect); it is the ONLY code permitted to write
   // the render caches (r.elements, r.cachedVersion, r.derived). Every
   // element-rendering helper reads r.derived and never recomputes or mutates a
-  // cache mid-render. `inCreationArg` / `inCreationCloudArg` let the mount
-  // effect pass the just-committed values without waiting for a re-render.
-  const deriveRenderState = (
-    inCreationArg: ViewElement | undefined = latest.current.inCreation,
-    inCreationCloudArg: CloudViewElement | undefined = latest.current.inCreationCloud,
-  ): RenderDerivation => {
+  // cache mid-render.
+  const deriveRenderState = (): RenderDerivation => {
     const p = latest.current.props;
+    const inCreationNow = latest.current.inCreation;
+    const inCreationCloudNow = latest.current.inCreationCloud;
     let displayElements: readonly ViewElement[] = p.view.elements;
-    if (inCreationArg) {
-      displayElements = [...displayElements, inCreationArg];
+    if (inCreationNow) {
+      displayElements = [...displayElements, inCreationNow];
     }
-    if (inCreationCloudArg) {
-      displayElements = [...displayElements, inCreationCloudArg];
+    if (inCreationCloudNow) {
+      displayElements = [...displayElements, inCreationCloudNow];
     }
 
     // Rebuild the uid lookup only when the project version changed. r.elements
@@ -731,7 +729,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       r.cachedVersion = p.version;
     }
 
-    let selectionUpdates = buildSelectionMap(p, r.elements, inCreationArg);
+    let selectionUpdates = buildSelectionMap(p, r.elements, inCreationNow);
     const activeLabelSide = getLabelSide(latest.current.interaction);
     if (activeLabelSide) {
       selectionUpdates = mapValues(selectionUpdates, (el) => {
