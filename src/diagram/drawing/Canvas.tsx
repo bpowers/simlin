@@ -379,16 +379,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     return i.mode === 'movingLabel' ? i.side : undefined;
   }
 
-  // Execute the discrete effects a reducer transition emitted, in order.
+  // Execute the discrete effects a reducer transition emitted, in order. The
+  // reducer only ever emits `capturePointer` today (selection/tool changes are
+  // done by the shell directly), so this is the lone arm.
   private runEffects(effects: readonly InteractionEffect[], target: Element | undefined, pointerId: number): void {
     for (const effect of effects) {
       switch (effect.kind) {
-        case 'setSelection':
-          this.props.onSetSelection(effect.selection);
-          break;
-        case 'clearSelectedTool':
-          this.props.onClearSelectedTool();
-          break;
         case 'capturePointer':
           target?.setPointerCapture(pointerId);
           break;

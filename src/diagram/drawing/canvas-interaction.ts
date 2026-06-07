@@ -247,13 +247,9 @@ export function resolveDeferredSelection(deferredUid: UID | undefined, didDrag: 
  * is significant and preserved as emitted.
  */
 export type InteractionEffect =
-  // Replace the committed selection (props.onSetSelection).
-  | { readonly kind: 'setSelection'; readonly selection: ReadonlySet<UID> }
-  // Clear the active creation tool (props.onClearSelectedTool).
-  | { readonly kind: 'clearSelectedTool' }
   // Capture the pointer on the pressed target so moves keep flowing during a
   // drag even if the cursor leaves the element.
-  | { readonly kind: 'capturePointer' };
+  { readonly kind: 'capturePointer' };
 
 /** Read-only environment a transition needs from the shell. */
 export interface InteractionContext {
@@ -276,8 +272,10 @@ export interface InteractionResult {
  * start. These are mode transitions whose decision is NOT geometry-dominated, so
  * they live here and are table-tested. The shell (`Canvas.handlePointerDown`,
  * `handleLabelDrag`, `handlePointerCancel`) raises the matching event and
- * executes the returned effects (setSelection / clearSelectedTool /
- * capturePointer).
+ * executes the returned effects. The reducer only ever emits `capturePointer`
+ * today: selection replacement and tool-clearing are done by the shell directly
+ * (it owns the geometry/hit-testing those depend on), so they are not modeled
+ * as effects.
  *
  * What the reducer deliberately does NOT own: element / arrowhead / source press
  * resolution. That is geometry-dominated (which element was hit, cloud-vs-flow
