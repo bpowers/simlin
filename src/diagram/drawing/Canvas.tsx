@@ -343,9 +343,20 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     return this.state.interaction.mode === 'movingLabel';
   }
 
-  // Editing a name inline (the Slate value lives in state.editingName).
-  private get editingNameMode(): boolean {
-    return this.state.interaction.mode === 'editingName';
+  // The inline name editor is showing NOW. This reproduces the OLD boolean
+  // `isEditingName` ("the inline editor is visible"), which was distinct from
+  // `editNameOnPointerUp` ("enter editing AFTER this creation drag ends"). Both
+  // map onto the `editingName` union variant, separated by `onPointerUp`: during
+  // an aux/stock/module creation drag the variant is `editingName {onPointerUp:
+  // true}` but the editor is NOT yet visible, so this MUST exclude that staging
+  // case. Readers that drive the EditableLabel overlay, the label-suppression
+  // props, the overlay's pointer-event capture, and the tool-change deferred
+  // commit all want this "showing now" semantics -- never the staged handoff.
+  // The pointer-up staging read uses `mode === 'editingName' && onPointerUp`
+  // directly (the old `editNameOnPointerUp`), not this accessor.
+  private get showingNameEditor(): boolean {
+    const i = this.state.interaction;
+    return i.mode === 'editingName' && !i.onPointerUp;
   }
 
   // The pointer type captured at the start of an endpoint drag, or undefined
@@ -601,7 +612,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       element,
       series,
       isSelected,
-      isEditingName: isSelected && this.editingNameMode,
+      isEditingName: isSelected && this.showingNameEditor,
       isValidTarget: this.isValidTarget(element),
       onSelection: this.handleSetSelection,
       onLabelDrag: this.handleLabelDrag,
@@ -620,7 +631,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       element,
       series,
       isSelected,
-      isEditingName: isSelected && this.editingNameMode,
+      isEditingName: isSelected && this.showingNameEditor,
       isValidTarget: this.isValidTarget(element),
       onSelection: this.handleSetSelection,
       onLabelDrag: this.handleLabelDrag,
@@ -640,7 +651,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const props: ModuleProps = {
       element,
       isSelected,
-      isEditingName: isSelected && this.editingNameMode,
+      isEditingName: isSelected && this.showingNameEditor,
       isValidTarget: this.isValidTarget(element),
       onSelection: this.handleSetSelection,
       onLabelDrag: this.handleLabelDrag,
@@ -829,7 +840,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         hasWarning={hasWarning}
         isMovingArrow={isSelected && draggingArrowhead}
         isMovingSource={isSelected && this.draggingSource}
-        isEditingName={isSelected && this.editingNameMode}
+        isEditingName={isSelected && this.showingNameEditor}
         isValidTarget={this.isValidTarget(element)}
         onSelection={this.handleSetSelection}
         onLabelDrag={this.handleLabelDrag}
@@ -1967,8 +1978,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   };
 
   // The read-only environment the pure reducer needs from the shell.
-  interactionContext(canEditName = false): InteractionContext {
-    return { selection: this.props.selection, canEditName };
+  interactionContext(): InteractionContext {
+    return { selection: this.props.selection };
   }
 
   handleEditingEnd = (e: React.PointerEvent<HTMLDivElement>): void => {
@@ -2144,7 +2155,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         mode: 'movingEndpoint',
         endpoint: draggingSourceEndpoint ? 'source' : 'arrow',
         pointerType: e.pointerType,
-        inCreation: inCreation !== undefined,
       };
     } else if (isEditingName) {
       nextInteraction = { mode: 'editingName', onPointerUp: false, creatingFlow: false };
@@ -2175,7 +2185,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
   handleEditingNameDone = (isCancel: boolean) => {
     const interaction = this.state.interaction;
-    if (interaction.mode !== 'editingName') {
+    // Old guard was `if (!this.state.isEditingName) return` -- the editor must be
+    // SHOWING NOW. The staging variant (`onPointerUp: true`, set during a
+    // creation drag before the editor mounts) must NOT run this, so exclude it
+    // here too (mirrors the showingNameEditor accessor while narrowing the union).
+    if (interaction.mode !== 'editingName' || interaction.onPointerUp) {
       return;
     }
 
@@ -2403,7 +2417,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   render() {
     const { selectedTool, embedded } = this.props;
 
-    let isEditingName = this.editingNameMode;
+    let isEditingName = this.showingNameEditor;
     if (isEditingName && selectedTool !== this.prevSelectedTool) {
       setTimeout(() => {
         this.handleEditingNameDone(false);

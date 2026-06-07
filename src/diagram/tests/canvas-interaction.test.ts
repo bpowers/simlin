@@ -116,17 +116,12 @@ function makeLink(uid: number, fromUid: number, toUid: number): LinkViewElement 
   };
 }
 
-const ctx = (selection: Iterable<UID>, canEditName = false): InteractionContext => ({
+const ctx = (selection: Iterable<UID>): InteractionContext => ({
   selection: new Set(selection),
-  canEditName,
 });
 
-// Convenience accessors for asserting on emitted effects.
+// Convenience accessor for asserting on emitted effects.
 const effectKinds = (effects: readonly InteractionEffect[]): string[] => effects.map((e) => e.kind);
-const setSelectionEffect = (effects: readonly InteractionEffect[]): ReadonlySet<UID> | undefined => {
-  const e = effects.find((x) => x.kind === 'setSelection');
-  return e && e.kind === 'setSelection' ? e.selection : undefined;
-};
 
 describe('decideMouseDownSelection', () => {
   it('replaces selection when clicking an unselected element without modifier', () => {
@@ -255,10 +250,11 @@ describe('drag-select rectangle membership', () => {
   });
 });
 
-// The canvas-press branch is shell-driven (handlePointerDown routes through
-// reduceInteraction). The creation-tool, flow-tool, and element-press blocks
-// below pin the MODEL only -- the shell does not yet drive those branches
-// (tech-debt #65) -- so they are not coverage of live shell behavior.
+// Every branch the reducer still owns is shell-driven: the shell raises the
+// matching event and executes the returned effects. Element / arrowhead / source
+// press resolution is intentionally NOT in the reducer (it is geometry-dominated
+// and lives in Canvas.handleSetSelection), so there is no elementPointerDown
+// event to test here.
 describe('reduceInteraction: canvas press (shell-driven)', () => {
   it('touch/shift press enters panning, no selection change', () => {
     const r = reduceInteraction(idleState, { kind: 'canvasPointerDown', pan: true }, ctx([1]));
@@ -271,7 +267,7 @@ describe('reduceInteraction: canvas press (shell-driven)', () => {
   });
 });
 
-describe('reduceInteraction: creation tools (model-only, not yet shell-driven)', () => {
+describe('reduceInteraction: creation tools (shell-driven)', () => {
   it('aux/stock/module tool stages editing-on-pointer-up and captures pointer', () => {
     const r = reduceInteraction(idleState, { kind: 'createToolPointerDown', tool: 'aux' }, ctx([]));
     expect(r.state).toEqual({ mode: 'editingName', onPointerUp: true, creatingFlow: false });
@@ -279,12 +275,14 @@ describe('reduceInteraction: creation tools (model-only, not yet shell-driven)',
   });
 
   it('flow tool enters arrowhead drag of an in-creation flow', () => {
+    // The mode carries only endpoint + pointerType: the in-creation companion is
+    // the concrete element in shell state (CanvasState.inCreation), not a union
+    // field.
     const r = reduceInteraction(idleState, { kind: 'flowToolPointerDown', pointerType: 'mouse' }, ctx([]));
     expect(r.state).toEqual({
       mode: 'movingEndpoint',
       endpoint: 'arrow',
       pointerType: 'mouse',
-      inCreation: true,
     });
   });
 });
@@ -321,177 +319,11 @@ describe('reduceInteraction: label drag start (shell-driven)', () => {
   });
 });
 
-describe('reduceInteraction: element press selection (model-only, not yet shell-driven)', () => {
-  it('clicking an unselected element selects it and prepares to move', () => {
-    const r = reduceInteraction(
-      idleState,
-      {
-        kind: 'elementPointerDown',
-        elementUid: 5,
-        isText: false,
-        isArrowhead: false,
-        isSource: false,
-        segmentIndex: undefined,
-        modifier: false,
-        pointerType: 'mouse',
-      },
-      ctx([1, 2]),
-    );
-    expect(r.state).toEqual({
-      mode: 'movingSelection',
-      deferredSingleSelectUid: undefined,
-      deferredIsText: false,
-      segmentIndex: undefined,
-    });
-    expect(setSelectionEffect(r.effects)).toEqual(new Set([5]));
-    expect(effectKinds(r.effects)).toContain('clearSelectedTool');
-    expect(effectKinds(r.effects)).toContain('capturePointer');
-  });
-
-  it('ctrl-click toggles the element into the selection', () => {
-    const r = reduceInteraction(
-      idleState,
-      {
-        kind: 'elementPointerDown',
-        elementUid: 3,
-        isText: false,
-        isArrowhead: false,
-        isSource: false,
-        segmentIndex: undefined,
-        modifier: true,
-        pointerType: 'mouse',
-      },
-      ctx([1, 2]),
-    );
-    expect(setSelectionEffect(r.effects)).toEqual(new Set([1, 2, 3]));
-  });
-
-  it('pressing an already-selected element defers (preserving the group)', () => {
-    const r = reduceInteraction(
-      idleState,
-      {
-        kind: 'elementPointerDown',
-        elementUid: 2,
-        isText: false,
-        isArrowhead: false,
-        isSource: false,
-        segmentIndex: undefined,
-        modifier: false,
-        pointerType: 'mouse',
-      },
-      ctx([1, 2, 3]),
-    );
-    expect(r.state).toEqual({
-      mode: 'movingSelection',
-      deferredSingleSelectUid: 2,
-      deferredIsText: false,
-      segmentIndex: undefined,
-    });
-    // No setSelection effect: the selection is left intact for a potential drag.
-    expect(setSelectionEffect(r.effects)).toBeUndefined();
-  });
-
-  it('carries the flow segment index through into movingSelection', () => {
-    const r = reduceInteraction(
-      idleState,
-      {
-        kind: 'elementPointerDown',
-        elementUid: 5,
-        isText: false,
-        isArrowhead: false,
-        isSource: false,
-        segmentIndex: 1,
-        modifier: false,
-        pointerType: 'mouse',
-      },
-      ctx([]),
-    );
-    expect(r.state).toMatchObject({ mode: 'movingSelection', segmentIndex: 1 });
-  });
-
-  it('double-click (isText) on a single named element enters name editing', () => {
-    const r = reduceInteraction(
-      idleState,
-      {
-        kind: 'elementPointerDown',
-        elementUid: 5,
-        isText: true,
-        isArrowhead: false,
-        isSource: false,
-        segmentIndex: undefined,
-        modifier: false,
-        pointerType: 'mouse',
-      },
-      ctx([], true),
-    );
-    expect(r.state).toEqual({ mode: 'editingName', onPointerUp: false, creatingFlow: false });
-    expect(setSelectionEffect(r.effects)).toEqual(new Set([5]));
-    // No pointer capture while editing text.
-    expect(effectKinds(r.effects)).not.toContain('capturePointer');
-  });
-
-  it('double-click on a non-name-editable element falls back to moving', () => {
-    const r = reduceInteraction(
-      idleState,
-      {
-        kind: 'elementPointerDown',
-        elementUid: 5,
-        isText: true,
-        isArrowhead: false,
-        isSource: false,
-        segmentIndex: undefined,
-        modifier: false,
-        pointerType: 'mouse',
-      },
-      ctx([], false),
-    );
-    expect(r.state).toMatchObject({ mode: 'movingSelection' });
-  });
-});
-
-describe('reduceInteraction: endpoint drags (model-only, not yet shell-driven)', () => {
-  it('arrowhead press enters arrow endpoint drag and captures pointer', () => {
-    const r = reduceInteraction(
-      idleState,
-      {
-        kind: 'elementPointerDown',
-        elementUid: 9,
-        isText: false,
-        isArrowhead: true,
-        isSource: false,
-        segmentIndex: undefined,
-        modifier: false,
-        pointerType: 'mouse',
-      },
-      ctx([9]),
-    );
-    expect(r.state).toEqual({
-      mode: 'movingEndpoint',
-      endpoint: 'arrow',
-      pointerType: 'mouse',
-      inCreation: false,
-    });
-    expect(effectKinds(r.effects)).toEqual(['capturePointer']);
-  });
-
-  it('source press enters source endpoint drag', () => {
-    const r = reduceInteraction(
-      idleState,
-      {
-        kind: 'elementPointerDown',
-        elementUid: 9,
-        isText: false,
-        isArrowhead: false,
-        isSource: true,
-        segmentIndex: undefined,
-        modifier: false,
-        pointerType: 'mouse',
-      },
-      ctx([9]),
-    );
-    expect(r.state).toMatchObject({ mode: 'movingEndpoint', endpoint: 'source' });
-  });
-});
+// NOTE: element / arrowhead / source press resolution is intentionally absent
+// from the reducer (no elementPointerDown event). It is geometry-dominated and
+// lives in Canvas.handleSetSelection (composing decideMouseDownSelection /
+// resolveSelectionForReattachment and building the union variant directly); the
+// reconciler-level gesture suite (canvas-gestures-elements.test.tsx) covers it.
 
 describe('idleState', () => {
   it('is the idle mode', () => {
@@ -501,15 +333,18 @@ describe('idleState', () => {
 });
 
 // Type-only event coverage: exercising the discriminant ensures the union stays
-// exhaustive for the shell's translation layer.
+// exhaustive for the shell's translation layer. (No elementPointerDown: element
+// press resolution lives in the shell, not the reducer.)
 describe('InteractionEvent kinds', () => {
   it('enumerates the supported kinds', () => {
     const kinds: InteractionEvent['kind'][] = [
-      'elementPointerDown',
       'canvasPointerDown',
       'createToolPointerDown',
       'flowToolPointerDown',
+      'pinchStart',
+      'pinchEnd',
+      'labelDragStart',
     ];
-    expect(new Set(kinds).size).toBe(4);
+    expect(new Set(kinds).size).toBe(6);
   });
 });

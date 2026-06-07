@@ -77,13 +77,14 @@ export type InteractionState =
     }
   // Dragging a link or flow endpoint. `endpoint` distinguishes the arrowhead
   // (sink) from the source. `pointerType` drives the touch-is-always-straight
-  // rule for links. `inCreation` is true while the dragged element is a
-  // not-yet-persisted creation (link/flow tool or flow-from-stock).
+  // rule for links. Whether the dragged element is a not-yet-persisted creation
+  // (link/flow tool or flow-from-stock) is NOT recorded here: the shell already
+  // owns the concrete in-creation element (`CanvasState.inCreation`) as the
+  // single source of truth, and reads it directly on pointer-up.
   | {
       readonly mode: 'movingEndpoint';
       readonly endpoint: 'arrow' | 'source';
       readonly pointerType: string;
-      readonly inCreation: boolean;
     }
   // Dragging an element's label to a new side.
   | { readonly mode: 'movingLabel'; readonly side: LabelSideName }
@@ -109,21 +110,6 @@ export const idleState: InteractionState = { mode: 'idle' };
  * point, modifier keys, and pointer type. The reducer never sees a DOM event.
  */
 export type InteractionEvent =
-  // Pressed on a specific element (body, arrowhead, source, or label-adjacent
-  // text). selectedTool routes link/flow-tool creation behavior.
-  | {
-      readonly kind: 'elementPointerDown';
-      readonly elementUid: UID;
-      readonly isText: boolean;
-      readonly isArrowhead: boolean;
-      readonly isSource: boolean;
-      readonly segmentIndex: number | undefined;
-      readonly modifier: boolean; // ctrl/meta/shift -> toggle selection
-      // The raw pointer type ('mouse' | 'touch' | 'pen'). Carried into a
-      // movingEndpoint so the touch-is-always-straight link rule has the real
-      // value (touch links never get an arc).
-      readonly pointerType: string;
-    }
   // Pressed on empty canvas. `pan` is true for touch / shift (pan), false
   // otherwise (rubber-band drag-select).
   | { readonly kind: 'canvasPointerDown'; readonly pan: boolean }
@@ -273,8 +259,6 @@ export type InteractionEffect =
 export interface InteractionContext {
   /** The currently committed selection. */
   readonly selection: ReadonlySet<UID>;
-  /** Whether the pressed element can host an inline name editor (named, single). */
-  readonly canEditName: boolean;
 }
 
 export interface InteractionResult {
@@ -287,31 +271,39 @@ export interface InteractionResult {
  * a semantic (hit-tested) event, and the read-only context, it returns the next
  * mode and the effects the shell should perform.
  *
- * The shell drives every pointer-DOWN and mode-entry transition through here:
- * the empty-canvas press, the three creation tools, element/arrowhead/source
- * presses (including the deferred-single-select dance), and the pinch-enter /
- * pinch-exit / label-drag-start transitions. The shell does the geometry and
- * hit-testing first and passes the pre-resolved results in (an
- * `elementPointerDown` already names the hit element and whether it is an
- * arrowhead/source and the raw pointer type; a `pinchStart` already carries the
- * fixed pinch reference). The reducer composes the pure selection helpers
- * (decideMouseDownSelection) and emits the discrete effects the shell executes
- * (setSelection / clearSelectedTool / capturePointer).
+ * What the reducer owns: the empty-canvas press (pan vs rubber-band drag-select),
+ * the three creation tools, the flow tool, pinch enter/exit, and label-drag
+ * start. These are mode transitions whose decision is NOT geometry-dominated, so
+ * they live here and are table-tested. The shell (`Canvas.handlePointerDown`,
+ * `handleLabelDrag`, `handlePointerCancel`) raises the matching event and
+ * executes the returned effects (setSelection / clearSelectedTool /
+ * capturePointer).
  *
- * Pointer-UP RESOLUTION stays in the shell by design: it is dominated by
- * geometry (which element is under the cursor, the move delta, faux-target
+ * What the reducer deliberately does NOT own: element / arrowhead / source press
+ * resolution. That is geometry-dominated (which element was hit, cloud-vs-flow
+ * reattachment, link/flow-tool staging, the deferred-single-select dance) and is
+ * interleaved with shell-only concerns (building the staged ViewElement,
+ * deserializing the Slate name value, the reattachment selection override). It
+ * therefore lives entirely in the shell's `handleSetSelection`, which composes
+ * the pure helpers re-exported here (`decideMouseDownSelection`,
+ * `resolveSelectionForReattachment`) and constructs the next `InteractionState`
+ * variant directly. There is no `elementPointerDown` event: a single source of
+ * truth (the shell) avoids a parallel, easy-to-skew model of press handling.
+ *
+ * Pointer-UP RESOLUTION likewise stays in the shell by design: it is dominated
+ * by geometry (which element is under the cursor, the move delta, faux-target
  * centers, the dragged-link arc) and interleaved branches (a deferred-select
  * resolution falls through into the generic move-commit path). The shell reads
  * `state.interaction`, composes the pure helpers exported here
- * (resolveDeferredSelection, isDrag, computeDragSelection, labelSideForPointer),
- * and constructs the next InteractionState directly. Continuous physics
- * (per-frame pan offset, pinch zoom math, momentum frames) is likewise
- * shell-internal; the reducer only marks the pan/pinch *mode*.
+ * (`resolveDeferredSelection`, `isDrag`, `computeDragSelection`,
+ * `labelSideForPointer`), and constructs the next InteractionState directly.
+ * Continuous physics (per-frame pan offset, pinch zoom math, momentum frames) is
+ * likewise shell-internal; the reducer only marks the pan/pinch *mode*.
  */
 export function reduceInteraction(
   _state: InteractionState,
   event: InteractionEvent,
-  ctx: InteractionContext,
+  _ctx: InteractionContext,
 ): InteractionResult {
   switch (event.kind) {
     case 'canvasPointerDown': {
@@ -337,7 +329,7 @@ export function reduceInteraction(
       // Flow tool on empty canvas: stage a flow + source cloud and immediately
       // enter arrowhead-drag so the user drags the sink into place.
       return {
-        state: { mode: 'movingEndpoint', endpoint: 'arrow', pointerType: event.pointerType, inCreation: true },
+        state: { mode: 'movingEndpoint', endpoint: 'arrow', pointerType: event.pointerType },
         effects: [],
       };
     }
@@ -363,71 +355,6 @@ export function reduceInteraction(
 
     case 'labelDragStart': {
       return { state: { mode: 'movingLabel', side: event.side }, effects: [] };
-    }
-
-    case 'elementPointerDown': {
-      const effects: InteractionEffect[] = [];
-
-      // Arrowhead/source press starts an endpoint drag (link reattach or flow
-      // endpoint reattach). The shell pre-resolves which it is.
-      if (event.isArrowhead || event.isSource) {
-        if (!event.isText) {
-          effects.push({ kind: 'capturePointer' });
-        }
-        return {
-          state: {
-            mode: 'movingEndpoint',
-            endpoint: event.isSource ? 'source' : 'arrow',
-            pointerType: event.pointerType,
-            inCreation: false,
-          },
-          effects,
-        };
-      }
-
-      const decision = decideMouseDownSelection(ctx.selection, event.elementUid, event.modifier);
-      effects.push({ kind: 'clearSelectedTool' });
-      if (!event.isText) {
-        effects.push({ kind: 'capturePointer' });
-      }
-
-      if (decision.deferSingleSelect !== undefined) {
-        return {
-          state: {
-            mode: 'movingSelection',
-            deferredSingleSelectUid: decision.deferSingleSelect,
-            deferredIsText: event.isText,
-            segmentIndex: event.segmentIndex,
-          },
-          effects,
-        };
-      }
-
-      if (decision.newSelection !== undefined) {
-        effects.push({ kind: 'setSelection', selection: decision.newSelection });
-      }
-
-      // A text (double-click) press on a single named element enters name
-      // editing; otherwise the press begins a (potential) move of the new
-      // selection.
-      const enterEditing =
-        event.isText && ctx.canEditName && decision.newSelection !== undefined && decision.newSelection.size === 1;
-      if (enterEditing) {
-        return {
-          state: { mode: 'editingName', onPointerUp: false, creatingFlow: false },
-          effects,
-        };
-      }
-
-      return {
-        state: {
-          mode: 'movingSelection',
-          deferredSingleSelectUid: undefined,
-          deferredIsText: false,
-          segmentIndex: event.segmentIndex,
-        },
-        effects,
-      };
     }
   }
 }

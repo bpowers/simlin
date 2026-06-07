@@ -240,6 +240,19 @@ describe('Canvas gestures: creation tools (checklist 12)', () => {
       expect(h.query(`.simlin-${type}`)).not.toBeNull();
 
       pointerMove(h.svg, 210, 210, { buttons: 1 });
+
+      // DURING the creation drag (after move, before pointer-up) the name editor
+      // must NOT be active: the union is `editingName {onPointerUp: true}` (the
+      // "start editing once the drag ends" staging handoff), which is distinct
+      // from the editor being visible NOW. Asserting the old two-field semantics:
+      //  (a) no inline contenteditable overlay is mounted yet, and
+      //  (b) the staged element still renders its own text label (it is only
+      //      suppressed once the editor actually shows on pointer-up).
+      expect(h.query('[contenteditable]')).toBeNull();
+      const stagedLabel = h.query(`.simlin-${type} text`);
+      expect(stagedLabel).not.toBeNull();
+      expect(stagedLabel!.textContent).toBe(expectedName);
+
       pointerUp(h.svg, 210, 210);
 
       // The creation drag releases into name editing (EditableLabel overlay).
