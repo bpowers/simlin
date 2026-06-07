@@ -41,7 +41,7 @@ import { isCloudOnSourceSide, isCloudOnSinkSide } from './cloud-utils';
 import { calcViewBox, displayName, labelRadii, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
 import { Connector, ConnectorProps, computeLinkCreationArc } from './Connector';
 import { EditableLabel } from './EditableLabel';
-import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
+import { Flow, flowBounds } from './Flow';
 import { applyGroupMovement } from '../group-movement';
 import { Group, groupBounds, GroupProps } from './Group';
 import { Module, moduleBounds, moduleContains, ModuleProps } from './Module';
@@ -792,120 +792,6 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         onLabelDrag={this.handleLabelDrag}
       />
     );
-  }
-
-  constrainFlowMovement(
-    flow: FlowViewElement,
-    moveDelta: Point,
-  ): [FlowViewElement, readonly (StockViewElement | CloudViewElement)[]] {
-    const sourceId = defined(first(flow.points).attachedToUid);
-    let source = this.getElementByUid(sourceId) as StockViewElement | CloudViewElement;
-    if (source.type !== 'stock' && source.type !== 'cloud') {
-      throw new Error('invariant broken');
-    }
-
-    const sinkId = defined(last(flow.points).attachedToUid);
-    let sink = this.getElementByUid(sinkId) as StockViewElement | CloudViewElement;
-    if (sink.type !== 'stock' && sink.type !== 'cloud') {
-      throw new Error('invariant broken');
-    }
-
-    const { isMovingArrow, isMovingSource } = this.state;
-
-    if (isMovingSource && this.selectionCenterOffset) {
-      // Source movement: find valid target for source end
-      const validTarget = this.derived.displayElements.find((e: ViewElement) => {
-        // Don't connect to the sink stock
-        if (e.type !== 'stock' || e.uid === sinkId) {
-          return false;
-        }
-        return this.isValidTarget(e) || false;
-      }) as StockViewElement;
-
-      if (validTarget) {
-        moveDelta = {
-          x: source.x - validTarget.x,
-          y: source.y - validTarget.y,
-        };
-        source = {
-          ...validTarget,
-          uid: sourceId,
-          x: source.x,
-          y: source.y,
-        };
-      } else {
-        const off = this.selectionCenterOffset;
-        const canvasOffset = this.getCanvasOffset();
-
-        source = {
-          ...source,
-          x: off.x - canvasOffset.x,
-          y: off.y - canvasOffset.y,
-          isZeroRadius: true,
-        };
-      }
-
-      [source, flow] = UpdateCloudAndFlow(source, flow, moveDelta);
-      return [flow, []];
-    }
-
-    if (isMovingArrow && this.selectionCenterOffset) {
-      const validTarget = this.derived.displayElements.find((e: ViewElement) => {
-        // connecting both the inflow + outflow of a stock to itself wouldn't make sense.
-        if (e.type !== 'stock' || e.uid === sourceId) {
-          return false;
-        }
-        return this.isValidTarget(e) || false;
-      }) as StockViewElement;
-      if (validTarget) {
-        moveDelta = {
-          x: sink.x - validTarget.x,
-          y: sink.y - validTarget.y,
-        };
-        sink = {
-          ...validTarget,
-          uid: sinkId,
-          x: sink.x,
-          y: sink.y,
-        };
-      } else {
-        const off = this.selectionCenterOffset;
-        const canvasOffset = this.getCanvasOffset();
-
-        sink = {
-          ...sink,
-          x: off.x - canvasOffset.x,
-          y: off.y - canvasOffset.y,
-          isZeroRadius: true,
-        };
-      }
-
-      [sink, flow] = UpdateCloudAndFlow(sink, flow, moveDelta);
-      return [flow, []];
-    }
-
-    const ends: readonly (StockViewElement | CloudViewElement)[] = [source, sink];
-    return UpdateFlow(flow, ends, moveDelta, this.state.draggingSegmentIndex);
-  }
-
-  constrainCloudMovement(
-    cloudEl: CloudViewElement,
-    moveDelta: Point,
-  ): [StockViewElement | CloudViewElement, FlowViewElement] {
-    const flow = this.getElementByUid(defined(cloudEl.flowUid)) as FlowViewElement;
-    return UpdateCloudAndFlow(cloudEl, flow, moveDelta);
-  }
-
-  constrainStockMovement(
-    stockEl: StockViewElement,
-    moveDelta: Point,
-  ): [StockViewElement, readonly FlowViewElement[]] {
-    const flows = [...stockEl.inflows, ...stockEl.outflows]
-      .map((uid) => (this.derived.selectionUpdates.get(uid) || this.getElementByUid(uid)) as FlowViewElement | undefined)
-      .filter((element) => element !== undefined)
-      .map((element) => defined(element));
-
-    return UpdateStockAndFlows(stockEl, flows, moveDelta);
   }
 
   // The single render-phase derivation step. Invoked once at the top of
