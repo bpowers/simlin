@@ -60,86 +60,80 @@ export function moduleBounds(element: ModuleViewElement): Rect {
   return mergeBounds(bounds, labelBounds(labelProps));
 }
 
-export class Module extends React.PureComponent<ModuleProps> {
-  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+export const Module = React.memo(function Module(props: ModuleProps): React.ReactElement {
+  const { element, isEditingName, isSelected, isValidTarget, hasWarning, onSelection, onLabelDrag, onDoubleClick } =
+    props;
+
+  const handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    this.props.onSelection(this.props.element, e);
+    onSelection(element, e);
   };
 
-  handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
-    e.preventDefault();
-    e.stopPropagation();
-    this.props.onSelection(this.props.element, e, true);
-  };
+  // Memoized: passed to the memo'd Label below, so a stable identity (while
+  // element/onSelection are unchanged) lets Label skip re-rendering.
+  const handleLabelSelection = React.useCallback(
+    (e: React.PointerEvent<SVGElement>): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      onSelection(element, e, true);
+    },
+    [onSelection, element],
+  );
 
-  handleDoubleClick = (e: React.MouseEvent<SVGElement>): void => {
+  const handleDoubleClick = (e: React.MouseEvent<SVGElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    if (this.props.onDoubleClick) {
-      this.props.onDoubleClick(this.props.element);
+    if (onDoubleClick) {
+      onDoubleClick(element);
     }
   };
 
-  indicators() {
-    if (!this.props.hasWarning) {
-      return undefined;
-    }
+  const w = ModuleWidth;
+  const h = ModuleHeight;
+  const cx = element.x;
+  const cy = element.y;
+  const side = element.labelSide;
 
-    const { element } = this.props;
-    const w = ModuleWidth;
-    const h = ModuleHeight;
-    const cx = element.x + w / 2 - 1;
-    const cy = element.y - h / 2 + 1;
+  const label = isEditingName ? undefined : (
+    <Label
+      uid={element.uid}
+      cx={cx}
+      cy={cy}
+      side={side}
+      text={displayName(defined(element.name))}
+      rw={w / 2}
+      rh={h / 2}
+      onSelection={handleLabelSelection}
+      onLabelDrag={onLabelDrag}
+    />
+  );
 
-    return <circle className={styles.errorIndicator} cx={cx} cy={cy} r={3} />;
+  let indicator;
+  if (hasWarning) {
+    indicator = <circle className={styles.errorIndicator} cx={cx + w / 2 - 1} cy={cy - h / 2 + 1} r={3} />;
   }
 
-  render() {
-    const { element, isEditingName, isSelected, isValidTarget } = this.props;
-    const w = ModuleWidth;
-    const h = ModuleHeight;
-    const cx = element.x;
-    const cy = element.y;
-    const side = element.labelSide;
+  const groupClassName = clsx(styles.module, 'simlin-module', {
+    [styles.selected]: isSelected && isValidTarget === undefined,
+    'simlin-selected': isSelected && isValidTarget === undefined,
+    [styles.targetGood]: isValidTarget === true,
+    [styles.targetBad]: isValidTarget === false,
+  });
 
-    const label = isEditingName ? undefined : (
-      <Label
-        uid={element.uid}
-        cx={cx}
-        cy={cy}
-        side={side}
-        text={displayName(defined(element.name))}
-        rw={w / 2}
-        rh={h / 2}
-        onSelection={this.handleLabelSelection}
-        onLabelDrag={this.props.onLabelDrag}
+  return (
+    <g className={groupClassName} onPointerDown={handlePointerDown}>
+      <rect
+        x={Math.ceil(cx - w / 2)}
+        y={Math.ceil(cy - h / 2)}
+        width={w}
+        height={h}
+        rx={ModuleRadius}
+        ry={ModuleRadius}
+        onDoubleClick={handleDoubleClick}
       />
-    );
-
-    const indicator = this.indicators();
-
-    const groupClassName = clsx(styles.module, 'simlin-module', {
-      [styles.selected]: isSelected && isValidTarget === undefined,
-      'simlin-selected': isSelected && isValidTarget === undefined,
-      [styles.targetGood]: isValidTarget === true,
-      [styles.targetBad]: isValidTarget === false,
-    });
-
-    return (
-      <g className={groupClassName} onPointerDown={this.handlePointerDown}>
-        <rect
-          x={Math.ceil(cx - w / 2)}
-          y={Math.ceil(cy - h / 2)}
-          width={w}
-          height={h}
-          rx={ModuleRadius}
-          ry={ModuleRadius}
-          onDoubleClick={this.handleDoubleClick}
-        />
-        {indicator}
-        {label}
-      </g>
-    );
-  }
-}
+      {indicator}
+      {label}
+    </g>
+  );
+});
