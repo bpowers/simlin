@@ -13,17 +13,18 @@ import {
 } from '@simlin/core/datamodel';
 
 import {
-  Connector,
   circleFromPoints,
   getVisualCenter,
   intersectElementArc,
+  intersectElementStraight,
+  isStraightLine,
   rayRectIntersection,
   circleRectIntersections,
   ArrayedOffset,
   takeoffθ,
   computeLinkCreationArc,
 } from '../drawing/Connector';
-import { AuxRadius, StockWidth, StockHeight, StraightLineMax } from '../drawing/default';
+import { AuxRadius, StockWidth, StockHeight } from '../drawing/default';
 import { square, Circle, Point } from '../drawing/common';
 
 function makeAux(uid: number, x: number, y: number, isArrayed: boolean = false): AuxViewElement {
@@ -210,7 +211,7 @@ describe('Connector routing', () => {
         };
 
         // Verify isStraightLine is true for straight links
-        expect(Connector.isStraightLine(props)).toBe(true);
+        expect(isStraightLine(props)).toBe(true);
 
         // The intersection point for aux should be at (100 + AuxRadius, 100)
         // since we're going right (theta = 0)
@@ -270,7 +271,7 @@ describe('Connector routing', () => {
           onSelection: () => {},
         };
 
-        expect(Connector.isStraightLine(props)).toBe(true);
+        expect(isStraightLine(props)).toBe(true);
       });
 
       it('should adjust center for arrayed stock', () => {
@@ -550,7 +551,7 @@ describe('Connector routing', () => {
     it('should hit left edge when approaching from the left', () => {
       const stock = makeStock(2, 200, 100);
       const theta = Math.PI; // approaching from left means connector angle is PI
-      const p = Connector.intersectElementStraight(stock, theta);
+      const p = intersectElementStraight(stock, theta);
       expect(p.x).toBeCloseTo(200 - StockWidth / 2);
       expect(p.y).toBeCloseTo(100);
     });
@@ -558,7 +559,7 @@ describe('Connector routing', () => {
     it('should hit top edge when approaching from above', () => {
       const stock = makeStock(2, 200, 200);
       const theta = Math.PI / 2; // approaching from above
-      const p = Connector.intersectElementStraight(stock, theta);
+      const p = intersectElementStraight(stock, theta);
       expect(p.x).toBeCloseTo(200);
       expect(p.y).toBeCloseTo(200 + StockHeight / 2);
     });
@@ -566,7 +567,7 @@ describe('Connector routing', () => {
     it('should not change behavior for auxiliaries', () => {
       const aux = makeAux(1, 200, 100);
       const theta = 0;
-      const p = Connector.intersectElementStraight(aux, theta);
+      const p = intersectElementStraight(aux, theta);
       expect(p.x).toBeCloseTo(200 + AuxRadius);
       expect(p.y).toBeCloseTo(100);
     });
@@ -681,7 +682,7 @@ describe('Connector routing', () => {
         to,
         onSelection: () => {},
       };
-      expect(Connector.isStraightLine(props)).toBe(true);
+      expect(isStraightLine(props)).toBe(true);
     });
 
     it('should return true when arcPoint is collinear with from and to', () => {
@@ -696,7 +697,7 @@ describe('Connector routing', () => {
         onSelection: () => {},
         arcPoint: { x: 200, y: 100 },
       };
-      expect(Connector.isStraightLine(props)).toBe(true);
+      expect(isStraightLine(props)).toBe(true);
     });
 
     it('should return false when arcPoint is far from the line', () => {
@@ -711,7 +712,7 @@ describe('Connector routing', () => {
         onSelection: () => {},
         arcPoint: { x: 200, y: 0 },
       };
-      expect(Connector.isStraightLine(props)).toBe(false);
+      expect(isStraightLine(props)).toBe(false);
     });
   });
 

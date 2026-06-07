@@ -4,16 +4,19 @@
 
 import * as React from 'react';
 
-import {
-  isNamedViewElement,
-  LinkViewElement,
-  variableIsArrayed,
-  ViewElement,
-} from '@simlin/core/datamodel';
+import { isNamedViewElement, LinkViewElement, variableIsArrayed, ViewElement } from '@simlin/core/datamodel';
 
 import { Arrowhead } from './Arrowhead';
 import { Circle, isInf, isZero, Point, Rect, square } from './common';
-import { ArrowheadRadius, AuxRadius, StockWidth, StockHeight, ModuleWidth, ModuleHeight, StraightLineMax } from './default';
+import {
+  ArrowheadRadius,
+  AuxRadius,
+  StockWidth,
+  StockHeight,
+  ModuleWidth,
+  ModuleHeight,
+  StraightLineMax,
+} from './default';
 import { degToRad, radToDeg } from '../arc-utils';
 import { jsFormatNumber as f } from '../render-common';
 import styles from './Connector.module.css';
@@ -47,7 +50,6 @@ const cos = Math.cos;
 const tan = Math.tan;
 const PI = Math.PI;
 const sqrt = Math.sqrt;
-
 
 export function rayRectIntersection(cx: number, cy: number, hw: number, hh: number, θ: number): Point {
   const cosT = cos(θ);
@@ -162,11 +164,7 @@ export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' 
  * line) when the cursor is collinear or within StraightLineMax of the direct
  * source-to-target line.
  */
-export function computeLinkCreationArc(
-  from: ViewElement,
-  to: ViewElement,
-  arcPoint: Point,
-): number | undefined {
+export function computeLinkCreationArc(from: ViewElement, to: ViewElement, arcPoint: Point): number | undefined {
   const fromVisual = getVisualCenter(from);
   const toVisual = getVisualCenter(to);
   const midθ = atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
@@ -274,63 +272,186 @@ export interface ConnectorProps {
   arcPoint?: Point;
 }
 
-export class Connector extends React.PureComponent<ConnectorProps> {
-  handlePointerDownArc = (e: React.PointerEvent<SVGElement>): void => {
-    e.preventDefault();
-    e.stopPropagation();
-    this.props.onSelection(this.props.element, e, false);
-  };
+export function intersectElementStraight(element: ViewElement, θ: number): Point {
+  const { cx, cy } = getVisualCenter(element);
 
-  handlePointerDownArrowhead = (e: React.PointerEvent<SVGElement>): void => {
-    e.preventDefault();
-    e.stopPropagation();
-    this.props.onSelection(this.props.element, e, true);
-  };
-
-  static intersectElementStraight(element: ViewElement, θ: number): Point {
-    const { cx, cy } = getVisualCenter(element);
-
-    if (element.type === 'stock') {
-      return rayRectIntersection(cx, cy, StockWidth / 2, StockHeight / 2, θ);
-    } else if (element.type === 'module') {
-      return rayRectIntersection(cx, cy, ModuleWidth / 2, ModuleHeight / 2, θ);
-    }
-
-    let r: number = AuxRadius;
-    if (element.isZeroRadius) {
-      r = 0;
-    }
-
-    return {
-      x: cx + r * cos(θ),
-      y: cy + r * sin(θ),
-    };
+  if (element.type === 'stock') {
+    return rayRectIntersection(cx, cy, StockWidth / 2, StockHeight / 2, θ);
+  } else if (element.type === 'module') {
+    return rayRectIntersection(cx, cy, ModuleWidth / 2, ModuleHeight / 2, θ);
   }
 
-  static isStraightLine(props: ConnectorProps): boolean {
-    const { element, arcPoint, from, to } = props;
-
-    // If there's no arc defined and no arcPoint, draw a straight line
-    if (element.arc === undefined && !arcPoint) {
-      return true;
-    }
-
-    const takeoffAngle = takeoffθ(props);
-    const fromVisual = getVisualCenter(from);
-    const toVisual = getVisualCenter(to);
-    const midθ = atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
-
-    return Math.abs(midθ - takeoffAngle) < degToRad(StraightLineMax);
+  let r: number = AuxRadius;
+  if (element.isZeroRadius) {
+    r = 0;
   }
 
-  renderStraightLine() {
-    const { from, to, isSelected, isDashed } = this.props;
+  return {
+    x: cx + r * cos(θ),
+    y: cy + r * sin(θ),
+  };
+}
 
+export function isStraightLine(props: ConnectorProps): boolean {
+  const { element, arcPoint, from, to } = props;
+
+  // If there's no arc defined and no arcPoint, draw a straight line
+  if (element.arc === undefined && !arcPoint) {
+    return true;
+  }
+
+  const takeoffAngle = takeoffθ(props);
+  const fromVisual = getVisualCenter(from);
+  const toVisual = getVisualCenter(to);
+  const midθ = atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
+
+  return Math.abs(midθ - takeoffAngle) < degToRad(StraightLineMax);
+}
+
+function arcCircle(props: ConnectorProps): Circle | undefined {
+  const { from, to, arcPoint } = props;
+
+  const fromVisual = getVisualCenter(from);
+  const toVisual = getVisualCenter(to);
+
+  if (arcPoint && !(toVisual.cx === arcPoint.x && toVisual.cy === arcPoint.y)) {
+    try {
+      return circleFromPoints({ x: fromVisual.cx, y: fromVisual.cy }, { x: toVisual.cx, y: toVisual.cy }, arcPoint);
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Find cx, cy from 'takeoff angle', and center of
+  // 'from', and center of 'to'.  This means we have 2
+  // points on the edge of a cirlce, and the tangent at
+  // point 1.
+  //
+  //     eqn of a circle: (x - cx)^2 + (y - cy)^2 = r^2
+  //     line:            y = mx + b || 0 = mx - y + b
+
+  const slopeTakeoff = tan(takeoffθ(props));
+  // we need the slope of the line _perpendicular_ to
+  // the tangent in order to find out the x,y center of
+  // our circle
+  let slopePerpToTakeoff = -1 / slopeTakeoff;
+  if (isZero(slopePerpToTakeoff)) {
+    slopePerpToTakeoff = 0;
+  } else if (isInf(slopePerpToTakeoff)) {
+    // we are either on the left or right edge of the circle.
+    slopePerpToTakeoff = slopePerpToTakeoff > 0 ? Infinity : -Infinity;
+  }
+
+  // y = slope*x + b
+  // fy = slope*fx + b
+  // fy - slope*fx = b
+  // b = fy - slope*fx
+  const bFrom = fromVisual.cy - slopePerpToTakeoff * fromVisual.cx;
+  let cx: number;
+  let cy: number;
+
+  if (fromVisual.cy === toVisual.cy) {
+    cx = (fromVisual.cx + toVisual.cx) / 2;
+    cy = slopePerpToTakeoff * cx + bFrom;
+  } else {
+    // find the slope of the line between the 2 points
+    const slopeBisector = (fromVisual.cy - toVisual.cy) / (fromVisual.cx - toVisual.cx);
+    const slopePerpToBisector = -1 / slopeBisector;
+    const midx = (fromVisual.cx + toVisual.cx) / 2;
+    const midy = (fromVisual.cy + toVisual.cy) / 2;
+    // b = fy - slope*fx
+    const bPerp = midy - slopePerpToBisector * midx;
+
+    if (isInf(slopePerpToTakeoff)) {
+      cx = fromVisual.cx;
+      cy = slopePerpToBisector * cx + bPerp;
+    } else {
+      // y = perpSlopeTakeoff*x + bFrom
+      // y = perpSlopeBisector*x + bPerp
+      // perpSlopeTakeoff*x + bFrom = perpSlopeBisector*x + bPerp
+      // bFrom - bPerp = perpSlopeBisector*x - perpSlopeTakeoff*x
+      // bFrom - bPerp = (perpSlopeBisector- perpSlopeTakeoff)*x
+      // (bFrom - bPerp)/(perpSlopeBisector- perpSlopeTakeoff) = x
+      cx = (bFrom - bPerp) / (slopePerpToBisector - slopePerpToTakeoff);
+      cy = slopePerpToTakeoff * cx + bFrom;
+    }
+  }
+
+  const cr = sqrt(square(fromVisual.cx - cx) + square(fromVisual.cy - cy));
+
+  return { r: cr, x: cx, y: cy };
+}
+
+export function boundStraightLine(props: ConnectorProps): Rect {
+  const { to, from } = props;
+  const fromVisual = getVisualCenter(from);
+  const toVisual = getVisualCenter(to);
+  return {
+    top: Math.min(toVisual.cy, fromVisual.cy),
+    left: Math.min(toVisual.cx, fromVisual.cx),
+    right: Math.max(toVisual.cx, fromVisual.cx),
+    bottom: Math.max(toVisual.cy, fromVisual.cy),
+  };
+}
+
+export function boundArc(props: ConnectorProps): Rect | undefined {
+  const circ = arcCircle(props);
+  if (!circ) {
+    return undefined;
+  }
+
+  return {
+    top: circ.y - circ.r,
+    left: circ.x - circ.r,
+    right: circ.x + circ.r,
+    bottom: circ.y + circ.r,
+  };
+}
+
+export function connectorBounds(props: ConnectorProps): Rect | undefined {
+  if (isStraightLine(props)) {
+    return boundStraightLine(props);
+  } else {
+    return boundArc(props);
+  }
+}
+
+export const Connector = React.memo(function Connector(props: ConnectorProps): React.ReactElement {
+  const { element, from, to, isSelected, isDashed, onSelection } = props;
+
+  // Memoized: passed to the memo'd Arrowhead below, so a stable identity
+  // (while element/onSelection are unchanged) lets Arrowhead skip re-rendering.
+  const handlePointerDownArc = React.useCallback(
+    (e: React.PointerEvent<SVGElement>): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      onSelection(element, e, false);
+    },
+    [onSelection, element],
+  );
+
+  const handlePointerDownArrowhead = React.useCallback(
+    (e: React.PointerEvent<SVGElement>): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      onSelection(element, e, true);
+    },
+    [onSelection, element],
+  );
+
+  let connectorClass = isSelected
+    ? `${styles.connectorSelected} simlin-connector simlin-connector-selected`
+    : `${styles.connector} simlin-connector`;
+  if (isDashed && !isSelected) {
+    connectorClass = `${styles.connectorDashed} simlin-connector simlin-connector-dashed`;
+  }
+
+  if (isStraightLine(props)) {
     const fromVisual = getVisualCenter(from);
     const toVisual = getVisualCenter(to);
     const θ = atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
-    const start = Connector.intersectElementStraight(from, θ);
-    const end = Connector.intersectElementStraight(to, oppositeθ(θ));
+    const start = intersectElementStraight(from, θ);
+    const end = intersectElementStraight(to, oppositeθ(θ));
 
     const arrowθ = radToDeg(θ);
     // Quantize SVG coordinates so 1-ULP f64 differences between the Rust and
@@ -339,227 +460,83 @@ export class Connector extends React.PureComponent<ConnectorProps> {
     // identical). See `jsFormatNumber` in `render-common.tsx`.
     const path = `M${f(start.x)},${f(start.y)}L${f(end.x)},${f(end.y)}`;
 
-    let connectorClass = isSelected
-      ? `${styles.connectorSelected} simlin-connector simlin-connector-selected`
-      : `${styles.connector} simlin-connector`;
-    if (isDashed && !isSelected) {
-      connectorClass = `${styles.connectorDashed} simlin-connector simlin-connector-dashed`;
-    }
-
     return (
-      <g key={this.props.element.uid}>
-        <path
-          d={path}
-          className={`${styles.connectorBg} simlin-connector-bg`}
-          onPointerDown={this.handlePointerDownArc}
-        />
-        <path d={path} className={connectorClass} onPointerDown={this.handlePointerDownArc} />
+      <g key={element.uid}>
+        <path d={path} className={`${styles.connectorBg} simlin-connector-bg`} onPointerDown={handlePointerDownArc} />
+        <path d={path} className={connectorClass} onPointerDown={handlePointerDownArc} />
         <Arrowhead
           point={end}
           angle={arrowθ}
           isSelected={isSelected}
           size={ArrowheadRadius}
-          onSelection={this.handlePointerDownArrowhead}
+          onSelection={handlePointerDownArrowhead}
           type="connector"
         />
       </g>
     );
   }
 
-  private static arcCircle(props: ConnectorProps): Circle | undefined {
-    const { from, to, arcPoint } = props;
+  const fromVisual = getVisualCenter(from);
+  const toVisual = getVisualCenter(to);
 
-    const fromVisual = getVisualCenter(from);
-    const toVisual = getVisualCenter(to);
-
-    if (arcPoint && !(toVisual.cx === arcPoint.x && toVisual.cy === arcPoint.y)) {
-      try {
-        return circleFromPoints({ x: fromVisual.cx, y: fromVisual.cy }, { x: toVisual.cx, y: toVisual.cy }, arcPoint);
-      } catch {
-        return undefined;
-      }
-    }
-
-    // Find cx, cy from 'takeoff angle', and center of
-    // 'from', and center of 'to'.  This means we have 2
-    // points on the edge of a cirlce, and the tangent at
-    // point 1.
-    //
-    //     eqn of a circle: (x - cx)^2 + (y - cy)^2 = r^2
-    //     line:            y = mx + b || 0 = mx - y + b
-
-    const slopeTakeoff = tan(takeoffθ(props));
-    // we need the slope of the line _perpendicular_ to
-    // the tangent in order to find out the x,y center of
-    // our circle
-    let slopePerpToTakeoff = -1 / slopeTakeoff;
-    if (isZero(slopePerpToTakeoff)) {
-      slopePerpToTakeoff = 0;
-    } else if (isInf(slopePerpToTakeoff)) {
-      // we are either on the left or right edge of the circle.
-      slopePerpToTakeoff = slopePerpToTakeoff > 0 ? Infinity : -Infinity;
-    }
-
-    // y = slope*x + b
-    // fy = slope*fx + b
-    // fy - slope*fx = b
-    // b = fy - slope*fx
-    const bFrom = fromVisual.cy - slopePerpToTakeoff * fromVisual.cx;
-    let cx: number;
-    let cy: number;
-
-    if (fromVisual.cy === toVisual.cy) {
-      cx = (fromVisual.cx + toVisual.cx) / 2;
-      cy = slopePerpToTakeoff * cx + bFrom;
-    } else {
-      // find the slope of the line between the 2 points
-      const slopeBisector = (fromVisual.cy - toVisual.cy) / (fromVisual.cx - toVisual.cx);
-      const slopePerpToBisector = -1 / slopeBisector;
-      const midx = (fromVisual.cx + toVisual.cx) / 2;
-      const midy = (fromVisual.cy + toVisual.cy) / 2;
-      // b = fy - slope*fx
-      const bPerp = midy - slopePerpToBisector * midx;
-
-      if (isInf(slopePerpToTakeoff)) {
-        cx = fromVisual.cx;
-        cy = slopePerpToBisector * cx + bPerp;
-      } else {
-        // y = perpSlopeTakeoff*x + bFrom
-        // y = perpSlopeBisector*x + bPerp
-        // perpSlopeTakeoff*x + bFrom = perpSlopeBisector*x + bPerp
-        // bFrom - bPerp = perpSlopeBisector*x - perpSlopeTakeoff*x
-        // bFrom - bPerp = (perpSlopeBisector- perpSlopeTakeoff)*x
-        // (bFrom - bPerp)/(perpSlopeBisector- perpSlopeTakeoff) = x
-        cx = (bFrom - bPerp) / (slopePerpToBisector - slopePerpToTakeoff);
-        cy = slopePerpToTakeoff * cx + bFrom;
-      }
-    }
-
-    const cr = sqrt(square(fromVisual.cx - cx) + square(fromVisual.cy - cy));
-
-    return { r: cr, x: cx, y: cy };
+  const takeoffAngle = takeoffθ(props);
+  const circ = arcCircle(props);
+  if (circ === undefined) {
+    console.log('FIXME: arcCircle returned null');
+    return <g key={element.uid} />;
   }
 
-  renderArc() {
-    const { from, to, isSelected, isDashed } = this.props;
-
-    const fromVisual = getVisualCenter(from);
-    const toVisual = getVisualCenter(to);
-
-    const takeoffAngle = takeoffθ(this.props);
-    const circ = Connector.arcCircle(this.props);
-    if (circ === undefined) {
-      console.log('FIXME: arcCircle returned null');
-      return <g key={this.props.element.uid} />;
-    }
-
-    const fromθ = atan2(fromVisual.cy - circ.y, fromVisual.cx - circ.x);
-    const toθ = atan2(toVisual.cy - circ.y, toVisual.cx - circ.x);
-    let spanθ = toθ - fromθ;
-    if (spanθ > degToRad(180)) {
-      spanθ -= degToRad(360);
-    }
-
-    // if the sweep flag is set, we need to negate the
-    // inverse flag
-    let inv: boolean = spanθ > 0 || spanθ <= degToRad(-180);
-
-    const side1 =
-      (circ.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) -
-      (circ.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
-    const startA = intersectElementArc(from, circ, inv);
-    const startR = sqrt(square(startA.x - fromVisual.cx) + square(startA.y - fromVisual.cy));
-    const takeoffPoint = {
-      x: fromVisual.cx + startR * cos(takeoffAngle),
-      y: fromVisual.cy + startR * sin(takeoffAngle),
-    };
-    const side2 =
-      (takeoffPoint.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) -
-      (takeoffPoint.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
-
-    const sweep = side1 < 0 === side2 < 0;
-
-    if (sweep) {
-      inv = !inv;
-    }
-    const start = { x: fromVisual.cx, y: fromVisual.cy };
-    const arcEnd = { x: toVisual.cx, y: toVisual.cy };
-    const end = intersectElementArc(to, circ, !inv);
-
-    const path = `M${f(start.x)},${f(start.y)}A${f(circ.r)},${f(circ.r)} 0 ${+sweep},${+inv} ${f(arcEnd.x)},${f(arcEnd.y)}`;
-
-    let arrowθ = radToDeg(atan2(end.y - circ.y, end.x - circ.x)) - 90;
-    if (inv) {
-      arrowθ += 180;
-    }
-
-    let connectorClass = isSelected
-      ? `${styles.connectorSelected} simlin-connector simlin-connector-selected`
-      : `${styles.connector} simlin-connector`;
-    if (isDashed && !isSelected) {
-      connectorClass = `${styles.connectorDashed} simlin-connector simlin-connector-dashed`;
-    }
-
-    return (
-      <g key={this.props.element.uid}>
-        <path
-          d={path}
-          className={`${styles.connectorBg} simlin-connector-bg`}
-          onPointerDown={this.handlePointerDownArc}
-        />
-        <path d={path} className={connectorClass} onPointerDown={this.handlePointerDownArc} />
-        <Arrowhead
-          point={end}
-          angle={arrowθ}
-          isSelected={isSelected}
-          size={ArrowheadRadius}
-          type="connector"
-          onSelection={this.handlePointerDownArrowhead}
-        />
-      </g>
-    );
+  const fromθ = atan2(fromVisual.cy - circ.y, fromVisual.cx - circ.x);
+  const toθ = atan2(toVisual.cy - circ.y, toVisual.cx - circ.x);
+  let spanθ = toθ - fromθ;
+  if (spanθ > degToRad(180)) {
+    spanθ -= degToRad(360);
   }
 
-  static boundStraightLine(props: ConnectorProps): Rect {
-    const { to, from } = props;
-    const fromVisual = getVisualCenter(from);
-    const toVisual = getVisualCenter(to);
-    return {
-      top: Math.min(toVisual.cy, fromVisual.cy),
-      left: Math.min(toVisual.cx, fromVisual.cx),
-      right: Math.max(toVisual.cx, fromVisual.cx),
-      bottom: Math.max(toVisual.cy, fromVisual.cy),
-    };
+  // if the sweep flag is set, we need to negate the
+  // inverse flag
+  let inv: boolean = spanθ > 0 || spanθ <= degToRad(-180);
+
+  const side1 =
+    (circ.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) - (circ.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
+  const startA = intersectElementArc(from, circ, inv);
+  const startR = sqrt(square(startA.x - fromVisual.cx) + square(startA.y - fromVisual.cy));
+  const takeoffPoint = {
+    x: fromVisual.cx + startR * cos(takeoffAngle),
+    y: fromVisual.cy + startR * sin(takeoffAngle),
+  };
+  const side2 =
+    (takeoffPoint.x - fromVisual.cx) * (toVisual.cy - fromVisual.cy) -
+    (takeoffPoint.y - fromVisual.cy) * (toVisual.cx - fromVisual.cx);
+
+  const sweep = side1 < 0 === side2 < 0;
+
+  if (sweep) {
+    inv = !inv;
+  }
+  const start = { x: fromVisual.cx, y: fromVisual.cy };
+  const arcEnd = { x: toVisual.cx, y: toVisual.cy };
+  const end = intersectElementArc(to, circ, !inv);
+
+  const path = `M${f(start.x)},${f(start.y)}A${f(circ.r)},${f(circ.r)} 0 ${+sweep},${+inv} ${f(arcEnd.x)},${f(arcEnd.y)}`;
+
+  let arrowθ = radToDeg(atan2(end.y - circ.y, end.x - circ.x)) - 90;
+  if (inv) {
+    arrowθ += 180;
   }
 
-  static boundArc(props: ConnectorProps): Rect | undefined {
-    const circ = Connector.arcCircle(props);
-    if (!circ) {
-      return undefined;
-    }
-
-    const bounds = {
-      top: circ.y - circ.r,
-      left: circ.x - circ.r,
-      right: circ.x + circ.r,
-      bottom: circ.y + circ.r,
-    };
-    return bounds;
-  }
-
-  static bounds(props: ConnectorProps): Rect | undefined {
-    if (Connector.isStraightLine(props)) {
-      return Connector.boundStraightLine(props);
-    } else {
-      return Connector.boundArc(props);
-    }
-  }
-
-  render() {
-    if (Connector.isStraightLine(this.props)) {
-      return this.renderStraightLine();
-    } else {
-      return this.renderArc();
-    }
-  }
-}
+  return (
+    <g key={element.uid}>
+      <path d={path} className={`${styles.connectorBg} simlin-connector-bg`} onPointerDown={handlePointerDownArc} />
+      <path d={path} className={connectorClass} onPointerDown={handlePointerDownArc} />
+      <Arrowhead
+        point={end}
+        angle={arrowθ}
+        isSelected={isSelected}
+        size={ArrowheadRadius}
+        type="connector"
+        onSelection={handlePointerDownArrowhead}
+      />
+    </g>
+  );
+});

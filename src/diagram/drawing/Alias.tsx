@@ -57,89 +57,80 @@ export function aliasBounds(element: AliasViewElement, aliasOf: NamedViewElement
   return mergeBounds(bounds, labelBounds(labelProps));
 }
 
-export class Alias extends React.PureComponent<AliasProps> {
-  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+export const Alias = React.memo(function Alias(props: AliasProps): React.ReactElement {
+  const { element, isSelected, isValidTarget, series, aliasOf, onSelection, onLabelDrag } = props;
+
+  const handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    this.props.onSelection(this.props.element, e);
+    onSelection(element, e);
   };
 
-  handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
-    e.preventDefault();
-    e.stopPropagation();
-    this.props.onSelection(this.props.element, e, true);
-  };
+  // Memoized: passed to the memo'd Label below, so a stable identity (while
+  // element/onSelection are unchanged) lets Label skip re-rendering.
+  const handleLabelSelection = React.useCallback(
+    (e: React.PointerEvent<SVGElement>): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      onSelection(element, e, true);
+    },
+    [onSelection, element],
+  );
 
-  radius(): number {
-    return AuxRadius;
-  }
+  const cx = element.x;
+  const cy = element.y;
+  const r = AuxRadius;
 
-  sparkline(series: Readonly<Array<Series>> | undefined) {
-    if (!series || series.length === 0) {
-      return undefined;
-    }
-    const { element } = this.props;
-    const isArrayed = false; // element.var?.isArrayed || false;
-    const arrayedOffset = isArrayed ? 3 : 0;
-    const cx = element.x - arrayedOffset;
-    const cy = element.y - arrayedOffset;
-    const r = this.radius();
+  const isArrayed = false; // element.var?.isArrayed || false;
+  const arrayedOffset = isArrayed ? 3 : 0;
 
-    return (
-      <g transform={`translate(${f(cx + 1 - r / 2)} ${f(cy + 1 - r / 2)})`}>
+  const side = element.labelSide;
+  const label = (
+    <Label
+      uid={element.uid}
+      cx={cx}
+      cy={cy}
+      side={side}
+      rw={r + arrayedOffset}
+      rh={r + arrayedOffset}
+      text={displayName(aliasOf?.name || 'unknown alias')}
+      onSelection={handleLabelSelection}
+      onLabelDrag={onLabelDrag}
+    />
+  );
+
+  let sparkline;
+  if (series && series.length > 0) {
+    const sx = cx - arrayedOffset;
+    const sy = cy - arrayedOffset;
+    sparkline = (
+      <g transform={`translate(${f(sx + 1 - r / 2)} ${f(sy + 1 - r / 2)})`}>
         <Sparkline series={series} width={r - 2} height={r - 2} />
       </g>
     );
   }
 
-  render() {
-    const { element, isSelected, isValidTarget, series, aliasOf } = this.props;
-    const cx = element.x;
-    const cy = element.y;
-    const r = this.radius();
+  const groupClassName = clsx(styles.alias, 'simlin-alias', {
+    [styles.selected]: isSelected && isValidTarget === undefined,
+    'simlin-selected': isSelected && isValidTarget === undefined,
+    [styles.targetGood]: isValidTarget === true,
+    [styles.targetBad]: isValidTarget === false,
+  });
 
-    const isArrayed = false; // element.var?.isArrayed || false;
-    const arrayedOffset = isArrayed ? 3 : 0;
-
-    const side = element.labelSide;
-    const label = (
-      <Label
-        uid={element.uid}
-        cx={cx}
-        cy={cy}
-        side={side}
-        rw={r + arrayedOffset}
-        rh={r + arrayedOffset}
-        text={displayName(aliasOf?.name || 'unknown alias')}
-        onSelection={this.handleLabelSelection}
-        onLabelDrag={this.props.onLabelDrag}
-      />
-    );
-
-    const sparkline = this.sparkline(series);
-
-    const groupClassName = clsx(styles.alias, 'simlin-alias', {
-      [styles.selected]: isSelected && isValidTarget === undefined,
-      'simlin-selected': isSelected && isValidTarget === undefined,
-      [styles.targetGood]: isValidTarget === true,
-      [styles.targetBad]: isValidTarget === false,
-    });
-
-    let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
-    if (isArrayed) {
-      circles = [
-        <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
-        <circle key="1" cx={cx} cy={cy} r={r} />,
-        <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
-      ];
-    }
-
-    return (
-      <g className={groupClassName} onPointerDown={this.handlePointerDown}>
-        {circles}
-        {sparkline}
-        {label}
-      </g>
-    );
+  let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
+  if (isArrayed) {
+    circles = [
+      <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
+      <circle key="1" cx={cx} cy={cy} r={r} />,
+      <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
+    ];
   }
-}
+
+  return (
+    <g className={groupClassName} onPointerDown={handlePointerDown}>
+      {circles}
+      {sparkline}
+      {label}
+    </g>
+  );
+});

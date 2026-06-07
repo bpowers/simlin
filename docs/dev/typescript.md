@@ -3,7 +3,7 @@
 ## Code Style
 
 - Use TypeScript with strict mode enabled.
-- Prefer class components by default. Hooks are allowed when wrapping/integrating with components that only support hook-based APIs; in all other cases, prefer classes.
+- Prefer function components with hooks. Wrap render-hot components (e.g. per-element diagram pieces) in `React.memo`, and `useCallback` any handler passed to a memo'd child so the memoization actually holds. Class components remain only where there is a concrete reason: `ErrorBoundary` (React has no hook equivalent), and large imperative shells like `Canvas`/`Editor` that are scheduled for incremental migration.
 - Use proper TypeScript types, avoid `any`.
 - NEVER manually copy files around to get builds or tests passing. Identify the root cause and fix the build scripts.
 

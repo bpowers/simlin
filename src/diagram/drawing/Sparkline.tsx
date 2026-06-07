@@ -50,18 +50,19 @@ export interface SparklineProps {
   height: number;
 }
 
-export class Sparkline extends React.PureComponent<SparklineProps> {
-  // these should all be 'private', but Typescript can't enforce that with the `styled` above
-  pAxis = '';
-  sparklines: Array<React.ReactNode> = [];
-  cachedSeries: Readonly<Array<Series>> | unknown;
+export const Sparkline = React.memo(function Sparkline(props: SparklineProps): React.ReactElement {
+  const { series, width, height } = props;
 
-  recache() {
-    const time = defined(this.props.series[0]).time;
+  // Path construction walks every data point of every series, so memoize it;
+  // this replaces the hand-rolled `recache()`/`cachedSeries` instance-field
+  // cache the class component used (which only keyed off series identity --
+  // keying off width/height too is strictly more correct).
+  const { pAxis, sparklines } = React.useMemo(() => {
+    const time = defined(series[0]).time;
     const x = 0;
     const y = 0;
-    const w = this.props.width;
-    const h = this.props.height;
+    const w = width;
+    const h = height;
 
     const xMin = time[0];
     const xMax = last(time);
@@ -70,7 +71,7 @@ export class Sparkline extends React.PureComponent<SparklineProps> {
     let yMin = 0;
     let yMax = -Infinity;
     // first build up the min + max across all datasets
-    for (const dataset of this.props.series) {
+    for (const dataset of series) {
       const values = dataset.values;
       yMin = Math.min(yMin, min(values)); // 0 or below 0
       yMax = Math.max(yMax, max(values));
@@ -78,45 +79,36 @@ export class Sparkline extends React.PureComponent<SparklineProps> {
     const ySpan = yMax - yMin || 1;
 
     const colors = Dark2;
-    const sparklines = [];
+    const lines = [];
     let i = 0;
-    for (const dataset of this.props.series) {
+    for (const dataset of series) {
       const values = dataset.values;
       let p = '';
-      for (let i = 0; i < values.length; i++) {
-        if (isNaN(values[i])) {
-          // console.log(`NaN at ${time[i]}`);
+      for (let j = 0; j < values.length; j++) {
+        if (isNaN(values[j])) {
+          // console.log(`NaN at ${time[j]}`);
           continue;
         }
-        const prefix = i === 0 ? 'M' : 'L';
+        const prefix = j === 0 ? 'M' : 'L';
         // Quantize sparkline path coordinates for cross-toolchain SVG parity;
         // see `jsFormatNumber` in `render-common.tsx`.
-        p += `${prefix}${f(x + (w * (time[i] - xMin)) / xSpan)},${f(y + h - (h * (values[i] - yMin)) / ySpan)}`;
+        p += `${prefix}${f(x + (w * (time[j] - xMin)) / xSpan)},${f(y + h - (h * (values[j] - yMin)) / ySpan)}`;
       }
-      const style = this.props.series.length === 1 ? undefined : { stroke: colors[i % colors.length] };
-      sparklines.push(
+      const style = series.length === 1 ? undefined : { stroke: colors[i % colors.length] };
+      lines.push(
         <path key={dataset.name} d={p} className={`${styles.sparkline} simlin-sparkline-line`} style={style} />,
       );
       i++;
     }
 
-    this.pAxis = `M${f(x)},${f(y + h - (h * (0 - yMin)) / ySpan)}L${f(x + w)},${f(y + h - (h * (0 - yMin)) / ySpan)}`;
-    this.sparklines = sparklines;
-    this.cachedSeries = this.props.series;
-  }
+    const axis = `M${f(x)},${f(y + h - (h * (0 - yMin)) / ySpan)}L${f(x + w)},${f(y + h - (h * (0 - yMin)) / ySpan)}`;
+    return { pAxis: axis, sparklines: lines };
+  }, [series, width, height]);
 
-  render() {
-    if (this.props.series !== this.cachedSeries) {
-      this.recache();
-    }
-
-    return (
-      <g>
-        <>
-          <path key="$axis" d={this.pAxis} className={`${styles.axis} simlin-sparkline-axis`} />
-          {this.sparklines}
-        </>
-      </g>
-    );
-  }
-}
+  return (
+    <g>
+      <path key="$axis" d={pAxis} className={`${styles.axis} simlin-sparkline-axis`} />
+      {sparklines}
+    </g>
+  );
+});

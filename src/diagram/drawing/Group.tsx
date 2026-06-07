@@ -34,24 +34,22 @@ export function groupBounds(element: GroupViewElement): Rect {
   };
 }
 
-export class Group extends React.PureComponent<GroupProps> {
-  render() {
-    const { element, isSelected } = this.props;
-    const { x, y, width, height, name } = element;
+export const Group = React.memo(function Group(props: GroupProps): React.ReactElement {
+  const { element, isSelected } = props;
+  const { x, y, width, height, name } = element;
 
-    // x/y is the center, compute top-left for SVG rect
-    const left = x - width / 2;
-    const top = y - height / 2;
+  // x/y is the center, compute top-left for SVG rect
+  const left = x - width / 2;
+  const top = y - height / 2;
 
-    const className = isSelected ? `${styles.group} ${styles.selected}` : styles.group;
+  const className = isSelected ? `${styles.group} ${styles.selected}` : styles.group;
 
-    return (
-      <g className={`${className} simlin-group`}>
-        <rect x={left} y={top} width={width} height={height} rx={GroupRadius} ry={GroupRadius} />
-        <text x={left + LabelPadding} y={top + LabelPadding} dominantBaseline="hanging" className={styles.label}>
-          {displayName(name)}
-        </text>
-      </g>
-    );
-  }
-}
+  return (
+    <g className={`${className} simlin-group`}>
+      <rect x={left} y={top} width={width} height={height} rx={GroupRadius} ry={GroupRadius} />
+      <text x={left + LabelPadding} y={top + LabelPadding} dominantBaseline="hanging" className={styles.label}>
+        {displayName(name)}
+      </text>
+    </g>
+  );
+});

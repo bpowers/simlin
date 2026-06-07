@@ -58,106 +58,87 @@ export function auxBounds(element: AuxViewElement): Rect {
   return mergeBounds(bounds, labelBounds(labelProps));
 }
 
-export class Aux extends React.PureComponent<AuxProps> {
-  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+export const Aux = React.memo(function Aux(props: AuxProps): React.ReactElement {
+  const { element, isEditingName, isSelected, isValidTarget, hasWarning, series, onSelection, onLabelDrag } = props;
+
+  const handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    this.props.onSelection(this.props.element, e);
+    onSelection(element, e);
   };
 
-  handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
-    e.preventDefault();
-    e.stopPropagation();
-    this.props.onSelection(this.props.element, e, true);
-  };
+  // Memoized: passed to the memo'd Label below, so a stable identity (while
+  // element/onSelection are unchanged) lets Label skip re-rendering.
+  const handleLabelSelection = React.useCallback(
+    (e: React.PointerEvent<SVGElement>): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      onSelection(element, e, true);
+    },
+    [onSelection, element],
+  );
 
-  radius(): number {
-    return AuxRadius;
-  }
+  const cx = element.x;
+  const cy = element.y;
+  const r = AuxRadius;
 
-  indicators() {
-    if (!this.props.hasWarning) {
-      return undefined;
-    }
+  const isArrayed = (element.var && variableIsArrayed(element.var)) || false;
+  const arrayedOffset = isArrayed ? 3 : 0;
 
-    const { element } = this.props;
-    const r = this.radius();
-    const θ = -Math.PI / 4; // 45 degrees
+  const side = element.labelSide;
+  const label = isEditingName ? undefined : (
+    <Label
+      uid={element.uid}
+      cx={cx}
+      cy={cy}
+      side={side}
+      rw={r + arrayedOffset}
+      rh={r + arrayedOffset}
+      text={displayName(defined(element.name))}
+      onSelection={handleLabelSelection}
+      onLabelDrag={onLabelDrag}
+    />
+  );
 
-    const cx = element.x + r * Math.cos(θ);
-    const cy = element.y + r * Math.sin(θ);
-
-    return <circle className={styles.errorIndicator} cx={cx} cy={cy} r={3} />;
-  }
-
-  sparkline(series: Readonly<Array<Series>> | undefined) {
-    if (!series || series.length === 0) {
-      return undefined;
-    }
-    const { element } = this.props;
-    const isArrayed = (element.var && variableIsArrayed(element.var)) || false;
-    const arrayedOffset = isArrayed ? 3 : 0;
-    const cx = element.x - arrayedOffset;
-    const cy = element.y - arrayedOffset;
-    const r = this.radius();
-
-    return (
-      <g transform={`translate(${f(cx + 1 - r / 2)} ${f(cy + 1 - r / 2)})`}>
+  let sparkline;
+  if (series && series.length > 0) {
+    const sx = cx - arrayedOffset;
+    const sy = cy - arrayedOffset;
+    sparkline = (
+      <g transform={`translate(${f(sx + 1 - r / 2)} ${f(sy + 1 - r / 2)})`}>
         <Sparkline series={series} width={r - 2} height={r - 2} />
       </g>
     );
   }
 
-  render() {
-    const { element, isEditingName, isSelected, isValidTarget, series } = this.props;
-    const cx = element.x;
-    const cy = element.y;
-    const r = this.radius();
-
-    const isArrayed = (element.var && variableIsArrayed(element.var)) || false;
-    const arrayedOffset = isArrayed ? 3 : 0;
-
-    const side = element.labelSide;
-    const label = isEditingName ? undefined : (
-      <Label
-        uid={element.uid}
-        cx={cx}
-        cy={cy}
-        side={side}
-        rw={r + arrayedOffset}
-        rh={r + arrayedOffset}
-        text={displayName(defined(element.name))}
-        onSelection={this.handleLabelSelection}
-        onLabelDrag={this.props.onLabelDrag}
-      />
-    );
-
-    const sparkline = this.sparkline(series);
-    const indicator = this.indicators();
-
-    const groupClassName = clsx(styles.aux, 'simlin-aux', {
-      [styles.selected]: isSelected && isValidTarget === undefined,
-      'simlin-selected': isSelected && isValidTarget === undefined,
-      [styles.targetGood]: isValidTarget === true,
-      [styles.targetBad]: isValidTarget === false,
-    });
-
-    let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
-    if (isArrayed) {
-      circles = [
-        <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
-        <circle key="1" cx={cx} cy={cy} r={r} />,
-        <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
-      ];
-    }
-
-    return (
-      <g className={groupClassName} onPointerDown={this.handlePointerDown}>
-        {circles}
-        {sparkline}
-        {indicator}
-        {label}
-      </g>
-    );
+  let indicator;
+  if (hasWarning) {
+    const θ = -Math.PI / 4; // 45 degrees
+    indicator = <circle className={styles.errorIndicator} cx={cx + r * Math.cos(θ)} cy={cy + r * Math.sin(θ)} r={3} />;
   }
-}
+
+  const groupClassName = clsx(styles.aux, 'simlin-aux', {
+    [styles.selected]: isSelected && isValidTarget === undefined,
+    'simlin-selected': isSelected && isValidTarget === undefined,
+    [styles.targetGood]: isValidTarget === true,
+    [styles.targetBad]: isValidTarget === false,
+  });
+
+  let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
+  if (isArrayed) {
+    circles = [
+      <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
+      <circle key="1" cx={cx} cy={cy} r={r} />,
+      <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
+    ];
+  }
+
+  return (
+    <g className={groupClassName} onPointerDown={handlePointerDown}>
+      {circles}
+      {sparkline}
+      {indicator}
+      {label}
+    </g>
+  );
+});

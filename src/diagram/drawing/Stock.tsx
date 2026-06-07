@@ -66,114 +66,95 @@ export function stockBounds(element: StockViewElement): Rect {
   return mergeBounds(bounds, labelBounds(labelProps));
 }
 
-export class Stock extends React.PureComponent<StockProps> {
-  handlePointerUp = (_e: React.PointerEvent<SVGElement>): void => {
+export const Stock = React.memo(function Stock(props: StockProps): React.ReactElement {
+  const { element, isEditingName, isSelected, isValidTarget, hasWarning, series, onSelection, onLabelDrag } = props;
+
+  const handlePointerUp = (_e: React.PointerEvent<SVGElement>): void => {
     // e.preventDefault();
     // e.stopPropagation();
   };
 
-  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+  const handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    this.props.onSelection(this.props.element, e);
+    onSelection(element, e);
   };
 
-  handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
-    e.preventDefault();
-    e.stopPropagation();
-    this.props.onSelection(this.props.element, e, true);
-  };
+  // Memoized: passed to the memo'd Label below, so a stable identity (while
+  // element/onSelection are unchanged) lets Label skip re-rendering.
+  const handleLabelSelection = React.useCallback(
+    (e: React.PointerEvent<SVGElement>): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      onSelection(element, e, true);
+    },
+    [onSelection, element],
+  );
 
-  indicators() {
-    if (!this.props.hasWarning) {
-      return undefined;
-    }
+  const w = StockWidth;
+  const h = StockHeight;
+  const cx = element.x;
+  const cy = element.y;
 
-    const { element } = this.props;
-    const w = StockWidth;
-    const h = StockHeight;
+  const isArrayed = (element.var && variableIsArrayed(element.var)) || false;
+  const arrayedOffset = isArrayed ? 3 : 0;
 
-    const cx = element.x + w / 2 - 1;
-    const cy = element.y - h / 2 + 1;
+  const side = element.labelSide;
+  const label = isEditingName ? undefined : (
+    <Label
+      uid={element.uid}
+      cx={cx}
+      cy={cy}
+      side={side}
+      rw={w / 2 + arrayedOffset}
+      rh={h / 2 + arrayedOffset}
+      text={displayName(defined(element.name))}
+      onSelection={handleLabelSelection}
+      onLabelDrag={onLabelDrag}
+    />
+  );
 
-    return <circle className={styles.errorIndicator} cx={cx} cy={cy} r={3} />;
-  }
-
-  sparkline(series: Readonly<Array<Series>> | undefined) {
-    if (!series || series.length === 0) {
-      return undefined;
-    }
-    const { element } = this.props;
-    const isArrayed = (element.var && variableIsArrayed(element.var)) || false;
-    const arrayedOffset = isArrayed ? 3 : 0;
-    const cx = element.x - arrayedOffset;
-    const cy = element.y - arrayedOffset;
-    const w = StockWidth;
-    const h = StockHeight;
-
-    return (
-      <g transform={`translate(${f(cx + 1 - w / 2)} ${f(cy + 1 - h / 2)})`}>
+  let sparkline;
+  if (series && series.length > 0) {
+    const sx = cx - arrayedOffset;
+    const sy = cy - arrayedOffset;
+    sparkline = (
+      <g transform={`translate(${f(sx + 1 - w / 2)} ${f(sy + 1 - h / 2)})`}>
         <Sparkline series={series} width={w - 2} height={h - 2} />
       </g>
     );
   }
 
-  render() {
-    const { element, isEditingName, isSelected, isValidTarget } = this.props;
-    const w = StockWidth;
-    const h = StockHeight;
-    const cx = element.x;
-    const cy = element.y;
-
-    const series = this.props.series;
-
-    const isArrayed = (element.var && variableIsArrayed(element.var)) || false;
-    const arrayedOffset = isArrayed ? 3 : 0;
-
-    const side = element.labelSide;
-    const label = isEditingName ? undefined : (
-      <Label
-        uid={element.uid}
-        cx={cx}
-        cy={cy}
-        side={side}
-        rw={w / 2 + arrayedOffset}
-        rh={h / 2 + arrayedOffset}
-        text={displayName(defined(element.name))}
-        onSelection={this.handleLabelSelection}
-        onLabelDrag={this.props.onLabelDrag}
-      />
-    );
-
-    const sparkline = this.sparkline(series);
-    const indicator = this.indicators();
-
-    const groupClassName = clsx(styles.stock, 'simlin-stock', {
-      [styles.selected]: isSelected && isValidTarget === undefined,
-      'simlin-selected': isSelected && isValidTarget === undefined,
-      [styles.targetGood]: isValidTarget === true,
-      [styles.targetBad]: isValidTarget === false,
-    });
-
-    const x = cx - w / 2;
-    const y = cy - h / 2;
-
-    let rects = [<rect key="1" x={x} y={y} width={w} height={h} />];
-    if (isArrayed) {
-      rects = [
-        <rect key="0" x={x + arrayedOffset} y={y + arrayedOffset} width={w} height={h} />,
-        <rect key="1" x={x} y={y} width={w} height={h} />,
-        <rect key="2" x={x - arrayedOffset} y={y - arrayedOffset} width={w} height={h} />,
-      ];
-    }
-
-    return (
-      <g className={groupClassName} onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
-        {rects}
-        {sparkline}
-        {indicator}
-        {label}
-      </g>
-    );
+  let indicator;
+  if (hasWarning) {
+    indicator = <circle className={styles.errorIndicator} cx={cx + w / 2 - 1} cy={cy - h / 2 + 1} r={3} />;
   }
-}
+
+  const groupClassName = clsx(styles.stock, 'simlin-stock', {
+    [styles.selected]: isSelected && isValidTarget === undefined,
+    'simlin-selected': isSelected && isValidTarget === undefined,
+    [styles.targetGood]: isValidTarget === true,
+    [styles.targetBad]: isValidTarget === false,
+  });
+
+  const x = cx - w / 2;
+  const y = cy - h / 2;
+
+  let rects = [<rect key="1" x={x} y={y} width={w} height={h} />];
+  if (isArrayed) {
+    rects = [
+      <rect key="0" x={x + arrayedOffset} y={y + arrayedOffset} width={w} height={h} />,
+      <rect key="1" x={x} y={y} width={w} height={h} />,
+      <rect key="2" x={x - arrayedOffset} y={y - arrayedOffset} width={w} height={h} />,
+    ];
+  }
+
+  return (
+    <g className={groupClassName} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp}>
+      {rects}
+      {sparkline}
+      {indicator}
+      {label}
+    </g>
+  );
+});

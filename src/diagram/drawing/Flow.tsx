@@ -6,7 +6,14 @@ import * as React from 'react';
 
 import clsx from 'clsx';
 
-import { Point, FlowViewElement, ViewElement, StockViewElement, CloudViewElement, variableIsArrayed } from '@simlin/core/datamodel';
+import {
+  Point,
+  FlowViewElement,
+  ViewElement,
+  StockViewElement,
+  CloudViewElement,
+  variableIsArrayed,
+} from '@simlin/core/datamodel';
 import { arrayWith, defined, Series } from '@simlin/core/common';
 import { at, first, last } from '@simlin/core/collections';
 
@@ -1633,13 +1640,16 @@ export interface FlowProps {
   sink: StockViewElement | CloudViewElement;
 }
 
-export class Flow extends React.PureComponent<FlowProps> {
-  handlePointerUp = (_e: React.PointerEvent<SVGElement>): void => {
+export const Flow = React.memo(function Flow(props: FlowProps): React.ReactElement {
+  const { element, isEditingName, isMovingArrow, isMovingSource, isSelected, isValidTarget, series, sink } = props;
+  const { hasWarning, embedded, onSelection, onLabelDrag } = props;
+
+  const handlePointerUp = (_e: React.PointerEvent<SVGElement>): void => {
     // e.preventDefault();
     // e.stopPropagation();
   };
 
-  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+  const handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
     e.preventDefault();
     e.stopPropagation();
 
@@ -1659,224 +1669,195 @@ export class Flow extends React.PureComponent<FlowProps> {
       const ctm = target.getScreenCTM();
       if (ctm) {
         const modelPt = pt.matrixTransform(ctm.inverse());
-        segmentIndex = findClickedSegment(
-          modelPt.x,
-          modelPt.y,
-          this.props.element.x,
-          this.props.element.y,
-          this.props.element.points,
-        );
+        segmentIndex = findClickedSegment(modelPt.x, modelPt.y, element.x, element.y, element.points);
       }
     }
 
-    this.props.onSelection(this.props.element, e, false, false, segmentIndex);
+    onSelection(element, e, false, false, segmentIndex);
   };
 
-  handleLabelSelection = (e: React.PointerEvent<SVGElement>): void => {
+  // Memoized: passed to the memo'd Label/Arrowhead below, so a stable identity
+  // (while element/onSelection are unchanged) lets them skip re-rendering.
+  const handleLabelSelection = React.useCallback(
+    (e: React.PointerEvent<SVGElement>): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      onSelection(element, e, true);
+    },
+    [onSelection, element],
+  );
+
+  const handlePointerDownArrowhead = React.useCallback(
+    (e: React.PointerEvent<SVGElement>): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      onSelection(element, e, false, true);
+    },
+    [onSelection, element],
+  );
+
+  const handlePointerDownSource = (e: React.PointerEvent<SVGElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    this.props.onSelection(this.props.element, e, true);
+    onSelection(element, e, false, false, undefined, true);
   };
 
-  handlePointerDownArrowhead = (e: React.PointerEvent<SVGElement>): void => {
-    e.preventDefault();
-    e.stopPropagation();
-    this.props.onSelection(this.props.element, e, false, true);
-  };
+  const isArrayed = element.var ? variableIsArrayed(element.var) : false;
+  const arrayedOffset = isArrayed ? 3 : 0;
 
-  handlePointerDownSource = (e: React.PointerEvent<SVGElement>): void => {
-    e.preventDefault();
-    e.stopPropagation();
-    this.props.onSelection(this.props.element, e, false, false, undefined, true);
-  };
-
-  radius(): number {
-    return AuxRadius;
+  let pts = element.points;
+  if (pts.length < 2) {
+    throw new Error('expected at least two points on a flow');
   }
 
-  indicators() {
-    if (!this.props.hasWarning) {
-      return undefined;
-    }
-
-    const { element } = this.props;
-    const r = this.radius();
-    const theta = -Math.PI / 4; // 45 degrees
-
-    const cx = element.x + r * Math.cos(theta);
-    const cy = element.y + r * Math.sin(theta);
-
-    return <circle className={styles.errorIndicator} cx={cx} cy={cy} r={3} />;
+  if (sink.type === 'cloud' && !isMovingArrow) {
+    pts = retractFinalPointIntoCloud(pts, CloudRadius);
   }
 
-  sparkline(series: Readonly<Array<Series>> | undefined) {
-    if (!series || series.length === 0) {
-      return undefined;
+  const finalAdjust = 7.5;
+  let spath = '';
+  let arrowTheta = 0;
+  for (let j = 0; j < pts.length; j++) {
+    let x = at(pts, j).x;
+    let y = at(pts, j).y;
+    if (j === pts.length - 1) {
+      // Walk back past coincident points: a degenerate (zero-length) final
+      // segment must not read as "pointing right" via atan2(0, 0) === 0.
+      const theta = finalSegmentAngle(pts);
+      if (theta === undefined) {
+        arrowTheta = 0;
+      } else if (theta >= 315 || theta < 45) {
+        x -= finalAdjust;
+        arrowTheta = 0;
+      } else if (theta >= 45 && theta < 135) {
+        y -= finalAdjust;
+        arrowTheta = 90;
+      } else if (theta >= 135 && theta < 225) {
+        x += finalAdjust;
+        arrowTheta = 180;
+      } else {
+        y += finalAdjust;
+        arrowTheta = 270;
+      }
     }
-    const { element } = this.props;
-    const isArrayed = element.var ? variableIsArrayed(element.var) : false;
-    const arrayedOffset = isArrayed ? 3 : 0;
-    const cx = element.x - arrayedOffset;
-    const cy = element.y - arrayedOffset;
-    const r = this.radius();
+    const prefix = j === 0 ? 'M' : 'L';
+    // Quantize flow path coordinates -- see `jsFormatNumber` in
+    // `render-common.tsx` for the cross-toolchain SVG parity invariant.
+    spath += `${prefix}${ff(x)},${ff(y)}`;
+  }
 
-    return (
-      <g transform={`translate(${ff(cx + 1 - r / 2)} ${ff(cy + 1 - r / 2)})`}>
+  const cx = element.x;
+  const cy = element.y;
+  const r = AuxRadius;
+
+  const lastPt = at(pts, pts.length - 1);
+  const side = element.labelSide;
+  const label = isEditingName ? undefined : (
+    <Label
+      uid={element.uid}
+      cx={cx}
+      cy={cy}
+      side={side}
+      rw={r + arrayedOffset}
+      rh={r + arrayedOffset}
+      text={displayName(defined(element.name))}
+      onSelection={handleLabelSelection}
+      onLabelDrag={onLabelDrag}
+    />
+  );
+
+  let sparkline;
+  if (series && series.length > 0) {
+    const sx = cx - arrayedOffset;
+    const sy = cy - arrayedOffset;
+    sparkline = (
+      <g transform={`translate(${ff(sx + 1 - r / 2)} ${ff(sy + 1 - r / 2)})`}>
         <Sparkline series={series} width={r - 2} height={r - 2} />
       </g>
     );
   }
 
-  render() {
-    const { element, isEditingName, isMovingArrow, isMovingSource, isSelected, isValidTarget, series, sink } =
-      this.props;
-
-    const isArrayed = element.var ? variableIsArrayed(element.var) : false;
-    const arrayedOffset = isArrayed ? 3 : 0;
-
-    let pts = this.props.element.points;
-    if (pts.length < 2) {
-      throw new Error('expected at least two points on a flow');
-    }
-
-    if (sink.type === 'cloud' && !isMovingArrow) {
-      pts = retractFinalPointIntoCloud(pts, CloudRadius);
-    }
-
-    const finalAdjust = 7.5;
-    let spath = '';
-    let arrowTheta = 0;
-    for (let j = 0; j < pts.length; j++) {
-      let x = at(pts, j).x;
-      let y = at(pts, j).y;
-      if (j === pts.length - 1) {
-        // Walk back past coincident points: a degenerate (zero-length) final
-        // segment must not read as "pointing right" via atan2(0, 0) === 0.
-        const theta = finalSegmentAngle(pts);
-        if (theta === undefined) {
-          arrowTheta = 0;
-        } else if (theta >= 315 || theta < 45) {
-          x -= finalAdjust;
-          arrowTheta = 0;
-        } else if (theta >= 45 && theta < 135) {
-          y -= finalAdjust;
-          arrowTheta = 90;
-        } else if (theta >= 135 && theta < 225) {
-          x += finalAdjust;
-          arrowTheta = 180;
-        } else {
-          y += finalAdjust;
-          arrowTheta = 270;
-        }
-      }
-      const prefix = j === 0 ? 'M' : 'L';
-      // Quantize flow path coordinates -- see `jsFormatNumber` in
-      // `render-common.tsx` for the cross-toolchain SVG parity invariant.
-      spath += `${prefix}${ff(x)},${ff(y)}`;
-    }
-
-    const cx = element.x;
-    const cy = element.y;
-    const r = this.radius();
-
-    const lastPt = at(pts, pts.length - 1);
-    const side = element.labelSide;
-    const label = isEditingName ? undefined : (
-      <Label
-        uid={element.uid}
-        cx={cx}
-        cy={cy}
-        side={side}
-        rw={r + arrayedOffset}
-        rh={r + arrayedOffset}
-        text={displayName(defined(element.name))}
-        onSelection={this.handleLabelSelection}
-        onLabelDrag={this.props.onLabelDrag}
-      />
-    );
-
-    const sparkline = this.sparkline(series);
-    const indicator = this.indicators();
-
-    const groupClassName = clsx(styles.flow, 'simlin-flow', {
-      [styles.selected]: isSelected && isValidTarget === undefined,
-      'simlin-selected': isSelected && isValidTarget === undefined,
-      [styles.targetGood]: isValidTarget === true,
-      [styles.targetBad]: isValidTarget === false,
-    });
-
-    let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
-    if (isArrayed) {
-      circles = [
-        <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
-        <circle key="1" cx={cx} cy={cy} r={r} />,
-        <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
-      ];
-    }
-
-    const outerClassName = isSelected
-      ? clsx(styles.outerSelected, 'simlin-outer-selected')
-      : clsx(styles.outer, 'simlin-outer');
-
-    // Invisible hit area at the source end for grabbing the source
-    // Position it slightly into the first segment from the source point
-    const firstPt = at(pts, 0);
-    const secondPt = at(pts, 1);
-    const sourceHitSize = 20;
-
-    // Calculate position along the first segment, offset from the source
-    let sourceHitX = firstPt.x;
-    let sourceHitY = firstPt.y;
-
-    // Move hit area slightly into the segment for better UX
-    const segDx = secondPt.x - firstPt.x;
-    const segDy = secondPt.y - firstPt.y;
-    const segLen = Math.hypot(segDx, segDy);
-    if (segLen > sourceHitSize) {
-      const offsetRatio = sourceHitSize / 2 / segLen;
-      sourceHitX = firstPt.x + segDx * offsetRatio;
-      sourceHitY = firstPt.y + segDy * offsetRatio;
-    }
-
-    // Only show the source hit area when not in embedded/export mode and not already moving the source
-    const sourceHitArea =
-      !this.props.embedded && !isMovingSource ? (
-        <rect
-          x={sourceHitX - sourceHitSize / 2}
-          y={sourceHitY - sourceHitSize / 2}
-          width={sourceHitSize}
-          height={sourceHitSize}
-          fill="transparent"
-          style={{ cursor: 'grab' }}
-          onPointerDown={this.handlePointerDownSource}
-        />
-      ) : null;
-
-    return (
-      <g className={groupClassName}>
-        <path
-          d={spath}
-          className={outerClassName}
-          onPointerDown={this.handlePointerDown}
-          onPointerUp={this.handlePointerUp}
-        />
-        {sourceHitArea}
-        <Arrowhead
-          point={lastPt}
-          angle={arrowTheta}
-          size={FlowArrowheadRadius}
-          type="flow"
-          isSelected={this.props.isSelected}
-          onSelection={this.handlePointerDownArrowhead}
-        />
-        <path d={spath} className={clsx(styles.inner, 'simlin-inner')} />
-        <g onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
-          {circles}
-          {sparkline}
-        </g>
-        {indicator}
-        {label}
-      </g>
+  let indicator;
+  if (hasWarning) {
+    const theta = -Math.PI / 4; // 45 degrees
+    indicator = (
+      <circle className={styles.errorIndicator} cx={cx + r * Math.cos(theta)} cy={cy + r * Math.sin(theta)} r={3} />
     );
   }
-}
+
+  const groupClassName = clsx(styles.flow, 'simlin-flow', {
+    [styles.selected]: isSelected && isValidTarget === undefined,
+    'simlin-selected': isSelected && isValidTarget === undefined,
+    [styles.targetGood]: isValidTarget === true,
+    [styles.targetBad]: isValidTarget === false,
+  });
+
+  let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
+  if (isArrayed) {
+    circles = [
+      <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
+      <circle key="1" cx={cx} cy={cy} r={r} />,
+      <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
+    ];
+  }
+
+  const outerClassName = isSelected
+    ? clsx(styles.outerSelected, 'simlin-outer-selected')
+    : clsx(styles.outer, 'simlin-outer');
+
+  // Invisible hit area at the source end for grabbing the source
+  // Position it slightly into the first segment from the source point
+  const firstPt = at(pts, 0);
+  const secondPt = at(pts, 1);
+  const sourceHitSize = 20;
+
+  // Calculate position along the first segment, offset from the source
+  let sourceHitX = firstPt.x;
+  let sourceHitY = firstPt.y;
+
+  // Move hit area slightly into the segment for better UX
+  const segDx = secondPt.x - firstPt.x;
+  const segDy = secondPt.y - firstPt.y;
+  const segLen = Math.hypot(segDx, segDy);
+  if (segLen > sourceHitSize) {
+    const offsetRatio = sourceHitSize / 2 / segLen;
+    sourceHitX = firstPt.x + segDx * offsetRatio;
+    sourceHitY = firstPt.y + segDy * offsetRatio;
+  }
+
+  // Only show the source hit area when not in embedded/export mode and not already moving the source
+  const sourceHitArea =
+    !embedded && !isMovingSource ? (
+      <rect
+        x={sourceHitX - sourceHitSize / 2}
+        y={sourceHitY - sourceHitSize / 2}
+        width={sourceHitSize}
+        height={sourceHitSize}
+        fill="transparent"
+        style={{ cursor: 'grab' }}
+        onPointerDown={handlePointerDownSource}
+      />
+    ) : null;
+
+  return (
+    <g className={groupClassName}>
+      <path d={spath} className={outerClassName} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} />
+      {sourceHitArea}
+      <Arrowhead
+        point={lastPt}
+        angle={arrowTheta}
+        size={FlowArrowheadRadius}
+        type="flow"
+        isSelected={isSelected}
+        onSelection={handlePointerDownArrowhead}
+      />
+      <path d={spath} className={clsx(styles.inner, 'simlin-inner')} />
+      <g onPointerDown={handlePointerDown} onPointerUp={handlePointerUp}>
+        {circles}
+        {sparkline}
+      </g>
+      {indicator}
+      {label}
+    </g>
+  );
+});

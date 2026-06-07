@@ -143,83 +143,79 @@ interface LabelPropsFull extends CommonLabelProps {
 
 export type LabelProps = Pick<LabelPropsFull, 'text' | 'onSelection' | 'cx' | 'cy' | 'side' | 'rw' | 'rh'>;
 
-export class Label extends React.PureComponent<LabelPropsFull> {
-  pointerId: number | undefined;
-  inMove = false;
+export const Label = React.memo(function Label(props: LabelPropsFull): React.ReactElement {
+  const { uid, onSelection, onLabelDrag } = props;
 
-  constructor(props: LabelPropsFull) {
-    super(props);
+  // Transient pointer-gesture tracking: deliberately refs, not state -- a
+  // drag-in-progress must not trigger re-renders of the label itself.
+  const pointerId = React.useRef<number | undefined>(undefined);
+  const inMove = React.useRef(false);
 
-    this.state = {};
-  }
-
-  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+  const handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
     if (!e.isPrimary) {
       return;
     }
     e.preventDefault();
     e.stopPropagation();
 
-    this.pointerId = e.pointerId;
+    pointerId.current = e.pointerId;
   };
 
-  handlePointerMove = (e: React.PointerEvent<SVGElement>): void => {
-    if (this.pointerId !== e.pointerId) {
+  const handlePointerMove = (e: React.PointerEvent<SVGElement>): void => {
+    if (pointerId.current !== e.pointerId) {
       return;
     }
-    this.inMove = true;
+    inMove.current = true;
 
     (e.target as Element).setPointerCapture(e.pointerId);
-    this.props.onLabelDrag?.(this.props.uid, e);
+    onLabelDrag?.(uid, e);
   };
 
-  handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {
-    if (this.pointerId !== e.pointerId) {
+  const handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {
+    if (pointerId.current !== e.pointerId) {
       return;
     }
-    this.pointerId = undefined;
-    this.inMove = false;
+    pointerId.current = undefined;
+    inMove.current = false;
   };
 
-  handleDoubleClick = (e: React.MouseEvent<SVGElement>): void => {
-    if (!this.inMove) {
-      this.props.onSelection?.(e as unknown as React.PointerEvent<SVGElement>);
+  const handleDoubleClick = (e: React.MouseEvent<SVGElement>): void => {
+    if (!inMove.current) {
+      onSelection?.(e as unknown as React.PointerEvent<SVGElement>);
     }
   };
 
-  render() {
-    const { textX, textY, x, lines, reverseBaseline, align } = labelLayout(this.props);
-    const linesCount = lines.length;
+  const { textX, textY, x, lines, reverseBaseline, align } = labelLayout(props);
+  const linesCount = lines.length;
 
-    return (
-      <g>
-        <text
-          x={textX}
-          y={textY}
-          style={{ ...textStyle, textAnchor: align, filter: 'url(#labelBackground)' }}
-          onPointerDown={this.handlePointerDown}
-          onPointerMove={this.handlePointerMove}
-          onPointerUp={this.handlePointerUp}
-          onDoubleClick={this.handleDoubleClick}
-          textRendering="optimizeLegibility"
-        >
-          {lines.map((l, i) => {
-            let dy: string = i === 0 ? '1em' : `${lineSpacing}px`;
-            if (reverseBaseline && i === 0) {
-              dy = `${-(lineSpacing * (linesCount - 1))}px`;
-            }
-            return (
-              // Keyed by index, not line text: repeated lines (e.g. a label
-              // edited to "x\nx") would otherwise produce duplicate keys.
-              // Index keys are safe here -- a flat, fully-rebuilt list with
-              // no per-line state.
-              <tspan key={i} x={x} dy={dy}>
-                {l}
-              </tspan>
-            );
-          })}
-        </text>
-      </g>
-    );
-  }
-}
+  return (
+    <g>
+      <text
+        x={textX}
+        y={textY}
+        style={{ ...textStyle, textAnchor: align, filter: 'url(#labelBackground)' }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onDoubleClick={handleDoubleClick}
+        textRendering="optimizeLegibility"
+      >
+        {lines.map((l, i) => {
+          let dy: string = i === 0 ? '1em' : `${lineSpacing}px`;
+          if (reverseBaseline && i === 0) {
+            dy = `${-(lineSpacing * (linesCount - 1))}px`;
+          }
+          return (
+            // Keyed by index, not line text: repeated lines (e.g. a label
+            // edited to "x\nx") would otherwise produce duplicate keys.
+            // Index keys are safe here -- a flat, fully-rebuilt list with
+            // no per-line state.
+            <tspan key={i} x={x} dy={dy}>
+              {l}
+            </tspan>
+          );
+        })}
+      </text>
+    </g>
+  );
+});

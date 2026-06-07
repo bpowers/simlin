@@ -54,35 +54,34 @@ export function cloudBounds(element: CloudViewElement): Rect {
   };
 }
 
-export class Cloud extends React.PureComponent<CloudProps> {
-  handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+export const Cloud = React.memo(function Cloud(props: CloudProps): React.ReactElement {
+  const { element, isHidden, onSelection } = props;
+
+  const handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    this.props.onSelection(this.props.element, e);
+    onSelection(element, e);
   };
 
-  render() {
-    const { element, isHidden } = this.props;
-    const x = defined(element.x);
-    const y = defined(element.y);
+  const x = defined(element.x);
+  const y = defined(element.y);
 
-    const radius = CloudRadius;
-    const diameter = radius * 2;
+  const radius = CloudRadius;
+  const diameter = radius * 2;
 
-    const scale = diameter / CloudWidth;
-    const t = `matrix(${f(scale)}, 0, 0, ${f(scale)}, ${f(x - radius)}, ${f(y - radius)})`;
+  const scale = diameter / CloudWidth;
+  const t = `matrix(${f(scale)}, 0, 0, ${f(scale)}, ${f(x - radius)}, ${f(y - radius)})`;
 
-    // Keep cloud in DOM (for pointer capture) but visually hidden when dragging
-    const style = isHidden ? { visibility: 'hidden' as const } : undefined;
+  // Keep cloud in DOM (for pointer capture) but visually hidden when dragging
+  const style = isHidden ? { visibility: 'hidden' as const } : undefined;
 
-    return (
-      <path
-        d={CloudPath}
-        className={`${styles.cloud} simlin-cloud`}
-        transform={t}
-        style={style}
-        onPointerDown={this.handlePointerDown}
-      />
-    );
-  }
-}
+  return (
+    <path
+      d={CloudPath}
+      className={`${styles.cloud} simlin-cloud`}
+      transform={t}
+      style={style}
+      onPointerDown={handlePointerDown}
+    />
+  );
+});

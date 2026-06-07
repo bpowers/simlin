@@ -20,15 +20,13 @@ interface EditingLabelProps extends CommonLabelProps {
   zoom: number;
 }
 
-interface EditingLabelState {
-  editor: ReactEditor;
-}
+export const EditableLabel = React.memo(function EditableLabel(props: EditingLabelProps): React.ReactElement {
+  const { value, onChange, onDone } = props;
 
-export class EditableLabel extends React.PureComponent<EditingLabelProps, EditingLabelState> {
-  constructor(props: EditingLabelProps) {
-    super(props);
-
-    const { value } = props;
+  // The Slate editor is created exactly once per mount (Canvas remounts this
+  // component for each edit session), seeded from the initial value with the
+  // full text selected -- mirroring the class component's constructor.
+  const [editor] = React.useState<ReactEditor>(() => {
     const editor = withHistory(withReact(createEditor()));
     if (value.length > 0) {
       editor.children = value;
@@ -40,106 +38,99 @@ export class EditableLabel extends React.PureComponent<EditingLabelProps, Editin
         focus: Editor.end(editor, [value.length - 1]),
       });
     }
+    return editor;
+  });
 
-    this.state = {
-      editor,
-    };
-  }
-
-  handleChange = (value: Descendant[]): void => {
-    this.props.onChange(value);
+  const handleChange = (value: Descendant[]): void => {
+    onChange(value);
   };
 
-  handlePointerUpDown = (e: React.PointerEvent<HTMLDivElement>): void => {
+  const handlePointerUpDown = (e: React.PointerEvent<HTMLDivElement>): void => {
     e.stopPropagation();
   };
 
-  handleKeyPress = (e: React.KeyboardEvent<HTMLDivElement>): void => {
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLDivElement>): void => {
     if (e.code === 'Enter' && (e.ctrlKey || e.shiftKey || e.altKey)) {
       e.stopPropagation();
-      this.props.onDone(false);
+      onDone(false);
     } else if (e.code === 'Escape') {
       e.stopPropagation();
-      this.props.onDone(true);
+      onDone(true);
     }
   };
 
-  render() {
-    const { cx, cy, side, zoom } = this.props;
-    const fontSize = 12 * zoom;
+  const { cx, cy, side, zoom } = props;
+  const fontSize = 12 * zoom;
 
-    const lines: string[] = this.props.value.map((n) => Node.string(n));
-    const linesCount = lines.length;
+  const lines: string[] = value.map((n) => Node.string(n));
+  const linesCount = lines.length;
 
-    const maxWidthChars = lines.reduce((prev, curr) => (curr.length > prev ? curr.length : prev), 0);
-    const editorWidth = (maxWidthChars * 6 + 10) * zoom;
+  const maxWidthChars = lines.reduce((prev, curr) => (curr.length > prev ? curr.length : prev), 0);
+  const editorWidth = (maxWidthChars * 6 + 10) * zoom;
 
-    const rw: number = this.props.rw || AuxRadius;
-    const rh: number = this.props.rh || AuxRadius;
-    let x = cx;
-    let y = cy;
-    const textX = Math.round(x);
-    let textY = y;
-    let left = 0;
-    let textAlign: 'center' | 'left' | 'right' = 'center';
-    const labelPadding = baseLabelPadding * zoom;
-    const lineSpacing = baseLineSpacing * zoom;
-    switch (side) {
-      case 'top':
-        y = cy - rh - labelPadding - lineSpacing * linesCount;
-        left = textX - editorWidth / 2;
-        textY = y;
-        break;
-      case 'bottom':
-        y = cy + rh + labelPadding;
-        left = textX - editorWidth / 2;
-        textY = y;
-        break;
-      case 'left':
-        x = cx - rw - labelPadding + 1;
-        textAlign = 'right';
-        left = x - editorWidth;
-        textY = y - (fontSize + (lines.length - 1) * 14 * zoom) / 2 - 3;
-        break;
-      case 'right':
-        x = cx + rw + labelPadding - 1;
-        textAlign = 'left';
-        left = x;
-        textY = y - (fontSize + (lines.length - 1) * 14 * zoom) / 2 - 3;
-        break;
-      default:
-        // FIXME
-        console.log('unknown label case ' + side);
-    }
-
-    textY = Math.round(textY);
-
-    const style: React.CSSProperties = {
-      position: 'relative',
-      left,
-      top: textY,
-      width: editorWidth,
-      textAlign,
-      lineHeight: `${14 * zoom}px`,
-      background: 'white',
-      borderRadius: '3px',
-      border: '1px solid #4444dd',
-      fontSize,
-    };
-
-    const { value } = this.props;
-
-    return (
-      <div
-        className={styles.editableLabel}
-        style={style}
-        onPointerDown={this.handlePointerUpDown}
-        onPointerUp={this.handlePointerUpDown}
-      >
-        <Slate editor={this.state.editor} initialValue={value} onChange={this.handleChange}>
-          <Editable autoFocus={true} onKeyUp={this.handleKeyPress} />
-        </Slate>
-      </div>
-    );
+  const rw: number = props.rw || AuxRadius;
+  const rh: number = props.rh || AuxRadius;
+  let x = cx;
+  let y = cy;
+  const textX = Math.round(x);
+  let textY = y;
+  let left = 0;
+  let textAlign: 'center' | 'left' | 'right' = 'center';
+  const labelPadding = baseLabelPadding * zoom;
+  const lineSpacing = baseLineSpacing * zoom;
+  switch (side) {
+    case 'top':
+      y = cy - rh - labelPadding - lineSpacing * linesCount;
+      left = textX - editorWidth / 2;
+      textY = y;
+      break;
+    case 'bottom':
+      y = cy + rh + labelPadding;
+      left = textX - editorWidth / 2;
+      textY = y;
+      break;
+    case 'left':
+      x = cx - rw - labelPadding + 1;
+      textAlign = 'right';
+      left = x - editorWidth;
+      textY = y - (fontSize + (lines.length - 1) * 14 * zoom) / 2 - 3;
+      break;
+    case 'right':
+      x = cx + rw + labelPadding - 1;
+      textAlign = 'left';
+      left = x;
+      textY = y - (fontSize + (lines.length - 1) * 14 * zoom) / 2 - 3;
+      break;
+    default:
+      // FIXME
+      console.log('unknown label case ' + side);
   }
-}
+
+  textY = Math.round(textY);
+
+  const style: React.CSSProperties = {
+    position: 'relative',
+    left,
+    top: textY,
+    width: editorWidth,
+    textAlign,
+    lineHeight: `${14 * zoom}px`,
+    background: 'white',
+    borderRadius: '3px',
+    border: '1px solid #4444dd',
+    fontSize,
+  };
+
+  return (
+    <div
+      className={styles.editableLabel}
+      style={style}
+      onPointerDown={handlePointerUpDown}
+      onPointerUp={handlePointerUpDown}
+    >
+      <Slate editor={editor} initialValue={value} onChange={handleChange}>
+        <Editable autoFocus={true} onKeyUp={handleKeyPress} />
+      </Slate>
+    </div>
+  );
+});
