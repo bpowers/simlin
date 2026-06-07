@@ -685,7 +685,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // element the view no longer contains. (Clearing it after
     // `await this.updateView(...)` instead left a window where props.view had
     // dropped the deleted element but props.selection still pointed at it --
-    // Canvas.buildSelectionMap now tolerates that, but the state transition
+    // Canvas's buildSelectionMap now tolerates that, but the state transition
     // should still be atomic.) The deleteOps above were computed from the
     // pre-clear selection.
     this.setState({

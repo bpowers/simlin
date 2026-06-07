@@ -1,0 +1,417 @@
+/**
+ * @jest-environment jsdom
+ *
+ * Copyright 2026 The Simlin Authors. All rights reserved.
+ * Use of this source code is governed by the Apache License,
+ * Version 2.0, that can be found in the LICENSE file.
+ */
+
+// Reconciler-level gesture tests for element-edge interactions of the React
+// `Canvas` (Piece 1a; see
+// docs/design-plans/2026-06-07-canvas-interaction-migration.md): flow-segment
+// drag, label drag, link/flow endpoint drag, creation tools, and name editing.
+// Assertions are on prop-callback payloads and rendered DOM only.
+
+import { fireEvent, act } from '@testing-library/react';
+
+import type { StockFlowView } from '@simlin/core/datamodel';
+
+import {
+  makeAux,
+  makeCloud,
+  makeFlow,
+  makeLink,
+  makeStock,
+  pointerDown,
+  pointerMove,
+  pointerUp,
+  renderCanvas,
+  type CanvasHarness,
+} from './canvas-gesture-harness';
+
+function lastSelection(fn: jest.Mock): number[] {
+  const calls = fn.mock.calls;
+  const last = calls[calls.length - 1];
+  return last ? [...(last[0] as Set<number>)].sort((a, b) => a - b) : [];
+}
+
+// A horizontal flow stock -> cloud, with the stock wired to the flow.
+function stockToCloudFlow(): CanvasHarness {
+  const stock = makeStock(1, 'stock', 100, 100);
+  const cloud = makeCloud(2, 3, 300, 100);
+  const flow = makeFlow(
+    3,
+    'flow',
+    [
+      { x: 100, y: 100, attachedToUid: 1 },
+      { x: 300, y: 100, attachedToUid: 2 },
+    ],
+    { x: 200, y: 100 },
+  );
+  const stockWithFlow = { ...stock, outflows: [3] };
+  return renderCanvas({ elements: [stockWithFlow, cloud, flow] });
+}
+
+describe('Canvas gestures: flow segment drag (checklist 8)', () => {
+  it('dragging an interior flow segment plumbs the segmentIndex through onMoveSelection', () => {
+    // L-shaped flow: stock(100,100) -> (300,100) -> (300,300) -> cloud(500,300).
+    // The interior vertical segment is index 1.
+    const stock = makeStock(1, 'stock', 100, 100);
+    const cloud = makeCloud(2, 3, 500, 300);
+    const flow = makeFlow(
+      3,
+      'flow',
+      [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 300, y: 100, attachedToUid: undefined },
+        { x: 300, y: 300, attachedToUid: undefined },
+        { x: 500, y: 300, attachedToUid: 2 },
+      ],
+      { x: 300, y: 200 },
+    );
+    const stockWithFlow = { ...stock, outflows: [3] };
+    const h = renderCanvas({ elements: [stockWithFlow, cloud, flow] });
+    h.clearMountCalls();
+
+    const outer = h.query('.simlin-outer')!;
+    // Press the vertical interior segment at (300,260) -- away from the valve
+    // (300,200) so findClickedSegment returns the segment, not the valve.
+    pointerDown(outer, 300, 260);
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([3]);
+
+    pointerMove(h.svg, 340, 260, { buttons: 1 });
+    pointerUp(h.svg, 340, 260);
+
+    expect(h.callbacks.onMoveSelection).toHaveBeenCalledTimes(1);
+    const [delta, , segmentIndex] = h.callbacks.onMoveSelection.mock.calls[0];
+    expect(delta).toEqual({ x: -40, y: 0 });
+    expect(segmentIndex).toBe(1);
+  });
+});
+
+describe('Canvas gestures: label drag (checklist 9)', () => {
+  // labelSideForPointer maps the pointer position relative to the element center
+  // to a quadrant. Each direction is dragged from the label text node.
+  it.each([
+    ['left', 60, 100, 'left'],
+    ['right', 140, 100, 'right'],
+    ['top', 100, 60, 'top'],
+    ['bottom', 100, 140, 'bottom'],
+  ] as const)('dragging the label toward the %s fires onMoveLabel with that side', (_name, toX, toY, side) => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const text = h.query('.simlin-aux text')!;
+    pointerDown(text, 130, 100);
+    pointerMove(text, toX, toY);
+    // The label-drag selects the element (handleLabelDrag), which the host
+    // commits so the pointer-up's only(selection) resolves.
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([10]);
+
+    pointerUp(h.svg, toX, toY);
+    expect(h.callbacks.onMoveLabel).toHaveBeenCalledWith(10, side);
+  });
+
+  it('shows the label-side preview during the drag (text-anchor flips with the side)', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const text = h.query('.simlin-aux text')!;
+    // Default labelSide is 'right' -> text-anchor 'start'.
+    expect((h.query('.simlin-aux text') as SVGTextElement).style.textAnchor).toBe('start');
+
+    pointerDown(text, 130, 100);
+    pointerMove(text, 60, 100); // drag to the left
+    // During the drag the selected element's labelSide is overridden to 'left'
+    // (deriveRenderState applies state.labelSide to selectionUpdates), so the
+    // rendered label re-anchors to 'end'.
+    expect((h.query('.simlin-aux text') as SVGTextElement).style.textAnchor).toBe('end');
+  });
+});
+
+describe('Canvas gestures: link arrowhead drag (checklist 10)', () => {
+  it('releasing over a valid target fires onAttachLink with that target ident', () => {
+    const from = makeAux(1, 'from', 100, 100);
+    const to = makeAux(2, 'to', 300, 100);
+    const other = makeAux(3, 'other', 300, 300);
+    const link = makeLink(4, 1, 2);
+    const h = renderCanvas({ elements: [from, to, other, link] });
+    h.clearMountCalls();
+
+    const arrowhead = h.query('.simlin-arrowhead-link')!;
+    pointerDown(arrowhead, 290, 100);
+    // Pressing the arrowhead enters reattachment and selects the link.
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([4]);
+
+    pointerMove(h.svg, 300, 300, { buttons: 1 }); // over 'other'
+    pointerUp(h.svg, 300, 300);
+
+    expect(h.callbacks.onAttachLink).toHaveBeenCalledTimes(1);
+    const [linkArg, target] = h.callbacks.onAttachLink.mock.calls[0];
+    expect(linkArg.uid).toBe(4);
+    expect(target).toBe('other');
+    expect(h.callbacks.onDeleteSelection).not.toHaveBeenCalled();
+  });
+
+  it('releasing over empty space with no invalid target deletes the link', () => {
+    const from = makeAux(1, 'from', 100, 100);
+    const to = makeAux(2, 'to', 300, 100);
+    const link = makeLink(4, 1, 2);
+    const h = renderCanvas({ elements: [from, to, link] });
+    h.clearMountCalls();
+
+    const arrowhead = h.query('.simlin-arrowhead-link')!;
+    pointerDown(arrowhead, 290, 100);
+    pointerMove(h.svg, 600, 600, { buttons: 1 });
+    pointerUp(h.svg, 600, 600);
+
+    expect(h.callbacks.onAttachLink).not.toHaveBeenCalled();
+    expect(h.callbacks.onDeleteSelection).toHaveBeenCalledTimes(1);
+  });
+
+  it('pressing a flow sink cloud swaps the selection to the flow (reattachment override)', () => {
+    const h = stockToCloudFlow();
+    h.clearMountCalls();
+
+    const cloudNode = h.query('.simlin-cloud')!;
+    pointerDown(cloudNode, 300, 100);
+    // resolveSelectionForReattachment replaces the cloud uid with the flow uid.
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([3]);
+  });
+});
+
+describe('Canvas gestures: flow endpoint drag (checklist 11)', () => {
+  it('dragging the flow arrowhead (sink) fires onMoveFlow with isSourceAttach false', () => {
+    const h = stockToCloudFlow();
+    h.clearMountCalls();
+
+    const arrowhead = h.query('.simlin-arrowhead-flow')!;
+    pointerDown(arrowhead, 300, 100);
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([3]);
+
+    pointerMove(h.svg, 350, 150, { buttons: 1 });
+    pointerUp(h.svg, 350, 150);
+
+    expect(h.callbacks.onMoveFlow).toHaveBeenCalledTimes(1);
+    const [flowArg, targetUid, delta, , inCreation, isSourceAttach] = h.callbacks.onMoveFlow.mock.calls[0];
+    expect(flowArg.uid).toBe(3);
+    expect(targetUid).toBe(0); // no valid stock under the cursor
+    expect(delta).toEqual({ x: -50, y: -50 });
+    expect(inCreation).toBe(false);
+    expect(isSourceAttach).toBe(false);
+  });
+
+  it('dragging the flow source fires onMoveFlow with isSourceAttach true and a faux-target center', () => {
+    const h = stockToCloudFlow();
+    h.clearMountCalls();
+
+    const sourceHit = h.query('.simlin-flow rect[fill="transparent"]')!;
+    pointerDown(sourceHit, 110, 100);
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([3]);
+
+    pointerMove(h.svg, 150, 200, { buttons: 1 });
+    pointerUp(h.svg, 150, 200);
+
+    expect(h.callbacks.onMoveFlow).toHaveBeenCalledTimes(1);
+    const [flowArg, targetUid, delta, fauxTargetCenter, , isSourceAttach] = h.callbacks.onMoveFlow.mock.calls[0];
+    expect(flowArg.uid).toBe(3);
+    expect(targetUid).toBe(0);
+    expect(delta).toEqual({ x: -40, y: -100 });
+    // Unattached source -> faux-target center = selectionCenterOffset - offset.
+    expect(fauxTargetCenter).toEqual({ x: 110, y: 100 });
+    expect(isSourceAttach).toBe(true);
+  });
+});
+
+describe('Canvas gestures: creation tools (checklist 12)', () => {
+  it.each([
+    ['aux', 'aux', 'New Variable'],
+    ['stock', 'stock', 'New Stock'],
+    ['module', 'module', 'New Module'],
+  ] as const)(
+    '%s tool: press stages the element, release opens name editing, Enter commits via onCreateVariable',
+    (tool, type, expectedName) => {
+      const h = renderCanvas({ elements: [], selectedTool: tool });
+      h.clearMountCalls();
+
+      pointerDown(h.svg, 200, 200);
+      // The in-creation element is staged and selected (uid inCreationUid = -2).
+      expect(lastSelection(h.callbacks.onSetSelection)).toEqual([-2]);
+      expect(h.query(`.simlin-${type}`)).not.toBeNull();
+
+      pointerMove(h.svg, 210, 210, { buttons: 1 });
+
+      // DURING the creation drag (after move, before pointer-up) the name editor
+      // must NOT be active: the union is `editingName {onPointerUp: true}` (the
+      // "start editing once the drag ends" staging handoff), which is distinct
+      // from the editor being visible NOW. Asserting the old two-field semantics:
+      //  (a) no inline contenteditable overlay is mounted yet, and
+      //  (b) the staged element still renders its own text label (it is only
+      //      suppressed once the editor actually shows on pointer-up).
+      expect(h.query('[contenteditable]')).toBeNull();
+      const stagedLabel = h.query(`.simlin-${type} text`);
+      expect(stagedLabel).not.toBeNull();
+      expect(stagedLabel!.textContent).toBe(expectedName);
+
+      pointerUp(h.svg, 210, 210);
+
+      // The creation drag releases into name editing (EditableLabel overlay).
+      const editable = h.query('[contenteditable]');
+      expect(editable).not.toBeNull();
+
+      act(() => {
+        fireEvent.keyUp(editable!, { code: 'Enter', shiftKey: true });
+      });
+      expect(h.callbacks.onCreateVariable).toHaveBeenCalledTimes(1);
+      const created = h.callbacks.onCreateVariable.mock.calls[0][0];
+      expect(created.type).toBe(type);
+      expect(created.name).toBe(expectedName);
+    },
+  );
+
+  it('flow tool: cancelling the just-created flow name edit deletes it (flowStillBeingCreated)', () => {
+    const h = renderCanvas({ elements: [], selectedTool: 'flow' });
+    h.clearMountCalls();
+
+    // Model the host: onMoveFlow materializes a concrete flow + clouds and
+    // selects the real flow (uid 50) -- mirroring Editor.handleFlowAttach.
+    h.callbacks.onMoveFlow.mockImplementation(() => {
+      const source = makeCloud(51, 50, 200, 200);
+      const sink = makeCloud(52, 50, 300, 200);
+      const flow = makeFlow(
+        50,
+        'New Flow',
+        [
+          { x: 200, y: 200, attachedToUid: 51 },
+          { x: 300, y: 200, attachedToUid: 52 },
+        ],
+        { x: 250, y: 200 },
+      );
+      const view: StockFlowView = {
+        nextUid: 53,
+        elements: [source, sink, flow],
+        viewBox: { x: 0, y: 0, width: 1000, height: 1000 },
+        zoom: 1,
+        useLetteredPolarity: false,
+      };
+      h.setProps({ view, selection: new Set([50]) });
+    });
+
+    pointerDown(h.svg, 200, 200);
+    pointerMove(h.svg, 300, 200, { buttons: 1 });
+    pointerUp(h.svg, 300, 200);
+
+    const editable = h.query('[contenteditable]');
+    expect(editable).not.toBeNull();
+
+    act(() => {
+      fireEvent.keyUp(editable!, { code: 'Escape' });
+    });
+    // Cancelling the initial flow name deletes the just-created flow.
+    expect(h.callbacks.onDeleteSelection).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Canvas gestures: link/flow tool from a named element (checklist 13)', () => {
+  it('link tool pressing a named element starts an inCreation link drag that attaches on release', () => {
+    const a = makeAux(1, 'a', 100, 100);
+    const b = makeAux(2, 'b', 300, 100);
+    const h = renderCanvas({ elements: [a, b], selectedTool: 'link' });
+    h.clearMountCalls();
+
+    const nodes = h.queryAll('.simlin-aux');
+    pointerDown(nodes[0], 100, 100);
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([-2]); // inCreation link
+    expect(h.query('.simlin-connector')).not.toBeNull();
+
+    pointerMove(h.svg, 300, 100, { buttons: 1 }); // onto b
+    pointerUp(h.svg, 300, 100);
+
+    expect(h.callbacks.onAttachLink).toHaveBeenCalledTimes(1);
+    const [linkArg, target] = h.callbacks.onAttachLink.mock.calls[0];
+    expect(linkArg.fromUid).toBe(1);
+    expect(target).toBe('b');
+  });
+
+  it('flow tool pressing a stock starts an inCreation flow drag', () => {
+    const s = makeStock(1, 'stock', 100, 100);
+    const h = renderCanvas({ elements: [s], selectedTool: 'flow' });
+    h.clearMountCalls();
+
+    const node = h.query('.simlin-stock')!;
+    pointerDown(node, 100, 100);
+
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([-2]); // inCreation flow
+    // The in-creation flow renders (a second .simlin-flow exists beyond none).
+    expect(h.query('.simlin-flow')).not.toBeNull();
+  });
+});
+
+describe('Canvas gestures: name editing (checklist 15)', () => {
+  function enterEditing(h: CanvasHarness): Element {
+    const text = h.query('.simlin-aux text')!;
+    act(() => {
+      fireEvent.doubleClick(text, { clientX: 130, clientY: 100 });
+    });
+    // Host commits the selection the double-click requested.
+    h.setProps({ selection: new Set([10]) });
+    return h.query('[contenteditable]')!;
+  }
+
+  it('double-clicking a single named element enters editing (EditableLabel overlay appears)', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    expect(h.query('.editableLabel')).toBeNull();
+    enterEditing(h);
+    expect(h.query('.editableLabel')).not.toBeNull();
+  });
+
+  it('Enter commits the rename via onRenameVariable', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const editable = enterEditing(h);
+    act(() => {
+      // EditableLabel commits on Enter held with a modifier.
+      fireEvent.keyUp(editable, { code: 'Enter', shiftKey: true });
+    });
+
+    expect(h.callbacks.onRenameVariable).toHaveBeenCalledTimes(1);
+    // No text was typed, so the name round-trips unchanged.
+    expect(h.callbacks.onRenameVariable.mock.calls[0]).toEqual(['foo', 'foo']);
+    expect(h.callbacks.onDeleteSelection).not.toHaveBeenCalled();
+  });
+
+  it('Escape cancels editing without a rename and clears the selection', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const editable = enterEditing(h);
+    act(() => {
+      fireEvent.keyUp(editable, { code: 'Escape' });
+    });
+
+    expect(h.callbacks.onRenameVariable).not.toHaveBeenCalled();
+    // clearPointerState() on cancel clears the selection.
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([]);
+    expect(h.query('[contenteditable]')).toBeNull();
+  });
+
+  it('changing the selected tool ends editing (deferred commit)', async () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    enterEditing(h);
+    expect(h.query('[contenteditable]')).not.toBeNull();
+
+    // render() schedules handleEditingNameDone(false) when selectedTool changes.
+    h.setProps({ selectedTool: 'aux' });
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(h.callbacks.onRenameVariable).toHaveBeenCalledTimes(1);
+  });
+});

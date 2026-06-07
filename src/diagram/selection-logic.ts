@@ -6,6 +6,8 @@ import { setAdd, setDelete } from '@simlin/core/common';
 
 import { UID } from '@simlin/core/datamodel';
 
+import type { InteractionState } from './drawing/canvas-interaction';
+
 export interface MouseDownSelectionResult {
   newSelection: ReadonlySet<UID> | undefined;
   deferSingleSelect: UID | undefined;
@@ -65,41 +67,32 @@ export function resolveSelectionForReattachment(
  * clearPointerState and the deferred-click early-return for non-named
  * elements (clouds) to ensure no stale pointer state leaks into subsequent
  * renders or interactions.
+ *
+ * Post tagged-union migration (#65): the eight former boolean modes plus the
+ * loose labelSide / flowStillBeingCreated / draggingSegmentIndex fields all
+ * collapse into a single `interaction: idle`. (Notably, `editingName.creatingFlow`
+ * -- formerly `flowStillBeingCreated` -- is reset here so that once name editing
+ * ends, a later Escape-cancel of an unrelated rename can't see a stale `true`
+ * and delete that variable via the cancel-of-newly-created-flow path.) Only the
+ * continuous companions that travel alongside the discrete mode are also
+ * cleared; the Slate `editingName` value and `movingCanvasOffset` are
+ * intentionally left untouched, matching the pre-migration reset.
  */
 export interface PointerStateReset {
+  interaction: InteractionState;
   moveDelta: undefined;
-  isMovingArrow: false;
-  isMovingSource: false;
-  isMovingLabel: false;
-  labelSide: undefined;
-  isDragSelecting: false;
-  isMovingCanvas: false;
-  isEditingName: false;
-  // Cleared here so that once name editing ends (commit or cancel), a later
-  // Escape-cancel of an unrelated rename can't see a stale `true` and delete
-  // that variable via the cancel-of-newly-created-flow path.
-  flowStillBeingCreated: false;
   dragSelectionPoint: undefined;
   inCreation: undefined;
   inCreationCloud: undefined;
-  draggingSegmentIndex: undefined;
 }
 
 export function pointerStateReset(): PointerStateReset {
   return {
+    interaction: { mode: 'idle' },
     moveDelta: undefined,
-    isMovingArrow: false,
-    isMovingSource: false,
-    isMovingLabel: false,
-    labelSide: undefined,
-    isDragSelecting: false,
-    isMovingCanvas: false,
-    isEditingName: false,
-    flowStillBeingCreated: false,
     dragSelectionPoint: undefined,
     inCreation: undefined,
     inCreationCloud: undefined,
-    draggingSegmentIndex: undefined,
   };
 }
 

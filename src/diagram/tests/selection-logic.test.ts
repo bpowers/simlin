@@ -103,23 +103,19 @@ describe('pointerStateReset', () => {
     expect(reset.moveDelta).toBeUndefined();
   });
 
-  it('clears all movement flags', () => {
+  it('resets the discrete interaction mode to idle', () => {
+    // Post tagged-union migration (#65): the eight former boolean modes plus the
+    // loose labelSide / flowStillBeingCreated / draggingSegmentIndex fields all
+    // collapse into `interaction: idle`.
     const reset = pointerStateReset();
-    expect(reset.isMovingArrow).toBe(false);
-    expect(reset.isMovingSource).toBe(false);
-    expect(reset.isMovingLabel).toBe(false);
-    expect(reset.isMovingCanvas).toBe(false);
+    expect(reset.interaction).toEqual({ mode: 'idle' });
   });
 
-  it('clears all interaction state', () => {
+  it('clears the continuous pointer companions', () => {
     const reset = pointerStateReset();
-    expect(reset.isDragSelecting).toBe(false);
-    expect(reset.isEditingName).toBe(false);
-    expect(reset.labelSide).toBeUndefined();
     expect(reset.dragSelectionPoint).toBeUndefined();
     expect(reset.inCreation).toBeUndefined();
     expect(reset.inCreationCloud).toBeUndefined();
-    expect(reset.draggingSegmentIndex).toBeUndefined();
   });
 
   it('returns consistent values across calls', () => {
