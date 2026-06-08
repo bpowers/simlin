@@ -6,6 +6,7 @@ import { Request, Response, Router } from 'express';
 import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
 import * as logger from './logger';
 
+import { validateCreateProjectBody, validateUserPatchBody } from './api-validation';
 import { Application } from './application';
 import { Database } from './models/db-interfaces';
 import { populateExamples } from './new-user';
@@ -99,8 +100,9 @@ export const apiRouter = (app: Application): Router => {
   api.post('/projects', async (req: Request, res: Response): Promise<void> => {
     const user = getUser(req, res);
 
-    if (!req.body.projectName) {
-      res.status(400).json({ error: 'projectName is required' });
+    const createBodyError = validateCreateProjectBody(req.body);
+    if (createBodyError) {
+      res.status(400).json({ error: createBodyError });
       return;
     }
 
@@ -312,8 +314,9 @@ export const apiRouter = (app: Application): Router => {
   api.patch('/user', async (req: Request, res: Response): Promise<void> => {
     const userModel = getUser(req, res);
 
-    if (Object.keys(req.body).length !== 2 || !req.body.username) {
-      res.status(400).json({ error: 'only username can be patched' });
+    const patchBodyError = validateUserPatchBody(req.body);
+    if (patchBodyError) {
+      res.status(400).json({ error: patchBodyError });
       return;
     }
 
