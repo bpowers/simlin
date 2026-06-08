@@ -39,9 +39,7 @@ def build_libsimlin() -> Path:
     # allocator: the engine compile path is allocation-heavy and mimalloc roughly
     # halves allocator time on native builds (docs/design/engine-performance.md).
     subprocess.run(
-        ["cargo", "build", "--release", "--features", "mimalloc"],
-        cwd=libsimlin_dir,
-        check=True
+        ["cargo", "build", "--release", "--features", "mimalloc"], cwd=libsimlin_dir, check=True
     )
 
     # Return the path to the built library
@@ -104,7 +102,7 @@ def build_wheel() -> None:
     subprocess.run(
         [sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "-w", "dist"],
         cwd=package_dir,
-        check=True
+        check=True,
     )
 
     # Get the built wheel

@@ -144,9 +144,7 @@ class Sim:
             name_ptrs = ffi.new("char *[]", count)
             written_ptr = ffi.new("uintptr_t *")
             err_ptr2 = ffi.new("SimlinError **")
-            lib.simlin_sim_get_var_names(
-                self._ptr, name_ptrs, count, written_ptr, err_ptr2
-            )
+            lib.simlin_sim_get_var_names(self._ptr, name_ptrs, count, written_ptr, err_ptr2)
             check_out_error(err_ptr2, "Get sim variable names")
 
             names: list[str] = []
@@ -286,9 +284,7 @@ class Sim:
         with self._lock:
             self._check_alive()
             err_ptr = ffi.new("SimlinError **")
-            links_ptr = lib.simlin_analyze_get_links(
-                self._ptr, include_internal, err_ptr
-            )
+            links_ptr = lib.simlin_analyze_get_links(self._ptr, include_internal, err_ptr)
             check_out_error(err_ptr, "Get links")
 
         if links_ptr == ffi.NULL:
@@ -313,13 +309,8 @@ class Sim:
                 # populated exactly when the raw score is, and has the same
                 # length; it is the comparable [-1, 1] series for ranking.
                 relative_score = None
-                if (
-                    c_link.relative_score_len > 0
-                    and c_link.relative_score != ffi.NULL
-                ):
-                    relative_score = np.zeros(
-                        c_link.relative_score_len, dtype=np.float64
-                    )
+                if c_link.relative_score_len > 0 and c_link.relative_score != ffi.NULL:
+                    relative_score = np.zeros(c_link.relative_score_len, dtype=np.float64)
                     for j in range(c_link.relative_score_len):
                         relative_score[j] = c_link.relative_score[j]
 

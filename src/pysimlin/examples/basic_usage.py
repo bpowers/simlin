@@ -77,7 +77,7 @@ def work_with_dataframes():
 
     # Select a subset of variables for display
     var_names = model.get_var_names()
-    selected_vars = var_names[:min(5, len(var_names))]
+    selected_vars = var_names[: min(5, len(var_names))]
     df_subset = df[[v for v in selected_vars if v in df.columns]]
 
     print("Simulation results DataFrame:")
@@ -149,8 +149,7 @@ def ltm_analysis():
             print(f"\nFound {len(run.dominant_periods)} dominant periods:")
             for period in run.dominant_periods[:3]:
                 print(
-                    f"  t=[{period.start_time:.1f}, {period.end_time:.1f}]: "
-                    f"{period.dominant_loops}"
+                    f"  t=[{period.start_time:.1f}, {period.end_time:.1f}]: {period.dominant_loops}"
                 )
     else:
         print("No loops with behavior data (model may not have feedback loops)")
@@ -244,6 +243,7 @@ def main():
     except Exception as e:
         print(f"\nError running examples: {e}")
         import traceback
+
         traceback.print_exc()
 
 
