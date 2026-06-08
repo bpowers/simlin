@@ -151,9 +151,7 @@ describe('App shell', () => {
       render(<App />);
       await waitFor(() => expect(screen.queryByRole('banner')).not.toBeNull());
 
-      expect(() =>
-        fireEvent.click(screen.getByRole('button', { name: /dismiss/i })),
-      ).not.toThrow();
+      expect(() => fireEvent.click(screen.getByRole('button', { name: /dismiss/i }))).not.toThrow();
       expect(screen.queryByRole('banner')).toBeNull();
     } finally {
       proto.setItem = originalSetItem;
@@ -482,9 +480,7 @@ describe('App shell', () => {
     // forces a refetch and lands the editor on version=3 with a recorded
     // liveVersion of 3.
     await act(async () => {
-      ws.emitMessage(
-        JSON.stringify({ type: 'projectChanged', path: 'a.stmx', version: 3, source: 'disk' }),
-      );
+      ws.emitMessage(JSON.stringify({ type: 'projectChanged', path: 'a.stmx', version: 3, source: 'disk' }));
     });
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
@@ -590,9 +586,7 @@ describe('App shell', () => {
     const ws = MockWebSocket.instances[0];
 
     await act(async () => {
-      ws.emitMessage(
-        JSON.stringify({ type: 'projectChanged', path: 'a.stmx', version: 1, source: 'disk' }),
-      );
+      ws.emitMessage(JSON.stringify({ type: 'projectChanged', path: 'a.stmx', version: 1, source: 'disk' }));
     });
 
     await waitFor(() => expect(screen.queryByRole('status')).not.toBeNull());
@@ -709,9 +703,7 @@ describe('App shell', () => {
     const ws = MockWebSocket.instances[0];
 
     await act(async () => {
-      ws.emitMessage(
-        JSON.stringify({ type: 'projectChanged', path: 'a.stmx', version: 1, source: 'user' }),
-      );
+      ws.emitMessage(JSON.stringify({ type: 'projectChanged', path: 'a.stmx', version: 1, source: 'user' }));
     });
 
     // Allow the refetch to settle.

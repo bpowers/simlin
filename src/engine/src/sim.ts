@@ -30,12 +30,7 @@ export class Sim {
   private _enableLtm: boolean;
 
   /** @internal Use Sim.create() instead. */
-  private constructor(
-    handle: SimHandle,
-    model: Model,
-    overrides: Record<string, number>,
-    enableLtm: boolean,
-  ) {
+  private constructor(handle: SimHandle, model: Model, overrides: Record<string, number>, enableLtm: boolean) {
     this._handle = handle;
     this._model = model;
     this._overrides = { ...overrides };

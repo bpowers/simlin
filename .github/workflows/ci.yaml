@@ -190,6 +190,12 @@ jobs:
       - name: Install pnpm dependencies
         run: pnpm install
 
+      # eslint only disables prettier-conflicting rules via
+      # eslint-config-prettier; this is the step that actually
+      # enforces prettier formatting (mirrors scripts/pre-commit).
+      - name: Check TypeScript formatting
+        run: pnpm js-needs-format
+
       - name: Build the Typescript project
         run: DISABLE_WASM_OPT=1 pnpm build
 
@@ -257,6 +263,14 @@ jobs:
           uv sync --extra dev
           uv pip install setuptools
           uv run python setup.py build_ext --inplace 2>/dev/null || true
+
+      # ruff format --check enforces formatting (ruff check, run by the
+      # pre-commit pysimlin script, is the linter only and does not).
+      - name: Check formatting and lint with ruff
+        working-directory: src/pysimlin
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
 
       - name: Type check with mypy
         working-directory: src/pysimlin

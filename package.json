@@ -17,9 +17,9 @@
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "js-needs-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|core)/' | xargs prettier -l",
+    "js-needs-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?)/' | xargs prettier -l",
     "rust-needs-format": "cargo fmt -- --check",
-    "js-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|core)/' | xargs prettier --write",
+    "js-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?)/' | xargs prettier --write",
     "rust-format": "cargo fmt",
     "format": "cargo fmt && pnpm js-format",
     "precommit": "pnpm js-needs-format && pnpm rust-needs-format && pnpm lint",

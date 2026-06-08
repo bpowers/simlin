@@ -110,8 +110,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
       // gives the most recent committed projects; setState calls earlier
       // in this handler are queued, but for an unseen path the projects
       // entry would not be there in either pre- or post-commit state.
-      const known =
-        this.state.projects?.some((p) => p.path === msg.path) ?? false;
+      const known = this.state.projects?.some((p) => p.path === msg.path) ?? false;
       if (!known) {
         void this.loadProjects();
       }
@@ -158,9 +157,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
         // EditorHost's refetch gate then sees `liveVersion === serverVersion`
         // and stays mounted on the same payload. Clearing `liveVersions[from]`
         // avoids leaking stale entries if the path is later re-used.
-        const swapped = projects.map((p) =>
-          p.path === msg.from ? { ...p, path: msg.to } : p,
-        );
+        const swapped = projects.map((p) => (p.path === msg.from ? { ...p, path: msg.to } : p));
         const carriedVersion = prev.liveVersions[msg.from];
         const carriedSource = prev.liveSources[msg.from];
         const nextLiveVersions = { ...prev.liveVersions };
@@ -241,8 +238,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
   };
 
   render(): React.ReactNode {
-    const { projects, gitAvailable, selectedPath, gitHintDismissed, loadError, liveVersions, liveSources } =
-      this.state;
+    const { projects, gitAvailable, selectedPath, gitHintDismissed, loadError, liveVersions, liveSources } = this.state;
 
     const showHint = !gitAvailable && !gitHintDismissed;
     const ready = projects !== null;

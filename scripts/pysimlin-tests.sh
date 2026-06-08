@@ -37,6 +37,15 @@ cd "$REPO_ROOT"
 echo "Running pysimlin linting..."
 uv run --directory src/pysimlin ruff check .
 
+# ruff check is the linter only; this is what actually enforces
+# formatting (the Python analogue of cargo fmt --check / prettier -l).
+echo "Checking pysimlin formatting..."
+if ! uv run --directory src/pysimlin ruff format --check .; then
+  echo "The files listed above are not ruff-formatted."
+  echo "Run: uv run --directory src/pysimlin ruff format ."
+  exit 1
+fi
+
 echo "Running pysimlin type checking..."
 uv run --directory src/pysimlin mypy simlin/
 

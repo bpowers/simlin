@@ -184,9 +184,9 @@ describe('saveProject', () => {
   });
 
   test('throws a generic Error on other non-OK statuses', async () => {
-    globalThis.fetch = jest.fn().mockResolvedValue(
-      jsonResponse({ error: 'forbidden' }, 403),
-    ) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ error: 'forbidden' }, 403)) as unknown as typeof globalThis.fetch;
 
     await expect(saveProject('a.stmx', '{}', 0)).rejects.toThrow(/403/);
   });
@@ -194,9 +194,7 @@ describe('saveProject', () => {
 
 describe('createProject', () => {
   test('POSTs JSON body with name+format and returns the response', async () => {
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValue(jsonResponse({ path: 'foo.stmx', version: 0 }));
+    const fetchMock = jest.fn().mockResolvedValue(jsonResponse({ path: 'foo.stmx', version: 0 }));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     const result = await createProject('foo', 'stmx');
@@ -212,9 +210,7 @@ describe('createProject', () => {
   });
 
   test('forwards the optional parent_dir to the server', async () => {
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValue(jsonResponse({ path: 'sub/foo.stmx', version: 0 }));
+    const fetchMock = jest.fn().mockResolvedValue(jsonResponse({ path: 'sub/foo.stmx', version: 0 }));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     await createProject('foo', 'stmx', 'sub');
@@ -227,9 +223,9 @@ describe('createProject', () => {
   });
 
   test('throws an Error carrying the server message on non-OK responses', async () => {
-    globalThis.fetch = jest.fn().mockResolvedValue(
-      jsonResponse({ error: 'already_exists' }, 409),
-    ) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ error: 'already_exists' }, 409)) as unknown as typeof globalThis.fetch;
 
     await expect(createProject('dup', 'stmx')).rejects.toThrow(/already_exists|409/i);
   });

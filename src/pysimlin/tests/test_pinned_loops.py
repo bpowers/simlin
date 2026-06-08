@@ -85,9 +85,7 @@ class TestPinViaEditApi:
         # Before pinning, every enumerated loop reports no assigned name.
         before = model.loops
         assert before, "the two-loop model has structural loops"
-        assert all(loop.name is None for loop in before), (
-            "enumerated loops must have name == None"
-        )
+        assert all(loop.name is None for loop in before), "enumerated loops must have name == None"
 
         with model.edit() as (_current, patch):
             patch.set_loop_name("Ocean carbon uptake", ["population", "births"])

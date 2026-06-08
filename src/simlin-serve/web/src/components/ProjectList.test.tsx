@@ -82,7 +82,9 @@ describe('ProjectList', () => {
   test('invokes onSelect with the path when a row is clicked', () => {
     const projects = [tracked('a.stmx', false), tracked('b.stmx', true)];
     const calls: Array<string> = [];
-    render(<ProjectList projects={projects} selectedPath={null} onSelect={(p) => calls.push(p)} onCreated={() => {}} />);
+    render(
+      <ProjectList projects={projects} selectedPath={null} onSelect={(p) => calls.push(p)} onCreated={() => {}} />,
+    );
 
     fireEvent.click(screen.getByText('b.stmx'));
     expect(calls).toEqual(['b.stmx']);
@@ -110,9 +112,7 @@ describe('ProjectList', () => {
     const { container } = render(
       <ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />,
     );
-    const labels = Array.from(container.querySelectorAll('.serve-project-list-path')).map(
-      (el) => el.textContent ?? '',
-    );
+    const labels = Array.from(container.querySelectorAll('.serve-project-list-path')).map((el) => el.textContent ?? '');
     expect(labels).toEqual(['a.stmx', 'b.stmx']);
   });
 
@@ -121,9 +121,7 @@ describe('ProjectList', () => {
     const { container } = render(
       <ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />,
     );
-    const labels = Array.from(container.querySelectorAll('.serve-project-list-path')).map(
-      (el) => el.textContent ?? '',
-    );
+    const labels = Array.from(container.querySelectorAll('.serve-project-list-path')).map((el) => el.textContent ?? '');
     expect(labels).toEqual(['a/x.stmx', 'b/x.stmx']);
   });
 

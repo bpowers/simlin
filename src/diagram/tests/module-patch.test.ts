@@ -298,7 +298,16 @@ describe('upsertModule patch operation', () => {
     );
 
     // Verify the metadata via serialized JSON (getVariable doesn't return all module fields)
-    type JsonModelEntry = { name: string; modules?: { name: string; modelName: string; references?: { src: string; dst: string }[]; units?: string; documentation?: string }[] };
+    type JsonModelEntry = {
+      name: string;
+      modules?: {
+        name: string;
+        modelName: string;
+        references?: { src: string; dst: string }[];
+        units?: string;
+        documentation?: string;
+      }[];
+    };
     let json = JSON.parse(await project.serializeJson());
     let mainModelJson = json.models.find((m: JsonModelEntry) => m.name === 'main') as JsonModelEntry;
     let ecoModule = mainModelJson.modules?.find((m) => m.name === 'eco_module');
@@ -309,9 +318,12 @@ describe('upsertModule patch operation', () => {
 
     // Now change model reference, preserving existing metadata.
     // Use allowErrors because the copy is empty and doesn't have the referenced variables.
-    await project.applyPatch({
-      projectOps: [{ type: 'addModel', payload: { name: 'ecosystem_copy' } }],
-    }, { allowErrors: true });
+    await project.applyPatch(
+      {
+        projectOps: [{ type: 'addModel', payload: { name: 'ecosystem_copy' } }],
+      },
+      { allowErrors: true },
+    );
     await project.applyPatch(
       {
         models: [

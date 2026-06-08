@@ -136,9 +136,7 @@ function params(overrides: Partial<FlowAttachParams> & { flow: FlowViewElement }
 // Convenience: assert exactly one updateStockFlows op for `ident` and return it.
 function stockFlowsOpFor(ops: readonly JsonModelOperation[], ident: string): JsonModelOperation {
   const matches = ops.filter(
-    (op) =>
-      op.type === 'updateStockFlows' &&
-      (op as { payload: { ident: string } }).payload.ident === ident,
+    (op) => op.type === 'updateStockFlows' && (op as { payload: { ident: string } }).payload.ident === ident,
   );
   expect(matches.length).toBe(1);
   return matches[0];
@@ -195,7 +193,11 @@ describe('computeFlowAttachment', () => {
       const view = makeView([srcStock, oldSink, flow], 5);
       const variables = varsOf(makeStockVar('old_sink', ['f']));
 
-      const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 0, cursorMoveDelta: { x: -40, y: 0 } }));
+      const result = computeFlowAttachment(
+        view,
+        variables,
+        params({ flow, targetUid: 0, cursorMoveDelta: { x: -40, y: 0 } }),
+      );
 
       // a new cloud was created (uid 5)
       const clouds = result.elements.filter((e) => e.type === 'cloud');
@@ -262,7 +264,11 @@ describe('computeFlowAttachment', () => {
       const view = makeView([srcStock, oldCloud, flow], 5);
       const variables = varsOf();
 
-      const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 0, cursorMoveDelta: { x: -30, y: 0 } }));
+      const result = computeFlowAttachment(
+        view,
+        variables,
+        params({ flow, targetUid: 0, cursorMoveDelta: { x: -30, y: 0 } }),
+      );
 
       // cloud preserved (updated), no new cloud, no ops
       expect(result.elements.filter((e) => e.type === 'cloud').length).toBe(1);
@@ -451,7 +457,11 @@ describe('computeFlowAttachment', () => {
       const view = makeView([srcStock, oldSink, flow], 5);
       const variables = varsOf(makeStockVar('old_sink', ['f']));
 
-      const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 0, cursorMoveDelta: { x: -40, y: 0 } }));
+      const result = computeFlowAttachment(
+        view,
+        variables,
+        params({ flow, targetUid: 0, cursorMoveDelta: { x: -40, y: 0 } }),
+      );
 
       expect(result.nextUid).toBeGreaterThanOrEqual(view.nextUid);
       for (const el of result.elements) {
@@ -522,9 +532,7 @@ describe('computeFlowAttachment', () => {
       const view = makeView([srcStock, oldSink, flow], 5);
       const variables = varsOf(makeStockVar('old_sink', ['f']));
 
-      expect(() => computeFlowAttachment(view, variables, params({ flow, targetUid: 999 }))).toThrow(
-        'unknown uid 999',
-      );
+      expect(() => computeFlowAttachment(view, variables, params({ flow, targetUid: 999 }))).toThrow('unknown uid 999');
     });
 
     it("throws when the snap target isn't a stock or cloud", () => {

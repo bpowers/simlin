@@ -113,10 +113,7 @@ function makeProject(models: ReadonlyArray<Model>): Project {
 
 describe('countModelInstances', () => {
   it('returns 0 when no modules reference the model', () => {
-    const project = makeProject([
-      makeModel('main', [makeAux('x')]),
-      makeModel('hares', [makeAux('y')]),
-    ]);
+    const project = makeProject([makeModel('main', [makeAux('x')]), makeModel('hares', [makeAux('y')])]);
     expect(countModelInstances(project, 'hares')).toBe(0);
   });
 
@@ -157,9 +154,7 @@ describe('countModelInstances', () => {
 
 describe('wouldCreateCycle', () => {
   it('detects direct self-reference', () => {
-    const project = makeProject([
-      makeModel('main', [makeModule('self', 'main')]),
-    ]);
+    const project = makeProject([makeModel('main', [makeModule('self', 'main')])]);
     expect(wouldCreateCycle(project, 'main', 'main')).toBe(true);
   });
 
@@ -185,17 +180,12 @@ describe('wouldCreateCycle', () => {
   });
 
   it('returns false for a leaf model with no modules', () => {
-    const project = makeProject([
-      makeModel('main', [makeAux('x')]),
-      makeModel('sub', [makeAux('y')]),
-    ]);
+    const project = makeProject([makeModel('main', [makeAux('x')]), makeModel('sub', [makeAux('y')])]);
     expect(wouldCreateCycle(project, 'main', 'sub')).toBe(false);
   });
 
   it('handles models that do not exist in the project', () => {
-    const project = makeProject([
-      makeModel('main', [makeAux('x')]),
-    ]);
+    const project = makeProject([makeModel('main', [makeAux('x')])]);
     // Referencing a nonexistent model cannot create a cycle
     expect(wouldCreateCycle(project, 'main', 'nonexistent')).toBe(false);
   });
@@ -230,9 +220,7 @@ describe('getAvailableModels', () => {
   });
 
   it('always includes all 9 stdlib models from the registry', () => {
-    const project = makeProject([
-      makeModel('main', [makeAux('x')]),
-    ]);
+    const project = makeProject([makeModel('main', [makeAux('x')])]);
     const result = getAvailableModels(project, 'main');
     // All 9 stdlib models are offered even when none are in the project
     expect(result.stdlibModels).toHaveLength(9);
@@ -261,9 +249,7 @@ describe('getAvailableModels', () => {
     const result = getAvailableModels(project, 'main');
     // systems_rate should appear exactly once despite being both in the
     // project models map and in the stdlib registry
-    const rateCount = result.stdlibModels.filter(
-      (n) => n === 'stdlib\u{205A}systems_rate',
-    ).length;
+    const rateCount = result.stdlibModels.filter((n) => n === 'stdlib\u{205A}systems_rate').length;
     expect(rateCount).toBe(1);
     expect(result.projectModels).toHaveLength(0);
   });
@@ -285,10 +271,7 @@ describe('getAvailableModels', () => {
   it('treats user models with bare stdlib names as project models', () => {
     // A user-created model named "delay1" (no stdlib prefix) should
     // appear in projectModels, not stdlibModels.
-    const project = makeProject([
-      makeModel('main', [makeModule('d', 'delay1')]),
-      makeModel('delay1', [makeAux('x')]),
-    ]);
+    const project = makeProject([makeModel('main', [makeModule('d', 'delay1')]), makeModel('delay1', [makeAux('x')])]);
     const result = getAvailableModels(project, 'main');
     expect(result.projectModels).toContain('delay1');
   });
@@ -415,19 +398,13 @@ describe('getInputPorts', () => {
   });
 
   it('returns empty array when model has no input ports', () => {
-    const model = makeModel('hares', [
-      makeAux('food'),
-      makeAux('rate'),
-    ]);
+    const model = makeModel('hares', [makeAux('food'), makeAux('rate')]);
     const inputs = getInputPorts(model);
     expect(inputs).toHaveLength(0);
   });
 
   it('excludes module variables (modules cannot be input ports)', () => {
-    const model = makeModel('hares', [
-      makeAux('food', { canBeModuleInput: true }),
-      makeModule('sub', 'sub_model'),
-    ]);
+    const model = makeModel('hares', [makeAux('food', { canBeModuleInput: true }), makeModule('sub', 'sub_model')]);
     const inputs = getInputPorts(model);
     expect(inputs).toHaveLength(1);
     expect(inputs[0].ident).toBe('food');
@@ -450,19 +427,13 @@ describe('getPublicVariables', () => {
   });
 
   it('returns empty array when model has no public variables', () => {
-    const model = makeModel('hares', [
-      makeAux('food'),
-      makeStock('level'),
-    ]);
+    const model = makeModel('hares', [makeAux('food'), makeStock('level')]);
     const pubs = getPublicVariables(model);
     expect(pubs).toHaveLength(0);
   });
 
   it('excludes module variables', () => {
-    const model = makeModel('hares', [
-      makeAux('food', { isPublic: true }),
-      makeModule('sub', 'sub_model'),
-    ]);
+    const model = makeModel('hares', [makeAux('food', { isPublic: true }), makeModule('sub', 'sub_model')]);
     const pubs = getPublicVariables(model);
     expect(pubs).toHaveLength(1);
     expect(pubs[0].ident).toBe('food');

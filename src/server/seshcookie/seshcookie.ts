@@ -43,11 +43,7 @@ export interface SessionRequest extends IncomingMessage {
 
 export type NextFunction = (err?: unknown) => void;
 
-export type RequestHandler = (
-  req: IncomingMessage,
-  res: ServerResponse,
-  next: NextFunction,
-) => void;
+export type RequestHandler = (req: IncomingMessage, res: ServerResponse, next: NextFunction) => void;
 
 // when used with express, downstream handlers see the session on
 // express's Request type without needing a cast.

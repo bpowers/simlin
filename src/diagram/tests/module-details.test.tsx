@@ -131,10 +131,7 @@ describe('ModuleDetails', () => {
   describe('rendering', () => {
     test('renders without crashing', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('population')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('population')])]);
       const callbacks = defaultCallbacks();
 
       const { container } = render(
@@ -152,10 +149,7 @@ describe('ModuleDetails', () => {
 
     test('does not render an equation editor', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('population')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('population')])]);
       const callbacks = defaultCallbacks();
 
       const { container } = render(
@@ -178,10 +172,7 @@ describe('ModuleDetails', () => {
   describe('model reference display', () => {
     test('shows the referenced model name in selector', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('population')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('population')])]);
       const callbacks = defaultCallbacks();
 
       render(
@@ -200,10 +191,7 @@ describe('ModuleDetails', () => {
 
     test('shows module ident as header', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('population')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('population')])]);
       const callbacks = defaultCallbacks();
 
       render(
@@ -249,10 +237,7 @@ describe('ModuleDetails', () => {
 
     test('excludes current model name from selector', () => {
       const variable = makeModule('mod1', '');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('x')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('x')])]);
       const callbacks = defaultCallbacks();
 
       const { container } = render(
@@ -295,10 +280,7 @@ describe('ModuleDetails', () => {
     // AC1.8: selecting a model reference calls callback
     test('changing model reference calls onModelReferenceChange', () => {
       const variable = makeModule('mod1', '');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('x')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('x')])]);
       const callbacks = defaultCallbacks();
 
       const { container } = render(
@@ -340,10 +322,7 @@ describe('ModuleDetails', () => {
     // AC1.11: "Duplicate model" action
     test('selecting "Duplicate model" calls onDuplicateModel', () => {
       const variable = makeModule('mod1', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('x')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('x')])]);
       const callbacks = defaultCallbacks();
 
       const { container } = render(
@@ -386,10 +365,7 @@ describe('ModuleDetails', () => {
   describe('Open Model button', () => {
     test('renders Open Model button when model reference is set', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('x')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('x')])]);
       const callbacks = defaultCallbacks();
 
       render(
@@ -425,10 +401,7 @@ describe('ModuleDetails', () => {
 
     test('clicking Open Model calls onDrillIntoModule', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('x')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('x')])]);
       const callbacks = defaultCallbacks();
 
       render(
@@ -481,10 +454,7 @@ describe('ModuleDetails', () => {
     // AC2.9: Module with zero input ports shows empty state
     test('shows empty message when no references configured', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('x')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('x')])]);
       const callbacks = defaultCallbacks();
 
       render(
@@ -552,10 +522,7 @@ describe('ModuleDetails', () => {
     // AC2.10: Model with zero public outputs
     test('shows empty message when no public outputs', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('internal_only')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('internal_only')])]);
       const callbacks = defaultCallbacks();
 
       render(
@@ -594,10 +561,7 @@ describe('ModuleDetails', () => {
   describe('units and docs editors', () => {
     test('renders units editor with placeholder', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('x')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('x')])]);
       const callbacks = defaultCallbacks();
 
       const { container } = render(
@@ -616,10 +580,7 @@ describe('ModuleDetails', () => {
 
     test('renders docs editor with placeholder', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('x')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('x')])]);
       const callbacks = defaultCallbacks();
 
       const { container } = render(
@@ -641,10 +602,7 @@ describe('ModuleDetails', () => {
         units: 'rabbits',
         documentation: 'Number of hares in the system',
       });
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('x')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('x')])]);
       const callbacks = defaultCallbacks();
 
       render(
@@ -666,10 +624,7 @@ describe('ModuleDetails', () => {
   describe('delete button', () => {
     test('renders delete button', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('x')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('x')])]);
       const callbacks = defaultCallbacks();
 
       render(
@@ -687,10 +642,7 @@ describe('ModuleDetails', () => {
 
     test('clicking delete calls onDelete with ident', () => {
       const variable = makeModule('hares_mod', 'hares');
-      const project = makeProject([
-        makeModel('main', [variable]),
-        makeModel('hares', [makeAux('x')]),
-      ]);
+      const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('x')])]);
       const callbacks = defaultCallbacks();
 
       render(
@@ -899,9 +851,7 @@ describe('ModuleDetails', () => {
       const project = makeProject([
         makeModel('main', [moduleA]),
         makeModel('model_a', [moduleB, makeAux('local_var')]),
-        makeModel('model_b', [
-          makeAux('deep_input', { canBeModuleInput: true }),
-        ]),
+        makeModel('model_b', [makeAux('deep_input', { canBeModuleInput: true })]),
       ]);
       const callbacks = defaultCallbacks();
 

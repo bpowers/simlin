@@ -312,9 +312,7 @@ describe('ModuleDetails wiring editor', () => {
       fireEvent.click(removeButtons[0]);
 
       expect(callbacks.onReferencesChange).toHaveBeenCalledTimes(1);
-      expect(callbacks.onReferencesChange).toHaveBeenCalledWith('hares_mod', [
-        { src: 'water', dst: 'input_water' },
-      ]);
+      expect(callbacks.onReferencesChange).toHaveBeenCalledWith('hares_mod', [{ src: 'water', dst: 'input_water' }]);
     });
 
     test('clicking remove on second row preserves first row', () => {
@@ -346,9 +344,7 @@ describe('ModuleDetails wiring editor', () => {
       const removeButtons = screen.getAllByLabelText('Remove reference');
       fireEvent.click(removeButtons[1]);
 
-      expect(callbacks.onReferencesChange).toHaveBeenCalledWith('hares_mod', [
-        { src: 'food', dst: 'input_food' },
-      ]);
+      expect(callbacks.onReferencesChange).toHaveBeenCalledWith('hares_mod', [{ src: 'food', dst: 'input_food' }]);
     });
 
     test('removing only reference results in empty array', () => {
@@ -385,12 +381,7 @@ describe('ModuleDetails wiring editor', () => {
         references: [{ src: '', dst: '' }],
       });
       const project = makeProject([
-        makeModel('main', [
-          variable,
-          makeAux('aux_var'),
-          makeStock('stock_var'),
-          makeFlow('flow_var'),
-        ]),
+        makeModel('main', [variable, makeAux('aux_var'), makeStock('stock_var'), makeFlow('flow_var')]),
         makeModel('hares', [makeAux('input_a', { canBeModuleInput: true })]),
       ]);
       const callbacks = defaultCallbacks();

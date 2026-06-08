@@ -2,14 +2,16 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import type { JsonView, JsonViewElement, JsonRect, JsonFlowPoint, JsonLinkPoint, JsonLinkViewElement } from '@simlin/engine';
+import type {
+  JsonView,
+  JsonViewElement,
+  JsonRect,
+  JsonFlowPoint,
+  JsonLinkPoint,
+  JsonLinkViewElement,
+} from '@simlin/engine';
 
-import {
-  ViewElement,
-  StockFlowView,
-  Rect,
-  Point,
-} from '@simlin/core/datamodel';
+import { ViewElement, StockFlowView, Rect, Point } from '@simlin/core/datamodel';
 
 function rectToJson(rect: Rect): JsonRect {
   return {

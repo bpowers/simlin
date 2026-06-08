@@ -14,12 +14,7 @@ import Button from './components/Button';
 import { canonicalize } from '@simlin/core/canonicalize';
 
 import { Project as EngineProject } from '@simlin/engine';
-import type {
-  JsonProjectPatch,
-  JsonModelOperation,
-  JsonSimSpecs,
-  JsonArrayedEquation,
-} from '@simlin/engine';
+import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs, JsonArrayedEquation } from '@simlin/engine';
 import { stockFlowViewToJson } from './view-conversion';
 import {
   Project,
@@ -631,8 +626,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       const remove =
         selection.has(element.uid) ||
         (element.type === 'cloud' && selection.has(element.flowUid)) ||
-        (element.type === 'link' &&
-          (selection.has(element.toUid) || selection.has(element.fromUid)));
+        (element.type === 'link' && (selection.has(element.toUid) || selection.has(element.fromUid)));
       return !remove;
     });
 
@@ -1178,7 +1172,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         <div>
           {this.state.modelErrors.map((err) => {
             const id = this.errorKey(err);
-            return <Toast variant="warning" id={id} onClose={this.handleCloseSnackbar} message={err.message} key={id} />;
+            return (
+              <Toast variant="warning" id={id} onClose={this.handleCloseSnackbar} message={err.message} key={id} />
+            );
           })}
         </div>
       </Snackbar>
@@ -1674,7 +1670,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // Look up existing module to preserve metadata through the model reference change
     const model = this.getModel();
     const existingModule = model?.variables.get(moduleIdent);
-    const modulePayload: { name: string; modelName: string; references?: { src: string; dst: string }[]; units?: string; documentation?: string } = {
+    const modulePayload: {
+      name: string;
+      modelName: string;
+      references?: { src: string; dst: string }[];
+      units?: string;
+      documentation?: string;
+    } = {
       name: moduleIdent,
       modelName: newModelName,
     };
@@ -1745,7 +1747,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // Preserve existing module metadata through the model reference change
     const currentModel = this.getModel();
     const existingModule = currentModel?.variables.get(moduleIdent);
-    const dupModulePayload: { name: string; modelName: string; references?: { src: string; dst: string }[]; units?: string; documentation?: string } = {
+    const dupModulePayload: {
+      name: string;
+      modelName: string;
+      references?: { src: string; dst: string }[];
+      units?: string;
+      documentation?: string;
+    } = {
       name: moduleIdent,
       modelName: newModelName,
     };
@@ -1765,10 +1773,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         { name: newModelName, ops: variableOps },
         {
           name: this.modelName(),
-          ops: [{
-            type: 'upsertModule',
-            payload: { module: dupModulePayload },
-          }],
+          ops: [
+            {
+              type: 'upsertModule',
+              payload: { module: dupModulePayload },
+            },
+          ],
         },
       ],
     };
@@ -1813,11 +1823,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     // AC4.4: stdlib models show read-only message
     if (isStdlibModel(modelName)) {
-      return (
-        <div className={styles.sharedModelBanner}>
-          Standard library model (read-only)
-        </div>
-      );
+      return <div className={styles.sharedModelBanner}>Standard library model (read-only)</div>;
     }
 
     // AC4.1, AC4.2: count instances

@@ -436,7 +436,11 @@ export function stockToJson(stock: Stock): JsonStock {
 }
 
 export function flowFromJson(json: JsonFlow): Flow {
-  const { equation, graphicalFunction } = auxEquationFromJson(json.equation, json.arrayedEquation, json.graphicalFunction);
+  const { equation, graphicalFunction } = auxEquationFromJson(
+    json.equation,
+    json.arrayedEquation,
+    json.graphicalFunction,
+  );
   return {
     type: 'flow',
     ident: canonicalize(json.name),
@@ -501,7 +505,11 @@ export function flowToJson(flow: Flow): JsonFlow {
 }
 
 export function auxFromJson(json: JsonAuxiliary): Aux {
-  const { equation, graphicalFunction } = auxEquationFromJson(json.equation, json.arrayedEquation, json.graphicalFunction);
+  const { equation, graphicalFunction } = auxEquationFromJson(
+    json.equation,
+    json.arrayedEquation,
+    json.graphicalFunction,
+  );
   return {
     type: 'aux',
     ident: canonicalize(json.name),
@@ -784,10 +792,7 @@ export function stockViewElementFromJson(
   };
 }
 
-export function flowViewElementFromJson(
-  json: JsonFlowViewElement,
-  flowVar?: Variable | undefined,
-): FlowViewElement {
+export function flowViewElementFromJson(json: JsonFlowViewElement, flowVar?: Variable | undefined): FlowViewElement {
   const ident = canonicalize(json.name);
   return {
     type: 'flow',
@@ -1438,7 +1443,9 @@ export function projectFromJson(json: JsonProject): Project {
   return {
     name: json.name,
     simSpecs: simSpecsFromJson(json.simSpecs),
-    models: new Map<string, Model>(json.models.map((model: JsonModel) => [model.name, modelFromJson(model)] as [string, Model])),
+    models: new Map<string, Model>(
+      json.models.map((model: JsonModel) => [model.name, modelFromJson(model)] as [string, Model]),
+    ),
     dimensions: new Map<string, Dimension>(
       (json.dimensions ?? []).map((dim: JsonDimension) => [dim.name, dimensionFromJson(dim)] as [string, Dimension]),
     ),

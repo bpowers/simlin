@@ -87,16 +87,9 @@ export function simlin_free_loops(loops: SimlinLoopsPtr): void {
  * @param includeInternal Whether to keep macro/module-internal synthetic nodes
  * @returns Links pointer
  */
-export function simlin_analyze_get_links(
-  sim: SimlinSimPtr,
-  includeInternal = true,
-): SimlinLinksPtr {
+export function simlin_analyze_get_links(sim: SimlinSimPtr, includeInternal = true): SimlinLinksPtr {
   const exports = getExports();
-  const fn = exports.simlin_analyze_get_links as (
-    sim: number,
-    includeInternal: number,
-    outErr: number,
-  ) => number;
+  const fn = exports.simlin_analyze_get_links as (sim: number, includeInternal: number, outErr: number) => number;
 
   const outErrPtr = allocOutPtr();
 
@@ -160,15 +153,7 @@ export function simlin_analyze_links_from_wasm_results(
   const outErrPtr = allocOutPtr();
 
   try {
-    const result = fn(
-      model,
-      slabPtr,
-      slab.length,
-      layoutPtr,
-      layoutBytes.length,
-      includeInternal ? 1 : 0,
-      outErrPtr,
-    );
+    const result = fn(model, slabPtr, slab.length, layoutPtr, layoutBytes.length, includeInternal ? 1 : 0, outErrPtr);
     const errPtr = readOutPtr(outErrPtr);
 
     if (errPtr !== 0) {

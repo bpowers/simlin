@@ -74,8 +74,7 @@ def validate_population_curve(values: list[float]) -> None:
 
     if not 950 <= last <= 1025:
         raise RuntimeError(
-            "Population should approach the carrying capacity (~1000), "
-            f"but ended at {last:.2f}"
+            f"Population should approach the carrying capacity (~1000), but ended at {last:.2f}"
         )
 
 

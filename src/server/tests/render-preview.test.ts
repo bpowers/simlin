@@ -101,8 +101,7 @@ describe('parseSvgDimensions', () => {
   });
 
   it('handles viewBox with style attribute present', () => {
-    const svg =
-      '<svg style="width: 500; height: 300;" viewBox="0 0 500 300" xmlns="http://www.w3.org/2000/svg"></svg>';
+    const svg = '<svg style="width: 500; height: 300;" viewBox="0 0 500 300" xmlns="http://www.w3.org/2000/svg"></svg>';
     expect(parseSvgDimensions(svg)).toEqual({ width: 500, height: 300 });
   });
 });

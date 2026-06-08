@@ -66,15 +66,17 @@ class ModelAnalyzer:
             # Out-degree: number of variables that depend on this one
             out_degree = sum(1 for deps in graph.values() if var in deps)
 
-            metrics.append({
-                'variable': var,
-                'in_degree': in_degree,
-                'out_degree': out_degree,
-                'total_degree': in_degree + out_degree
-            })
+            metrics.append(
+                {
+                    "variable": var,
+                    "in_degree": in_degree,
+                    "out_degree": out_degree,
+                    "total_degree": in_degree + out_degree,
+                }
+            )
 
         df = pd.DataFrame(metrics)
-        df = df.sort_values('total_degree', ascending=False)
+        df = df.sort_values("total_degree", ascending=False)
         return df
 
 
@@ -86,10 +88,7 @@ class SimulationExperiment:
         self.results: list[pd.DataFrame] = []
 
     def run_sensitivity_analysis(
-        self,
-        param_name: str,
-        param_values: list[float],
-        output_vars: list[str]
+        self, param_name: str, param_values: list[float], output_vars: list[str]
     ) -> pd.DataFrame:
         """Run sensitivity analysis on a parameter."""
         sensitivity_results = []
@@ -109,27 +108,24 @@ class SimulationExperiment:
             sim.run_to_end()
 
             # Collect results
-            result = {'param_value': value}
+            result = {"param_value": value}
             for var in output_vars:
                 try:
                     series = sim.get_series(var)
-                    result[f'{var}_mean'] = np.mean(series)
-                    result[f'{var}_max'] = np.max(series)
-                    result[f'{var}_final'] = series[-1] if len(series) > 0 else np.nan
+                    result[f"{var}_mean"] = np.mean(series)
+                    result[f"{var}_max"] = np.max(series)
+                    result[f"{var}_final"] = series[-1] if len(series) > 0 else np.nan
                 except simlin.SimlinRuntimeError:
-                    result[f'{var}_mean'] = np.nan
-                    result[f'{var}_max'] = np.nan
-                    result[f'{var}_final'] = np.nan
+                    result[f"{var}_mean"] = np.nan
+                    result[f"{var}_max"] = np.nan
+                    result[f"{var}_final"] = np.nan
 
             sensitivity_results.append(result)
 
         return pd.DataFrame(sensitivity_results)
 
     def run_monte_carlo(
-        self,
-        param_distributions: dict[str, tuple],
-        output_vars: list[str],
-        n_runs: int = 100
+        self, param_distributions: dict[str, tuple], output_vars: list[str], n_runs: int = 100
     ) -> pd.DataFrame:
         """Run Monte Carlo simulation with parameter distributions."""
         mc_results = []
@@ -140,9 +136,9 @@ class SimulationExperiment:
             # Sample and set parameters
             param_values = {}
             for param, (dist_type, *dist_params) in param_distributions.items():
-                if dist_type == 'uniform':
+                if dist_type == "uniform":
                     value = np.random.uniform(dist_params[0], dist_params[1])
-                elif dist_type == 'normal':
+                elif dist_type == "normal":
                     value = np.random.normal(dist_params[0], dist_params[1])
                 else:
                     value = dist_params[0]  # Default/constant value
@@ -155,19 +151,19 @@ class SimulationExperiment:
             sim.run_to_end()
 
             # Collect results
-            result = {'run': run}
+            result = {"run": run}
             result.update(param_values)
 
             for var in output_vars:
                 try:
                     series = sim.get_series(var)
-                    result[f'{var}_mean'] = np.mean(series)
-                    result[f'{var}_std'] = np.std(series)
-                    result[f'{var}_final'] = series[-1] if len(series) > 0 else np.nan
+                    result[f"{var}_mean"] = np.mean(series)
+                    result[f"{var}_std"] = np.std(series)
+                    result[f"{var}_final"] = series[-1] if len(series) > 0 else np.nan
                 except simlin.SimlinRuntimeError:
-                    result[f'{var}_mean'] = np.nan
-                    result[f'{var}_std'] = np.nan
-                    result[f'{var}_final'] = np.nan
+                    result[f"{var}_mean"] = np.nan
+                    result[f"{var}_std"] = np.nan
+                    result[f"{var}_final"] = np.nan
 
             mc_results.append(result)
 
@@ -206,8 +202,8 @@ class LoopDominanceAnalyzer:
         df = pd.DataFrame(loop_data)
 
         # Add dominance analysis
-        df['dominant_loop'] = df.idxmax(axis=1)
-        df['max_score'] = df.max(axis=1)
+        df["dominant_loop"] = df.idxmax(axis=1)
+        df["max_score"] = df.max(axis=1)
 
         return df
 
@@ -253,9 +249,7 @@ def demonstrate_advanced_features():
         print(f"Testing sensitivity of {output} to {param}")
         try:
             sensitivity_df = experiment.run_sensitivity_analysis(
-                param_name=param,
-                param_values=[0.5, 1.0, 1.5, 2.0],
-                output_vars=[output]
+                param_name=param, param_values=[0.5, 1.0, 1.5, 2.0], output_vars=[output]
             )
             if not sensitivity_df.empty:
                 print(sensitivity_df)
@@ -274,7 +268,7 @@ def demonstrate_advanced_features():
             print(dominance_df.head())
 
             # Find transitions
-            dominant_changes = dominance_df['dominant_loop'].value_counts()
+            dominant_changes = dominance_df["dominant_loop"].value_counts()
             print("\nLoop dominance frequency:")
             print(dominant_changes)
     else:
@@ -291,11 +285,9 @@ def demonstrate_advanced_features():
         sim = model.simulate()
         sim.run_to_end()
 
-        results.append({
-            'model': model_name,
-            'variables': len(model.variables),
-            'steps': sim.get_step_count()
-        })
+        results.append(
+            {"model": model_name, "variables": len(model.variables), "steps": sim.get_step_count()}
+        )
 
     batch_df = pd.DataFrame(results)
     print(batch_df)

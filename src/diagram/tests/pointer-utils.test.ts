@@ -35,7 +35,7 @@ describe('isDragMovement', () => {
 
   it('uses Euclidean distance, not per-axis', () => {
     // each axis is below threshold but the combined move is not
-    const half = (ClickDragThresholdPx / Math.SQRT2) + 0.1;
+    const half = ClickDragThresholdPx / Math.SQRT2 + 0.1;
     expect(isDragMovement({ x: half, y: half }, 1)).toBe(true);
   });
 });

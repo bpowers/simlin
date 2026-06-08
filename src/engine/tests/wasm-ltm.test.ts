@@ -234,15 +234,7 @@ describe('LTM on the wasm engine (public API)', () => {
 // the dynamic-range subscript, so the same model still simulates on
 // engine:'vm' -- confirming this is a wasm-only limitation.
 function loadDynamicRangeUnsupportedXmile(): Uint8Array {
-  const xmilePath = path.join(
-    __dirname,
-    '..',
-    '..',
-    '..',
-    'test',
-    'ltm_dynamic_range_unsupported',
-    'model.stmx',
-  );
+  const xmilePath = path.join(__dirname, '..', '..', '..', 'test', 'ltm_dynamic_range_unsupported', 'model.stmx');
   if (!fs.existsSync(xmilePath)) {
     throw new Error('Required test XMILE model not found: ' + xmilePath);
   }

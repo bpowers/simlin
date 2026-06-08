@@ -25,23 +25,17 @@ describe('isDuplicateReference', () => {
   });
 
   it('returns true when exact src/dst pair exists', () => {
-    const refs: ReadonlyArray<ModuleReference> = [
-      { src: 'food', dst: 'input_food' },
-    ];
+    const refs: ReadonlyArray<ModuleReference> = [{ src: 'food', dst: 'input_food' }];
     expect(isDuplicateReference(refs, 'food', 'input_food')).toBe(true);
   });
 
   it('returns false when src matches but dst differs', () => {
-    const refs: ReadonlyArray<ModuleReference> = [
-      { src: 'food', dst: 'input_food' },
-    ];
+    const refs: ReadonlyArray<ModuleReference> = [{ src: 'food', dst: 'input_food' }];
     expect(isDuplicateReference(refs, 'food', 'input_water')).toBe(false);
   });
 
   it('returns false when dst matches but src differs', () => {
-    const refs: ReadonlyArray<ModuleReference> = [
-      { src: 'food', dst: 'input_food' },
-    ];
+    const refs: ReadonlyArray<ModuleReference> = [{ src: 'food', dst: 'input_food' }];
     expect(isDuplicateReference(refs, 'water', 'input_food')).toBe(false);
   });
 });
@@ -54,9 +48,7 @@ describe('addReference', () => {
   });
 
   it('adding to existing array appends without modifying original', () => {
-    const original: ReadonlyArray<ModuleReference> = [
-      { src: 'food', dst: 'input_food' },
-    ];
+    const original: ReadonlyArray<ModuleReference> = [{ src: 'food', dst: 'input_food' }];
     const result = addReference(original, 'water', 'input_water');
     expect(result).toHaveLength(2);
     expect(result[0]).toEqual({ src: 'food', dst: 'input_food' });
@@ -64,34 +56,26 @@ describe('addReference', () => {
   });
 
   it('original array is not mutated', () => {
-    const original: Array<ModuleReference> = [
-      { src: 'food', dst: 'input_food' },
-    ];
+    const original: Array<ModuleReference> = [{ src: 'food', dst: 'input_food' }];
     addReference(original, 'water', 'input_water');
     expect(original).toHaveLength(1);
     expect(original[0]).toEqual({ src: 'food', dst: 'input_food' });
   });
 
   it('adding duplicate (same non-empty src and dst) returns original array unchanged', () => {
-    const original: ReadonlyArray<ModuleReference> = [
-      { src: 'food', dst: 'input_food' },
-    ];
+    const original: ReadonlyArray<ModuleReference> = [{ src: 'food', dst: 'input_food' }];
     const result = addReference(original, 'food', 'input_food');
     expect(result).toBe(original);
   });
 
   it('adding with empty src allows addition (for new row placeholder)', () => {
-    const original: ReadonlyArray<ModuleReference> = [
-      { src: '', dst: 'input_food' },
-    ];
+    const original: ReadonlyArray<ModuleReference> = [{ src: '', dst: 'input_food' }];
     const result = addReference(original, '', 'input_food');
     expect(result).toHaveLength(2);
   });
 
   it('adding with empty dst allows addition (for new row placeholder)', () => {
-    const original: ReadonlyArray<ModuleReference> = [
-      { src: 'food', dst: '' },
-    ];
+    const original: ReadonlyArray<ModuleReference> = [{ src: 'food', dst: '' }];
     const result = addReference(original, 'food', '');
     expect(result).toHaveLength(2);
   });
@@ -105,9 +89,7 @@ describe('addReference', () => {
 
 describe('removeReference', () => {
   it('removing from single-element array returns empty array', () => {
-    const refs: ReadonlyArray<ModuleReference> = [
-      { src: 'food', dst: 'input_food' },
-    ];
+    const refs: ReadonlyArray<ModuleReference> = [{ src: 'food', dst: 'input_food' }];
     const result = removeReference(refs, 0);
     expect(result).toHaveLength(0);
   });
@@ -165,9 +147,7 @@ describe('updateReferenceSrc', () => {
   });
 
   it('original array is not mutated', () => {
-    const original: Array<ModuleReference> = [
-      { src: 'food', dst: 'input_food' },
-    ];
+    const original: Array<ModuleReference> = [{ src: 'food', dst: 'input_food' }];
     updateReferenceSrc(original, 0, 'grain');
     expect(original[0]).toEqual({ src: 'food', dst: 'input_food' });
   });
@@ -193,9 +173,7 @@ describe('updateReferenceDst', () => {
   });
 
   it('original array is not mutated', () => {
-    const original: Array<ModuleReference> = [
-      { src: 'food', dst: 'input_food' },
-    ];
+    const original: Array<ModuleReference> = [{ src: 'food', dst: 'input_food' }];
     updateReferenceDst(original, 0, 'input_grain');
     expect(original[0]).toEqual({ src: 'food', dst: 'input_food' });
   });

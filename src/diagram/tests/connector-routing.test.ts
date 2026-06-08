@@ -441,7 +441,7 @@ describe('Connector routing', () => {
   });
 
   describe('rayRectIntersection', () => {
-    const hw = StockWidth / 2;  // 22.5
+    const hw = StockWidth / 2; // 22.5
     const hh = StockHeight / 2; // 17.5
 
     function assertOnRectBoundary(p: Point, cx: number, cy: number, hw: number, hh: number) {
@@ -628,9 +628,7 @@ describe('Connector routing', () => {
       // arcPoint directly on the line between from and to
       const arcPoint = { x: 200, y: 100 };
 
-      expect(() =>
-        takeoffθ({ element: link, from, to, arcPoint }),
-      ).not.toThrow();
+      expect(() => takeoffθ({ element: link, from, to, arcPoint })).not.toThrow();
     });
 
     it('should return straight-line angle for collinear points', () => {

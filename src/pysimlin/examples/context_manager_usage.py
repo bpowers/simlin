@@ -91,7 +91,7 @@ def mixed_usage_patterns():
     with model2.project, model2 as m2, m2.simulate() as sim2:
         sim2.run_to_end()
         print(f"Context manager sim completed with {sim2.get_step_count()} steps")
-            # Explicit cleanup happens here
+        # Explicit cleanup happens here
 
     # Both patterns can be mixed as needed
     print("Both usage patterns work seamlessly together!")
@@ -149,9 +149,11 @@ def advanced_analysis_with_context_managers():
                     print(f"Time range: {results.index.min():.2f} to {results.index.max():.2f}")
                     if len(results.columns) > 0:
                         first_var = results.columns[0]
-                        print(f"Sample variable '{first_var}': "
-                              f"min={results[first_var].min():.3f}, "
-                              f"max={results[first_var].max():.3f}")
+                        print(
+                            f"Sample variable '{first_var}': "
+                            f"min={results[first_var].min():.3f}, "
+                            f"max={results[first_var].max():.3f}"
+                        )
 
     print("Advanced analysis complete - all resources cleaned up!")
 
@@ -180,8 +182,8 @@ def context_manager_benefits():
         with model as m, m.simulate() as sim:
             sim.run_to_end()
             steps = sim.get_step_count()
-            print(f"  Simulation {i+1}: {steps} steps completed")
-                # Resources automatically cleaned up after each iteration
+            print(f"  Simulation {i + 1}: {steps} steps completed")
+            # Resources automatically cleaned up after each iteration
 
     print("All simulations completed with automatic cleanup!")
     print("\nKey advantages:")

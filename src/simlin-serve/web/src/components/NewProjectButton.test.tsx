@@ -91,9 +91,7 @@ describe('NewProjectButton', () => {
   });
 
   test('respects the format dropdown selection', async () => {
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValue(jsonResponse({ path: 'foo.sd.json', version: 0 }));
+    const fetchMock = jest.fn().mockResolvedValue(jsonResponse({ path: 'foo.sd.json', version: 0 }));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     render(<NewProjectButton onCreated={() => {}} />);
@@ -111,9 +109,7 @@ describe('NewProjectButton', () => {
   });
 
   test('renders a server error message when fetch returns 409', async () => {
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValue(jsonResponse({ error: 'already_exists' }, 409));
+    const fetchMock = jest.fn().mockResolvedValue(jsonResponse({ error: 'already_exists' }, 409));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     const calls: Array<string> = [];

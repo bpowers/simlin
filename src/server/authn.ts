@@ -120,8 +120,7 @@ export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void =>
   // passport strategy's error() path produced.
   app.post('/session', (req: Request, res: Response, next: NextFunction): void => {
     const body: unknown = req.body;
-    const idToken =
-      typeof body === 'object' && body !== null ? (body as Record<string, unknown>).idToken : undefined;
+    const idToken = typeof body === 'object' && body !== null ? (body as Record<string, unknown>).idToken : undefined;
     if (typeof idToken !== 'string' || idToken === '') {
       logger.error('no idToken in body');
       res.sendStatus(500);

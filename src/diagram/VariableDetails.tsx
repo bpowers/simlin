@@ -13,14 +13,7 @@ import { Tabs, Tab } from './components/Tabs';
 import katex from 'katex';
 import { Dark2 } from './colors';
 
-import {
-  ViewElement,
-  Variable,
-  GraphicalFunction,
-  EquationError,
-  UnitError,
-  variableGf,
-} from '@simlin/core/datamodel';
+import { ViewElement, Variable, GraphicalFunction, EquationError, UnitError, variableGf } from '@simlin/core/datamodel';
 
 import { defined, Series } from '@simlin/core/common';
 import { at } from '@simlin/core/collections';
@@ -122,9 +115,7 @@ function highlightErrors(
     }
   }
 
-  return highlightSpansForLines(s, rawStart, range).map(
-    (children): CustomElement => ({ type: 'equation', children }),
-  );
+  return highlightSpansForLines(s, rawStart, range).map((children): CustomElement => ({ type: 'equation', children }));
 }
 
 // KaTeX needs `trust` enabled to honor `\htmlData`. Scope it to that one

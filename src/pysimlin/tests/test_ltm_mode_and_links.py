@@ -190,9 +190,7 @@ def _predator_prey_model() -> simlin.Model:
     the relative link score (per-target normalization) is exercised with more
     than one scored input per target.
     """
-    project = simlin.Project.new(
-        name="predator_prey", sim_start=0.0, sim_stop=5.0, dt=1.0
-    )
+    project = simlin.Project.new(name="predator_prey", sim_start=0.0, sim_stop=5.0, dt=1.0)
     model = project.main_model
     with model.edit() as (_current, patch):
         from simlin.json_types import Flow, Stock
@@ -299,9 +297,7 @@ class TestRelativeLinkScore:
         # Relative scores are all bounded, so they are comparable across
         # targets.  Ranking by relative is therefore meaningful; ranking by raw
         # is not.  Confirm the two orderings differ (the degeneracy is real).
-        raw_order = sorted(
-            links, key=lambda lk: abs(lk.average_score() or 0.0), reverse=True
-        )
+        raw_order = sorted(links, key=lambda lk: abs(lk.average_score() or 0.0), reverse=True)
         rel_order = sorted(
             links,
             key=lambda lk: abs(lk.average_relative_score() or 0.0),
@@ -309,9 +305,7 @@ class TestRelativeLinkScore:
         )
         raw_keys = [(lk.from_var, lk.to_var) for lk in raw_order]
         rel_keys = [(lk.from_var, lk.to_var) for lk in rel_order]
-        assert raw_keys != rel_keys, (
-            "raw and relative rankings should differ on this model"
-        )
+        assert raw_keys != rel_keys, "raw and relative rankings should differ on this model"
 
 
 class TestRunLtmDegradation:

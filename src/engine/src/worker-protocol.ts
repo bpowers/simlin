@@ -50,7 +50,13 @@ export type WorkerRequest =
   | { type: 'projectGetModel'; requestId: number; handle: WorkerProjectHandle; name: string | null }
   | { type: 'projectIsSimulatable'; requestId: number; handle: WorkerProjectHandle; modelName: string | null }
   | { type: 'projectSerializeProtobuf'; requestId: number; handle: WorkerProjectHandle }
-  | { type: 'projectSerializeJson'; requestId: number; handle: WorkerProjectHandle; format: number; includeStdlib?: boolean }
+  | {
+      type: 'projectSerializeJson';
+      requestId: number;
+      handle: WorkerProjectHandle;
+      format: number;
+      includeStdlib?: boolean;
+    }
   | { type: 'projectSerializeXmile'; requestId: number; handle: WorkerProjectHandle }
   | { type: 'projectRenderSvg'; requestId: number; handle: WorkerProjectHandle; modelName: string }
   | {
