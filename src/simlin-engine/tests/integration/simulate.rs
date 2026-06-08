@@ -3689,13 +3689,24 @@ static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
 fn incremental_compilation_covers_all_models() {
     let mut failures: Vec<(String, String)> = Vec::new();
 
+    // ALL_INCREMENTALLY_COMPILABLE_MODELS entries already carry the
+    // crate-relative `../../` prefix; the corpus TEST_MODELS list stores
+    // repo-relative paths (the generated corpus tests add the prefix via
+    // `concat!`), so it must be added here too. A file that fails to open
+    // is a hard failure: silently `continue`-ing here is how every
+    // TEST_MODELS entry was skipped for months without anyone noticing
+    // (GH #623).
     for model_path in ALL_INCREMENTALLY_COMPILABLE_MODELS
         .iter()
-        .chain(TEST_MODELS.iter())
+        .map(|p| p.to_string())
+        .chain(TEST_MODELS.iter().map(|p| format!("../../{p}")))
     {
-        let f = match File::open(model_path) {
+        let f = match File::open(&model_path) {
             Ok(f) => f,
-            Err(_) => continue,
+            Err(e) => {
+                failures.push((model_path.clone(), format!("failed to open: {e}")));
+                continue;
+            }
         };
         let mut f = BufReader::new(f);
 
