@@ -87,7 +87,9 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 - **`src/db/diagnostic_tests.rs`** - Verification tests for diagnostic accumulation paths.
 - **`src/db/differential_tests.rs`** - Differential tests verifying `classify_dependencies()` produces identical results to the old per-category walker functions, plus fragment-phase agreement tests ensuring dt/init ASTs yield consistent dependency classifications.
 - **`src/db/dimension_invalidation_tests.rs`** - Tests for dimension-granularity salsa invalidation: verifying that dimension changes only re-parse variables that reference those dimensions.
-- **`src/db/tests.rs`** - Core salsa pipeline tests.
+- **`src/db/tests.rs`** - Core salsa pipeline tests (sync, parsing, dependency extraction, accumulator parity, incremental sync). Two sections were split into siblings to stay under the 6000-line per-file lint cap (GH #645):
+- **`src/db/incremental_compile_tests.rs`** - Incremental compilation and acceptance-criteria tests (fragment reuse on add/remove, dimension-change selective recompile, cross-model isolation, sim-specs override, implicit-lookup dep tables, stdlib restore).
+- **`src/db/vm_verification_tests.rs`** - VM-level verification of PREVIOUS/INIT opcodes and LTM synthetic variables compiled through the incremental pipeline (opcode behavior, LTM zero-overhead/bytecode-identity, link polarities).
 
 ## Format import/export
 
