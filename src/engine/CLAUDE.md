@@ -4,7 +4,7 @@ TypeScript API for interacting with the WASM-compiled simulation engine. Promise
 
 ## WASM artifacts
 
-`build.sh` produces two wasm binaries in `core/` (each with a `.raw` sibling, build.sh's wasm-opt change-detection cache):
+`build.sh` produces two wasm binaries in the gitignored `core` output directory (each with a `.raw` sibling, build.sh's wasm-opt change-detection cache):
 
 - `libsimlin.wasm` -- full build (libsimlin default features, including `png_render`). Loaded by Node via `wasm.node.ts`; `src/server`'s model-preview pipeline calls `Project.renderPng`, which needs the `simlin_project_render_png` export.
 - `libsimlin-browser.wasm` -- slim `--no-default-features` build, imported by `wasm.browser.ts` and bundled into SPAs. Omits the PNG rasterization stack (resvg + text shaping + embedded font, ~28% of the full binary); calling `Project.renderPng` against it throws a descriptive error from `src/internal/import-export.ts`. SVG rendering (pure string generation) remains available.
