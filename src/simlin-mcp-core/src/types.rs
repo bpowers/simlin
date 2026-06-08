@@ -94,6 +94,15 @@ fn round_sig_figs_3(v: f64) -> f64 {
     s.parse::<f64>().unwrap_or(v)
 }
 
+/// Serializes a single float rounded to 3 significant figures, matching
+/// `serialize_importance`'s per-element rounding for scalar fields.
+fn serialize_sig_figs_3<S: serde::Serializer>(
+    value: &f64,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_f64(round_sig_figs_3(*value))
+}
+
 /// Serializes an importance array with values rounded to 3 significant figures,
 /// reducing token count in MCP tool output.
 fn serialize_importance<S: serde::Serializer>(
@@ -122,6 +131,22 @@ pub struct LoopDominanceSummary {
     /// loops/partitions, so a larger `|importance|` means a more dominant loop.
     #[serde(serialize_with = "serialize_importance")]
     pub importance: Vec<f64>,
+    /// Polarity-confidence ratio in `[0.0, 1.0]` (GH #495): `1.0` for a clean
+    /// reinforcing/balancing loop, below 1.0 for a mixed-sign
+    /// `mostlyReinforcing`/`mostlyBalancing` loop, `0.0` for `undetermined`.
+    /// Rounded to 3 significant figures like `importance` to keep MCP output
+    /// compact; additive so existing clients see the new field but the prior
+    /// shape is unchanged.
+    #[serde(serialize_with = "serialize_sig_figs_3")]
+    pub polarity_confidence: f64,
+    /// RESULT-SCOPED index into the analyze output's `partitions` list naming
+    /// this loop's cycle partition, or absent (`None`) for a loop with no
+    /// parent-level partition.  Indices are dense and in first-appearance order
+    /// over `loopDominance`; they are NOT stable across edits -- key on a
+    /// `PartitionOutput.stocks` set for a durable identity.  Additive and
+    /// elided when absent so the prior wire shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition: Option<usize>,
 }
 
 impl From<simlin_engine::analysis::LoopSummary> for LoopDominanceSummary {
@@ -132,6 +157,37 @@ impl From<simlin_engine::analysis::LoopSummary> for LoopDominanceSummary {
             polarity: ls.polarity,
             variables: ls.variables,
             importance: ls.importance,
+            polarity_confidence: ls.polarity_confidence,
+            partition: ls.partition,
+        }
+    }
+}
+
+/// One cycle partition referenced by an analyze result's loops: a group of
+/// stocks connected by feedback, within which relative loop scores are
+/// comparable.  Mirrors the engine `DiscoveredPartition` / pysimlin
+/// `Partition`; lets a client group loops partition-by-partition.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionOutput {
+    /// The partition's stock names (element-level for arrayed models), sorted
+    /// lexicographically.  This SET is the durable per-result identity.  It
+    /// matches the exhaustive (`Model.loops`) surface's stock set only for
+    /// SCALAR models: this analyze output partitions stocks at ELEMENT
+    /// granularity (`population[nyc]`) while the exhaustive surface partitions
+    /// at VARIABLE granularity (`population`), so an arrayed model's two
+    /// surfaces differ in granularity.
+    pub stocks: Vec<String>,
+    /// Number of loops in the returned `loopDominance` list that belong to
+    /// this partition.
+    pub loop_count: usize,
+}
+
+impl From<&simlin_engine::ltm_finding::DiscoveredPartition> for PartitionOutput {
+    fn from(p: &simlin_engine::ltm_finding::DiscoveredPartition) -> Self {
+        Self {
+            stocks: p.stocks.clone(),
+            loop_count: p.loop_count,
         }
     }
 }
@@ -277,6 +333,8 @@ mod tests {
             polarity: "positive".into(),
             variables: vec![],
             importance: vec![2.449, 0.0, 0.000004781, 25.189],
+            polarity_confidence: 1.0,
+            partition: None,
         };
         let json = serde_json::to_value(&summary).unwrap();
         let arr = json["importance"].as_array().unwrap();
@@ -294,12 +352,32 @@ mod tests {
             polarity: "negative".into(),
             variables: vec![],
             importance: vec![1.0, 100.0, 0.5],
+            polarity_confidence: 1.0,
+            partition: None,
         };
         let json = serde_json::to_value(&summary).unwrap();
         let arr = json["importance"].as_array().unwrap();
         assert_eq!(arr[0].as_f64().unwrap(), 1.0);
         assert_eq!(arr[1].as_f64().unwrap(), 100.0);
         assert_eq!(arr[2].as_f64().unwrap(), 0.5);
+    }
+
+    #[test]
+    fn polarity_confidence_serializes_camel_case_rounded() {
+        // The mixed-sign Rux/Bux confidence (GH #495) rides on the wire as a
+        // camelCase, 3-sig-fig field alongside importance.
+        let summary = LoopDominanceSummary {
+            loop_id: "L3".into(),
+            name: None,
+            polarity: "mostly_reinforcing".into(),
+            variables: vec![],
+            importance: vec![0.5],
+            polarity_confidence: 0.993871,
+            partition: None,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["polarityConfidence"].as_f64().unwrap(), 0.994);
+        assert_eq!(json["polarity"].as_str().unwrap(), "mostly_reinforcing");
     }
 
     #[test]

@@ -24,4 +24,6 @@ pub mod types;
 pub use access::{OpenedProject, ProjectAccess};
 pub use errors::AccessError;
 pub use server::{ResourceContent, SimlinMcpServer};
-pub use types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, SourceFormat};
+pub use types::{
+    DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput, SourceFormat,
+};

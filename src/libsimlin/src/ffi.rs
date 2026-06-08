@@ -38,7 +38,15 @@ pub struct SimlinError {
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
 
-/// Loop polarity for C API
+/// Loop polarity for C API.
+///
+/// `MostlyReinforcing`/`MostlyBalancing` ("Rux"/"Bux" in the LTM literature)
+/// are the mixed-sign runtime polarities the engine determines when a loop has
+/// expressed both signs over a simulation but one dominates with high
+/// confidence; they are reported here verbatim rather than coalesced down to
+/// `Reinforcing`/`Balancing` (GH #495).  The companion
+/// `SimlinLoop.polarity_confidence` / `SimlinDiscoveredLoop.polarity_confidence`
+/// carries the `[0.0, 1.0]` confidence ratio behind the classification.
 #[repr(C)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -46,6 +54,10 @@ pub enum SimlinLoopPolarity {
     Reinforcing = 0,
     Balancing = 1,
     Undetermined = 2,
+    /// "Rux" -- mixed-sign runtime scores, predominantly reinforcing.
+    MostlyReinforcing = 3,
+    /// "Bux" -- mixed-sign runtime scores, predominantly balancing.
+    MostlyBalancing = 4,
 }
 
 /// Link polarity for C API
@@ -108,6 +120,34 @@ pub struct SimlinLoop {
     /// `SimlinLink` gained `relative_score`); `simlin_sizeof_loop` and the
     /// `@simlin/engine` `LOOP_SIZE`/`readLoops` offsets track it.
     pub name: *mut c_char,
+    /// Polarity-confidence ratio in `[0.0, 1.0]` behind `polarity` (GH #495):
+    /// `1.0` for a clean `Reinforcing`/`Balancing` loop, `0.0` for
+    /// `Undetermined`.  On the STRUCTURAL `simlin_analyze_get_loops` surface
+    /// this is `1.0`/`0.0` by design (a loop's links are either all signed or
+    /// at least one is unknown); the mixed-sign `MostlyReinforcing`/
+    /// `MostlyBalancing` variants with intermediate confidence appear on the
+    /// discovery surface (`SimlinDiscoveredLoop`).  Adding this `f64` grew the
+    /// struct additively (8-byte alignment pushed it past the old 20 bytes);
+    /// `simlin_sizeof_loop` and the `@simlin/engine` `LOOP_SIZE`/`readLoops`
+    /// offsets track the new size.
+    pub polarity_confidence: f64,
+    /// RESULT-SCOPED index into `SimlinLoops.partitions` naming the loop's
+    /// cycle partition, or -1 for a loop whose stocks resolve to no
+    /// parent-level partition (a pure module-internal loop).  A single index
+    /// suffices because a feedback loop's stocks form one strongly-connected
+    /// set (mirroring `SimlinDiscoveredLoop.partition`).  Indices are dense,
+    /// assigned in first-appearance order over this `SimlinLoops` list; they
+    /// identify partitions within ONE result only and are not stable across
+    /// runs or model edits -- key on the partition's stock-name SET for a
+    /// durable identity.  That stock set is a reliable cross-surface key only
+    /// for SCALAR models: this exhaustive surface partitions stocks at
+    /// VARIABLE granularity (`population`) while the discovery surface
+    /// (`SimlinDiscoveredLoop.partition`) partitions at ELEMENT granularity
+    /// (`population[nyc]`), so an arrayed model's two surfaces differ in
+    /// granularity.  Adding this `i32` grew the struct additively past its old
+    /// 32 bytes (`simlin_sizeof_loop` and the `@simlin/engine`
+    /// `LOOP_SIZE`/`readLoops` offsets track the new size).
+    pub partition: i32,
 }
 
 /// List of loops returned by analysis
@@ -115,6 +155,17 @@ pub struct SimlinLoop {
 pub struct SimlinLoops {
     pub loops: *mut SimlinLoop,
     pub count: usize,
+    /// The cycle partitions referenced by `loops` (each loop's `partition`
+    /// indexes this array).  Dense, in first-appearance order over the loop
+    /// list; result-scoped.  Reuses `SimlinDiscoveredPartition` so the
+    /// exhaustive/pinned loop surface reports partitions in the same shape as
+    /// the discovery surface.  The stock SETS match exactly only for SCALAR
+    /// models -- this surface partitions stocks at variable granularity, the
+    /// discovery surface at element granularity (see `SimlinLoop.partition`).
+    /// Appended after `loops`/`count` so the existing container offsets the TS
+    /// reader uses are unchanged.
+    pub partitions: *mut SimlinDiscoveredPartition,
+    pub partition_count: usize,
 }
 
 /// Single causal link structure
@@ -179,6 +230,13 @@ pub struct SimlinDiscoveredLoop {
     /// they identify partitions within ONE discovery result only and are not
     /// stable across runs or model edits.
     pub partition: i32,
+    /// Polarity-confidence ratio in `[0.0, 1.0]` behind `polarity` (GH #495):
+    /// `1.0` for a clean `Reinforcing`/`Balancing` loop, a value below 1.0 for
+    /// a mixed-sign `MostlyReinforcing`/`MostlyBalancing` loop, `0.0` for
+    /// `Undetermined`.  This is the high-value confidence surface: discovery
+    /// classifies loops from runtime score series, so the Rux/Bux variants and
+    /// their intermediate confidences actually appear here.
+    pub polarity_confidence: f64,
 }
 
 /// One cycle partition referenced by a discovery result's loops: a group of
@@ -229,6 +287,14 @@ pub struct SimlinDiscoveryResult {
     /// ranked loop list; result-scoped.
     pub partitions: *mut SimlinDiscoveredPartition,
     pub partition_count: usize,
-    /// Non-zero when discovery hit its `budget_ms` before finishing.
+    /// Non-zero when discovery hit its wall-clock `budget_ms` before finishing,
+    /// so `loops`/`periods` may be partial.
     pub truncated: bool,
+    /// Non-zero when discovery's cross-element-through-aggregate loop recovery
+    /// (GH #696) hit its reducer-loop-count budget, so some cross-agg reducer
+    /// loops are absent from `loops`.  Distinct from `truncated` (the wall-clock
+    /// time budget): this is the structural-completeness signal (GH #515/#696)
+    /// that mirrors exhaustive mode's analogous salsa Warning, surfacing the
+    /// completeness asymmetry that previously left discovery callers blind.
+    pub agg_recovery_truncated: bool,
 }

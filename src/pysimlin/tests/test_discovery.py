@@ -34,6 +34,17 @@ class TestAnalyzeDiscovery:
         assert isinstance(analysis, Analysis)
         assert not analysis.truncated
 
+    def test_agg_recovery_truncated_field(self, logistic_model: simlin.Model) -> None:
+        # The cross-element-through-aggregate reducer-loop recovery budget is a
+        # structural-completeness signal distinct from the wall-clock
+        # `truncated`. It is plumbed additively from the FFI through to
+        # Analysis; a small scalar model has no cross-agg loops to recover, so
+        # it reports False. (Tripping the real 256-loop budget needs a huge
+        # arrayed model, which is out of scope for a plumbing test.)
+        analysis = logistic_model.analyze()
+        assert isinstance(analysis.agg_recovery_truncated, bool)
+        assert analysis.agg_recovery_truncated is False
+
     def test_discovers_loops_with_importance(self, logistic_model: simlin.Model) -> None:
         analysis = logistic_model.analyze()
 
@@ -149,11 +160,20 @@ class TestAnalyzeDiscovery:
                 f"loop {loop.id} must index the single (dense index 0) partition"
             )
 
-    def test_structural_loops_have_no_partition(self, logistic_model: simlin.Model) -> None:
-        # The structural Model.loops surface doesn't carry partition metadata;
-        # the field defaults to None there.
+    def test_structural_loops_carry_partition(self, logistic_model: simlin.Model) -> None:
+        # GH #685: the structural Model.loops surface now carries cycle-partition
+        # metadata too. Each loop's partition (when present) indexes
+        # Model.loop_partitions, and the partition stock sets agree with the
+        # discovery surface (Analysis.partitions) for the same model -- this
+        # holds because logistic_model is SCALAR (the exhaustive surface is
+        # variable-level and discovery element-level, so arrayed models' sets
+        # differ in granularity).
+        partitions = logistic_model.loop_partitions
         for loop in logistic_model.loops:
-            assert loop.partition is None
+            assert loop.partition is None or 0 <= loop.partition < len(partitions)
+        exhaustive_sets = {frozenset(p.stocks) for p in partitions}
+        discovery_sets = {frozenset(p.stocks) for p in logistic_model.analyze().partitions}
+        assert exhaustive_sets == discovery_sets
 
 
 class TestAnalyzeOptIn:

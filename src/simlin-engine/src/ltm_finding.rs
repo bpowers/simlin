@@ -160,6 +160,20 @@ pub struct FoundLoop {
     /// key on the partition's stock-name set instead.  Filled by
     /// `attach_partition_metadata` at the end of ranking.
     pub partition: Option<usize>,
+    /// Polarity-confidence ratio in `[0.0, 1.0]` for [`Self::loop_info`]'s
+    /// polarity (GH #495).
+    ///
+    /// When the loop has runtime score data this is the
+    /// `|r - |b|| / (r + |b|)` ratio that
+    /// [`crate::ltm::LoopPolarity::from_runtime_scores`] returns alongside the
+    /// polarity, so a mixed-sign `MostlyReinforcing`/`MostlyBalancing` loop
+    /// reports a value strictly below 1.0 that distinguishes it from a clean
+    /// `Reinforcing`/`Balancing` (confidence exactly 1.0).  For a loop with no
+    /// valid runtime scores the polarity falls back to the structural
+    /// negative-link count, and this confidence mirrors the structural
+    /// convention `db::analysis` uses (1.0 when the structural polarity is
+    /// determined, 0.0 when it is `Undetermined`) so the two surfaces agree.
+    pub polarity_confidence: f64,
 }
 
 /// One cycle partition referenced by a discovery result's loops.
@@ -170,7 +184,7 @@ pub struct FoundLoop {
 /// importance is only comparable to its partition-mates' -- this metadata lets
 /// callers group, filter, or present loops partition-by-partition (e.g. lead
 /// with the model's giant component).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub struct DiscoveredPartition {
     /// The partition's stock names (element-level for arrayed models, e.g.
     /// `population[nyc]`), sorted lexicographically.
@@ -2516,17 +2530,23 @@ pub fn discover_loops_with_graph(
         };
         let polarity_structural = causal_graph.calculate_polarity(&reported_links);
 
-        // Determine runtime polarity from scores. The confidence ratio
-        // returned alongside the polarity is discarded here because
-        // `FoundLoop` does not carry one; downstream consumers that need
-        // it (such as `DetectedLoop`) call `from_runtime_scores`
-        // directly. Falling back to the structural polarity for empty
-        // valid sets keeps behaviour identical to the pre-confidence
-        // implementation.
+        // Determine runtime polarity from scores, capturing the confidence
+        // ratio alongside it (GH #495). When the loop has no valid runtime
+        // scores we fall back to the structural polarity; the matching
+        // confidence mirrors the structural pipeline's convention in
+        // `db::analysis` (1.0 when the polarity is determined, 0.0 when it is
+        // Undetermined) so the discovery and structural surfaces agree on what
+        // a "fully confident" loop reports.
         let runtime_scores: Vec<f64> = scores.iter().map(|(_, s)| *s).collect();
-        let polarity = LoopPolarity::from_runtime_scores(&runtime_scores)
-            .map(|(p, _confidence)| p)
-            .unwrap_or(polarity_structural);
+        let (polarity, polarity_confidence) = LoopPolarity::from_runtime_scores(&runtime_scores)
+            .unwrap_or_else(|| {
+                let confidence = if polarity_structural == LoopPolarity::Undetermined {
+                    0.0
+                } else {
+                    1.0
+                };
+                (polarity_structural, confidence)
+            });
 
         let loop_info = Loop {
             id: String::new(), // Will be assigned below
@@ -2545,6 +2565,7 @@ pub fn discover_loops_with_graph(
             rel_scores: Vec::new(),
             // Filled in by attach_partition_metadata at the end of ranking.
             partition: None,
+            polarity_confidence,
         });
     }
 

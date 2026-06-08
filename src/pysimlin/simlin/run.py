@@ -98,18 +98,15 @@ class Run:
         self,
         sim: Sim,
         overrides: dict[str, float],
-        loops_structural: tuple[Loop, ...],
     ) -> None:
         """Initialize a Run from completed simulation.
 
         Args:
             sim: Completed Sim instance with results
             overrides: Variable overrides used for this run
-            loops_structural: Structural loops from the model (without behavior data)
         """
         self._sim = sim
         self._overrides = overrides
-        self._loops_structural = loops_structural
         self._cached_results: pd.DataFrame | None = None
         self._cached_loops: tuple[Loop, ...] | None = None
         self._cached_dominant_periods: tuple[DominantPeriod, ...] | None = None
@@ -164,15 +161,27 @@ class Run:
 
     @property
     def loops(self) -> tuple[Loop, ...]:
-        """Feedback loops with behavior time series.
+        """Feedback loops with RUNTIME polarity and behavior time series.
 
-        Each Loop has behavior_time_series populated showing the loop's
-        contribution to model behavior at each time step.
+        This is the single authoritative runtime loop surface.  Each loop's
+        ``polarity`` / ``polarity_confidence`` / ``partition`` come from the
+        engine's in-process reclassification primitive
+        (:meth:`Sim.get_loops_runtime` -> ``reclassify_loops_from_results``,
+        GH #679), the Rust source of truth -- it classifies over ALL element
+        slots of an arrayed loop's ``loop_score`` series, so an arrayed (A2A)
+        loop is labeled by its whole-loop behavior rather than slot 0.  For
+        scalar loops the all-slots classification is identical to slot 0.  On
+        top of that polarity, each loop carries ``behavior_time_series`` -- its
+        per-step relative loop score (its share of the cycle partition's
+        activity), used for the dominance analysis.
 
-        Returns empty tuple if analyze_loops=False was used.
+        When LTM was disabled for this run (``analyze_loops=False``, or LTM
+        could not be enabled), there is no runtime loop_score series: the loops
+        come back with their STRUCTURAL polarity and no ``behavior_time_series``.
+        The tuple is empty only when the model has no enumerable feedback loops.
 
         Returns:
-            Tuple of Loop objects with behavioral data
+            Tuple of Loop objects with runtime polarity and behavioral data
 
         Example:
             >>> most_important = max(run.loops, key=lambda l: l.average_importance() or 0)
@@ -252,50 +261,46 @@ class Run:
         return self._cached_time_spec
 
     def _populate_loop_behavior(self) -> tuple[Loop, ...]:
-        """Populate structural loops with behavioral time series data.
+        """Build the runtime loop surface: engine-classified polarity plus
+        per-loop behavior time series.
 
-        Also reclassifies loop polarity based on actual runtime scores:
-        - If loop scores are all positive -> Reinforcing
-        - If loop scores are all negative -> Balancing
-        - If loop scores change sign -> Undetermined
+        Polarity / ``polarity_confidence`` / ``partition`` are taken verbatim
+        from the engine primitive (:meth:`Sim.get_loops_runtime`,
+        ``reclassify_loops_from_results``), which classifies over all element
+        slots of an arrayed loop -- the single source of truth.  On top of that
+        we attach each loop's ``behavior_time_series`` (its relative loop score),
+        which the engine primitive does not carry.  Loop ids are stable across
+        the two, so the behavior series is keyed by id.
 
         Returns:
-            Tuple of Loop objects with behavior_time_series populated
+            Tuple of Loop objects with runtime polarity and
+            behavior_time_series populated
         """
-        if not self._loops_structural:
+        runtime_loops = self._sim.get_loops_runtime()
+        if not runtime_loops:
             return ()
 
         loops_with_behavior = []
-        for structural_loop in self._loops_structural:
+        for runtime_loop in runtime_loops:
             try:
-                behavior_ts = self._sim.get_relative_loop_score(structural_loop.id)
-
-                # Get absolute loop score to determine runtime polarity
-                # The absolute score determines the sign (positive/negative)
-                abs_score_var = f"$\u205altm\u205aloop_score\u205a{structural_loop.id}"
-                try:
-                    abs_scores = self._sim.get_series(abs_score_var)
-                    runtime_polarity = LoopPolarity.from_runtime_scores(abs_scores)
-                    # Use runtime polarity if it could be determined, otherwise keep structural
-                    polarity = (
-                        runtime_polarity
-                        if runtime_polarity is not None
-                        else structural_loop.polarity
-                    )
-                except SimlinRuntimeError:
-                    # If we can't get absolute scores, use structural polarity
-                    polarity = structural_loop.polarity
-
-                loop_with_behavior = Loop(
-                    id=structural_loop.id,
-                    variables=structural_loop.variables,
-                    polarity=polarity,
-                    behavior_time_series=behavior_ts,
-                    name=structural_loop.name,
-                )
-                loops_with_behavior.append(loop_with_behavior)
+                behavior_ts = self._sim.get_relative_loop_score(runtime_loop.id)
             except SimlinRuntimeError:
-                loops_with_behavior.append(structural_loop)
+                # No relative-score series (e.g. LTM disabled for this run): keep
+                # the engine-classified loop without a behavior series.
+                loops_with_behavior.append(runtime_loop)
+                continue
+
+            loops_with_behavior.append(
+                Loop(
+                    id=runtime_loop.id,
+                    variables=runtime_loop.variables,
+                    polarity=runtime_loop.polarity,
+                    polarity_confidence=runtime_loop.polarity_confidence,
+                    behavior_time_series=behavior_ts,
+                    name=runtime_loop.name,
+                    partition=runtime_loop.partition,
+                )
+            )
 
         return tuple(loops_with_behavior)
 

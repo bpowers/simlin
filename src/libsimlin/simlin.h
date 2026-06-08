@@ -22,11 +22,23 @@
 
 #define SIMLIN_VARTYPE_MODULE (1 << 3)
 
-// Loop polarity for C API
+// Loop polarity for C API.
+//
+// `MostlyReinforcing`/`MostlyBalancing` ("Rux"/"Bux" in the LTM literature)
+// are the mixed-sign runtime polarities the engine determines when a loop has
+// expressed both signs over a simulation but one dominates with high
+// confidence; they are reported here verbatim rather than coalesced down to
+// `Reinforcing`/`Balancing` (GH #495).  The companion
+// `SimlinLoop.polarity_confidence` / `SimlinDiscoveredLoop.polarity_confidence`
+// carries the `[0.0, 1.0]` confidence ratio behind the classification.
 typedef enum {
   SIMLIN_LOOP_POLARITY_REINFORCING = 0,
   SIMLIN_LOOP_POLARITY_BALANCING = 1,
   SIMLIN_LOOP_POLARITY_UNDETERMINED = 2,
+  // "Rux" -- mixed-sign runtime scores, predominantly reinforcing.
+  SIMLIN_LOOP_POLARITY_MOSTLY_REINFORCING = 3,
+  // "Bux" -- mixed-sign runtime scores, predominantly balancing.
+  SIMLIN_LOOP_POLARITY_MOSTLY_BALANCING = 4,
 } SimlinLoopPolarity;
 
 // Link polarity for C API
@@ -142,12 +154,65 @@ typedef struct {
   // `SimlinLink` gained `relative_score`); `simlin_sizeof_loop` and the
   // `@simlin/engine` `LOOP_SIZE`/`readLoops` offsets track it.
   char *name;
+  // Polarity-confidence ratio in `[0.0, 1.0]` behind `polarity` (GH #495):
+  // `1.0` for a clean `Reinforcing`/`Balancing` loop, `0.0` for
+  // `Undetermined`.  On the STRUCTURAL `simlin_analyze_get_loops` surface
+  // this is `1.0`/`0.0` by design (a loop's links are either all signed or
+  // at least one is unknown); the mixed-sign `MostlyReinforcing`/
+  // `MostlyBalancing` variants with intermediate confidence appear on the
+  // discovery surface (`SimlinDiscoveredLoop`).  Adding this `f64` grew the
+  // struct additively (8-byte alignment pushed it past the old 20 bytes);
+  // `simlin_sizeof_loop` and the `@simlin/engine` `LOOP_SIZE`/`readLoops`
+  // offsets track the new size.
+  double polarity_confidence;
+  // RESULT-SCOPED index into `SimlinLoops.partitions` naming the loop's
+  // cycle partition, or -1 for a loop whose stocks resolve to no
+  // parent-level partition (a pure module-internal loop).  A single index
+  // suffices because a feedback loop's stocks form one strongly-connected
+  // set (mirroring `SimlinDiscoveredLoop.partition`).  Indices are dense,
+  // assigned in first-appearance order over this `SimlinLoops` list; they
+  // identify partitions within ONE result only and are not stable across
+  // runs or model edits -- key on the partition's stock-name SET for a
+  // durable identity.  That stock set is a reliable cross-surface key only
+  // for SCALAR models: this exhaustive surface partitions stocks at
+  // VARIABLE granularity (`population`) while the discovery surface
+  // (`SimlinDiscoveredLoop.partition`) partitions at ELEMENT granularity
+  // (`population[nyc]`), so an arrayed model's two surfaces differ in
+  // granularity.  Adding this `i32` grew the struct additively past its old
+  // 32 bytes (`simlin_sizeof_loop` and the `@simlin/engine`
+  // `LOOP_SIZE`/`readLoops` offsets track the new size).
+  int32_t partition;
 } SimlinLoop;
+
+// One cycle partition referenced by a discovery result's loops: a group of
+// stocks connected by feedback, within which relative loop scores are
+// normalized and therefore comparable.  Lets callers group/filter loops
+// partition-by-partition (e.g. lead with the model's giant component).
+typedef struct {
+  // The partition's stock names (element-level for arrayed models),
+  // sorted lexicographically.  `stock_count` entries.
+  char **stocks;
+  uintptr_t stock_count;
+  // Number of loops in the returned loop list that belong to this
+  // partition.
+  uintptr_t loop_count;
+} SimlinDiscoveredPartition;
 
 // List of loops returned by analysis
 typedef struct {
   SimlinLoop *loops;
   uintptr_t count;
+  // The cycle partitions referenced by `loops` (each loop's `partition`
+  // indexes this array).  Dense, in first-appearance order over the loop
+  // list; result-scoped.  Reuses `SimlinDiscoveredPartition` so the
+  // exhaustive/pinned loop surface reports partitions in the same shape as
+  // the discovery surface.  The stock SETS match exactly only for SCALAR
+  // models -- this surface partitions stocks at variable granularity, the
+  // discovery surface at element granularity (see `SimlinLoop.partition`).
+  // Appended after `loops`/`count` so the existing container offsets the TS
+  // reader uses are unchanged.
+  SimlinDiscoveredPartition *partitions;
+  uintptr_t partition_count;
 } SimlinLoops;
 
 // Opaque model structure
@@ -159,6 +224,11 @@ typedef struct {
 typedef struct {
   uint8_t _private[0];
 } SimlinError;
+
+// Opaque simulation structure
+typedef struct {
+  uint8_t _private[0];
+} SimlinSim;
 
 // A single loop discovered via the strongest-path LTM discovery algorithm.
 //
@@ -191,6 +261,13 @@ typedef struct {
   // they identify partitions within ONE discovery result only and are not
   // stable across runs or model edits.
   int32_t partition;
+  // Polarity-confidence ratio in `[0.0, 1.0]` behind `polarity` (GH #495):
+  // `1.0` for a clean `Reinforcing`/`Balancing` loop, a value below 1.0 for
+  // a mixed-sign `MostlyReinforcing`/`MostlyBalancing` loop, `0.0` for
+  // `Undetermined`.  This is the high-value confidence surface: discovery
+  // classifies loops from runtime score series, so the Rux/Bux variants and
+  // their intermediate confidences actually appear here.
+  double polarity_confidence;
 } SimlinDiscoveredLoop;
 
 // A time interval during which a specific set of loops dominates behavior.
@@ -205,20 +282,6 @@ typedef struct {
   // Combined relative score of the dominant loops.
   double combined_score;
 } SimlinDominantPeriod;
-
-// One cycle partition referenced by a discovery result's loops: a group of
-// stocks connected by feedback, within which relative loop scores are
-// normalized and therefore comparable.  Lets callers group/filter loops
-// partition-by-partition (e.g. lead with the model's giant component).
-typedef struct {
-  // The partition's stock names (element-level for arrayed models),
-  // sorted lexicographically.  `stock_count` entries.
-  char **stocks;
-  uintptr_t stock_count;
-  // Number of loops in the returned loop list that belong to this
-  // partition.
-  uintptr_t loop_count;
-} SimlinDiscoveredPartition;
 
 // The cohesive output of one discovery run: discovered loops, dominant
 // periods, and whether the time budget elapsed before discovery finished.
@@ -238,8 +301,16 @@ typedef struct {
   // ranked loop list; result-scoped.
   SimlinDiscoveredPartition *partitions;
   uintptr_t partition_count;
-  // Non-zero when discovery hit its `budget_ms` before finishing.
+  // Non-zero when discovery hit its wall-clock `budget_ms` before finishing,
+  // so `loops`/`periods` may be partial.
   bool truncated;
+  // Non-zero when discovery's cross-element-through-aggregate loop recovery
+  // (GH #696) hit its reducer-loop-count budget, so some cross-agg reducer
+  // loops are absent from `loops`.  Distinct from `truncated` (the wall-clock
+  // time budget): this is the structural-completeness signal (GH #515/#696)
+  // that mirrors exhaustive mode's analogous salsa Warning, surfacing the
+  // completeness asymmetry that previously left discovery callers blind.
+  bool agg_recovery_truncated;
 } SimlinDiscoveryResult;
 
 // Single causal link structure
@@ -270,11 +341,6 @@ typedef struct {
   uintptr_t count;
 } SimlinLinks;
 
-// Opaque simulation structure
-typedef struct {
-  uint8_t _private[0];
-} SimlinSim;
-
 // Error detail structure containing contextual information for failures.
 typedef struct {
   SimlinErrorCode code;
@@ -297,12 +363,59 @@ typedef struct {
 extern "C" {
 #endif // __cplusplus
 
-// Get the feedback loops detected in a model
+// Get the feedback loops detected in a model, with STRUCTURAL polarity.
+//
+// The polarity reported here comes from static analysis of the loops' link
+// signs (`model_detected_loops`): a loop is Reinforcing/Balancing only when
+// every link has a determined sign (confidence 1.0), Undetermined when any
+// link is unknown (confidence 0.0).  No simulation is required -- this works
+// off a `SimlinModel` alone.  For the RUNTIME polarity (Rux/Bux from the
+// post-sim `loop_score` series, per the LTM papers' confidence gate) use
+// `simlin_analyze_get_loops_runtime`, which takes a run `SimlinSim`.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
 // - The returned SimlinLoops must be freed with simlin_free_loops
 SimlinLoops *simlin_analyze_get_loops(SimlinModel *model, SimlinError **out_error);
+
+// Get the feedback loops detected in a model, with RUNTIME polarity derived
+// from a completed simulation's per-step loop-score series.
+//
+// This is the sim-bearing sibling of `simlin_analyze_get_loops` (which takes
+// only a `SimlinModel` and reports STRUCTURAL polarity).  It builds the same
+// exhaustive `model_detected_loops` set, then runs the engine's
+// `reclassify_loops_from_results` primitive (GH #679) over it: for every loop
+// whose `$⁚ltm⁚loop_score⁚{id}` series exists in the results, the loop's
+// polarity and confidence are overwritten by
+// `crate::ltm::LoopPolarity::from_runtime_scores` (the LTM papers' Rux/Bux/U
+// classification with the 0.99 confidence gate).  A loop whose runtime score
+// is never active keeps its structural classification.  Loop IDs are stable
+// (a `u1` stays `u1` even after its polarity flips to Reinforcing).
+//
+// This is the FIRST production caller of `reclassify_loops_from_results`: it
+// is the only path on which the exhaustive loop surface can report Rux/Bux,
+// or a runtime sign flip (e.g. a structurally-Undetermined loop that the
+// simulation shows is single-signed), which the structural surface can never
+// express.
+//
+// **A2A (arrayed) semantics**: the engine primitive concatenates ALL element
+// slots of an arrayed loop's `loop_score` series into one sample set before
+// classifying, so an A2A loop with one reinforcing element and one balancing
+// element classifies Undetermined -- the whole-loop behavior rather than any
+// single slot.  pysimlin's `Run.loops` is built directly on this primitive
+// (it adds only the per-step behavior series on top), so it reports exactly
+// this all-slots classification.  See the note on
+// `engine::db::reclassify_loops_from_results`.
+//
+// Requires `sim` to have been created with `enable_ltm = true` and run to
+// completion (it must hold `Results`); otherwise an error is reported through
+// `out_error`.  When LTM was not enabled the `loop_score` series are absent,
+// so the result degenerates to the structural classification.
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim that has been run.
+// - The returned SimlinLoops must be freed with simlin_free_loops.
+SimlinLoops *simlin_analyze_get_loops_runtime(SimlinSim *sim, SimlinError **out_error);
 
 // Frees a SimlinLoops structure
 //

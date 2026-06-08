@@ -817,6 +817,25 @@ pub struct DetectedLoop {
     /// `None` for an automatically-enumerated loop. Lets a caller map a pinned
     /// loop's stable `pin{n}` id back to the human label it was pinned under.
     pub name: Option<String>,
+    /// RESULT-SCOPED cycle-partition index into [`DetectedLoopsResult::partitions`],
+    /// or `None` for a loop whose stocks resolve to no parent-level partition
+    /// (a pure module-internal loop).  A single index suffices because a
+    /// feedback loop's stocks form one strongly-connected set and therefore
+    /// belong to exactly one cycle partition (mirroring the discovery
+    /// `FoundLoop::partition` / `LoopSummary::partition` shape).  Indices are
+    /// dense and assigned in first-appearance order over this result's final
+    /// loop list -- they identify partitions *within one detected-loops result
+    /// only* and are NOT stable across runs or model edits (the underlying SCC
+    /// numbering renumbers when stocks are added or renamed).  Consumers that
+    /// need a durable identity should key on the partition's stock-name set
+    /// instead.  That stock set is a reliable cross-surface key only for SCALAR
+    /// models: this exhaustive surface computes partitions over the
+    /// VARIABLE-level stock graph (stocks `pop`, `prey`) while the discovery
+    /// surface (`ltm_finding`) computes them over the ELEMENT-level graph
+    /// (`pop[nyc]`), so for an ARRAYED model the two surfaces' stock sets match
+    /// in identity but differ in *granularity* (variable-level `pop` here vs
+    /// element-level `pop[nyc]` there).
+    pub partition: Option<usize>,
 }
 
 /// Loop polarity as determined by structural analysis of link signs (and,
@@ -849,6 +868,17 @@ pub enum DetectedLoopPolarity {
 #[derive(Clone, Debug, PartialEq, salsa::Update)]
 pub struct DetectedLoopsResult {
     pub loops: Vec<DetectedLoop>,
+    /// The cycle partitions referenced by `loops` (each loop's `partition`
+    /// indexes this list).  Dense, in first-appearance order over the final
+    /// loop list; result-scoped.  Reuses the discovery surface's
+    /// [`crate::ltm_finding::DiscoveredPartition`] so the two surfaces report
+    /// partitions in the same shape.  The stock SETS match exactly only for
+    /// SCALAR models: these partitions are computed over the VARIABLE-level
+    /// stock graph (`compute_cycle_partitions` on `causal_graph_with_modules`),
+    /// whereas the discovery surface computes them over the ELEMENT-level
+    /// graph, so an arrayed model's exhaustive stocks are variable-level (`pop`)
+    /// and its discovery stocks are element-level (`pop[nyc]`).
+    pub partitions: Vec<crate::ltm_finding::DiscoveredPartition>,
 }
 
 /// Stock-to-stock cycle partitions.
@@ -1658,12 +1688,74 @@ pub fn model_loop_circuits(
 /// (`simlin_analyze_get_loops`) and the layout path
 /// (`layout::try_detect_ltm_loops_incremental`) hit this function directly, so
 /// the shared gate protects them too.
+/// Resolve each loop's cycle partition over the parent-level stock graph and
+/// dense-remap the engine-internal partition indices to result-scoped ones,
+/// mirroring `ltm_finding::attach_partition_metadata` so the exhaustive and
+/// discovery surfaces are consistent by construction.
+///
+/// `loops` is the FINAL ordered loop list (enumerated then pinned, in the same
+/// order the returned `DetectedLoop`s appear).  For each loop its single
+/// cycle-partition index is the first partition any of its stocks resolves to
+/// (`partition_for_loop` then `.flatten().next()`).  Every loop that reaches
+/// this exhaustive surface is constructed single-slot (`Loop.dimensions` is
+/// always `vec![]` here -- the enumerated loops are built that way in
+/// `ltm::graph` and the pinned ones are element-subscripted scalar loops), so
+/// `partition_for_loop` always takes its single-slot scalar branch and returns
+/// a one-element vector.  The `.flatten().next()` collapse is therefore trivial
+/// (it picks that lone slot); it is NOT multi-slot A2A handling, which never
+/// reaches this path.  The result is `(per_loop_partition, partitions)`:
+/// `per_loop_partition[i]` is `loops[i]`'s dense result-scoped index (or
+/// `None`), and `partitions` is the `DiscoveredPartition` list in
+/// first-appearance order with `loop_count` counting exactly the loops in
+/// `loops` that resolve to each partition.
+fn resolve_loop_partitions(
+    loops: &[crate::ltm::Loop],
+    partitions: &crate::ltm::CyclePartitions,
+    dims: &[datamodel::Dimension],
+) -> (
+    Vec<Option<usize>>,
+    Vec<crate::ltm_finding::DiscoveredPartition>,
+) {
+    let mut dense_for_internal: HashMap<usize, usize> = HashMap::new();
+    let mut meta: Vec<crate::ltm_finding::DiscoveredPartition> = Vec::new();
+    let mut per_loop: Vec<Option<usize>> = Vec::with_capacity(loops.len());
+    for l in loops {
+        let internal = partitions
+            .partition_for_loop(l, dims)
+            .into_iter()
+            .flatten()
+            .next();
+        let dense = internal.map(|internal_idx| {
+            let dense = *dense_for_internal.entry(internal_idx).or_insert_with(|| {
+                meta.push(crate::ltm_finding::DiscoveredPartition {
+                    stocks: partitions.partitions[internal_idx]
+                        .iter()
+                        .map(|s| s.as_str().to_string())
+                        .collect(),
+                    loop_count: 0,
+                });
+                meta.len() - 1
+            });
+            meta[dense].loop_count += 1;
+            dense
+        });
+        per_loop.push(dense);
+    }
+    (per_loop, meta)
+}
+
 pub fn model_detected_loops(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
 ) -> DetectedLoopsResult {
     let graph = causal_graph_with_modules(db, model, project);
+    // The cycle partitions over the SAME module-aware parent stock graph the
+    // loops are enumerated on, and the project's declared dimensions for A2A
+    // per-slot resolution -- both needed to attach result-scoped partition
+    // metadata to every reported loop (enumerated and pinned alike).
+    let partitions = graph.compute_cycle_partitions();
+    let dims = project_datamodel_dims(db, project);
 
     // Pinned loops are always surfaced, in both modes. This is the FFI half of
     // the LOOPSCORE escape hatch: a pinned loop appears in
@@ -1679,12 +1771,23 @@ pub fn model_detected_loops(
         // consistent with what the simulation actually scores. A pin that
         // expanded to several element-level instances reports each instance
         // (`pin{n}⁚{j}` ids), all carrying the user's name.
+        let pin_loops: Vec<&crate::ltm::Loop> =
+            pinned.loops.iter().flat_map(|p| p.loops.iter()).collect();
+        let pin_ltm: Vec<crate::ltm::Loop> = pin_loops.iter().map(|l| (*l).clone()).collect();
+        let (per_loop, parts) = resolve_loop_partitions(&pin_ltm, &partitions, dims.as_slice());
+        let loops = pinned
+            .loops
+            .iter()
+            .flat_map(|p| p.loops.iter().map(|l| detected_loop_from_loop(l, &p.name)))
+            .zip(per_loop)
+            .map(|(mut dl, part)| {
+                dl.partition = part;
+                dl
+            })
+            .collect();
         return DetectedLoopsResult {
-            loops: pinned
-                .loops
-                .iter()
-                .flat_map(|p| p.loops.iter().map(|l| detected_loop_from_loop(l, &p.name)))
-                .collect(),
+            loops,
+            partitions: parts,
         };
     }
 
@@ -1701,12 +1804,25 @@ pub fn model_detected_loops(
             "model_detected_loops: circuit budget bound in exhaustive mode; \
              model_ltm_mode should have flipped this model to discovery"
         );
+        let pin_ltm: Vec<crate::ltm::Loop> = pinned
+            .loops
+            .iter()
+            .flat_map(|p| p.loops.iter().cloned())
+            .collect();
+        let (per_loop, parts) = resolve_loop_partitions(&pin_ltm, &partitions, dims.as_slice());
+        let loops = pinned
+            .loops
+            .iter()
+            .flat_map(|p| p.loops.iter().map(|l| detected_loop_from_loop(l, &p.name)))
+            .zip(per_loop)
+            .map(|(mut dl, part)| {
+                dl.partition = part;
+                dl
+            })
+            .collect();
         return DetectedLoopsResult {
-            loops: pinned
-                .loops
-                .iter()
-                .flat_map(|p| p.loops.iter().map(|l| detected_loop_from_loop(l, &p.name)))
-                .collect(),
+            loops,
+            partitions: parts,
         };
     };
     // Variable-level canonical rotation of a scored loop, used both to dedup a
@@ -1743,70 +1859,97 @@ pub fn model_detected_loops(
             crate::ltm::canonical_rotation(&seq)
         })
         .collect();
-    let extra_pins: Vec<DetectedLoop> = pinned
+    // The extra pins (those not duplicating an enumerated loop), kept as
+    // `ltm::Loop`s alongside their pin name so partition resolution can run
+    // over the full final loop list in the SAME order the `DetectedLoop`s
+    // appear (enumerated first, then extra pins).
+    let extra_pin_loops: Vec<(crate::ltm::Loop, String)> = pinned
         .loops
         .iter()
         .flat_map(|p| {
             p.loops
                 .iter()
                 .filter(|l| !enumerated.contains(&loop_rotation(l)))
-                .map(|l| detected_loop_from_loop(l, &p.name))
+                .map(|l| (l.clone(), p.name.clone()))
+        })
+        .collect();
+
+    // Resolve partitions over the final ordered loop list (enumerated then
+    // extra pins) so the dense first-appearance indices and per-partition
+    // loop counts cover exactly the loops this query returns.
+    let final_loops: Vec<crate::ltm::Loop> = loops
+        .iter()
+        .cloned()
+        .chain(extra_pin_loops.iter().map(|(l, _)| l.clone()))
+        .collect();
+    let (per_loop_partition, parts) =
+        resolve_loop_partitions(&final_loops, &partitions, dims.as_slice());
+
+    let enumerated_loops = loops.into_iter().map(|l| {
+        // Extract variable names from the loop's links
+        let mut vars = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let loop_rotation: Vec<String> = l
+            .links
+            .iter()
+            .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
+            .collect();
+        let loop_key = crate::ltm::canonical_rotation(&loop_rotation);
+        if !l.links.is_empty() {
+            let first = l.links[0].from.to_string();
+            if seen.insert(first.clone()) {
+                vars.push(first);
+            }
+            for link in &l.links {
+                let to = link.to.to_string();
+                if seen.insert(to.clone()) {
+                    vars.push(to);
+                }
+            }
+        }
+        // Structural classification has no runtime score data, so
+        // confidence is binary: 1.0 when every link in the loop has
+        // a determined polarity (R/B), 0.0 when any link is unknown
+        // and the loop falls back to Undetermined.  The structural
+        // path never produces MostlyReinforcing/MostlyBalancing --
+        // those variants are reserved for callers that classify on
+        // top of a simulated loop-score series via
+        // [`LoopPolarity::from_runtime_scores`].
+        let polarity = detected_polarity_from_ltm(&l.polarity);
+        // Structural confidence is binary: 0.0 for the Undetermined
+        // fallback (an unknown link), 1.0 otherwise. Runtime
+        // reclassification (`reclassify_loops_from_results`) replaces
+        // both fields post-simulation when a loop_score series exists.
+        let polarity_confidence = match polarity {
+            DetectedLoopPolarity::Undetermined => 0.0,
+            _ => 1.0,
+        };
+        DetectedLoop {
+            id: l.id,
+            variables: vars,
+            polarity,
+            polarity_confidence,
+            // Transfer a pin's name onto the enumerated loop it
+            // duplicates so the modeler's label survives the dedup.
+            name: pin_name_by_rotation.get(&loop_key).cloned(),
+            // Filled below by zipping with `per_loop_partition`.
+            partition: None,
+        }
+    });
+    let extra_pins = extra_pin_loops
+        .iter()
+        .map(|(l, name)| detected_loop_from_loop(l, name));
+    let detected = enumerated_loops
+        .chain(extra_pins)
+        .zip(per_loop_partition)
+        .map(|(mut dl, part)| {
+            dl.partition = part;
+            dl
         })
         .collect();
     DetectedLoopsResult {
-        loops: loops
-            .into_iter()
-            .map(|l| {
-                // Extract variable names from the loop's links
-                let mut vars = Vec::new();
-                let mut seen = std::collections::HashSet::new();
-                let loop_rotation: Vec<String> = l
-                    .links
-                    .iter()
-                    .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
-                    .collect();
-                let loop_key = crate::ltm::canonical_rotation(&loop_rotation);
-                if !l.links.is_empty() {
-                    let first = l.links[0].from.to_string();
-                    if seen.insert(first.clone()) {
-                        vars.push(first);
-                    }
-                    for link in &l.links {
-                        let to = link.to.to_string();
-                        if seen.insert(to.clone()) {
-                            vars.push(to);
-                        }
-                    }
-                }
-                // Structural classification has no runtime score data, so
-                // confidence is binary: 1.0 when every link in the loop has
-                // a determined polarity (R/B), 0.0 when any link is unknown
-                // and the loop falls back to Undetermined.  The structural
-                // path never produces MostlyReinforcing/MostlyBalancing --
-                // those variants are reserved for callers that classify on
-                // top of a simulated loop-score series via
-                // [`LoopPolarity::from_runtime_scores`].
-                let polarity = detected_polarity_from_ltm(&l.polarity);
-                // Structural confidence is binary: 0.0 for the Undetermined
-                // fallback (an unknown link), 1.0 otherwise. Runtime
-                // reclassification (`reclassify_loops_from_results`) replaces
-                // both fields post-simulation when a loop_score series exists.
-                let polarity_confidence = match polarity {
-                    DetectedLoopPolarity::Undetermined => 0.0,
-                    _ => 1.0,
-                };
-                DetectedLoop {
-                    id: l.id,
-                    variables: vars,
-                    polarity,
-                    polarity_confidence,
-                    // Transfer a pin's name onto the enumerated loop it
-                    // duplicates so the modeler's label survives the dedup.
-                    name: pin_name_by_rotation.get(&loop_key).cloned(),
-                }
-            })
-            .chain(extra_pins)
-            .collect(),
+        loops: detected,
+        partitions: parts,
     }
 }
 
@@ -1842,6 +1985,10 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
         polarity,
         polarity_confidence,
         name: Some(pin_name.to_string()),
+        // The caller (`model_detected_loops`) fills the partition after
+        // resolving it over the full ordered loop list; the `detected_loop_from_loop`
+        // standalone shape has no partition context.
+        partition: None,
     }
 }
 
@@ -1874,22 +2021,23 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// simply absent) keeps its structural polarity and confidence untouched --
 /// there is no runtime evidence to override it.
 ///
-/// # Status: in-engine primitive, not yet wired to a shipping Rust surface
+/// # Status: in-engine primitive, wired to the sim-bearing loops FFI
 ///
-/// This is the canonical in-engine reclassification primitive. As of this
-/// writing it has **no production caller**: the libsimlin / WASM / TS
-/// `simlin_analyze_get_loops` surface takes only a `SimlinModel` (no
-/// simulation `Results` in hand) and is intentionally structural-only -- it
-/// folds `Mostly*` to `R`/`B` and drops the confidence at the FFI boundary
-/// (surfacing runtime polarity there is bundled with the FFI work tracked
-/// under GH #495, which this helper does NOT unblock on the exhaustive path:
-/// the coalescing/confidence-drop happens regardless of how the polarity was
-/// computed). The pysimlin `Run.loops` surface already reclassifies via its
-/// own Python `LoopPolarity.from_runtime_scores` mirror (pre-existing,
-/// predating this helper); the engine `analyze_model` / MCP surface is
-/// discovery-based and reclassifies through the `FoundLoop` path. This helper
-/// exists so a future sim-bearing Rust consumer has one correct place to call
-/// rather than re-deriving the loop-score read.
+/// This is the canonical in-engine reclassification primitive. Its production
+/// caller (GH #679) is libsimlin's `simlin_analyze_get_loops_runtime(sim, ..)`
+/// -- the sim-bearing sibling of the structural-only `simlin_analyze_get_loops`
+/// (model-only) surface. The structural FFI takes no `Results` and reports R/B
+/// at confidence 1.0 / U at 0.0; the runtime FFI builds the same exhaustive
+/// loop set and calls this helper over the completed sim's `loop_score`
+/// series, so the exhaustive surface can finally report `Mostly*` (Rux/Bux) or
+/// a runtime sign flip. (Now that GH #495 surfaces all five polarity variants
+/// along with the confidence verbatim across the FFI, there is no longer a
+/// coalescing/confidence-drop at the boundary.) The pysimlin `Run.loops`
+/// surface still reclassifies via its own Python `LoopPolarity.from_runtime_scores`
+/// mirror (slot-0 only -- see the A2A note below); pysimlin exposes the
+/// all-slots engine path separately as `Run.loops_runtime`. The engine
+/// `analyze_model` / MCP surface is discovery-based and reclassifies through
+/// the `FoundLoop` path.
 ///
 /// # A2A semantics differ across the three reclassification sites
 ///
@@ -1912,10 +2060,11 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// filter; all-positive -> Reinforcing, all-negative -> Balancing, mixed
 /// dominant >= threshold -> Mostly*, otherwise Undetermined) and agree exactly
 /// on a scalar loop; they diverge only in how an A2A loop's multiple element
-/// slots are reduced to one classification. Reconciling that (e.g. teaching
-/// pysimlin to read all element slots via `get_loop_element_count` +
-/// subscripted `get_series`) is deferred until a sim-bearing Rust consumer
-/// actually needs the all-slots reading.
+/// slots are reduced to one classification. The sim-bearing FFI consumer
+/// (`simlin_analyze_get_loops_runtime`, GH #679) deliberately exposes THIS
+/// all-slots reading -- pysimlin surfaces it as `Run.loops_runtime`, keeping
+/// the slot-0 `Run.loops` path unchanged -- so the two A2A readings now coexist
+/// rather than one being reconciled into the other.
 pub fn reclassify_loops_from_results(
     loops: &mut [DetectedLoop],
     results: &crate::Results,
@@ -3324,6 +3473,250 @@ mod polarity_confidence_tests {
                 POLARITY_CONFIDENCE_THRESHOLD
             );
         }
+    }
+}
+
+/// Tests for the cycle-partition metadata surfaced on the exhaustive/pinned
+/// loop surface (`DetectedLoop::partition` + `DetectedLoopsResult::partitions`,
+/// GH #685).  Partition indices are result-scoped on both the exhaustive and
+/// the discovery surface, so the cross-surface tests key on the partition's
+/// stock-name SET, not the dense index.  That stock set is a reliable
+/// cross-surface key only for SCALAR models (this surface partitions stocks at
+/// VARIABLE granularity, discovery at ELEMENT granularity) -- the scalar
+/// agreement is pinned by `exhaustive_and_discovery_partitions_agree_..._scalar`
+/// and the arrayed granularity *divergence* by
+/// `exhaustive_and_discovery_partitions_diverge_in_granularity_arrayed`.
+#[cfg(test)]
+mod detected_loop_partition_tests {
+    use super::*;
+    use crate::analysis::analyze_model;
+    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::test_common::TestProject;
+    use std::collections::BTreeSet;
+
+    fn detect_loops(project: &TestProject) -> DetectedLoopsResult {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        model_detected_loops(&db, source_model, sync.project)
+    }
+
+    /// Each returned `DetectedLoopsResult.partitions[k]` as a sorted stock set.
+    fn partition_stock_sets(result: &DetectedLoopsResult) -> Vec<BTreeSet<String>> {
+        result
+            .partitions
+            .iter()
+            .map(|p| p.stocks.iter().cloned().collect())
+            .collect()
+    }
+
+    /// Two independent reinforcing loops -- two disjoint stocks, each with its
+    /// own self-feeding flow -- form two distinct stock-to-stock SCCs and so
+    /// must land in two distinct partitions, each loop keyed to its own
+    /// partition with `loop_count == 1`.
+    #[test]
+    fn two_independent_loops_get_distinct_partitions() {
+        let project = TestProject::new("two_loops")
+            .stock("pop_a", "100", &["births_a"], &[], None)
+            .flow("births_a", "pop_a * 0.02", None)
+            .stock("pop_b", "50", &["births_b"], &[], None)
+            .flow("births_b", "pop_b * 0.03", None);
+        let result = detect_loops(&project);
+
+        assert_eq!(result.loops.len(), 2, "two independent loops expected");
+        assert_eq!(
+            result.partitions.len(),
+            2,
+            "two disjoint stock SCCs => two partitions"
+        );
+
+        // Every loop carries a partition, and the two partitions are distinct.
+        let p0 = result.loops[0]
+            .partition
+            .expect("loop 0 must resolve a partition");
+        let p1 = result.loops[1]
+            .partition
+            .expect("loop 1 must resolve a partition");
+        assert_ne!(p0, p1, "independent loops must be in different partitions");
+
+        // Each partition is exactly one stock with one loop.
+        for part in &result.partitions {
+            assert_eq!(part.loop_count, 1);
+            assert_eq!(part.stocks.len(), 1);
+        }
+        let sets = partition_stock_sets(&result);
+        assert!(sets.iter().any(|s| s.contains("pop_a")));
+        assert!(sets.iter().any(|s| s.contains("pop_b")));
+    }
+
+    /// A coupled predator-prey core -- two stocks mutually reachable through
+    /// their flows -- forms ONE stock-to-stock SCC.  Every enumerated loop
+    /// through that core must therefore share a single partition index, and
+    /// that partition's stock set is both stocks.
+    #[test]
+    fn coupled_core_loops_share_one_partition() {
+        // prey grows on its own and is eaten (depends on predator); predator
+        // grows by eating prey and dies on its own.  prey<->predator are
+        // mutually reachable => one SCC.
+        let project = TestProject::new("pred_prey")
+            .stock("prey", "100", &["prey_births"], &["predation"], None)
+            .stock("predator", "20", &["pred_births"], &["pred_deaths"], None)
+            .flow("prey_births", "prey * 0.1", None)
+            .flow("predation", "prey * predator * 0.01", None)
+            .flow("pred_births", "prey * predator * 0.005", None)
+            .flow("pred_deaths", "predator * 0.1", None);
+        let result = detect_loops(&project);
+
+        assert!(
+            !result.loops.is_empty(),
+            "coupled core must enumerate loops"
+        );
+        assert_eq!(
+            result.partitions.len(),
+            1,
+            "one coupled SCC => exactly one partition, got {:?}",
+            result.partitions
+        );
+        // Every loop shares the single partition index 0.
+        for l in &result.loops {
+            assert_eq!(
+                l.partition,
+                Some(0),
+                "every loop in the coupled core must share partition 0"
+            );
+        }
+        assert_eq!(result.partitions[0].loop_count, result.loops.len());
+        let set: BTreeSet<&str> = result.partitions[0]
+            .stocks
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        assert!(set.contains("prey") && set.contains("predator"));
+    }
+
+    /// For a SCALAR model the exhaustive and discovery surfaces must agree on
+    /// the partition STOCK SETS.  Indices are result-scoped and may differ; the
+    /// stock-name sets must not -- because at scalar granularity a stock's
+    /// variable-level name and its (sole) element-level name coincide.  The
+    /// arrayed counterpart (`..._diverge_in_granularity_arrayed`) pins the
+    /// granularity divergence that makes this scalar-only.
+    #[test]
+    fn exhaustive_and_discovery_partitions_agree_on_stock_sets_scalar() {
+        let project = TestProject::new("two_loops_xsurface")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .stock("pop_a", "100", &["births_a"], &[], None)
+            .flow("births_a", "pop_a * 0.02", None)
+            .stock("pop_b", "50", &["births_b"], &[], None)
+            .flow("births_b", "pop_b * 0.03", None);
+        let datamodel = project.build_datamodel();
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+
+        let exhaustive = model_detected_loops(&db, source_model, sync.project);
+        let exhaustive_sets: BTreeSet<BTreeSet<String>> =
+            partition_stock_sets(&exhaustive).into_iter().collect();
+
+        let analysis = analyze_model(&datamodel, &mut db, sync.project, "main", None)
+            .expect("analyze_model must succeed");
+        let discovery_sets: BTreeSet<BTreeSet<String>> = analysis
+            .partitions
+            .iter()
+            .map(|p| p.stocks.iter().cloned().collect())
+            .collect();
+
+        assert!(
+            !exhaustive_sets.is_empty(),
+            "exhaustive must report partitions"
+        );
+        assert!(
+            !discovery_sets.is_empty(),
+            "discovery must report partitions"
+        );
+        assert_eq!(
+            exhaustive_sets, discovery_sets,
+            "exhaustive and discovery must report the same partition stock sets"
+        );
+    }
+
+    /// For an ARRAYED (A2A) model the two surfaces partition stocks at
+    /// DIFFERENT granularity, so their stock SETS do NOT match: the exhaustive
+    /// surface (`model_detected_loops` -> `compute_cycle_partitions` over the
+    /// VARIABLE-level stock graph) names the bare variable `population`, while
+    /// the discovery surface (`analyze_model` -> element-level graph) names the
+    /// per-element stocks `population[nyc]` / `population[boston]`.  This pins
+    /// the documented contract: the stock set is a reliable cross-surface key
+    /// only for scalar models.  It fails loudly if someone later "fixes" one
+    /// surface to match the other's granularity without updating the contract
+    /// in the partition rustdocs and the FFI / pysimlin / MCP docstrings.
+    #[test]
+    fn exhaustive_and_discovery_partitions_diverge_in_granularity_arrayed() {
+        // population[Region] coupled to itself through SUM(population[*]) is the
+        // canonical cross-element A2A loop: one variable-level SCC ({population})
+        // that the element graph expands into per-region element stocks.
+        let project = TestProject::new("a2a_xsurface")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow("births[Region]", "SUM(population[*]) * 0.01", None);
+        let datamodel = project.build_datamodel();
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+
+        let exhaustive = model_detected_loops(&db, source_model, sync.project);
+        let exhaustive_stocks: BTreeSet<String> = exhaustive
+            .partitions
+            .iter()
+            .flat_map(|p| p.stocks.iter().cloned())
+            .collect();
+
+        let analysis = analyze_model(&datamodel, &mut db, sync.project, "main", None)
+            .expect("analyze_model must succeed");
+        let discovery_stocks: BTreeSet<String> = analysis
+            .partitions
+            .iter()
+            .flat_map(|p| p.stocks.iter().cloned())
+            .collect();
+
+        assert!(
+            !exhaustive_stocks.is_empty(),
+            "exhaustive must report a partition for the A2A loop"
+        );
+        assert!(
+            !discovery_stocks.is_empty(),
+            "discovery must report a partition for the A2A loop"
+        );
+
+        // Exhaustive is variable-level: a BARE `population`, no element subscript.
+        assert!(
+            exhaustive_stocks.contains("population"),
+            "exhaustive partition must name the variable-level stock `population`, got {exhaustive_stocks:?}"
+        );
+        assert!(
+            exhaustive_stocks.iter().all(|s| !s.contains('[')),
+            "exhaustive partition stocks are variable-level (no `[elem]`), got {exhaustive_stocks:?}"
+        );
+
+        // Discovery is element-level: subscripted `population[nyc]` etc., and no
+        // bare `population`.
+        assert!(
+            discovery_stocks
+                .iter()
+                .any(|s| s.starts_with("population[")),
+            "discovery partition must name element-level stocks like `population[nyc]`, got {discovery_stocks:?}"
+        );
+        assert!(
+            !discovery_stocks.contains("population"),
+            "discovery partition must NOT carry the bare variable-level `population`, got {discovery_stocks:?}"
+        );
+
+        // The sets therefore differ -- the granularity divergence the contract documents.
+        assert_ne!(
+            exhaustive_stocks, discovery_stocks,
+            "arrayed exhaustive (variable-level) and discovery (element-level) stock sets must differ in granularity"
+        );
     }
 }
 

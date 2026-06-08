@@ -542,6 +542,13 @@ export enum LinkPolarity {
 
 /**
  * Loop polarity indicating reinforcing or balancing behavior.
+ *
+ * `MostlyReinforcing`/`MostlyBalancing` ("Rux"/"Bux" in the LTM literature)
+ * are the mixed-sign runtime polarities: the loop expressed both signs over
+ * the simulation but one dominates with high confidence (see
+ * {@link Loop.polarityConfidence}). They appear on the discovery surface
+ * (GH #495); the structural surface reports only Reinforcing/Balancing/
+ * Undetermined.
  */
 export enum LoopPolarity {
   /** Reinforcing: amplifies changes (positive feedback) */
@@ -550,6 +557,10 @@ export enum LoopPolarity {
   Balancing = 1,
   /** Undetermined: polarity cannot be determined or changes during simulation */
   Undetermined = 2,
+  /** "Rux": mixed-sign runtime scores, predominantly reinforcing */
+  MostlyReinforcing = 3,
+  /** "Bux": mixed-sign runtime scores, predominantly balancing */
+  MostlyBalancing = 4,
 }
 
 /**
@@ -596,6 +607,22 @@ export interface Loop {
    * no assigned name. Non-null only for pinned loops.
    */
   readonly name: string | null;
+  /**
+   * Polarity-confidence ratio in `[0, 1]` behind {@link polarity} (GH #495):
+   * `1` for a clean reinforcing/balancing loop, below `1` for a mixed-sign
+   * `MostlyReinforcing`/`MostlyBalancing` loop, `0` for `Undetermined`. On the
+   * structural loop surface this is `1` or `0` by design.
+   */
+  readonly polarityConfidence: number;
+  /**
+   * Result-scoped index naming this loop's cycle partition (GH #685), or
+   * `null` for a loop with no parent-level partition (a pure module-internal
+   * loop). Indices are dense, in first-appearance order over the loop list;
+   * they are NOT stable across model edits, so key on the partition's stock
+   * set for a durable identity. The exhaustive (`Model.loops`) and discovery
+   * surfaces report the same partition stock sets for a given model.
+   */
+  readonly partition: number | null;
 }
 
 /**

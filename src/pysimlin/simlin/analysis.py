@@ -77,10 +77,12 @@ class LoopPolarity(IntEnum):
     - UNDETERMINED (U): Loop polarity cannot be determined; mixed-sign
       runtime scores with neither polarity dominant
 
-    Integer values 0-2 mirror the C FFI; values 3 and 4 are Python-only
-    classifications produced by `from_runtime_scores` (the FFI does not
-    surface a polarity-confidence ratio yet, so structural loops never
-    arrive as MOSTLY_*).
+    All five integer values mirror the C FFI `SimlinLoopPolarity` 1:1
+    (GH #495): the FFI no longer coalesces MOSTLY_* down to R/B, and carries
+    a polarity-confidence ratio alongside the polarity (see
+    `Loop.polarity_confidence`). On the structural loop surface the FFI still
+    only emits R/B/U (it has no runtime scores); the MOSTLY_* variants and
+    intermediate confidences arrive on the discovery surface.
     """
 
     REINFORCING = 0
@@ -105,8 +107,13 @@ class LoopPolarity(IntEnum):
     def from_runtime_scores(cls, scores: NDArray[np.float64]) -> LoopPolarity | None:
         """Classify loop polarity based on actual runtime loop score values.
 
-        Mirrors `LoopPolarity::from_runtime_scores` in
-        `src/simlin-engine/src/ltm.rs`.  The polarity confidence
+        This is a standalone convenience utility that mirrors
+        `LoopPolarity::from_runtime_scores` in `src/simlin-engine/src/ltm.rs`,
+        operating on an arbitrary score array.  It is NOT the path
+        :attr:`Run.loops` uses to reclassify polarity -- that surface sources
+        polarity from the engine primitive
+        (:meth:`Sim.get_loops_runtime`) so the classification is the Rust
+        source of truth over all element slots.  The polarity confidence
         ``|r - |b|| / (r + |b|)`` (Schoenberg & Eberlein, 2020) drives
         the classification:
 
@@ -304,9 +311,21 @@ class Loop:
 
     polarity: LoopPolarity
     """Loop polarity: REINFORCING (R), BALANCING (B), MOSTLY_REINFORCING (Rux),
-    MOSTLY_BALANCING (Bux), or UNDETERMINED (U). MOSTLY_* values only arise
-    from `LoopPolarity.from_runtime_scores`; the C FFI surface coalesces them
-    onto REINFORCING/BALANCING because it has no polarity-confidence field."""
+    MOSTLY_BALANCING (Bux), or UNDETERMINED (U). All five arrive through the C
+    FFI verbatim (GH #495) -- the MOSTLY_* ("Rux"/"Bux") variants are no longer
+    coalesced onto REINFORCING/BALANCING. They occur on the runtime surfaces
+    (``Run.loops``, ``Sim.get_loops_runtime``, and discovery), where the
+    polarity is classified from runtime score series; see
+    :attr:`polarity_confidence`."""
+
+    polarity_confidence: float = 1.0
+    """Polarity-confidence ratio in ``[0.0, 1.0]`` behind :attr:`polarity`
+    (GH #495): ``1.0`` for a clean reinforcing/balancing loop, a value below
+    ``1.0`` for a mixed-sign MOSTLY_REINFORCING/MOSTLY_BALANCING loop, and
+    ``0.0`` for an UNDETERMINED one. On the structural ``Model.loops`` surface
+    this is ``1.0``/``0.0`` by design (links are either all signed or some are
+    unknown). The default ``1.0`` matches the structural "fully determined"
+    convention for the rare construction path that omits it."""
 
     behavior_time_series: NDArray[np.float64] | None = None
     """
@@ -328,7 +347,7 @@ class Loop:
     """RESULT-SCOPED index into :attr:`Analysis.partitions` naming this loop's
     cycle partition, or ``None`` -- both for loops with no parent-level
     partition (pure module-internal loops) and for loop surfaces that don't
-    carry partition metadata (structural ``Model.loops``, ``Run.loops``).
+    carry partition metadata (structural ``Model.loops``).
     Indices are dense, assigned in first-appearance order over the ranked
     loop list; they identify partitions within ONE analysis result only and
     are not stable across runs or model edits -- key on
@@ -431,7 +450,16 @@ class Analysis:
     """Intervals where a specific set of loops dominates behavior."""
 
     truncated: bool = False
-    """True when the `timeout` elapsed before discovery finished."""
+    """True when the `timeout` elapsed before discovery finished, so
+    `loops`/`dominant_periods` may be partial. This is the wall-clock time
+    budget -- distinct from `agg_recovery_truncated`."""
+
+    agg_recovery_truncated: bool = False
+    """True when discovery's cross-element-through-aggregate loop recovery hit
+    its reducer-loop-count budget, so some cross-agg reducer loops are absent
+    from `loops`. This is the *structural*-completeness signal (mirroring
+    exhaustive mode's analogous warning), distinct from `truncated` (the
+    wall-clock time budget)."""
 
     partitions: tuple[Partition, ...] = ()
     """The cycle partitions referenced by ``loops`` (each loop's

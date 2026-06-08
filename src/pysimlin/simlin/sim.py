@@ -22,7 +22,7 @@ from ._ffi import (
     lib,
     string_to_c,
 )
-from .analysis import Link, LinkPolarity, LtmMode
+from .analysis import Link, LinkPolarity, Loop, LoopPolarity, LtmMode
 from .errors import SimlinRuntimeError
 
 if TYPE_CHECKING:
@@ -328,6 +328,86 @@ class Sim:
         finally:
             lib.simlin_free_links(links_ptr)
 
+    def get_loops_runtime(self) -> list[Loop]:
+        """Get the exhaustive feedback loops with RUNTIME polarity.
+
+        This is the sim-bearing sibling of :meth:`Model.get_loops` (which takes
+        only a model and reports STRUCTURAL polarity).  It builds the same
+        exhaustive structural loop set, then reclassifies each loop's polarity
+        and ``polarity_confidence`` from its post-simulation
+        ``$:ltm:loop_score:{id}`` series via the engine's
+        ``reclassify_loops_from_results`` primitive (GH #679): the LTM papers'
+        Rux/Bux/U runtime classification with the 0.99 confidence gate.  A loop
+        whose runtime score is never active keeps its structural classification;
+        loop ids are stable across the two surfaces.
+
+        This is the single Rust source of truth for runtime loop polarity.  It
+        is the only path on which the exhaustive loop surface can report
+        ``MOSTLY_REINFORCING`` / ``MOSTLY_BALANCING``, or a runtime sign flip the
+        static analysis could not express.  :attr:`Run.loops` is built directly
+        on this primitive (it attaches the per-step behavior series on top), so
+        the two report the same polarity / confidence / partition.
+
+        .. note::
+            **A2A (arrayed) classification.**  The engine primitive concatenates
+            ALL element slots of an arrayed loop's ``loop_score`` series into one
+            sample set before classifying, so an A2A loop with one reinforcing
+            element and one balancing element classifies ``UNDETERMINED`` -- the
+            whole-loop behavior rather than any single slot.  See the note on
+            ``engine::db::reclassify_loops_from_results`` in the Rust engine.
+
+        Requires the simulation to have been created with ``enable_ltm=True`` and
+        run to completion.
+
+        Returns:
+            List of Loop objects with runtime-reclassified polarity and
+            confidence (empty if the model has no feedback loops).
+
+        Raises:
+            SimlinRuntimeError: If the simulation has no results (never run).
+        """
+        with self._lock:
+            self._check_alive()
+            err_ptr = ffi.new("SimlinError **")
+            loops_ptr = lib.simlin_analyze_get_loops_runtime(self._ptr, err_ptr)
+            check_out_error(err_ptr, "Get runtime loops")
+
+        if loops_ptr == ffi.NULL:
+            return []
+
+        try:
+            if loops_ptr.count == 0:
+                return []
+
+            loops = []
+            for i in range(loops_ptr.count):
+                c_loop = loops_ptr.loops[i]
+
+                variables = []
+                for j in range(c_loop.var_count):
+                    var_name = c_to_string(c_loop.variables[j])
+                    if var_name:
+                        variables.append(var_name)
+
+                loops.append(
+                    Loop(
+                        id=c_to_string(c_loop.id) or f"loop_{i}",
+                        variables=tuple(variables),
+                        polarity=LoopPolarity(c_loop.polarity),
+                        polarity_confidence=float(c_loop.polarity_confidence),
+                        name=c_to_string(c_loop.name),
+                        # The runtime loops come from the same FFI loop list as
+                        # Model.get_loops, so they carry the same cycle-partition
+                        # index (GH #685).
+                        partition=None if c_loop.partition < 0 else int(c_loop.partition),
+                    )
+                )
+
+            return loops
+
+        finally:
+            lib.simlin_free_loops(loops_ptr)
+
     def get_ltm_mode(self) -> LtmMode:
         """Return the LTM loop-enumeration mode this simulation resolved to.
 
@@ -484,8 +564,7 @@ class Sim:
         """
         from .run import Run
 
-        loops_structural = self._model.loops
-        return Run(self, self._overrides, loops_structural)
+        return Run(self, self._overrides)
 
     def __enter__(self) -> Self:
         """Context manager entry point."""

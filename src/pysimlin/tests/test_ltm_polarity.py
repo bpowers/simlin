@@ -246,6 +246,163 @@ class TestLtmModuleBoundaryReclassification:
         )
 
 
+class TestRuntimeLoopsFfiAgreesWithPython:
+    """GH #679/#685: `Run.loops` is the single authoritative runtime loop
+    surface -- its polarity / confidence / partition come from the engine's
+    `reclassify_loops_from_results` primitive (bound as `Sim.get_loops_runtime`,
+    the all-slots Rust source of truth), with `behavior_time_series` attached on
+    top.  These tests pin that `Run.loops` reports the engine's runtime
+    classification (not the static structural one) and that the low-level
+    `Sim.get_loops_runtime` primitive it builds on still behaves."""
+
+    def _sign_flipping_logistic(self) -> Project:
+        """A logistic loop whose runtime loop_score straddles zero: the
+        `stock -> net` link is reinforcing while `stock < K/2` and balancing
+        once it saturates, so the static analyzer cannot sign it (structurally
+        Undetermined) but the simulation expresses both signs."""
+        project = Project.new(
+            name="logistic_flip",
+            sim_start=0.0,
+            sim_stop=20.0,
+            dt=0.125,
+        )
+        model = project.main_model
+        with model.edit() as (_current, patch):
+            from simlin.json_types import Auxiliary, Flow, Stock
+
+            patch.upsert_aux(Auxiliary(name="r", equation="0.8"))
+            patch.upsert_aux(Auxiliary(name="k", equation="1000"))
+            patch.upsert_stock(
+                Stock(name="stock", initial_equation="100", inflows=["net"], outflows=[])
+            )
+            patch.upsert_flow(Flow(name="net", equation="r * stock * (1 - stock / k)"))
+        return project
+
+    def test_run_loops_match_sim_primitive_on_scalar_loop(self) -> None:
+        """For a scalar sign-flipping loop, `Run.loops` must report the same
+        polarity / confidence / id as the engine primitive it is built on
+        (`Sim.get_loops_runtime`); `Run.loops` adds only the behavior series."""
+        project = self._sign_flipping_logistic()
+        model = project.main_model
+
+        run = model.run(analyze_loops=True)
+        assert run.ltm_mode == "exhaustive"
+
+        run_loops = run.loops
+        primitive_loops = run._sim.get_loops_runtime()
+        assert len(run_loops) == 1, "logistic model has one feedback loop"
+        assert len(primitive_loops) == 1, "primitive returns the same single loop"
+
+        run_loop = run_loops[0]
+        prim_loop = primitive_loops[0]
+
+        assert run_loop.id == prim_loop.id, (
+            "loop id must be stable between Run.loops and the engine primitive "
+            f"(run {run_loop.id} vs primitive {prim_loop.id})"
+        )
+        # Run.loops sources polarity straight from the engine primitive, so the
+        # label and confidence must match it exactly.
+        assert run_loop.polarity == prim_loop.polarity, (
+            "Run.loops polarity must equal the engine primitive's "
+            f"({run_loop.polarity} vs {prim_loop.polarity})"
+        )
+        assert run_loop.polarity_confidence == prim_loop.polarity_confidence
+        # ...and unlike the primitive, Run.loops carries the behavior series.
+        assert run_loop.behavior_time_series is not None
+
+    def test_run_loops_differs_from_structural(self) -> None:
+        """`Run.loops` must report a label/confidence the STRUCTURAL surface
+        (`Model.loops`) cannot: the structural loop is Undetermined at
+        confidence 0.0, the runtime one carries a genuine dominance ratio."""
+        project = self._sign_flipping_logistic()
+        model = project.main_model
+
+        structural = model.loops
+        assert len(structural) == 1
+        assert structural[0].polarity == LoopPolarity.UNDETERMINED
+        assert structural[0].polarity_confidence == 0.0
+
+        run = model.run(analyze_loops=True)
+        run_loop = run.loops[0]
+        # A strictly-intermediate confidence is only reachable when the runtime
+        # loop_score series carries both signs -- evidence of the sign flip.
+        assert 0.0 < run_loop.polarity_confidence < 1.0, (
+            "the sign-straddling loop must reclassify to a strictly intermediate "
+            f"confidence, got {run_loop.polarity_confidence}"
+        )
+
+    def test_runtime_loops_empty_without_ltm(self) -> None:
+        """When LTM is disabled the loop_score series are absent, so the engine
+        primitive leaves the structural loops untouched; the FFI still returns
+        them (the structural set) rather than erroring."""
+        project = self._sign_flipping_logistic()
+        sim = project.main_model.simulate(enable_ltm=False)
+        sim.run_to_end()
+        # No LTM -> no loop_score columns -> structural classification preserved.
+        loops = sim.get_loops_runtime()
+        assert len(loops) == 1
+        assert loops[0].polarity == LoopPolarity.UNDETERMINED
+
+    def test_run_loops_arrayed_uses_engine_all_slots_classification(self) -> None:
+        """On an ARRAYED (A2A) model, `Run.loops` must report the engine's
+        all-slots runtime classification, not a slot-0-only one.
+
+        This pins the GH #679/#685 consolidation: `Run.loops` sources polarity /
+        confidence / partition from the engine primitive
+        (`Sim.get_loops_runtime`), which concatenates ALL element slots of an
+        arrayed loop's `loop_score` before classifying.  Before the
+        consolidation `Run.loops` reclassified off slot 0 only, which could
+        disagree with the engine on a sign-heterogeneous arrayed loop; now the
+        two surfaces are the same source of truth by construction.
+        """
+        import os
+        from pathlib import Path
+
+        import simlin
+
+        repo_root = (
+            Path(os.environ["SIMLIN_REPO_ROOT"])
+            if "SIMLIN_REPO_ROOT" in os.environ
+            else Path(__file__).parent.parent.parent.parent
+        )
+        fixture_path = repo_root / "test" / "arrayed_population_ltm" / "arrayed_population.stmx"
+        if not fixture_path.exists():
+            import pytest
+
+            pytest.skip(f"arrayed fixture missing at {fixture_path}")
+
+        model = simlin.load(fixture_path)
+        run = model.run(analyze_loops=True)
+
+        run_loops = run.loops
+        assert run_loops, "arrayed_population should expose runtime loops"
+
+        # The engine all-slots primitive is the source of truth; Run.loops must
+        # match it loop-for-loop on polarity / confidence / partition, adding
+        # only the behavior series on top.
+        primitive_by_id = {lp.id: lp for lp in run._sim.get_loops_runtime()}
+        assert primitive_by_id, "engine primitive should return the same loops"
+
+        arrayed_seen = False
+        for loop in run_loops:
+            assert loop.id in primitive_by_id, (
+                f"Run.loops id {loop.id} not present in the engine primitive set"
+            )
+            prim = primitive_by_id[loop.id]
+            assert loop.polarity == prim.polarity, (
+                f"Run.loops polarity for {loop.id} must equal the engine all-slots "
+                f"classification ({loop.polarity} vs {prim.polarity})"
+            )
+            assert loop.polarity_confidence == prim.polarity_confidence
+            assert loop.partition == prim.partition
+            # The behavior series is attached on top of the engine polarity.
+            assert loop.behavior_time_series is not None
+            if run._sim.get_loop_element_count(loop.id) > 1:
+                arrayed_seen = True
+
+        assert arrayed_seen, "expected at least one arrayed (multi-slot) loop"
+
+
 class TestLtmUndeterminedPolarity:
     """Test the from_runtime_scores classification method."""
 
@@ -327,10 +484,12 @@ class TestLoopPolarityEnum:
         assert str(LoopPolarity.MOSTLY_BALANCING) == "Bux"
 
     def test_polarity_values(self) -> None:
-        """Test that polarity integer values match FFI for R/B/U.
+        """Test that polarity integer values match the C FFI for all five
+        variants.
 
-        MOSTLY_* are Python-side variants only; the C FFI coalesces them
-        onto REINFORCING/BALANCING.
+        Since GH #495 the FFI surfaces all five `SimlinLoopPolarity` variants
+        1:1 (no coalescing); these integer values mirror it exactly so
+        `LoopPolarity(c_loop.polarity)` round-trips a Rux/Bux loop.
         """
         assert LoopPolarity.REINFORCING == 0
         assert LoopPolarity.BALANCING == 1
@@ -450,3 +609,62 @@ class TestStructuralPolarityClassification:
         assert len(loops) >= 1, "Should have at least one loop"
         b_loops = [lp for lp in loops if lp.polarity == LoopPolarity.BALANCING]
         assert len(b_loops) >= 1, "Goal-seeking model should have a Balancing loop"
+
+
+class TestPolarityConfidence:
+    """GH #495: every loop carries a `polarity_confidence` ratio in [0, 1]
+    threaded from the FFI, and a clean single-signed loop reports 1.0."""
+
+    def _reinforcing_model(self) -> Project:
+        project = Project.new(
+            name="test_confidence",
+            sim_start=0.0,
+            sim_stop=5.0,
+            dt=0.25,
+        )
+        model = project.main_model
+        with model.edit() as (_current, patch):
+            from simlin.json_types import Auxiliary, Flow, Stock
+
+            patch.upsert_stock(
+                Stock(
+                    name="population",
+                    initial_equation="100",
+                    inflows=["births"],
+                    outflows=[],
+                )
+            )
+            patch.upsert_flow(Flow(name="births", equation="population * birth_rate"))
+            patch.upsert_aux(Auxiliary(name="birth_rate", equation="0.1"))
+        return project
+
+    def test_structural_loops_carry_confidence_in_range(self) -> None:
+        """Structural `Model.loops` populate `polarity_confidence` in [0, 1];
+        a fully-signed loop reports 1.0 (the structural convention)."""
+        project = self._reinforcing_model()
+        loops = project.main_model.loops
+        assert len(loops) >= 1
+        for loop in loops:
+            assert isinstance(loop.polarity_confidence, float)
+            assert 0.0 <= loop.polarity_confidence <= 1.0
+        r_loops = [lp for lp in loops if lp.polarity == LoopPolarity.REINFORCING]
+        assert len(r_loops) >= 1
+        assert r_loops[0].polarity_confidence == 1.0, (
+            "a fully-signed reinforcing loop has structural confidence 1.0"
+        )
+
+    def test_discovery_loops_carry_confidence_in_range(self) -> None:
+        """Behavioral `Run.loops` populate `polarity_confidence` in [0, 1];
+        a single-signed reinforcing loop reports full confidence."""
+        project = self._reinforcing_model()
+        run = project.main_model.run(analyze_loops=True)
+        loops = run.loops
+        assert len(loops) >= 1
+        for loop in loops:
+            assert isinstance(loop.polarity_confidence, float)
+            assert 0.0 <= loop.polarity_confidence <= 1.0
+        r_loops = [lp for lp in loops if lp.polarity == LoopPolarity.REINFORCING]
+        assert len(r_loops) >= 1
+        assert r_loops[0].polarity_confidence == 1.0, (
+            "a single-signed reinforcing loop scores confidence 1.0"
+        )

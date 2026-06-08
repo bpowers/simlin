@@ -244,9 +244,13 @@ export function simlin_analyze_get_relative_loop_score(
 
 // Struct sizes for wasm32 target (expected values)
 // SimlinLoop: id: ptr(4), variables: ptr(4), var_count: usize(4), polarity: u32(4),
-// name: ptr(4) = 20 bytes. `name` grew additively (NULL when the loop has no
-// modeler-assigned name), mirroring how SimlinLink gained relative_score.
-const LOOP_SIZE = 20;
+// name: ptr(4), then a 4-byte pad so polarity_confidence: f64(8) lands 8-byte
+// aligned at offset 24, then partition: i32(4) at offset 32 and a 4-byte tail pad
+// (the struct's 8-byte alignment from the f64) = 40 bytes total. `partition`
+// (GH #685) grew the struct additively past its old 32-byte size;
+// validateStructSizes asserts this against simlin_sizeof_loop() so any
+// miscalculation fails loudly.
+const LOOP_SIZE = 40;
 // SimlinLink: from: ptr(4), to: ptr(4), polarity: u32(4), score: ptr(4),
 // score_len: usize(4), relative_score: ptr(4), relative_score_len: usize(4) = 28 bytes
 const LINK_SIZE = 28;
@@ -335,6 +339,13 @@ export function readLoops(loopsPtr: SimlinLoopsPtr): Loop[] {
     const varCount = view.getUint32(ptr + 8, true);
     const polarity = view.getUint32(ptr + 12, true) as SimlinLoopPolarity;
     const namePtr = view.getUint32(ptr + 16, true);
+    // 4-byte pad at ptr + 20 aligns the f64 polarity_confidence to offset 24.
+    const polarityConfidence = view.getFloat64(ptr + 24, true);
+    // partition is a SIGNED i32 at offset 32; -1 means no parent-level
+    // partition (mapped to null below). The trailing partitions array of the
+    // SimlinLoops container is intentionally left unread here -- no TS/diagram
+    // consumer needs it yet; it is available via the C ABI / pysimlin / MCP.
+    const partition = view.getInt32(ptr + 32, true);
 
     // Read variable names
     const variables: string[] = [];
@@ -347,7 +358,7 @@ export function readLoops(loopsPtr: SimlinLoopsPtr): Loop[] {
     const id = wasmToString(idPtr) ?? '';
     // namePtr is NULL (0) for an enumerated loop with no modeler-assigned name.
     const name = namePtr !== 0 ? wasmToString(namePtr) : null;
-    loops.push({ id, variables, polarity, name });
+    loops.push({ id, variables, polarity, name, polarityConfidence, partition: partition < 0 ? null : partition });
   }
 
   return loops;

@@ -624,11 +624,11 @@ class Model:
             units=sim_specs.get("timeUnits") or None,
         )
 
-    def get_loops(self) -> list[Loop]:
-        """Get all feedback loops in the model.
-
-        Returns:
-            List of Loop objects
+    def _get_loops_and_partitions(self) -> tuple[list[Loop], list[Partition]]:
+        """Read the exhaustive/pinned loop list AND its cycle partitions from a
+        single FFI call, so a loop's ``partition`` index and the
+        ``Partition`` it names come from the same result (the indices are
+        result-scoped -- see :attr:`Loop.partition`).
         """
         with self._lock:
             self._check_alive()
@@ -637,13 +637,10 @@ class Model:
             check_out_error(err_ptr, "Get loops")
 
         if loops_ptr == ffi.NULL:
-            return []
+            return [], []
 
         try:
-            if loops_ptr.count == 0:
-                return []
-
-            loops = []
+            loops: list[Loop] = []
             for i in range(loops_ptr.count):
                 c_loop = loops_ptr.loops[i]
 
@@ -657,14 +654,44 @@ class Model:
                     id=c_to_string(c_loop.id) or f"loop_{i}",
                     variables=tuple(variables),
                     polarity=LoopPolarity(c_loop.polarity),
+                    polarity_confidence=float(c_loop.polarity_confidence),
                     name=c_to_string(c_loop.name),
+                    # -1 = no parent-level partition (a pure module-internal
+                    # loop); otherwise the result-scoped index into the
+                    # partitions list below.
+                    partition=None if c_loop.partition < 0 else int(c_loop.partition),
                 )
                 loops.append(loop)
 
-            return loops
+            partitions: list[Partition] = []
+            for i in range(loops_ptr.partition_count):
+                c_part = loops_ptr.partitions[i]
+                stocks = []
+                for j in range(c_part.stock_count):
+                    stock = c_to_string(c_part.stocks[j])
+                    if stock:
+                        stocks.append(stock)
+                partitions.append(
+                    Partition(stocks=tuple(stocks), loop_count=int(c_part.loop_count))
+                )
+
+            return loops, partitions
 
         finally:
             lib.simlin_free_loops(loops_ptr)
+
+    def get_loops(self) -> list[Loop]:
+        """Get all feedback loops in the model.
+
+        Each loop carries a result-scoped :attr:`Loop.partition` index into
+        :attr:`loop_partitions`; the partitions' stock SETS agree with the
+        discovery surface (:attr:`Analysis.partitions`) for the same model.
+
+        Returns:
+            List of Loop objects
+        """
+        loops, _partitions = self._get_loops_and_partitions()
+        return loops
 
     @property
     def loops(self) -> tuple[Loop, ...]:
@@ -678,6 +705,29 @@ class Model:
             Tuple of Loop objects (structural only, no behavior data)
         """
         return tuple(self.get_loops())
+
+    @property
+    def loop_partitions(self) -> tuple[Partition, ...]:
+        """The cycle partitions referenced by :attr:`loops`.
+
+        Each :attr:`Loop.partition` index from :attr:`loops` indexes this
+        tuple. A partition is a group of stocks connected by feedback (a
+        strongly-connected component of the stock-to-stock graph); loop scores
+        are only comparable WITHIN a partition, so group loops by partition to
+        present each feedback subsystem separately. Indices are dense and
+        result-scoped -- key on :attr:`Partition.stocks` for a durable
+        identity. That stock set matches across the exhaustive (``Model.loops``)
+        and discovery (:attr:`Analysis.partitions`) surfaces only for SCALAR
+        models: this exhaustive surface partitions stocks at VARIABLE
+        granularity (``population``) while discovery partitions at ELEMENT
+        granularity (``population[nyc]``), so an arrayed model's two surfaces
+        differ in granularity.
+
+        Returns:
+            Tuple of Partition objects (exhaustive/structural surface).
+        """
+        _loops, partitions = self._get_loops_and_partitions()
+        return tuple(partitions)
 
     def analyze(self, timeout: float | None = None) -> Analysis:
         """Run strongest-path loop *discovery* on this model.
@@ -763,6 +813,7 @@ class Model:
                         id=c_to_string(c_loop.id) or f"loop_{i}",
                         variables=tuple(variables),
                         polarity=LoopPolarity(c_loop.polarity),
+                        polarity_confidence=float(c_loop.polarity_confidence),
                         behavior_time_series=behavior_ts,
                         name=c_to_string(c_loop.name),
                         partition=None if c_loop.partition < 0 else int(c_loop.partition),
@@ -804,6 +855,7 @@ class Model:
                 loops=tuple(loops),
                 dominant_periods=tuple(periods),
                 truncated=bool(result_ptr.truncated),
+                agg_recovery_truncated=bool(result_ptr.agg_recovery_truncated),
                 partitions=tuple(partitions),
             )
         finally:
@@ -892,9 +944,10 @@ class Model:
                 sim.run_to_end()
                 warnings.warn(
                     f"loop analysis (LTM) could not be enabled for this run, so it "
-                    f"was skipped and run.loops will be empty. Pass "
-                    f"analyze_loops=False to silence this warning. Underlying "
-                    f"error: {ltm_err}",
+                    f"was skipped: run.loops will carry the model's structural loops "
+                    f"with structural polarity and no behavior series (no runtime "
+                    f"reclassification or relative scores). Pass analyze_loops=False "
+                    f"to silence this warning. Underlying error: {ltm_err}",
                     RuntimeWarning,
                     stacklevel=2,
                 )
@@ -902,8 +955,12 @@ class Model:
             sim = self.simulate(overrides=overrides or {}, enable_ltm=False)
             sim.run_to_end()
 
+        run = Run(sim, overrides or {})
+
+        # The discovery auto-flip warning below keys off whether the model has
+        # any enumerable structural loops; that is a separate question from the
+        # runtime loop surface `Run.loops` exposes, so query it directly here.
         loops_structural = self.loops
-        run = Run(sim, overrides or {}, loops_structural)
 
         # Surface the discovery auto-flip: on models too large for exhaustive
         # loop enumeration, LTM resolves to the strongest-path discovery

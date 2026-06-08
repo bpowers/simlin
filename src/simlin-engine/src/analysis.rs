@@ -34,6 +34,12 @@ pub struct LoopSummary {
     /// `ltm_finding::FoundLoop::partition` for the stability caveats (indices
     /// are dense per result, not durable across runs/edits).
     pub partition: Option<usize>,
+    /// Polarity-confidence ratio in `[0.0, 1.0]` for [`Self::polarity`]
+    /// (GH #495): `1.0` for a clean reinforcing/balancing loop, a value below
+    /// 1.0 for a mixed-sign `mostly_reinforcing`/`mostly_balancing` loop, and
+    /// `0.0` for an `undetermined` one.  Carried verbatim from the discovered
+    /// loop's [`crate::ltm_finding::FoundLoop::polarity_confidence`].
+    pub polarity_confidence: f64,
 }
 
 /// Complete analysis results for a model.
@@ -422,6 +428,7 @@ fn to_loop_summary(
         variables,
         importance,
         partition: fl.partition,
+        polarity_confidence: fl.polarity_confidence,
     }
 }
 

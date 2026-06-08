@@ -21,7 +21,7 @@ use simlin_engine::json;
 use crate::access::ProjectAccess;
 use crate::errors::AccessError;
 use crate::open::resolve_model_name;
-use crate::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary};
+use crate::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput};
 
 /// Input for the `ReadModel` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -48,7 +48,21 @@ pub struct ReadModelOutput {
     pub model: json::Model,
     pub time: Vec<f64>,
     pub loop_dominance: Vec<LoopDominanceSummary>,
+    /// The cycle partitions referenced by `loopDominance` (each summary's
+    /// `partition` indexes this list).  Elided when empty to preserve the
+    /// stable wire shape; the stock SET of each entry is the durable per-result
+    /// identity.  It matches the exhaustive (`Model.loops`) surface's stock set
+    /// only for SCALAR models -- this surface is element-level, the exhaustive
+    /// surface variable-level, so they differ in granularity for arrayed models.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub partitions: Vec<PartitionOutput>,
     pub dominant_loops_by_period: Vec<DominantPeriodOutput>,
+    /// True when discovery's cross-element-through-aggregate loop recovery hit
+    /// its budget, so `loopDominance` may be missing some cross-agg reducer
+    /// loops. A result-level structural-completeness signal (not per-loop);
+    /// elided when false to preserve the stable wire shape.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub agg_recovery_truncated: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<ErrorOutput>,
 }
@@ -108,6 +122,8 @@ pub async fn read_model<A: ProjectAccess>(
         simlin_engine::analysis::analyze_model(&project, &mut db, source_project, model_name, None)
             .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
 
+    let agg_recovery_truncated = analysis.agg_recovery_truncated;
+    let partitions: Vec<PartitionOutput> = analysis.partitions.iter().map(Into::into).collect();
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
         .loop_dominance
         .into_iter()
@@ -124,7 +140,9 @@ pub async fn read_model<A: ProjectAccess>(
         model: analysis.model,
         time: analysis.time,
         loop_dominance,
+        partitions,
         dominant_loops_by_period,
+        agg_recovery_truncated,
         errors,
     })
 }

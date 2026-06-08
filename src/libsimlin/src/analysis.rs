@@ -301,7 +301,171 @@ pub(crate) unsafe fn owned_links_to_ffi(
     }))
 }
 
-/// Get the feedback loops detected in a model
+/// Map the engine's `DetectedLoopPolarity` 1:1 onto the FFI enum (GH #495).
+///
+/// All five variants are surfaced verbatim -- the MostlyReinforcing/
+/// MostlyBalancing ("Rux"/"Bux") variants are NOT coalesced down to R/B.  On
+/// the STRUCTURAL surface (`simlin_analyze_get_loops`) the Mostly* variants
+/// never actually arise (the engine has no runtime scores there, so the
+/// confidence is 1.0/0.0), but the runtime surface
+/// (`simlin_analyze_get_loops_runtime`) does produce them, and sharing this
+/// mapping is what keeps the two surfaces from drifting.
+fn detected_loop_polarity_to_ffi(polarity: engine::db::DetectedLoopPolarity) -> SimlinLoopPolarity {
+    match polarity {
+        engine::db::DetectedLoopPolarity::Reinforcing => SimlinLoopPolarity::Reinforcing,
+        engine::db::DetectedLoopPolarity::Balancing => SimlinLoopPolarity::Balancing,
+        engine::db::DetectedLoopPolarity::MostlyReinforcing => {
+            SimlinLoopPolarity::MostlyReinforcing
+        }
+        engine::db::DetectedLoopPolarity::MostlyBalancing => SimlinLoopPolarity::MostlyBalancing,
+        engine::db::DetectedLoopPolarity::Undetermined => SimlinLoopPolarity::Undetermined,
+    }
+}
+
+/// Convert a slice of engine `DetectedLoop`s into the C-ABI `*mut SimlinLoops`.
+///
+/// Shared by the STRUCTURAL entry point (`simlin_analyze_get_loops`) and the
+/// RUNTIME entry point (`simlin_analyze_get_loops_runtime`): both produce a
+/// `Vec<DetectedLoop>` (the runtime one having first run
+/// `reclassify_loops_from_results` over it) and need byte-identical id /
+/// variable-name / polarity / confidence / name marshalling plus the same
+/// interior-NUL error handling and partial-allocation cleanup.  Factoring it
+/// out is the single point that guarantees the two surfaces cannot diverge in
+/// how they present a loop -- only in how the loops' polarity was computed.
+///
+/// On a `CString::new` failure (interior NUL in an id, variable name, or loop
+/// name -- though a NUL in the *name* folds to NULL rather than failing) the
+/// partial allocations are freed via `drop_loops_vec`, a generic error is
+/// reported through `out_error`, and the function returns `ptr::null_mut()`.
+unsafe fn detected_loops_to_ffi(
+    loops: &[engine::db::DetectedLoop],
+    partitions: &[engine::ltm_finding::DiscoveredPartition],
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinLoops {
+    if loops.is_empty() {
+        return Box::into_raw(Box::new(SimlinLoops {
+            loops: ptr::null_mut(),
+            count: 0,
+            partitions: ptr::null_mut(),
+            partition_count: 0,
+        }));
+    }
+    let mut c_loops = Vec::with_capacity(loops.len());
+    for loop_item in loops {
+        let id = match CString::new(loop_item.id.as_str()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                drop_loops_vec(&mut c_loops);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("loop id contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+
+        let mut var_names: Vec<*mut c_char> = Vec::with_capacity(loop_item.variables.len());
+        for name in &loop_item.variables {
+            match CString::new(name.as_str()) {
+                Ok(s) => var_names.push(s.into_raw()),
+                Err(_) => {
+                    drop_c_string(id);
+                    for ptr in &var_names {
+                        drop_c_string(*ptr);
+                    }
+                    drop_loops_vec(&mut c_loops);
+                    store_error(
+                        out_error,
+                        SimlinError::new(SimlinErrorCode::Generic)
+                            .with_message("loop variable name contains interior NUL byte"),
+                    );
+                    return ptr::null_mut();
+                }
+            }
+        }
+        let var_count = var_names.len();
+        let variables = if var_count > 0 {
+            let mut vars = var_names.into_boxed_slice();
+            let ptr = vars.as_mut_ptr();
+            std::mem::forget(vars);
+            ptr
+        } else {
+            ptr::null_mut()
+        };
+        let polarity = detected_loop_polarity_to_ffi(loop_item.polarity);
+        // A modeler-pinned loop carries a human-meaningful name; an enumerated
+        // loop has none (NULL).  An interior NUL in the name folds to NULL --
+        // the loop is still returned, just unnamed -- rather than failing the
+        // whole call over a degenerate name.
+        let name = loop_item
+            .name
+            .as_deref()
+            .and_then(|n| CString::new(n).ok())
+            .map_or(ptr::null_mut(), |s| s.into_raw());
+        c_loops.push(SimlinLoop {
+            id,
+            variables,
+            var_count,
+            polarity,
+            name,
+            polarity_confidence: loop_item.polarity_confidence,
+            // -1 = no parent-level partition; otherwise the result-scoped
+            // dense index into `partitions` below.  Mirrors
+            // `SimlinDiscoveredLoop.partition`'s None->-1 mapping.
+            partition: loop_item
+                .partition
+                .map_or(-1, |p| i32::try_from(p).unwrap_or(-1)),
+        });
+    }
+
+    // Build the partitions array (mirroring the discovery `discovery_to_ffi`
+    // path).  An interior NUL in a stock name frees the already-built loops
+    // and partitions and surfaces a generic error.
+    let mut c_partitions: Vec<SimlinDiscoveredPartition> = Vec::with_capacity(partitions.len());
+    for partition in partitions {
+        let (stocks, stock_count) = match strings_to_c_array(&partition.stocks) {
+            Ok(v) => v,
+            Err(()) => {
+                drop_discovered_partitions_vec(&mut c_partitions);
+                drop_loops_vec(&mut c_loops);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("partition stock name contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+        c_partitions.push(SimlinDiscoveredPartition {
+            stocks,
+            stock_count,
+            loop_count: partition.loop_count,
+        });
+    }
+
+    let count = c_loops.len();
+    let mut loops = c_loops.into_boxed_slice();
+    let loops_ptr = loops.as_mut_ptr();
+    std::mem::forget(loops);
+    let (partitions_ptr, partition_count) = vec_into_raw_parts(c_partitions);
+    Box::into_raw(Box::new(SimlinLoops {
+        loops: loops_ptr,
+        count,
+        partitions: partitions_ptr,
+        partition_count,
+    }))
+}
+
+/// Get the feedback loops detected in a model, with STRUCTURAL polarity.
+///
+/// The polarity reported here comes from static analysis of the loops' link
+/// signs (`model_detected_loops`): a loop is Reinforcing/Balancing only when
+/// every link has a determined sign (confidence 1.0), Undetermined when any
+/// link is unknown (confidence 0.0).  No simulation is required -- this works
+/// off a `SimlinModel` alone.  For the RUNTIME polarity (Rux/Bux from the
+/// post-sim `loop_score` series, per the LTM papers' confidence gate) use
+/// `simlin_analyze_get_loops_runtime`, which takes a run `SimlinSim`.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
@@ -349,98 +513,137 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
     };
 
     let detected = engine::db::model_detected_loops(&*db_locked, source_model, source_project);
+    detected_loops_to_ffi(&detected.loops, &detected.partitions, out_error)
+}
 
-    if detected.loops.is_empty() {
-        let result = Box::new(SimlinLoops {
-            loops: ptr::null_mut(),
-            count: 0,
-        });
-        return Box::into_raw(result);
-    }
-    let mut c_loops = Vec::with_capacity(detected.loops.len());
-    for loop_item in &detected.loops {
-        let id = match CString::new(loop_item.id.as_str()) {
-            Ok(s) => s.into_raw(),
-            Err(_) => {
-                drop_loops_vec(&mut c_loops);
+/// Get the feedback loops detected in a model, with RUNTIME polarity derived
+/// from a completed simulation's per-step loop-score series.
+///
+/// This is the sim-bearing sibling of `simlin_analyze_get_loops` (which takes
+/// only a `SimlinModel` and reports STRUCTURAL polarity).  It builds the same
+/// exhaustive `model_detected_loops` set, then runs the engine's
+/// `reclassify_loops_from_results` primitive (GH #679) over it: for every loop
+/// whose `$⁚ltm⁚loop_score⁚{id}` series exists in the results, the loop's
+/// polarity and confidence are overwritten by
+/// `crate::ltm::LoopPolarity::from_runtime_scores` (the LTM papers' Rux/Bux/U
+/// classification with the 0.99 confidence gate).  A loop whose runtime score
+/// is never active keeps its structural classification.  Loop IDs are stable
+/// (a `u1` stays `u1` even after its polarity flips to Reinforcing).
+///
+/// This is the FIRST production caller of `reclassify_loops_from_results`: it
+/// is the only path on which the exhaustive loop surface can report Rux/Bux,
+/// or a runtime sign flip (e.g. a structurally-Undetermined loop that the
+/// simulation shows is single-signed), which the structural surface can never
+/// express.
+///
+/// **A2A (arrayed) semantics**: the engine primitive concatenates ALL element
+/// slots of an arrayed loop's `loop_score` series into one sample set before
+/// classifying, so an A2A loop with one reinforcing element and one balancing
+/// element classifies Undetermined -- the whole-loop behavior rather than any
+/// single slot.  pysimlin's `Run.loops` is built directly on this primitive
+/// (it adds only the per-step behavior series on top), so it reports exactly
+/// this all-slots classification.  See the note on
+/// `engine::db::reclassify_loops_from_results`.
+///
+/// Requires `sim` to have been created with `enable_ltm = true` and run to
+/// completion (it must hold `Results`); otherwise an error is reported through
+/// `out_error`.  When LTM was not enabled the `loop_score` series are absent,
+/// so the result degenerates to the structural classification.
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim that has been run.
+/// - The returned SimlinLoops must be freed with simlin_free_loops.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_analyze_get_loops_runtime(
+    sim: *mut SimlinSim,
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinLoops {
+    clear_out_error(out_error);
+    let sim_ref = match require_sim(sim) {
+        Ok(s) => s,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return ptr::null_mut();
+        }
+    };
+    let model_ref = &*sim_ref.model;
+
+    // The LTM-snapshot recompute flips `ltm_enabled` on the shared salsa input
+    // (it must be true for `model_ltm_variables` to emit non-empty
+    // `loop_partitions`), so a mutable db lock is required.  `recompute_ltm_snapshots`
+    // wraps that flip in an `LtmEnabledGuard` that unconditionally restores the
+    // flag on drop -- the same pattern `simlin_analyze_rel_loop_score_from_wasm_results`
+    // uses.
+    let mut db_locked = (*model_ref.project).db.lock().unwrap();
+    let source_project = match db_locked.current_source_project() {
+        Some(sp) => sp,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message("project not initialized"),
+            );
+            return ptr::null_mut();
+        }
+    };
+    let canonical_model = canonicalize(&model_ref.model_name);
+    let source_model = match source_project
+        .models(&*db_locked)
+        .get(canonical_model.as_ref())
+    {
+        Some(m) => *m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return ptr::null_mut();
+        }
+    };
+
+    // Build the exhaustive structural loop set, identical to
+    // `simlin_analyze_get_loops`, BEFORE recomputing the LTM snapshots so the
+    // detected-loop query runs with `ltm_enabled` in whatever state it already
+    // was (it has no LTM dependency).
+    let detected = engine::db::model_detected_loops(&*db_locked, source_model, source_project);
+    // Partition metadata is structural (independent of the runtime
+    // reclassification below), so capture it before the loops are moved out.
+    let partitions = detected.partitions;
+    let mut loops = detected.loops;
+
+    // `loop_partitions` drives the per-loop slot count the primitive uses to
+    // concatenate an arrayed loop's element slots.  Recompute it the same way
+    // the rel-loop-score-from-wasm FFI does, under the ltm-enabled guard.
+    let (loop_partitions, _loop_element_index) = recompute_ltm_snapshots(
+        &mut db_locked,
+        source_project,
+        source_model,
+        &model_ref.model_name,
+    );
+
+    // Hold the sim-state lock only to borrow `&Results`; require a completed
+    // run so there is a loop-score series to classify against.  Without
+    // results (sim never run, or non-LTM) the structural loops are returned
+    // unchanged -- there is nothing to reclassify.
+    {
+        let state_guard = sim_ref.state.lock().unwrap();
+        match state_guard.results.as_ref() {
+            Some(results) => {
+                engine::db::reclassify_loops_from_results(&mut loops, results, &loop_partitions);
+            }
+            None => {
                 store_error(
                     out_error,
                     SimlinError::new(SimlinErrorCode::Generic)
-                        .with_message("loop id contains interior NUL byte"),
+                        .with_message("simulation has no results; run the simulation first"),
                 );
                 return ptr::null_mut();
             }
-        };
-
-        let mut var_names: Vec<*mut c_char> = Vec::with_capacity(loop_item.variables.len());
-        for name in &loop_item.variables {
-            match CString::new(name.as_str()) {
-                Ok(s) => var_names.push(s.into_raw()),
-                Err(_) => {
-                    drop_c_string(id);
-                    for ptr in &var_names {
-                        drop_c_string(*ptr);
-                    }
-                    drop_loops_vec(&mut c_loops);
-                    store_error(
-                        out_error,
-                        SimlinError::new(SimlinErrorCode::Generic)
-                            .with_message("loop variable name contains interior NUL byte"),
-                    );
-                    return ptr::null_mut();
-                }
-            }
         }
-        let var_count = var_names.len();
-        let variables = if var_count > 0 {
-            let mut vars = var_names.into_boxed_slice();
-            let ptr = vars.as_mut_ptr();
-            std::mem::forget(vars);
-            ptr
-        } else {
-            ptr::null_mut()
-        };
-        // The C ABI exposes only the legacy three-way polarity surface
-        // (Reinforcing / Balancing / Undetermined), so MostlyReinforcing /
-        // MostlyBalancing fold into their dominant cousin here.  The
-        // polarity_confidence ratio is dropped at this boundary because
-        // the FFI struct has no field for it; native Rust callers that
-        // need confidence go through `engine::db::DetectedLoop` directly.
-        let polarity = match loop_item.polarity {
-            engine::db::DetectedLoopPolarity::Reinforcing
-            | engine::db::DetectedLoopPolarity::MostlyReinforcing => {
-                SimlinLoopPolarity::Reinforcing
-            }
-            engine::db::DetectedLoopPolarity::Balancing
-            | engine::db::DetectedLoopPolarity::MostlyBalancing => SimlinLoopPolarity::Balancing,
-            engine::db::DetectedLoopPolarity::Undetermined => SimlinLoopPolarity::Undetermined,
-        };
-        // A modeler-pinned loop carries a human-meaningful name; an enumerated
-        // loop has none (NULL).  An interior NUL in the name folds to NULL --
-        // the loop is still returned, just unnamed -- rather than failing the
-        // whole call over a degenerate name.
-        let name = loop_item
-            .name
-            .as_deref()
-            .and_then(|n| CString::new(n).ok())
-            .map_or(ptr::null_mut(), |s| s.into_raw());
-        c_loops.push(SimlinLoop {
-            id,
-            variables,
-            var_count,
-            polarity,
-            name,
-        });
     }
-    let count = c_loops.len();
-    let mut loops = c_loops.into_boxed_slice();
-    let loops_ptr = loops.as_mut_ptr();
-    std::mem::forget(loops);
-    let result = Box::new(SimlinLoops {
-        loops: loops_ptr,
-        count,
-    });
-    Box::into_raw(result)
+    drop(db_locked);
+
+    detected_loops_to_ffi(&loops, &partitions, out_error)
 }
 
 /// Frees a SimlinLoops structure
@@ -459,6 +662,19 @@ pub unsafe extern "C" fn simlin_free_loops(loops: *mut SimlinLoops) {
             drop_loop(loop_item);
         }
         let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(loops.loops, loops.count));
+    }
+    // Free the partitions array and each partition's stock CString array,
+    // mirroring `simlin_free_discovery_result`'s partition free path.
+    if !loops.partitions.is_null() && loops.partition_count > 0 {
+        let partition_slice =
+            std::slice::from_raw_parts_mut(loops.partitions, loops.partition_count);
+        for partition in partition_slice.iter_mut() {
+            drop_discovered_partition(partition);
+        }
+        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            loops.partitions,
+            loops.partition_count,
+        ));
     }
 }
 
@@ -506,13 +722,18 @@ unsafe fn vec_into_raw_parts<T>(items: Vec<T>) -> (*mut T, usize) {
     (ptr, count)
 }
 
-/// Map the discovery polarity string (`LoopSummary::polarity`) to the
-/// three-way C ABI surface.  The "mostly_*" variants fold into their dominant
-/// cousin, matching `simlin_analyze_get_loops`.
+/// Map the discovery polarity string (`LoopSummary::polarity`) to the C ABI
+/// surface, preserving all five variants (GH #495): the "mostly_*" strings map
+/// to the MostlyReinforcing/MostlyBalancing ("Rux"/"Bux") enum variants rather
+/// than coalescing into R/B.  This is the high-value path -- discovery
+/// classifies from runtime scores, so the Mostly* variants actually occur here.
+/// An unrecognized string is treated as Undetermined.
 fn discovery_polarity(polarity: &str) -> SimlinLoopPolarity {
     match polarity {
-        "reinforcing" | "mostly_reinforcing" => SimlinLoopPolarity::Reinforcing,
-        "balancing" | "mostly_balancing" => SimlinLoopPolarity::Balancing,
+        "reinforcing" => SimlinLoopPolarity::Reinforcing,
+        "balancing" => SimlinLoopPolarity::Balancing,
+        "mostly_reinforcing" => SimlinLoopPolarity::MostlyReinforcing,
+        "mostly_balancing" => SimlinLoopPolarity::MostlyBalancing,
         _ => SimlinLoopPolarity::Undetermined,
     }
 }
@@ -672,6 +893,7 @@ unsafe fn discovery_to_ffi(
             partition: summary
                 .partition
                 .map_or(-1, |p| i32::try_from(p).unwrap_or(-1)),
+            polarity_confidence: summary.polarity_confidence,
         });
     }
 
@@ -737,6 +959,7 @@ unsafe fn discovery_to_ffi(
         partitions,
         partition_count,
         truncated: analysis.truncated,
+        agg_recovery_truncated: analysis.agg_recovery_truncated,
     }))
 }
 
