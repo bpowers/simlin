@@ -223,7 +223,7 @@ describe('Canvas gestures: resize (issue #707)', () => {
     expect(lastViewBox(h.callbacks.onViewBoxChange)).toEqual({ x: -50, y: -50, zoom: 1 });
   });
 
-  it('folds a resize during a pan into the live viewport without committing (no snap)', () => {
+  it('leaves the offset to an active pan and commits the new size on settle', () => {
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
     h.resize(1000, 1000); // establish svgSize before the gesture
     h.clearMountCalls();
@@ -235,17 +235,25 @@ describe('Canvas gestures: resize (issue #707)', () => {
       pointerMove(h.svg, 530, 540, { shiftKey: true, buttons: 1 });
       expect(translate(h.getTransform())).toMatchObject({ x: 30, y: 40 });
 
-      // Resize mid-pan: folds the +dW/4 = +10 re-centering into the live viewport,
-      // updating the transform but committing nothing.
-      h.resize(1040, 1000);
+      // Resize mid-pan: the pan owns the offset, so the offset does NOT shift
+      // (no re-centering jump) and nothing commits. Only the measured size changes.
+      h.resize(1200, 900);
       expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
-      expect(translate(h.getTransform())).toMatchObject({ x: 40, y: 40 });
+      expect(translate(h.getTransform())).toMatchObject({ x: 30, y: 40 });
 
-      // Releasing stationary commits the pan once, carrying the folded offset.
+      // The pan continues correctly from its press-time anchor after the resize
+      // (it must not be discarded or jump): another move yields (60, 80).
+      clock.tick(10);
+      pointerMove(h.svg, 560, 580, { shiftKey: true, buttons: 1 });
+      expect(translate(h.getTransform())).toMatchObject({ x: 60, y: 80 });
+
+      // Releasing stationary commits once, carrying the final offset AND the new
+      // measured size (so view.viewBox.width/height are not left stale).
       clock.tick(50);
-      pointerUp(h.svg, 530, 540, { shiftKey: true });
+      pointerUp(h.svg, 560, 580, { shiftKey: true });
       expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
-      expect(lastViewBox(h.callbacks.onViewBoxChange)).toMatchObject({ x: 40, y: 40 });
+      const committed = h.callbacks.onViewBoxChange.mock.calls[0][0];
+      expect(committed).toMatchObject({ x: 60, y: 80, width: 1200, height: 900 });
     } finally {
       clock.restore();
     }

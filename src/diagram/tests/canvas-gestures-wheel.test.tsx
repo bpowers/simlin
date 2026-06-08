@@ -104,6 +104,35 @@ describe('Canvas gestures: wheel zoom (issue #707)', () => {
   });
 });
 
+describe('Canvas gestures: a plain click does not strand a pending wheel commit (issue #707)', () => {
+  it('still commits the wheel offset after an intervening click', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+    jest.useFakeTimers();
+    try {
+      // Wheel-pan arms the debounce (uncommitted).
+      dispatchWheel(h.svg, { deltaX: 30, deltaY: 40 });
+      expect(translate(h.getTransform())).toMatchObject({ x: -30, y: -40 });
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+
+      // A plain empty-canvas click (press+release) before the debounce fires. This
+      // is NOT a viewport gesture, so it must not strand the pending wheel commit.
+      pointerDown(h.svg, 500, 500);
+      pointerUp(h.svg, 500, 500);
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+
+      // The debounce still fires and commits the wheel offset.
+      act(() => {
+        jest.advanceTimersByTime(200);
+      });
+      expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+      expect(h.callbacks.onViewBoxChange.mock.calls[0][0]).toMatchObject({ x: -30, y: -40 });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
 describe('Canvas gestures: external view change overrides a live gesture (issue #707)', () => {
   it('clears the live wheel viewport and cancels the pending commit', () => {
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
@@ -127,6 +156,49 @@ describe('Canvas gestures: external view change overrides a live gesture (issue 
         jest.advanceTimersByTime(200);
       });
       expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('Canvas gestures: a plain click interrupting a coast persists it (issue #707)', () => {
+  it('commits the coasted offset after the click, via the deferred commit', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+    jest.useFakeTimers();
+    try {
+      // Flick to start a coast, then advance a couple of frames.
+      pointerDown(h.svg, 500, 500, { pointerType: 'touch', isPrimary: true });
+      act(() => {
+        jest.advanceTimersByTime(10);
+      });
+      pointerMove(h.svg, 540, 540, { pointerType: 'touch', isPrimary: true, buttons: 1 });
+      act(() => {
+        jest.advanceTimersByTime(5);
+      });
+      pointerUp(h.svg, 540, 540, { pointerType: 'touch', isPrimary: true });
+      act(() => {
+        jest.advanceTimersByTime(32);
+      });
+      const coasted = translate(h.getTransform());
+      expect(coasted.x).toBeGreaterThan(40);
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+
+      // A plain click interrupts the coast. It is not a viewport gesture, so the
+      // coasted offset must not be stranded: the press stops the coast and arms a
+      // deferred commit.
+      pointerDown(h.svg, 200, 200);
+      pointerUp(h.svg, 200, 200);
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+
+      // The deferred commit fires once idle, persisting the coasted offset exactly
+      // once.
+      act(() => {
+        jest.advanceTimersByTime(200);
+      });
+      expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+      expect(h.callbacks.onViewBoxChange.mock.calls[0][0].x).toBeCloseTo(coasted.x, 3);
     } finally {
       jest.useRealTimers();
     }
