@@ -107,8 +107,13 @@ class LoopPolarity(IntEnum):
     def from_runtime_scores(cls, scores: NDArray[np.float64]) -> LoopPolarity | None:
         """Classify loop polarity based on actual runtime loop score values.
 
-        Mirrors `LoopPolarity::from_runtime_scores` in
-        `src/simlin-engine/src/ltm.rs`.  The polarity confidence
+        This is a standalone convenience utility that mirrors
+        `LoopPolarity::from_runtime_scores` in `src/simlin-engine/src/ltm.rs`,
+        operating on an arbitrary score array.  It is NOT the path
+        :attr:`Run.loops` uses to reclassify polarity -- that surface sources
+        polarity from the engine primitive
+        (:meth:`Sim.get_loops_runtime`) so the classification is the Rust
+        source of truth over all element slots.  The polarity confidence
         ``|r - |b|| / (r + |b|)`` (Schoenberg & Eberlein, 2020) drives
         the classification:
 
@@ -308,8 +313,9 @@ class Loop:
     """Loop polarity: REINFORCING (R), BALANCING (B), MOSTLY_REINFORCING (Rux),
     MOSTLY_BALANCING (Bux), or UNDETERMINED (U). All five arrive through the C
     FFI verbatim (GH #495) -- the MOSTLY_* ("Rux"/"Bux") variants are no longer
-    coalesced onto REINFORCING/BALANCING. They occur on the discovery surface,
-    where the polarity is classified from runtime score series; see
+    coalesced onto REINFORCING/BALANCING. They occur on the runtime surfaces
+    (``Run.loops``, ``Sim.get_loops_runtime``, and discovery), where the
+    polarity is classified from runtime score series; see
     :attr:`polarity_confidence`."""
 
     polarity_confidence: float = 1.0
@@ -341,7 +347,7 @@ class Loop:
     """RESULT-SCOPED index into :attr:`Analysis.partitions` naming this loop's
     cycle partition, or ``None`` -- both for loops with no parent-level
     partition (pure module-internal loops) and for loop surfaces that don't
-    carry partition metadata (structural ``Model.loops``, ``Run.loops``).
+    carry partition metadata (structural ``Model.loops``).
     Indices are dense, assigned in first-appearance order over the ranked
     loop list; they identify partitions within ONE analysis result only and
     are not stable across runs or model edits -- key on

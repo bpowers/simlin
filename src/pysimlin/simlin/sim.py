@@ -344,16 +344,16 @@ class Sim:
         This is the single Rust source of truth for runtime loop polarity.  It
         is the only path on which the exhaustive loop surface can report
         ``MOSTLY_REINFORCING`` / ``MOSTLY_BALANCING``, or a runtime sign flip the
-        static analysis could not express.
+        static analysis could not express.  :attr:`Run.loops` is built directly
+        on this primitive (it attaches the per-step behavior series on top), so
+        the two report the same polarity / confidence / partition.
 
         .. note::
-            **A2A (arrayed) divergence.**  The engine primitive concatenates
+            **A2A (arrayed) classification.**  The engine primitive concatenates
             ALL element slots of an arrayed loop's ``loop_score`` series into one
             sample set before classifying, so an A2A loop with one reinforcing
-            element and one balancing element classifies ``UNDETERMINED``.  This
-            deliberately differs from :attr:`Run.loops`, which reclassifies off
-            **slot 0 only** (the dominant/first element); the two agree on
-            scalar loops.  See the note on
+            element and one balancing element classifies ``UNDETERMINED`` -- the
+            whole-loop behavior rather than any single slot.  See the note on
             ``engine::db::reclassify_loops_from_results`` in the Rust engine.
 
         Requires the simulation to have been created with ``enable_ltm=True`` and
@@ -564,8 +564,7 @@ class Sim:
         """
         from .run import Run
 
-        loops_structural = self._model.loops
-        return Run(self, self._overrides, loops_structural)
+        return Run(self, self._overrides)
 
     def __enter__(self) -> Self:
         """Context manager entry point."""

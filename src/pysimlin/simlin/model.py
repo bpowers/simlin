@@ -954,8 +954,12 @@ class Model:
             sim = self.simulate(overrides=overrides or {}, enable_ltm=False)
             sim.run_to_end()
 
+        run = Run(sim, overrides or {})
+
+        # The discovery auto-flip warning below keys off whether the model has
+        # any enumerable structural loops; that is a separate question from the
+        # runtime loop surface `Run.loops` exposes, so query it directly here.
         loops_structural = self.loops
-        run = Run(sim, overrides or {}, loops_structural)
 
         # Surface the discovery auto-flip: on models too large for exhaustive
         # loop enumeration, LTM resolves to the strongest-path discovery

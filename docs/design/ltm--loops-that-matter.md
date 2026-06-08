@@ -768,10 +768,12 @@ surfaces handle it differently:
   from `from_runtime_scores` over its discovered strongest-path score series
   (falling back to the trimmed-chain structural polarity for an all-zero/NaN
   series). Fully reclassified.
-- **pysimlin `Run.loops`**: reclassifies post-simulation in its own Python
-  `LoopPolarity.from_runtime_scores` mirror, reading `loop_score` slot 0 for
-  each structural loop (this is pre-existing behavior -- it predates GH #679 --
-  now pinned by a regression test for the module-boundary case).
+- **pysimlin `Run.loops`**: sources polarity / confidence / partition straight
+  from the engine primitive (bound as `Sim.get_loops_runtime` ->
+  `reclassify_loops_from_results`, GH #679/#685, the all-slots Rust source of
+  truth) and attaches the per-step relative-score series on top. There is no
+  separate Python slot-0 reclassification path. (`LoopPolarity.from_runtime_scores`
+  survives only as a standalone scalar-array convenience utility.)
 - **libsimlin / WASM / TS `simlin_analyze_get_loops`**: **intentionally
   structural-only**. The FFI takes only a `SimlinModel` (no simulation
   `Results` in hand), folds `MostlyReinforcing`/`MostlyBalancing` to
@@ -798,15 +800,14 @@ runtime classification. A loop whose score is never active (every slot/step
 zero or non-finite) keeps its structural polarity -- there is no runtime
 evidence to override it.
 
-**A2A semantics differ across the three sites** and must not be conflated. The
-Rust `reclassify_loops_from_results` helper concatenates *all* element slots of
-an A2A loop into one sample set (so a loop that is reinforcing in one element
-and balancing in another classifies `Undetermined`). pysimlin reads slot 0
-only. Discovery uses one strongest-path scalar series per `FoundLoop`. All
-three share the scalar semantics and agree on a scalar loop; they diverge only
-in how an A2A loop's multiple element slots are reduced to one classification.
-Reconciling that is deferred until a sim-bearing Rust consumer needs the
-all-slots reading.
+**A2A semantics across the sites.** The Rust `reclassify_loops_from_results`
+helper concatenates *all* element slots of an A2A loop into one sample set (so a
+loop that is reinforcing in one element and balancing in another classifies
+`Undetermined`). pysimlin `Run.loops` is built on this primitive, so it reports
+exactly this all-slots classification. Discovery uses one strongest-path scalar
+series per `FoundLoop`. The exhaustive (sim-bearing) and discovery surfaces thus
+agree on scalar loops and differ only in how an A2A loop's element slots are
+reduced -- the exhaustive path now uses the all-slots reading rather than slot 0.
 
 ## Strongest-Path Algorithm
 

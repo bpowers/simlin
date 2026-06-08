@@ -247,13 +247,13 @@ class TestLtmModuleBoundaryReclassification:
 
 
 class TestRuntimeLoopsFfiAgreesWithPython:
-    """GH #679: the new sim-bearing runtime-loops FFI (`Sim.get_loops_runtime`
-    / `Run.loops_runtime`) routes through the engine's
-    `reclassify_loops_from_results` primitive.  On a SCALAR loop it must agree
-    with the pre-existing Python slot-0 reclassification path (`Run.loops`),
-    since both share the scalar `from_runtime_scores` semantics; they can only
-    diverge on arrayed (A2A) loops, where the engine concatenates all element
-    slots and the Python path reads slot 0 only."""
+    """GH #679/#685: `Run.loops` is the single authoritative runtime loop
+    surface -- its polarity / confidence / partition come from the engine's
+    `reclassify_loops_from_results` primitive (bound as `Sim.get_loops_runtime`,
+    the all-slots Rust source of truth), with `behavior_time_series` attached on
+    top.  These tests pin that `Run.loops` reports the engine's runtime
+    classification (not the static structural one) and that the low-level
+    `Sim.get_loops_runtime` primitive it builds on still behaves."""
 
     def _sign_flipping_logistic(self) -> Project:
         """A logistic loop whose runtime loop_score straddles zero: the
@@ -278,41 +278,40 @@ class TestRuntimeLoopsFfiAgreesWithPython:
             patch.upsert_flow(Flow(name="net", equation="r * stock * (1 - stock / k)"))
         return project
 
-    def test_runtime_ffi_agrees_with_python_on_scalar_loop(self) -> None:
-        """For a scalar sign-flipping loop, `Run.loops_runtime` (engine
-        primitive) and `Run.loops` (Python slot-0 path) must report the same
-        polarity and loop id."""
+    def test_run_loops_match_sim_primitive_on_scalar_loop(self) -> None:
+        """For a scalar sign-flipping loop, `Run.loops` must report the same
+        polarity / confidence / id as the engine primitive it is built on
+        (`Sim.get_loops_runtime`); `Run.loops` adds only the behavior series."""
         project = self._sign_flipping_logistic()
         model = project.main_model
 
         run = model.run(analyze_loops=True)
         assert run.ltm_mode == "exhaustive"
 
-        python_loops = run.loops
-        ffi_loops = run.loops_runtime
-        assert len(python_loops) == 1, "logistic model has one feedback loop"
-        assert len(ffi_loops) == 1, "runtime FFI returns the same single loop"
+        run_loops = run.loops
+        primitive_loops = run._sim.get_loops_runtime()
+        assert len(run_loops) == 1, "logistic model has one feedback loop"
+        assert len(primitive_loops) == 1, "primitive returns the same single loop"
 
-        py_loop = python_loops[0]
-        ffi_loop = ffi_loops[0]
+        run_loop = run_loops[0]
+        prim_loop = primitive_loops[0]
 
-        assert ffi_loop.id == py_loop.id, (
-            "loop id must be stable across the two reclassification surfaces "
-            f"(python {py_loop.id} vs ffi {ffi_loop.id})"
+        assert run_loop.id == prim_loop.id, (
+            "loop id must be stable between Run.loops and the engine primitive "
+            f"(run {run_loop.id} vs primitive {prim_loop.id})"
         )
-        # Both reclassify off the same scalar loop_score series, so the polarity
-        # label must agree.  (On an A2A loop they could legitimately differ.)
-        assert ffi_loop.polarity == py_loop.polarity, (
-            "scalar runtime reclassification must agree between the engine "
-            f"primitive ({ffi_loop.polarity}) and the Python slot-0 path "
-            f"({py_loop.polarity})"
+        # Run.loops sources polarity straight from the engine primitive, so the
+        # label and confidence must match it exactly.
+        assert run_loop.polarity == prim_loop.polarity, (
+            "Run.loops polarity must equal the engine primitive's "
+            f"({run_loop.polarity} vs {prim_loop.polarity})"
         )
-        # The runtime FFI carries a genuine confidence ratio (the engine
-        # primitive populates polarity_confidence from the dominance ratio).
-        assert 0.0 <= ffi_loop.polarity_confidence <= 1.0
+        assert run_loop.polarity_confidence == prim_loop.polarity_confidence
+        # ...and unlike the primitive, Run.loops carries the behavior series.
+        assert run_loop.behavior_time_series is not None
 
-    def test_runtime_ffi_differs_from_structural(self) -> None:
-        """The runtime FFI must report a label/confidence the STRUCTURAL surface
+    def test_run_loops_differs_from_structural(self) -> None:
+        """`Run.loops` must report a label/confidence the STRUCTURAL surface
         (`Model.loops`) cannot: the structural loop is Undetermined at
         confidence 0.0, the runtime one carries a genuine dominance ratio."""
         project = self._sign_flipping_logistic()
@@ -324,12 +323,12 @@ class TestRuntimeLoopsFfiAgreesWithPython:
         assert structural[0].polarity_confidence == 0.0
 
         run = model.run(analyze_loops=True)
-        ffi_loop = run.loops_runtime[0]
+        run_loop = run.loops[0]
         # A strictly-intermediate confidence is only reachable when the runtime
         # loop_score series carries both signs -- evidence of the sign flip.
-        assert 0.0 < ffi_loop.polarity_confidence < 1.0, (
+        assert 0.0 < run_loop.polarity_confidence < 1.0, (
             "the sign-straddling loop must reclassify to a strictly intermediate "
-            f"confidence, got {ffi_loop.polarity_confidence}"
+            f"confidence, got {run_loop.polarity_confidence}"
         )
 
     def test_runtime_loops_empty_without_ltm(self) -> None:
@@ -343,6 +342,65 @@ class TestRuntimeLoopsFfiAgreesWithPython:
         loops = sim.get_loops_runtime()
         assert len(loops) == 1
         assert loops[0].polarity == LoopPolarity.UNDETERMINED
+
+    def test_run_loops_arrayed_uses_engine_all_slots_classification(self) -> None:
+        """On an ARRAYED (A2A) model, `Run.loops` must report the engine's
+        all-slots runtime classification, not a slot-0-only one.
+
+        This pins the GH #679/#685 consolidation: `Run.loops` sources polarity /
+        confidence / partition from the engine primitive
+        (`Sim.get_loops_runtime`), which concatenates ALL element slots of an
+        arrayed loop's `loop_score` before classifying.  Before the
+        consolidation `Run.loops` reclassified off slot 0 only, which could
+        disagree with the engine on a sign-heterogeneous arrayed loop; now the
+        two surfaces are the same source of truth by construction.
+        """
+        import os
+        from pathlib import Path
+
+        import simlin
+
+        repo_root = (
+            Path(os.environ["SIMLIN_REPO_ROOT"])
+            if "SIMLIN_REPO_ROOT" in os.environ
+            else Path(__file__).parent.parent.parent.parent
+        )
+        fixture_path = repo_root / "test" / "arrayed_population_ltm" / "arrayed_population.stmx"
+        if not fixture_path.exists():
+            import pytest
+
+            pytest.skip(f"arrayed fixture missing at {fixture_path}")
+
+        model = simlin.load(fixture_path)
+        run = model.run(analyze_loops=True)
+
+        run_loops = run.loops
+        assert run_loops, "arrayed_population should expose runtime loops"
+
+        # The engine all-slots primitive is the source of truth; Run.loops must
+        # match it loop-for-loop on polarity / confidence / partition, adding
+        # only the behavior series on top.
+        primitive_by_id = {lp.id: lp for lp in run._sim.get_loops_runtime()}
+        assert primitive_by_id, "engine primitive should return the same loops"
+
+        arrayed_seen = False
+        for loop in run_loops:
+            assert loop.id in primitive_by_id, (
+                f"Run.loops id {loop.id} not present in the engine primitive set"
+            )
+            prim = primitive_by_id[loop.id]
+            assert loop.polarity == prim.polarity, (
+                f"Run.loops polarity for {loop.id} must equal the engine all-slots "
+                f"classification ({loop.polarity} vs {prim.polarity})"
+            )
+            assert loop.polarity_confidence == prim.polarity_confidence
+            assert loop.partition == prim.partition
+            # The behavior series is attached on top of the engine polarity.
+            assert loop.behavior_time_series is not None
+            if run._sim.get_loop_element_count(loop.id) > 1:
+                arrayed_seen = True
+
+        assert arrayed_seen, "expected at least one arrayed (multi-slot) loop"
 
 
 class TestLtmUndeterminedPolarity:

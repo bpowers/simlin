@@ -539,9 +539,11 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
 /// **A2A (arrayed) semantics**: the engine primitive concatenates ALL element
 /// slots of an arrayed loop's `loop_score` series into one sample set before
 /// classifying, so an A2A loop with one reinforcing element and one balancing
-/// element classifies Undetermined.  This deliberately differs from pysimlin's
-/// `Run.loops`, which reclassifies off slot 0 only; the two agree on scalar
-/// loops.  See the note on `engine::db::reclassify_loops_from_results`.
+/// element classifies Undetermined -- the whole-loop behavior rather than any
+/// single slot.  pysimlin's `Run.loops` is built directly on this primitive
+/// (it adds only the per-step behavior series on top), so it reports exactly
+/// this all-slots classification.  See the note on
+/// `engine::db::reclassify_loops_from_results`.
 ///
 /// Requires `sim` to have been created with `enable_ltm = true` and run to
 /// completion (it must hold `Results`); otherwise an error is reported through
