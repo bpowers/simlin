@@ -264,6 +264,14 @@ jobs:
           uv pip install setuptools
           uv run python setup.py build_ext --inplace 2>/dev/null || true
 
+      # ruff format --check enforces formatting (ruff check, run by the
+      # pre-commit pysimlin script, is the linter only and does not).
+      - name: Check formatting and lint with ruff
+        working-directory: src/pysimlin
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+
       - name: Type check with mypy
         working-directory: src/pysimlin
         run: uv run mypy simlin/
