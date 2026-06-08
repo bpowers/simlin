@@ -164,7 +164,10 @@ class TestAnalyzeDiscovery:
         # GH #685: the structural Model.loops surface now carries cycle-partition
         # metadata too. Each loop's partition (when present) indexes
         # Model.loop_partitions, and the partition stock sets agree with the
-        # discovery surface (Analysis.partitions) for the same model.
+        # discovery surface (Analysis.partitions) for the same model -- this
+        # holds because logistic_model is SCALAR (the exhaustive surface is
+        # variable-level and discovery element-level, so arrayed models' sets
+        # differ in granularity).
         partitions = logistic_model.loop_partitions
         for loop in logistic_model.loops:
             assert loop.partition is None or 0 <= loop.partition < len(partitions)

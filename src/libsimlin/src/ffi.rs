@@ -139,10 +139,14 @@ pub struct SimlinLoop {
     /// assigned in first-appearance order over this `SimlinLoops` list; they
     /// identify partitions within ONE result only and are not stable across
     /// runs or model edits -- key on the partition's stock-name SET for a
-    /// durable identity (the discovery and exhaustive surfaces report the SAME
-    /// stock sets for a given model).  Adding this `i32` grew the struct
-    /// additively past its old 32 bytes (`simlin_sizeof_loop` and the
-    /// `@simlin/engine` `LOOP_SIZE`/`readLoops` offsets track the new size).
+    /// durable identity.  That stock set is a reliable cross-surface key only
+    /// for SCALAR models: this exhaustive surface partitions stocks at
+    /// VARIABLE granularity (`population`) while the discovery surface
+    /// (`SimlinDiscoveredLoop.partition`) partitions at ELEMENT granularity
+    /// (`population[nyc]`), so an arrayed model's two surfaces differ in
+    /// granularity.  Adding this `i32` grew the struct additively past its old
+    /// 32 bytes (`simlin_sizeof_loop` and the `@simlin/engine`
+    /// `LOOP_SIZE`/`readLoops` offsets track the new size).
     pub partition: i32,
 }
 
@@ -154,10 +158,12 @@ pub struct SimlinLoops {
     /// The cycle partitions referenced by `loops` (each loop's `partition`
     /// indexes this array).  Dense, in first-appearance order over the loop
     /// list; result-scoped.  Reuses `SimlinDiscoveredPartition` so the
-    /// exhaustive/pinned loop surface reports partitions identically to the
-    /// discovery surface (and -- by construction -- the same stock sets for a
-    /// given model).  Appended after `loops`/`count` so the existing container
-    /// offsets the TS reader uses are unchanged.
+    /// exhaustive/pinned loop surface reports partitions in the same shape as
+    /// the discovery surface.  The stock SETS match exactly only for SCALAR
+    /// models -- this surface partitions stocks at variable granularity, the
+    /// discovery surface at element granularity (see `SimlinLoop.partition`).
+    /// Appended after `loops`/`count` so the existing container offsets the TS
+    /// reader uses are unchanged.
     pub partitions: *mut SimlinDiscoveredPartition,
     pub partition_count: usize,
 }

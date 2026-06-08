@@ -171,7 +171,12 @@ impl From<simlin_engine::analysis::LoopSummary> for LoopDominanceSummary {
 #[serde(rename_all = "camelCase")]
 pub struct PartitionOutput {
     /// The partition's stock names (element-level for arrayed models), sorted
-    /// lexicographically.  This SET is the durable cross-surface identity.
+    /// lexicographically.  This SET is the durable per-result identity.  It
+    /// matches the exhaustive (`Model.loops`) surface's stock set only for
+    /// SCALAR models: this analyze output partitions stocks at ELEMENT
+    /// granularity (`population[nyc]`) while the exhaustive surface partitions
+    /// at VARIABLE granularity (`population`), so an arrayed model's two
+    /// surfaces differ in granularity.
     pub stocks: Vec<String>,
     /// Number of loops in the returned `loopDominance` list that belong to
     /// this partition.

@@ -828,8 +828,13 @@ pub struct DetectedLoop {
     /// only* and are NOT stable across runs or model edits (the underlying SCC
     /// numbering renumbers when stocks are added or renamed).  Consumers that
     /// need a durable identity should key on the partition's stock-name set
-    /// instead.  This carries the SAME stock sets the discovery surface
-    /// reports for the same model -- the durable cross-surface identity.
+    /// instead.  That stock set is a reliable cross-surface key only for SCALAR
+    /// models: this exhaustive surface computes partitions over the
+    /// VARIABLE-level stock graph (stocks `pop`, `prey`) while the discovery
+    /// surface (`ltm_finding`) computes them over the ELEMENT-level graph
+    /// (`pop[nyc]`), so for an ARRAYED model the two surfaces' stock sets match
+    /// in identity but differ in *granularity* (variable-level `pop` here vs
+    /// element-level `pop[nyc]` there).
     pub partition: Option<usize>,
 }
 
@@ -867,8 +872,12 @@ pub struct DetectedLoopsResult {
     /// indexes this list).  Dense, in first-appearance order over the final
     /// loop list; result-scoped.  Reuses the discovery surface's
     /// [`crate::ltm_finding::DiscoveredPartition`] so the two surfaces report
-    /// partitions in the same shape and -- by construction -- the same stock
-    /// sets for a given model.
+    /// partitions in the same shape.  The stock SETS match exactly only for
+    /// SCALAR models: these partitions are computed over the VARIABLE-level
+    /// stock graph (`compute_cycle_partitions` on `causal_graph_with_modules`),
+    /// whereas the discovery surface computes them over the ELEMENT-level
+    /// graph, so an arrayed model's exhaustive stocks are variable-level (`pop`)
+    /// and its discovery stocks are element-level (`pop[nyc]`).
     pub partitions: Vec<crate::ltm_finding::DiscoveredPartition>,
 }
 
@@ -1687,11 +1696,14 @@ pub fn model_loop_circuits(
 /// `loops` is the FINAL ordered loop list (enumerated then pinned, in the same
 /// order the returned `DetectedLoop`s appear).  For each loop its single
 /// cycle-partition index is the first partition any of its stocks resolves to
-/// (`partition_for_loop` then `.first().flatten()`): a feedback loop's stocks
-/// form one strongly-connected set, so every slot resolves to the same
-/// partition and the length-1 collapse is exact for scalar loops and the
-/// first-slot pick is the loop's partition for an A2A loop whose slots share
-/// the parent partition.  The result is `(per_loop_partition, partitions)`:
+/// (`partition_for_loop` then `.flatten().next()`).  Every loop that reaches
+/// this exhaustive surface is constructed single-slot (`Loop.dimensions` is
+/// always `vec![]` here -- the enumerated loops are built that way in
+/// `ltm::graph` and the pinned ones are element-subscripted scalar loops), so
+/// `partition_for_loop` always takes its single-slot scalar branch and returns
+/// a one-element vector.  The `.flatten().next()` collapse is therefore trivial
+/// (it picks that lone slot); it is NOT multi-slot A2A handling, which never
+/// reaches this path.  The result is `(per_loop_partition, partitions)`:
 /// `per_loop_partition[i]` is `loops[i]`'s dense result-scoped index (or
 /// `None`), and `partitions` is the `DiscoveredPartition` list in
 /// first-appearance order with `loop_count` counting exactly the loops in
@@ -3466,9 +3478,14 @@ mod polarity_confidence_tests {
 
 /// Tests for the cycle-partition metadata surfaced on the exhaustive/pinned
 /// loop surface (`DetectedLoop::partition` + `DetectedLoopsResult::partitions`,
-/// GH #685).  The durable cross-surface identity is the partition's stock-name
-/// SET, so the cross-surface test keys on that rather than the result-scoped
-/// dense index.
+/// GH #685).  Partition indices are result-scoped on both the exhaustive and
+/// the discovery surface, so the cross-surface tests key on the partition's
+/// stock-name SET, not the dense index.  That stock set is a reliable
+/// cross-surface key only for SCALAR models (this surface partitions stocks at
+/// VARIABLE granularity, discovery at ELEMENT granularity) -- the scalar
+/// agreement is pinned by `exhaustive_and_discovery_partitions_agree_..._scalar`
+/// and the arrayed granularity *divergence* by
+/// `exhaustive_and_discovery_partitions_diverge_in_granularity_arrayed`.
 #[cfg(test)]
 mod detected_loop_partition_tests {
     use super::*;
@@ -3578,12 +3595,14 @@ mod detected_loop_partition_tests {
         assert!(set.contains("prey") && set.contains("predator"));
     }
 
-    /// The exhaustive and discovery surfaces must agree on the partition
-    /// STOCK SETS for the same model (the durable cross-surface identity).
-    /// Indices are result-scoped and may differ; the stock-name sets must
-    /// not.
+    /// For a SCALAR model the exhaustive and discovery surfaces must agree on
+    /// the partition STOCK SETS.  Indices are result-scoped and may differ; the
+    /// stock-name sets must not -- because at scalar granularity a stock's
+    /// variable-level name and its (sole) element-level name coincide.  The
+    /// arrayed counterpart (`..._diverge_in_granularity_arrayed`) pins the
+    /// granularity divergence that makes this scalar-only.
     #[test]
-    fn exhaustive_and_discovery_partitions_agree_on_stock_sets() {
+    fn exhaustive_and_discovery_partitions_agree_on_stock_sets_scalar() {
         let project = TestProject::new("two_loops_xsurface")
             .with_sim_time(0.0, 5.0, 1.0)
             .stock("pop_a", "100", &["births_a"], &[], None)
@@ -3618,6 +3637,85 @@ mod detected_loop_partition_tests {
         assert_eq!(
             exhaustive_sets, discovery_sets,
             "exhaustive and discovery must report the same partition stock sets"
+        );
+    }
+
+    /// For an ARRAYED (A2A) model the two surfaces partition stocks at
+    /// DIFFERENT granularity, so their stock SETS do NOT match: the exhaustive
+    /// surface (`model_detected_loops` -> `compute_cycle_partitions` over the
+    /// VARIABLE-level stock graph) names the bare variable `population`, while
+    /// the discovery surface (`analyze_model` -> element-level graph) names the
+    /// per-element stocks `population[nyc]` / `population[boston]`.  This pins
+    /// the documented contract: the stock set is a reliable cross-surface key
+    /// only for scalar models.  It fails loudly if someone later "fixes" one
+    /// surface to match the other's granularity without updating the contract
+    /// in the partition rustdocs and the FFI / pysimlin / MCP docstrings.
+    #[test]
+    fn exhaustive_and_discovery_partitions_diverge_in_granularity_arrayed() {
+        // population[Region] coupled to itself through SUM(population[*]) is the
+        // canonical cross-element A2A loop: one variable-level SCC ({population})
+        // that the element graph expands into per-region element stocks.
+        let project = TestProject::new("a2a_xsurface")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow("births[Region]", "SUM(population[*]) * 0.01", None);
+        let datamodel = project.build_datamodel();
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+
+        let exhaustive = model_detected_loops(&db, source_model, sync.project);
+        let exhaustive_stocks: BTreeSet<String> = exhaustive
+            .partitions
+            .iter()
+            .flat_map(|p| p.stocks.iter().cloned())
+            .collect();
+
+        let analysis = analyze_model(&datamodel, &mut db, sync.project, "main", None)
+            .expect("analyze_model must succeed");
+        let discovery_stocks: BTreeSet<String> = analysis
+            .partitions
+            .iter()
+            .flat_map(|p| p.stocks.iter().cloned())
+            .collect();
+
+        assert!(
+            !exhaustive_stocks.is_empty(),
+            "exhaustive must report a partition for the A2A loop"
+        );
+        assert!(
+            !discovery_stocks.is_empty(),
+            "discovery must report a partition for the A2A loop"
+        );
+
+        // Exhaustive is variable-level: a BARE `population`, no element subscript.
+        assert!(
+            exhaustive_stocks.contains("population"),
+            "exhaustive partition must name the variable-level stock `population`, got {exhaustive_stocks:?}"
+        );
+        assert!(
+            exhaustive_stocks.iter().all(|s| !s.contains('[')),
+            "exhaustive partition stocks are variable-level (no `[elem]`), got {exhaustive_stocks:?}"
+        );
+
+        // Discovery is element-level: subscripted `population[nyc]` etc., and no
+        // bare `population`.
+        assert!(
+            discovery_stocks
+                .iter()
+                .any(|s| s.starts_with("population[")),
+            "discovery partition must name element-level stocks like `population[nyc]`, got {discovery_stocks:?}"
+        );
+        assert!(
+            !discovery_stocks.contains("population"),
+            "discovery partition must NOT carry the bare variable-level `population`, got {discovery_stocks:?}"
+        );
+
+        // The sets therefore differ -- the granularity divergence the contract documents.
+        assert_ne!(
+            exhaustive_stocks, discovery_stocks,
+            "arrayed exhaustive (variable-level) and discovery (element-level) stock sets must differ in granularity"
         );
     }
 }

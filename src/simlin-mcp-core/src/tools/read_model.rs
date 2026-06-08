@@ -50,8 +50,10 @@ pub struct ReadModelOutput {
     pub loop_dominance: Vec<LoopDominanceSummary>,
     /// The cycle partitions referenced by `loopDominance` (each summary's
     /// `partition` indexes this list).  Elided when empty to preserve the
-    /// stable wire shape; the stock SET of each entry is the durable identity
-    /// matching the exhaustive (`Model.loops`) surface.
+    /// stable wire shape; the stock SET of each entry is the durable per-result
+    /// identity.  It matches the exhaustive (`Model.loops`) surface's stock set
+    /// only for SCALAR models -- this surface is element-level, the exhaustive
+    /// surface variable-level, so they differ in granularity for arrayed models.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub partitions: Vec<PartitionOutput>,
     pub dominant_loops_by_period: Vec<DominantPeriodOutput>,
