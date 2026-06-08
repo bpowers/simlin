@@ -182,15 +182,24 @@ PIPELINE_PIDS+=($PID_A)
         exit 1
     fi
 
-    # 1. Lint (parallel across packages via pnpm)
+    # 1. Prettier formatting check (eslint only disables prettier-conflicting
+    # rules via eslint-config-prettier; it does not enforce formatting)
+    echo "[ts] Checking formatting..."
+    if ! pnpm js-needs-format; then
+        echo "The files listed above are not prettier-formatted."
+        echo "Run: pnpm js-format"
+        exit 1
+    fi
+
+    # 2. Lint (parallel across packages via pnpm)
     echo "[ts] Running linting..."
     pnpm -r --parallel run lint
 
-    # 2. Build WASM and TS packages (needed for .d.ts files)
+    # 3. Build WASM and TS packages (needed for .d.ts files)
     echo "[ts] Building..."
     pnpm build
 
-    # 3. Type check and tests in parallel
+    # 4. Type check and tests in parallel
     echo "[ts] Running type check and tests..."
     TSC_TMP="$(mktemp)"
     TEST_TMP="$(mktemp)"

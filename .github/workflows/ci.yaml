@@ -190,6 +190,12 @@ jobs:
       - name: Install pnpm dependencies
         run: pnpm install
 
+      # eslint only disables prettier-conflicting rules via
+      # eslint-config-prettier; this is the step that actually
+      # enforces prettier formatting (mirrors scripts/pre-commit).
+      - name: Check TypeScript formatting
+        run: pnpm js-needs-format
+
       - name: Build the Typescript project
         run: DISABLE_WASM_OPT=1 pnpm build
 
