@@ -104,6 +104,35 @@ describe('Canvas gestures: wheel zoom (issue #707)', () => {
   });
 });
 
+describe('Canvas gestures: external view change overrides a live gesture (issue #707)', () => {
+  it('clears the live wheel viewport and cancels the pending commit', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+    jest.useFakeTimers();
+    try {
+      // A wheel pan sets the live viewport and arms the debounce (uncommitted).
+      dispatchWheel(h.svg, { deltaX: 30, deltaY: 40 });
+      expect(translate(h.getTransform())).toMatchObject({ x: -30, y: -40 });
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+
+      // An external viewport change arrives (e.g. centerVariable / navigation).
+      h.setViewport({ x: 500, y: 600, zoom: 1 });
+
+      // The external view wins immediately -- the live wheel offset is dropped.
+      expect(translate(h.getTransform())).toMatchObject({ x: 500, y: 600, zoom: 1 });
+
+      // ...and the pending wheel commit was cancelled, so the abandoned gesture
+      // never commits a stale offset over the external view.
+      act(() => {
+        jest.advanceTimersByTime(200);
+      });
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
 describe('Canvas gestures: wheel interrupts momentum (issue #707)', () => {
   it('continues from the coasted offset and commits once, without a stray commit', () => {
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });

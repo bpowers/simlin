@@ -453,6 +453,12 @@ export interface CanvasHarness {
   getTransform: () => string | null;
   /** Synthesize a container resize to `width`x`height` (drives handleSvgResize). */
   resize: (width: number, height: number) => void;
+  /**
+   * Push a new `props.view` with an overridden viewBox offset / zoom, modeling an
+   * EXTERNAL viewport change (centerVariable, module navigation, undo) -- i.e. one
+   * that did not originate from a canvas gesture.
+   */
+  setViewport: (next: { x?: number; y?: number; zoom?: number }) => void;
 }
 
 /**
@@ -541,6 +547,18 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
     },
     getTransform: () => result.container.querySelector('svg g[transform]')?.getAttribute('transform') ?? null,
     resize: (width: number, height: number) => triggerResize(width, height),
+    setViewport: (next: { x?: number; y?: number; zoom?: number }) => {
+      const nextView: StockFlowView = {
+        ...currentView,
+        viewBox: {
+          ...currentView.viewBox,
+          x: next.x ?? currentView.viewBox.x,
+          y: next.y ?? currentView.viewBox.y,
+        },
+        zoom: next.zoom ?? currentView.zoom,
+      };
+      setProps({ view: nextView });
+    },
   };
 }
 

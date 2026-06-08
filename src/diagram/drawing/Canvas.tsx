@@ -315,6 +315,13 @@ interface CanvasRefs {
   // committed once. Cancelled on unmount and by any interrupting gesture.
   wheelCommitTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // The props.view offset/zoom VALUE observed while no gesture was live. The
+  // external-override effect compares props.view against this to detect a
+  // non-gesture view change (centerVariable, navigation, undo) mid-gesture.
+  // Compared by value (not identity) so a content-equal republished snapshot does
+  // not look like an external change.
+  viewBaseline: { x: number; y: number; zoom: number } | undefined;
+
   // Momentum/inertia animation
   velocityTracker: VelocityTracker;
   momentumAnimationId: number | undefined;
@@ -400,6 +407,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       activePointers: new Map<number, TrackedPointer>(),
       panBaseOffset: undefined,
       wheelCommitTimer: undefined,
+      viewBaseline: undefined,
       velocityTracker: { positions: [] },
       momentumAnimationId: undefined,
       momentumStartTime: undefined,
@@ -2287,6 +2295,39 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
     return zLayers;
   };
+
+  // ---- External-view override (issue #707) --------------------------------
+  // While a gesture owns the live viewport, props.view is expected to stay put
+  // (a gesture does not commit mid-flight). If props.view's offset/zoom VALUE
+  // nonetheless changes, some other source moved the view -- centerVariable,
+  // module navigation, or an undo that restored a different viewport -- and that
+  // external view must win: drop the live viewport and cancel any pending
+  // momentum/wheel commit, with no stray commit of the abandoned gesture. A
+  // self-commit clears the live viewport in the same React commit as its
+  // optimistic props.view update, so it is never observed here as still-live.
+  // Comparison is by value against a baseline tracked while idle, so a
+  // content-equal republished snapshot (new identity, same viewport) is ignored.
+  React.useEffect(() => {
+    const pv = props.view;
+    const current = { x: pv.viewBox.x, y: pv.viewBox.y, zoom: pv.zoom };
+    if (liveViewport) {
+      const baseline = r.viewBaseline;
+      if (baseline && (baseline.x !== current.x || baseline.y !== current.y || baseline.zoom !== current.zoom)) {
+        stopMomentumAnimation();
+        cancelWheelCommit();
+        setLiveViewport(undefined);
+        r.viewBaseline = current;
+      }
+    } else {
+      // Idle: track props.view as the baseline for the next gesture.
+      r.viewBaseline = current;
+    }
+    // Triggers: props.view (the external change) and liveViewport (gesture
+    // start/end, which moves the baseline). The handler functions are stable
+    // shell closures read directly and are intentionally not deps. (The repo lint
+    // config does not enable react-hooks/exhaustive-deps, so no disable directive
+    // is needed.)
+  }, [props.view, liveViewport]);
 
   // ---- Mount / unmount effect ---------------------------------------------
   // componentDidMount -> mount effect; componentWillUnmount -> the cleanup.
