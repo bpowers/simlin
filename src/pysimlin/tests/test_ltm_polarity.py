@@ -246,6 +246,105 @@ class TestLtmModuleBoundaryReclassification:
         )
 
 
+class TestRuntimeLoopsFfiAgreesWithPython:
+    """GH #679: the new sim-bearing runtime-loops FFI (`Sim.get_loops_runtime`
+    / `Run.loops_runtime`) routes through the engine's
+    `reclassify_loops_from_results` primitive.  On a SCALAR loop it must agree
+    with the pre-existing Python slot-0 reclassification path (`Run.loops`),
+    since both share the scalar `from_runtime_scores` semantics; they can only
+    diverge on arrayed (A2A) loops, where the engine concatenates all element
+    slots and the Python path reads slot 0 only."""
+
+    def _sign_flipping_logistic(self) -> Project:
+        """A logistic loop whose runtime loop_score straddles zero: the
+        `stock -> net` link is reinforcing while `stock < K/2` and balancing
+        once it saturates, so the static analyzer cannot sign it (structurally
+        Undetermined) but the simulation expresses both signs."""
+        project = Project.new(
+            name="logistic_flip",
+            sim_start=0.0,
+            sim_stop=20.0,
+            dt=0.125,
+        )
+        model = project.main_model
+        with model.edit() as (_current, patch):
+            from simlin.json_types import Auxiliary, Flow, Stock
+
+            patch.upsert_aux(Auxiliary(name="r", equation="0.8"))
+            patch.upsert_aux(Auxiliary(name="k", equation="1000"))
+            patch.upsert_stock(
+                Stock(name="stock", initial_equation="100", inflows=["net"], outflows=[])
+            )
+            patch.upsert_flow(Flow(name="net", equation="r * stock * (1 - stock / k)"))
+        return project
+
+    def test_runtime_ffi_agrees_with_python_on_scalar_loop(self) -> None:
+        """For a scalar sign-flipping loop, `Run.loops_runtime` (engine
+        primitive) and `Run.loops` (Python slot-0 path) must report the same
+        polarity and loop id."""
+        project = self._sign_flipping_logistic()
+        model = project.main_model
+
+        run = model.run(analyze_loops=True)
+        assert run.ltm_mode == "exhaustive"
+
+        python_loops = run.loops
+        ffi_loops = run.loops_runtime
+        assert len(python_loops) == 1, "logistic model has one feedback loop"
+        assert len(ffi_loops) == 1, "runtime FFI returns the same single loop"
+
+        py_loop = python_loops[0]
+        ffi_loop = ffi_loops[0]
+
+        assert ffi_loop.id == py_loop.id, (
+            "loop id must be stable across the two reclassification surfaces "
+            f"(python {py_loop.id} vs ffi {ffi_loop.id})"
+        )
+        # Both reclassify off the same scalar loop_score series, so the polarity
+        # label must agree.  (On an A2A loop they could legitimately differ.)
+        assert ffi_loop.polarity == py_loop.polarity, (
+            "scalar runtime reclassification must agree between the engine "
+            f"primitive ({ffi_loop.polarity}) and the Python slot-0 path "
+            f"({py_loop.polarity})"
+        )
+        # The runtime FFI carries a genuine confidence ratio (the engine
+        # primitive populates polarity_confidence from the dominance ratio).
+        assert 0.0 <= ffi_loop.polarity_confidence <= 1.0
+
+    def test_runtime_ffi_differs_from_structural(self) -> None:
+        """The runtime FFI must report a label/confidence the STRUCTURAL surface
+        (`Model.loops`) cannot: the structural loop is Undetermined at
+        confidence 0.0, the runtime one carries a genuine dominance ratio."""
+        project = self._sign_flipping_logistic()
+        model = project.main_model
+
+        structural = model.loops
+        assert len(structural) == 1
+        assert structural[0].polarity == LoopPolarity.UNDETERMINED
+        assert structural[0].polarity_confidence == 0.0
+
+        run = model.run(analyze_loops=True)
+        ffi_loop = run.loops_runtime[0]
+        # A strictly-intermediate confidence is only reachable when the runtime
+        # loop_score series carries both signs -- evidence of the sign flip.
+        assert 0.0 < ffi_loop.polarity_confidence < 1.0, (
+            "the sign-straddling loop must reclassify to a strictly intermediate "
+            f"confidence, got {ffi_loop.polarity_confidence}"
+        )
+
+    def test_runtime_loops_empty_without_ltm(self) -> None:
+        """When LTM is disabled the loop_score series are absent, so the engine
+        primitive leaves the structural loops untouched; the FFI still returns
+        them (the structural set) rather than erroring."""
+        project = self._sign_flipping_logistic()
+        sim = project.main_model.simulate(enable_ltm=False)
+        sim.run_to_end()
+        # No LTM -> no loop_score columns -> structural classification preserved.
+        loops = sim.get_loops_runtime()
+        assert len(loops) == 1
+        assert loops[0].polarity == LoopPolarity.UNDETERMINED
+
+
 class TestLtmUndeterminedPolarity:
     """Test the from_runtime_scores classification method."""
 

@@ -183,6 +183,11 @@ typedef struct {
   uint8_t _private[0];
 } SimlinError;
 
+// Opaque simulation structure
+typedef struct {
+  uint8_t _private[0];
+} SimlinSim;
+
 // A single loop discovered via the strongest-path LTM discovery algorithm.
 //
 // This mirrors `SimlinLoop` but adds a per-timestep `importance` series.
@@ -308,11 +313,6 @@ typedef struct {
   uintptr_t count;
 } SimlinLinks;
 
-// Opaque simulation structure
-typedef struct {
-  uint8_t _private[0];
-} SimlinSim;
-
 // Error detail structure containing contextual information for failures.
 typedef struct {
   SimlinErrorCode code;
@@ -335,12 +335,57 @@ typedef struct {
 extern "C" {
 #endif // __cplusplus
 
-// Get the feedback loops detected in a model
+// Get the feedback loops detected in a model, with STRUCTURAL polarity.
+//
+// The polarity reported here comes from static analysis of the loops' link
+// signs (`model_detected_loops`): a loop is Reinforcing/Balancing only when
+// every link has a determined sign (confidence 1.0), Undetermined when any
+// link is unknown (confidence 0.0).  No simulation is required -- this works
+// off a `SimlinModel` alone.  For the RUNTIME polarity (Rux/Bux from the
+// post-sim `loop_score` series, per the LTM papers' confidence gate) use
+// `simlin_analyze_get_loops_runtime`, which takes a run `SimlinSim`.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
 // - The returned SimlinLoops must be freed with simlin_free_loops
 SimlinLoops *simlin_analyze_get_loops(SimlinModel *model, SimlinError **out_error);
+
+// Get the feedback loops detected in a model, with RUNTIME polarity derived
+// from a completed simulation's per-step loop-score series.
+//
+// This is the sim-bearing sibling of `simlin_analyze_get_loops` (which takes
+// only a `SimlinModel` and reports STRUCTURAL polarity).  It builds the same
+// exhaustive `model_detected_loops` set, then runs the engine's
+// `reclassify_loops_from_results` primitive (GH #679) over it: for every loop
+// whose `$⁚ltm⁚loop_score⁚{id}` series exists in the results, the loop's
+// polarity and confidence are overwritten by
+// `crate::ltm::LoopPolarity::from_runtime_scores` (the LTM papers' Rux/Bux/U
+// classification with the 0.99 confidence gate).  A loop whose runtime score
+// is never active keeps its structural classification.  Loop IDs are stable
+// (a `u1` stays `u1` even after its polarity flips to Reinforcing).
+//
+// This is the FIRST production caller of `reclassify_loops_from_results`: it
+// is the only path on which the exhaustive loop surface can report Rux/Bux,
+// or a runtime sign flip (e.g. a structurally-Undetermined loop that the
+// simulation shows is single-signed), which the structural surface can never
+// express.
+//
+// **A2A (arrayed) semantics**: the engine primitive concatenates ALL element
+// slots of an arrayed loop's `loop_score` series into one sample set before
+// classifying, so an A2A loop with one reinforcing element and one balancing
+// element classifies Undetermined.  This deliberately differs from pysimlin's
+// `Run.loops`, which reclassifies off slot 0 only; the two agree on scalar
+// loops.  See the note on `engine::db::reclassify_loops_from_results`.
+//
+// Requires `sim` to have been created with `enable_ltm = true` and run to
+// completion (it must hold `Results`); otherwise an error is reported through
+// `out_error`.  When LTM was not enabled the `loop_score` series are absent,
+// so the result degenerates to the structural classification.
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim that has been run.
+// - The returned SimlinLoops must be freed with simlin_free_loops.
+SimlinLoops *simlin_analyze_get_loops_runtime(SimlinSim *sim, SimlinError **out_error);
 
 // Frees a SimlinLoops structure
 //

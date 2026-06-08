@@ -2529,3 +2529,210 @@ fn loop_name_round_trips_through_set_loop_name_patch() {
         simlin_project_unref(proj);
     }
 }
+
+/// Build a logistic-growth project whose single feedback loop genuinely
+/// flips polarity over the run, open it, and return `(project, model, sim)`
+/// with the sim run to completion under LTM.
+///
+/// The stock's net flow is `r * stock * (1 - stock / K)`: the loop
+/// `stock -> net -> stock` is REINFORCING while `stock < K/2` (the
+/// `stock -> net` link has positive slope) and BALANCING once `stock > K/2`
+/// (negative slope), so the per-step `loop_score` series straddles zero --
+/// the runtime sign genuinely flips mid-run.  Structurally the `stock -> net`
+/// link is Unknown (the parabola has no fixed sign), so the loop is
+/// structurally Undetermined.  This is exactly the surface that #679 calls
+/// out: the structural and runtime polarity disagree.
+///
+/// `K = 1000`, `init = 100` (well below `K/2 = 500`), `r = 0.8` over
+/// `t in [0, 20]` so the trajectory climbs through the inflection and
+/// saturates, spending time on BOTH arms.
+unsafe fn setup_logistic_sign_flip_sim() -> (*mut SimlinProject, *mut SimlinModel, *mut SimlinSim) {
+    let test_project = TestProject::new("logistic")
+        .with_sim_time(0.0, 20.0, 0.125)
+        .aux("r", "0.8", None)
+        .aux("k", "1000", None)
+        .stock("stock", "100", &["net"], &[], None)
+        .flow("net", "r * stock * (1 - stock / k)", None);
+
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+    assert!(!proj.is_null());
+    assert!(err.is_null());
+
+    let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+    assert!(!model.is_null());
+    assert!(err.is_null());
+
+    let sim = simlin_sim_new(model, true, &mut err);
+    assert!(!sim.is_null());
+    assert!(err.is_null());
+
+    simlin_sim_run_to_end(sim, &mut err);
+    assert!(err.is_null());
+
+    (proj, model, sim)
+}
+
+/// #679: the structural loops surface (`simlin_analyze_get_loops`) and the
+/// runtime surface (`simlin_analyze_get_loops_runtime`) disagree exactly when
+/// the runtime loop score expresses a sign the static analysis could not.
+///
+/// For the logistic fixture: structurally the single loop is Undetermined
+/// (confidence 0.0) because the `stock -> net` parabola link has no fixed
+/// sign.  At runtime the `loop_score` straddles zero (reinforcing while the
+/// stock climbs through `K/2`, balancing as it saturates), so the runtime
+/// surface reclassifies it from the dominance ratio.  A smooth logistic's
+/// per-step scores shrink to zero as it saturates, so the balancing arm never
+/// overwhelms the reinforcing arm past the 0.99 gate -- the loop stays
+/// Undetermined but now carries a STRICTLY INTERMEDIATE confidence in `(0, 1)`
+/// that only a genuinely sign-straddling series can produce.  This is the
+/// third #679-described outcome (the Rux/Bux outcomes are the same code path
+/// with a more lopsided series); the point is that the runtime surface
+/// reports a value the structural surface (a hard 0.0/1.0) can never express.
+/// The loop id is stable across the two surfaces.
+#[test]
+fn runtime_loops_reclassify_sign_flipping_loop() {
+    unsafe {
+        let (proj, model, sim) = setup_logistic_sign_flip_sim();
+        let mut err: *mut SimlinError = ptr::null_mut();
+
+        // Structural surface: a single Undetermined loop, confidence 0.0.
+        let structural = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        assert!(!structural.is_null());
+        assert_eq!(
+            (*structural).count,
+            1,
+            "logistic model has one feedback loop"
+        );
+        let struct_slice = std::slice::from_raw_parts((*structural).loops, (*structural).count);
+        let struct_loop = &struct_slice[0];
+        let struct_id = CStr::from_ptr(struct_loop.id).to_str().unwrap().to_string();
+        // The FFI polarity enum is not `Debug` (it is a cbindgen ABI type), so
+        // render it to a label locally for assertion messages.
+        let polarity_label = |p: SimlinLoopPolarity| -> &'static str {
+            match p {
+                SimlinLoopPolarity::Reinforcing => "R",
+                SimlinLoopPolarity::Balancing => "B",
+                SimlinLoopPolarity::MostlyReinforcing => "Rux",
+                SimlinLoopPolarity::MostlyBalancing => "Bux",
+                SimlinLoopPolarity::Undetermined => "U",
+            }
+        };
+        assert!(
+            struct_loop.polarity == SimlinLoopPolarity::Undetermined,
+            "the parabolic stock->net link is structurally Unknown, so the loop is Undetermined"
+        );
+        assert_eq!(
+            struct_loop.polarity_confidence, 0.0,
+            "an Undetermined structural loop has confidence 0.0"
+        );
+
+        // Runtime surface: same loop id, but reclassified from the loop_score
+        // series.  The trajectory spends time on both the reinforcing and the
+        // balancing arm, so the label is no longer the bare Undetermined of
+        // the structural surface AND the confidence is a genuine ratio.
+        err = ptr::null_mut();
+        let runtime = simlin_analyze_get_loops_runtime(sim, &mut err);
+        assert!(err.is_null());
+        assert!(!runtime.is_null());
+        assert_eq!(
+            (*runtime).count,
+            1,
+            "same single loop on the runtime surface"
+        );
+        let rt_slice = std::slice::from_raw_parts((*runtime).loops, (*runtime).count);
+        let rt_loop = &rt_slice[0];
+        let rt_id = CStr::from_ptr(rt_loop.id).to_str().unwrap().to_string();
+        assert_eq!(
+            rt_id, struct_id,
+            "the loop id is stable across reclassification"
+        );
+
+        // The runtime score genuinely flips sign, so the classification is one
+        // of the mixed-sign outcomes (Rux/Bux when one arm dominates >= 0.99,
+        // else U) -- the Rux/Bux variants are *only* reachable on this surface.
+        assert!(
+            matches!(
+                rt_loop.polarity,
+                SimlinLoopPolarity::MostlyReinforcing
+                    | SimlinLoopPolarity::MostlyBalancing
+                    | SimlinLoopPolarity::Undetermined
+            ),
+            "a sign-flipping runtime loop_score classifies as Rux/Bux or U, got {}",
+            polarity_label(rt_loop.polarity)
+        );
+        // The confidence is a STRICTLY intermediate dominance ratio in (0, 1):
+        // a value strictly between the structural 0.0/1.0 sentinels is only
+        // reachable when the loop_score series carries BOTH signs (a pure
+        // single-signed series scores exactly 1.0, an all-zero/NaN one is left
+        // untouched at the structural 0.0).  This is the direct evidence that
+        // the runtime series genuinely straddles zero.
+        assert!(
+            rt_loop.polarity_confidence > 0.0 && rt_loop.polarity_confidence < 1.0,
+            "the sign-straddling loop_score must yield a strictly intermediate \
+             confidence (got {}), proving both runtime signs are present",
+            rt_loop.polarity_confidence
+        );
+
+        // The two surfaces must actually DIFFER -- either the label changed,
+        // or (for a borderline U-stays-U) the confidence moved off 0.0.  A
+        // run where neither moved would mean reclassification silently no-op'd.
+        let surfaces_differ = rt_loop.polarity != struct_loop.polarity
+            || rt_loop.polarity_confidence != struct_loop.polarity_confidence;
+        assert!(
+            surfaces_differ,
+            "runtime reclassification must change the label or the confidence \
+             (#679 raison d'etre); got polarity {} conf {} on both",
+            polarity_label(rt_loop.polarity),
+            rt_loop.polarity_confidence
+        );
+
+        simlin_free_loops(structural);
+        simlin_free_loops(runtime);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The runtime loops FFI requires a run sim: calling it on a freshly-created
+/// (un-run) sim reports an error and returns NULL rather than panicking.
+#[test]
+fn runtime_loops_without_run_errors() {
+    let test_project = TestProject::new("unrun")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * 0.1", None);
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(!proj.is_null());
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(!model.is_null());
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(!sim.is_null());
+        assert!(err.is_null());
+
+        // No run -> no Results -> error, NULL return, no panic.
+        err = ptr::null_mut();
+        let runtime = simlin_analyze_get_loops_runtime(sim, &mut err);
+        assert!(runtime.is_null(), "un-run sim must not return loops");
+        assert!(!err.is_null(), "un-run sim must report an error");
+        simlin_error_free(err);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

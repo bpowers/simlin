@@ -1874,22 +1874,23 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// simply absent) keeps its structural polarity and confidence untouched --
 /// there is no runtime evidence to override it.
 ///
-/// # Status: in-engine primitive, not yet wired to a shipping Rust surface
+/// # Status: in-engine primitive, wired to the sim-bearing loops FFI
 ///
-/// This is the canonical in-engine reclassification primitive. As of this
-/// writing it has **no production caller**: the libsimlin / WASM / TS
-/// `simlin_analyze_get_loops` surface takes only a `SimlinModel` (no
-/// simulation `Results` in hand) and is intentionally structural-only -- it
-/// folds `Mostly*` to `R`/`B` and drops the confidence at the FFI boundary
-/// (surfacing runtime polarity there is bundled with the FFI work tracked
-/// under GH #495, which this helper does NOT unblock on the exhaustive path:
-/// the coalescing/confidence-drop happens regardless of how the polarity was
-/// computed). The pysimlin `Run.loops` surface already reclassifies via its
-/// own Python `LoopPolarity.from_runtime_scores` mirror (pre-existing,
-/// predating this helper); the engine `analyze_model` / MCP surface is
-/// discovery-based and reclassifies through the `FoundLoop` path. This helper
-/// exists so a future sim-bearing Rust consumer has one correct place to call
-/// rather than re-deriving the loop-score read.
+/// This is the canonical in-engine reclassification primitive. Its production
+/// caller (GH #679) is libsimlin's `simlin_analyze_get_loops_runtime(sim, ..)`
+/// -- the sim-bearing sibling of the structural-only `simlin_analyze_get_loops`
+/// (model-only) surface. The structural FFI takes no `Results` and reports R/B
+/// at confidence 1.0 / U at 0.0; the runtime FFI builds the same exhaustive
+/// loop set and calls this helper over the completed sim's `loop_score`
+/// series, so the exhaustive surface can finally report `Mostly*` (Rux/Bux) or
+/// a runtime sign flip. (Now that GH #495 surfaces all five polarity variants
+/// along with the confidence verbatim across the FFI, there is no longer a
+/// coalescing/confidence-drop at the boundary.) The pysimlin `Run.loops`
+/// surface still reclassifies via its own Python `LoopPolarity.from_runtime_scores`
+/// mirror (slot-0 only -- see the A2A note below); pysimlin exposes the
+/// all-slots engine path separately as `Run.loops_runtime`. The engine
+/// `analyze_model` / MCP surface is discovery-based and reclassifies through
+/// the `FoundLoop` path.
 ///
 /// # A2A semantics differ across the three reclassification sites
 ///
@@ -1912,10 +1913,11 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// filter; all-positive -> Reinforcing, all-negative -> Balancing, mixed
 /// dominant >= threshold -> Mostly*, otherwise Undetermined) and agree exactly
 /// on a scalar loop; they diverge only in how an A2A loop's multiple element
-/// slots are reduced to one classification. Reconciling that (e.g. teaching
-/// pysimlin to read all element slots via `get_loop_element_count` +
-/// subscripted `get_series`) is deferred until a sim-bearing Rust consumer
-/// actually needs the all-slots reading.
+/// slots are reduced to one classification. The sim-bearing FFI consumer
+/// (`simlin_analyze_get_loops_runtime`, GH #679) deliberately exposes THIS
+/// all-slots reading -- pysimlin surfaces it as `Run.loops_runtime`, keeping
+/// the slot-0 `Run.loops` path unchanged -- so the two A2A readings now coexist
+/// rather than one being reconciled into the other.
 pub fn reclassify_loops_from_results(
     loops: &mut [DetectedLoop],
     results: &crate::Results,

@@ -183,6 +183,33 @@ class Run:
         return self._cached_loops
 
     @property
+    def loops_runtime(self) -> tuple[Loop, ...]:
+        """Exhaustive feedback loops with RUNTIME polarity from the Rust engine.
+
+        This routes through the single in-engine reclassification primitive
+        (:meth:`Sim.get_loops_runtime` -> ``reclassify_loops_from_results``,
+        GH #679), so its polarity / ``polarity_confidence`` are the Rust source
+        of truth.  Unlike :attr:`loops`, these carry no
+        ``behavior_time_series`` (the engine primitive reclassifies polarity
+        only; use :attr:`loops` for the per-step relative-score series).
+
+        .. note::
+            **Differs from** :attr:`loops` **on arrayed (A2A) loops.**  The
+            engine primitive concatenates ALL element slots of an arrayed loop's
+            ``loop_score`` series before classifying, whereas :attr:`loops`
+            reclassifies off **slot 0 only**.  The two agree on scalar loops and
+            can diverge on A2A loops -- this is why both surfaces exist rather
+            than one delegating to the other.  See
+            ``engine::db::reclassify_loops_from_results``.
+
+        Returns empty tuple if LTM was disabled for this run.
+
+        Returns:
+            Tuple of Loop objects with runtime-reclassified polarity.
+        """
+        return tuple(self._sim.get_loops_runtime())
+
+    @property
     def dominant_periods(self) -> tuple[DominantPeriod, ...]:
         """Time periods where specific loops dominate.
 
