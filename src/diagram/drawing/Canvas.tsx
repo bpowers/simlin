@@ -297,6 +297,13 @@ interface CanvasRefs {
   // Multi-touch tracking for pinch gestures
   activePointers: Map<number, TrackedPointer>;
 
+  // The canvas offset captured when a drag-pan begins. handleMovingCanvas
+  // anchors each move against this rather than props.view.viewBox, so a pan that
+  // interrupts an in-flight momentum coast (whose offset has not been committed
+  // back to props.view) starts from the on-screen position instead of jumping
+  // back to the last committed viewBox.
+  panBaseOffset: Point | undefined;
+
   // Momentum/inertia animation
   velocityTracker: VelocityTracker;
   momentumAnimationId: number | undefined;
@@ -380,6 +387,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         draggedLinkArc: undefined,
       },
       activePointers: new Map<number, TrackedPointer>(),
+      panBaseOffset: undefined,
       velocityTracker: { positions: [] },
       momentumAnimationId: undefined,
       momentumStartTime: undefined,
@@ -490,6 +498,27 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   const getCanvasOffset = (): Readonly<Point> => latest.current.liveViewport ?? latest.current.props.view.viewBox;
 
   const getCanvasZoom = (): number => latest.current.liveViewport?.zoom ?? latest.current.props.view.zoom;
+
+  // Push the live viewport to the controller exactly once and clear it. This is
+  // the single settle-time commit shared by every gesture tail (pan release with
+  // no momentum, momentum end, wheel debounce, pinch exit). Clearing the live
+  // state in the same synchronous stretch as onViewBoxChange -- whose controller
+  // path applies the optimistic view synchronously -- keeps props.view and the
+  // cleared live state consistent in one React commit, so the diagram does not
+  // snap back. A no-op when nothing is live.
+  const commitLiveViewport = (): void => {
+    const live = latest.current.liveViewport;
+    if (!live) {
+      return;
+    }
+    const newViewBox = {
+      ...latest.current.props.view.viewBox,
+      x: live.x,
+      y: live.y,
+    };
+    latest.current.props.onViewBoxChange(newViewBox, live.zoom);
+    setLiveViewport(undefined);
+  };
 
   const getElementByUid = (uid: UID): ViewElement => {
     let element: ViewElement | undefined;
@@ -812,40 +841,42 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     const elapsed = (timestamp - r.momentumStartTime) / 1000; // seconds
     const v0 = r.momentumInitialVelocity;
 
-    // Stop when the decayed momentum speed drops below threshold.
+    // Natural end: the decayed speed dropped below threshold. This is the single
+    // commit point for a coasted pan -- push the final live viewport once, then
+    // stop. (An interruption, by contrast, stops without committing and lets the
+    // interrupting gesture inherit the live viewport.)
     if (isMomentumDone(v0, elapsed)) {
+      commitLiveViewport();
       stopMomentumAnimation();
       return;
     }
 
     // Note: the friction displacement is ADDED because a higher offset moves the
     // view in the positive direction, while velocity is in screen coordinates
-    // where dragging right should move the view left.
+    // where dragging right should move the view left. The coasted offset is held
+    // in the live viewport (immediate render) -- no per-frame controller
+    // round-trip; that is the whole point of issue #707.
     const newOffset = momentumOffsetAt(r.momentumStartOffset, v0, elapsed);
-
-    // Update viewBox with new offset
-    const newViewBox = {
-      ...latest.current.props.view.viewBox,
-      x: newOffset.x,
-      y: newOffset.y,
-    };
-    latest.current.props.onViewBoxChange(newViewBox, latest.current.props.view.zoom);
+    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom: getCanvasZoom() });
 
     // Continue animation
     r.momentumAnimationId = window.requestAnimationFrame(animateMomentum);
   };
 
-  // Start momentum animation after pan release
-  const startMomentumAnimation = (): void => {
+  // Start a momentum coast after pan release. Returns whether a coast actually
+  // started: the caller commits the pan immediately when it did NOT (a stationary
+  // release), and defers the single commit to the coast's natural end when it
+  // did. The two are mutually exclusive, so a gesture commits exactly once.
+  const startMomentumAnimation = (): boolean => {
     // Cancel any existing momentum animation first (defensive)
     stopMomentumAnimation();
 
     const velocity = calculateVelocity();
-    const speed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+    const speed = Math.hypot(velocity.x, velocity.y);
 
     // Don't start animation if velocity is at or below threshold
     if (speed <= VELOCITY_THRESHOLD) {
-      return;
+      return false;
     }
 
     r.momentumInitialVelocity = velocity;
@@ -853,6 +884,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     r.momentumStartTime = window.performance.now();
 
     r.momentumAnimationId = window.requestAnimationFrame(animateMomentum);
+    return true;
   };
 
   // Track position for velocity calculation during pan
@@ -1046,6 +1078,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     r.pointerId = undefined;
     r.mouseDownPoint = undefined;
     r.selectionCenterOffset = undefined;
+    r.panBaseOffset = undefined;
 
     applyPointerStateReset();
 
@@ -1264,18 +1297,14 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
 
     if (interactionNow.mode === 'panning' && latest.current.liveViewport) {
-      const live = latest.current.liveViewport;
-      const newViewBox = {
-        ...latest.current.props.view.viewBox,
-        x: live.x,
-        y: live.y,
-      };
-
-      latest.current.props.onViewBoxChange(newViewBox, live.zoom);
-      setLiveViewport(undefined);
-
-      // Start momentum animation for smooth deceleration
-      startMomentumAnimation();
+      // Start the momentum coast first. If it starts, the live viewport stays set
+      // and the single commit is deferred to the coast's natural end; if it does
+      // not (a stationary release), commit the pan now. Exactly one commit either
+      // way.
+      const didStartMomentum = startMomentumAnimation();
+      if (!didStartMomentum) {
+        commitLiveViewport();
+      }
     }
 
     if (!r.mouseDownPoint) {
@@ -1340,7 +1369,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       return;
     }
 
-    const base = latest.current.props.view.viewBox;
+    // Anchor against the offset captured at pan start (see refs.panBaseOffset),
+    // not props.view.viewBox, so an interrupted-momentum -> pan does not jump.
+    const base = r.panBaseOffset ?? latest.current.props.view.viewBox;
     const curr = getCanvasPoint(e.clientX, e.clientY);
 
     const newOffset = {
@@ -1618,6 +1649,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       // Initialize velocity tracking for momentum
       r.velocityTracker.positions = [];
       const canvasOffsetPan = getCanvasOffset();
+      // Anchor the pan against the on-screen offset at press time (= the live
+      // viewport if a momentum coast was interrupted, else props.view.viewBox).
+      r.panBaseOffset = { x: canvasOffsetPan.x, y: canvasOffsetPan.y };
       trackPosition(canvasOffsetPan.x, canvasOffsetPan.y);
     }
     // The pan-vs-drag-select mode came from the reducer; the in-creation

@@ -6,16 +6,20 @@
  * Version 2.0, that can be found in the LICENSE file.
  */
 
-// Reconciler-level gesture tests for canvas pan and pinch-zoom of the React
-// `Canvas` (Piece 1a; see
-// docs/design-plans/2026-06-07-canvas-interaction-migration.md). The gestures
-// end stationary so the momentum rAF loop does not fire (calculateVelocity
-// returns zero once a frame is >40ms old, and only velocities above
-// VELOCITY_THRESHOLD start momentum); each test asserts on the LAST
-// onViewBoxChange call (the gesture's committed viewBox), tolerating the single
-// mount-time fit call that clearMountCalls already drops.
+// Reconciler-level gesture tests for canvas pan, pinch-zoom, and momentum of the
+// React `Canvas` (Piece 1a; see
+// docs/design-plans/2026-06-07-canvas-interaction-migration.md). Issue #707 made
+// the viewport fully local during a gesture and commits to the controller
+// (`onViewBoxChange`) exactly ONCE, on settle. These tests therefore assert two
+// things: the committed viewBox at settle, and -- via the rendered `<g>`
+// transform -- that the view updates live BEFORE any commit.
+//
+// Timing is made deterministic with `installFakeClock`: velocity estimation and
+// the momentum rAF loop both read the clock, so a "stationary" release is modeled
+// by ticking past the 40ms stop window before pointer-up, and a flick by
+// releasing immediately after a fast move.
 
-import { makeAux, pointerDown, pointerMove, pointerUp, renderCanvas } from './canvas-gesture-harness';
+import { installFakeClock, makeAux, pointerDown, pointerMove, pointerUp, renderCanvas } from './canvas-gesture-harness';
 
 interface ViewBoxCall {
   x: number;
@@ -32,32 +36,148 @@ function lastViewBox(fn: jest.Mock): ViewBoxCall | undefined {
   return { x: last[0].x, y: last[0].y, zoom: last[1] };
 }
 
+// Parse the translate (e, f) out of `matrix(z 0 0 z e f)`. With zoom 1 the
+// translate IS the live offset, so this reads the on-screen viewport directly.
+function translate(transform: string | null): { x: number; y: number; zoom: number } {
+  const m = /matrix\(([^)]+)\)/.exec(transform ?? '');
+  if (!m) {
+    throw new Error(`no matrix in transform: ${transform}`);
+  }
+  const [a, , , , e, f] = m[1].split(/[\s,]+/).map(Number);
+  // matrix translate is offset * zoom, so divide back out to recover the offset.
+  return { x: e / a, y: f / a, zoom: a };
+}
+
 describe('Canvas gestures: pan (checklist 3)', () => {
   it('shift-drag with a mouse pans the viewBox and does NOT clear the selection', () => {
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)], selection: new Set([10]) });
     h.clearMountCalls();
+    const clock = installFakeClock();
+    try {
+      pointerDown(h.svg, 500, 500, { shiftKey: true });
+      clock.tick(10);
+      pointerMove(h.svg, 530, 540, { shiftKey: true, buttons: 1 });
+      // Hold past the 40ms stop window so the release starts no momentum: the
+      // pan commits immediately, exactly once.
+      clock.tick(50);
+      pointerUp(h.svg, 530, 540, { shiftKey: true });
 
-    pointerDown(h.svg, 500, 500, { shiftKey: true });
-    pointerMove(h.svg, 530, 540, { shiftKey: true, buttons: 1 });
-    pointerUp(h.svg, 530, 540, { shiftKey: true });
+      // newOffset = viewBox(0,0) + (curr - mouseDown) = (30, 40); zoom unchanged.
+      expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+      expect(lastViewBox(h.callbacks.onViewBoxChange)).toEqual({ x: 30, y: 40, zoom: 1 });
+      // A pan must not clear the selection.
+      expect(h.callbacks.onSetSelection).not.toHaveBeenCalled();
+    } finally {
+      clock.restore();
+    }
+  });
 
-    // newOffset = viewBox(0,0) + (curr - mouseDown) = (30, 40); zoom unchanged.
-    expect(lastViewBox(h.callbacks.onViewBoxChange)).toEqual({ x: 30, y: 40, zoom: 1 });
-    // A pan must not clear the selection (handlePointerCancel uses
-    // clearSelection = !isMovingCanvas, ~line 1243).
-    expect(h.callbacks.onSetSelection).not.toHaveBeenCalled();
+  it('updates the live transform during the drag before committing', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+    const clock = installFakeClock();
+    try {
+      pointerDown(h.svg, 500, 500, { shiftKey: true });
+      clock.tick(10);
+      pointerMove(h.svg, 530, 540, { shiftKey: true, buttons: 1 });
+
+      // Mid-gesture: the diagram has visibly moved, but nothing is committed yet.
+      expect(translate(h.getTransform())).toMatchObject({ x: 30, y: 40 });
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+    } finally {
+      clock.restore();
+    }
   });
 
   it('a single-finger touch drag pans the viewBox and preserves the selection', () => {
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)], selection: new Set([10]) });
     h.clearMountCalls();
+    const clock = installFakeClock();
+    try {
+      pointerDown(h.svg, 500, 500, { pointerType: 'touch', isPrimary: true });
+      clock.tick(10);
+      pointerMove(h.svg, 540, 560, { pointerType: 'touch', isPrimary: true, buttons: 1 });
+      clock.tick(50);
+      pointerUp(h.svg, 540, 560, { pointerType: 'touch', isPrimary: true });
 
+      expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+      expect(lastViewBox(h.callbacks.onViewBoxChange)).toEqual({ x: 40, y: 60, zoom: 1 });
+      expect(h.callbacks.onSetSelection).not.toHaveBeenCalled();
+    } finally {
+      clock.restore();
+    }
+  });
+});
+
+describe('Canvas gestures: momentum (issue #707)', () => {
+  // A flick: fast move then immediate release (within the 40ms window) starts a
+  // momentum coast. The coast must update the view live and commit exactly once.
+  function flick(h: ReturnType<typeof renderCanvas>, clock: ReturnType<typeof installFakeClock>): void {
     pointerDown(h.svg, 500, 500, { pointerType: 'touch', isPrimary: true });
-    pointerMove(h.svg, 540, 560, { pointerType: 'touch', isPrimary: true, buttons: 1 });
-    pointerUp(h.svg, 540, 560, { pointerType: 'touch', isPrimary: true });
+    clock.tick(10);
+    pointerMove(h.svg, 540, 540, { pointerType: 'touch', isPrimary: true, buttons: 1 });
+    clock.tick(5); // released while still moving -> momentum
+    pointerUp(h.svg, 540, 540, { pointerType: 'touch', isPrimary: true });
+  }
 
-    expect(lastViewBox(h.callbacks.onViewBoxChange)).toEqual({ x: 40, y: 60, zoom: 1 });
-    expect(h.callbacks.onSetSelection).not.toHaveBeenCalled();
+  it('defers the commit until the coast settles, then commits exactly once', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+    const clock = installFakeClock();
+    try {
+      flick(h, clock);
+
+      // Pointer-up started a coast: no commit yet, but the view has moved to the
+      // release offset (40, 40).
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+      expect(translate(h.getTransform())).toMatchObject({ x: 40, y: 40 });
+
+      // A few frames in: still coasting, still no commit, but the offset advanced
+      // past the release point.
+      clock.frame();
+      clock.frame();
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+      expect(translate(h.getTransform()).x).toBeGreaterThan(40);
+
+      // Run the coast to its natural end: exactly one commit, at the final offset.
+      clock.flush();
+      expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+      expect(lastViewBox(h.callbacks.onViewBoxChange)!.x).toBeGreaterThan(40);
+    } finally {
+      clock.restore();
+    }
+  });
+
+  it('a pan that interrupts a coast starts from the coasted offset, not props.view', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+    const clock = installFakeClock();
+    try {
+      flick(h, clock);
+      clock.frame();
+      clock.frame();
+      const coasted = translate(h.getTransform());
+      expect(coasted.x).toBeGreaterThan(40);
+
+      // Press interrupts the coast (no commit), then pan by (+20, +20) screen px.
+      pointerDown(h.svg, 200, 200, { pointerType: 'touch', isPrimary: true });
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+      clock.tick(10);
+      pointerMove(h.svg, 220, 220, { pointerType: 'touch', isPrimary: true, buttons: 1 });
+
+      // The pan anchors at the coasted offset, so the live view is coasted + 20,
+      // NOT props.view(0,0) + 20.
+      const panned = translate(h.getTransform());
+      expect(panned.x).toBeCloseTo(coasted.x + 20, 3);
+      expect(panned.y).toBeCloseTo(coasted.y + 20, 3);
+
+      clock.tick(50);
+      pointerUp(h.svg, 220, 220, { pointerType: 'touch', isPrimary: true });
+      expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+      expect(lastViewBox(h.callbacks.onViewBoxChange)!.x).toBeCloseTo(coasted.x + 20, 3);
+    } finally {
+      clock.restore();
+    }
   });
 });
 
@@ -83,18 +203,24 @@ describe('Canvas gestures: pinch (checklist 14)', () => {
   it('pointer-up exits pinch cleanly so a subsequent single-finger pan works', () => {
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
     h.clearMountCalls();
+    const clock = installFakeClock();
+    try {
+      pointerDown(h.svg, 100, 100, { pointerId: 1, pointerType: 'touch', isPrimary: true });
+      pointerDown(h.svg, 200, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false });
+      pointerMove(h.svg, 300, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false, buttons: 1 });
+      pointerUp(h.svg, 300, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false });
 
-    pointerDown(h.svg, 100, 100, { pointerId: 1, pointerType: 'touch', isPrimary: true });
-    pointerDown(h.svg, 200, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false });
-    pointerMove(h.svg, 300, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false, buttons: 1 });
-    pointerUp(h.svg, 300, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false });
+      // A fresh single-finger gesture after the pinch must pan (no stuck pinch).
+      h.callbacks.onViewBoxChange.mockClear();
+      pointerDown(h.svg, 100, 100, { pointerId: 3, pointerType: 'touch', isPrimary: true });
+      clock.tick(10);
+      pointerMove(h.svg, 130, 130, { pointerId: 3, pointerType: 'touch', isPrimary: true, buttons: 1 });
+      clock.tick(50);
+      pointerUp(h.svg, 130, 130, { pointerId: 3, pointerType: 'touch', isPrimary: true });
 
-    // A fresh single-finger gesture after the pinch must pan (no stuck pinch).
-    h.callbacks.onViewBoxChange.mockClear();
-    pointerDown(h.svg, 100, 100, { pointerId: 3, pointerType: 'touch', isPrimary: true });
-    pointerMove(h.svg, 130, 130, { pointerId: 3, pointerType: 'touch', isPrimary: true, buttons: 1 });
-    pointerUp(h.svg, 130, 130, { pointerId: 3, pointerType: 'touch', isPrimary: true });
-
-    expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+      expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+    } finally {
+      clock.restore();
+    }
   });
 });
