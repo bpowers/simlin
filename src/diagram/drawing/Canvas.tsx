@@ -58,6 +58,18 @@ import { anyModuleHasModelReference } from '../module-warning';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 import { isDragMovement, shouldShowVariableDetails } from './pointer-utils';
+import {
+  VELOCITY_THRESHOLD,
+  calculateVelocity as computeVelocity,
+  isMomentumDone,
+  momentumOffsetAt,
+  pinchOffset,
+  pinchZoom,
+  resizeViewBox,
+  wheelPanOffset,
+  wheelZoom,
+  zoomAroundPoint,
+} from './viewport';
 import { pointerStateReset, resolveSelectionForReattachment } from '../selection-logic';
 import {
   computeDragSelection,
@@ -148,27 +160,9 @@ function computeElementBounds(
 
 const ZMax = 6;
 
-// Momentum scrolling physics for macOS-native feel.
-// macOS apps (Finder, Safari, Maps) have snappier deceleration than iOS.
-// A friction coefficient of 0.05 means velocity retains 5% after 1 second,
-// giving a ~0.5-0.8 second coast for typical pan gestures.
-const FRICTION_COEFFICIENT = 0.05;
-const FRICTION_LOG = Math.log(FRICTION_COEFFICIENT); // ≈ -3.0
-
-// Stop momentum when velocity drops below this threshold.
-// At 60fps, 15 px/s = 0.25 px/frame - imperceptible motion.
-// Lower values make the stop feel more gradual and natural.
-const VELOCITY_THRESHOLD = 15;
-
-// Pinch-to-zoom uses exponential scaling for natural feel.
-// A divisor of 100 means cumulative deltaY of ~100 results in 2x zoom.
-// This matches native macOS apps like Maps and Preview.
-const PINCH_ZOOM_DIVISOR = 100;
-
-// MIN_ZOOM matches the 0.2 floor used in render() to avoid mismatch between
-// view state and actual rendering (which clamps zoom < 0.2 to 1.0)
-const MIN_ZOOM = 0.2;
-const MAX_ZOOM = 5.0;
+// Momentum physics, zoom limits, and the wheel/pinch math live in `viewport.ts`
+// (the pure functional core); this shell resolves screen->canvas points and the
+// rAF/timer lifecycle, then calls those pure transforms.
 
 // Tracked pointer for multi-touch pinch detection
 interface TrackedPointer {
@@ -771,64 +765,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
   // ---- Momentum / velocity physics (shell-internal, escapes render) -------
 
-  // Flutter-style friction simulation: calculates position at time t
-  // Based on Flutter's FrictionSimulation class
-  // x(t) = x0 + v0 * (friction^t - 1) / ln(friction)
-  const frictionPosition = (velocity: number, time: number): number => {
-    return (velocity * (Math.pow(FRICTION_COEFFICIENT, time) - 1)) / FRICTION_LOG;
-  };
-
-  // Velocity at time t: v(t) = v0 * friction^t
-  const frictionVelocity = (velocity: number, time: number): number => {
-    return velocity * Math.pow(FRICTION_COEFFICIENT, time);
-  };
-
-  // Calculate velocity from recent positions for momentum scrolling.
-  // Returns zero if the pointer was stationary before release (intentional stop).
-  const calculateVelocity = (): Point => {
-    const positions = r.velocityTracker.positions;
-    if (positions.length < 2) {
-      return { x: 0, y: 0 };
-    }
-
-    const now = window.performance.now();
-    const lastPosition = positions[positions.length - 1];
-
-    // If the pointer has been stationary for more than 40ms before release,
-    // the user intentionally stopped - don't start momentum.
-    // 40ms ≈ 2.5 frames at 60fps, enough to detect intentional stops
-    // while still capturing quick flick-and-release gestures.
-    const timeSinceLastMove = now - lastPosition.timestamp;
-    if (timeSinceLastMove > 40) {
-      return { x: 0, y: 0 };
-    }
-
-    // Use last 100ms of samples for velocity calculation
-    const recentPositions = positions.filter((p) => now - p.timestamp < 100);
-
-    if (recentPositions.length < 2) {
-      // Fall back to last two positions
-      const lastP = positions[positions.length - 1];
-      const prev = positions[positions.length - 2];
-      const dt = (lastP.timestamp - prev.timestamp) / 1000; // seconds
-      if (dt <= 0) return { x: 0, y: 0 };
-      return {
-        x: (lastP.x - prev.x) / dt,
-        y: (lastP.y - prev.y) / dt,
-      };
-    }
-
-    // Calculate average velocity over recent samples
-    const firstP = recentPositions[0];
-    const lastP = recentPositions[recentPositions.length - 1];
-    const dt = (lastP.timestamp - firstP.timestamp) / 1000; // seconds
-    if (dt <= 0) return { x: 0, y: 0 };
-
-    return {
-      x: (lastP.x - firstP.x) / dt,
-      y: (lastP.y - firstP.y) / dt,
-    };
-  };
+  // Estimate release velocity from the tracked pointer samples. The decision
+  // logic (too-few-samples / stationary-stop / recent-average) lives in the pure
+  // `computeVelocity`; this shell only supplies the samples and the clock.
+  const calculateVelocity = (): Point => computeVelocity(r.velocityTracker.positions, window.performance.now());
 
   const stopMomentumAnimation = (): void => {
     if (r.momentumAnimationId !== undefined) {
@@ -851,30 +791,18 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
 
     const elapsed = (timestamp - r.momentumStartTime) / 1000; // seconds
-    const vx = r.momentumInitialVelocity.x;
-    const vy = r.momentumInitialVelocity.y;
+    const v0 = r.momentumInitialVelocity;
 
-    // Calculate current velocity
-    const currentVx = frictionVelocity(vx, elapsed);
-    const currentVy = frictionVelocity(vy, elapsed);
-    const currentSpeed = Math.sqrt(currentVx * currentVx + currentVy * currentVy);
-
-    // Stop when velocity drops below threshold
-    if (currentSpeed < VELOCITY_THRESHOLD) {
+    // Stop when the decayed momentum speed drops below threshold.
+    if (isMomentumDone(v0, elapsed)) {
       stopMomentumAnimation();
       return;
     }
 
-    // Calculate new position using friction simulation
-    // Note: We ADD the friction position because higher offset = view moves in positive direction
-    // but velocity is in screen coordinates where dragging right should move view left
-    const dx = frictionPosition(vx, elapsed);
-    const dy = frictionPosition(vy, elapsed);
-
-    const newOffset = {
-      x: r.momentumStartOffset.x + dx,
-      y: r.momentumStartOffset.y + dy,
-    };
+    // Note: the friction displacement is ADDED because a higher offset moves the
+    // view in the positive direction, while velocity is in screen coordinates
+    // where dragging right should move the view left.
+    const newOffset = momentumOffsetAt(r.momentumStartOffset, v0, elapsed);
 
     // Update viewBox with new offset
     const newViewBox = {
@@ -959,27 +887,16 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       return;
     }
 
-    // Calculate scale factor
+    // Scale the starting zoom by the finger-distance ratio (clamped).
     const scale = currentDistance / interactionNow.initialDistance;
-    let newZoom = interactionNow.initialZoom * scale;
+    const newZoom = pinchZoom(interactionNow.initialZoom, scale);
 
-    // Clamp zoom level
-    newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
-
-    // Get current pinch center in screen coordinates, then convert to canvas
-    // coordinates at the NEW zoom level
+    // Get the current pinch center in screen coordinates, then convert to canvas
+    // coordinates at the NEW zoom level. The fixed model point (under the fingers
+    // when the pinch began) is re-anchored under that center.
     const currentCenter = getPinchCenter();
     const currentCenterCanvas = getCanvasPointWithZoom(currentCenter.x, currentCenter.y, newZoom);
-
-    // The pinchModelPoint is fixed in model space - it's the point that was
-    // under the user's fingers when the pinch started. We want that same
-    // model point to remain under the current screen center.
-    // newOffset = currentCenterCanvas - pinchModelPoint
-    const modelPoint = interactionNow.modelPoint;
-    const newOffset = {
-      x: currentCenterCanvas.x - modelPoint.x,
-      y: currentCenterCanvas.y - modelPoint.y,
-    };
+    const newOffset = pinchOffset(currentCenterCanvas, interactionNow.modelPoint);
 
     const newViewBox = {
       ...latest.current.props.view.viewBox,
@@ -996,32 +913,18 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     const zoom = latest.current.props.view.zoom;
     const viewBox = latest.current.props.view.viewBox;
 
-    // Convert wheel delta to canvas coordinates
-    // deltaMode: 0 = pixels, 1 = lines, 2 = pages
-    let deltaX = e.deltaX;
-    let deltaY = e.deltaY;
-
-    if (e.deltaMode === 1) {
-      // Lines - multiply by line height (typically ~16-20px)
-      deltaX *= 16;
-      deltaY *= 16;
-    } else if (e.deltaMode === 2) {
-      // Pages - use actual viewport dimensions from DOM, not stored viewBox
-      // which may be stale during resize transitions
-      const viewportWidth = svgRef.current?.clientWidth ?? viewBox.width;
-      const viewportHeight = svgRef.current?.clientHeight ?? viewBox.height;
-      deltaX *= viewportWidth;
-      deltaY *= viewportHeight;
-    }
-
-    // Scale delta by zoom level (inverse because higher zoom = smaller view area)
-    deltaX /= zoom;
-    deltaY /= zoom;
+    // Page deltas (deltaMode 2) scroll a full viewport; measure it from the DOM
+    // since the stored viewBox size may be stale during a resize transition.
+    const viewportPx = {
+      width: svgRef.current?.clientWidth ?? viewBox.width,
+      height: svgRef.current?.clientHeight ?? viewBox.height,
+    };
+    const newOffset = wheelPanOffset(viewBox, { x: e.deltaX, y: e.deltaY, mode: e.deltaMode }, zoom, viewportPx);
 
     const newViewBox = {
       ...viewBox,
-      x: viewBox.x - deltaX,
-      y: viewBox.y - deltaY,
+      x: newOffset.x,
+      y: newOffset.y,
     };
 
     latest.current.props.onViewBoxChange(newViewBox, zoom);
@@ -1032,33 +935,19 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   const handleNativeWheelZoom = (e: WheelEvent): void => {
     const zoom = latest.current.props.view.zoom;
 
-    // Exponential scaling: deltaY of PINCH_ZOOM_DIVISOR results in 2x zoom change.
-    // Negative deltaY = pinch out = zoom in, so we negate to get correct direction.
-    const scale = Math.pow(2, -e.deltaY / PINCH_ZOOM_DIVISOR);
-    let newZoom = zoom * scale;
-
-    // Clamp zoom level
-    newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
-
-    // Use epsilon comparison for floating point
-    if (Math.abs(newZoom - zoom) < 0.0001) {
+    // Exponential scaling (negative deltaY = pinch out = zoom in), clamped, with
+    // an epsilon no-op at the zoom limits.
+    const { zoom: newZoom, changed } = wheelZoom(zoom, e.deltaY);
+    if (!changed) {
       return;
     }
 
-    // Get cursor position in canvas coordinates
+    // Keep the model point under the cursor fixed across the zoom change: map the
+    // same screen pixel into canvas space at both the old and new zoom.
     const cursorCanvas = getCanvasPoint(e.clientX, e.clientY);
     const viewBox = latest.current.props.view.viewBox;
-
-    // Calculate the point under cursor in model coordinates
-    const modelX = cursorCanvas.x - viewBox.x;
-    const modelY = cursorCanvas.y - viewBox.y;
-
-    // Calculate new offset to keep the point under cursor stable
     const newCursorCanvas = getCanvasPointWithZoom(e.clientX, e.clientY, newZoom);
-    const newOffset = {
-      x: newCursorCanvas.x - modelX,
-      y: newCursorCanvas.y - modelY,
-    };
+    const newOffset = zoomAroundPoint(viewBox, cursorCanvas, newCursorCanvas);
 
     const newViewBox = {
       ...viewBox,
@@ -1124,14 +1013,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     if (oldSize) {
       const dWidth = contentRect.width - oldSize.width;
       const dHeight = contentRect.height - oldSize.height;
-      const canvasOffset = getCanvasOffset();
-
-      const newViewBox: ViewRect = {
-        x: canvasOffset.x + dWidth / 4,
-        y: canvasOffset.y + dHeight / 4,
-        width: contentRect.width,
-        height: contentRect.height,
-      };
+      const newViewBox = resizeViewBox(getCanvasOffset(), dWidth, dHeight, contentRect.width, contentRect.height);
 
       latest.current.props.onViewBoxChange(newViewBox, latest.current.props.view.zoom);
     }
