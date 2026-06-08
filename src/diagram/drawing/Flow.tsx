@@ -558,7 +558,14 @@ function adjustFlows(
       return point;
     });
 
-    otherEnd = defined(otherEnd);
+    // Degenerate self-loop: both endpoints attach to the same stock, so no
+    // endpoint was recorded as the "other end" to anchor the valve fraction
+    // against. Such a flow can't be created in the editor but can arrive via an
+    // imported model or a programmatic patch (issue #720). Leave it unchanged
+    // rather than throwing on the canvas render/interaction path.
+    if (otherEnd === undefined) {
+      return flow;
+    }
 
     // For multi-segment flows (3+ points), use segment-based valve positioning.
     // When moving an endpoint (like the arrowhead), the valve should only be
