@@ -19,22 +19,20 @@ interface SnackbarProps {
 
 export const SnackbarDurationContext = React.createContext<number | undefined>(undefined);
 
-export default class Snackbar extends React.PureComponent<SnackbarProps> {
-  render() {
-    const { open, autoHideDuration, children } = this.props;
-    // We manage timing per-toast; keep Radix's provider duration effectively disabled.
-    const EFFECTIVELY_INFINITE_DURATION_MS = 2147483647;
-    const providerDuration = EFFECTIVELY_INFINITE_DURATION_MS;
+export default function Snackbar(props: SnackbarProps): React.ReactElement {
+  const { open, autoHideDuration, children } = props;
+  // We manage timing per-toast; keep Radix's provider duration effectively disabled.
+  const EFFECTIVELY_INFINITE_DURATION_MS = 2147483647;
+  const providerDuration = EFFECTIVELY_INFINITE_DURATION_MS;
 
-    return (
-      <SnackbarDurationContext.Provider value={autoHideDuration}>
-        <Toast.Provider duration={providerDuration}>
-          {open ? children : null}
-          <Toast.Viewport className={clsx(styles.toastViewport)} />
-        </Toast.Provider>
-      </SnackbarDurationContext.Provider>
-    );
-  }
+  return (
+    <SnackbarDurationContext.Provider value={autoHideDuration}>
+      <Toast.Provider duration={providerDuration}>
+        {open ? children : null}
+        <Toast.Viewport className={clsx(styles.toastViewport)} />
+      </Toast.Provider>
+    </SnackbarDurationContext.Provider>
+  );
 }
 
 interface SnackbarContentProps extends React.HTMLAttributes<HTMLDivElement> {
@@ -42,24 +40,22 @@ interface SnackbarContentProps extends React.HTMLAttributes<HTMLDivElement> {
   action?: React.ReactNode;
 }
 
-export class SnackbarContent extends React.PureComponent<SnackbarContentProps> {
-  render() {
-    const { className, message, action, 'aria-describedby': ariaDescribedby, ...rest } = this.props;
+export function SnackbarContent(props: SnackbarContentProps): React.ReactElement {
+  const { className, message, action, 'aria-describedby': ariaDescribedby, ...rest } = props;
 
-    // filter out non-DOM props that may be spread from parent destructuring
-    const domRest: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(rest)) {
-      if (key === 'onClose' || key === 'variant') {
-        continue;
-      }
-      domRest[key] = val;
+  // filter out non-DOM props that may be spread from parent destructuring
+  const domRest: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(rest)) {
+    if (key === 'onClose' || key === 'variant') {
+      continue;
     }
-
-    return (
-      <div className={clsx(styles.snackbarContent, className)} aria-describedby={ariaDescribedby} {...domRest}>
-        <div className={styles.snackbarContentMessage}>{message}</div>
-        {action && <div className={styles.snackbarContentAction}>{action}</div>}
-      </div>
-    );
+    domRest[key] = val;
   }
+
+  return (
+    <div className={clsx(styles.snackbarContent, className)} aria-describedby={ariaDescribedby} {...domRest}>
+      <div className={styles.snackbarContentMessage}>{message}</div>
+      {action && <div className={styles.snackbarContentAction}>{action}</div>}
+    </div>
+  );
 }

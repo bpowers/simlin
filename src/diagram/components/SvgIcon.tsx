@@ -14,13 +14,11 @@ export interface SvgIconProps extends Omit<React.SVGProps<SVGSVGElement>, 'ref'>
   children?: React.ReactNode;
 }
 
-export default class SvgIcon extends React.PureComponent<SvgIconProps> {
-  render() {
-    const { viewBox = '0 0 24 24', className, children, ...rest } = this.props;
-    return (
-      <svg className={clsx(styles.svgIcon, className)} viewBox={viewBox} focusable="false" aria-hidden="true" {...rest}>
-        {children}
-      </svg>
-    );
-  }
+export default function SvgIcon(props: SvgIconProps): React.ReactElement {
+  const { viewBox = '0 0 24 24', className, children, ...rest } = props;
+  return (
+    <svg className={clsx(styles.svgIcon, className)} viewBox={viewBox} focusable="false" aria-hidden="true" {...rest}>
+      {children}
+    </svg>
+  );
 }

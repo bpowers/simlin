@@ -173,6 +173,55 @@ describe('Drawer', () => {
       expect(document.activeElement).toBe(buttonRef.current);
     });
   });
+
+  test('restores focus to the pre-open element when mounted open under StrictMode', async () => {
+    // Regression guard: StrictMode double-invokes the mount effect, so the focus
+    // effect's body runs twice for a Drawer that mounts with open===true. The
+    // first run saves the real prior focus and focuses the panel; without the
+    // `activeElement === panel` guard the second run would overwrite
+    // previousActiveElement with the panel itself, so a later close would
+    // "restore" focus to the hidden drawer instead of the button focused before
+    // the drawer mounted.
+    const buttonRef = React.createRef<HTMLButtonElement>();
+    const openRef = React.createRef<{ close: () => void }>();
+
+    // Wrapper that mounts the Drawer ALREADY OPEN (the case the double-invoked
+    // mount effect exercises) and exposes a way to close it.
+    function MountOpenDrawer(): React.ReactElement {
+      const [open, setOpen] = React.useState(true);
+      React.useImperativeHandle(openRef, () => ({ close: () => setOpen(false) }));
+      return (
+        <Drawer open={open} onClose={() => setOpen(false)}>
+          <button>Inside Button</button>
+        </Drawer>
+      );
+    }
+
+    // Focus the outside button before the StrictMode subtree (with the open
+    // Drawer) mounts.
+    render(<button ref={buttonRef}>Outside Button</button>);
+    buttonRef.current!.focus();
+    expect(document.activeElement).toBe(buttonRef.current);
+
+    render(
+      <React.StrictMode>
+        <MountOpenDrawer />
+      </React.StrictMode>,
+    );
+
+    await waitFor(() => {
+      const panel = document.querySelector('[role="dialog"]');
+      expect(document.activeElement).toBe(panel);
+    });
+
+    act(() => {
+      openRef.current!.close();
+    });
+
+    await waitFor(() => {
+      expect(document.activeElement).toBe(buttonRef.current);
+    });
+  });
 });
 
 describe('Drawer focus trap', () => {

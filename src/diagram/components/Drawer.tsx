@@ -16,88 +16,95 @@ interface DrawerProps {
   children?: React.ReactNode;
 }
 
-export default class Drawer extends React.PureComponent<DrawerProps> {
-  private panelRef = React.createRef<HTMLDivElement>();
-  private previousActiveElement: Element | null = null;
+export default function Drawer(props: DrawerProps): React.ReactElement {
+  const { open, onClose, children } = props;
 
-  componentDidMount() {
-    document.addEventListener('keydown', this.handleKeyDown);
-  }
+  const panelRef = React.useRef<HTMLDivElement>(null);
+  // Remembers the element focused before the drawer opened so focus can be
+  // restored on close. Held in a ref (not state) because it is read/written
+  // only from effects and never affects rendering.
+  const previousActiveElement = React.useRef<Element | null>(null);
 
-  componentDidUpdate(prevProps: DrawerProps) {
-    if (this.props.open && !prevProps.open) {
-      // Drawer just opened - save current focus and focus the panel
-      this.previousActiveElement = document.activeElement;
-      this.panelRef.current?.focus();
-    } else if (!this.props.open && prevProps.open) {
-      // Drawer just closed - restore focus
-      if (this.previousActiveElement instanceof HTMLElement) {
-        this.previousActiveElement.focus();
+  // Manage focus on open/close transitions: on open, save the prior focus and
+  // move focus into the panel; on close, restore the previously-focused element.
+  // Keyed on `open` so it runs once per transition (the class did this in
+  // componentDidUpdate).
+  React.useEffect(() => {
+    if (open) {
+      // Guard against React StrictMode double-invoking this mount effect: the
+      // first run saves the real prior focus and focuses the panel, so on the
+      // second run document.activeElement IS the panel. Skip the save in that
+      // case, otherwise we'd overwrite previousActiveElement with the panel
+      // itself and a later close would "restore" focus to the hidden drawer.
+      if (document.activeElement !== panelRef.current) {
+        previousActiveElement.current = document.activeElement;
       }
-      this.previousActiveElement = null;
+      panelRef.current?.focus();
+    } else {
+      if (previousActiveElement.current instanceof HTMLElement) {
+        previousActiveElement.current.focus();
+      }
+      previousActiveElement.current = null;
     }
-  }
+  }, [open]);
 
-  componentWillUnmount() {
-    document.removeEventListener('keydown', this.handleKeyDown);
-  }
-
-  handleKeyDown = (event: KeyboardEvent) => {
-    if (event.key === 'Escape' && this.props.open) {
-      this.props.onClose();
-    }
-
-    // Focus trap: when Tab is pressed and drawer is open, keep focus within the panel
-    if (event.key === 'Tab' && this.props.open && this.panelRef.current) {
-      const panel = this.panelRef.current;
-      const focusableElements = panel.querySelectorAll<HTMLElement>(
-        'a, button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"]), [contenteditable]',
-      );
-
-      if (focusableElements.length === 0) {
-        event.preventDefault();
-        return;
+  React.useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && open) {
+        onClose();
       }
 
-      const firstElement = focusableElements[0];
-      const lastElement = focusableElements[focusableElements.length - 1];
+      // Focus trap: when Tab is pressed and drawer is open, keep focus within the panel
+      if (event.key === 'Tab' && open && panelRef.current) {
+        const panel = panelRef.current;
+        const focusableElements = panel.querySelectorAll<HTMLElement>(
+          'a, button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"]), [contenteditable]',
+        );
 
-      if (event.shiftKey && document.activeElement === firstElement) {
-        event.preventDefault();
-        lastElement.focus();
-      } else if (!event.shiftKey && document.activeElement === lastElement) {
-        event.preventDefault();
-        firstElement.focus();
+        if (focusableElements.length === 0) {
+          event.preventDefault();
+          return;
+        }
+
+        const firstElement = focusableElements[0];
+        const lastElement = focusableElements[focusableElements.length - 1];
+
+        if (event.shiftKey && document.activeElement === firstElement) {
+          event.preventDefault();
+          lastElement.focus();
+        } else if (!event.shiftKey && document.activeElement === lastElement) {
+          event.preventDefault();
+          firstElement.focus();
+        }
       }
-    }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [open, onClose]);
+
+  const handleBackdropClick = (): void => {
+    onClose();
   };
 
-  handleBackdropClick = () => {
-    this.props.onClose();
-  };
+  const content = (
+    <>
+      <div
+        className={clsx(styles.backdrop, !open && styles.backdropHidden)}
+        onClick={handleBackdropClick}
+        aria-hidden="true"
+      />
+      <div
+        ref={panelRef}
+        className={clsx(styles.panel, !open && styles.panelHidden)}
+        role="dialog"
+        aria-modal="true"
+        tabIndex={-1}
+      >
+        {children}
+      </div>
+    </>
+  );
 
-  render() {
-    const { open, children } = this.props;
-
-    const content = (
-      <>
-        <div
-          className={clsx(styles.backdrop, !open && styles.backdropHidden)}
-          onClick={this.handleBackdropClick}
-          aria-hidden="true"
-        />
-        <div
-          ref={this.panelRef}
-          className={clsx(styles.panel, !open && styles.panelHidden)}
-          role="dialog"
-          aria-modal="true"
-          tabIndex={-1}
-        >
-          {children}
-        </div>
-      </>
-    );
-
-    return ReactDOM.createPortal(content, document.body);
-  }
+  return ReactDOM.createPortal(content, document.body);
 }

@@ -25,84 +25,82 @@ interface ButtonProps {
   'aria-haspopup'?: boolean | 'true' | 'false';
 }
 
-export default class Button extends React.PureComponent<ButtonProps> {
-  render() {
-    const {
-      variant = 'text',
-      color = 'primary',
-      size = 'medium',
-      disabled,
-      onClick,
-      className,
-      style,
-      startIcon,
-      children,
-      type = 'button',
-      component = 'button',
-      'aria-label': ariaLabel,
-      'aria-owns': ariaOwns,
-      'aria-haspopup': ariaHaspopup,
-    } = this.props;
+export default function Button(props: ButtonProps): React.ReactElement {
+  const {
+    variant = 'text',
+    color = 'primary',
+    size = 'medium',
+    disabled,
+    onClick,
+    className,
+    style,
+    startIcon,
+    children,
+    type = 'button',
+    component = 'button',
+    'aria-label': ariaLabel,
+    'aria-owns': ariaOwns,
+    'aria-haspopup': ariaHaspopup,
+  } = props;
 
-    const sizeClass = size === 'small' ? styles.sizeSmall : size === 'large' ? styles.sizeLarge : styles.sizeMedium;
+  const sizeClass = size === 'small' ? styles.sizeSmall : size === 'large' ? styles.sizeLarge : styles.sizeMedium;
 
-    let variantColorClass: string;
-    let disabledClass: string | undefined;
-    if (variant === 'contained') {
-      variantColorClass =
-        color === 'secondary'
-          ? styles.containedSecondary
-          : color === 'error'
-            ? styles.containedError
-            : styles.containedPrimary;
-      disabledClass = disabled ? styles.disabledContained : undefined;
-    } else if (variant === 'outlined') {
-      variantColorClass =
-        color === 'secondary'
-          ? styles.outlinedSecondary
-          : color === 'error'
-            ? styles.outlinedError
-            : color === 'inherit'
-              ? styles.outlinedInherit
-              : styles.outlinedPrimary;
-      disabledClass = disabled ? styles.disabledOutlined : undefined;
-    } else {
-      variantColorClass =
-        color === 'secondary'
-          ? styles.textSecondary
-          : color === 'error'
-            ? styles.textError
-            : color === 'inherit'
-              ? styles.textInherit
-              : styles.textPrimary;
-      disabledClass = disabled ? styles.disabledText : undefined;
-    }
+  let variantColorClass: string;
+  let disabledClass: string | undefined;
+  if (variant === 'contained') {
+    variantColorClass =
+      color === 'secondary'
+        ? styles.containedSecondary
+        : color === 'error'
+          ? styles.containedError
+          : styles.containedPrimary;
+    disabledClass = disabled ? styles.disabledContained : undefined;
+  } else if (variant === 'outlined') {
+    variantColorClass =
+      color === 'secondary'
+        ? styles.outlinedSecondary
+        : color === 'error'
+          ? styles.outlinedError
+          : color === 'inherit'
+            ? styles.outlinedInherit
+            : styles.outlinedPrimary;
+    disabledClass = disabled ? styles.disabledOutlined : undefined;
+  } else {
+    variantColorClass =
+      color === 'secondary'
+        ? styles.textSecondary
+        : color === 'error'
+          ? styles.textError
+          : color === 'inherit'
+            ? styles.textInherit
+            : styles.textPrimary;
+    disabledClass = disabled ? styles.disabledText : undefined;
+  }
 
-    const buttonClassName = clsx(styles.button, sizeClass, variantColorClass, disabledClass, className);
+  const buttonClassName = clsx(styles.button, sizeClass, variantColorClass, disabledClass, className);
 
-    if (component === 'label') {
-      return (
-        <label className={buttonClassName} style={style} aria-label={ariaLabel}>
-          {startIcon && <span className={styles.startIcon}>{startIcon}</span>}
-          {children}
-        </label>
-      );
-    }
-
+  if (component === 'label') {
     return (
-      <button
-        className={buttonClassName}
-        style={style}
-        disabled={disabled}
-        onClick={onClick}
-        type={type}
-        aria-label={ariaLabel}
-        aria-owns={ariaOwns}
-        aria-haspopup={ariaHaspopup}
-      >
+      <label className={buttonClassName} style={style} aria-label={ariaLabel}>
         {startIcon && <span className={styles.startIcon}>{startIcon}</span>}
         {children}
-      </button>
+      </label>
     );
   }
+
+  return (
+    <button
+      className={buttonClassName}
+      style={style}
+      disabled={disabled}
+      onClick={onClick}
+      type={type}
+      aria-label={ariaLabel}
+      aria-owns={ariaOwns}
+      aria-haspopup={ariaHaspopup}
+    >
+      {startIcon && <span className={styles.startIcon}>{startIcon}</span>}
+      {children}
+    </button>
+  );
 }
