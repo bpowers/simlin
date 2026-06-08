@@ -182,7 +182,7 @@ describe('Canvas gestures: momentum (issue #707)', () => {
 });
 
 describe('Canvas gestures: pinch (checklist 14)', () => {
-  it('a second touch enters pinch mode and a pinch-apart zooms the viewBox in', () => {
+  it('a pinch-apart zooms the live view in and commits once on exit', () => {
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
     h.clearMountCalls();
 
@@ -194,10 +194,14 @@ describe('Canvas gestures: pinch (checklist 14)', () => {
     // Spread the fingers: distance 100 -> 200, scale 2 -> zoom 1 -> 2.
     pointerMove(h.svg, 300, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false, buttons: 1 });
 
-    const zoomed = lastViewBox(h.callbacks.onViewBoxChange);
-    expect(zoomed).toBeDefined();
-    // Pinch changed the zoom (only pinch/wheel do; pan keeps zoom == 1).
-    expect(zoomed!.zoom).toBeCloseTo(2, 5);
+    // The move zooms the live transform but does NOT commit yet.
+    expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+    expect(translate(h.getTransform()).zoom).toBeCloseTo(2, 5);
+
+    // Lifting the second finger exits pinch and commits the zoom exactly once.
+    pointerUp(h.svg, 300, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false });
+    expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+    expect(lastViewBox(h.callbacks.onViewBoxChange)!.zoom).toBeCloseTo(2, 5);
   });
 
   it('pointer-up exits pinch cleanly so a subsequent single-finger pan works', () => {

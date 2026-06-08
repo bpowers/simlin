@@ -983,13 +983,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     const currentCenterCanvas = getCanvasPointWithZoom(currentCenter.x, currentCenter.y, newZoom);
     const newOffset = pinchOffset(currentCenterCanvas, interactionNow.modelPoint);
 
-    const newViewBox = {
-      ...latest.current.props.view.viewBox,
-      x: newOffset.x,
-      y: newOffset.y,
-    };
-
-    latest.current.props.onViewBoxChange(newViewBox, newZoom);
+    // Update the live viewport (immediate render); the single commit happens on
+    // pinch exit, not per move.
+    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom: newZoom });
   };
 
   // ---- Native wheel / Safari-gesture listeners (registered at mount) ------
@@ -1131,6 +1127,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
     // Handle end of pinch gesture
     if (latest.current.interaction.mode === 'pinching') {
+      // Commit the pinched viewport once, on exit (handlePinchMove kept it local
+      // throughout the gesture).
+      commitLiveViewport();
       // When exiting pinch mode, clear all gesture state for a clean restart.
       // Continuing with a single finger after pinch leads to confusing UX.
       const { state: nextInteraction } = reduceInteraction(
@@ -1505,32 +1504,34 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       const distance = getPinchDistance();
       const center = getPinchCenter();
       const centerCanvas = getCanvasPoint(center.x, center.y);
-      const viewBox = latest.current.props.view.viewBox;
+      // Anchor against the live viewport (= a prior pan's offset if one was in
+      // flight, else props.view), so a pinch that follows a pan keeps its place.
+      const base = getCanvasOffset();
 
       // Calculate the MODEL point under the pinch center. This is the fixed
       // point in model space that should remain under the user's fingers
       // throughout the pinch gesture.
       const pinchModelPoint = {
-        x: centerCanvas.x - viewBox.x,
-        y: centerCanvas.y - viewBox.y,
+        x: centerCanvas.x - base.x,
+        y: centerCanvas.y - base.y,
       };
 
       // Entering pinch mode supersedes any single-finger panning/dragSelecting
       // mode; the reducer returns the pinching variant carrying the fixed
-      // reference. Clear the live viewport so exiting pinch can't start momentum.
+      // reference. The live viewport is intentionally NOT cleared: handlePinchMove
+      // writes it each move and pinch exit commits it once.
       const { state: nextInteraction, effects } = reduceInteraction(
         latest.current.interaction,
         {
           kind: 'pinchStart',
           initialDistance: distance,
-          initialZoom: latest.current.props.view.zoom,
+          initialZoom: getCanvasZoom(),
           modelPoint: pinchModelPoint,
         },
         interactionContext(),
       );
       runEffects(effects, e.target as Element | undefined, e.pointerId);
       setInteraction(nextInteraction);
-      setLiveViewport(undefined);
       return;
     }
 
