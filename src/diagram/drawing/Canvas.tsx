@@ -164,6 +164,11 @@ const ZMax = 6;
 // (the pure functional core); this shell resolves screen->canvas points and the
 // rAF/timer lifecycle, then calls those pure transforms.
 
+// How long the wheel/trackpad gesture must be idle before its live viewport is
+// committed to the controller. A wheel gesture is a stream of discrete events
+// with no end event, so we coalesce a burst and commit once it settles.
+const WHEEL_COMMIT_DELAY_MS = 200;
+
 // Tracked pointer for multi-touch pinch detection
 interface TrackedPointer {
   id: number;
@@ -304,6 +309,12 @@ interface CanvasRefs {
   // back to the last committed viewBox.
   panBaseOffset: Point | undefined;
 
+  // Trailing-debounce timer for wheel/trackpad pan+zoom. A wheel gesture has no
+  // native end event, so each wheel event updates the live viewport and (re)arms
+  // this timer; when it fires (the scroll has gone idle) the live viewport is
+  // committed once. Cancelled on unmount and by any interrupting gesture.
+  wheelCommitTimer: ReturnType<typeof setTimeout> | undefined;
+
   // Momentum/inertia animation
   velocityTracker: VelocityTracker;
   momentumAnimationId: number | undefined;
@@ -388,6 +399,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       },
       activePointers: new Map<number, TrackedPointer>(),
       panBaseOffset: undefined,
+      wheelCommitTimer: undefined,
       velocityTracker: { positions: [] },
       momentumAnimationId: undefined,
       momentumStartTime: undefined,
@@ -518,6 +530,28 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     };
     latest.current.props.onViewBoxChange(newViewBox, live.zoom);
     setLiveViewport(undefined);
+  };
+
+  // (Re)arm the trailing-debounce commit for a wheel/trackpad gesture. Each
+  // wheel event calls this; the commit fires only once the scroll has been idle
+  // for WHEEL_COMMIT_DELAY_MS.
+  const scheduleWheelCommit = (): void => {
+    if (r.wheelCommitTimer !== undefined) {
+      clearTimeout(r.wheelCommitTimer);
+    }
+    r.wheelCommitTimer = setTimeout(() => {
+      r.wheelCommitTimer = undefined;
+      commitLiveViewport();
+    }, WHEEL_COMMIT_DELAY_MS);
+  };
+
+  // Cancel a pending wheel commit WITHOUT committing -- used when an interrupting
+  // gesture (a new pointer-down / pinch) takes ownership of the live viewport.
+  const cancelWheelCommit = (): void => {
+    if (r.wheelCommitTimer !== undefined) {
+      clearTimeout(r.wheelCommitTimer);
+      r.wheelCommitTimer = undefined;
+    }
   };
 
   const getElementByUid = (uid: UID): ViewElement => {
@@ -961,7 +995,8 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // ---- Native wheel / Safari-gesture listeners (registered at mount) ------
 
   const handleWheelPan = (e: WheelEvent): void => {
-    const zoom = latest.current.props.view.zoom;
+    const zoom = getCanvasZoom();
+    const base = getCanvasOffset();
     const viewBox = latest.current.props.view.viewBox;
 
     // Page deltas (deltaMode 2) scroll a full viewport; measure it from the DOM
@@ -970,21 +1005,18 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       width: svgRef.current?.clientWidth ?? viewBox.width,
       height: svgRef.current?.clientHeight ?? viewBox.height,
     };
-    const newOffset = wheelPanOffset(viewBox, { x: e.deltaX, y: e.deltaY, mode: e.deltaMode }, zoom, viewportPx);
+    const newOffset = wheelPanOffset(base, { x: e.deltaX, y: e.deltaY, mode: e.deltaMode }, zoom, viewportPx);
 
-    const newViewBox = {
-      ...viewBox,
-      x: newOffset.x,
-      y: newOffset.y,
-    };
-
-    latest.current.props.onViewBoxChange(newViewBox, zoom);
+    // Update the live viewport and (re)arm the trailing commit; do NOT round-trip
+    // to the controller per event.
+    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom });
+    scheduleWheelCommit();
   };
 
   // Native wheel zoom handler using exponential scaling for natural macOS feel.
   // Exponential scaling ensures symmetric behavior: zoom in 2x then out 2x returns to original.
   const handleNativeWheelZoom = (e: WheelEvent): void => {
-    const zoom = latest.current.props.view.zoom;
+    const zoom = getCanvasZoom();
 
     // Exponential scaling (negative deltaY = pinch out = zoom in), clamped, with
     // an epsilon no-op at the zoom limits.
@@ -994,19 +1026,16 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
 
     // Keep the model point under the cursor fixed across the zoom change: map the
-    // same screen pixel into canvas space at both the old and new zoom.
+    // same screen pixel into canvas space at both the old (current live) and new
+    // zoom. getCanvasPoint reads the live zoom, so the old mapping is correct
+    // even mid-gesture.
     const cursorCanvas = getCanvasPoint(e.clientX, e.clientY);
-    const viewBox = latest.current.props.view.viewBox;
+    const base = getCanvasOffset();
     const newCursorCanvas = getCanvasPointWithZoom(e.clientX, e.clientY, newZoom);
-    const newOffset = zoomAroundPoint(viewBox, cursorCanvas, newCursorCanvas);
+    const newOffset = zoomAroundPoint(base, cursorCanvas, newCursorCanvas);
 
-    const newViewBox = {
-      ...viewBox,
-      x: newOffset.x,
-      y: newOffset.y,
-    };
-
-    latest.current.props.onViewBoxChange(newViewBox, newZoom);
+    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom: newZoom });
+    scheduleWheelCommit();
   };
 
   // Native wheel event handler with { passive: false } to ensure preventDefault works.
@@ -1444,8 +1473,16 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     e.preventDefault();
     e.stopPropagation();
 
-    // Stop any momentum animation when user starts interacting
+    // A new press interrupts an in-flight viewport gesture: stop the momentum
+    // coast and cancel any pending wheel-debounce commit so neither fires
+    // mid-gesture. Neither commits -- the live viewport is preserved, and a pan or
+    // pinch started by this press inherits it (via panBaseOffset / the pinch
+    // reference reads) and commits the combined result on its own settle. (A press
+    // that starts no viewport gesture leaves the offset live; it is folded into
+    // the next viewport commit. viewBox is presentational and not independently
+    // saved, so this is benign.)
     stopMomentumAnimation();
+    cancelWheelCommit();
 
     // Track this pointer for multi-touch detection
     r.activePointers.set(e.pointerId, {
@@ -2377,6 +2414,11 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       }
       // Cancel any running momentum animation and clear all momentum state
       stopMomentumAnimation();
+      // Cancel a pending wheel-debounce commit WITHOUT firing it: committing
+      // during teardown would call onViewBoxChange (-> a setState on the
+      // unmounting host). The dropped commit is harmless -- viewBox is
+      // presentational and re-persisted on the next interaction.
+      cancelWheelCommit();
       // Clear velocity tracking and pointer data
       r.velocityTracker.positions = [];
       r.activePointers.clear();
