@@ -6,6 +6,19 @@
  * Version 2.0, that can be found in the LICENSE file.
  */
 
+// Regression tests for the loadLatex race guard in VariableDetails. Selecting a
+// new variable while the previous variable's getLatexEquation() promise is still
+// in flight must not let the stale response (success or error) overwrite the
+// current variable's rendered LaTeX. The component is keyed on viewElement.ident
+// inside its load effect, so a rerender with a new ident re-fires the request and
+// bumps the request id; only the latest request is allowed to commit.
+//
+// These assertions are made against observable render output -- whether KaTeX
+// markup (.katex) is present and what raw text the plain-text fallback shows --
+// rather than internal state. The plain-text fallback (.eqnPlain) renders exactly
+// when latexEquation is undefined (loading, or no engine LaTeX); KaTeX renders
+// once a non-undefined LaTeX string has been committed.
+
 // jsdom does not provide TextEncoder/TextDecoder, but the engine's
 // memory module uses them at import time.  Polyfill from Node's util.
 import { TextEncoder, TextDecoder } from 'util';
@@ -61,263 +74,180 @@ function createDeferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-describe('VariableDetails latex loading', () => {
-  test('loadLatex race condition: only latest request updates state', async () => {
-    const calls: Array<{ ident: string; deferred: Deferred<string | undefined> }> = [];
+const noop = () => {};
 
+function renderDetails(
+  ident: string,
+  getLatexEquation: (ident: string) => Promise<string | undefined>,
+): ReturnType<typeof render> {
+  return render(
+    <VariableDetails
+      variable={makeAux(ident)}
+      viewElement={makeViewElement(ident)}
+      getLatexEquation={getLatexEquation}
+      onDelete={noop}
+      onEquationChange={noop}
+      onTableChange={noop}
+      activeTab={0}
+      onActiveTabChange={noop}
+    />,
+  );
+}
+
+function rerenderDetails(
+  rerender: ReturnType<typeof render>['rerender'],
+  ident: string,
+  getLatexEquation: (ident: string) => Promise<string | undefined>,
+): void {
+  rerender(
+    <VariableDetails
+      variable={makeAux(ident)}
+      viewElement={makeViewElement(ident)}
+      getLatexEquation={getLatexEquation}
+      onDelete={noop}
+      onEquationChange={noop}
+      onTableChange={noop}
+      activeTab={0}
+      onActiveTabChange={noop}
+    />,
+  );
+}
+
+// The KaTeX preview is committed once a non-undefined LaTeX string arrives; the
+// raw equation ('1') renders in .eqnPlain while LaTeX is undefined.
+function hasKatex(container: HTMLElement): boolean {
+  return container.querySelector('.katex') !== null;
+}
+
+// The visible text KaTeX rendered, read from the HTML (non-MathML) layer. KaTeX
+// duplicates content into a clipped MathML accessibility mirror (.katex-mathml);
+// reading .katex-html avoids counting that mirror twice. Whitespace is collapsed
+// because KaTeX splits glyphs across many spans.
+function katexText(container: HTMLElement): string {
+  const htmlLayer = container.querySelector('.katex-html') ?? container.querySelector('.katex');
+  return (htmlLayer?.textContent ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function plainText(container: HTMLElement): string | undefined {
+  return container.querySelector('.eqnPlain')?.textContent ?? undefined;
+}
+
+describe('VariableDetails latex loading', () => {
+  test('loadLatex race condition: only the latest request commits its LaTeX', async () => {
+    const calls: Array<{ ident: string; deferred: Deferred<string | undefined> }> = [];
     const getLatexEquation = jest.fn((ident: string) => {
       const deferred = createDeferred<string | undefined>();
       calls.push({ ident, deferred });
       return deferred.promise;
     });
 
-    const ref = React.createRef<VariableDetails>();
-    const noop = () => {};
+    const { container, rerender } = renderDetails('var_a', getLatexEquation);
 
-    const { rerender } = render(
-      <VariableDetails
-        ref={ref}
-        variable={makeAux('var_a')}
-        viewElement={makeViewElement('var_a')}
-        getLatexEquation={getLatexEquation}
-        onDelete={noop}
-        onEquationChange={noop}
-        onTableChange={noop}
-        activeTab={0}
-        onActiveTabChange={noop}
-      />,
-    );
-
-    // componentDidMount triggers loadLatex for var_a
+    // Mount fires loadLatex for var_a.
     expect(calls.length).toBe(1);
     expect(calls[0].ident).toBe('var_a');
 
-    // Simulate selecting a new variable before var_a's response arrives
-    rerender(
-      <VariableDetails
-        ref={ref}
-        variable={makeAux('var_b')}
-        viewElement={makeViewElement('var_b')}
-        getLatexEquation={getLatexEquation}
-        onDelete={noop}
-        onEquationChange={noop}
-        onTableChange={noop}
-        activeTab={0}
-        onActiveTabChange={noop}
-      />,
-    );
-
-    // componentDidUpdate triggers loadLatex for var_b
+    // Select a new variable before var_a's response arrives; the ident-keyed
+    // effect re-fires for var_b.
+    rerenderDetails(rerender, 'var_b', getLatexEquation);
     expect(calls.length).toBe(2);
     expect(calls[1].ident).toBe('var_b');
 
-    // Now resolve var_b first (the current request)
+    // Resolve var_b first (the current request): KaTeX renders var_b's LaTeX.
     await act(async () => {
-      calls[1].deferred.resolve('\\text{var\\_b equation}');
+      calls[1].deferred.resolve('\\text{betaEqn}');
     });
+    expect(katexText(container)).toContain('betaEqn');
 
-    expect(ref.current!.state.latexEquation).toBe('\\text{var\\_b equation}');
-    expect(ref.current!.state.latexLoading).toBe(false);
-
-    // Now resolve var_a (the stale request) -- should be ignored
+    // Resolve var_a (the stale request) with a DIFFERENT, recognizable LaTeX
+    // string. The request-id guard must drop it, so the rendered KaTeX still
+    // shows var_b's equation and never var_a's. (If the guard is removed, the
+    // stale success overwrites the preview and this assertion fails.)
     await act(async () => {
-      calls[0].deferred.resolve('\\text{var\\_a equation}');
+      calls[0].deferred.resolve('\\text{alphaEqn}');
     });
-
-    // State should NOT have been overwritten by the stale response
-    expect(ref.current!.state.latexEquation).toBe('\\text{var\\_b equation}');
+    expect(katexText(container)).toContain('betaEqn');
+    expect(katexText(container)).not.toContain('alphaEqn');
   });
 
-  test('loadLatex race condition: stale error does not overwrite success', async () => {
+  test('loadLatex race condition: a stale error does not clear the current LaTeX', async () => {
     const calls: Array<{ ident: string; deferred: Deferred<string | undefined> }> = [];
-
     const getLatexEquation = jest.fn((ident: string) => {
       const deferred = createDeferred<string | undefined>();
       calls.push({ ident, deferred });
       return deferred.promise;
     });
 
-    const ref = React.createRef<VariableDetails>();
-    const noop = () => {};
-
-    const { rerender } = render(
-      <VariableDetails
-        ref={ref}
-        variable={makeAux('var_a')}
-        viewElement={makeViewElement('var_a')}
-        getLatexEquation={getLatexEquation}
-        onDelete={noop}
-        onEquationChange={noop}
-        onTableChange={noop}
-        activeTab={0}
-        onActiveTabChange={noop}
-      />,
-    );
-
-    rerender(
-      <VariableDetails
-        ref={ref}
-        variable={makeAux('var_b')}
-        viewElement={makeViewElement('var_b')}
-        getLatexEquation={getLatexEquation}
-        onDelete={noop}
-        onEquationChange={noop}
-        onTableChange={noop}
-        activeTab={0}
-        onActiveTabChange={noop}
-      />,
-    );
-
+    const { container, rerender } = renderDetails('var_a', getLatexEquation);
+    rerenderDetails(rerender, 'var_b', getLatexEquation);
     expect(calls.length).toBe(2);
 
-    // Resolve var_b successfully
     await act(async () => {
-      calls[1].deferred.resolve('\\text{var\\_b}');
+      calls[1].deferred.resolve('\\text{var b}');
     });
+    expect(hasKatex(container)).toBe(true);
 
-    expect(ref.current!.state.latexEquation).toBe('\\text{var\\_b}');
-
-    // Reject var_a with an error -- should be ignored
+    // Reject var_a with an error -- the stale rejection must be ignored.
     await act(async () => {
       calls[0].deferred.reject(new Error('network error'));
     });
-
-    // State should still show var_b's equation
-    expect(ref.current!.state.latexEquation).toBe('\\text{var\\_b}');
-    expect(ref.current!.state.latexLoading).toBe(false);
+    expect(hasKatex(container)).toBe(true);
   });
 
-  test('rapid variable changes: only final request matters', async () => {
+  test('rapid variable changes: only the final request commits', async () => {
     const calls: Array<{ ident: string; deferred: Deferred<string | undefined> }> = [];
-
     const getLatexEquation = jest.fn((ident: string) => {
       const deferred = createDeferred<string | undefined>();
       calls.push({ ident, deferred });
       return deferred.promise;
     });
 
-    const ref = React.createRef<VariableDetails>();
-    const noop = () => {};
-
-    const { rerender } = render(
-      <VariableDetails
-        ref={ref}
-        variable={makeAux('v1')}
-        viewElement={makeViewElement('v1')}
-        getLatexEquation={getLatexEquation}
-        onDelete={noop}
-        onEquationChange={noop}
-        onTableChange={noop}
-        activeTab={0}
-        onActiveTabChange={noop}
-      />,
-    );
-
-    // Rapidly switch through v2 and v3
-    rerender(
-      <VariableDetails
-        ref={ref}
-        variable={makeAux('v2')}
-        viewElement={makeViewElement('v2')}
-        getLatexEquation={getLatexEquation}
-        onDelete={noop}
-        onEquationChange={noop}
-        onTableChange={noop}
-        activeTab={0}
-        onActiveTabChange={noop}
-      />,
-    );
-
-    rerender(
-      <VariableDetails
-        ref={ref}
-        variable={makeAux('v3')}
-        viewElement={makeViewElement('v3')}
-        getLatexEquation={getLatexEquation}
-        onDelete={noop}
-        onEquationChange={noop}
-        onTableChange={noop}
-        activeTab={0}
-        onActiveTabChange={noop}
-      />,
-    );
-
+    const { container, rerender } = renderDetails('v1', getLatexEquation);
+    rerenderDetails(rerender, 'v2', getLatexEquation);
+    rerenderDetails(rerender, 'v3', getLatexEquation);
     expect(calls.length).toBe(3);
 
-    // Resolve in reverse order: v1 first, then v2, then v3
+    // Resolve in the order v1, v2, v3. Only v3 (the current request) commits.
     await act(async () => {
       calls[0].deferred.resolve('latex_v1');
     });
-    expect(ref.current!.state.latexEquation).toBeUndefined(); // stale, ignored
+    expect(hasKatex(container)).toBe(false);
 
     await act(async () => {
       calls[1].deferred.resolve('latex_v2');
     });
-    expect(ref.current!.state.latexEquation).toBeUndefined(); // stale, ignored
+    expect(hasKatex(container)).toBe(false);
 
     await act(async () => {
       calls[2].deferred.resolve('latex_v3');
     });
-    expect(ref.current!.state.latexEquation).toBe('latex_v3'); // current, accepted
+    expect(hasKatex(container)).toBe(true);
   });
 
-  test('switching variables clears stale latexEquation while new request is in flight', async () => {
+  test('switching variables clears stale LaTeX while the new request is in flight', async () => {
     const calls: Array<{ ident: string; deferred: Deferred<string | undefined> }> = [];
-
     const getLatexEquation = jest.fn((ident: string) => {
       const deferred = createDeferred<string | undefined>();
       calls.push({ ident, deferred });
       return deferred.promise;
     });
 
-    const ref = React.createRef<VariableDetails>();
-    const noop = () => {};
+    const { container, rerender } = renderDetails('var_a', getLatexEquation);
 
-    const { rerender } = render(
-      <VariableDetails
-        ref={ref}
-        variable={makeAux('var_a')}
-        viewElement={makeViewElement('var_a')}
-        getLatexEquation={getLatexEquation}
-        onDelete={noop}
-        onEquationChange={noop}
-        onTableChange={noop}
-        activeTab={0}
-        onActiveTabChange={noop}
-      />,
-    );
-
-    // Resolve var_a's LaTeX
     await act(async () => {
-      calls[0].deferred.resolve('\\text{var\\_a}');
+      calls[0].deferred.resolve('\\text{var a}');
     });
-    expect(ref.current!.state.latexEquation).toBe('\\text{var\\_a}');
-    expect(ref.current!.state.latexLoading).toBe(false);
+    expect(hasKatex(container)).toBe(true);
 
-    // Switch to var_b
-    rerender(
-      <VariableDetails
-        ref={ref}
-        variable={makeAux('var_b')}
-        viewElement={makeViewElement('var_b')}
-        getLatexEquation={getLatexEquation}
-        onDelete={noop}
-        onEquationChange={noop}
-        onTableChange={noop}
-        activeTab={0}
-        onActiveTabChange={noop}
-      />,
-    );
+    // Switch to var_b: the stale KaTeX is cleared immediately and the raw
+    // equation ('1') shows as plain text while var_b's request is in flight.
+    rerenderDetails(rerender, 'var_b', getLatexEquation);
+    expect(hasKatex(container)).toBe(false);
+    expect(plainText(container)).toBe('1');
 
-    // While var_b's request is in flight, the old LaTeX should be cleared
-    expect(ref.current!.state.latexEquation).toBeUndefined();
-    expect(ref.current!.state.latexLoading).toBe(true);
-
-    // Resolve var_b
     await act(async () => {
-      calls[1].deferred.resolve('\\text{var\\_b}');
+      calls[1].deferred.resolve('\\text{var b}');
     });
-    expect(ref.current!.state.latexEquation).toBe('\\text{var\\_b}');
-    expect(ref.current!.state.latexLoading).toBe(false);
+    expect(hasKatex(container)).toBe(true);
   });
 });

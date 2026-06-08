@@ -4,24 +4,18 @@
 
 import * as React from 'react';
 
-import { fromUint8Array, toUint8Array } from '@simlin/core/base64';
-
-import { baseURL, defined } from '@simlin/core/common';
+import { baseURL } from '@simlin/core/common';
 import { first } from '@simlin/core/collections';
 
 import { Editor, ProtobufProjectData } from './Editor';
 import { ErrorBoundary } from './ErrorBoundary';
+import { HostedWebEditorError, ProjectEndpoint, loadProject, saveProject } from './hosted-web-editor-core';
+// Imported as a namespace so the delete-flow navigation and DELETE go through
+// `core.*`, which a test can intercept with jest.spyOn (jsdom's
+// window.location.assign is itself non-spyable).
+import * as core from './hosted-web-editor-core';
 
 import styles from './HostedWebEditor.module.css';
-
-// Extends the built-in Error so instances carry a stack trace and satisfy
-// `instanceof Error`. The explicit name assignment survives minification.
-class HostedWebEditorError extends Error {
-  constructor(msg: string) {
-    super(msg);
-    this.name = 'HostedWebEditorError';
-  }
-}
 
 interface HostedWebEditorProps {
   username: string;
@@ -31,211 +25,116 @@ interface HostedWebEditorProps {
   readOnlyMode?: boolean;
 }
 
-interface HostedWebEditorState {
-  serviceErrors: readonly Error[];
-  projectBinary: Readonly<Uint8Array> | undefined;
-  projectVersion: number;
-}
+export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement {
+  const { username, projectName, embedded, readOnlyMode } = props;
 
-export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, HostedWebEditorState> {
-  // Pending setTimeout(0) handle for the deferred loadProject(); held so
-  // componentWillUnmount can cancel it. `unmounted` short-circuits a callback
-  // that already drained off the macrotask queue (clearTimeout no longer
-  // reaches it). Both reset in componentDidMount -- see the comment there.
-  private loadProjectTimer: ReturnType<typeof setTimeout> | null = null;
-  private unmounted = false;
+  const [serviceErrors, setServiceErrors] = React.useState<readonly Error[]>([]);
+  const [projectBinary, setProjectBinary] = React.useState<Readonly<Uint8Array> | undefined>(undefined);
+  const [projectVersion, setProjectVersion] = React.useState<number>(-1);
 
-  constructor(props: HostedWebEditorProps) {
-    super(props);
+  const getBaseURL = (): string => props.baseURL ?? baseURL;
 
-    this.state = {
-      serviceErrors: [],
-      projectBinary: undefined,
-      projectVersion: -1,
+  // The project endpoint is rebuilt per call (cheap) so escaped async callbacks
+  // never close over a stale base/username/projectName.
+  const makeEndpoint = (): ProjectEndpoint => ({
+    base: getBaseURL(),
+    username,
+    projectName,
+    fetch,
+  });
+
+  const appendServiceError = (msg: string): void => {
+    setServiceErrors((prev) => [...prev, new HostedWebEditorError(msg)]);
+  };
+
+  // Mount guard for post-await setState, mirroring the class's `unmounted` flag.
+  // Cleared in the effect cleanup so a load that already left the macrotask queue
+  // (the timer drained before unmount) short-circuits instead of setState-ing on
+  // an unmounted tree.
+  const mounted = React.useRef(false);
+
+  // Kick off the project load, deferred a macrotask exactly as the class's
+  // componentDidMount setTimeout(0) was. The deferral is what makes the request
+  // fire ONCE under React 18+ StrictMode: StrictMode drives the committed
+  // component through mount -> unmount -> mount, so this becomes
+  // schedule -> cancel (cleanup clearTimeout) -> schedule -- the throwaway first
+  // mount's timer never fires loadProject(), and only the live mount's does.
+  // (A plain `void loadProject()` in the effect body would fire the fetch on the
+  // first mount before the cleanup can cancel it, issuing two network requests.)
+  React.useEffect(() => {
+    mounted.current = true;
+
+    const timer = setTimeout(() => {
+      void (async () => {
+        const result = await loadProject(makeEndpoint());
+        if (!mounted.current) {
+          return;
+        }
+        if (result.kind === 'loaded') {
+          setProjectBinary(result.projectBinary);
+          setProjectVersion(result.projectVersion);
+        } else {
+          appendServiceError(result.message);
+        }
+      })();
+    });
+
+    return () => {
+      mounted.current = false;
+      clearTimeout(timer);
     };
-    // The deferred loadProject() is kicked off in componentDidMount, not here
-    // -- see the comment there. Keep this constructor side-effect free.
-  }
+    // Empty deps: the load runs once per committed mount. username/projectName/
+    // baseURL are captured via makeEndpoint at call time; a host that swaps them
+    // remounts via the App route, not an in-place rerender.
+  }, []);
 
-  componentDidMount() {
-    // React 18 StrictMode (dev) drives every committed component through
-    // componentDidMount -> componentWillUnmount -> componentDidMount on the
-    // *same* instance without re-running the constructor, and double-invokes
-    // the render phase so a second instance is created and discarded. So:
-    //  - `unmounted` is (re)set false here, not (only) in the constructor, so
-    //    the second StrictMode mount doesn't leave it stuck true.
-    //  - loadProject() is scheduled here, not in the constructor, so the
-    //    StrictMode unmount/remount is schedule -> cancel -> schedule (one
-    //    fetch, not two) and a discarded render-phase instance -- which never
-    //    reaches componentDidMount -- never fires loadProject() onto a zombie
-    //    `this` and setState()s on an instance React never committed.
-    this.unmounted = false;
-    this.loadProjectTimer = setTimeout(async () => {
-      this.loadProjectTimer = null;
-      if (this.unmounted) {
-        return;
-      }
-      await this.loadProject();
-    });
-  }
+  const handleSave = async (project: ProtobufProjectData, currVersion: number): Promise<number | undefined> => {
+    if (readOnlyMode) return undefined;
 
-  componentWillUnmount() {
-    // Flag first, then cancel: a callback already drained off the macrotask
-    // queue at unmount time must short-circuit on `unmounted` (clearTimeout
-    // below is best-effort for the still-pending case).
-    this.unmounted = true;
-    if (this.loadProjectTimer !== null) {
-      clearTimeout(this.loadProjectTimer);
-      this.loadProjectTimer = null;
-    }
-  }
-
-  appendModelError(msg: string) {
-    this.setState({
-      serviceErrors: [...this.state.serviceErrors, new HostedWebEditorError(msg)],
-    });
-  }
-
-  getBaseURL(): string {
-    return this.props.baseURL ?? baseURL;
-  }
-
-  handleSave = async (project: ProtobufProjectData, currVersion: number): Promise<number | undefined> => {
-    if (this.props.readOnlyMode) return;
-
-    const bodyContents = {
-      currVersion,
-      projectPB: fromUint8Array(project.data as Uint8Array),
-    };
-
-    const base = this.getBaseURL();
-    const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
-    const response = await fetch(apiPath, {
-      credentials: 'same-origin',
-      method: 'POST',
-      cache: 'no-cache',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(bodyContents),
-    });
-
-    const status = response.status;
-    if (!(status >= 200 && status < 400)) {
-      const body = await response.json();
-      const errorMsg =
-        body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
-      this.appendModelError(errorMsg);
+    const result = await saveProject(makeEndpoint(), project, currVersion);
+    if (result.kind === 'error') {
+      appendServiceError(result.message);
       return undefined;
     }
-
-    const projectResponse = await response.json();
-    const projectVersion = defined(projectResponse.version) as number;
-
-    this.setState({ projectVersion });
-
-    return projectVersion;
+    setProjectVersion(result.version);
+    return result.version;
   };
 
-  handleDelete = async (): Promise<void> => {
-    if (this.props.readOnlyMode) return;
+  const handleDelete = async (): Promise<void> => {
+    if (readOnlyMode) return;
 
-    const base = this.getBaseURL();
-    const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
-    const response = await fetch(apiPath, {
-      credentials: 'same-origin',
-      method: 'DELETE',
-      cache: 'no-cache',
-    });
-
-    const status = response.status;
-    if (!(status >= 200 && status < 400)) {
-      let errorMsg = `HTTP ${status} while deleting project`;
-      try {
-        const body = await response.json();
-        if (body && typeof body.error === 'string') {
-          errorMsg = body.error as string;
-        }
-      } catch {
-        // keep the status-bearing fallback
-      }
-      // Surface this to the in-editor confirmation dialog (which stays open
-      // for a retry) rather than appendModelError(): once a project loads,
-      // serviceErrors are no longer rendered.
-      throw new Error(errorMsg);
-    }
-
+    // deleteProject throws on failure so the in-editor confirmation dialog (which
+    // stays open for a retry) can surface the message; once a project loads,
+    // serviceErrors are no longer rendered. On success it returns the home URL.
+    const homeUrl = await core.deleteProject(makeEndpoint());
     // Full navigation back to the project list so it refetches without the
-    // just-deleted project.
-    this.redirectToHome(`${base}/`);
+    // just-deleted project. Routed through the core namespace so it is mockable.
+    core.redirectToHome(homeUrl);
   };
 
-  // Extracted so tests can observe the post-delete navigation without
-  // assigning to jsdom's non-writable window.location.
-  redirectToHome(url: string): void {
-    window.location.assign(url);
-  }
-
-  // Must never reject: the componentDidMount caller is fire-and-forget, so a
-  // thrown error would become an unhandled rejection and leave the editor
-  // permanently blank (render() shows nothing until projectBinary is set and
-  // only serviceErrors produce a message).
-  async loadProject(): Promise<void> {
-    const base = this.getBaseURL();
-    const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
-    try {
-      const response = await fetch(apiPath);
-      if (response.status >= 400) {
-        this.appendModelError(`unable to load ${apiPath}`);
-        return;
-      }
-
-      const projectResponse = (await response.json()) as { pb?: unknown; version?: unknown };
-      if (typeof projectResponse?.pb !== 'string' || typeof projectResponse?.version !== 'number') {
-        this.appendModelError(`malformed project response from ${apiPath}`);
-        return;
-      }
-
-      const projectBinary = toUint8Array(projectResponse.pb);
-
-      this.setState({
-        projectBinary,
-        projectVersion: projectResponse.version,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.appendModelError(`unable to load ${apiPath}: ${msg}`);
+  if (!projectBinary || !projectVersion) {
+    if (serviceErrors.length > 0) {
+      return <div>{first(serviceErrors).message}</div>;
     }
+    return <div />;
   }
 
-  render(): React.ReactNode {
-    const { embedded } = this.props;
+  const classNames = embedded ? undefined : styles.bg;
 
-    if (!this.state.projectBinary || !this.state.projectVersion) {
-      if (this.state.serviceErrors.length > 0) {
-        return <div>{first(this.state.serviceErrors).message}</div>;
-      } else {
-        return <div />;
-      }
-    }
-
-    const classNames = embedded ? undefined : styles.bg;
-
-    return (
-      <div className={classNames}>
-        <ErrorBoundary resetKey={`${this.props.username}/${this.props.projectName}`}>
-          <Editor
-            inputFormat="protobuf"
-            initialProjectBinary={this.state.projectBinary}
-            initialProjectVersion={this.state.projectVersion}
-            name={this.props.projectName}
-            embedded={this.props.embedded}
-            onSave={this.handleSave}
-            onDeleteProject={this.props.readOnlyMode ? undefined : this.handleDelete}
-            readOnlyMode={this.props.readOnlyMode}
-          />
-        </ErrorBoundary>
-      </div>
-    );
-  }
+  return (
+    <div className={classNames}>
+      <ErrorBoundary resetKey={`${username}/${projectName}`}>
+        <Editor
+          inputFormat="protobuf"
+          initialProjectBinary={projectBinary}
+          initialProjectVersion={projectVersion}
+          name={projectName}
+          embedded={embedded}
+          onSave={handleSave}
+          onDeleteProject={readOnlyMode ? undefined : handleDelete}
+          readOnlyMode={readOnlyMode}
+        />
+      </ErrorBoundary>
+    </div>
+  );
 }
