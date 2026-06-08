@@ -1937,6 +1937,13 @@ fn discover_loops_returns_loops_periods_and_importance() {
             !res.truncated,
             "an unbudgeted run on a tiny model must not be truncated"
         );
+        // The cross-agg reducer-loop recovery budget (GH #696) is a structural
+        // completeness signal distinct from the wall-clock `truncated`; a tiny
+        // scalar model has no cross-agg loops to recover, so it must be false.
+        assert!(
+            !res.agg_recovery_truncated,
+            "a tiny scalar model must not report agg-recovery truncation"
+        );
         assert!(
             res.loop_count > 0,
             "discovery should find at least one loop in a reinforcing model"

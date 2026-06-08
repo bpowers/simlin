@@ -431,7 +431,16 @@ class Analysis:
     """Intervals where a specific set of loops dominates behavior."""
 
     truncated: bool = False
-    """True when the `timeout` elapsed before discovery finished."""
+    """True when the `timeout` elapsed before discovery finished, so
+    `loops`/`dominant_periods` may be partial. This is the wall-clock time
+    budget -- distinct from `agg_recovery_truncated`."""
+
+    agg_recovery_truncated: bool = False
+    """True when discovery's cross-element-through-aggregate loop recovery hit
+    its reducer-loop-count budget, so some cross-agg reducer loops are absent
+    from `loops`. This is the *structural*-completeness signal (mirroring
+    exhaustive mode's analogous warning), distinct from `truncated` (the
+    wall-clock time budget)."""
 
     partitions: tuple[Partition, ...] = ()
     """The cycle partitions referenced by ``loops`` (each loop's

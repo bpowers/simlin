@@ -804,6 +804,7 @@ class Model:
                 loops=tuple(loops),
                 dominant_periods=tuple(periods),
                 truncated=bool(result_ptr.truncated),
+                agg_recovery_truncated=bool(result_ptr.agg_recovery_truncated),
                 partitions=tuple(partitions),
             )
         finally:

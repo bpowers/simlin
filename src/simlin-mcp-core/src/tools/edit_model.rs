@@ -199,6 +199,12 @@ pub struct EditModelOutput {
     pub time: Vec<f64>,
     pub loop_dominance: Vec<LoopDominanceSummary>,
     pub dominant_loops_by_period: Vec<DominantPeriodOutput>,
+    /// True when discovery's cross-element-through-aggregate loop recovery hit
+    /// its budget, so `loopDominance` may be missing some cross-agg reducer
+    /// loops. A result-level structural-completeness signal (not per-loop);
+    /// elided when false to preserve the stable wire shape.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub agg_recovery_truncated: bool,
     pub dry_run: bool,
 }
 
@@ -332,6 +338,7 @@ pub async fn edit_model<A: ProjectAccess>(
             .await?;
     }
 
+    let agg_recovery_truncated = analysis.agg_recovery_truncated;
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
         .loop_dominance
         .into_iter()
@@ -350,6 +357,7 @@ pub async fn edit_model<A: ProjectAccess>(
         time: analysis.time,
         loop_dominance,
         dominant_loops_by_period,
+        agg_recovery_truncated,
         dry_run,
     })
 }

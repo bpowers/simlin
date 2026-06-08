@@ -238,8 +238,16 @@ typedef struct {
   // ranked loop list; result-scoped.
   SimlinDiscoveredPartition *partitions;
   uintptr_t partition_count;
-  // Non-zero when discovery hit its `budget_ms` before finishing.
+  // Non-zero when discovery hit its wall-clock `budget_ms` before finishing,
+  // so `loops`/`periods` may be partial.
   bool truncated;
+  // Non-zero when discovery's cross-element-through-aggregate loop recovery
+  // (GH #696) hit its reducer-loop-count budget, so some cross-agg reducer
+  // loops are absent from `loops`.  Distinct from `truncated` (the wall-clock
+  // time budget): this is the structural-completeness signal (GH #515/#696)
+  // that mirrors exhaustive mode's analogous salsa Warning, surfacing the
+  // completeness asymmetry that previously left discovery callers blind.
+  bool agg_recovery_truncated;
 } SimlinDiscoveryResult;
 
 // Single causal link structure

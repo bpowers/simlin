@@ -229,6 +229,14 @@ pub struct SimlinDiscoveryResult {
     /// ranked loop list; result-scoped.
     pub partitions: *mut SimlinDiscoveredPartition,
     pub partition_count: usize,
-    /// Non-zero when discovery hit its `budget_ms` before finishing.
+    /// Non-zero when discovery hit its wall-clock `budget_ms` before finishing,
+    /// so `loops`/`periods` may be partial.
     pub truncated: bool,
+    /// Non-zero when discovery's cross-element-through-aggregate loop recovery
+    /// (GH #696) hit its reducer-loop-count budget, so some cross-agg reducer
+    /// loops are absent from `loops`.  Distinct from `truncated` (the wall-clock
+    /// time budget): this is the structural-completeness signal (GH #515/#696)
+    /// that mirrors exhaustive mode's analogous salsa Warning, surfacing the
+    /// completeness asymmetry that previously left discovery callers blind.
+    pub agg_recovery_truncated: bool,
 }

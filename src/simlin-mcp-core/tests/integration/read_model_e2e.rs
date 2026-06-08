@@ -31,6 +31,19 @@ async fn read_model_returns_clean_xmile_snapshot() {
         !output.loop_dominance.is_empty(),
         "logistic growth fixture must have at least one loop"
     );
+    // The cross-agg reducer-loop recovery budget is a structural-completeness
+    // signal; a small scalar fixture has no cross-agg loops to recover, so it
+    // is false and (by the skip_serializing_if) elided from the wire shape,
+    // keeping the JSON byte-identical for the common case.
+    assert!(
+        !output.agg_recovery_truncated,
+        "logistic growth fixture must not report agg-recovery truncation"
+    );
+    let value = serde_json::to_value(&output).unwrap();
+    assert!(
+        value.get("aggRecoveryTruncated").is_none(),
+        "a false agg_recovery_truncated must be elided from the wire shape"
+    );
 }
 
 #[tokio::test]

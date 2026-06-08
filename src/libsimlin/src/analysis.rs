@@ -737,6 +737,7 @@ unsafe fn discovery_to_ffi(
         partitions,
         partition_count,
         truncated: analysis.truncated,
+        agg_recovery_truncated: analysis.agg_recovery_truncated,
     }))
 }
 

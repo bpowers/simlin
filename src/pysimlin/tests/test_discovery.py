@@ -34,6 +34,17 @@ class TestAnalyzeDiscovery:
         assert isinstance(analysis, Analysis)
         assert not analysis.truncated
 
+    def test_agg_recovery_truncated_field(self, logistic_model: simlin.Model) -> None:
+        # The cross-element-through-aggregate reducer-loop recovery budget is a
+        # structural-completeness signal distinct from the wall-clock
+        # `truncated`. It is plumbed additively from the FFI through to
+        # Analysis; a small scalar model has no cross-agg loops to recover, so
+        # it reports False. (Tripping the real 256-loop budget needs a huge
+        # arrayed model, which is out of scope for a plumbing test.)
+        analysis = logistic_model.analyze()
+        assert isinstance(analysis.agg_recovery_truncated, bool)
+        assert analysis.agg_recovery_truncated is False
+
     def test_discovers_loops_with_importance(self, logistic_model: simlin.Model) -> None:
         analysis = logistic_model.analyze()
 
