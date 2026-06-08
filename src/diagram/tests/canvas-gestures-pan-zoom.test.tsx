@@ -181,6 +181,49 @@ describe('Canvas gestures: momentum (issue #707)', () => {
   });
 });
 
+describe('Canvas gestures: resize (issue #707)', () => {
+  it('commits the re-centered viewBox immediately when no gesture is in flight', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    // First resize establishes the known size; clear so we assert on the second.
+    h.resize(1000, 1000);
+    h.clearMountCalls();
+
+    h.resize(800, 800);
+
+    // resizeViewBox((0,0), dW=-200, dH=-200, 800, 800) shifts by dW/4 = -50.
+    expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+    expect(lastViewBox(h.callbacks.onViewBoxChange)).toEqual({ x: -50, y: -50, zoom: 1 });
+  });
+
+  it('folds a resize during a pan into the live viewport without committing (no snap)', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.resize(1000, 1000); // establish svgSize before the gesture
+    h.clearMountCalls();
+    const clock = installFakeClock();
+    try {
+      // Begin a pan (not released): live viewport = (30, 40).
+      pointerDown(h.svg, 500, 500, { shiftKey: true });
+      clock.tick(10);
+      pointerMove(h.svg, 530, 540, { shiftKey: true, buttons: 1 });
+      expect(translate(h.getTransform())).toMatchObject({ x: 30, y: 40 });
+
+      // Resize mid-pan: folds the +dW/4 = +10 re-centering into the live viewport,
+      // updating the transform but committing nothing.
+      h.resize(1040, 1000);
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+      expect(translate(h.getTransform())).toMatchObject({ x: 40, y: 40 });
+
+      // Releasing stationary commits the pan once, carrying the folded offset.
+      clock.tick(50);
+      pointerUp(h.svg, 530, 540, { shiftKey: true });
+      expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+      expect(lastViewBox(h.callbacks.onViewBoxChange)).toMatchObject({ x: 40, y: 40 });
+    } finally {
+      clock.restore();
+    }
+  });
+});
+
 describe('Canvas gestures: pinch (checklist 14)', () => {
   it('a pinch-apart zooms the live view in and commits once on exit', () => {
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });

@@ -1086,12 +1086,24 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       height: contentRect.height,
     };
     const oldSize = latest.current.svgSize;
-    if (oldSize) {
+    // Embedded mode draws to tight element bounds and ignores viewBox, so a
+    // resize there only updates the measured size.
+    if (oldSize && !latest.current.props.embedded) {
       const dWidth = contentRect.width - oldSize.width;
       const dHeight = contentRect.height - oldSize.height;
-      const newViewBox = resizeViewBox(getCanvasOffset(), dWidth, dHeight, contentRect.width, contentRect.height);
-
-      latest.current.props.onViewBoxChange(newViewBox, latest.current.props.view.zoom);
+      const live = latest.current.liveViewport;
+      if (live) {
+        // A viewport gesture is in flight: fold the re-centering offset shift into
+        // the live viewport so the gesture's own settle commit carries it. Do NOT
+        // commit here -- an onViewBoxChange mid-gesture would be seen as an
+        // external view change and snap the gesture (see the external-override
+        // effect).
+        const adjusted = resizeViewBox(live, dWidth, dHeight, contentRect.width, contentRect.height);
+        setLiveViewport({ x: adjusted.x, y: adjusted.y, zoom: live.zoom });
+      } else {
+        const newViewBox = resizeViewBox(getCanvasOffset(), dWidth, dHeight, contentRect.width, contentRect.height);
+        latest.current.props.onViewBoxChange(newViewBox, getCanvasZoom());
+      }
     }
 
     setSvgSize(newSvgSize);

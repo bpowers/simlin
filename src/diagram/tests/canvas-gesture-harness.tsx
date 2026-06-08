@@ -134,6 +134,48 @@ const CANVAS_RECT: DOMRect = {
   toJSON: () => ({}),
 };
 
+// A ResizeObserver that records its callback + observed targets so a test can
+// synthesize a resize (jsdom never fires real ones). The Canvas reads the new
+// size from `entry.target.clientWidth/Height`, so `triggerResize` sets those on
+// each observed element before invoking the callback.
+const liveResizeObservers = new Set<FakeResizeObserver>();
+
+class FakeResizeObserver {
+  private readonly callback: ResizeObserverCallback;
+  readonly targets = new Set<Element>();
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+  }
+  observe(target: Element): void {
+    this.targets.add(target);
+    liveResizeObservers.add(this);
+  }
+  unobserve(target: Element): void {
+    this.targets.delete(target);
+  }
+  disconnect(): void {
+    this.targets.clear();
+    liveResizeObservers.delete(this);
+  }
+  fire(width: number, height: number): void {
+    for (const target of this.targets) {
+      Object.defineProperty(target, 'clientWidth', { configurable: true, value: width });
+      Object.defineProperty(target, 'clientHeight', { configurable: true, value: height });
+      const entry = { target, contentRect: { width, height } } as unknown as ResizeObserverEntry;
+      this.callback([entry], this as unknown as ResizeObserver);
+    }
+  }
+}
+
+/** Synthesize a resize to `width`x`height` on every live observed element. */
+export function triggerResize(width: number, height: number): void {
+  act(() => {
+    for (const obs of liveResizeObservers) {
+      obs.fire(width, height);
+    }
+  });
+}
+
 let polyfillsInstalled = false;
 
 /**
@@ -158,11 +200,6 @@ export function installCanvasPolyfills(): void {
     g.DOMPoint = FakeDOMPoint as unknown as typeof DOMPoint;
   }
   if (typeof g.ResizeObserver !== 'function') {
-    class FakeResizeObserver {
-      observe(): void {}
-      unobserve(): void {}
-      disconnect(): void {}
-    }
     g.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver;
   }
 
@@ -414,6 +451,8 @@ export interface CanvasHarness {
    * `onViewBoxChange`.
    */
   getTransform: () => string | null;
+  /** Synthesize a container resize to `width`x`height` (drives handleSvgResize). */
+  resize: (width: number, height: number) => void;
 }
 
 /**
@@ -501,6 +540,7 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
       }
     },
     getTransform: () => result.container.querySelector('svg g[transform]')?.getAttribute('transform') ?? null,
+    resize: (width: number, height: number) => triggerResize(width, height),
   };
 }
 
