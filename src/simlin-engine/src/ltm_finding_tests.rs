@@ -1295,11 +1295,13 @@ fn single_partition(stocks: &[&str]) -> CyclePartitions {
 
 #[test]
 fn test_rank_and_filter_truncates_to_max_loops() {
-    // Create MAX_LOOPS + 50 loops and verify truncation
-    let stock_names: Vec<String> = (0..MAX_LOOPS + 50)
-        .map(|i| format!("stock_{i:04}"))
-        .collect();
-    let mut loops: Vec<FoundLoop> = (0..MAX_LOOPS + 50)
+    // Exercise the global cap with a test-only override and a tiny fixture
+    // (per docs/dev/rust.md#test-time-budgets) rather than building 200+
+    // loops to trip the production MAX_LOOPS constant.
+    const CAP: usize = 3;
+    const EXCESS: usize = 2;
+    let stock_names: Vec<String> = (0..CAP + EXCESS).map(|i| format!("stock_{i:04}")).collect();
+    let mut loops: Vec<FoundLoop> = (0..CAP + EXCESS)
         .map(|i| {
             let name_a = format!("var_a_{i:04}");
             let name_b = format!("var_b_{i:04}");
@@ -1317,14 +1319,10 @@ fn test_rank_and_filter_truncates_to_max_loops() {
     let all_stocks: Vec<&str> = stock_names.iter().map(|s| s.as_str()).collect();
     let partitions = single_partition(&all_stocks);
 
-    assert_eq!(loops.len(), MAX_LOOPS + 50);
+    assert_eq!(loops.len(), CAP + EXCESS);
+    let _guard = MaxLoopsGuard::new(CAP);
     rank_and_filter(&mut loops, &partitions);
-    assert_eq!(
-        loops.len(),
-        MAX_LOOPS,
-        "Should truncate to MAX_LOOPS ({})",
-        MAX_LOOPS
-    );
+    assert_eq!(loops.len(), CAP, "Should truncate to the cap ({CAP})");
 }
 
 #[test]
