@@ -3,6 +3,16 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 // ── concurrency regression tests ────────────────────────────────────────
+//
+// Timeout policy: positive waits ("the other thread SHOULD get here") use
+// POSITIVE_WAIT, generous because `recv_timeout` returns as soon as the
+// message arrives -- the budget is only consumed on genuine failure, and a
+// tight budget false-fails under coverage instrumentation or CI load
+// (GH #726). Negative waits ("the other thread should NOT have completed
+// yet") stay short: slowness can only make them pass, never fail, and they
+// are paid in full on every run.
+
+const POSITIVE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Regression test for issue #303: concurrent add_model + sim_new should never
 /// produce a spurious NotSimulatable error caused by sync_state being temporarily
@@ -98,6 +108,28 @@ fn test_concurrent_add_model_and_sim_new_no_spurious_not_simulatable() {
     }
 }
 
+/// A test that panics while holding the patch-test-hook guard (e.g. a timing
+/// assertion blown by coverage instrumentation slowdown, GH #726) poisons the
+/// hook mutexes. Subsequent hook installs must recover instead of cascading
+/// that one failure into spurious panics in every other hook-based test.
+#[test]
+fn test_patch_hook_survives_poisoning_panic() {
+    use crate::patch::install_patch_test_hook;
+    use std::sync::Arc;
+    use std::thread;
+
+    let result = thread::spawn(|| {
+        let _guard = install_patch_test_hook(Arc::new(|_, _| {}));
+        panic!("intentional panic while holding the patch test hook guard");
+    })
+    .join();
+    assert!(result.is_err(), "spawned thread should have panicked");
+
+    // Without poison recovery this second install panics on the poisoned
+    // lock; with it, hook-based tests keep working after an earlier failure.
+    let _guard = install_patch_test_hook(Arc::new(|_, _| {}));
+}
+
 /// Regression test for issue #296: warning baseline and datamodel snapshot
 /// must be captured under one project lock scope so competing patches cannot
 /// interleave between those reads.
@@ -186,7 +218,7 @@ fn test_issue_296_snapshot_lock_blocks_competing_patch() {
     });
 
     hook_enter_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(POSITIVE_WAIT)
         .expect("issue #296 hook should have been reached");
 
     let (writer_b_done_tx, writer_b_done_rx) = mpsc::channel::<()>();
@@ -224,7 +256,7 @@ fn test_issue_296_snapshot_lock_blocks_competing_patch() {
     release.store(true, Ordering::Release);
 
     writer_b_done_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(POSITIVE_WAIT)
         .expect("writer B should complete after writer A releases the snapshot lock");
     writer_a.join().expect("writer A should not panic");
     writer_b.join().expect("writer B should not panic");
@@ -326,7 +358,7 @@ fn test_issue_297_patch_staging_keeps_sync_state_present() {
     });
 
     hook_enter_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(POSITIVE_WAIT)
         .expect("issue #297 hook should have been reached during staging");
 
     // Reader races the staging patch: it must block on the db lock until the
@@ -353,7 +385,7 @@ fn test_issue_297_patch_staging_keeps_sync_state_present() {
     release.store(true, Ordering::Release);
 
     let observed_some = reader_done_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(POSITIVE_WAIT)
         .expect("reader should complete after the patch decision releases the lock");
     assert!(
         observed_some,
@@ -442,7 +474,7 @@ fn test_issue_298_sim_new_blocks_until_patch_decision() {
     });
 
     hook_enter_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(POSITIVE_WAIT)
         .expect("issue #298 hook should have been reached");
 
     let (reader_result_tx, reader_result_rx) = mpsc::channel::<f64>();
@@ -483,7 +515,7 @@ fn test_issue_298_sim_new_blocks_until_patch_decision() {
     release.store(true, Ordering::Release);
 
     let alpha_value = reader_result_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(POSITIVE_WAIT)
         .expect("reader should complete after patch decision");
     assert!(
         (alpha_value - 100.0).abs() < 1e-10,
@@ -580,7 +612,7 @@ fn test_concurrent_patches_no_lost_update() {
 
     // Wait for Thread A to enter validation (holding db lock).
     hook_enter_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(POSITIVE_WAIT)
         .expect("Thread A should reach the hook");
 
     // Thread B: patch b → 20. With the fix, this blocks on the
@@ -633,7 +665,7 @@ fn test_concurrent_patches_no_lost_update() {
     // Both threads should complete.
     thread_a.join().expect("Thread A should not panic");
     b_done_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(POSITIVE_WAIT)
         .expect("Thread B should complete after Thread A releases");
     thread_b.join().expect("Thread B should not panic");
 

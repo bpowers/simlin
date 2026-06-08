@@ -122,32 +122,46 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-llvm-cov-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            cargo-coverage-
+            cargo-llvm-cov-
 
-      - name: Install cargo-tarpaulin
+      - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-tarpaulin
+          tool: cargo-llvm-cov
 
-      # 90-minute outer cap on tarpaulin. Baseline pre-simlin-serve was
-      # ~23 min; the simlin-serve test suite (filesystem watcher with
-      # real debounce waits, MCP duplex pairs, end-to-end save/HTTP
-      # round-trips) tipped the wall-clock past the original 45-minute
-      # cap, so the whole job timed out without producing coverage XML.
-      # Tarpaulin still self-polices per-test at 60s, so this outer cap
-      # is a backstop against a runaway test rather than the primary
-      # budget. If runtime keeps growing, the next move is `--engine
-      # llvm` for source-based coverage at native test speed.
-      - name: Run cargo-tarpaulin
-        timeout-minutes: 90
-        run: cargo tarpaulin --out Xml
+      # cargo-llvm-cov needs the llvm-tools component for the pinned
+      # toolchain. It is deliberately NOT in rust-toolchain.toml: every
+      # other job (and every developer `rustup show`) would pay the
+      # download for a component only this job uses.
+      - name: Install llvm-tools
+        run: rustup component add llvm-tools
+
+      # Source-based LLVM coverage replaced cargo-tarpaulin's default
+      # ptrace engine (GH #622, #726): ptrace instrumentation ran the
+      # suite 5-50x slower than native, first blowing a 90-minute cap
+      # and later violating timing assumptions in libsimlin's
+      # concurrency tests. llvm-cov instrumentation runs tests at
+      # near-native speed (native `cargo test --workspace` is ~60s
+      # post-compile), so this cap is a generous backstop dominated by
+      # the instrumented build: a warm-cache run fits comfortably in
+      # 30 minutes, and the headroom above that absorbs the cold-cache
+      # case (first run after a Cargo.lock change or cache eviction
+      # rebuilds the whole instrumented workspace from scratch). Note
+      # that unlike tarpaulin, llvm-cov has no per-test 60s
+      # self-policing -- a runaway test eats the whole cap, and the
+      # Build job's 3-minute test cap is the primary guard against
+      # that.
+      - name: Run cargo-llvm-cov
+        timeout-minutes: 45
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
 
       - name: Upload Coverage
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
 
   frontend:
     runs-on: ubuntu-latest

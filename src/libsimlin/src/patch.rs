@@ -38,6 +38,19 @@ static PATCH_TEST_HOOK_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
 static PATCH_TEST_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<PatchTestHook>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
+/// Lock one of the hook mutexes, recovering from poisoning. A test that
+/// panics while holding `PatchTestHookGuard` poisons these mutexes; the
+/// guard's `Drop` always resets the hook to `None`, so the protected state
+/// is consistent even after a panic and recovery is sound. Without this,
+/// one genuine test failure cascades into spurious `PoisonError` panics in
+/// every other hook-based test (GH #726).
+#[cfg(test)]
+fn lock_unpoisoned<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 pub(crate) struct PatchTestHookGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
@@ -46,20 +59,20 @@ pub(crate) struct PatchTestHookGuard {
 #[cfg(test)]
 impl Drop for PatchTestHookGuard {
     fn drop(&mut self) {
-        *PATCH_TEST_HOOK.lock().unwrap() = None;
+        *lock_unpoisoned(&PATCH_TEST_HOOK) = None;
     }
 }
 
 #[cfg(test)]
 pub(crate) fn install_patch_test_hook(hook: PatchTestHook) -> PatchTestHookGuard {
-    let lock = PATCH_TEST_HOOK_LOCK.lock().unwrap();
-    *PATCH_TEST_HOOK.lock().unwrap() = Some(hook);
+    let lock = lock_unpoisoned(&PATCH_TEST_HOOK_LOCK);
+    *lock_unpoisoned(&PATCH_TEST_HOOK) = Some(hook);
     PatchTestHookGuard { _lock: lock }
 }
 
 #[cfg(test)]
 fn invoke_patch_test_hook(point: PatchHookPoint, project_ref: &SimlinProject) {
-    let hook = PATCH_TEST_HOOK.lock().unwrap().clone();
+    let hook = lock_unpoisoned(&PATCH_TEST_HOOK).clone();
     if let Some(hook) = hook {
         hook(point, project_ref);
     }
