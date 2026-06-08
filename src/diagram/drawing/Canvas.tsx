@@ -305,6 +305,19 @@ interface CanvasRefs {
   momentumStartOffset: Point | undefined;
 }
 
+// The local "live viewport" the canvas owns DURING a gesture (pan, momentum,
+// wheel, pinch, resize). While set, the render transform and all gesture math
+// read offset+zoom from here instead of `props.view`, so a multi-event gesture
+// stays fully local and only notifies the controller once, on settle. `undefined`
+// means "no gesture in flight -- read from props.view". It carries zoom as well
+// as offset because pinch/wheel-zoom change zoom mid-gesture and there is
+// otherwise no local home for it.
+interface LiveViewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
 // The snapshot of props + discrete/continuous state that event-time readers
 // (native wheel/gesture listeners, the momentum rAF loop, the ResizeObserver,
 // the deferred tool-change commit) must see CURRENT, not as captured by a stale
@@ -316,7 +329,7 @@ interface LatestState {
   editingName: Array<Descendant>;
   dragSelectionPoint: Point | undefined;
   moveDelta: Point | undefined;
-  movingCanvasOffset: Point | undefined;
+  liveViewport: LiveViewport | undefined;
   svgSize: Readonly<{ width: number; height: number }> | undefined;
   inCreation: ViewElement | undefined;
   inCreationCloud: CloudViewElement | undefined;
@@ -338,7 +351,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   const [editingName, setEditingName] = React.useState<Array<Descendant>>([]);
   const [dragSelectionPoint, setDragSelectionPoint] = React.useState<Point | undefined>(undefined);
   const [moveDelta, setMoveDelta] = React.useState<Point | undefined>(undefined);
-  const [movingCanvasOffset, setMovingCanvasOffset] = React.useState<Point | undefined>(undefined);
+  const [liveViewport, setLiveViewport] = React.useState<LiveViewport | undefined>(undefined);
   const [initialBounds, setInitialBounds] = React.useState<ViewRect>(viewRectDefault);
   const [svgSize, setSvgSize] = React.useState<Readonly<{ width: number; height: number }> | undefined>(undefined);
   const [inCreation, setInCreation] = React.useState<ViewElement | undefined>(undefined);
@@ -392,7 +405,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     editingName,
     dragSelectionPoint,
     moveDelta,
-    movingCanvasOffset,
+    liveViewport,
     svgSize,
     inCreation,
     inCreationCloud,
@@ -470,7 +483,13 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     setInCreationCloud(reset.inCreationCloud);
   };
 
-  const getCanvasOffset = (): Readonly<Point> => latest.current.movingCanvasOffset ?? latest.current.props.view.viewBox;
+  // Offset/zoom resolve from the live viewport while a gesture is in flight,
+  // else from props.view. Every gesture-math and render read goes through these
+  // so a live gesture never has to round-trip through the controller to see its
+  // own in-progress viewport.
+  const getCanvasOffset = (): Readonly<Point> => latest.current.liveViewport ?? latest.current.props.view.viewBox;
+
+  const getCanvasZoom = (): number => latest.current.liveViewport?.zoom ?? latest.current.props.view.zoom;
 
   const getElementByUid = (uid: UID): ViewElement => {
     let element: ViewElement | undefined;
@@ -492,7 +511,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       x -= bounds.x;
       y -= bounds.y;
     }
-    return screenToCanvasPoint(x, y, latest.current.props.view.zoom);
+    return screenToCanvasPoint(x, y, getCanvasZoom());
   };
 
   // Helper to get canvas point with a specific zoom level
@@ -1244,15 +1263,16 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       return;
     }
 
-    if (interactionNow.mode === 'panning' && latest.current.movingCanvasOffset) {
+    if (interactionNow.mode === 'panning' && latest.current.liveViewport) {
+      const live = latest.current.liveViewport;
       const newViewBox = {
         ...latest.current.props.view.viewBox,
-        x: latest.current.movingCanvasOffset.x,
-        y: latest.current.movingCanvasOffset.y,
+        x: live.x,
+        y: live.y,
       };
 
-      latest.current.props.onViewBoxChange(newViewBox, latest.current.props.view.zoom);
-      setMovingCanvasOffset(undefined);
+      latest.current.props.onViewBoxChange(newViewBox, live.zoom);
+      setLiveViewport(undefined);
 
       // Start momentum animation for smooth deceleration
       startMomentumAnimation();
@@ -1332,9 +1352,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     trackPosition(newOffset.x, newOffset.y);
 
     // The panning mode was already entered on pointer-down; re-affirm it (it is
-    // the move-guard in handlePointerMove) alongside the continuous offset.
+    // the move-guard in handlePointerMove) alongside the continuous offset. A pan
+    // does not change zoom, so the live viewport keeps the current zoom.
     setInteraction({ mode: 'panning' });
-    setMovingCanvasOffset(newOffset);
+    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom: getCanvasZoom() });
   };
 
   const handleDragSelection = (e: React.PointerEvent<SVGElement>): void => {
@@ -1428,7 +1449,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
       // Entering pinch mode supersedes any single-finger panning/dragSelecting
       // mode; the reducer returns the pinching variant carrying the fixed
-      // reference. Clear movingCanvasOffset so exiting pinch can't start momentum.
+      // reference. Clear the live viewport so exiting pinch can't start momentum.
       const { state: nextInteraction, effects } = reduceInteraction(
         latest.current.interaction,
         {
@@ -1441,7 +1462,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       );
       runEffects(effects, e.target as Element | undefined, e.pointerId);
       setInteraction(nextInteraction);
-      setMovingCanvasOffset(undefined);
+      setLiveViewport(undefined);
       return;
     }
 
@@ -2384,7 +2405,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   if (!isEditingNameNow || props.selection.size === 0) {
     overlayClass += ' ' + styles.noPointerEvents;
   } else {
-    const zoom = props.view.zoom;
+    const zoom = getCanvasZoom();
     const editingUid = only(props.selection);
     const editingElement = getElementByUid(editingUid) as NamedViewElement;
     const { rw, rh } = labelRadii(editingElement.type);
@@ -2420,7 +2441,8 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       viewBox = `${left} ${top} ${width} ${height}`;
     }
   } else {
-    const zoom = props.view.zoom >= 0.2 ? props.view.zoom : 1;
+    const liveZoom = getCanvasZoom();
+    const zoom = liveZoom >= 0.2 ? liveZoom : 1;
     const offset = getCanvasOffset();
 
     transform = `matrix(${zoom} 0 0 ${zoom} ${offset.x * zoom} ${offset.y * zoom})`;
