@@ -21,7 +21,7 @@ use simlin_engine::json;
 use crate::access::ProjectAccess;
 use crate::errors::AccessError;
 use crate::open::resolve_model_name;
-use crate::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary};
+use crate::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput};
 
 /// Input for the `ReadModel` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -48,6 +48,12 @@ pub struct ReadModelOutput {
     pub model: json::Model,
     pub time: Vec<f64>,
     pub loop_dominance: Vec<LoopDominanceSummary>,
+    /// The cycle partitions referenced by `loopDominance` (each summary's
+    /// `partition` indexes this list).  Elided when empty to preserve the
+    /// stable wire shape; the stock SET of each entry is the durable identity
+    /// matching the exhaustive (`Model.loops`) surface.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub partitions: Vec<PartitionOutput>,
     pub dominant_loops_by_period: Vec<DominantPeriodOutput>,
     /// True when discovery's cross-element-through-aggregate loop recovery hit
     /// its budget, so `loopDominance` may be missing some cross-agg reducer
@@ -115,6 +121,7 @@ pub async fn read_model<A: ProjectAccess>(
             .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
 
     let agg_recovery_truncated = analysis.agg_recovery_truncated;
+    let partitions: Vec<PartitionOutput> = analysis.partitions.iter().map(Into::into).collect();
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
         .loop_dominance
         .into_iter()
@@ -131,6 +138,7 @@ pub async fn read_model<A: ProjectAccess>(
         model: analysis.model,
         time: analysis.time,
         loop_dominance,
+        partitions,
         dominant_loops_by_period,
         agg_recovery_truncated,
         errors,

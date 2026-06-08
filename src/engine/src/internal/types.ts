@@ -137,4 +137,8 @@ export interface Loop {
   // clean reinforcing/balancing loop, 0 for undetermined; the structural loop
   // surface is 1/0 by design.
   polarityConfidence: number;
+  // Result-scoped cycle-partition index (GH #685), or null for a loop with no
+  // parent-level partition. Indices are dense, first-appearance order; not
+  // stable across edits -- key on the partition stock set for durable identity.
+  partition: number | null;
 }

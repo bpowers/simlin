@@ -131,6 +131,19 @@ pub struct SimlinLoop {
     /// `simlin_sizeof_loop` and the `@simlin/engine` `LOOP_SIZE`/`readLoops`
     /// offsets track the new size.
     pub polarity_confidence: f64,
+    /// RESULT-SCOPED index into `SimlinLoops.partitions` naming the loop's
+    /// cycle partition, or -1 for a loop whose stocks resolve to no
+    /// parent-level partition (a pure module-internal loop).  A single index
+    /// suffices because a feedback loop's stocks form one strongly-connected
+    /// set (mirroring `SimlinDiscoveredLoop.partition`).  Indices are dense,
+    /// assigned in first-appearance order over this `SimlinLoops` list; they
+    /// identify partitions within ONE result only and are not stable across
+    /// runs or model edits -- key on the partition's stock-name SET for a
+    /// durable identity (the discovery and exhaustive surfaces report the SAME
+    /// stock sets for a given model).  Adding this `i32` grew the struct
+    /// additively past its old 32 bytes (`simlin_sizeof_loop` and the
+    /// `@simlin/engine` `LOOP_SIZE`/`readLoops` offsets track the new size).
+    pub partition: i32,
 }
 
 /// List of loops returned by analysis
@@ -138,6 +151,15 @@ pub struct SimlinLoop {
 pub struct SimlinLoops {
     pub loops: *mut SimlinLoop,
     pub count: usize,
+    /// The cycle partitions referenced by `loops` (each loop's `partition`
+    /// indexes this array).  Dense, in first-appearance order over the loop
+    /// list; result-scoped.  Reuses `SimlinDiscoveredPartition` so the
+    /// exhaustive/pinned loop surface reports partitions identically to the
+    /// discovery surface (and -- by construction -- the same stock sets for a
+    /// given model).  Appended after `loops`/`count` so the existing container
+    /// offsets the TS reader uses are unchanged.
+    pub partitions: *mut SimlinDiscoveredPartition,
+    pub partition_count: usize,
 }
 
 /// Single causal link structure

@@ -139,6 +139,14 @@ pub struct LoopDominanceSummary {
     /// shape is unchanged.
     #[serde(serialize_with = "serialize_sig_figs_3")]
     pub polarity_confidence: f64,
+    /// RESULT-SCOPED index into the analyze output's `partitions` list naming
+    /// this loop's cycle partition, or absent (`None`) for a loop with no
+    /// parent-level partition.  Indices are dense and in first-appearance order
+    /// over `loopDominance`; they are NOT stable across edits -- key on a
+    /// `PartitionOutput.stocks` set for a durable identity.  Additive and
+    /// elided when absent so the prior wire shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition: Option<usize>,
 }
 
 impl From<simlin_engine::analysis::LoopSummary> for LoopDominanceSummary {
@@ -150,6 +158,31 @@ impl From<simlin_engine::analysis::LoopSummary> for LoopDominanceSummary {
             variables: ls.variables,
             importance: ls.importance,
             polarity_confidence: ls.polarity_confidence,
+            partition: ls.partition,
+        }
+    }
+}
+
+/// One cycle partition referenced by an analyze result's loops: a group of
+/// stocks connected by feedback, within which relative loop scores are
+/// comparable.  Mirrors the engine `DiscoveredPartition` / pysimlin
+/// `Partition`; lets a client group loops partition-by-partition.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionOutput {
+    /// The partition's stock names (element-level for arrayed models), sorted
+    /// lexicographically.  This SET is the durable cross-surface identity.
+    pub stocks: Vec<String>,
+    /// Number of loops in the returned `loopDominance` list that belong to
+    /// this partition.
+    pub loop_count: usize,
+}
+
+impl From<&simlin_engine::ltm_finding::DiscoveredPartition> for PartitionOutput {
+    fn from(p: &simlin_engine::ltm_finding::DiscoveredPartition) -> Self {
+        Self {
+            stocks: p.stocks.clone(),
+            loop_count: p.loop_count,
         }
     }
 }
@@ -296,6 +329,7 @@ mod tests {
             variables: vec![],
             importance: vec![2.449, 0.0, 0.000004781, 25.189],
             polarity_confidence: 1.0,
+            partition: None,
         };
         let json = serde_json::to_value(&summary).unwrap();
         let arr = json["importance"].as_array().unwrap();
@@ -314,6 +348,7 @@ mod tests {
             variables: vec![],
             importance: vec![1.0, 100.0, 0.5],
             polarity_confidence: 1.0,
+            partition: None,
         };
         let json = serde_json::to_value(&summary).unwrap();
         let arr = json["importance"].as_array().unwrap();
@@ -333,6 +368,7 @@ mod tests {
             variables: vec![],
             importance: vec![0.5],
             polarity_confidence: 0.993871,
+            partition: None,
         };
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["polarityConfidence"].as_f64().unwrap(), 0.994);

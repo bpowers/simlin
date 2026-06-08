@@ -319,6 +319,11 @@ class Run:
                     polarity=polarity,
                     behavior_time_series=behavior_ts,
                     name=structural_loop.name,
+                    # Carry the structural loop's cycle-partition index (GH
+                    # #685) onto the runtime loop; it comes from the same
+                    # exhaustive loop list (`Model.get_loops`) so the indices
+                    # are consistent with `Model.loop_partitions`.
+                    partition=structural_loop.partition,
                 )
                 loops_with_behavior.append(loop_with_behavior)
             except SimlinRuntimeError:

@@ -614,6 +614,15 @@ export interface Loop {
    * structural loop surface this is `1` or `0` by design.
    */
   readonly polarityConfidence: number;
+  /**
+   * Result-scoped index naming this loop's cycle partition (GH #685), or
+   * `null` for a loop with no parent-level partition (a pure module-internal
+   * loop). Indices are dense, in first-appearance order over the loop list;
+   * they are NOT stable across model edits, so key on the partition's stock
+   * set for a durable identity. The exhaustive (`Model.loops`) and discovery
+   * surfaces report the same partition stock sets for a given model.
+   */
+  readonly partition: number | null;
 }
 
 /**

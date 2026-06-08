@@ -396,6 +396,10 @@ class Sim:
                         polarity=LoopPolarity(c_loop.polarity),
                         polarity_confidence=float(c_loop.polarity_confidence),
                         name=c_to_string(c_loop.name),
+                        # The runtime loops come from the same FFI loop list as
+                        # Model.get_loops, so they carry the same cycle-partition
+                        # index (GH #685).
+                        partition=None if c_loop.partition < 0 else int(c_loop.partition),
                     )
                 )
 

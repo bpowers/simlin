@@ -2736,3 +2736,50 @@ fn runtime_loops_without_run_errors() {
         simlin_project_unref(proj);
     }
 }
+
+/// GH #685: the structural loop surface must carry cycle-partition metadata.
+/// Two loops sharing one population stock land in ONE partition, and every
+/// loop's `partition` field indexes the `partitions` array.
+#[test]
+fn test_get_loops_carries_cycle_partition() {
+    unsafe {
+        let (proj, model, sim) = setup_two_loop_sim();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(!loops.is_null());
+        assert!((*loops).count >= 2, "two loops on a shared stock expected");
+
+        // Both loops share the single cycle partition (population).
+        assert_eq!(
+            (*loops).partition_count,
+            1,
+            "two loops on one stock SCC => exactly one partition"
+        );
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        for l in loop_slice {
+            assert_eq!(
+                l.partition, 0,
+                "every loop on the shared stock must index partition 0"
+            );
+        }
+        // The partition's stock set is `population`, and its loop_count matches.
+        let part_slice = std::slice::from_raw_parts((*loops).partitions, (*loops).partition_count);
+        let stocks = std::slice::from_raw_parts(part_slice[0].stocks, part_slice[0].stock_count);
+        let stock_names: Vec<&str> = stocks
+            .iter()
+            .map(|s| CStr::from_ptr(*s).to_str().unwrap())
+            .collect();
+        assert!(
+            stock_names.iter().any(|s| s.contains("population")),
+            "partition stock set must contain population, got {stock_names:?}"
+        );
+        assert_eq!(part_slice[0].loop_count, (*loops).count);
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

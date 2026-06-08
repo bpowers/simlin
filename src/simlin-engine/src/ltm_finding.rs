@@ -184,7 +184,7 @@ pub struct FoundLoop {
 /// importance is only comparable to its partition-mates' -- this metadata lets
 /// callers group, filter, or present loops partition-by-partition (e.g. lead
 /// with the model's giant component).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub struct DiscoveredPartition {
     /// The partition's stock names (element-level for arrayed models, e.g.
     /// `population[nyc]`), sorted lexicographically.

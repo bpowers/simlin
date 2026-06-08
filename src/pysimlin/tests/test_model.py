@@ -443,6 +443,17 @@ class TestModelStructuralProperties:
             assert isinstance(loop.variables, tuple)
             assert loop.behavior_time_series is None
 
+    def test_loops_carry_partition_index(self, test_model: Model) -> None:
+        """Every structural loop carries a partition (None or non-negative int)
+        indexing model.loop_partitions (GH #685)."""
+        loops = test_model.loops
+        partitions = test_model.loop_partitions
+        assert isinstance(partitions, tuple)
+        for loop in loops:
+            assert loop.partition is None or isinstance(loop.partition, int)
+            if loop.partition is not None:
+                assert 0 <= loop.partition < len(partitions)
+
     def test_structural_properties_consistent(self, test_model: Model) -> None:
         """Test that structural properties return equal results across calls."""
         vars1 = test_model.variables
@@ -456,6 +467,58 @@ class TestModelStructuralProperties:
         time_spec1 = test_model.time_spec
         time_spec2 = test_model.time_spec
         assert time_spec1 == time_spec2
+
+
+_TWO_PARTITION_XMILE = """<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><vendor>Test</vendor><product version="1.0">Test</product></header>
+  <sim_specs method="euler"><start>0</start><stop>5</stop><dt>1</dt></sim_specs>
+  <model>
+    <variables>
+      <stock name="pop_a"><eqn>100</eqn><inflow>births_a</inflow></stock>
+      <flow name="births_a"><eqn>pop_a * 0.02</eqn></flow>
+      <stock name="pop_b"><eqn>50</eqn><inflow>births_b</inflow></stock>
+      <flow name="births_b"><eqn>pop_b * 0.03</eqn></flow>
+    </variables>
+  </model>
+</xmile>"""
+
+
+class TestModelPartitions:
+    """Cycle-partition metadata on the exhaustive/structural loop surface (GH #685)."""
+
+    @pytest.fixture
+    def two_partition_model(self, tmp_path: Path) -> Model:
+        p = tmp_path / "two_partition.stmx"
+        p.write_text(_TWO_PARTITION_XMILE)
+        return simlin.load(p)
+
+    def test_two_independent_loops_get_distinct_partitions(
+        self, two_partition_model: Model
+    ) -> None:
+        loops = two_partition_model.loops
+        partitions = two_partition_model.loop_partitions
+        assert len(loops) == 2, "two independent loops expected"
+        assert len(partitions) == 2, "two disjoint stock SCCs => two partitions"
+        idxs = {loop.partition for loop in loops}
+        assert None not in idxs, "both loops must resolve a partition"
+        assert len(idxs) == 2, "independent loops must be in distinct partitions"
+        stock_sets = {frozenset(part.stocks) for part in partitions}
+        assert any("pop_a" in s for s in stock_sets)
+        assert any("pop_b" in s for s in stock_sets)
+
+    def test_exhaustive_and_discovery_partitions_agree_on_stock_sets(
+        self, two_partition_model: Model
+    ) -> None:
+        """The durable cross-surface identity is the partition's stock SET:
+        Model.loop_partitions and Model.analyze().partitions must agree on the
+        stock sets (indices are result-scoped and may differ)."""
+        exhaustive_sets = {frozenset(part.stocks) for part in two_partition_model.loop_partitions}
+        analysis = two_partition_model.analyze()
+        discovery_sets = {frozenset(part.stocks) for part in analysis.partitions}
+        assert exhaustive_sets, "exhaustive surface must report partitions"
+        assert discovery_sets, "discovery surface must report partitions"
+        assert exhaustive_sets == discovery_sets
 
 
 class TestModelSimulationMethods:

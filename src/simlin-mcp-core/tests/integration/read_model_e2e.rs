@@ -127,3 +127,70 @@ async fn read_model_broken_equations_surface_errors() {
     assert!(errors[0]["code"].is_string());
     assert!(errors[0]["kind"].is_string());
 }
+
+/// A two-independent-loop model must surface cycle-partition metadata on the
+/// analyze output (GH #685): each `loopDominance` entry carries a `partition`
+/// index and the top-level `partitions` list holds the partition stock sets.
+#[tokio::test]
+async fn read_model_surfaces_cycle_partitions() {
+    const TWO_PARTITION_XMILE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><vendor>Test</vendor><product version="1.0">Test</product></header>
+  <sim_specs method="euler"><start>0</start><stop>5</stop><dt>1</dt></sim_specs>
+  <model>
+    <variables>
+      <stock name="pop_a"><eqn>100</eqn><inflow>births_a</inflow></stock>
+      <flow name="births_a"><eqn>pop_a * 0.02</eqn></flow>
+      <stock name="pop_b"><eqn>50</eqn><inflow>births_b</inflow></stock>
+      <flow name="births_b"><eqn>pop_b * 0.03</eqn></flow>
+    </variables>
+  </model>
+</xmile>"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("two_partition.stmx");
+    std::fs::write(&path, TWO_PARTITION_XMILE).unwrap();
+
+    let input = ReadModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+    };
+    let output = read_model(&TestFileSystemAccess, input).await.unwrap();
+    assert_eq!(
+        output.partitions.len(),
+        2,
+        "two disjoint stock loops must produce two partitions"
+    );
+    // Every loop summary carries a partition index into `partitions`.
+    for ls in &output.loop_dominance {
+        let idx = ls.partition.expect("loop must carry a partition");
+        assert!(idx < output.partitions.len());
+    }
+    // The two partitions' stock sets are pop_a and pop_b.
+    let stock_sets: Vec<std::collections::BTreeSet<&str>> = output
+        .partitions
+        .iter()
+        .map(|p| p.stocks.iter().map(|s| s.as_str()).collect())
+        .collect();
+    assert!(
+        stock_sets
+            .iter()
+            .any(|s| s.iter().any(|x| x.contains("pop_a")))
+    );
+    assert!(
+        stock_sets
+            .iter()
+            .any(|s| s.iter().any(|x| x.contains("pop_b")))
+    );
+
+    // Wire-shape assertions: partition appears on loop summaries and the
+    // partitions list appears in the serialized output.
+    let value = serde_json::to_value(&output).unwrap();
+    assert!(
+        value.get("partitions").is_some(),
+        "partitions must appear in the analyze output wire shape"
+    );
+    assert!(
+        value["loopDominance"][0].get("partition").is_some(),
+        "partition must appear on the loopDominance wire shape"
+    );
+}

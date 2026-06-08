@@ -165,12 +165,48 @@ typedef struct {
   // `simlin_sizeof_loop` and the `@simlin/engine` `LOOP_SIZE`/`readLoops`
   // offsets track the new size.
   double polarity_confidence;
+  // RESULT-SCOPED index into `SimlinLoops.partitions` naming the loop's
+  // cycle partition, or -1 for a loop whose stocks resolve to no
+  // parent-level partition (a pure module-internal loop).  A single index
+  // suffices because a feedback loop's stocks form one strongly-connected
+  // set (mirroring `SimlinDiscoveredLoop.partition`).  Indices are dense,
+  // assigned in first-appearance order over this `SimlinLoops` list; they
+  // identify partitions within ONE result only and are not stable across
+  // runs or model edits -- key on the partition's stock-name SET for a
+  // durable identity (the discovery and exhaustive surfaces report the SAME
+  // stock sets for a given model).  Adding this `i32` grew the struct
+  // additively past its old 32 bytes (`simlin_sizeof_loop` and the
+  // `@simlin/engine` `LOOP_SIZE`/`readLoops` offsets track the new size).
+  int32_t partition;
 } SimlinLoop;
+
+// One cycle partition referenced by a discovery result's loops: a group of
+// stocks connected by feedback, within which relative loop scores are
+// normalized and therefore comparable.  Lets callers group/filter loops
+// partition-by-partition (e.g. lead with the model's giant component).
+typedef struct {
+  // The partition's stock names (element-level for arrayed models),
+  // sorted lexicographically.  `stock_count` entries.
+  char **stocks;
+  uintptr_t stock_count;
+  // Number of loops in the returned loop list that belong to this
+  // partition.
+  uintptr_t loop_count;
+} SimlinDiscoveredPartition;
 
 // List of loops returned by analysis
 typedef struct {
   SimlinLoop *loops;
   uintptr_t count;
+  // The cycle partitions referenced by `loops` (each loop's `partition`
+  // indexes this array).  Dense, in first-appearance order over the loop
+  // list; result-scoped.  Reuses `SimlinDiscoveredPartition` so the
+  // exhaustive/pinned loop surface reports partitions identically to the
+  // discovery surface (and -- by construction -- the same stock sets for a
+  // given model).  Appended after `loops`/`count` so the existing container
+  // offsets the TS reader uses are unchanged.
+  SimlinDiscoveredPartition *partitions;
+  uintptr_t partition_count;
 } SimlinLoops;
 
 // Opaque model structure
@@ -240,20 +276,6 @@ typedef struct {
   // Combined relative score of the dominant loops.
   double combined_score;
 } SimlinDominantPeriod;
-
-// One cycle partition referenced by a discovery result's loops: a group of
-// stocks connected by feedback, within which relative loop scores are
-// normalized and therefore comparable.  Lets callers group/filter loops
-// partition-by-partition (e.g. lead with the model's giant component).
-typedef struct {
-  // The partition's stock names (element-level for arrayed models),
-  // sorted lexicographically.  `stock_count` entries.
-  char **stocks;
-  uintptr_t stock_count;
-  // Number of loops in the returned loop list that belong to this
-  // partition.
-  uintptr_t loop_count;
-} SimlinDiscoveredPartition;
 
 // The cohesive output of one discovery run: discovered loops, dominant
 // periods, and whether the time budget elapsed before discovery finished.

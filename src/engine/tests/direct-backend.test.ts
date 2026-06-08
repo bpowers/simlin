@@ -156,12 +156,18 @@ describe('DirectBackend', () => {
           LoopPolarity.MostlyReinforcing,
           LoopPolarity.MostlyBalancing,
         ]).toContain(loop.polarity);
-        // polarity_confidence rides at the f64 offset the 32-byte LOOP_SIZE
+        // polarity_confidence rides at the f64 offset the 40-byte LOOP_SIZE
         // layout exposes; it must decode to a finite ratio in [0, 1].
         expect(typeof loop.polarityConfidence).toBe('number');
         expect(Number.isFinite(loop.polarityConfidence)).toBe(true);
         expect(loop.polarityConfidence).toBeGreaterThanOrEqual(0);
         expect(loop.polarityConfidence).toBeLessThanOrEqual(1);
+        // partition (GH #685): null for a loop with no parent-level partition,
+        // otherwise a non-negative result-scoped index decoded from offset 32.
+        expect(loop.partition === null || typeof loop.partition === 'number').toBe(true);
+        if (typeof loop.partition === 'number') {
+          expect(loop.partition).toBeGreaterThanOrEqual(0);
+        }
       }
       backend.modelDispose(modelHandle);
     });

@@ -339,12 +339,15 @@ fn detected_loop_polarity_to_ffi(polarity: engine::db::DetectedLoopPolarity) -> 
 /// reported through `out_error`, and the function returns `ptr::null_mut()`.
 unsafe fn detected_loops_to_ffi(
     loops: &[engine::db::DetectedLoop],
+    partitions: &[engine::ltm_finding::DiscoveredPartition],
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinLoops {
     if loops.is_empty() {
         return Box::into_raw(Box::new(SimlinLoops {
             loops: ptr::null_mut(),
             count: 0,
+            partitions: ptr::null_mut(),
+            partition_count: 0,
         }));
     }
     let mut c_loops = Vec::with_capacity(loops.len());
@@ -407,15 +410,50 @@ unsafe fn detected_loops_to_ffi(
             polarity,
             name,
             polarity_confidence: loop_item.polarity_confidence,
+            // -1 = no parent-level partition; otherwise the result-scoped
+            // dense index into `partitions` below.  Mirrors
+            // `SimlinDiscoveredLoop.partition`'s None->-1 mapping.
+            partition: loop_item
+                .partition
+                .map_or(-1, |p| i32::try_from(p).unwrap_or(-1)),
         });
     }
+
+    // Build the partitions array (mirroring the discovery `discovery_to_ffi`
+    // path).  An interior NUL in a stock name frees the already-built loops
+    // and partitions and surfaces a generic error.
+    let mut c_partitions: Vec<SimlinDiscoveredPartition> = Vec::with_capacity(partitions.len());
+    for partition in partitions {
+        let (stocks, stock_count) = match strings_to_c_array(&partition.stocks) {
+            Ok(v) => v,
+            Err(()) => {
+                drop_discovered_partitions_vec(&mut c_partitions);
+                drop_loops_vec(&mut c_loops);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("partition stock name contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+        c_partitions.push(SimlinDiscoveredPartition {
+            stocks,
+            stock_count,
+            loop_count: partition.loop_count,
+        });
+    }
+
     let count = c_loops.len();
     let mut loops = c_loops.into_boxed_slice();
     let loops_ptr = loops.as_mut_ptr();
     std::mem::forget(loops);
+    let (partitions_ptr, partition_count) = vec_into_raw_parts(c_partitions);
     Box::into_raw(Box::new(SimlinLoops {
         loops: loops_ptr,
         count,
+        partitions: partitions_ptr,
+        partition_count,
     }))
 }
 
@@ -475,7 +513,7 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
     };
 
     let detected = engine::db::model_detected_loops(&*db_locked, source_model, source_project);
-    detected_loops_to_ffi(&detected.loops, out_error)
+    detected_loops_to_ffi(&detected.loops, &detected.partitions, out_error)
 }
 
 /// Get the feedback loops detected in a model, with RUNTIME polarity derived
@@ -566,6 +604,9 @@ pub unsafe extern "C" fn simlin_analyze_get_loops_runtime(
     // detected-loop query runs with `ltm_enabled` in whatever state it already
     // was (it has no LTM dependency).
     let detected = engine::db::model_detected_loops(&*db_locked, source_model, source_project);
+    // Partition metadata is structural (independent of the runtime
+    // reclassification below), so capture it before the loops are moved out.
+    let partitions = detected.partitions;
     let mut loops = detected.loops;
 
     // `loop_partitions` drives the per-loop slot count the primitive uses to
@@ -600,7 +641,7 @@ pub unsafe extern "C" fn simlin_analyze_get_loops_runtime(
     }
     drop(db_locked);
 
-    detected_loops_to_ffi(&loops, out_error)
+    detected_loops_to_ffi(&loops, &partitions, out_error)
 }
 
 /// Frees a SimlinLoops structure
@@ -619,6 +660,19 @@ pub unsafe extern "C" fn simlin_free_loops(loops: *mut SimlinLoops) {
             drop_loop(loop_item);
         }
         let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(loops.loops, loops.count));
+    }
+    // Free the partitions array and each partition's stock CString array,
+    // mirroring `simlin_free_discovery_result`'s partition free path.
+    if !loops.partitions.is_null() && loops.partition_count > 0 {
+        let partition_slice =
+            std::slice::from_raw_parts_mut(loops.partitions, loops.partition_count);
+        for partition in partition_slice.iter_mut() {
+            drop_discovered_partition(partition);
+        }
+        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            loops.partitions,
+            loops.partition_count,
+        ));
     }
 }
 

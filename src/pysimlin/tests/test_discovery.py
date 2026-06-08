@@ -160,11 +160,17 @@ class TestAnalyzeDiscovery:
                 f"loop {loop.id} must index the single (dense index 0) partition"
             )
 
-    def test_structural_loops_have_no_partition(self, logistic_model: simlin.Model) -> None:
-        # The structural Model.loops surface doesn't carry partition metadata;
-        # the field defaults to None there.
+    def test_structural_loops_carry_partition(self, logistic_model: simlin.Model) -> None:
+        # GH #685: the structural Model.loops surface now carries cycle-partition
+        # metadata too. Each loop's partition (when present) indexes
+        # Model.loop_partitions, and the partition stock sets agree with the
+        # discovery surface (Analysis.partitions) for the same model.
+        partitions = logistic_model.loop_partitions
         for loop in logistic_model.loops:
-            assert loop.partition is None
+            assert loop.partition is None or 0 <= loop.partition < len(partitions)
+        exhaustive_sets = {frozenset(p.stocks) for p in partitions}
+        discovery_sets = {frozenset(p.stocks) for p in logistic_model.analyze().partitions}
+        assert exhaustive_sets == discovery_sets
 
 
 class TestAnalyzeOptIn:

@@ -1103,3 +1103,63 @@ fn clearn_pinned_climate_loop_is_scored() {
         &nonzero[..nonzero.len().min(5)]
     );
 }
+
+/// A pinned loop must carry a cycle-partition index (GH #685) keyed to the
+/// stock SCC it belongs to, in BOTH exhaustive and discovery mode.  The
+/// durable identity is the partition's stock SET (indices are result-scoped).
+#[test]
+fn pinned_loop_carries_cycle_partition_in_discovery_mode() {
+    // Reuse the 60-node-ring + small a<->b loop shape from the discovery-mode
+    // scoring test: the ring forces discovery, and we pin the a<->b cycle.
+    let mut builder = TestProject::new("big_with_pin_part").with_sim_time(0.0, 5.0, 0.25);
+    const RING: usize = 60;
+    for i in 0..RING {
+        let next = (i + 1) % RING;
+        builder = builder.flow(&format!("f{i}"), &format!("stock_{next} * 0.001"), None);
+        builder = builder.stock(&format!("stock_{i}"), "10", &[&format!("f{i}")], &[], None);
+    }
+    builder = builder
+        .stock("a", "100", &["to_a"], &[], None)
+        .stock("b", "100", &["to_b"], &[], None)
+        .flow("to_b", "a * 0.05", None)
+        .flow("to_a", "b * 0.05", None);
+    let mut project = builder.build_datamodel();
+    assign_uids(&mut project);
+    pin_loop(&mut project, "main", "ab loop", &["a", "to_b", "b", "to_a"]);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    assert_eq!(
+        model_ltm_mode(&db, source_model, sync.project),
+        LtmMode::Discovery,
+        "a 60-node SCC must auto-flip LTM to discovery mode"
+    );
+    let detected = model_detected_loops(&db, source_model, sync.project).clone();
+    assert_eq!(
+        detected.loops.len(),
+        1,
+        "discovery-mode model should surface ONLY the pinned loop"
+    );
+    let pinned = &detected.loops[0];
+    assert_eq!(pinned.id, "pin1");
+    let part_idx = pinned
+        .partition
+        .expect("a pinned loop must carry a cycle partition");
+    let stocks: std::collections::BTreeSet<&str> = detected.partitions[part_idx]
+        .stocks
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    assert!(
+        stocks.contains("a") && stocks.contains("b"),
+        "the pinned a<->b loop's partition must contain stocks a and b, got {stocks:?}"
+    );
+    // The ring stocks must NOT be in the pinned loop's partition (distinct SCC).
+    assert!(
+        !stocks.contains("stock_0"),
+        "the pinned loop's partition must not contain the disjoint ring stocks"
+    );
+}
