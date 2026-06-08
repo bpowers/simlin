@@ -2212,9 +2212,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
           // revoke any previous snapshot URL via setSnapshotUrl.
           setSnapshotUrl(URL.createObjectURL(snapshotBlob));
         } else {
-          setState({
-            modelErrors: [...latest.current.state.modelErrors, new Error('snapshot creation failed (1).')],
-          });
+          setState((prev) => ({
+            modelErrors: [...prev.modelErrors, new Error('snapshot creation failed (1).')],
+          }));
         }
       });
     };
@@ -2223,9 +2223,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       if (isUnmounted()) {
         return;
       }
-      setState({
-        modelErrors: [...latest.current.state.modelErrors, new Error('snapshot creation failed (2).')],
-      });
+      setState((prev) => ({
+        modelErrors: [...prev.modelErrors, new Error('snapshot creation failed (2).')],
+      }));
     };
 
     image.src = svgUrl;

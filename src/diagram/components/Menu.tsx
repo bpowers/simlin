@@ -20,13 +20,65 @@ export interface MenuProps {
   children?: React.ReactNode;
 }
 
+/**
+ * Track an anchor element's viewport rect live while a menu is open.
+ *
+ * The rect must follow the anchor if it moves while the menu is open (window
+ * resize, scroll of a non-fixed scroll container, layout reflow). Memoizing on
+ * `anchorEl` identity alone captures a stale snapshot that never re-measures, so
+ * the menu detaches from its trigger (issue #710). Re-measure on scroll
+ * (capture phase, so nested scroll containers count, not just window) and
+ * resize, and observe the anchor's own size changes. `useLayoutEffect`
+ * re-measures synchronously before paint, so the first open positions correctly
+ * without a visible jump.
+ */
+function useAnchorRect(anchorEl: HTMLElement | null, open: boolean): DOMRect | undefined {
+  const [rect, setRect] = React.useState<DOMRect | undefined>(undefined);
+
+  React.useLayoutEffect(() => {
+    if (!open || !anchorEl) {
+      return;
+    }
+    // Re-measure, but bail out (return the previous reference) when nothing
+    // changed so a stream of scroll/resize ticks over a stationary anchor does
+    // not force a re-render on every event -- this fires hottest exactly in the
+    // scrollable-region case the issue is about.
+    const update = (): void => {
+      const next = anchorEl.getBoundingClientRect();
+      setRect((prev) =>
+        prev &&
+        prev.top === next.top &&
+        prev.left === next.left &&
+        prev.width === next.width &&
+        prev.height === next.height
+          ? prev
+          : next,
+      );
+    };
+    update();
+
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : undefined;
+    observer?.observe(anchorEl);
+
+    return () => {
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+      observer?.disconnect();
+    };
+  }, [anchorEl, open]);
+
+  return rect;
+}
+
 export function Menu(props: MenuProps): React.ReactElement {
   const { anchorEl, open, onClose, anchorOrigin, id, className, style, children } = props;
 
   const side = anchorOrigin?.vertical === 'top' ? 'top' : 'bottom';
   const align = anchorOrigin?.horizontal === 'right' ? 'end' : 'start';
 
-  const anchorRect = React.useMemo(() => anchorEl?.getBoundingClientRect(), [anchorEl]);
+  const anchorRect = useAnchorRect(anchorEl, open);
 
   return (
     <DropdownMenu.Root open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>

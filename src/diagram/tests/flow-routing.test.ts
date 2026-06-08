@@ -2660,4 +2660,37 @@ describe('Flow routing', () => {
       expect(firstPt.y).toBe(stockY - moveDelta.y);
     });
   });
+
+  describe('degenerate self-loop flow (both endpoints on the same stock)', () => {
+    // A flow whose first and last points are both attached to the same stock
+    // (issue #720). It cannot be produced through normal editor interactions,
+    // but can arrive via imported models or programmatic patches. adjustFlows
+    // (reached here through UpdateCloudAndFlow's straight-flow axis-constrain
+    // path) used to call defined(otherEnd) and throw because no endpoint was
+    // attached to a *different* element -- crashing the canvas render/interaction
+    // path. It must degrade gracefully instead.
+    it('does not throw and leaves the flow unchanged when dragged', () => {
+      const stockX = 100;
+      const stockY = 100;
+      // 2-point horizontal flow with BOTH endpoints attached to the stock.
+      const flow = makeFlow(flowUid, 150, stockY, [
+        { x: stockX, y: stockY, attachedToUid: stockUid },
+        { x: 200, y: stockY, attachedToUid: stockUid },
+      ]);
+      const stock = makeStock(stockUid, stockX, stockY);
+
+      // A small drag so we stay on the straight-flow axis-constrain path
+      // (below PERP_THRESHOLD) that reaches adjustFlows.
+      const moveDelta = { x: 2, y: 1 };
+
+      let result: ReturnType<typeof UpdateCloudAndFlow> | undefined;
+      expect(() => {
+        result = UpdateCloudAndFlow(stock, flow, moveDelta);
+      }).not.toThrow();
+
+      const [, newFlow] = result!;
+      // Graceful degradation: the degenerate flow's points are returned intact.
+      expect(newFlow.points).toEqual(flow.points);
+    });
+  });
 });
