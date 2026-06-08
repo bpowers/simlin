@@ -35,88 +35,86 @@ interface ModelPropertiesDrawerProps {
   onDelete?: () => Promise<void>;
 }
 
-export class ModelPropertiesDrawer extends React.PureComponent<ModelPropertiesDrawerProps> {
-  handleOpen = () => {
-    this.props.onDrawerToggle(true);
+export function ModelPropertiesDrawer(props: ModelPropertiesDrawerProps): React.ReactElement {
+  const {
+    modelName,
+    open,
+    onDrawerToggle,
+    startTime,
+    stopTime,
+    dt,
+    timeUnits,
+    onStartTimeChange,
+    onStopTimeChange,
+    onDtChange,
+    onTimeUnitsChange,
+    onDownloadXmile,
+    onDelete,
+  } = props;
+
+  const handleOpen = (): void => {
+    onDrawerToggle(true);
   };
 
-  handleClose = () => {
-    this.props.onDrawerToggle(false);
+  const handleClose = (): void => {
+    onDrawerToggle(false);
   };
 
-  render() {
-    const { modelName, open } = this.props;
-    return (
-      <Drawer open={open} onOpen={this.handleOpen} onClose={this.handleClose}>
-        <div className={styles.content}>
-          <div>
-            <div className={styles.modelApp}>
-              <div className={styles.imageWrap}>
-                <ModelIcon className={styles.modelIcon} />
-              </div>
-              <div className={styles.modelName}>Simlin</div>
+  return (
+    <Drawer open={open} onOpen={handleOpen} onClose={handleClose}>
+      <div className={styles.content}>
+        <div>
+          <div className={styles.modelApp}>
+            <div className={styles.imageWrap}>
+              <ModelIcon className={styles.modelIcon} />
             </div>
-            <Link to="/" className={styles.exitLink}>
-              <IconButton className={styles.menuButton} color="inherit" aria-label="Exit">
-                <ArrowBackIcon />
-              </IconButton>
-            </Link>
-            <IconButton className={styles.closeButton} color="inherit" aria-label="Close" onClick={this.handleClose}>
-              <ClearIcon />
+            <div className={styles.modelName}>Simlin</div>
+          </div>
+          <Link to="/" className={styles.exitLink}>
+            <IconButton className={styles.menuButton} color="inherit" aria-label="Exit">
+              <ArrowBackIcon />
             </IconButton>
-          </div>
-
-          <div className={styles.propsForm}>
-            <h2>{modelName}</h2>
-            <TextField
-              label="Start Time"
-              value={this.props.startTime}
-              onChange={this.props.onStartTimeChange}
-              type="number"
-              margin="normal"
-              fullWidth
-            />
-            <TextField
-              label="Stop Time"
-              value={this.props.stopTime}
-              onChange={this.props.onStopTimeChange}
-              type="number"
-              margin="normal"
-              fullWidth
-            />
-            <TextField
-              label="dt"
-              value={this.props.dt}
-              onChange={this.props.onDtChange}
-              type="number"
-              margin="normal"
-              fullWidth
-            />
-            <TextField
-              label="Time Units"
-              value={this.props.timeUnits}
-              onChange={this.props.onTimeUnitsChange}
-              margin="normal"
-              fullWidth
-            />
-            <br />
-            <br />
-            <Button
-              className={styles.downloadButton}
-              variant="contained"
-              color="primary"
-              size="large"
-              startIcon={<CloudDownloadIcon />}
-              onClick={this.props.onDownloadXmile}
-            >
-              Download model
-            </Button>
-            {this.props.onDelete ? (
-              <DeleteProjectButton projectName={modelName} onDelete={this.props.onDelete} />
-            ) : null}
-          </div>
+          </Link>
+          <IconButton className={styles.closeButton} color="inherit" aria-label="Close" onClick={handleClose}>
+            <ClearIcon />
+          </IconButton>
         </div>
-      </Drawer>
-    );
-  }
+
+        <div className={styles.propsForm}>
+          <h2>{modelName}</h2>
+          <TextField
+            label="Start Time"
+            value={startTime}
+            onChange={onStartTimeChange}
+            type="number"
+            margin="normal"
+            fullWidth
+          />
+          <TextField
+            label="Stop Time"
+            value={stopTime}
+            onChange={onStopTimeChange}
+            type="number"
+            margin="normal"
+            fullWidth
+          />
+          <TextField label="dt" value={dt} onChange={onDtChange} type="number" margin="normal" fullWidth />
+          <TextField label="Time Units" value={timeUnits} onChange={onTimeUnitsChange} margin="normal" fullWidth />
+          <br />
+          <br />
+          <Button
+            className={styles.downloadButton}
+            variant="contained"
+            color="primary"
+            size="large"
+            startIcon={<CloudDownloadIcon />}
+            onClick={onDownloadXmile}
+          >
+            Download model
+          </Button>
+          {onDelete ? <DeleteProjectButton projectName={modelName} onDelete={onDelete} /> : null}
+        </div>
+      </div>
+    </Drawer>
+  );
 }

@@ -50,49 +50,53 @@ function findNext(zoom: number, dir: 'out' | 'in'): number | undefined {
   return zooms[snappedIndex + (dir === 'in' ? 1 : -1)];
 }
 
-export class ZoomBar extends React.PureComponent<ZoomBarProps> {
-  handleZoomOut = () => {
-    const next = findNext(this.props.zoom, 'out');
+// Memoized: the Editor re-renders on every pan/momentum frame (optimistic view
+// updates replace the controller snapshot wholesale). During a plain pan the
+// `zoom` prop is unchanged and `onChangeZoom` is a stable bound handler, so
+// React.memo restores the old PureComponent shallow-prop bailout and avoids a
+// per-frame re-render. (A pinch-zoom does change `zoom`, which correctly
+// re-renders.)
+export const ZoomBar = React.memo(function ZoomBar({ zoom: zoomProp, onChangeZoom }: ZoomBarProps): React.ReactElement {
+  const handleZoomOut = (): void => {
+    const next = findNext(zoomProp, 'out');
     if (next) {
-      this.props.onChangeZoom(next);
+      onChangeZoom(next);
     }
   };
 
-  handleZoomIn = () => {
-    const next = findNext(this.props.zoom, 'in');
+  const handleZoomIn = (): void => {
+    const next = findNext(zoomProp, 'in');
     if (next) {
-      this.props.onChangeZoom(next);
+      onChangeZoom(next);
     }
   };
 
-  render() {
-    const zoom = snapToZoom(this.props.zoom);
+  const zoom = snapToZoom(zoomProp);
 
-    const zoomInEnabled = zoom < zooms[zooms.length - 1];
-    const zoomOutEnabled = zoom > zooms[0];
+  const zoomInEnabled = zoom < zooms[zooms.length - 1];
+  const zoomOutEnabled = zoom > zooms[0];
 
-    return (
-      <div className={styles.card}>
-        <IconButton
-          disabled={!zoomOutEnabled}
-          style={{ display: 'inline-block' }}
-          aria-label="Zoom Out"
-          onClick={this.handleZoomOut}
-        >
-          <RemoveIcon />
-        </IconButton>
-        <div className={styles.divider1} />
-        <p className={styles.zoomText}>{(zoom * 100).toFixed(0)}%</p>
-        <div className={styles.divider2} />
-        <IconButton
-          disabled={!zoomInEnabled}
-          style={{ display: 'inline-block' }}
-          aria-label="Zoom In"
-          onClick={this.handleZoomIn}
-        >
-          <AddIcon />
-        </IconButton>
-      </div>
-    );
-  }
-}
+  return (
+    <div className={styles.card}>
+      <IconButton
+        disabled={!zoomOutEnabled}
+        style={{ display: 'inline-block' }}
+        aria-label="Zoom Out"
+        onClick={handleZoomOut}
+      >
+        <RemoveIcon />
+      </IconButton>
+      <div className={styles.divider1} />
+      <p className={styles.zoomText}>{(zoom * 100).toFixed(0)}%</p>
+      <div className={styles.divider2} />
+      <IconButton
+        disabled={!zoomInEnabled}
+        style={{ display: 'inline-block' }}
+        aria-label="Zoom In"
+        onClick={handleZoomIn}
+      >
+        <AddIcon />
+      </IconButton>
+    </div>
+  );
+});
