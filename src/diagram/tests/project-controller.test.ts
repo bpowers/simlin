@@ -214,7 +214,12 @@ describe('ProjectController optimistic view updates', () => {
     // No project yet -> applyOptimisticView is a no-op, but the queued-view
     // flag is set for the eventual engine install path. We assert via the
     // reopen-for-undo path below instead; here just verify it does not throw.
-    const dummyView = { elements: [], nextUid: 1, viewBox: { x: 0, y: 0, width: 0, height: 0 }, zoom: 1 } as StockFlowView;
+    const dummyView = {
+      elements: [],
+      nextUid: 1,
+      viewBox: { x: 0, y: 0, width: 0, height: 0 },
+      zoom: 1,
+    } as StockFlowView;
     await controller.queueViewUpdate(dummyView);
     expect(controller.getSnapshot().project).toBeUndefined();
     await controller.dispose();

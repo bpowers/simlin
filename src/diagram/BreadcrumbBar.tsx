@@ -58,10 +58,7 @@ export function BreadcrumbBar(props: BreadcrumbBarProps): React.ReactElement {
               {isCurrent ? (
                 <span className={styles.breadcrumbCurrent}>{seg.label}</span>
               ) : (
-                <button
-                  className={styles.breadcrumbLink}
-                  onClick={() => onNavigateToLevel(seg.level)}
-                >
+                <button className={styles.breadcrumbLink} onClick={() => onNavigateToLevel(seg.level)}>
                   {seg.label}
                 </button>
               )}

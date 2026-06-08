@@ -176,7 +176,17 @@ describe('Autocomplete dropdown positioning', () => {
     // jsdom has no layout: stub the wrapper's rect and move it between calls,
     // simulating the input shifting as its scrollable container scrolls.
     const wrapper = screen.getByTestId('wrapper');
-    const rect = { top: 100, bottom: 120, left: 10, right: 210, width: 200, height: 20, x: 10, y: 100, toJSON: () => ({}) };
+    const rect = {
+      top: 100,
+      bottom: 120,
+      left: 10,
+      right: 210,
+      width: 200,
+      height: 20,
+      x: 10,
+      y: 100,
+      toJSON: () => ({}),
+    };
     const rectMock = jest.fn(() => ({ ...rect }) as DOMRect);
     wrapper.getBoundingClientRect = rectMock;
 
@@ -217,7 +227,17 @@ describe('Autocomplete dropdown positioning', () => {
     );
 
     const wrapper = screen.getByTestId('wrapper');
-    const rect = { top: 100, bottom: 120, left: 10, right: 210, width: 200, height: 20, x: 10, y: 100, toJSON: () => ({}) };
+    const rect = {
+      top: 100,
+      bottom: 120,
+      left: 10,
+      right: 210,
+      width: 200,
+      height: 20,
+      x: 10,
+      y: 100,
+      toJSON: () => ({}),
+    };
     wrapper.getBoundingClientRect = jest.fn(() => ({ ...rect }) as DOMRect);
 
     fireEvent.change(screen.getByTestId('autocomplete-input'), { target: { value: 'ap' } });

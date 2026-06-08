@@ -437,7 +437,18 @@ describe('DirectBackend', () => {
                   view: {
                     elements: [
                       { type: 'stock', uid: 1, name: 'Teacup Temperature', x: 300, y: 200, labelSide: 'bottom' },
-                      { type: 'flow', uid: 2, name: 'Heat Loss to Room', x: 200, y: 200, points: [{ x: 300, y: 200 }, { x: 100, y: 200 }], labelSide: 'bottom' },
+                      {
+                        type: 'flow',
+                        uid: 2,
+                        name: 'Heat Loss to Room',
+                        x: 200,
+                        y: 200,
+                        points: [
+                          { x: 300, y: 200 },
+                          { x: 100, y: 200 },
+                        ],
+                        labelSide: 'bottom',
+                      },
                       { type: 'cloud', uid: 3, flowUid: 2, x: 100, y: 200 },
                       { type: 'aux', uid: 4, name: 'Room Temperature', x: 200, y: 340, labelSide: 'bottom' },
                       { type: 'link', uid: 5, fromUid: 1, toUid: 2, arc: 30 },

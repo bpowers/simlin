@@ -28,7 +28,10 @@ describe('disambiguatedLabels', () => {
   });
 
   test('preserves the original item reference on each entry', () => {
-    const items = [{ path: 'a/x.stmx', extra: 'one' as const }, { path: 'b/x.stmx', extra: 'two' as const }];
+    const items = [
+      { path: 'a/x.stmx', extra: 'one' as const },
+      { path: 'b/x.stmx', extra: 'two' as const },
+    ];
     const out = disambiguatedLabels(items);
     expect(out[0].item).toBe(items[0]);
     expect(out[1].item).toBe(items[1]);

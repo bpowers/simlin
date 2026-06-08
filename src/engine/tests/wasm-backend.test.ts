@@ -806,7 +806,6 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
       dispose();
     });
   });
-
 });
 
 // A statically-arrayed model the wasm backend supports. `source` is dimensioned

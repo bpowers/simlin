@@ -634,9 +634,7 @@ describe('EditorHost', () => {
     // render. The componentDidUpdate path checks `prev.path !== this.props.path`
     // first; on a path change it clears the disk notice state and re-loads,
     // so the liveVersion gate is never reached for the old path's event.
-    rerender(
-      <EditorHost path="b.stmx" liveVersion={1} liveSource="disk" />,
-    );
+    rerender(<EditorHost path="b.stmx" liveVersion={1} liveSource="disk" />);
 
     // Give React time to process the update.
     await act(async () => {
@@ -901,9 +899,7 @@ describe('EditorHost', () => {
         jest.advanceTimersByTime(1);
       });
 
-      expect(sent).toEqual([
-        { type: 'selectionChanged', path: 'a.stmx', variableIdents: ['a', 'b'] },
-      ]);
+      expect(sent).toEqual([{ type: 'selectionChanged', path: 'a.stmx', variableIdents: ['a', 'b'] }]);
     } finally {
       jest.useRealTimers();
     }

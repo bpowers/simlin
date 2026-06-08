@@ -9,12 +9,7 @@
 // coordination can be exercised without spinning up WASM or jsdom.
 
 import type { JsonProjectPatch, ErrorDetail } from '@simlin/engine';
-import type {
-  EngineApi,
-  EngineModelApi,
-  EngineRunApi,
-  ProjectControllerConfig,
-} from '../project-controller';
+import type { EngineApi, EngineModelApi, EngineRunApi, ProjectControllerConfig } from '../project-controller';
 
 // The engine prefixes injected stdlib model names (e.g. 'stdlib\u{205A}delay1').
 // We mirror that convention so isStdlibModel() recognizes the fake's stdlib
@@ -138,7 +133,10 @@ export function makeFakeEngine(options: FakeEngineOptions = {}): FakeEngine {
     typeof options.simulatable === 'function' ? options.simulatable() : (options.simulatable ?? true);
 
   const model: EngineModelApi = {
-    async run(overrides: Record<string, number> = {}, runOptions: { analyzeLtm?: boolean } = {}): Promise<EngineRunApi> {
+    async run(
+      overrides: Record<string, number> = {},
+      runOptions: { analyzeLtm?: boolean } = {},
+    ): Promise<EngineRunApi> {
       runCalls.push({ overrides, analyzeLtm: runOptions.analyzeLtm });
       if (options.run) {
         return options.run(overrides, runOptions);

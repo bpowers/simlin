@@ -126,7 +126,11 @@ function routeCloudEndpointFlow(
       }
     } else {
       // Just update the cloud point position
-      const updatedPoints = arrayWith(routedFlow.points, cloudPointIndex, { ...cloudPoint, x: newCloudX, y: newCloudY });
+      const updatedPoints = arrayWith(routedFlow.points, cloudPointIndex, {
+        ...cloudPoint,
+        x: newCloudX,
+        y: newCloudY,
+      });
       updatedFlow = { ...routedFlow, points: updatedPoints };
     }
   }

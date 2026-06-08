@@ -1100,7 +1100,14 @@ export class ProjectController {
     if (!project || !project.models.has(targetModelName)) {
       return { restoredSelection: undefined };
     }
-    const newStack = pushModule(this.modelStack, targetModelName, moduleIdent, currentSelection, currentViewBox, currentZoom);
+    const newStack = pushModule(
+      this.modelStack,
+      targetModelName,
+      moduleIdent,
+      currentSelection,
+      currentViewBox,
+      currentZoom,
+    );
     const newModelName = currentModelName(newStack);
     this.batch(() => {
       this.modelStack = newStack;

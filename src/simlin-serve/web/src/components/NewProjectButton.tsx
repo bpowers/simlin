@@ -160,12 +160,7 @@ export class NewProjectButton extends React.Component<NewProjectButtonProps, New
         />
         <label className="serve-new-project-format">
           <span className="serve-visually-hidden">format</span>
-          <select
-            aria-label="format"
-            value={format}
-            onChange={this.handleFormatChange}
-            disabled={pending}
-          >
+          <select aria-label="format" value={format} onChange={this.handleFormatChange} disabled={pending}>
             <option value="stmx">XMILE (.stmx)</option>
             <option value="sd_json">Simlin JSON (.sd.json)</option>
           </select>

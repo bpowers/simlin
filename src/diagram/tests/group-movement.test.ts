@@ -205,7 +205,11 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, flow],
+        [3, stockB],
+      ]);
 
       const selection = new Set<UID>([1, 2, 3]);
       const delta = { x: -50, y: -30 }; // Move right 50, down 30
@@ -249,7 +253,13 @@ describe('Group Movement', () => {
         { x: 300 - StockWidth / 2, y: 100, attachedToUid: 5 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow1], [3, stockB], [4, flow2], [5, stockC]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, flow1],
+        [3, stockB],
+        [4, flow2],
+        [5, stockC],
+      ]);
 
       const selection = new Set<UID>([1, 2, 3, 4, 5]);
       const delta = { x: -100, y: 0 }; // Move right 100
@@ -277,7 +287,11 @@ describe('Group Movement', () => {
         { x: 200, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, cloud]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, flow],
+        [3, cloud],
+      ]);
 
       // Only select the stock, not the flow
       const selection = new Set<UID>([1]);
@@ -414,7 +428,13 @@ describe('Group Movement', () => {
         { x: 200, y: 150, attachedToUid: 5 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow1], [3, flow2], [4, stockB], [5, cloud]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, flow1],
+        [3, flow2],
+        [4, stockB],
+        [5, cloud],
+      ]);
 
       // Select Stock A and Stock B (so Flow 1 has both endpoints selected)
       // Don't select the cloud (so Flow 2 has only one endpoint selected)
@@ -459,7 +479,11 @@ describe('Group Movement', () => {
         { x: 200, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, cloudA], [2, flow], [3, cloudB]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, cloudA],
+        [2, flow],
+        [3, cloudB],
+      ]);
 
       // Only select the flow (not the clouds)
       const selection = new Set<UID>([2]);
@@ -499,7 +523,11 @@ describe('Group Movement', () => {
         { x: 200, y: 200, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, cloudA], [2, flow], [3, cloudB]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, cloudA],
+        [2, flow],
+        [3, cloudB],
+      ]);
 
       // Only select the flow
       const selection = new Set<UID>([2]);
@@ -541,7 +569,12 @@ describe('Group Movement', () => {
       // Add an aux that's also selected (making this a group selection)
       const aux = makeAux(4, 300, 200);
 
-      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock], [4, aux]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, cloud],
+        [2, flow],
+        [3, stock],
+        [4, aux],
+      ]);
 
       // Select the flow AND the aux (group selection, but neither flow endpoint is selected)
       const selection = new Set<UID>([2, 4]);
@@ -592,7 +625,11 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, cloud],
+        [2, flow],
+        [3, stock],
+      ]);
 
       // Only select the flow (single-flow selection, not group movement)
       const selection = new Set<UID>([2]);
@@ -638,7 +675,11 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, cloud],
+        [2, flow],
+        [3, stock],
+      ]);
 
       // Small perpendicular drag (< 5px threshold)
       const selection = new Set<UID>([2]);
@@ -664,7 +705,11 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, cloud],
+        [2, flow],
+        [3, stock],
+      ]);
 
       // Parallel drag (along the flow)
       const selection = new Set<UID>([2]);
@@ -697,7 +742,11 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, flow],
+        [3, stockB],
+      ]);
 
       // Only select the flow
       const selection = new Set<UID>([2]);
@@ -731,7 +780,11 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, flow],
+        [3, stockB],
+      ]);
 
       // Only select the flow, move UP (perpendicular to the horizontal flow)
       const selection = new Set<UID>([2]);
@@ -763,7 +816,11 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, flow],
+        [3, stockB],
+      ]);
 
       // Select Stock A and Flow 1, but NOT Stock B
       const selection = new Set<UID>([1, 2]);
@@ -801,7 +858,11 @@ describe('Group Movement', () => {
         { x: 300 - StockWidth / 2, y: 100, attachedToUid: 3 }, // x = 277.5
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, flow],
+        [3, stockB],
+      ]);
 
       // Select Stock A and Flow (not Stock B)
       const selection = new Set<UID>([1, 2]);
@@ -838,7 +899,11 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, stockA], [2, flow], [3, stockB]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, flow],
+        [3, stockB],
+      ]);
 
       // Select Stock A and Flow, but NOT Stock B
       // Move UP by 50 (perpendicular to original horizontal flow)
@@ -869,7 +934,11 @@ describe('Group Movement', () => {
       const aux2 = makeAux(2, 150, 150);
       const stock = makeStock(3, 200, 100);
 
-      const elements = new Map<UID, ViewElement>([[1, aux1], [2, aux2], [3, stock]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, aux1],
+        [2, aux2],
+        [3, stock],
+      ]);
 
       const selection = new Set<UID>([1, 2, 3]);
       const delta = { x: -30, y: -20 };
@@ -890,7 +959,10 @@ describe('Group Movement', () => {
       const module1 = makeModule(1, 100, 100);
       const stock = makeStock(2, 200, 100);
 
-      const elements = new Map<UID, ViewElement>([[1, module1], [2, stock]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, module1],
+        [2, stock],
+      ]);
 
       const selection = new Set<UID>([1, 2]);
       const delta = { x: -50, y: -25 };
@@ -924,7 +996,10 @@ describe('Group Movement', () => {
       const aux = makeAux(1, 100, 100);
       const alias = makeAlias(2, 1, 200, 150);
 
-      const elements = new Map<UID, ViewElement>([[1, aux], [2, alias]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, aux],
+        [2, alias],
+      ]);
 
       const selection = new Set<UID>([1, 2]);
       const delta = { x: -40, y: -30 };
@@ -942,7 +1017,10 @@ describe('Group Movement', () => {
       const aux = makeAux(1, 100, 100);
       const alias = makeAlias(2, 1, 200, 150);
 
-      const elements = new Map<UID, ViewElement>([[1, aux], [2, alias]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, aux],
+        [2, alias],
+      ]);
 
       // Only select the alias
       const selection = new Set<UID>([2]);
@@ -964,7 +1042,10 @@ describe('Group Movement', () => {
       const group = makeGroup(1, 150, 140, 100, 80);
       const stock = makeStock(2, 150, 140);
 
-      const elements = new Map<UID, ViewElement>([[1, group], [2, stock]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, group],
+        [2, stock],
+      ]);
 
       const selection = new Set<UID>([1, 2]);
       const delta = { x: -50, y: -30 };
@@ -1007,7 +1088,11 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, cloud],
+        [2, flow],
+        [3, stock],
+      ]);
 
       // Select cloud, flow, and stock
       const selection = new Set<UID>([1, 2, 3]);
@@ -1140,7 +1225,11 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, cloud],
+        [2, flow],
+        [3, stock],
+      ]);
 
       // Only select the cloud, not the flow
       const selection = new Set<UID>([1]);
@@ -1174,7 +1263,11 @@ describe('Group Movement', () => {
         { x: 200 - StockWidth / 2, y: 100, attachedToUid: 3 },
       ]);
 
-      const elements = new Map<UID, ViewElement>([[1, cloud], [2, flow], [3, stock]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, cloud],
+        [2, flow],
+        [3, stock],
+      ]);
 
       // Only select the cloud, not the flow
       const selection = new Set<UID>([1]);
@@ -1227,7 +1320,11 @@ describe('Link arc adjustment during group movement', () => {
     const auxB = makeAux(2, 200, 100);
     const link = makeLink(3, 1, 2, 30); // Arc of 30 degrees
 
-    const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
+    const elements = new Map<UID, ViewElement>([
+      [1, auxA],
+      [2, auxB],
+      [3, link],
+    ]);
 
     // Select both auxes and the link
     const selection = new Set<UID>([1, 2, 3]);
@@ -1254,7 +1351,11 @@ describe('Link arc adjustment during group movement', () => {
     const auxB = makeAux(2, 200, 100);
     const link = makeLink(3, 1, 2, 30);
 
-    const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
+    const elements = new Map<UID, ViewElement>([
+      [1, auxA],
+      [2, auxB],
+      [3, link],
+    ]);
 
     // Select only Aux A and the link (not Aux B)
     const selection = new Set<UID>([1, 3]);
@@ -1284,7 +1385,11 @@ describe('Link arc adjustment during group movement', () => {
     const auxB = makeAux(2, 200, 100);
     const link = makeLink(3, 1, 2, 0); // No initial arc
 
-    const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
+    const elements = new Map<UID, ViewElement>([
+      [1, auxA],
+      [2, auxB],
+      [3, link],
+    ]);
 
     // Select only Aux A and the link
     const selection = new Set<UID>([1, 3]);
@@ -1315,7 +1420,11 @@ describe('Link arc adjustment during group movement', () => {
     const auxB = makeAux(2, 200, 100);
     const link = makeLink(3, 1, 2, 0);
 
-    const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
+    const elements = new Map<UID, ViewElement>([
+      [1, auxA],
+      [2, auxB],
+      [3, link],
+    ]);
 
     // Select Aux A and the link (but not Aux B)
     const selection = new Set<UID>([1, 3]);
@@ -1337,7 +1446,11 @@ describe('Link arc adjustment during group movement', () => {
     const auxB = makeAux(2, 200, 100);
     const link = makeLink(3, 1, 2, 0); // Initially straight (arc = 0)
 
-    const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
+    const elements = new Map<UID, ViewElement>([
+      [1, auxA],
+      [2, auxB],
+      [3, link],
+    ]);
 
     // Select only the link (no endpoints)
     const selection = new Set<UID>([3]);
@@ -1367,7 +1480,11 @@ describe('Link arc adjustment during group movement', () => {
       const auxB = makeAux(2, 200, 100, false); // Not arrayed
       const link = makeLink(3, 1, 2, 0); // Initially straight
 
-      const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, auxA],
+        [2, auxB],
+        [3, link],
+      ]);
 
       // Select Aux A and link (not Aux B)
       const selection = new Set<UID>([1, 3]);
@@ -1394,7 +1511,11 @@ describe('Link arc adjustment during group movement', () => {
       const auxB = makeAux(2, 200, 100, true); // Arrayed (visual center at 197, 97 due to ArrayedOffset)
       const link = makeLink(3, 1, 2, 0); // Initially straight
 
-      const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, auxA],
+        [2, auxB],
+        [3, link],
+      ]);
 
       // Select Aux B and link (not Aux A)
       const selection = new Set<UID>([2, 3]);
@@ -1425,7 +1546,11 @@ describe('Link arc adjustment during group movement', () => {
       const auxB = makeAux(2, 200, 100, true); // Arrayed
       const link = makeLink(3, 1, 2, 0); // Initially straight
 
-      const elements = new Map<UID, ViewElement>([[1, auxA], [2, auxB], [3, link]]);
+      const elements = new Map<UID, ViewElement>([
+        [1, auxA],
+        [2, auxB],
+        [3, link],
+      ]);
 
       // Select Aux A and link (not Aux B)
       const selection = new Set<UID>([1, 3]);

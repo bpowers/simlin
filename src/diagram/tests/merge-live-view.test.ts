@@ -105,7 +105,9 @@ describe('preserveLiveView', () => {
     const hasFiniteXY = (el: { x?: unknown; y?: unknown }): boolean =>
       typeof el.x === 'number' && Number.isFinite(el.x) && typeof el.y === 'number' && Number.isFinite(el.y);
     const movedElements = baselineView.elements.map((el) =>
-      hasFiniteXY(el as { x?: unknown; y?: unknown }) ? { ...el, x: (el as { x: number }).x + 200, y: (el as { y: number }).y - 75 } : el,
+      hasFiniteXY(el as { x?: unknown; y?: unknown })
+        ? { ...el, x: (el as { x: number }).x + 200, y: (el as { y: number }).y - 75 }
+        : el,
     );
     const optimisticView: StockFlowView = { ...baselineView, elements: movedElements };
     const live = withView(baseline, 'main', optimisticView);

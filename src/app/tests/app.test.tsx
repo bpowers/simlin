@@ -366,7 +366,15 @@ describe('InnerApp.handleLogout', () => {
 
     consoleSpy.mockRestore();
     fetchMock.mockReset();
-    fetchMock.mockImplementation(async () => ({ status: 401, async json() { return {}; } }) as unknown as Response);
+    fetchMock.mockImplementation(
+      async () =>
+        ({
+          status: 401,
+          async json() {
+            return {};
+          },
+        }) as unknown as Response,
+    );
     unmount();
   });
 });

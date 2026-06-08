@@ -230,7 +230,10 @@ export class Project {
    *   persistence to avoid storing engine internals.
    * @returns JSON string
    */
-  async serializeJson(format: SimlinJsonFormat = SimlinJsonFormat.Native, includeStdlib: boolean = false): Promise<string> {
+  async serializeJson(
+    format: SimlinJsonFormat = SimlinJsonFormat.Native,
+    includeStdlib: boolean = false,
+  ): Promise<string> {
     this.checkDisposed();
     const bytes = await this._backend.projectSerializeJson(this._handle, format, includeStdlib);
     return new TextDecoder().decode(bytes);

@@ -166,8 +166,7 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
       // loaded, the underlying state hasn't changed — update the
       // displayed name without refetching or remounting the Editor.
       const liveVersion = this.props.liveVersion ?? 0;
-      const sameUnderlyingState =
-        this.state.payload !== null && liveVersion === this.state.serverVersion;
+      const sameUnderlyingState = this.state.payload !== null && liveVersion === this.state.serverVersion;
       if (sameUnderlyingState) {
         this.setState({ loadedPath: this.props.path });
         this.emitProjectFocused(this.props.path);

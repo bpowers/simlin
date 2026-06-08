@@ -96,9 +96,7 @@ describe('anyModuleHasModelReference', () => {
   });
 
   it('returns false when one module has empty modelName', () => {
-    const variables = new Map<string, Variable>([
-      ['hare_population', makeModuleVar('hare_population', '')],
-    ]);
+    const variables = new Map<string, Variable>([['hare_population', makeModuleVar('hare_population', '')]]);
     expect(anyModuleHasModelReference(variables)).toBe(false);
   });
 
@@ -111,9 +109,7 @@ describe('anyModuleHasModelReference', () => {
   });
 
   it('returns true when one module has a non-empty modelName', () => {
-    const variables = new Map<string, Variable>([
-      ['hare_population', makeModuleVar('hare_population', 'hares')],
-    ]);
+    const variables = new Map<string, Variable>([['hare_population', makeModuleVar('hare_population', 'hares')]]);
     expect(anyModuleHasModelReference(variables)).toBe(true);
   });
 
@@ -189,4 +185,3 @@ describe('module creation data structures', () => {
     expect(tool).toBe('module');
   });
 });
-

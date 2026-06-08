@@ -17,7 +17,13 @@ import TextField from './components/TextField';
 import { AddIcon, RemoveIcon } from './components/icons';
 import { getAvailableModels, getInputPorts, getPublicVariables } from './module-details-utils';
 import { STDLIB_PREFIX } from './module-navigation';
-import { addReference, getAvailableSrcVariables, removeReference, updateReferenceDst, updateReferenceSrc } from './module-wiring';
+import {
+  addReference,
+  getAvailableSrcVariables,
+  removeReference,
+  updateReferenceDst,
+  updateReferenceSrc,
+} from './module-wiring';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import type { CustomEditor } from './drawing/SlateEditor';
 
@@ -189,9 +195,7 @@ export class ModuleDetails extends React.PureComponent<ModuleDetailsProps, Modul
     const parentModel = project.models.get(currentModelName);
     const childModel = project.models.get(variable.modelName);
 
-    const availableSrcVars: ReadonlyArray<string> = parentModel
-      ? getAvailableSrcVariables(parentModel.variables)
-      : [];
+    const availableSrcVars: ReadonlyArray<string> = parentModel ? getAvailableSrcVariables(parentModel.variables) : [];
     const inputPorts: ReadonlyArray<Variable> = childModel ? getInputPorts(childModel) : [];
     const dstOptions: Array<string> = inputPorts.map((v) => v.ident).sort();
 
@@ -222,11 +226,7 @@ export class ModuleDetails extends React.PureComponent<ModuleDetailsProps, Modul
                         }
                       }}
                       renderInput={(params) => (
-                        <TextField
-                          {...params}
-                          variant="standard"
-                          placeholder="Select variable"
-                        />
+                        <TextField {...params} variant="standard" placeholder="Select variable" />
                       )}
                     />
                   </td>
@@ -239,13 +239,7 @@ export class ModuleDetails extends React.PureComponent<ModuleDetailsProps, Modul
                           this.handleDstChange(i, newValue);
                         }
                       }}
-                      renderInput={(params) => (
-                        <TextField
-                          {...params}
-                          variant="standard"
-                          placeholder="Select input"
-                        />
-                      )}
+                      renderInput={(params) => <TextField {...params} variant="standard" placeholder="Select input" />}
                     />
                   </td>
                   <td>
@@ -263,12 +257,7 @@ export class ModuleDetails extends React.PureComponent<ModuleDetailsProps, Modul
           </table>
         )}
         <div className={styles.addInputButton}>
-          <Button
-            size="small"
-            variant="outlined"
-            onClick={this.handleAddReference}
-            data-testid="add-input-button"
-          >
+          <Button size="small" variant="outlined" onClick={this.handleAddReference} data-testid="add-input-button">
             <AddIcon /> Add Input
           </Button>
         </div>

@@ -35,34 +35,34 @@ describe('common', () => {
     });
 
     it('should return the bounds of a single element', () => {
-      const elements = ([{ top: 100, left: 150, right: 200, bottom: 180 }]);
+      const elements = [{ top: 100, left: 150, right: 200, bottom: 180 }];
       const result = calcViewBox(elements);
       expect(result).toEqual({ top: 100, left: 150, right: 200, bottom: 180 });
     });
 
     it('should calculate tight bounds from multiple elements', () => {
-      const elements = ([
+      const elements = [
         { top: 100, left: 150, right: 200, bottom: 180 },
         { top: 200, left: 300, right: 400, bottom: 280 },
         { top: 50, left: 100, right: 250, bottom: 150 },
-      ]);
+      ];
       const result = calcViewBox(elements);
       expect(result).toEqual({ top: 50, left: 100, right: 400, bottom: 280 });
     });
 
     it('should skip undefined elements in the list', () => {
-      const elements = ([
+      const elements = [
         { top: 100, left: 150, right: 200, bottom: 180 },
         undefined,
         { top: 200, left: 300, right: 400, bottom: 280 },
         undefined,
-      ]);
+      ];
       const result = calcViewBox(elements);
       expect(result).toEqual({ top: 100, left: 150, right: 400, bottom: 280 });
     });
 
     it('should handle all undefined elements by returning Infinity bounds', () => {
-      const elements = ([undefined, undefined]);
+      const elements = [undefined, undefined];
       const result = calcViewBox(elements);
       expect(result).toEqual({
         top: Infinity,
@@ -73,10 +73,10 @@ describe('common', () => {
     });
 
     it('should handle elements with negative coordinates', () => {
-      const elements = ([
+      const elements = [
         { top: -50, left: -100, right: 50, bottom: 50 },
         { top: 0, left: 0, right: 100, bottom: 100 },
-      ]);
+      ];
       const result = calcViewBox(elements);
       expect(result).toEqual({ top: -50, left: -100, right: 100, bottom: 100 });
     });

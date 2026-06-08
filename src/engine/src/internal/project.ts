@@ -279,7 +279,11 @@ export function simlin_project_serialize_protobuf(project: SimlinProjectPtr): Ui
  * @param format JSON format
  * @returns JSON-encoded project data
  */
-export function simlin_project_serialize_json(project: SimlinProjectPtr, format: SimlinJsonFormat, includeStdlib: boolean = false): Uint8Array {
+export function simlin_project_serialize_json(
+  project: SimlinProjectPtr,
+  format: SimlinJsonFormat,
+  includeStdlib: boolean = false,
+): Uint8Array {
   const exports = getExports();
   const fn = exports.simlin_project_serialize_json as (
     proj: number,

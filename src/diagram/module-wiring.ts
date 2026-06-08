@@ -9,11 +9,7 @@ import type { ModuleReference } from '@simlin/core/datamodel';
 /**
  * Returns true if a reference with the same src and dst already exists.
  */
-export function isDuplicateReference(
-  references: ReadonlyArray<ModuleReference>,
-  src: string,
-  dst: string,
-): boolean {
+export function isDuplicateReference(references: ReadonlyArray<ModuleReference>, src: string, dst: string): boolean {
   return references.some((ref) => ref.src === src && ref.dst === dst);
 }
 
