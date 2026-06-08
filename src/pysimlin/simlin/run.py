@@ -175,7 +175,10 @@ class Run:
         per-step relative loop score (its share of the cycle partition's
         activity), used for the dominance analysis.
 
-        Returns empty tuple if analyze_loops=False was used.
+        When LTM was disabled for this run (``analyze_loops=False``, or LTM
+        could not be enabled), there is no runtime loop_score series: the loops
+        come back with their STRUCTURAL polarity and no ``behavior_time_series``.
+        The tuple is empty only when the model has no enumerable feedback loops.
 
         Returns:
             Tuple of Loop objects with runtime polarity and behavioral data

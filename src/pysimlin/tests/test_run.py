@@ -54,12 +54,30 @@ class TestRunClass:
         assert run.time_spec.dt > 0
 
     def test_run_loops_property_without_ltm(self, xmile_model_path: Path) -> None:
-        """Test that Run.loops returns empty tuple when analyze_loops=False."""
+        """Without LTM, Run.loops carries the structural loops (structural
+        polarity, no behavior series), not an empty tuple, when the model has
+        enumerable feedback loops.
+
+        This pins the LTM-disabled fallback: ``Run.loops`` flows through the
+        engine's ``model_detected_loops`` (structural, no LTM dependency), so
+        the loop set and polarity match ``Model.loops`` exactly, and only the
+        runtime ``behavior_time_series`` is absent.
+        """
         model = simlin.load(xmile_model_path)
+        structural = model.loops
 
         run = model.run(analyze_loops=False)
 
         assert isinstance(run.loops, tuple)
+        # Same loops as the structural surface (id + structural polarity).
+        assert {loop.id for loop in run.loops} == {loop.id for loop in structural}
+        structural_polarity = {loop.id: loop.polarity for loop in structural}
+        for loop in run.loops:
+            assert loop.polarity == structural_polarity[loop.id]
+            # No runtime score series was emitted, so no behavior data.
+            assert loop.behavior_time_series is None
+        if len(structural) == 0:
+            assert run.loops == ()
 
     def test_run_loops_property_with_ltm(self, xmile_model_path: Path) -> None:
         """Test that Run.loops returns Loop objects with behavior when analyze_loops=True."""

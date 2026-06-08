@@ -944,9 +944,10 @@ class Model:
                 sim.run_to_end()
                 warnings.warn(
                     f"loop analysis (LTM) could not be enabled for this run, so it "
-                    f"was skipped and run.loops will be empty. Pass "
-                    f"analyze_loops=False to silence this warning. Underlying "
-                    f"error: {ltm_err}",
+                    f"was skipped: run.loops will carry the model's structural loops "
+                    f"with structural polarity and no behavior series (no runtime "
+                    f"reclassification or relative scores). Pass analyze_loops=False "
+                    f"to silence this warning. Underlying error: {ltm_err}",
                     RuntimeWarning,
                     stacklevel=2,
                 )
