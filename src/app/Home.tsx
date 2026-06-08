@@ -28,11 +28,6 @@ import { User } from './User';
 import styles from './Home.module.css';
 import typography from './typography.module.css';
 
-interface HomeState {
-  anchorEl?: HTMLElement;
-  projects: readonly Project[];
-}
-
 interface HomeProps {
   user: User;
   isNewProject: boolean;
@@ -45,44 +40,25 @@ const AnchorOrigin = {
   horizontal: 'right' as const,
 };
 
-class Home extends React.Component<HomeProps, HomeState> {
-  state: HomeState;
+function Home(props: HomeProps): React.JSX.Element {
+  const [anchorEl, setAnchorEl] = React.useState<HTMLElement | undefined>(undefined);
+  const [projects, setProjects] = React.useState<readonly Project[]>([]);
 
-  // Pending setTimeout(0) handle for the deferred getProjects(), plus an
-  // unmount flag: the fetch can resolve after a route change unmounts Home,
-  // and a StrictMode-discarded render-phase instance must never fire the
-  // request at all (it never reaches componentDidMount).
-  private getProjectsTimer: ReturnType<typeof setTimeout> | null = null;
-  private unmounted = false;
+  // The mutable, non-render instance state that lived as class instance fields:
+  // the pending setTimeout(0) handle for the deferred getProjects() and an
+  // unmount flag. The fetch can resolve after a route change unmounts Home, and
+  // the deferred timer must be cancellable from the cleanup. Collected into one
+  // ref so escaped callbacks (the timer continuation and the async fetch) read
+  // the latest values.
+  const refs = React.useRef<{
+    getProjectsTimer: ReturnType<typeof setTimeout> | null;
+    unmounted: boolean;
+  }>({ getProjectsTimer: null, unmounted: false });
 
-  constructor(props: HomeProps) {
-    super(props);
-
-    this.state = {
-      anchorEl: undefined,
-      projects: [],
-    };
-    // getProjects is kicked off in componentDidMount, not here: a constructor
-    // side effect also runs for StrictMode's discarded render-phase instance.
-  }
-
-  componentDidMount() {
-    this.unmounted = false;
-    this.getProjectsTimer = setTimeout(() => {
-      this.getProjectsTimer = null;
-      void this.getProjects();
-    });
-  }
-
-  componentWillUnmount() {
-    this.unmounted = true;
-    if (this.getProjectsTimer !== null) {
-      clearTimeout(this.getProjectsTimer);
-      this.getProjectsTimer = null;
-    }
-  }
-
-  getProjects = async (): Promise<void> => {
+  // getProjects reads the freshest onLogout callback indirectly through state
+  // setters only, so no latest-props ref is needed here: it only ever calls
+  // setProjects, which is stable.
+  const getProjects = async (): Promise<void> => {
     let projects: Project[];
     try {
       const response = await fetch('/api/projects', { credentials: 'same-origin' });
@@ -96,58 +72,79 @@ class Home extends React.Component<HomeProps, HomeState> {
       console.error("couldn't fetch projects:", err);
       return;
     }
-    if (this.unmounted) {
+    if (refs.current.unmounted) {
       return;
     }
-    this.setState({
-      projects,
+    setProjects(projects);
+  };
+
+  // Mount / unmount effect (formerly componentDidMount / componentWillUnmount).
+  // The deferred getProjects() is scheduled here, not during render: a render
+  // side effect also runs for StrictMode's discarded render-phase instance.
+  // The cleanup cancels the pending timer and latches `unmounted` so a fetch
+  // that resolves after a route change does not setProjects on an unmounted
+  // component. A StrictMode mount/unmount/mount cycle therefore cancels the
+  // first schedule and re-schedules on the second mount.
+  React.useEffect(() => {
+    const r = refs.current;
+    r.unmounted = false;
+    r.getProjectsTimer = setTimeout(() => {
+      r.getProjectsTimer = null;
+      void getProjects();
     });
+    return () => {
+      r.unmounted = true;
+      if (r.getProjectsTimer !== null) {
+        clearTimeout(r.getProjectsTimer);
+        r.getProjectsTimer = null;
+      }
+    };
+    // Empty deps: this effect mirrors componentDidMount/Unmount. getProjects
+    // only closes over the persistent refs object and stable setters, so a
+    // once-per-mount run carries no stale values. (The repo lint config does
+    // not enable react-hooks/exhaustive-deps, so no disable directive is
+    // needed.)
+  }, []);
+
+  const handleClose = () => {
+    setAnchorEl(undefined);
   };
 
-  handleClose = () => {
-    this.setState({
-      anchorEl: undefined,
-    });
+  const handleLogout = () => {
+    handleClose();
+    props.onLogout();
   };
 
-  handleLogout = () => {
-    this.handleClose();
-    this.props.onLogout();
+  const handleMenu = (event: React.MouseEvent<HTMLElement>) => {
+    setAnchorEl(event.currentTarget);
   };
 
-  handleMenu = (event: React.MouseEvent<HTMLElement>) => {
-    this.setState({
-      anchorEl: event.currentTarget,
-    });
-  };
-
-  handleProjectCreated = (project: Project) => {
+  const handleProjectCreated = (project: Project) => {
     window.location.pathname = '/' + project.id;
   };
 
-  getGridListCols = () => {
+  const getGridListCols = () => {
     // TODO: this should be 1 on small screens, but useMediaQuery doesn't
     //       work in class components, only function components.
     return 2;
   };
 
-  newProjectForm() {
+  const newProjectForm = () => {
     return (
       <div className={styles.newProjectForm}>
         <div className={styles.centeredFlex}>
           <div>
-            <NewProject user={this.props.user} onProjectCreated={this.handleProjectCreated} />
+            <NewProject user={props.user} onProjectCreated={handleProjectCreated} />
           </div>
         </div>
       </div>
     );
-  }
+  };
 
-  projects() {
-    const { projects } = this.state;
+  const projectsView = () => {
     return (
       <div className={styles.projectGrid}>
-        <ImageList cols={this.getGridListCols()} gap={0}>
+        <ImageList cols={getGridListCols()} gap={0}>
           {projects.map((project) => (
             <ImageListItem key={project.id} style={{ height: 'auto' }}>
               <Link to={`/${project.id}`} className={styles.modelLink}>
@@ -164,68 +161,65 @@ class Home extends React.Component<HomeProps, HomeState> {
         </ImageList>
       </div>
     );
-  }
+  };
 
-  render() {
-    const { anchorEl } = this.state;
-    const { photoUrl } = this.props.user;
-    const open = Boolean(anchorEl);
+  const { photoUrl } = props.user;
+  const open = Boolean(anchorEl);
 
-    const account = photoUrl ? (
-      <Avatar alt={this.props.user.displayName} src={photoUrl} className={styles.avatar} />
-    ) : (
-      <AccountCircleIcon />
-    );
+  const account = photoUrl ? (
+    <Avatar alt={props.user.displayName} src={photoUrl} className={styles.avatar} />
+  ) : (
+    <AccountCircleIcon />
+  );
 
-    const content = this.props.isNewProject ? this.newProjectForm() : this.projects();
+  const content = props.isNewProject ? newProjectForm() : projectsView();
 
-    return (
-      <div className={clsx(styles.root)}>
-        <AppBar position="fixed">
-          <Toolbar variant="dense">
-            <IconButton className={styles.menuButton} color="inherit" aria-label="Menu" edge="start" size="small">
-              <MenuIcon />
+  return (
+    <div className={clsx(styles.root)}>
+      <AppBar position="fixed">
+        <Toolbar variant="dense">
+          <IconButton className={styles.menuButton} color="inherit" aria-label="Menu" edge="start" size="small">
+            <MenuIcon />
+          </IconButton>
+          <h6 className={clsx(typography.heading6, typography.colorInherit, styles.appBarTitle)}>
+            <Link to="/" className={styles.modelLink}>
+              Simlin
+            </Link>
+          </h6>
+          <div>
+            <Link to="/new" className={styles.modelLink}>
+              <Button variant="outlined" className={styles.newProjectButton}>
+                New Project
+              </Button>
+            </Link>
+
+            <IconButton
+              className={styles.profileIcon}
+              aria-owns={open ? 'menu-appbar' : undefined}
+              aria-haspopup="true"
+              onClick={handleMenu}
+              color="inherit"
+              size="small"
+            >
+              {account}
             </IconButton>
-            <h6 className={clsx(typography.heading6, typography.colorInherit, styles.appBarTitle)}>
-              <Link to="/" className={styles.modelLink}>
-                Simlin
-              </Link>
-            </h6>
-            <div>
-              <Link to="/new" className={styles.modelLink}>
-                <Button variant="outlined" className={styles.newProjectButton}>
-                  New Project
-                </Button>
-              </Link>
-
-              <IconButton
-                className={styles.profileIcon}
-                aria-owns={open ? 'menu-appbar' : undefined}
-                aria-haspopup="true"
-                onClick={this.handleMenu}
-                color="inherit"
-                size="small"
-              >
-                {account}
-              </IconButton>
-              <Menu
-                id="menu-appbar"
-                anchorEl={anchorEl ?? null}
-                anchorOrigin={AnchorOrigin}
-                transformOrigin={AnchorOrigin}
-                open={open}
-                onClose={this.handleClose}
-              >
-                <MenuItem onClick={this.handleLogout}>Logout</MenuItem>
-              </Menu>
-            </div>
-          </Toolbar>
-        </AppBar>
-        <div className={styles.toolbarSpacer} />
-        {content}
-      </div>
-    );
-  }
+            <Menu
+              id="menu-appbar"
+              anchorEl={anchorEl ?? null}
+              anchorOrigin={AnchorOrigin}
+              transformOrigin={AnchorOrigin}
+              open={open}
+              onClose={handleClose}
+            >
+              <MenuItem onClick={handleLogout}>Logout</MenuItem>
+            </Menu>
+          </div>
+        </Toolbar>
+      </AppBar>
+      <div className={styles.toolbarSpacer} />
+      {content}
+    </div>
+  );
 }
 
 export default Home;

@@ -103,60 +103,68 @@ interface AppState {
   firebaseIdToken?: string | null;
 }
 
-// Exported for unit tests; production code only constructs InnerApp via <App>.
-// We need the export so tests can drive authStateChanged / asyncAuthStateChanged
-// directly without rendering through the firebase/onAuthStateChanged plumbing.
-export class InnerApp extends React.PureComponent<{}, AppState> {
+function getBaseURL(): string {
+  return '';
+}
+
+// The mutable, non-render instance state that lived as class instance fields:
+// the pending setTimeout(0) handle for the deferred getUserInfo() and the
+// onAuthStateChanged unsubscribe function. Held so the unmount cleanup can
+// cancel/tear them down. Set up in the mount effect -- see the comment there.
+interface InnerAppRefs {
+  getUserInfoTimer: ReturnType<typeof setTimeout> | null;
+  authUnsubscribe: (() => void) | null;
+}
+
+// The escaped async continuations (authStateChanged, maybeLogin, getUserInfo,
+// handleLogout, handleUsernameChanged) read CURRENT props/state through this
+// ref, exactly as the class read this.props / this.state at call time rather
+// than as captured by a stale render closure.
+interface InnerAppLatest {
   state: AppState;
-  // Pending setTimeout(0) handle for the deferred getUserInfo(), and the
-  // onAuthStateChanged unsubscribe function. Held so componentWillUnmount can
-  // cancel/tear them down. Set up in componentDidMount -- see the comment there.
-  private getUserInfoTimer: ReturnType<typeof setTimeout> | null = null;
-  private authUnsubscribe: (() => void) | null = null;
+}
 
-  constructor(props: {}) {
-    super(props);
-
-    const isDevServer = process.env.NODE_ENV === 'development';
-    const auth = getAuth(firebaseApp);
-    if (isDevServer) {
-      connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
-    }
-
-    this.state = {
-      authUnknown: true,
-      auth,
-    };
-    // The auth-state subscription and the deferred getUserInfo() are wired up
-    // in componentDidMount, not here -- see the comment there. Keep this
-    // constructor side-effect free (auth object construction is pure setup).
+// Build the initial auth state. Mirrors the class constructor: getAuth() and
+// the emulator connection are pure setup (no observer registered yet), so they
+// run in the lazy state initializer. The auth-state subscription and the
+// deferred getUserInfo() are wired up in the mount effect -- see there.
+function makeInitialState(): AppState {
+  const isDevServer = process.env.NODE_ENV === 'development';
+  const auth = getAuth(firebaseApp);
+  if (isDevServer) {
+    connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
   }
+  return {
+    authUnknown: true,
+    auth,
+  };
+}
 
-  componentDidMount() {
-    // React 18 StrictMode (dev) double-invokes the render phase (so a second
-    // InnerApp is constructed and discarded -- it never reaches this method)
-    // and, on the committed instance, runs componentDidMount ->
-    // componentWillUnmount -> componentDidMount without re-running the
-    // constructor. Registering the onAuthStateChanged observer and scheduling
-    // getUserInfo() here (and undoing both in componentWillUnmount) keeps the
-    // discarded instance from setState()ing on something React never committed
-    // and from being pinned alive by the firebase auth event hub, and makes
-    // the StrictMode cycle subscribe -> unsubscribe -> subscribe / schedule ->
-    // cancel -> schedule rather than leaking the first of each.
-    this.authUnsubscribe = onAuthStateChanged(this.state.auth, this.authStateChanged);
-    this.getUserInfoTimer = setTimeout(this.getUserInfo);
-  }
+// Exported so unit tests can render InnerApp directly (production renders it
+// only via <App>, which wraps it in <React.StrictMode>). Tests drive the auth
+// flow through the clean seam the firebase plumbing already provides -- the
+// listener passed to the mocked onAuthStateChanged -- rather than any
+// component-internal hook.
+//
+// Converted from React.PureComponent to a function component. InnerApp takes no
+// render-affecting props ({} in the class), so React.memo would never bail out
+// on anything and is pointless -- a plain function is the right shape. AppState
+// is one useState object with a class-parity merging setState helper.
+export function InnerApp(): React.JSX.Element {
+  const [state, setStateRaw] = React.useState<AppState>(makeInitialState);
 
-  componentWillUnmount() {
-    if (this.authUnsubscribe) {
-      this.authUnsubscribe();
-      this.authUnsubscribe = null;
-    }
-    if (this.getUserInfoTimer !== null) {
-      clearTimeout(this.getUserInfoTimer);
-      this.getUserInfoTimer = null;
-    }
-  }
+  // Class-parity setState: merges a partial patch onto the previous state,
+  // exactly like React.Component's setState.
+  const setState = React.useCallback((patch: Partial<AppState>): void => {
+    setStateRaw((prev) => ({ ...prev, ...patch }));
+  }, []);
+
+  const refs = React.useRef<InnerAppRefs>({ getUserInfoTimer: null, authUnsubscribe: null });
+
+  // Refreshed synchronously every render so escaped async callbacks read
+  // current state (the class read this.state, which was always current).
+  const latest = React.useRef<InnerAppLatest>(undefined as unknown as InnerAppLatest);
+  latest.current = { state };
 
   // Firebase invokes authStateChanged synchronously from its event hub. The
   // previous setTimeout-around-async pattern made this fire-and-forget: any
@@ -164,9 +172,9 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
   // (server `/session` error) was silently dropped. Await directly and
   // surface failures via console.error so they're at least visible in dev
   // tools. Returning the promise lets tests `await` the full chain.
-  authStateChanged = async (user: FirebaseUser | null): Promise<void> => {
+  const authStateChanged = React.useCallback(async (user: FirebaseUser | null): Promise<void> => {
     try {
-      await this.asyncAuthStateChanged(user);
+      await asyncAuthStateChanged(user);
     } catch (err) {
       // We deliberately do NOT setState an error here: this method runs on
       // every auth-state transition (including sign-out), and the app's
@@ -174,21 +182,26 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
       // the failure visible without overwriting unrelated UI state.
       console.error('auth state change failed:', err);
     }
-  };
+    // Empty deps: asyncAuthStateChanged/maybeLogin read all state through
+    // `latest`, so a fresh closure each render would behave identically -- a
+    // stable callback keeps the mount-effect subscription identity steady.
+    // (The repo lint config does not enable react-hooks/exhaustive-deps, so no
+    // disable directive is needed.)
+  }, []);
 
-  asyncAuthStateChanged = async (user: FirebaseUser | null) => {
+  const asyncAuthStateChanged = async (user: FirebaseUser | null) => {
     if (!user) {
-      this.setState({ firebaseIdToken: null });
+      setState({ firebaseIdToken: null });
       return;
     }
 
     const firebaseIdToken = await user.getIdToken();
-    this.setState({ firebaseIdToken });
-    await this.maybeLogin(undefined, firebaseIdToken);
+    setState({ firebaseIdToken });
+    await maybeLogin(undefined, firebaseIdToken);
   };
 
-  async maybeLogin(authIsKnown = false, firebaseIdToken?: string): Promise<void> {
-    authIsKnown = authIsKnown || !this.state.authUnknown;
+  async function maybeLogin(authIsKnown = false, firebaseIdToken?: string): Promise<void> {
+    authIsKnown = authIsKnown || !latest.current.state.authUnknown;
     if (!authIsKnown) {
       return;
     }
@@ -199,7 +212,7 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
       return;
     }
 
-    const idToken = firebaseIdToken ?? this.state.firebaseIdToken;
+    const idToken = firebaseIdToken ?? latest.current.state.firebaseIdToken;
     if (idToken === null || idToken === undefined) {
       return;
     }
@@ -208,7 +221,7 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
       idToken,
     };
 
-    const base = this.getBaseURL();
+    const base = getBaseURL();
     const apiPath = `${base}/session`;
     const response = await fetch(apiPath, {
       credentials: 'same-origin',
@@ -225,46 +238,49 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
       const body = await response.json();
       const errorMsg =
         body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
-      // this.appendModelError(errorMsg);
+      // appendModelError(errorMsg);
       console.log(`session error: ${errorMsg}`);
       return undefined;
     }
 
-    this.handleUsernameChanged();
+    handleUsernameChanged();
   }
 
-  getUserInfo = async (): Promise<void> => {
+  const getUserInfo = React.useCallback(async (): Promise<void> => {
     const [user, status] = await userInfo.get();
     if (!(status >= 200 && status < 400) || !user) {
-      this.setState({
+      setState({
         authUnknown: false,
       });
-      await this.maybeLogin(true);
+      await maybeLogin(true);
       return;
     }
     const isNewUser = user.id.startsWith(`temp-`);
-    this.setState({
+    setState({
       authUnknown: false,
       isNewUser,
       user,
     });
-  };
+    // Deps are just [setState] (stable): maybeLogin reads all state through
+    // `latest`, so it need not be a dep. (The repo lint config does not enable
+    // react-hooks/exhaustive-deps, so no disable directive is needed.)
+  }, [setState]);
 
-  handleUsernameChanged = () => {
+  const handleUsernameChanged = React.useCallback((): void => {
     setTimeout(async () => {
       await userInfo.invalidate();
-      await this.getUserInfo();
+      await getUserInfo();
     });
-  };
+  }, [getUserInfo]);
 
   // Sign the user out: clear the server session cookie, then the Firebase
   // client auth state, then drop the cached/in-memory user so the top-level
   // auth gate renders Login again. Each step is best-effort -- even if the
   // network calls fail we still clear local state rather than leaving the
   // user stuck "logged in" with no way out.
-  handleLogout = async (): Promise<void> => {
+  const handleLogout = React.useCallback(async (): Promise<void> => {
     try {
-      await fetch(`${this.getBaseURL()}/session`, {
+      await fetch(`${getBaseURL()}/session`, {
         credentials: 'same-origin',
         method: 'DELETE',
         cache: 'no-cache',
@@ -273,7 +289,7 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
       console.error('logout: clearing the server session failed:', err);
     }
     try {
-      await signOut(this.state.auth);
+      await signOut(latest.current.state.auth);
     } catch (err) {
       console.error('logout: firebase signOut failed:', err);
     }
@@ -282,80 +298,117 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
     // invalidate() can rethrow a pending request's rejection (it awaits any
     // in-flight fetch), which would otherwise escape Home's fire-and-forget
     // call as an unhandled rejection.
-    this.setState({ user: undefined, isNewUser: undefined, firebaseIdToken: null });
+    setState({ user: undefined, isNewUser: undefined, firebaseIdToken: null });
     try {
       await userInfo.invalidate();
     } catch (err) {
       console.error('logout: refreshing cached user info failed:', err);
     }
-  };
+  }, [setState]);
 
-  getBaseURL(): string {
-    return '';
-  }
+  // Mount / unmount effect (formerly componentDidMount / componentWillUnmount).
+  // React 18 StrictMode (dev) double-invokes the render phase (so a second
+  // InnerApp render is performed and discarded -- this effect never runs for
+  // it) and, on the committed fiber, runs the mount effect -> its cleanup ->
+  // the mount effect again without re-running the lazy state initializer.
+  // Registering the onAuthStateChanged observer and scheduling getUserInfo()
+  // here (and undoing both in the cleanup) keeps a discarded render from
+  // setState()ing on something React never committed and from being pinned
+  // alive by the firebase auth event hub, and makes the StrictMode cycle
+  // subscribe -> unsubscribe -> subscribe / schedule -> cancel -> schedule
+  // rather than leaking the first of each.
+  React.useEffect(() => {
+    const r = refs.current;
+    r.authUnsubscribe = onAuthStateChanged(latest.current.state.auth, authStateChanged);
+    r.getUserInfoTimer = setTimeout(getUserInfo);
+    return () => {
+      if (r.authUnsubscribe) {
+        r.authUnsubscribe();
+        r.authUnsubscribe = null;
+      }
+      if (r.getUserInfoTimer !== null) {
+        clearTimeout(r.getUserInfoTimer);
+        r.getUserInfoTimer = null;
+      }
+    };
+    // Empty deps: this effect mirrors componentDidMount/Unmount. Everything it
+    // reads goes through `latest`/`refs`, and authStateChanged/getUserInfo are
+    // stable useCallbacks, so nothing here closes over stale values. (The repo
+    // lint config does not enable react-hooks/exhaustive-deps, so no disable
+    // directive is needed.)
+  }, []);
 
-  editor = (props: RouteComponentProps<EditorMatchParams>) => {
-    const { username, projectName } = props.params;
-    const user = this.state.user;
+  // The two route components MUST keep a stable identity across InnerApp
+  // re-renders. wouter renders <Route component={...}> by component TYPE, so a
+  // fresh function identity each render would unmount and remount Home/the
+  // editor on every InnerApp state change -- re-firing Home's getProjects and
+  // discarding its menu state. The class's bound `this.home`/`this.editor`
+  // arrow fields were stable references that read `this.state` at render time;
+  // these useCallback([])s reproduce that exactly by reading current state
+  // through `latest` rather than closing over a render's `state`.
+  const editor = React.useCallback((editorProps: RouteComponentProps<EditorMatchParams>) => {
+    const { username, projectName } = editorProps.params;
+    const user = latest.current.state.user;
     const readOnlyMode = !user || user.id !== username;
 
     return (
       <HostedWebEditor
         username={username}
         projectName={projectName}
-        baseURL={this.getBaseURL()}
+        baseURL={getBaseURL()}
         readOnlyMode={readOnlyMode}
       />
     );
-  };
+  }, []);
 
-  home = (_props: RouteComponentProps) => {
-    const location = useLocation()[0];
+  // Rendered via wouter's <Route component={...}>, so it is a real component and
+  // may call hooks -- the class relied on exactly this to use useLocation().
+  const home = React.useCallback(
+    (_props: RouteComponentProps) => {
+      const location = useLocation()[0];
 
-    const isNewProject = location === '/new';
-    return <Home isNewProject={isNewProject} user={defined(this.state.user)} onLogout={this.handleLogout} />;
-  };
+      const isNewProject = location === '/new';
+      return <Home isNewProject={isNewProject} user={defined(latest.current.state.user)} onLogout={handleLogout} />;
+    },
+    [handleLogout],
+  );
 
-  render() {
-    const urlParams = new URLSearchParams(window.location.search);
-    const projectParam = urlParams.get('project');
-    if (projectParam) return <Redirect to={projectParam} />;
+  const urlParams = new URLSearchParams(window.location.search);
+  const projectParam = urlParams.get('project');
+  if (projectParam) return <Redirect to={projectParam} />;
 
-    // if a user is navigating to a project,
-    // skip the high level auth check, to enable public models
-    if (!/\/.*\/.*/.test(window.location.pathname)) {
-      if (!this.state.user) {
-        return <Login disabled={this.state.authUnknown} auth={this.state.auth} />;
-      }
-
-      if (this.state.isNewUser) {
-        return <NewUser user={defined(this.state.user)} onUsernameChanged={this.handleUsernameChanged} />;
-      }
+  // if a user is navigating to a project,
+  // skip the high level auth check, to enable public models
+  if (!/\/.*\/.*/.test(window.location.pathname)) {
+    if (!state.user) {
+      return <Login disabled={state.authUnknown} auth={state.auth} />;
     }
 
-    // Hoist the styled wrapper outside <Switch>: wouter's Switch only
-    // descends into Fragments (see flattenChildren in wouter's source),
-    // so a <div> child silently disables first-match semantics. Order
-    // routes literal-first so any future overlap with the dynamic
-    // ":username/:projectName" pattern still resolves to the literal.
-    return (
-      <div className={styles.inner}>
-        <Switch>
-          <Route path="/" component={this.home} />
-          <Route path="/new" component={this.home} />
-          <Route path="/:username/:projectName" component={this.editor} />
-        </Switch>
-      </div>
-    );
+    if (state.isNewUser) {
+      return <NewUser user={defined(state.user)} onUsernameChanged={handleUsernameChanged} />;
+    }
   }
+
+  // Hoist the styled wrapper outside <Switch>: wouter's Switch only
+  // descends into Fragments (see flattenChildren in wouter's source),
+  // so a <div> child silently disables first-match semantics. Order
+  // routes literal-first so any future overlap with the dynamic
+  // ":username/:projectName" pattern still resolves to the literal.
+  return (
+    <div className={styles.inner}>
+      <Switch>
+        <Route path="/" component={home} />
+        <Route path="/new" component={home} />
+        <Route path="/:username/:projectName" component={editor} />
+      </Switch>
+    </div>
+  );
 }
 
-export class App extends React.PureComponent {
-  render(): React.JSX.Element {
-    return (
-      <React.StrictMode>
-        <InnerApp />
-      </React.StrictMode>
-    );
-  }
+export function App(): React.JSX.Element {
+  return (
+    <React.StrictMode>
+      <InnerApp />
+    </React.StrictMode>
+  );
 }

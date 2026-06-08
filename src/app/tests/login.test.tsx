@@ -97,7 +97,7 @@ jest.mock(
 );
 
 import * as React from 'react';
-import { render, fireEvent, screen, waitFor, act } from '@testing-library/react';
+import { render, fireEvent, screen, waitFor } from '@testing-library/react';
 
 import { Login } from '../Login';
 
@@ -170,23 +170,36 @@ describe('Login OAuth click handlers', () => {
 });
 
 describe('Login showProviderRedirect flow', () => {
-  test('renders the OAuth error visibly in the "you already have an account" card', () => {
-    const ref = React.createRef<Login>();
-    render(<Login ref={ref} disabled={false} auth={makeAuth()} />);
-    // Drive the component into the provider-redirect state and seed an
-    // OAuth error, as googleLoginClick / appleLoginClick do when
-    // signInWithRedirect rejects. This card has no helperText-bearing
-    // TextField, so the error must be rendered explicitly.
-    act(() => {
-      ref.current?.setState({
-        emailLoginFlow: 'showProviderRedirect',
-        provider: 'google.com',
-        email: 'a@example.com',
-        emailError: 'popup blocked by browser',
-      });
+  beforeEach(() => {
+    firebaseAuth.signInWithRedirect.mockReset();
+    firebaseAuth.fetchSignInMethodsForEmail.mockReset();
+  });
+
+  test('renders the OAuth error visibly in the "you already have an account" card', async () => {
+    // Drive the component into the provider-redirect card through observable
+    // behavior: an email whose only sign-in method is google.com lands on the
+    // "you already have an account" card, and clicking "Sign in with Google"
+    // there rejects from signInWithRedirect. The card has no helperText-bearing
+    // TextField, so the OAuth error must be rendered explicitly (role=alert).
+    firebaseAuth.fetchSignInMethodsForEmail.mockResolvedValueOnce(['google.com']);
+    firebaseAuth.signInWithRedirect.mockRejectedValueOnce(new Error('popup blocked by browser'));
+
+    render(<Login disabled={false} auth={makeAuth()} />);
+    fireEvent.click(screen.getByText('Sign in with email'));
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'a@example.com' } });
+    fireEvent.click(screen.getByText('Next'));
+
+    // Now on the provider-redirect card.
+    await waitFor(() => {
+      expect(screen.queryByText(/you already have an account/i)).not.toBeNull();
     });
     expect(screen.queryByText('Sign in with Google')).not.toBeNull();
-    expect(screen.getByRole('alert').textContent).toMatch(/popup blocked by browser/i);
+
+    fireEvent.click(screen.getByText('Sign in with Google'));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toMatch(/popup blocked by browser/i);
+    });
   });
 });
 

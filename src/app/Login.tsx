@@ -65,71 +65,84 @@ export const GoogleIcon: React.FunctionComponent = (props) => {
   );
 };
 
-export class Login extends React.Component<LoginProps, LoginState> {
-  state: LoginState;
+const initialState: LoginState = {
+  emailLoginFlow: undefined,
+  email: '',
+  emailError: undefined,
+  password: '',
+  passwordError: undefined,
+  fullName: '',
+  fullNameError: undefined,
+  provider: undefined,
+};
 
-  constructor(props: LoginProps) {
-    super(props);
+export function Login(props: LoginProps): React.JSX.Element {
+  // One useState object with a class-parity merging `setState` helper preserves
+  // the class's behavior for handlers that issue several setState calls in one
+  // turn (each merges a partial patch onto the previous state).
+  const [state, setStateRaw] = React.useState<LoginState>(() => ({ ...initialState }));
 
-    this.state = {
-      emailLoginFlow: undefined,
-      email: '',
-      emailError: undefined,
-      password: '',
-      passwordError: undefined,
-      fullName: '',
-      fullNameError: undefined,
-      provider: undefined,
-    };
-  }
+  const setState = React.useCallback((patch: Partial<LoginState>): void => {
+    setStateRaw((prev) => ({ ...prev, ...patch }));
+  }, []);
+
+  // The async auth handlers escape the render that created them (they await
+  // firebase calls), so they read the freshest props/state through this ref:
+  // a prop change (auth) or an interleaved state edit between handler creation
+  // and the await's resolution is observed correctly, matching the class's
+  // this.props / this.state reads.
+  const latest = React.useRef<{ props: LoginProps; state: LoginState }>(
+    undefined as unknown as { props: LoginProps; state: LoginState },
+  );
+  latest.current = { props, state };
 
   // Surface OAuth redirect failures (provider misconfig, popup blocked,
   // network errors, expired auth domain) into emailError so the user sees
   // them. The previous setTimeout-around-async pattern silently swallowed
   // rejections because nothing awaited or .catch'd the inner promise.
-  appleLoginClick = async () => {
+  const appleLoginClick = async () => {
     const provider = appleProvider();
     try {
-      await signInWithRedirect(this.props.auth, provider);
+      await signInWithRedirect(latest.current.props.auth, provider);
     } catch (err) {
-      this.setState({
+      setState({
         emailError: err instanceof Error ? err.message : 'Sign in with Apple failed',
       });
     }
   };
-  googleLoginClick = async () => {
+  const googleLoginClick = async () => {
     const provider = new GoogleAuthProvider();
     provider.addScope('profile');
     try {
-      await signInWithRedirect(this.props.auth, provider);
+      await signInWithRedirect(latest.current.props.auth, provider);
     } catch (err) {
-      this.setState({
+      setState({
         emailError: err instanceof Error ? err.message : 'Sign in with Google failed',
       });
     }
   };
-  emailLoginClick = () => {
-    this.setState({ emailLoginFlow: 'showEmail' });
+  const emailLoginClick = () => {
+    setState({ emailLoginFlow: 'showEmail' });
   };
   // Editing a field clears its stale error: once the user starts correcting
   // the value, keeping the old red message would be misleading (it described
   // the previous submission, not the text on screen).
-  onFullNameChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-    this.setState({ fullName: event.target.value, fullNameError: undefined });
+  const onFullNameChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setState({ fullName: event.target.value, fullNameError: undefined });
   };
-  onPasswordChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-    this.setState({ password: event.target.value, passwordError: undefined });
+  const onPasswordChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setState({ password: event.target.value, passwordError: undefined });
   };
-  onEmailChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-    this.setState({ email: event.target.value, emailError: undefined });
+  const onEmailChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setState({ email: event.target.value, emailError: undefined });
   };
-  onEmailCancel = () => {
-    this.setState({ emailLoginFlow: undefined });
+  const onEmailCancel = () => {
+    setState({ emailLoginFlow: undefined });
   };
-  onSubmitEmail = async () => {
-    const email = this.state.email.trim();
+  const onSubmitEmail = async () => {
+    const email = latest.current.state.email.trim();
     if (!email) {
-      this.setState({ emailError: 'Enter your email address to continue' });
+      setState({ emailError: 'Enter your email address to continue' });
       return;
     }
 
@@ -139,365 +152,365 @@ export class Login extends React.Component<LoginProps, LoginState> {
     // unhandled rejection and the form just sat there).
     let methods: string[];
     try {
-      methods = await fetchSignInMethodsForEmail(this.props.auth, email);
+      methods = await fetchSignInMethodsForEmail(latest.current.props.auth, email);
     } catch (err) {
-      this.setState({
+      setState({
         emailError: err instanceof Error ? err.message : 'unable to look up that email address; try again',
       });
       return;
     }
     if (methods.includes('password')) {
-      this.setState({ emailLoginFlow: 'showPassword' });
+      setState({ emailLoginFlow: 'showPassword' });
     } else if (methods.length === 0) {
-      this.setState({ emailLoginFlow: 'showSignup' });
+      setState({ emailLoginFlow: 'showSignup' });
     } else {
       // we only allow 1 method
       const method = methods[0];
       if (method === 'google.com' || method === 'apple.com') {
-        this.setState({
+        setState({
           emailLoginFlow: 'showProviderRedirect',
           provider: methods[0] as 'google.com' | 'apple.com',
         });
       } else {
-        this.setState({
+        setState({
           emailError: 'an unknown error occurred; try a different email address',
         });
       }
     }
   };
-  onSubmitRecovery = async () => {
-    const email = this.state.email.trim();
+  const onSubmitRecovery = async () => {
+    const email = latest.current.state.email.trim();
     if (!email) {
-      this.setState({ emailError: 'Enter your email address to continue' });
+      setState({ emailError: 'Enter your email address to continue' });
       return;
     }
 
     try {
-      await sendPasswordResetEmail(this.props.auth, email);
+      await sendPasswordResetEmail(latest.current.props.auth, email);
     } catch (err) {
       // Stay on the recovery card with a visible error rather than advancing
       // as if the reset email had been sent.
-      this.setState({
+      setState({
         emailError: err instanceof Error ? err.message : 'sending the recovery email failed; try again',
       });
       return;
     }
 
-    this.setState({
+    setState({
       emailLoginFlow: 'showPassword',
       password: '',
       passwordError: undefined,
     });
   };
-  onSubmitNewUser = async () => {
-    const email = this.state.email.trim();
+  const onSubmitNewUser = async () => {
+    const email = latest.current.state.email.trim();
     if (!email) {
-      this.setState({ emailError: 'Enter your email address to continue' });
+      setState({ emailError: 'Enter your email address to continue' });
       return;
     }
 
-    const fullName = this.state.fullName.trim();
+    const fullName = latest.current.state.fullName.trim();
     if (!fullName) {
-      this.setState({ fullNameError: 'Enter your name to continue' });
+      setState({ fullNameError: 'Enter your name to continue' });
       return;
     }
 
-    const password = this.state.password.trim();
+    const password = latest.current.state.password.trim();
     if (!password) {
-      this.setState({ passwordError: 'Enter a password to continue' });
+      setState({ passwordError: 'Enter a password to continue' });
       return;
     }
 
     try {
-      const userCred = await createUserWithEmailAndPassword(this.props.auth, email, password);
+      const userCred = await createUserWithEmailAndPassword(latest.current.props.auth, email, password);
       await updateProfile(userCred.user, { displayName: fullName });
     } catch (err) {
       console.log(err);
       if (err instanceof Error) {
-        this.setState({ passwordError: err.message });
+        setState({ passwordError: err.message });
       } else {
-        this.setState({ passwordError: 'something unknown went wrong' });
+        setState({ passwordError: 'something unknown went wrong' });
       }
     }
   };
-  onNullSubmit = (event: React.FormEvent<HTMLFormElement>): boolean => {
+  const onNullSubmit = (event: React.FormEvent<HTMLFormElement>): boolean => {
     event.preventDefault();
     return false;
   };
-  onEmailHelp = () => {
-    this.setState({ emailLoginFlow: 'showRecover' });
+  const onEmailHelp = () => {
+    setState({ emailLoginFlow: 'showRecover' });
   };
-  onEmailLogin = async () => {
-    const email = this.state.email.trim();
+  const onEmailLogin = async () => {
+    const email = latest.current.state.email.trim();
     if (!email) {
-      this.setState({ emailError: 'Enter your email address to continue' });
+      setState({ emailError: 'Enter your email address to continue' });
       return;
     }
 
-    const password = this.state.password.trim();
+    const password = latest.current.state.password.trim();
     if (!password) {
-      this.setState({ passwordError: 'Enter your email address to continue' });
+      setState({ passwordError: 'Enter your email address to continue' });
       return;
     }
 
     try {
-      await signInWithEmailAndPassword(this.props.auth, email, password);
+      await signInWithEmailAndPassword(latest.current.props.auth, email, password);
     } catch (err) {
       console.log(err);
       if (err instanceof Error) {
-        this.setState({ passwordError: err.message });
+        setState({ passwordError: err.message });
       }
     }
   };
-  render() {
-    const disabledClass = this.props.disabled ? styles.disabled : styles.innerInner;
 
-    let loginUI: React.JSX.Element | undefined = undefined;
-    if (!this.props.disabled) {
-      switch (this.state.emailLoginFlow) {
-        case 'showEmail':
-          loginUI = (
-            <Card variant="outlined" className={styles.emailForm}>
-              <form onSubmit={this.onNullSubmit}>
-                <CardContent>
-                  <h6 className={typography.heading6}>Sign in with email</h6>
-                  <TextField
-                    label="Email"
-                    value={this.state.email}
-                    onChange={this.onEmailChanged}
-                    type="email"
-                    margin="normal"
-                    variant="standard"
-                    error={this.state.emailError !== undefined}
-                    helperText={this.state.emailError}
-                    fullWidth
-                    autoFocus
-                  />
-                </CardContent>
-                <CardActions>
-                  <Button style={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
-                    Cancel
-                  </Button>
-                  <Button type="submit" variant="contained" onClick={this.onSubmitEmail}>
-                    Next
-                  </Button>
-                </CardActions>
-              </form>
-            </Card>
-          );
-          break;
-        case 'showPassword':
-          loginUI = (
-            <Card variant="outlined" className={styles.emailForm}>
-              <form onSubmit={this.onNullSubmit}>
-                <CardContent>
-                  <h6 className={typography.heading6}>Sign in</h6>
-                  <TextField
-                    label="Email"
-                    value={this.state.email}
-                    onChange={this.onEmailChanged}
-                    type="email"
-                    margin="normal"
-                    variant="standard"
-                    error={this.state.emailError !== undefined}
-                    helperText={this.state.emailError}
-                    fullWidth
-                  />
-                  <TextField
-                    label="Password"
-                    value={this.state.password}
-                    onChange={this.onPasswordChanged}
-                    type="password"
-                    autoComplete="current-password"
-                    margin="normal"
-                    variant="standard"
-                    error={this.state.passwordError !== undefined}
-                    helperText={this.state.passwordError}
-                    fullWidth
-                    autoFocus
-                  />
-                </CardContent>
-                <CardActions>
-                  <span className={typography.body2} style={{ marginRight: 'auto' }}>
-                    <TextLink style={{ cursor: 'help' }} underline="hover" onClick={this.onEmailHelp}>
-                      Trouble signing in?
-                    </TextLink>
-                  </span>
-                  <Button type="submit" variant="contained" onClick={this.onEmailLogin}>
-                    Sign in
-                  </Button>
-                </CardActions>
-              </form>
-            </Card>
-          );
-          break;
-        case 'showSignup':
-          loginUI = (
-            <Card variant="outlined" className={styles.emailForm}>
-              <form onSubmit={this.onNullSubmit}>
-                <CardContent>
-                  <h6 className={typography.heading6}>Create account</h6>
-                  <TextField
-                    label="Email"
-                    value={this.state.email}
-                    onChange={this.onEmailChanged}
-                    type="email"
-                    margin="normal"
-                    variant="standard"
-                    error={this.state.emailError !== undefined}
-                    helperText={this.state.emailError}
-                    fullWidth
-                  />
-                  <TextField
-                    label="First & last name"
-                    value={this.state.fullName}
-                    onChange={this.onFullNameChanged}
-                    margin="normal"
-                    variant="standard"
-                    error={this.state.fullNameError !== undefined}
-                    helperText={this.state.fullNameError}
-                    fullWidth
-                    autoFocus
-                  />
-                  <TextField
-                    label="Choose password"
-                    value={this.state.password}
-                    onChange={this.onPasswordChanged}
-                    type="password"
-                    autoComplete="current-password"
-                    margin="normal"
-                    variant="standard"
-                    error={this.state.passwordError !== undefined}
-                    helperText={this.state.passwordError}
-                    fullWidth
-                  />
-                </CardContent>
-                <CardActions>
-                  <Button style={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
-                    Cancel
-                  </Button>
-                  <Button type="submit" variant="contained" onClick={this.onSubmitNewUser}>
-                    Save
-                  </Button>
-                </CardActions>
-              </form>
-            </Card>
-          );
-          break;
-        case 'showProviderRedirect':
-          const provider = this.state.provider === 'google.com' ? 'Google' : 'Apple';
-          loginUI = (
-            <Card variant="outlined" className={styles.emailForm}>
-              <form onSubmit={this.onNullSubmit}>
-                <CardContent>
-                  <h6 className={typography.heading6}>Sign in - you already have an account</h6>
-                  <p className={styles.recoverInstructions}>
-                    You've already used {provider} to sign up with <b>{this.state.email}</b>. Sign in with {provider} to
-                    continue.
-                  </p>
-                  {/* The "Sign in with {provider}" button calls googleLoginClick /
-                   * appleLoginClick, whose signInWithRedirect rejection is surfaced
-                   * via emailError -- render it here so the failure is visible (this
-                   * card has no helperText-bearing TextField like the other flows). */}
-                  {this.state.emailError !== undefined && (
-                    <p role="alert" className={typography.body2}>
-                      {this.state.emailError}
-                    </p>
-                  )}
-                </CardContent>
-                <CardActions>
-                  <Button
-                    style={{ marginLeft: 'auto' }}
-                    type="submit"
-                    variant="contained"
-                    onClick={this.state.provider === 'google.com' ? this.googleLoginClick : this.appleLoginClick}
-                  >
-                    Sign in with {provider}
-                  </Button>
-                </CardActions>
-              </form>
-            </Card>
-          );
-          break;
-        case 'showRecover':
-          loginUI = (
-            <Card variant="outlined" className={styles.emailForm}>
-              <form onSubmit={this.onNullSubmit}>
-                <CardContent>
-                  <h6 className={typography.heading6}>Recover password</h6>
-                  <p className={styles.recoverInstructions}>
-                    Get instructions sent to this email that explain how to reset your password
-                  </p>
-                  <TextField
-                    label="Email"
-                    value={this.state.email}
-                    onChange={this.onEmailChanged}
-                    type="email"
-                    margin="normal"
-                    variant="standard"
-                    error={this.state.emailError !== undefined}
-                    helperText={this.state.emailError}
-                    fullWidth
-                    autoFocus
-                  />
-                </CardContent>
-                <CardActions>
-                  <Button style={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
-                    Cancel
-                  </Button>
-                  <Button type="submit" variant="contained" onClick={this.onSubmitRecovery}>
-                    Send
-                  </Button>
-                </CardActions>
-              </form>
-            </Card>
-          );
-          break;
-        default:
-          loginUI = (
-            <div className={styles.optionsButtons}>
-              <Button
-                variant="contained"
-                className={styles.appleButton}
-                startIcon={<AppleIcon />}
-                onClick={this.appleLoginClick}
-              >
-                Sign in with Apple
-              </Button>
-              <Button variant="contained" color="primary" startIcon={<GoogleIcon />} onClick={this.googleLoginClick}>
-                Sign in with Google
-              </Button>
-              <Button
-                variant="contained"
-                className={styles.emailButton}
-                startIcon={<EmailIcon />}
-                onClick={this.emailLoginClick}
-              >
-                Sign in with email
-              </Button>
-              {/* Visible error sink for OAuth click handlers. Without this, a
-               * rejected signInWithRedirect (popup blocked, provider misconfig,
-               * network failure) would set emailError but stay invisible until
-               * the user enters the email-flow path. */}
-              {this.state.emailError !== undefined && (
-                <p role="alert" className={typography.body2}>
-                  {this.state.emailError}
+  const disabledClass = props.disabled ? styles.disabled : styles.innerInner;
+
+  let loginUI: React.JSX.Element | undefined = undefined;
+  if (!props.disabled) {
+    switch (state.emailLoginFlow) {
+      case 'showEmail':
+        loginUI = (
+          <Card variant="outlined" className={styles.emailForm}>
+            <form onSubmit={onNullSubmit}>
+              <CardContent>
+                <h6 className={typography.heading6}>Sign in with email</h6>
+                <TextField
+                  label="Email"
+                  value={state.email}
+                  onChange={onEmailChanged}
+                  type="email"
+                  margin="normal"
+                  variant="standard"
+                  error={state.emailError !== undefined}
+                  helperText={state.emailError}
+                  fullWidth
+                  autoFocus
+                />
+              </CardContent>
+              <CardActions>
+                <Button style={{ marginLeft: 'auto' }} onClick={onEmailCancel}>
+                  Cancel
+                </Button>
+                <Button type="submit" variant="contained" onClick={onSubmitEmail}>
+                  Next
+                </Button>
+              </CardActions>
+            </form>
+          </Card>
+        );
+        break;
+      case 'showPassword':
+        loginUI = (
+          <Card variant="outlined" className={styles.emailForm}>
+            <form onSubmit={onNullSubmit}>
+              <CardContent>
+                <h6 className={typography.heading6}>Sign in</h6>
+                <TextField
+                  label="Email"
+                  value={state.email}
+                  onChange={onEmailChanged}
+                  type="email"
+                  margin="normal"
+                  variant="standard"
+                  error={state.emailError !== undefined}
+                  helperText={state.emailError}
+                  fullWidth
+                />
+                <TextField
+                  label="Password"
+                  value={state.password}
+                  onChange={onPasswordChanged}
+                  type="password"
+                  autoComplete="current-password"
+                  margin="normal"
+                  variant="standard"
+                  error={state.passwordError !== undefined}
+                  helperText={state.passwordError}
+                  fullWidth
+                  autoFocus
+                />
+              </CardContent>
+              <CardActions>
+                <span className={typography.body2} style={{ marginRight: 'auto' }}>
+                  <TextLink style={{ cursor: 'help' }} underline="hover" onClick={onEmailHelp}>
+                    Trouble signing in?
+                  </TextLink>
+                </span>
+                <Button type="submit" variant="contained" onClick={onEmailLogin}>
+                  Sign in
+                </Button>
+              </CardActions>
+            </form>
+          </Card>
+        );
+        break;
+      case 'showSignup':
+        loginUI = (
+          <Card variant="outlined" className={styles.emailForm}>
+            <form onSubmit={onNullSubmit}>
+              <CardContent>
+                <h6 className={typography.heading6}>Create account</h6>
+                <TextField
+                  label="Email"
+                  value={state.email}
+                  onChange={onEmailChanged}
+                  type="email"
+                  margin="normal"
+                  variant="standard"
+                  error={state.emailError !== undefined}
+                  helperText={state.emailError}
+                  fullWidth
+                />
+                <TextField
+                  label="First & last name"
+                  value={state.fullName}
+                  onChange={onFullNameChanged}
+                  margin="normal"
+                  variant="standard"
+                  error={state.fullNameError !== undefined}
+                  helperText={state.fullNameError}
+                  fullWidth
+                  autoFocus
+                />
+                <TextField
+                  label="Choose password"
+                  value={state.password}
+                  onChange={onPasswordChanged}
+                  type="password"
+                  autoComplete="current-password"
+                  margin="normal"
+                  variant="standard"
+                  error={state.passwordError !== undefined}
+                  helperText={state.passwordError}
+                  fullWidth
+                />
+              </CardContent>
+              <CardActions>
+                <Button style={{ marginLeft: 'auto' }} onClick={onEmailCancel}>
+                  Cancel
+                </Button>
+                <Button type="submit" variant="contained" onClick={onSubmitNewUser}>
+                  Save
+                </Button>
+              </CardActions>
+            </form>
+          </Card>
+        );
+        break;
+      case 'showProviderRedirect': {
+        const provider = state.provider === 'google.com' ? 'Google' : 'Apple';
+        loginUI = (
+          <Card variant="outlined" className={styles.emailForm}>
+            <form onSubmit={onNullSubmit}>
+              <CardContent>
+                <h6 className={typography.heading6}>Sign in - you already have an account</h6>
+                <p className={styles.recoverInstructions}>
+                  You've already used {provider} to sign up with <b>{state.email}</b>. Sign in with {provider} to
+                  continue.
                 </p>
-              )}
-            </div>
-          );
+                {/* The "Sign in with {provider}" button calls googleLoginClick /
+                 * appleLoginClick, whose signInWithRedirect rejection is surfaced
+                 * via emailError -- render it here so the failure is visible (this
+                 * card has no helperText-bearing TextField like the other flows). */}
+                {state.emailError !== undefined && (
+                  <p role="alert" className={typography.body2}>
+                    {state.emailError}
+                  </p>
+                )}
+              </CardContent>
+              <CardActions>
+                <Button
+                  style={{ marginLeft: 'auto' }}
+                  type="submit"
+                  variant="contained"
+                  onClick={state.provider === 'google.com' ? googleLoginClick : appleLoginClick}
+                >
+                  Sign in with {provider}
+                </Button>
+              </CardActions>
+            </form>
+          </Card>
+        );
+        break;
       }
-    }
-
-    return (
-      <div className={styles.outer}>
-        <div className={styles.middle}>
-          <div className={styles.inner}>
-            <ModelIcon className={styles.logo} />
-            <div className={disabledClass}>{loginUI}</div>
+      case 'showRecover':
+        loginUI = (
+          <Card variant="outlined" className={styles.emailForm}>
+            <form onSubmit={onNullSubmit}>
+              <CardContent>
+                <h6 className={typography.heading6}>Recover password</h6>
+                <p className={styles.recoverInstructions}>
+                  Get instructions sent to this email that explain how to reset your password
+                </p>
+                <TextField
+                  label="Email"
+                  value={state.email}
+                  onChange={onEmailChanged}
+                  type="email"
+                  margin="normal"
+                  variant="standard"
+                  error={state.emailError !== undefined}
+                  helperText={state.emailError}
+                  fullWidth
+                  autoFocus
+                />
+              </CardContent>
+              <CardActions>
+                <Button style={{ marginLeft: 'auto' }} onClick={onEmailCancel}>
+                  Cancel
+                </Button>
+                <Button type="submit" variant="contained" onClick={onSubmitRecovery}>
+                  Send
+                </Button>
+              </CardActions>
+            </form>
+          </Card>
+        );
+        break;
+      default:
+        loginUI = (
+          <div className={styles.optionsButtons}>
+            <Button
+              variant="contained"
+              className={styles.appleButton}
+              startIcon={<AppleIcon />}
+              onClick={appleLoginClick}
+            >
+              Sign in with Apple
+            </Button>
+            <Button variant="contained" color="primary" startIcon={<GoogleIcon />} onClick={googleLoginClick}>
+              Sign in with Google
+            </Button>
+            <Button
+              variant="contained"
+              className={styles.emailButton}
+              startIcon={<EmailIcon />}
+              onClick={emailLoginClick}
+            >
+              Sign in with email
+            </Button>
+            {/* Visible error sink for OAuth click handlers. Without this, a
+             * rejected signInWithRedirect (popup blocked, provider misconfig,
+             * network failure) would set emailError but stay invisible until
+             * the user enters the email-flow path. */}
+            {state.emailError !== undefined && (
+              <p role="alert" className={typography.body2}>
+                {state.emailError}
+              </p>
+            )}
           </div>
+        );
+    }
+  }
+
+  return (
+    <div className={styles.outer}>
+      <div className={styles.middle}>
+        <div className={styles.inner}>
+          <ModelIcon className={styles.logo} />
+          <div className={disabledClass}>{loginUI}</div>
         </div>
       </div>
-    );
-  }
+    </div>
+  );
 }
