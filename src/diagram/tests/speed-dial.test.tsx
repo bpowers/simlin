@@ -6,39 +6,43 @@ import * as React from 'react';
 import { render, fireEvent, screen, act } from '@testing-library/react';
 import SpeedDial, { SpeedDialAction, SpeedDialIcon, CloseReason } from '../components/SpeedDial';
 
-// Controlled wrapper for testing SpeedDial open/close behavior
-class ControlledSpeedDial extends React.Component<
-  { children?: React.ReactNode },
-  { open: boolean; lastCloseReason: CloseReason | null }
-> {
-  state = { open: false, lastCloseReason: null as CloseReason | null };
+// Controlled wrapper for testing SpeedDial open/close behavior. Exposes the same
+// imperative surface the old class component did -- `setOpen` plus a live `state`
+// object -- so tests can drive and inspect it through a ref.
+interface ControlledSpeedDialHandle {
+  setOpen: (open: boolean) => void;
+  state: { open: boolean; lastCloseReason: CloseReason | null };
+}
 
-  setOpen = (open: boolean) => {
-    this.setState({ open });
-  };
+const ControlledSpeedDial = React.forwardRef<ControlledSpeedDialHandle, { children?: React.ReactNode }>(
+  function ControlledSpeedDial({ children }, ref) {
+    const [open, setOpen] = React.useState(false);
+    const [lastCloseReason, setLastCloseReason] = React.useState<CloseReason | null>(null);
 
-  handleClick = () => {
-    this.setState((prev) => ({ open: !prev.open }));
-  };
+    const handleClick = () => {
+      setOpen((prev) => !prev);
+    };
 
-  handleClose = (_event: React.SyntheticEvent, reason: CloseReason) => {
-    this.setState({ open: false, lastCloseReason: reason });
-  };
+    const handleClose = (_event: React.SyntheticEvent, reason: CloseReason) => {
+      setOpen(false);
+      setLastCloseReason(reason);
+    };
 
-  render() {
+    React.useImperativeHandle(ref, () => ({ setOpen, state: { open, lastCloseReason } }), [open, lastCloseReason]);
+
     return (
       <SpeedDial
         ariaLabel="Test SpeedDial"
-        open={this.state.open}
-        onClick={this.handleClick}
-        onClose={this.handleClose}
+        open={open}
+        onClick={handleClick}
+        onClose={handleClose}
         icon={<SpeedDialIcon icon={<span>+</span>} openIcon={<span>x</span>} />}
       >
-        {this.props.children}
+        {children}
       </SpeedDial>
     );
-  }
-}
+  },
+);
 
 describe('SpeedDial', () => {
   test('renders FAB button with aria-label', () => {
@@ -95,7 +99,7 @@ describe('SpeedDial', () => {
   });
 
   test('calls onClose with mouseLeave reason on mouse leave', () => {
-    const ref = React.createRef<ControlledSpeedDial>();
+    const ref = React.createRef<ControlledSpeedDialHandle>();
     const { container } = render(<ControlledSpeedDial ref={ref} />);
 
     act(() => {
@@ -109,7 +113,7 @@ describe('SpeedDial', () => {
   });
 
   test('calls onClose with blur reason on FAB blur', () => {
-    const ref = React.createRef<ControlledSpeedDial>();
+    const ref = React.createRef<ControlledSpeedDialHandle>();
     render(<ControlledSpeedDial ref={ref} />);
 
     act(() => {
@@ -123,7 +127,7 @@ describe('SpeedDial', () => {
   });
 
   test('calls onClose with escapeKeyDown reason on Escape key', () => {
-    const ref = React.createRef<ControlledSpeedDial>();
+    const ref = React.createRef<ControlledSpeedDialHandle>();
     const { container } = render(<ControlledSpeedDial ref={ref} />);
 
     act(() => {
