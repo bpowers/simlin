@@ -122,50 +122,58 @@ trap cleanup_pipelines EXIT INT TERM
         exit 1
     fi
 
-    # 3. Clippy and tests in parallel (they share the build cache)
-    echo "[rust] Running clippy and tests..."
-    CLIPPY_TMP="$(mktemp)"
+    # 3. Clippy, then build test binaries, then run tests under the cap.
+    #
+    # Sequential, not parallel: the cargo invocations share one build
+    # cache, and cargo serializes same-target-dir builds on a file lock,
+    # so a clippy --all-features build running concurrently with a
+    # wall-clock-capped `cargo test` made the test step's budget absorb
+    # clippy's compile time -- on a cold cache that tripped the cap even
+    # for docs-only commits (GH #629).
+    echo "[rust] Running clippy..."
+    cargo clippy --all-targets --all-features -- -D warnings
+
+    # Compile test binaries untimed, mirroring CI (ci.yaml runs
+    # `cargo test --no-run` before its 3-minute-capped test step), so
+    # the cap below measures test execution rather than compilation --
+    # compile time varies enormously with cache state and hardware,
+    # while test runtime is what the cap is meant to police (GH #703).
+    echo "[rust] Building test binaries..."
+    cargo test --no-run
+
+    # Wall-clock cap on `cargo test`.  A healthy post-compile run is
+    # well under a minute; 180s is a ~3x safety rail that trips only
+    # when a single test or the whole suite regresses into the
+    # pathological territory that caused PR #461 (a single test binary
+    # took 44 minutes there, and the CI job hit GitHub's 60-minute
+    # per-job cap).  SIGTERM first, SIGKILL 30s later so the in-flight
+    # test output flushes before we lose the process.  See
+    # docs/dev/rust.md for per-test budget guidance.
+    echo "[rust] Running tests..."
     TEST_TMP="$(mktemp)"
-
-    # Wall-clock cap on `cargo test`.  A healthy run is well under a
-    # minute on dev machines and ~60s on CI; 180s is a ~3x safety rail
-    # that trips only when a single test or the whole suite regresses
-    # into the pathological territory that caused PR #461 (a single
-    # test binary took 44 minutes there, and the CI job hit GitHub's
-    # 60-minute per-job cap).  SIGTERM first, SIGKILL 30s later so
-    # the in-flight test output flushes before we lose the process.
-    # See docs/dev/rust.md for per-test budget guidance.
-    cargo clippy --all-targets --all-features -- -D warnings > "$CLIPPY_TMP" 2>&1 &
-    PID_CLIPPY=$!
-    RUST_BACKTRACE=1 "$TIMEOUT_CMD" --kill-after=30 180 cargo test > "$TEST_TMP" 2>&1 &
-    PID_TEST=$!
-
-    RUST_FAIL=0
-    if ! wait $PID_CLIPPY; then
-        echo "Clippy found issues:"
-        cat "$CLIPPY_TMP"
-        RUST_FAIL=1
-    fi
     # The `&& TEST_EXIT=0 || TEST_EXIT=$?` pattern is load-bearing:
     # the enclosing subshell runs under `set -e`, and inside an `if`
     # / `!` / `&&` / `||` context errexit is suppressed, so we both
     # keep the script running on a test failure AND capture the real
     # exit code (including 124/137 from the timeout) for the
-    # diagnostic below.  `wait $PID_TEST || true; TEST_EXIT=$?`
-    # looks tempting but clobbers $? with `true`'s 0.
-    wait $PID_TEST && TEST_EXIT=0 || TEST_EXIT=$?
+    # diagnostic below.
+    RUST_BACKTRACE=1 "$TIMEOUT_CMD" --kill-after=30 180 cargo test > "$TEST_TMP" 2>&1 \
+        && TEST_EXIT=0 || TEST_EXIT=$?
+    RUST_FAIL=0
     if [ $TEST_EXIT -ne 0 ]; then
         echo "Rust tests failed:"
         cat "$TEST_TMP"
         if [ $TEST_EXIT -eq 124 ] || [ $TEST_EXIT -eq 137 ]; then
             echo
             echo "cargo test exceeded the 180s wall-clock cap (exit $TEST_EXIT)."
-            echo "Individual unit tests should complete in a few seconds; see"
-            echo "docs/dev/rust.md for per-test budget guidance."
+            echo "Test binaries were already compiled before the timed run, so"
+            echo "this is genuine test runtime.  Individual unit tests should"
+            echo "complete in a few seconds; see docs/dev/rust.md for per-test"
+            echo "budget guidance."
         fi
         RUST_FAIL=1
     fi
-    rm -f "$CLIPPY_TMP" "$TEST_TMP"
+    rm -f "$TEST_TMP"
     exit $RUST_FAIL
 ) > "$PIPELINE_A_OUT" 2>&1 &
 PID_A=$!
