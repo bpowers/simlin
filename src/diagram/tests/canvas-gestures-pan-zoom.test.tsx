@@ -19,7 +19,15 @@
 // by ticking past the 40ms stop window before pointer-up, and a flick by
 // releasing immediately after a fast move.
 
-import { installFakeClock, makeAux, pointerDown, pointerMove, pointerUp, renderCanvas } from './canvas-gesture-harness';
+import {
+  dispatchWheel,
+  installFakeClock,
+  makeAux,
+  pointerDown,
+  pointerMove,
+  pointerUp,
+  renderCanvas,
+} from './canvas-gesture-harness';
 
 interface ViewBoxCall {
   x: number;
@@ -178,6 +186,26 @@ describe('Canvas gestures: momentum (issue #707)', () => {
     } finally {
       clock.restore();
     }
+  });
+});
+
+describe('Canvas gestures: embedded mode is viewport-inert (issue #707)', () => {
+  it('ignores wheel and resize, never setting a live viewport or committing', () => {
+    const h = renderCanvas({ embedded: true, elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    // A wheel in embedded mode is a no-op (handleNativeWheel early-returns), so
+    // nothing commits and there is no content transform (embedded draws to a
+    // tight viewBox attribute, leaving the content <g> with no transform).
+    dispatchWheel(h.svg, { deltaX: 30, deltaY: 40 });
+    expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+    expect(h.getTransform()).toBeNull();
+
+    // Resize in embedded mode only measures; it never commits a viewBox.
+    h.resize(1000, 1000);
+    h.resize(800, 800);
+    expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+    expect(h.getTransform()).toBeNull();
   });
 });
 
