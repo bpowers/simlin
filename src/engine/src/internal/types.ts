@@ -90,11 +90,15 @@ export enum SimlinLinkPolarity {
   Unknown = 2,
 }
 
-// Loop polarity
+// Loop polarity - matches SimlinLoopPolarity in simlin.h. MostlyReinforcing/
+// MostlyBalancing ("Rux"/"Bux") are the mixed-sign runtime variants surfaced
+// from discovery (GH #495).
 export enum SimlinLoopPolarity {
   Reinforcing = 0,
   Balancing = 1,
   Undetermined = 2,
+  MostlyReinforcing = 3,
+  MostlyBalancing = 4,
 }
 
 // Error detail structure - matches SimlinErrorDetail in simlin.h
@@ -129,4 +133,8 @@ export interface Loop {
   // Modeler-assigned loop name (via SetLoopName), or null when the loop has no
   // assigned name. Non-null only for pinned loops.
   name: string | null;
+  // Polarity-confidence ratio in [0, 1] behind `polarity` (GH #495): 1 for a
+  // clean reinforcing/balancing loop, 0 for undetermined; the structural loop
+  // surface is 1/0 by design.
+  polarityConfidence: number;
 }

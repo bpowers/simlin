@@ -327,10 +327,12 @@ class TestLoopPolarityEnum:
         assert str(LoopPolarity.MOSTLY_BALANCING) == "Bux"
 
     def test_polarity_values(self) -> None:
-        """Test that polarity integer values match FFI for R/B/U.
+        """Test that polarity integer values match the C FFI for all five
+        variants.
 
-        MOSTLY_* are Python-side variants only; the C FFI coalesces them
-        onto REINFORCING/BALANCING.
+        Since GH #495 the FFI surfaces all five `SimlinLoopPolarity` variants
+        1:1 (no coalescing); these integer values mirror it exactly so
+        `LoopPolarity(c_loop.polarity)` round-trips a Rux/Bux loop.
         """
         assert LoopPolarity.REINFORCING == 0
         assert LoopPolarity.BALANCING == 1
@@ -450,3 +452,62 @@ class TestStructuralPolarityClassification:
         assert len(loops) >= 1, "Should have at least one loop"
         b_loops = [lp for lp in loops if lp.polarity == LoopPolarity.BALANCING]
         assert len(b_loops) >= 1, "Goal-seeking model should have a Balancing loop"
+
+
+class TestPolarityConfidence:
+    """GH #495: every loop carries a `polarity_confidence` ratio in [0, 1]
+    threaded from the FFI, and a clean single-signed loop reports 1.0."""
+
+    def _reinforcing_model(self) -> Project:
+        project = Project.new(
+            name="test_confidence",
+            sim_start=0.0,
+            sim_stop=5.0,
+            dt=0.25,
+        )
+        model = project.main_model
+        with model.edit() as (_current, patch):
+            from simlin.json_types import Auxiliary, Flow, Stock
+
+            patch.upsert_stock(
+                Stock(
+                    name="population",
+                    initial_equation="100",
+                    inflows=["births"],
+                    outflows=[],
+                )
+            )
+            patch.upsert_flow(Flow(name="births", equation="population * birth_rate"))
+            patch.upsert_aux(Auxiliary(name="birth_rate", equation="0.1"))
+        return project
+
+    def test_structural_loops_carry_confidence_in_range(self) -> None:
+        """Structural `Model.loops` populate `polarity_confidence` in [0, 1];
+        a fully-signed loop reports 1.0 (the structural convention)."""
+        project = self._reinforcing_model()
+        loops = project.main_model.loops
+        assert len(loops) >= 1
+        for loop in loops:
+            assert isinstance(loop.polarity_confidence, float)
+            assert 0.0 <= loop.polarity_confidence <= 1.0
+        r_loops = [lp for lp in loops if lp.polarity == LoopPolarity.REINFORCING]
+        assert len(r_loops) >= 1
+        assert r_loops[0].polarity_confidence == 1.0, (
+            "a fully-signed reinforcing loop has structural confidence 1.0"
+        )
+
+    def test_discovery_loops_carry_confidence_in_range(self) -> None:
+        """Behavioral `Run.loops` populate `polarity_confidence` in [0, 1];
+        a single-signed reinforcing loop reports full confidence."""
+        project = self._reinforcing_model()
+        run = project.main_model.run(analyze_loops=True)
+        loops = run.loops
+        assert len(loops) >= 1
+        for loop in loops:
+            assert isinstance(loop.polarity_confidence, float)
+            assert 0.0 <= loop.polarity_confidence <= 1.0
+        r_loops = [lp for lp in loops if lp.polarity == LoopPolarity.REINFORCING]
+        assert len(r_loops) >= 1
+        assert r_loops[0].polarity_confidence == 1.0, (
+            "a single-signed reinforcing loop scores confidence 1.0"
+        )

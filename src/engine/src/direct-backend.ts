@@ -433,6 +433,7 @@ export class DirectBackend implements EngineBackend {
         variables: loop.variables,
         polarity: loop.polarity as unknown as LoopPolarity,
         name: loop.name,
+        polarityConfidence: loop.polarityConfidence,
       }));
     } finally {
       simlin_free_loops(loopsPtr);

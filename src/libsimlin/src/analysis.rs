@@ -400,19 +400,22 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
         } else {
             ptr::null_mut()
         };
-        // The C ABI exposes only the legacy three-way polarity surface
-        // (Reinforcing / Balancing / Undetermined), so MostlyReinforcing /
-        // MostlyBalancing fold into their dominant cousin here.  The
-        // polarity_confidence ratio is dropped at this boundary because
-        // the FFI struct has no field for it; native Rust callers that
-        // need confidence go through `engine::db::DetectedLoop` directly.
+        // Map all five engine polarity variants 1:1 to the FFI enum (GH #495):
+        // the MostlyReinforcing/MostlyBalancing ("Rux"/"Bux") variants are
+        // surfaced rather than coalesced down to R/B.  On this STRUCTURAL
+        // surface `polarity_confidence` is 1.0 (every link signed) or 0.0 (some
+        // link unknown) by design -- the engine has no runtime scores here -- so
+        // the Mostly* variants don't actually arise on this path, but the
+        // mapping is exhaustive so the discovery surface and this one agree.
         let polarity = match loop_item.polarity {
-            engine::db::DetectedLoopPolarity::Reinforcing
-            | engine::db::DetectedLoopPolarity::MostlyReinforcing => {
-                SimlinLoopPolarity::Reinforcing
+            engine::db::DetectedLoopPolarity::Reinforcing => SimlinLoopPolarity::Reinforcing,
+            engine::db::DetectedLoopPolarity::Balancing => SimlinLoopPolarity::Balancing,
+            engine::db::DetectedLoopPolarity::MostlyReinforcing => {
+                SimlinLoopPolarity::MostlyReinforcing
             }
-            engine::db::DetectedLoopPolarity::Balancing
-            | engine::db::DetectedLoopPolarity::MostlyBalancing => SimlinLoopPolarity::Balancing,
+            engine::db::DetectedLoopPolarity::MostlyBalancing => {
+                SimlinLoopPolarity::MostlyBalancing
+            }
             engine::db::DetectedLoopPolarity::Undetermined => SimlinLoopPolarity::Undetermined,
         };
         // A modeler-pinned loop carries a human-meaningful name; an enumerated
@@ -430,6 +433,7 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
             var_count,
             polarity,
             name,
+            polarity_confidence: loop_item.polarity_confidence,
         });
     }
     let count = c_loops.len();
@@ -506,13 +510,18 @@ unsafe fn vec_into_raw_parts<T>(items: Vec<T>) -> (*mut T, usize) {
     (ptr, count)
 }
 
-/// Map the discovery polarity string (`LoopSummary::polarity`) to the
-/// three-way C ABI surface.  The "mostly_*" variants fold into their dominant
-/// cousin, matching `simlin_analyze_get_loops`.
+/// Map the discovery polarity string (`LoopSummary::polarity`) to the C ABI
+/// surface, preserving all five variants (GH #495): the "mostly_*" strings map
+/// to the MostlyReinforcing/MostlyBalancing ("Rux"/"Bux") enum variants rather
+/// than coalescing into R/B.  This is the high-value path -- discovery
+/// classifies from runtime scores, so the Mostly* variants actually occur here.
+/// An unrecognized string is treated as Undetermined.
 fn discovery_polarity(polarity: &str) -> SimlinLoopPolarity {
     match polarity {
-        "reinforcing" | "mostly_reinforcing" => SimlinLoopPolarity::Reinforcing,
-        "balancing" | "mostly_balancing" => SimlinLoopPolarity::Balancing,
+        "reinforcing" => SimlinLoopPolarity::Reinforcing,
+        "balancing" => SimlinLoopPolarity::Balancing,
+        "mostly_reinforcing" => SimlinLoopPolarity::MostlyReinforcing,
+        "mostly_balancing" => SimlinLoopPolarity::MostlyBalancing,
         _ => SimlinLoopPolarity::Undetermined,
     }
 }
@@ -672,6 +681,7 @@ unsafe fn discovery_to_ffi(
             partition: summary
                 .partition
                 .map_or(-1, |p| i32::try_from(p).unwrap_or(-1)),
+            polarity_confidence: summary.polarity_confidence,
         });
     }
 

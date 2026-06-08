@@ -31,6 +31,14 @@ async fn read_model_returns_clean_xmile_snapshot() {
         !output.loop_dominance.is_empty(),
         "logistic growth fixture must have at least one loop"
     );
+    // GH #495: every loop carries a polarity_confidence ratio in [0, 1].
+    for loop_summary in &output.loop_dominance {
+        assert!(
+            (0.0..=1.0).contains(&loop_summary.polarity_confidence),
+            "polarity_confidence must be in [0, 1], got {}",
+            loop_summary.polarity_confidence
+        );
+    }
     // The cross-agg reducer-loop recovery budget is a structural-completeness
     // signal; a small scalar fixture has no cross-agg loops to recover, so it
     // is false and (by the skip_serializing_if) elided from the wire shape,
@@ -43,6 +51,12 @@ async fn read_model_returns_clean_xmile_snapshot() {
     assert!(
         value.get("aggRecoveryTruncated").is_none(),
         "a false agg_recovery_truncated must be elided from the wire shape"
+    );
+    // The polarityConfidence field is present on each loopDominance entry.
+    let first_loop = &value["loopDominance"][0];
+    assert!(
+        first_loop.get("polarityConfidence").is_some(),
+        "polarityConfidence must appear on the loopDominance wire shape"
     );
 }
 

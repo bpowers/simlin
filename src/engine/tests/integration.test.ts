@@ -579,7 +579,9 @@ describe('WASM Integration Tests', () => {
       // Also verify the actual values for documentation
       const rustSizes = getRustStructSizes();
       expect(rustSizes.ptrSize).toBe(4); // wasm32 pointers are 4 bytes
-      expect(rustSizes.loopSize).toBe(20); // SimlinLoop: id + variables + var_count + polarity + name
+      // SimlinLoop: id + variables + var_count + polarity + name + pad +
+      // polarity_confidence (f64, 8-byte aligned) = 32 bytes (GH #495).
+      expect(rustSizes.loopSize).toBe(32);
       // SimlinLink: from + to + polarity + score + score_len + relative_score + relative_score_len
       expect(rustSizes.linkSize).toBe(28);
     });

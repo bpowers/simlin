@@ -13,7 +13,7 @@ import * as path from 'path';
 import { DirectBackend } from '../src/direct-backend';
 import { ProjectHandle, ModelHandle, SimHandle } from '../src/backend';
 import { SimlinJsonFormat } from '../src/internal/types';
-import { LinkPolarity } from '../src/types';
+import { LinkPolarity, LoopPolarity } from '../src/types';
 
 function loadWasmBuffer(): Buffer {
   const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
@@ -146,6 +146,23 @@ describe('DirectBackend', () => {
       const modelHandle = backend.projectGetModel(projectHandle, null);
       const loops = backend.modelGetLoops(modelHandle);
       expect(Array.isArray(loops)).toBe(true);
+      for (const loop of loops) {
+        // All five polarity variants are valid (GH #495); the structural
+        // surface only ever emits R/B/U, but the read path must accept Rux/Bux.
+        expect([
+          LoopPolarity.Reinforcing,
+          LoopPolarity.Balancing,
+          LoopPolarity.Undetermined,
+          LoopPolarity.MostlyReinforcing,
+          LoopPolarity.MostlyBalancing,
+        ]).toContain(loop.polarity);
+        // polarity_confidence rides at the f64 offset the 32-byte LOOP_SIZE
+        // layout exposes; it must decode to a finite ratio in [0, 1].
+        expect(typeof loop.polarityConfidence).toBe('number');
+        expect(Number.isFinite(loop.polarityConfidence)).toBe(true);
+        expect(loop.polarityConfidence).toBeGreaterThanOrEqual(0);
+        expect(loop.polarityConfidence).toBeLessThanOrEqual(1);
+      }
       backend.modelDispose(modelHandle);
     });
 

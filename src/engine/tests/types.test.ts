@@ -10,6 +10,7 @@ import {
   SimlinLinkPolarity,
   SimlinLoopPolarity,
 } from '../src/internal/types';
+import { LoopPolarity } from '../src/types';
 
 describe('Types', () => {
   describe('SimlinErrorCode', () => {
@@ -59,6 +60,19 @@ describe('Types', () => {
       expect(SimlinLoopPolarity.Reinforcing).toBe(0);
       expect(SimlinLoopPolarity.Balancing).toBe(1);
       expect(SimlinLoopPolarity.Undetermined).toBe(2);
+      // Rux/Bux mixed-sign runtime variants (GH #495).
+      expect(SimlinLoopPolarity.MostlyReinforcing).toBe(3);
+      expect(SimlinLoopPolarity.MostlyBalancing).toBe(4);
+    });
+
+    it('public LoopPolarity matches the FFI numeric values', () => {
+      // The public enum and the internal FFI enum must share numeric values so
+      // direct-backend's `polarity as unknown as LoopPolarity` cast is sound.
+      expect(LoopPolarity.Reinforcing).toBe(SimlinLoopPolarity.Reinforcing);
+      expect(LoopPolarity.Balancing).toBe(SimlinLoopPolarity.Balancing);
+      expect(LoopPolarity.Undetermined).toBe(SimlinLoopPolarity.Undetermined);
+      expect(LoopPolarity.MostlyReinforcing).toBe(SimlinLoopPolarity.MostlyReinforcing);
+      expect(LoopPolarity.MostlyBalancing).toBe(SimlinLoopPolarity.MostlyBalancing);
     });
   });
 });

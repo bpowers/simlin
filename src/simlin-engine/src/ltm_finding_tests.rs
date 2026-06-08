@@ -1112,6 +1112,7 @@ fn test_assign_loop_ids() {
             avg_abs_score: 1.0,
             rel_scores: vec![],
             partition: None,
+            polarity_confidence: 1.0,
         },
         FoundLoop {
             loop_info: Loop {
@@ -1137,6 +1138,7 @@ fn test_assign_loop_ids() {
             avg_abs_score: 0.5,
             rel_scores: vec![],
             partition: None,
+            polarity_confidence: 1.0,
         },
     ];
 
@@ -1279,6 +1281,7 @@ fn make_found_loop_with_scores(
         avg_abs_score,
         rel_scores: vec![],
         partition: None,
+        polarity_confidence: 1.0,
     }
 }
 

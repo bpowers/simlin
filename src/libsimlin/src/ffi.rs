@@ -38,7 +38,15 @@ pub struct SimlinError {
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
 
-/// Loop polarity for C API
+/// Loop polarity for C API.
+///
+/// `MostlyReinforcing`/`MostlyBalancing` ("Rux"/"Bux" in the LTM literature)
+/// are the mixed-sign runtime polarities the engine determines when a loop has
+/// expressed both signs over a simulation but one dominates with high
+/// confidence; they are reported here verbatim rather than coalesced down to
+/// `Reinforcing`/`Balancing` (GH #495).  The companion
+/// `SimlinLoop.polarity_confidence` / `SimlinDiscoveredLoop.polarity_confidence`
+/// carries the `[0.0, 1.0]` confidence ratio behind the classification.
 #[repr(C)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -46,6 +54,10 @@ pub enum SimlinLoopPolarity {
     Reinforcing = 0,
     Balancing = 1,
     Undetermined = 2,
+    /// "Rux" -- mixed-sign runtime scores, predominantly reinforcing.
+    MostlyReinforcing = 3,
+    /// "Bux" -- mixed-sign runtime scores, predominantly balancing.
+    MostlyBalancing = 4,
 }
 
 /// Link polarity for C API
@@ -108,6 +120,17 @@ pub struct SimlinLoop {
     /// `SimlinLink` gained `relative_score`); `simlin_sizeof_loop` and the
     /// `@simlin/engine` `LOOP_SIZE`/`readLoops` offsets track it.
     pub name: *mut c_char,
+    /// Polarity-confidence ratio in `[0.0, 1.0]` behind `polarity` (GH #495):
+    /// `1.0` for a clean `Reinforcing`/`Balancing` loop, `0.0` for
+    /// `Undetermined`.  On the STRUCTURAL `simlin_analyze_get_loops` surface
+    /// this is `1.0`/`0.0` by design (a loop's links are either all signed or
+    /// at least one is unknown); the mixed-sign `MostlyReinforcing`/
+    /// `MostlyBalancing` variants with intermediate confidence appear on the
+    /// discovery surface (`SimlinDiscoveredLoop`).  Adding this `f64` grew the
+    /// struct additively (8-byte alignment pushed it past the old 20 bytes);
+    /// `simlin_sizeof_loop` and the `@simlin/engine` `LOOP_SIZE`/`readLoops`
+    /// offsets track the new size.
+    pub polarity_confidence: f64,
 }
 
 /// List of loops returned by analysis
@@ -179,6 +202,13 @@ pub struct SimlinDiscoveredLoop {
     /// they identify partitions within ONE discovery result only and are not
     /// stable across runs or model edits.
     pub partition: i32,
+    /// Polarity-confidence ratio in `[0.0, 1.0]` behind `polarity` (GH #495):
+    /// `1.0` for a clean `Reinforcing`/`Balancing` loop, a value below 1.0 for
+    /// a mixed-sign `MostlyReinforcing`/`MostlyBalancing` loop, `0.0` for
+    /// `Undetermined`.  This is the high-value confidence surface: discovery
+    /// classifies loops from runtime score series, so the Rux/Bux variants and
+    /// their intermediate confidences actually appear here.
+    pub polarity_confidence: f64,
 }
 
 /// One cycle partition referenced by a discovery result's loops: a group of
