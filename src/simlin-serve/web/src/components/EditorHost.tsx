@@ -115,47 +115,303 @@ function formatValidationErrors(errors: ReadonlyArray<ServerValidationError>): s
   return `Save failed:\n${lines.join('\n')}`;
 }
 
-export class EditorHost extends React.Component<EditorHostProps, EditorHostState> {
+// The mutable, non-render instance state that lived as class instance fields.
+// All three are side-effecting bookkeeping the render function never reads, so
+// they live in refs rather than state.
+interface EditorHostRefs {
   // Track the in-flight request so that switching paths quickly doesn't paint
   // a stale model after the slow fetch finally resolves.
-  private currentLoadKey: number = 0;
+  currentLoadKey: number;
   // Pending auto-dismiss timer for the disk-update toast. Held so we
   // can clear a previous timer when a second disk advance arrives
   // before the first one expires (otherwise the second toast would be
   // dismissed early by the first timer's callback).
-  private diskNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  diskNoticeTimer: ReturnType<typeof setTimeout> | null;
   // Pending debounce timer for the next selection-changed frame. We
   // hold the handle so a rapid sequence of selection changes can
   // collapse into one outbound frame: each new event clears the
   // previous timer and schedules a fresh one. Cleared on unmount.
-  private selectionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  selectionDebounceTimer: ReturnType<typeof setTimeout> | null;
+}
 
-  state: EditorHostState = INITIAL_STATE;
+// The escaped callbacks (the debounce timer, the async load/save/conflict
+// continuations, and the post-commit update effect) read CURRENT props/state
+// through this ref, exactly as the class read this.props / this.state at call
+// time rather than as captured by a stale render closure.
+interface EditorHostLatest {
+  props: EditorHostProps;
+  state: EditorHostState;
+}
 
-  componentDidMount(): void {
-    if (this.props.path) {
-      void this.loadProject(this.props.path);
-      this.emitProjectFocused(this.props.path);
+// The previous-render props the update effect compares against to reproduce
+// componentDidUpdate's "fire on change, not on mount" semantics. `null` until
+// the first post-commit run; the mount effect owns the initial load/focus.
+interface EditorHostPrev {
+  props: EditorHostProps | null;
+}
+
+// Converted from React.Component to a function component following the
+// Canvas/Editor pattern. EditorHostState is one useState object with a
+// class-parity merging setState helper (it also accepts the full INITIAL_STATE
+// reset and functional updaters the class used). componentDidMount/Unmount
+// becomes a symmetric mount effect; componentDidUpdate becomes a post-commit
+// update effect guarded by a prev-props ref so it fires on change, not on
+// mount. Instance fields move into a refs object; async continuations and the
+// debounce timer read current props/state through the `latest` ref.
+export function EditorHost(props: EditorHostProps): React.ReactElement | null {
+  const [state, setStateRaw] = React.useState<EditorHostState>(INITIAL_STATE);
+
+  // Class-parity setState: a partial patch merges onto previous state and a
+  // functional updater returns a partial patch, exactly like
+  // React.Component's setState. A full-state object (INITIAL_STATE) is also a
+  // valid partial and replaces every field, matching setState(INITIAL_STATE).
+  const setState = React.useCallback(
+    (patch: Partial<EditorHostState> | ((prev: EditorHostState) => Partial<EditorHostState>)): void => {
+      setStateRaw((prev) => {
+        const resolved = typeof patch === 'function' ? patch(prev) : patch;
+        return { ...prev, ...resolved };
+      });
+    },
+    [],
+  );
+
+  const refs = React.useRef<EditorHostRefs>({
+    currentLoadKey: 0,
+    diskNoticeTimer: null,
+    selectionDebounceTimer: null,
+  });
+
+  // Refreshed synchronously every render so escaped callbacks read current
+  // props/state (the class read this.props / this.state, always current).
+  const latest = React.useRef<EditorHostLatest>(undefined as unknown as EditorHostLatest);
+  latest.current = { props, state };
+
+  const prev = React.useRef<EditorHostPrev>({ props: null });
+
+  // Tell the server which project the browser is currently looking at
+  // so the MCP notification fan-out can correlate AI sessions with the
+  // user's focus. The `Editor` component itself doesn't know this — the
+  // host owns the path-to-project mapping.
+  const emitProjectFocused = React.useCallback((path: string): void => {
+    latest.current.props.socket?.send({ type: 'projectFocused', path });
+  }, []);
+
+  const clearDiskNoticeTimer = React.useCallback((): void => {
+    const r = refs.current;
+    if (r.diskNoticeTimer !== null) {
+      clearTimeout(r.diskNoticeTimer);
+      r.diskNoticeTimer = null;
     }
-  }
+  }, []);
 
-  componentWillUnmount(): void {
-    if (this.diskNoticeTimer !== null) {
-      clearTimeout(this.diskNoticeTimer);
-      this.diskNoticeTimer = null;
-    }
-    if (this.selectionDebounceTimer !== null) {
-      clearTimeout(this.selectionDebounceTimer);
-      this.selectionDebounceTimer = null;
-    }
-  }
+  const showDiskNotice = React.useCallback((): void => {
+    const r = refs.current;
+    clearDiskNoticeTimer();
+    setState({ diskNoticeVisible: true });
+    r.diskNoticeTimer = setTimeout(() => {
+      r.diskNoticeTimer = null;
+      setState({ diskNoticeVisible: false });
+    }, DISK_NOTICE_TIMEOUT_MS);
+  }, [setState, clearDiskNoticeTimer]);
 
-  componentDidUpdate(prev: EditorHostProps): void {
-    if (prev.path !== this.props.path) {
-      if (!this.props.path) {
-        this.currentLoadKey += 1;
-        this.clearDiskNoticeTimer();
-        this.setState(INITIAL_STATE);
+  const loadProject = React.useCallback(
+    async (path: string): Promise<void> => {
+      const r = refs.current;
+      r.currentLoadKey += 1;
+      const loadKey = r.currentLoadKey;
+
+      setState({ pending: true, error: null });
+
+      try {
+        const payload = await fetchProject(path);
+        if (loadKey !== r.currentLoadKey) {
+          return;
+        }
+        setState((prevState) => ({
+          loadedPath: path,
+          payload,
+          error: null,
+          pending: false,
+          loadGeneration: prevState.loadGeneration + 1,
+          serverVersion: payload.version,
+        }));
+      } catch (err) {
+        if (loadKey !== r.currentLoadKey) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : 'failed to load project';
+        setState({ payload: null, error: message, pending: false });
+      }
+    },
+    [setState],
+  );
+
+  // Refetch the project after a 409 and surface the new authoritative
+  // state. If the parent supplied `onConflict`, hand the latest payload
+  // off to it; otherwise update local state and let the Editor's `key`
+  // remount with the new initial JSON + version. Refetch failures
+  // propagate to the caller so the user sees the underlying error
+  // instead of a stale conflict toast.
+  //
+  // Mirrors `loadProject`'s currentLoadKey sentinel so a path swap that
+  // lands while the conflict refetch is in flight drops the stale
+  // setState (which would otherwise strand the UI on "Loading <new>…"
+  // with no in-flight fetch to recover from).
+  const handleVersionConflict = React.useCallback(
+    async (path: string): Promise<void> => {
+      const r = refs.current;
+      r.currentLoadKey += 1;
+      const loadKey = r.currentLoadKey;
+      const latestPayload = await fetchProject(path);
+      if (loadKey !== r.currentLoadKey || latest.current.props.path !== path) {
+        return;
+      }
+      if (latest.current.props.onConflict) {
+        latest.current.props.onConflict(latestPayload.json, latestPayload.version);
+        return;
+      }
+      setState((prevState) => ({
+        loadedPath: path,
+        payload: latestPayload,
+        error: null,
+        pending: false,
+        loadGeneration: prevState.loadGeneration + 1,
+        serverVersion: latestPayload.version,
+      }));
+    },
+    [setState],
+  );
+
+  const handleSave = React.useCallback(
+    async (project: JsonProjectData, currVersion: number): Promise<number | undefined> => {
+      // Defensive: the Editor only feeds us the protobuf format when
+      // `inputFormat="protobuf"`, but the union allows it. We always use
+      // JSON in serve so a mismatch indicates a bug we'd rather skip
+      // silently than POST garbage.
+      if (project.format !== 'json') {
+        return undefined;
+      }
+      const path = latest.current.props.path;
+      if (!path) {
+        return undefined;
+      }
+      // Capture the current load generation so a path swap (or any other
+      // event that bumps `currentLoadKey`) during the in-flight POST drops
+      // our post-await setState — otherwise A's saved version would
+      // overwrite B's freshly-loaded serverVersion and break the WS
+      // refetch gate.
+      const r = refs.current;
+      const loadKey = r.currentLoadKey;
+      try {
+        const result = await saveProject(path, project.data, currVersion);
+        if (result.path !== path) {
+          latest.current.props.onPathRedirect?.(result.path);
+        }
+        // Track the post-save server version so the WS echo of our own
+        // save (which arrives with the same version) does not trigger a
+        // refetch. `setState` here only matters for the WS gate; the
+        // Editor itself owns its `projectVersion` via `result.version`.
+        // Skip the gate update when the user navigated away during the
+        // POST: the version belongs to a path we no longer display.
+        if (loadKey === r.currentLoadKey && latest.current.props.path === path) {
+          setState({ serverVersion: result.version });
+        }
+        return result.version;
+      } catch (err) {
+        if (err instanceof VersionConflictError) {
+          await handleVersionConflict(path);
+          // Surface a friendly toast via the Editor's onSave error path.
+          // Phase 3 will replace this round-trip with proper Loro merging.
+          throw new Error(
+            'Your edit conflicted with another save. The latest version has been loaded — please re-apply your changes.',
+          );
+        }
+        if (err instanceof ValidationError) {
+          throw new Error(formatValidationErrors(err.errors));
+        }
+        throw err;
+      }
+    },
+    [setState, handleVersionConflict],
+  );
+
+  // Coalesce a burst of selection changes into one WS frame. Each new
+  // call replaces any pending frame so only the latest selection set
+  // is sent. The path is captured at schedule time and re-checked at
+  // flush; a path swap during the debounce window invalidates the
+  // pending frame because the captured idents reference the *previous*
+  // project's namespace and would land as a phantom selection on the
+  // new project.
+  const handleSelectionChanged = React.useCallback((idents: ReadonlyArray<string>): void => {
+    const r = refs.current;
+    if (r.selectionDebounceTimer !== null) {
+      clearTimeout(r.selectionDebounceTimer);
+    }
+    const targetPath = latest.current.props.path;
+    if (!targetPath) {
+      r.selectionDebounceTimer = null;
+      return;
+    }
+    r.selectionDebounceTimer = setTimeout(() => {
+      r.selectionDebounceTimer = null;
+      if (latest.current.props.path !== targetPath) {
+        return;
+      }
+      latest.current.props.socket?.send({
+        type: 'selectionChanged',
+        path: targetPath,
+        variableIdents: idents,
+      });
+    }, SELECTION_DEBOUNCE_MS);
+  }, []);
+
+  // Mount / unmount effect (formerly componentDidMount / componentWillUnmount).
+  // On mount, load the project and emit projectFocused when a path is present;
+  // on unmount, clear both pending timers. Effects run outside StrictMode in
+  // production but the cleanup is symmetric so a StrictMode mount/unmount/mount
+  // cycle leaks no timer. The prev-props ref is seeded here so the update
+  // effect's first comparison is against the mount-time props, not null.
+  React.useEffect(() => {
+    const r = refs.current;
+    if (props.path) {
+      void loadProject(props.path);
+      emitProjectFocused(props.path);
+    }
+    return () => {
+      if (r.diskNoticeTimer !== null) {
+        clearTimeout(r.diskNoticeTimer);
+        r.diskNoticeTimer = null;
+      }
+      if (r.selectionDebounceTimer !== null) {
+        clearTimeout(r.selectionDebounceTimer);
+        r.selectionDebounceTimer = null;
+      }
+    };
+    // Empty deps: mirrors componentDidMount/Unmount. loadProject and
+    // emitProjectFocused are stable useCallbacks. (The repo lint config does
+    // not enable react-hooks/exhaustive-deps, so no disable directive is
+    // needed.)
+  }, []);
+
+  // Post-commit update effect (formerly componentDidUpdate). Runs after every
+  // committed render; the prev-props ref guards "fire on change, not on
+  // mount". The first invocation seeds prev.props from the mount-time props
+  // (whose load/focus the mount effect already handled) and does nothing else,
+  // so projectFocused is not double-emitted on mount.
+  React.useEffect(() => {
+    const prevProps = prev.current.props;
+    prev.current.props = props;
+    if (prevProps === null) {
+      // First post-commit run: mount already loaded/focused. Nothing to do.
+      return;
+    }
+
+    const r = refs.current;
+    if (prevProps.path !== props.path) {
+      if (!props.path) {
+        r.currentLoadKey += 1;
+        clearDiskNoticeTimer();
+        setStateRaw(INITIAL_STATE);
         return;
       }
       // Rename path: when the server emits ProjectRenamed, App swaps
@@ -165,11 +421,12 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
       // against state.serverVersion; if they match and a payload is
       // loaded, the underlying state hasn't changed — update the
       // displayed name without refetching or remounting the Editor.
-      const liveVersion = this.props.liveVersion ?? 0;
-      const sameUnderlyingState = this.state.payload !== null && liveVersion === this.state.serverVersion;
+      const liveVersion = props.liveVersion ?? 0;
+      const currentState = latest.current.state;
+      const sameUnderlyingState = currentState.payload !== null && liveVersion === currentState.serverVersion;
       if (sameUnderlyingState) {
-        this.setState({ loadedPath: this.props.path });
-        this.emitProjectFocused(this.props.path);
+        setState({ loadedPath: props.path });
+        emitProjectFocused(props.path);
         return;
       }
       // Switching to a different path drops any in-flight toast — it
@@ -179,10 +436,10 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
       // setState({pending: true}) inside loadProject doesn't re-enter
       // this method's path-unchanged refetch arm before the GET
       // resolves.
-      this.clearDiskNoticeTimer();
-      this.setState({ diskNoticeVisible: false, serverVersion: liveVersion });
-      void this.loadProject(this.props.path);
-      this.emitProjectFocused(this.props.path);
+      clearDiskNoticeTimer();
+      setState({ diskNoticeVisible: false, serverVersion: liveVersion });
+      void loadProject(props.path);
+      emitProjectFocused(props.path);
       return;
     }
     // Path unchanged: check whether the WS-driven liveVersion advanced
@@ -196,223 +453,64 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
     // so the intermediate `setState({pending: true})` inside
     // `loadProject` doesn't re-enter this branch and re-issue the
     // request before the GET resolves.
-    const path = this.props.path;
-    const liveVersion = this.props.liveVersion ?? 0;
-    if (path && liveVersion > this.state.serverVersion) {
-      this.setState({ serverVersion: liveVersion });
-      if (this.props.liveSource === 'disk') {
-        this.showDiskNotice();
+    const path = props.path;
+    const liveVersion = props.liveVersion ?? 0;
+    if (path && liveVersion > latest.current.state.serverVersion) {
+      setState({ serverVersion: liveVersion });
+      if (props.liveSource === 'disk') {
+        showDiskNotice();
       }
-      void this.loadProject(path);
+      void loadProject(path);
     }
+    // No dep array: this effect must run after every commit to mirror
+    // componentDidUpdate. Its body short-circuits unless props actually
+    // changed in a way that matters, so spurious runs (from internal
+    // setState) are harmless. (The repo lint config does not enable
+    // react-hooks/exhaustive-deps, so no disable directive is needed.)
+  });
+
+  const { path } = props;
+  const { payload, error, loadedPath, loadGeneration, diskNoticeVisible } = state;
+
+  if (!path) {
+    return null;
   }
 
-  // Tell the server which project the browser is currently looking at
-  // so the MCP notification fan-out can correlate AI sessions with the
-  // user's focus. The `Editor` component itself doesn't know this — the
-  // host owns the path-to-project mapping.
-  private emitProjectFocused(path: string): void {
-    this.props.socket?.send({ type: 'projectFocused', path });
-  }
-
-  // Coalesce a burst of selection changes into one WS frame. Each new
-  // call replaces any pending frame so only the latest selection set
-  // is sent. The path is captured at schedule time and re-checked at
-  // flush; a path swap during the debounce window invalidates the
-  // pending frame because the captured idents reference the *previous*
-  // project's namespace and would land as a phantom selection on the
-  // new project.
-  private handleSelectionChanged = (idents: ReadonlyArray<string>): void => {
-    if (this.selectionDebounceTimer !== null) {
-      clearTimeout(this.selectionDebounceTimer);
-    }
-    const targetPath = this.props.path;
-    if (!targetPath) {
-      this.selectionDebounceTimer = null;
-      return;
-    }
-    this.selectionDebounceTimer = setTimeout(() => {
-      this.selectionDebounceTimer = null;
-      if (this.props.path !== targetPath) {
-        return;
-      }
-      this.props.socket?.send({
-        type: 'selectionChanged',
-        path: targetPath,
-        variableIdents: idents,
-      });
-    }, SELECTION_DEBOUNCE_MS);
-  };
-
-  private showDiskNotice(): void {
-    this.clearDiskNoticeTimer();
-    this.setState({ diskNoticeVisible: true });
-    this.diskNoticeTimer = setTimeout(() => {
-      this.diskNoticeTimer = null;
-      this.setState({ diskNoticeVisible: false });
-    }, DISK_NOTICE_TIMEOUT_MS);
-  }
-
-  private clearDiskNoticeTimer(): void {
-    if (this.diskNoticeTimer !== null) {
-      clearTimeout(this.diskNoticeTimer);
-      this.diskNoticeTimer = null;
-    }
-  }
-
-  private async loadProject(path: string): Promise<void> {
-    this.currentLoadKey += 1;
-    const loadKey = this.currentLoadKey;
-
-    this.setState({ pending: true, error: null });
-
-    try {
-      const payload = await fetchProject(path);
-      if (loadKey !== this.currentLoadKey) {
-        return;
-      }
-      this.setState((prev) => ({
-        loadedPath: path,
-        payload,
-        error: null,
-        pending: false,
-        loadGeneration: prev.loadGeneration + 1,
-        serverVersion: payload.version,
-      }));
-    } catch (err) {
-      if (loadKey !== this.currentLoadKey) {
-        return;
-      }
-      const message = err instanceof Error ? err.message : 'failed to load project';
-      this.setState({ payload: null, error: message, pending: false });
-    }
-  }
-
-  private handleSave = async (project: JsonProjectData, currVersion: number): Promise<number | undefined> => {
-    // Defensive: the Editor only feeds us the protobuf format when
-    // `inputFormat="protobuf"`, but the union allows it. We always use
-    // JSON in serve so a mismatch indicates a bug we'd rather skip
-    // silently than POST garbage.
-    if (project.format !== 'json') {
-      return undefined;
-    }
-    const path = this.props.path;
-    if (!path) {
-      return undefined;
-    }
-    // Capture the current load generation so a path swap (or any other
-    // event that bumps `currentLoadKey`) during the in-flight POST drops
-    // our post-await setState — otherwise A's saved version would
-    // overwrite B's freshly-loaded serverVersion and break the WS
-    // refetch gate.
-    const loadKey = this.currentLoadKey;
-    try {
-      const result = await saveProject(path, project.data, currVersion);
-      if (result.path !== path) {
-        this.props.onPathRedirect?.(result.path);
-      }
-      // Track the post-save server version so the WS echo of our own
-      // save (which arrives with the same version) does not trigger a
-      // refetch. `setState` here only matters for the WS gate; the
-      // Editor itself owns its `projectVersion` via `result.version`.
-      // Skip the gate update when the user navigated away during the
-      // POST: the version belongs to a path we no longer display.
-      if (loadKey === this.currentLoadKey && this.props.path === path) {
-        this.setState({ serverVersion: result.version });
-      }
-      return result.version;
-    } catch (err) {
-      if (err instanceof VersionConflictError) {
-        await this.handleVersionConflict(path);
-        // Surface a friendly toast via the Editor's onSave error path.
-        // Phase 3 will replace this round-trip with proper Loro merging.
-        throw new Error(
-          'Your edit conflicted with another save. The latest version has been loaded — please re-apply your changes.',
-        );
-      }
-      if (err instanceof ValidationError) {
-        throw new Error(formatValidationErrors(err.errors));
-      }
-      throw err;
-    }
-  };
-
-  // Refetch the project after a 409 and surface the new authoritative
-  // state. If the parent supplied `onConflict`, hand the latest payload
-  // off to it; otherwise update local state and let the Editor's `key`
-  // remount with the new initial JSON + version. Refetch failures
-  // propagate to the caller so the user sees the underlying error
-  // instead of a stale conflict toast.
-  //
-  // Mirrors `loadProject`'s currentLoadKey sentinel so a path swap that
-  // lands while the conflict refetch is in flight drops the stale
-  // setState (which would otherwise strand the UI on "Loading <new>…"
-  // with no in-flight fetch to recover from).
-  private async handleVersionConflict(path: string): Promise<void> {
-    this.currentLoadKey += 1;
-    const loadKey = this.currentLoadKey;
-    const latest = await fetchProject(path);
-    if (loadKey !== this.currentLoadKey || this.props.path !== path) {
-      return;
-    }
-    if (this.props.onConflict) {
-      this.props.onConflict(latest.json, latest.version);
-      return;
-    }
-    this.setState((prev) => ({
-      loadedPath: path,
-      payload: latest,
-      error: null,
-      pending: false,
-      loadGeneration: prev.loadGeneration + 1,
-      serverVersion: latest.version,
-    }));
-  }
-
-  render(): React.ReactNode {
-    const { path } = this.props;
-    const { payload, error, loadedPath, loadGeneration, diskNoticeVisible } = this.state;
-
-    if (!path) {
-      return null;
-    }
-
-    if (error) {
-      return (
-        <div className="serve-editor-host" role="alert">
-          <p>{`failed to load ${path}: ${error}`}</p>
-        </div>
-      );
-    }
-
-    if (!payload || loadedPath !== path) {
-      return <div className="serve-editor-host serve-editor-host--loading">Loading {path}…</div>;
-    }
-
-    const showMdlBanner = payload.source_format === 'mdl';
-
+  if (error) {
     return (
-      <div className="serve-editor-host">
-        {showMdlBanner ? (
-          <div className="serve-mdl-banner" role="note">
-            Vensim MDL — saves will be written to a <code>.sd.json</code> sidecar.
-          </div>
-        ) : null}
-        {diskNoticeVisible ? (
-          <div className="serve-disk-notice" role="status" aria-live="polite">
-            This model was updated on disk.
-          </div>
-        ) : null}
-        <Editor
-          key={`${path}#${loadGeneration}`}
-          inputFormat="json"
-          initialProjectJson={payload.json}
-          initialProjectVersion={payload.version}
-          name={path}
-          onSave={this.handleSave}
-          onSelectionChanged={this.handleSelectionChanged}
-        />
+      <div className="serve-editor-host" role="alert">
+        <p>{`failed to load ${path}: ${error}`}</p>
       </div>
     );
   }
+
+  if (!payload || loadedPath !== path) {
+    return <div className="serve-editor-host serve-editor-host--loading">Loading {path}…</div>;
+  }
+
+  const showMdlBanner = payload.source_format === 'mdl';
+
+  return (
+    <div className="serve-editor-host">
+      {showMdlBanner ? (
+        <div className="serve-mdl-banner" role="note">
+          Vensim MDL — saves will be written to a <code>.sd.json</code> sidecar.
+        </div>
+      ) : null}
+      {diskNoticeVisible ? (
+        <div className="serve-disk-notice" role="status" aria-live="polite">
+          This model was updated on disk.
+        </div>
+      ) : null}
+      <Editor
+        key={`${path}#${loadGeneration}`}
+        inputFormat="json"
+        initialProjectJson={payload.json}
+        initialProjectVersion={payload.version}
+        name={path}
+        onSave={handleSave}
+        onSelectionChanged={handleSelectionChanged}
+      />
+    </div>
+  );
 }

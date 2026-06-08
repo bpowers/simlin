@@ -18,36 +18,33 @@ type ProjectListProps = Readonly<{
   onCreated: (path: string) => void;
 }>;
 
-export class ProjectList extends React.Component<ProjectListProps> {
-  private handleClick = (path: string) => () => {
-    this.props.onSelect(path);
-  };
-
-  render(): React.ReactNode {
-    const { projects, selectedPath, onCreated } = this.props;
-    const labelled = disambiguatedLabels(projects);
-    return (
-      <div className="serve-project-list-wrapper">
-        <NewProjectButton onCreated={onCreated} />
-        <ul className="serve-project-list" role="list">
-          {labelled.map(({ item: project, label }) => {
-            const isSelected = project.path === selectedPath;
-            return (
-              <li
-                key={project.path}
-                className={'serve-project-list-item' + (isSelected ? ' serve-project-list-item--selected' : '')}
-                aria-current={isSelected ? 'true' : undefined}
-                onClick={this.handleClick(project.path)}
-              >
-                <ProjectLabel label={label} />
-                <GitChip git={project.git} />
-              </li>
-            );
-          })}
-        </ul>
-      </div>
-    );
-  }
+export function ProjectList({ projects, selectedPath, onSelect, onCreated }: ProjectListProps): React.ReactElement {
+  const labelled = disambiguatedLabels(projects);
+  return (
+    <div className="serve-project-list-wrapper">
+      <NewProjectButton onCreated={onCreated} />
+      <ul className="serve-project-list" role="list">
+        {labelled.map(({ item: project, label }) => {
+          const isSelected = project.path === selectedPath;
+          // The class created a fresh `() => onSelect(path)` per row each
+          // render via a curried factory; an inline arrow keeps that exact
+          // behavior. Rows are not memoized, so closure identity churn is a
+          // non-issue.
+          return (
+            <li
+              key={project.path}
+              className={'serve-project-list-item' + (isSelected ? ' serve-project-list-item--selected' : '')}
+              aria-current={isSelected ? 'true' : undefined}
+              onClick={() => onSelect(project.path)}
+            >
+              <ProjectLabel label={label} />
+              <GitChip git={project.git} />
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
 }
 
 type ProjectLabelProps = Readonly<{ label: string }>;

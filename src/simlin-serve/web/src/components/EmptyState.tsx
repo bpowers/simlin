@@ -13,17 +13,15 @@ type EmptyStateProps = Readonly<{
   onCreated: (path: string) => void;
 }>;
 
-export class EmptyState extends React.Component<EmptyStateProps> {
-  render(): React.ReactNode {
-    return (
-      <div className="serve-empty-state">
-        <h2>No models found</h2>
-        <p>
-          simlin-serve scans the current directory tree for <code>.stmx</code>, <code>.xmile</code>, <code>.mdl</code>,
-          and <code>.sd.json</code> files. Drop one in or create a new model below.
-        </p>
-        <NewProjectButton onCreated={this.props.onCreated} />
-      </div>
-    );
-  }
+export function EmptyState({ onCreated }: EmptyStateProps): React.ReactElement {
+  return (
+    <div className="serve-empty-state">
+      <h2>No models found</h2>
+      <p>
+        simlin-serve scans the current directory tree for <code>.stmx</code>, <code>.xmile</code>, <code>.mdl</code>,
+        and <code>.sd.json</code> files. Drop one in or create a new model below.
+      </p>
+      <NewProjectButton onCreated={onCreated} />
+    </div>
+  );
 }

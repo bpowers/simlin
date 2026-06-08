@@ -20,19 +20,27 @@ type EditorMockProps = Readonly<{
   onSelectionChanged?: (idents: ReadonlyArray<string>) => void;
 }>;
 
-export class Editor extends React.Component<EditorMockProps> {
-  static lastProps: EditorMockProps | null = null;
-
-  render(): React.ReactNode {
-    Editor.lastProps = this.props;
-    return (
-      <div
-        data-testid="editor-mock"
-        data-name={this.props.name}
-        data-embedded={String(this.props.embedded ?? false)}
-        data-read-only={String(this.props.readOnlyMode ?? false)}
-        data-input-format={this.props.inputFormat}
-      />
-    );
-  }
+// Carries the `lastProps` recording slot tests read via `Editor.lastProps`.
+interface EditorMock {
+  (props: EditorMockProps): React.ReactElement;
+  lastProps: EditorMockProps | null;
 }
+
+// Converted from a class to a function component to match the codebase's
+// function-component convention. The recording slot stays a property on the
+// component function (was a static class field), assigned during render just
+// as the class's render() did, so it always reflects the most recently
+// committed props.
+export const Editor: EditorMock = (props: EditorMockProps): React.ReactElement => {
+  Editor.lastProps = props;
+  return (
+    <div
+      data-testid="editor-mock"
+      data-name={props.name}
+      data-embedded={String(props.embedded ?? false)}
+      data-read-only={String(props.readOnlyMode ?? false)}
+      data-input-format={props.inputFormat}
+    />
+  );
+};
+Editor.lastProps = null;
