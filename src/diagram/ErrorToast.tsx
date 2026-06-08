@@ -38,95 +38,91 @@ export interface ToastProps {
   variant: keyof typeof variantIcon;
 }
 
-interface ToastState {
-  open: boolean;
-}
+export function Toast(props: ToastProps): React.ReactElement {
+  // `id` is intentionally pulled out (rest-sibling omission) so our numeric
+  // toast-identity prop is not spread onto the DOM node as an HTML id.
+  const { message, variant, id, onClose, ...other } = props;
+  const Icon = variantIcon[variant];
 
-export class Toast extends React.PureComponent<ToastProps, ToastState> {
-  static contextType = SnackbarDurationContext;
-  declare context: React.ContextType<typeof SnackbarDurationContext>;
+  const duration = React.useContext(SnackbarDurationContext);
 
-  timerHandle: ReturnType<typeof setTimeout> | undefined;
-  lastDuration: number | undefined;
+  const [open, setOpen] = React.useState(true);
 
-  state: ToastState = { open: true };
+  // The live timer handle and the values escaped callbacks must read at fire
+  // time live in refs so the auto-hide timer is set up exactly once per
+  // (open, duration) transition -- mirroring the class's instance fields and
+  // the `lastDuration !== context` comparison in componentDidUpdate. Reading
+  // current props/state through refs (rather than closing over them) keeps the
+  // timer's effect dependent only on `open` and `duration`, so unrelated
+  // re-renders (e.g. a message change) do not restart it.
+  const timerHandle = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const openRef = React.useRef(open);
+  openRef.current = open;
+  const onCloseRef = React.useRef(onClose);
+  onCloseRef.current = onClose;
+  const idRef = React.useRef(id);
+  idRef.current = id;
+  const messageRef = React.useRef(message);
+  messageRef.current = message;
 
-  componentDidMount() {
-    this.lastDuration = this.context;
-    this.startTimer();
-  }
-
-  componentDidUpdate(_prevProps: ToastProps, prevState: ToastState) {
-    const becameOpen = !prevState.open && this.state.open;
-    const durationChanged = prevState.open && this.state.open && this.lastDuration !== this.context;
-    if (becameOpen || durationChanged) {
-      this.lastDuration = this.context;
-      this.startTimer();
+  const clearTimer = React.useCallback((): void => {
+    if (timerHandle.current !== undefined) {
+      window.clearTimeout(timerHandle.current);
+      timerHandle.current = undefined;
     }
-  }
+  }, []);
 
-  componentWillUnmount() {
-    this.clearTimer();
-  }
-
-  clearTimer() {
-    if (this.timerHandle !== undefined) {
-      window.clearTimeout(this.timerHandle);
-      this.timerHandle = undefined;
-    }
-  }
-
-  startTimer() {
-    this.clearTimer();
-    const duration = this.context;
-    if (duration !== undefined) {
-      this.timerHandle = setTimeout(this.closeToast, duration);
-    }
-  }
-
-  closeToast = () => {
-    if (!this.state.open) {
+  const closeToast = React.useCallback((): void => {
+    if (!openRef.current) {
       return;
     }
-    this.clearTimer();
-    this.setState({ open: false });
-    this.props.onClose(this.props.id ?? this.props.message);
-  };
+    clearTimer();
+    setOpen(false);
+    onCloseRef.current(idRef.current ?? messageRef.current);
+  }, [clearTimer]);
 
-  handleOpenChange = (open: boolean) => {
+  // (Re)start the auto-hide timer whenever the toast is open and the duration
+  // changes. The class started the timer on mount and again in
+  // componentDidUpdate when it (re)opened or the context duration changed; an
+  // effect keyed on [open, duration] reproduces both transitions, and its
+  // cleanup clears any pending timer on unmount or before the next run --
+  // StrictMode-safe (mount/unmount/mount leaves no orphaned timer).
+  React.useEffect(() => {
     if (!open) {
-      this.closeToast();
+      return undefined;
+    }
+    if (duration !== undefined) {
+      timerHandle.current = setTimeout(closeToast, duration);
+    }
+    return clearTimer;
+  }, [open, duration, closeToast, clearTimer]);
+
+  const handleOpenChange = (next: boolean): void => {
+    if (!next) {
+      closeToast();
     }
   };
 
-  render() {
-    // `id` is intentionally pulled out (rest-sibling omission) so our numeric
-    // toast-identity prop is not spread onto the DOM node as an HTML id.
-    const { message, variant, id, ...other } = this.props;
-    const Icon = variantIcon[variant];
-    void id;
-
-    return (
-      <RadixToast.Root open={this.state.open} onOpenChange={this.handleOpenChange}>
-        <SnackbarContent
-          className={variantClass[variant]}
-          aria-describedby="client-snackbar"
-          message={
-            <span id="client-snackbar" className={styles.message}>
-              <Icon className={clsx(styles.icon, styles.iconVariant)} />
-              {message}
-            </span>
-          }
-          action={[
-            <RadixToast.Close asChild key="close">
-              <IconButton aria-label="close" color="inherit">
-                <CloseIcon className={styles.icon} />
-              </IconButton>
-            </RadixToast.Close>,
-          ]}
-          {...other}
-        />
-      </RadixToast.Root>
-    );
-  }
+  return (
+    <RadixToast.Root open={open} onOpenChange={handleOpenChange}>
+      <SnackbarContent
+        className={variantClass[variant]}
+        aria-describedby="client-snackbar"
+        message={
+          <span id="client-snackbar" className={styles.message}>
+            <Icon className={clsx(styles.icon, styles.iconVariant)} />
+            {message}
+          </span>
+        }
+        action={[
+          <RadixToast.Close asChild key="close">
+            <IconButton aria-label="close" color="inherit">
+              <CloseIcon className={styles.icon} />
+            </IconButton>
+          </RadixToast.Close>,
+        ]}
+        {...other}
+      />
+    </RadixToast.Root>
+  );
 }

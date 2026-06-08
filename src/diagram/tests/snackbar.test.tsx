@@ -7,26 +7,33 @@ import { render, act } from '@testing-library/react';
 import Snackbar, { SnackbarContent } from '../components/Snackbar';
 import { Toast } from '../ErrorToast';
 
-// Controlled wrapper to test open/close transitions
-class ControlledSnackbar extends React.Component<{ autoHideDuration?: number }, { open: boolean; closeCount: number }> {
-  state = { open: false, closeCount: 0 };
+// Controlled wrapper to test open/close transitions. Exposes the same imperative
+// surface the old class component did -- `setOpen` plus a live `state` object --
+// so tests can drive and inspect it through a ref.
+interface ControlledSnackbarHandle {
+  setOpen: (open: boolean) => void;
+  state: { open: boolean; closeCount: number };
+}
 
-  setOpen = (open: boolean) => {
-    this.setState({ open });
-  };
+const ControlledSnackbar = React.forwardRef<ControlledSnackbarHandle, { autoHideDuration?: number }>(
+  function ControlledSnackbar({ autoHideDuration }, ref) {
+    const [open, setOpen] = React.useState(false);
+    const [closeCount, setCloseCount] = React.useState(0);
 
-  handleClose = () => {
-    this.setState((prev) => ({ open: false, closeCount: prev.closeCount + 1 }));
-  };
+    const handleClose = () => {
+      setOpen(false);
+      setCloseCount((prev) => prev + 1);
+    };
 
-  render() {
+    React.useImperativeHandle(ref, () => ({ setOpen, state: { open, closeCount } }), [open, closeCount]);
+
     return (
-      <Snackbar open={this.state.open} autoHideDuration={this.props.autoHideDuration}>
-        <Toast message="Test message" onClose={this.handleClose} variant="info" />
+      <Snackbar open={open} autoHideDuration={autoHideDuration}>
+        <Toast message="Test message" onClose={handleClose} variant="info" />
       </Snackbar>
     );
-  }
-}
+  },
+);
 
 describe('Snackbar', () => {
   beforeEach(() => {
@@ -78,7 +85,7 @@ describe('Snackbar', () => {
   });
 
   test('starts auto-hide timer on transition from closed to open', () => {
-    const ref = React.createRef<ControlledSnackbar>();
+    const ref = React.createRef<ControlledSnackbarHandle>();
     render(<ControlledSnackbar ref={ref} autoHideDuration={3000} />);
 
     expect(ref.current!.state.closeCount).toBe(0);
@@ -96,7 +103,7 @@ describe('Snackbar', () => {
   });
 
   test('clears timer when closed before timeout', () => {
-    const ref = React.createRef<ControlledSnackbar>();
+    const ref = React.createRef<ControlledSnackbarHandle>();
     render(<ControlledSnackbar ref={ref} autoHideDuration={5000} />);
 
     act(() => {
@@ -120,7 +127,7 @@ describe('Snackbar', () => {
   });
 
   test('handles rapid open/close cycles without race conditions', () => {
-    const ref = React.createRef<ControlledSnackbar>();
+    const ref = React.createRef<ControlledSnackbarHandle>();
     render(<ControlledSnackbar ref={ref} autoHideDuration={3000} />);
 
     act(() => {
@@ -159,30 +166,41 @@ describe('Snackbar', () => {
   });
 
   test('does not reset timer on unrelated re-renders', () => {
-    class ReRenderWrapper extends React.Component<
-      Record<string, never>,
-      { counter: number; open: boolean; closeCount: number }
-    > {
-      state = { counter: 0, open: true, closeCount: 0 };
-
-      forceRerender = () => {
-        this.setState((prev) => ({ counter: prev.counter + 1 }));
-      };
-
-      handleClose = () => {
-        this.setState((prev) => ({ open: false, closeCount: prev.closeCount + 1 }));
-      };
-
-      render() {
-        return (
-          <Snackbar open={this.state.open} autoHideDuration={3000}>
-            <Toast message={`Count: ${this.state.counter}`} onClose={this.handleClose} variant="info" />
-          </Snackbar>
-        );
-      }
+    interface ReRenderWrapperHandle {
+      forceRerender: () => void;
+      state: { counter: number; open: boolean; closeCount: number };
     }
 
-    const ref = React.createRef<ReRenderWrapper>();
+    const ReRenderWrapper = React.forwardRef<ReRenderWrapperHandle, Record<string, never>>(
+      function ReRenderWrapper(_props, ref) {
+        const [counter, setCounter] = React.useState(0);
+        const [open, setOpen] = React.useState(true);
+        const [closeCount, setCloseCount] = React.useState(0);
+
+        const forceRerender = () => {
+          setCounter((prev) => prev + 1);
+        };
+
+        const handleClose = () => {
+          setOpen(false);
+          setCloseCount((prev) => prev + 1);
+        };
+
+        React.useImperativeHandle(ref, () => ({ forceRerender, state: { counter, open, closeCount } }), [
+          counter,
+          open,
+          closeCount,
+        ]);
+
+        return (
+          <Snackbar open={open} autoHideDuration={3000}>
+            <Toast message={`Count: ${counter}`} onClose={handleClose} variant="info" />
+          </Snackbar>
+        );
+      },
+    );
+
+    const ref = React.createRef<ReRenderWrapperHandle>();
     render(<ReRenderWrapper ref={ref} />);
 
     act(() => {
@@ -209,30 +227,37 @@ describe('Snackbar', () => {
   });
 
   test('restarts timer when duration changes while open', () => {
-    class DurationWrapper extends React.Component<
-      Record<string, never>,
-      { duration: number; open: boolean; closeCount: number }
-    > {
-      state = { duration: 5000, open: true, closeCount: 0 };
-
-      setDuration = (duration: number) => {
-        this.setState({ duration });
-      };
-
-      handleClose = () => {
-        this.setState((prev) => ({ open: false, closeCount: prev.closeCount + 1 }));
-      };
-
-      render() {
-        return (
-          <Snackbar open={this.state.open} autoHideDuration={this.state.duration}>
-            <Toast message="Test message" onClose={this.handleClose} variant="info" />
-          </Snackbar>
-        );
-      }
+    interface DurationWrapperHandle {
+      setDuration: (duration: number) => void;
+      state: { duration: number; open: boolean; closeCount: number };
     }
 
-    const ref = React.createRef<DurationWrapper>();
+    const DurationWrapper = React.forwardRef<DurationWrapperHandle, Record<string, never>>(
+      function DurationWrapper(_props, ref) {
+        const [duration, setDuration] = React.useState(5000);
+        const [open, setOpen] = React.useState(true);
+        const [closeCount, setCloseCount] = React.useState(0);
+
+        const handleClose = () => {
+          setOpen(false);
+          setCloseCount((prev) => prev + 1);
+        };
+
+        React.useImperativeHandle(ref, () => ({ setDuration, state: { duration, open, closeCount } }), [
+          duration,
+          open,
+          closeCount,
+        ]);
+
+        return (
+          <Snackbar open={open} autoHideDuration={duration}>
+            <Toast message="Test message" onClose={handleClose} variant="info" />
+          </Snackbar>
+        );
+      },
+    );
+
+    const ref = React.createRef<DurationWrapperHandle>();
     render(<DurationWrapper ref={ref} />);
 
     act(() => {
@@ -257,30 +282,37 @@ describe('Snackbar', () => {
   });
 
   test('does not reset timer when message changes', () => {
-    class MessageWrapper extends React.Component<
-      Record<string, never>,
-      { message: string; open: boolean; closeCount: number }
-    > {
-      state = { message: 'First', open: true, closeCount: 0 };
-
-      setMessage = (message: string) => {
-        this.setState({ message });
-      };
-
-      handleClose = () => {
-        this.setState((prev) => ({ open: false, closeCount: prev.closeCount + 1 }));
-      };
-
-      render() {
-        return (
-          <Snackbar open={this.state.open} autoHideDuration={3000}>
-            <Toast message={this.state.message} onClose={this.handleClose} variant="info" />
-          </Snackbar>
-        );
-      }
+    interface MessageWrapperHandle {
+      setMessage: (message: string) => void;
+      state: { message: string; open: boolean; closeCount: number };
     }
 
-    const ref = React.createRef<MessageWrapper>();
+    const MessageWrapper = React.forwardRef<MessageWrapperHandle, Record<string, never>>(
+      function MessageWrapper(_props, ref) {
+        const [message, setMessage] = React.useState('First');
+        const [open, setOpen] = React.useState(true);
+        const [closeCount, setCloseCount] = React.useState(0);
+
+        const handleClose = () => {
+          setOpen(false);
+          setCloseCount((prev) => prev + 1);
+        };
+
+        React.useImperativeHandle(ref, () => ({ setMessage, state: { message, open, closeCount } }), [
+          message,
+          open,
+          closeCount,
+        ]);
+
+        return (
+          <Snackbar open={open} autoHideDuration={3000}>
+            <Toast message={message} onClose={handleClose} variant="info" />
+          </Snackbar>
+        );
+      },
+    );
+
+    const ref = React.createRef<MessageWrapperHandle>();
     render(<MessageWrapper ref={ref} />);
 
     act(() => {
@@ -357,32 +389,34 @@ describe('Snackbar', () => {
       message: string;
     }
 
-    class DupHost extends React.Component<Record<string, never>, { items: Item[] }> {
-      state = {
-        items: [
-          { id: 1, message: 'same error' },
-          { id: 2, message: 'same error' },
-        ],
-      };
-
-      handleClose = (id: string | number) => {
-        this.setState((prev) => ({ items: prev.items.filter((it) => it.id !== id) }));
-      };
-
-      render() {
-        return (
-          <Snackbar open={this.state.items.length > 0} autoHideDuration={3000}>
-            <div>
-              {this.state.items.map((it) => (
-                <Toast key={it.id} id={it.id} message={it.message} onClose={this.handleClose} variant="warning" />
-              ))}
-            </div>
-          </Snackbar>
-        );
-      }
+    interface DupHostHandle {
+      state: { items: Item[] };
     }
 
-    const ref = React.createRef<DupHost>();
+    const DupHost = React.forwardRef<DupHostHandle, Record<string, never>>(function DupHost(_props, ref) {
+      const [items, setItems] = React.useState<Item[]>([
+        { id: 1, message: 'same error' },
+        { id: 2, message: 'same error' },
+      ]);
+
+      const handleClose = (id: string | number) => {
+        setItems((prev) => prev.filter((it) => it.id !== id));
+      };
+
+      React.useImperativeHandle(ref, () => ({ state: { items } }), [items]);
+
+      return (
+        <Snackbar open={items.length > 0} autoHideDuration={3000}>
+          <div>
+            {items.map((it) => (
+              <Toast key={it.id} id={it.id} message={it.message} onClose={handleClose} variant="warning" />
+            ))}
+          </div>
+        </Snackbar>
+      );
+    });
+
+    const ref = React.createRef<DupHostHandle>();
     const { container } = render(<DupHost ref={ref} />);
 
     // Two toasts initially.

@@ -27,51 +27,46 @@ interface TabProps {
   label: string;
 }
 
-export class Tab extends React.PureComponent<TabProps> {
-  static contextType = TabIndexContext;
-  declare context: React.ContextType<typeof TabIndexContext>;
-
-  render() {
-    const { label } = this.props;
-    const tabValue = this.context;
-    return (
-      <RadixTabs.Trigger value={tabValue} className={styles.tab}>
-        {label}
-      </RadixTabs.Trigger>
-    );
-  }
+export function Tab(props: TabProps): React.ReactElement {
+  const { label } = props;
+  // The tab's Radix value is its zero-based index, injected by the parent Tabs
+  // via context (so an individual <Tab> doesn't need to know its position).
+  const tabValue = React.useContext(TabIndexContext);
+  return (
+    <RadixTabs.Trigger value={tabValue} className={styles.tab}>
+      {label}
+    </RadixTabs.Trigger>
+  );
 }
 
-export class Tabs extends React.PureComponent<TabsProps> {
-  handleValueChange = (newValue: string) => {
+export function Tabs(props: TabsProps): React.ReactElement {
+  const { className, value, onChange, children, ...rest } = props;
+  const ariaLabel = rest['aria-label'];
+
+  const handleValueChange = (newValue: string): void => {
     const syntheticEvent = {} as React.SyntheticEvent;
-    this.props.onChange(syntheticEvent, Number(newValue));
+    onChange(syntheticEvent, Number(newValue));
   };
 
-  render() {
-    const { className, value, children, ...rest } = this.props;
-    const ariaLabel = rest['aria-label'];
+  // Count children (non-null) and wrap each with context provider
+  const childArray = React.Children.toArray(children).filter(Boolean);
+  const tabCount = childArray.length;
 
-    // Count children (non-null) and wrap each with context provider
-    const childArray = React.Children.toArray(children).filter(Boolean);
-    const tabCount = childArray.length;
+  const enrichedChildren = childArray.map((child, index) => (
+    <TabIndexContext.Provider key={index} value={String(index)}>
+      {child}
+    </TabIndexContext.Provider>
+  ));
 
-    const enrichedChildren = childArray.map((child, index) => (
-      <TabIndexContext.Provider key={index} value={String(index)}>
-        {child}
-      </TabIndexContext.Provider>
-    ));
+  const indicatorLeft = tabCount > 0 ? `${(value / tabCount) * 100}%` : '0%';
+  const indicatorWidth = tabCount > 0 ? `${(1 / tabCount) * 100}%` : '0%';
 
-    const indicatorLeft = tabCount > 0 ? `${(value / tabCount) * 100}%` : '0%';
-    const indicatorWidth = tabCount > 0 ? `${(1 / tabCount) * 100}%` : '0%';
-
-    return (
-      <RadixTabs.Root value={String(value)} onValueChange={this.handleValueChange}>
-        <RadixTabs.List className={clsx(styles.tabsList, className)} aria-label={ariaLabel}>
-          {enrichedChildren}
-          <div className={styles.indicator} style={{ left: indicatorLeft, width: indicatorWidth }} />
-        </RadixTabs.List>
-      </RadixTabs.Root>
-    );
-  }
+  return (
+    <RadixTabs.Root value={String(value)} onValueChange={handleValueChange}>
+      <RadixTabs.List className={clsx(styles.tabsList, className)} aria-label={ariaLabel}>
+        {enrichedChildren}
+        <div className={styles.indicator} style={{ left: indicatorLeft, width: indicatorWidth }} />
+      </RadixTabs.List>
+    </RadixTabs.Root>
+  );
 }

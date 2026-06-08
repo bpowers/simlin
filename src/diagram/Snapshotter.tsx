@@ -13,18 +13,16 @@ interface SnapshotterProps {
   onSnapshot: (kind: 'show' | 'close') => void;
 }
 
-export class Snapshotter extends React.PureComponent<SnapshotterProps> {
-  handleSnapshot = () => {
-    this.props.onSnapshot('show');
+export function Snapshotter({ onSnapshot }: SnapshotterProps): React.ReactElement {
+  const handleSnapshot = (): void => {
+    onSnapshot('show');
   };
 
-  render() {
-    return (
-      <div className={styles.card}>
-        <IconButton className={styles.button} aria-label="Snapshot" onClick={this.handleSnapshot}>
-          <PhotoCameraIcon />
-        </IconButton>
-      </div>
-    );
-  }
+  return (
+    <div className={styles.card}>
+      <IconButton className={styles.button} aria-label="Snapshot" onClick={handleSnapshot}>
+        <PhotoCameraIcon />
+      </IconButton>
+    </div>
+  );
 }

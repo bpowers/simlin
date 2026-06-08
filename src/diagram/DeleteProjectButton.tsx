@@ -41,73 +41,73 @@ function errorMessage(err: unknown): string {
  * `ModelPropertiesDrawer` so the confirmation state lives in one small place
  * and can be reused by other surfaces (e.g. a project list).
  */
-export class DeleteProjectButton extends React.PureComponent<DeleteProjectButtonProps, DeleteProjectButtonState> {
-  state: DeleteProjectButtonState = { confirmOpen: false, deleting: false };
+export function DeleteProjectButton({ projectName, onDelete }: DeleteProjectButtonProps): React.ReactElement {
+  const [state, setState] = React.useState<DeleteProjectButtonState>({ confirmOpen: false, deleting: false });
+  const { confirmOpen, deleting, error } = state;
 
-  private openConfirm = (): void => {
-    this.setState({ confirmOpen: true, error: undefined });
+  const openConfirm = (): void => {
+    setState({ confirmOpen: true, deleting: false, error: undefined });
   };
 
-  private closeConfirm = (): void => {
+  const closeConfirm = (): void => {
     // Don't let an outside-click / Escape dismiss the dialog mid-delete.
-    if (this.state.deleting) {
+    if (deleting) {
       return;
     }
-    this.setState({ confirmOpen: false, error: undefined });
+    setState({ confirmOpen: false, deleting: false, error: undefined });
   };
 
-  private confirmDelete = async (): Promise<void> => {
-    if (this.state.deleting) {
+  const confirmDelete = async (): Promise<void> => {
+    if (deleting) {
       return;
     }
-    this.setState({ deleting: true, error: undefined });
+    setState((prev) => ({ ...prev, deleting: true, error: undefined }));
     try {
-      await this.props.onDelete();
+      await onDelete();
       // Success: the caller navigates away and this component unmounts. Leave
       // `deleting` set so the buttons stay disabled during that brief window.
+      // No state update is queued here, so there is nothing to guard against a
+      // post-unmount setState -- mirroring the class, which only set state in
+      // the rejection path (where the component is still mounted with the
+      // dialog open).
     } catch (err) {
-      this.setState({ deleting: false, error: errorMessage(err) });
+      setState((prev) => ({ ...prev, deleting: false, error: errorMessage(err) }));
     }
   };
 
-  render(): React.ReactNode {
-    const { projectName } = this.props;
-    const { confirmOpen, deleting, error } = this.state;
-
-    return (
-      <>
-        <Button
-          className={styles.trigger}
-          variant="outlined"
-          color="error"
-          size="large"
-          startIcon={<DeleteIcon />}
-          onClick={this.openConfirm}
-        >
-          Delete project
-        </Button>
-        <Dialog open={confirmOpen} onClose={this.closeConfirm} aria-labelledby="delete-project-title">
-          <DialogTitle id="delete-project-title">Delete this project?</DialogTitle>
-          <DialogContent>
-            <DialogContentText>
-              This permanently deletes &ldquo;{projectName}&rdquo; and can&rsquo;t be undone.
+  return (
+    <>
+      <Button
+        className={styles.trigger}
+        variant="outlined"
+        color="error"
+        size="large"
+        startIcon={<DeleteIcon />}
+        onClick={openConfirm}
+      >
+        Delete project
+      </Button>
+      <Dialog open={confirmOpen} onClose={closeConfirm} aria-labelledby="delete-project-title">
+        <DialogTitle id="delete-project-title">Delete this project?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This permanently deletes &ldquo;{projectName}&rdquo; and can&rsquo;t be undone.
+          </DialogContentText>
+          {error ? (
+            <DialogContentText className={styles.errorText}>
+              <b>{error}</b>
             </DialogContentText>
-            {error ? (
-              <DialogContentText className={styles.errorText}>
-                <b>{error}</b>
-              </DialogContentText>
-            ) : null}
-          </DialogContent>
-          <DialogActions>
-            <Button onClick={this.closeConfirm} disabled={deleting}>
-              Cancel
-            </Button>
-            <Button variant="contained" color="error" onClick={this.confirmDelete} disabled={deleting}>
-              {deleting ? 'Deleting…' : 'Delete'}
-            </Button>
-          </DialogActions>
-        </Dialog>
-      </>
-    );
-  }
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeConfirm} disabled={deleting}>
+            Cancel
+          </Button>
+          <Button variant="contained" color="error" onClick={confirmDelete} disabled={deleting}>
+            {deleting ? 'Deleting…' : 'Delete'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  );
 }

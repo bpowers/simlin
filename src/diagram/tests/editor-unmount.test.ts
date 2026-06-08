@@ -1,5 +1,5 @@
 /**
- * @jest-environment node
+ * @jest-environment jsdom
  *
  * Copyright 2026 The Simlin Authors. All rights reserved.
  * Use of this source code is governed by the Apache License,
@@ -13,24 +13,27 @@
 // project-controller.ts and project-controller.test.ts). The Editor's only
 // remaining lifecycle responsibility is to:
 //
-//   - create a controller in componentDidMount and kick off
-//     openInitialProject() (the controller guards its own dispose-races),
+//   - construct a controller and kick off openInitialProject() on mount (the
+//     controller guards its own dispose-races),
 //   - subscribe to controller snapshots,
 //   - dispose the controller (which releases the WASM EngineProject handle)
-//     and unsubscribe in componentWillUnmount.
+//     and unsubscribe on unmount.
 //
-// A mount -> unmount -> mount cycle on the same instance (React 18 StrictMode)
-// must create a *fresh* controller on the second mount because the first was
-// disposed. These tests pin that contract by spying on the controller's
-// openInitialProject/dispose, without spinning up real WASM. We use
-// `new Editor(props)` so the arrow-function fields and constructor-built
-// controller exist, and the document stub lets componentDidMount/
-// componentWillUnmount run under @jest-environment node without jsdom.
+// A mount -> unmount -> mount cycle (React 18 StrictMode) must create a *fresh*
+// controller on the second mount because the first was disposed. The Editor is
+// now a function component, so these assert against OBSERVABLE behavior by
+// rendering a real <Editor> through @testing-library/react and spying on the
+// controller's openInitialProject/dispose -- never reaching into instance
+// internals. openInitialProject/dispose are stubbed so the tests stay off WASM.
 
-import { Editor } from '../Editor';
+import { TextEncoder, TextDecoder } from 'util';
+Object.assign(globalThis, { TextEncoder, TextDecoder });
+
+import * as React from 'react';
+import { act, render } from '@testing-library/react';
+
+import { Editor, type EditorProps } from '../Editor';
 import { ProjectController } from '../project-controller';
-
-type EditorInstance = InstanceType<typeof Editor>;
 
 const validProjectJson = JSON.stringify({
   name: 'test',
@@ -38,35 +41,14 @@ const validProjectJson = JSON.stringify({
   models: [{ name: 'main', stocks: [], flows: [], auxiliaries: [], views: [{ elements: [] }] }],
 });
 
-function makeProps(): EditorInstance['props'] {
+function makeProps(): EditorProps {
   return {
     inputFormat: 'json',
     initialProjectJson: validProjectJson,
     initialProjectVersion: 1,
     name: 'test',
     onSave: async () => 1,
-  } as unknown as EditorInstance['props'];
-}
-
-// componentDidMount/componentWillUnmount touch document.addEventListener and
-// document.removeEventListener. Under @jest-environment node there is no DOM,
-// so install a minimal stub.
-function withDocumentStub<T>(fn: () => T): T {
-  const documentStub = {
-    addEventListener: () => {},
-    removeEventListener: () => {},
-  } as unknown as Document;
-  const previous = (globalThis as { document?: Document }).document;
-  (globalThis as { document?: Document }).document = documentStub;
-  try {
-    return fn();
-  } finally {
-    if (previous === undefined) {
-      delete (globalThis as { document?: Document }).document;
-    } else {
-      (globalThis as { document?: Document }).document = previous;
-    }
-  }
+  } as EditorProps;
 }
 
 describe('Editor controller lifecycle', () => {
@@ -85,46 +67,52 @@ describe('Editor controller lifecycle', () => {
     jest.restoreAllMocks();
   });
 
-  it('opens the project on mount and disposes the controller on unmount', async () => {
-    const editor = new Editor(makeProps());
-
-    withDocumentStub(() => editor.componentDidMount());
+  it('opens the project on mount and disposes the controller on unmount', () => {
+    let result!: ReturnType<typeof render>;
+    act(() => {
+      result = render(React.createElement(Editor, makeProps()));
+    });
     expect(openSpy).toHaveBeenCalledTimes(1);
 
-    withDocumentStub(() => editor.componentWillUnmount());
+    act(() => {
+      result.unmount();
+    });
     expect(disposeSpy).toHaveBeenCalledTimes(1);
   });
 
   it('creates a fresh controller across a StrictMode mount/unmount/mount cycle', () => {
-    // The constructor builds controller #1. componentWillUnmount disposes it
-    // and clears the reference, so the second componentDidMount must build a
-    // fresh controller #2 (and open it). Two opens, one per mount; one dispose,
-    // for the controller torn down between them.
-    const editor = new Editor(makeProps());
-
-    withDocumentStub(() => {
-      editor.componentDidMount();
-      editor.componentWillUnmount();
-      editor.componentDidMount();
+    // React 18 StrictMode drives the component through mount -> unmount -> mount
+    // on the same fiber. The mount effect builds controller #1, the unmount
+    // cleanup disposes it, and the remount must build a fresh controller #2 (and
+    // open it). Two opens (one per mount); one dispose (the controller torn down
+    // between them). A final unmount disposes the live controller.
+    let result!: ReturnType<typeof render>;
+    act(() => {
+      result = render(React.createElement(React.StrictMode, null, React.createElement(Editor, makeProps())));
     });
 
     expect(openSpy).toHaveBeenCalledTimes(2);
     expect(disposeSpy).toHaveBeenCalledTimes(1);
 
-    // Clean up the second controller.
-    withDocumentStub(() => editor.componentWillUnmount());
+    act(() => {
+      result.unmount();
+    });
     expect(disposeSpy).toHaveBeenCalledTimes(2);
   });
 
   it('does not throw on unmount when the controller dispose rejects (best-effort)', () => {
     disposeSpy.mockRejectedValue(new Error('engine dispose failed'));
-    const editor = new Editor(makeProps());
-
-    withDocumentStub(() => editor.componentDidMount());
-    // dispose is fire-and-forget (void); a rejected promise must not throw
-    // synchronously out of componentWillUnmount.
-    withDocumentStub(() => {
-      expect(() => editor.componentWillUnmount()).not.toThrow();
+    let result!: ReturnType<typeof render>;
+    act(() => {
+      result = render(React.createElement(Editor, makeProps()));
     });
+
+    // dispose is fire-and-forget (the cleanup attaches a .catch); a rejected
+    // promise must not throw synchronously out of the unmount cleanup.
+    expect(() =>
+      act(() => {
+        result.unmount();
+      }),
+    ).not.toThrow();
   });
 });

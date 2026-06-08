@@ -17,64 +17,66 @@ interface ErrorDetailsProps {
   status: 'ok' | 'error' | 'disabled';
 }
 
-export class ErrorDetails extends React.PureComponent<ErrorDetailsProps> {
-  render() {
-    const { simError, modelErrors, varErrors, varUnitErrors } = this.props;
-    const errors = [];
-    if (
-      simError &&
-      !(
-        (simError.code === ErrorCode.NotSimulatable || simError.code === ErrorCode.EmptyEquation) &&
-        modelErrors.length > 0
-      )
-    ) {
+export function ErrorDetails({
+  simError,
+  modelErrors,
+  varErrors,
+  varUnitErrors,
+}: ErrorDetailsProps): React.ReactElement {
+  const errors = [];
+  if (
+    simError &&
+    !(
+      (simError.code === ErrorCode.NotSimulatable || simError.code === ErrorCode.EmptyEquation) &&
+      modelErrors.length > 0
+    )
+  ) {
+    errors.push(
+      <div key="sim" className={styles.list}>
+        simulation error: {errorCodeDescription(simError.code)}
+      </div>,
+    );
+  }
+  if (modelErrors.length > 0) {
+    modelErrors.forEach((err, i) => {
+      if (err.code === ErrorCode.VariablesHaveErrors && varErrors.size > 0) {
+        return;
+      }
+      const details = err.details;
       errors.push(
-        <div key="sim" className={styles.list}>
-          simulation error: {errorCodeDescription(simError.code)}
+        <div key={`model-${i}-${err.code}`} className={styles.list}>
+          model error: {errorCodeDescription(err.code)}
+          {details ? `: ${details}` : undefined}
+        </div>,
+      );
+    });
+  }
+  for (const [ident, errs] of varErrors) {
+    for (const err of errs) {
+      errors.push(
+        <div key={`var-${ident}-${err.code}-${err.start}`} className={styles.list}>
+          variable "{ident}" error: {errorCodeDescription(err.code)}
         </div>,
       );
     }
-    if (modelErrors.length > 0) {
-      modelErrors.forEach((err, i) => {
-        if (err.code === ErrorCode.VariablesHaveErrors && varErrors.size > 0) {
-          return;
-        }
-        const details = err.details;
-        errors.push(
-          <div key={`model-${i}-${err.code}`} className={styles.list}>
-            model error: {errorCodeDescription(err.code)}
-            {details ? `: ${details}` : undefined}
-          </div>,
-        );
-      });
-    }
-    for (const [ident, errs] of varErrors) {
-      for (const err of errs) {
-        errors.push(
-          <div key={`var-${ident}-${err.code}-${err.start}`} className={styles.list}>
-            variable "{ident}" error: {errorCodeDescription(err.code)}
-          </div>,
-        );
-      }
-    }
-    for (const [ident, errs] of varUnitErrors) {
-      for (const err of errs) {
-        const details = err.details;
-        errors.push(
-          <div key={`unit-${ident}-${err.code}-${err.start}`} className={styles.list}>
-            variable "{ident}" unit error: {errorCodeDescription(err.code)}
-            {details ? `: ${details}` : undefined}
-          </div>,
-        );
-      }
-    }
-
-    return (
-      <div className={styles.card}>
-        <div className={styles.inner}>
-          {errors.length > 0 ? errors : <div className={styles.yay}>Your model is error free!</div>}
-        </div>
-      </div>
-    );
   }
+  for (const [ident, errs] of varUnitErrors) {
+    for (const err of errs) {
+      const details = err.details;
+      errors.push(
+        <div key={`unit-${ident}-${err.code}-${err.start}`} className={styles.list}>
+          variable "{ident}" unit error: {errorCodeDescription(err.code)}
+          {details ? `: ${details}` : undefined}
+        </div>,
+      );
+    }
+  }
+
+  return (
+    <div className={styles.card}>
+      <div className={styles.inner}>
+        {errors.length > 0 ? errors : <div className={styles.yay}>Your model is error free!</div>}
+      </div>
+    </div>
+  );
 }

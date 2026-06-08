@@ -23,99 +23,102 @@ interface DiagramProps {
   data?: ReadonlyMap<string, Series>;
 }
 
-interface DiagramState {
-  project: Project | undefined;
-}
+export function StaticDiagram(props: DiagramProps): React.ReactElement | null {
+  const { isDarkTheme, projectPbBase64, project: ssrProject, data } = props;
 
-export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramState> {
-  constructor(props: DiagramProps) {
-    super(props);
-
-    // Use pre-loaded project if provided (for SSR), otherwise undefined
-    let project = props.project;
-    if (project && props.data !== undefined) {
-      project = projectAttachData(project, props.data, 'main');
+  // Seed from the pre-loaded SSR project (attaching data if provided) exactly
+  // once, mirroring the old constructor's one-shot derivation. A lazy
+  // useState initializer matches the constructor-once semantics: it does not
+  // re-run when props change on subsequent renders.
+  const [project, setProject] = React.useState<Project | undefined>(() => {
+    let initial = ssrProject;
+    if (initial && data !== undefined) {
+      initial = projectAttachData(initial, data, 'main');
     }
+    return initial;
+  });
 
-    this.state = {
-      project,
+  // Async load when there is no pre-loaded project (i.e. not SSR), replacing
+  // componentDidMount. A `cancelled` flag guards the post-await setState so a
+  // StrictMode mount/unmount/mount cycle (or any unmount mid-load) does not
+  // update state on an unmounted tree.
+  React.useEffect(() => {
+    if (project) {
+      return undefined;
+    }
+    let cancelled = false;
+    void (async () => {
+      const serializedProject = toUint8Array(projectPbBase64);
+      const engineProject = await EngineProject.openProtobuf(serializedProject);
+      const json = JSON.parse(await engineProject.serializeJson()) as JsonProject;
+      let loaded = projectFromJson(json);
+      await engineProject.dispose();
+
+      if (data !== undefined) {
+        loaded = projectAttachData(loaded, data, 'main');
+      }
+
+      if (!cancelled) {
+        setProject(loaded);
+      }
+    })();
+    return () => {
+      cancelled = true;
     };
+    // Intentionally empty deps: this effect mirrors componentDidMount -- the
+    // load is keyed to mount, not to prop identity. The SSR seed already
+    // covers the has-project case, and the pb/data inputs are fixed for a
+    // given mounted diagram. (The repo lint config does not enable
+    // react-hooks/exhaustive-deps, so no disable directive is needed.)
+  }, []);
+
+  if (!project) {
+    return null;
   }
 
-  componentDidMount() {
-    // Only load if we don't already have a project (i.e., not SSR)
-    if (!this.state.project) {
-      this.loadProject();
-    }
-  }
+  const canUseDOM = !!(typeof window !== 'undefined' && window.document && window.document.createElement);
 
-  async loadProject() {
-    const serializedProject = toUint8Array(this.props.projectPbBase64);
-    const engineProject = await EngineProject.openProtobuf(serializedProject);
-    const json = JSON.parse(await engineProject.serializeJson()) as JsonProject;
-    let project = projectFromJson(json);
-    await engineProject.dispose();
+  const model = getOrThrow(project.models, 'main');
 
-    if (this.props.data !== undefined) {
-      project = projectAttachData(project, this.props.data, 'main');
-    }
+  const renameVariable = (_oldName: string, _newName: string): void => {};
+  const onSelection = (_selected: ReadonlySet<UID>): void => {};
+  const moveSelection = (_position: Point): void => {};
+  const moveFlow = (_element: ViewElement, _target: number, _position: Point): void => {};
+  const moveLabel = (_uid: UID, _side: 'top' | 'left' | 'bottom' | 'right'): void => {};
+  const attachLink = (_element: ViewElement, _to: string): void => {};
+  const createCb = (_element: ViewElement): void => {};
+  const nullCb = (): void => {};
 
-    this.setState({
-      project,
-    });
-  }
+  const canvasElement = (
+    <Canvas
+      embedded={true}
+      project={project}
+      model={model}
+      view={at(model.views, 0)}
+      version={1}
+      selectedTool={undefined}
+      selection={new Set()}
+      onRenameVariable={renameVariable}
+      onSetSelection={onSelection}
+      onMoveSelection={moveSelection}
+      onMoveFlow={moveFlow}
+      onMoveLabel={moveLabel}
+      onAttachLink={attachLink}
+      onCreateVariable={createCb}
+      onClearSelectedTool={nullCb}
+      onDeleteSelection={nullCb}
+      onShowVariableDetails={nullCb}
+      onViewBoxChange={nullCb}
+      onDrillIntoModule={nullCb}
+    />
+  );
 
-  render(): React.ReactNode {
-    const { project } = this.state;
-    if (!project) {
-      return null;
-    }
+  const themedCanvas = <div data-theme={isDarkTheme ? 'dark' : undefined}>{canvasElement}</div>;
 
-    const canUseDOM = !!(typeof window !== 'undefined' && window.document && window.document.createElement);
-    const isDarkTheme = this.props.isDarkTheme;
-
-    const model = getOrThrow(project.models, 'main');
-
-    const renameVariable = (_oldName: string, _newName: string): void => {};
-    const onSelection = (_selected: ReadonlySet<UID>): void => {};
-    const moveSelection = (_position: Point): void => {};
-    const moveFlow = (_element: ViewElement, _target: number, _position: Point): void => {};
-    const moveLabel = (_uid: UID, _side: 'top' | 'left' | 'bottom' | 'right'): void => {};
-    const attachLink = (_element: ViewElement, _to: string): void => {};
-    const createCb = (_element: ViewElement): void => {};
-    const nullCb = (): void => {};
-
-    const canvasElement = (
-      <Canvas
-        embedded={true}
-        project={project}
-        model={model}
-        view={at(model.views, 0)}
-        version={1}
-        selectedTool={undefined}
-        selection={new Set()}
-        onRenameVariable={renameVariable}
-        onSetSelection={onSelection}
-        onMoveSelection={moveSelection}
-        onMoveFlow={moveFlow}
-        onMoveLabel={moveLabel}
-        onAttachLink={attachLink}
-        onCreateVariable={createCb}
-        onClearSelectedTool={nullCb}
-        onDeleteSelection={nullCb}
-        onShowVariableDetails={nullCb}
-        onViewBoxChange={nullCb}
-        onDrillIntoModule={nullCb}
-      />
-    );
-
-    const themedCanvas = <div data-theme={isDarkTheme ? 'dark' : undefined}>{canvasElement}</div>;
-
-    if (canUseDOM) {
-      return themedCanvas;
-    } else {
-      renderToString(themedCanvas);
-      return <>{themedCanvas}</>;
-    }
+  if (canUseDOM) {
+    return themedCanvas;
+  } else {
+    renderToString(themedCanvas);
+    return <>{themedCanvas}</>;
   }
 }

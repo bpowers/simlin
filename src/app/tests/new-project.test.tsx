@@ -61,6 +61,7 @@ jest.mock(
 );
 
 import * as React from 'react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 
 import { NewProject } from '../NewProject';
 import type { User } from '../User';
@@ -70,11 +71,9 @@ function makeFakeFile(name: string, contents: string): File {
   return new File([contents], name, { type: 'text/plain' });
 }
 
-function buildEvent(file: File): React.ChangeEvent<HTMLInputElement> {
-  return {
-    target: { files: [file] as unknown as FileList } as unknown as EventTarget & HTMLInputElement,
-  } as unknown as React.ChangeEvent<HTMLInputElement>;
-}
+afterEach(() => {
+  cleanup();
+});
 
 describe('NewProject.uploadModel', () => {
   beforeEach(() => {
@@ -96,29 +95,36 @@ describe('NewProject.uploadModel', () => {
     });
   });
 
-  function makeComponent() {
+  // Render a real NewProject and drive its hidden file <input> with the given
+  // file, awaiting the async uploadModel handler to completion. NewProject is
+  // a function component, so we exercise uploadModel through its observable
+  // surface (the file input's onChange) rather than reaching into an instance.
+  async function uploadFile(file: File): Promise<void> {
     const fakeUser = { id: 'tester', email: 't@example.com', displayName: 'tester' } as unknown as User;
     const onProjectCreated = jest.fn();
-    const props = { user: fakeUser, onProjectCreated };
-    // Construct without rendering so we don't have to mock the full diagram library.
-    return new NewProject(props);
+    const { container } = render(<NewProject user={fakeUser} onProjectCreated={onProjectCreated} />);
+
+    const input = container.querySelector('#xmile-model-file') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    // Drive React's onChange via fireEvent (it wraps the dispatch in act and
+    // routes through React's synthetic event system) with a target.files list
+    // uploadModel reads. The async uploadModel chain (readFile -> engine open
+    // -> serialize -> dispose) settles via the dispose assertion's waitFor.
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => {
+      expect(dispose).toHaveBeenCalled();
+    });
   }
 
   test('disposes the engine project after a successful XMILE upload', async () => {
-    const component = makeComponent();
-    const event = buildEvent(makeFakeFile('model.xmile', '<xmile/>'));
-
-    await component.uploadModel(event);
+    await uploadFile(makeFakeFile('model.xmile', '<xmile/>'));
 
     expect(open).toHaveBeenCalledTimes(1);
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
   test('disposes the engine project after a successful Vensim upload', async () => {
-    const component = makeComponent();
-    const event = buildEvent(makeFakeFile('model.mdl', 'vensim contents'));
-
-    await component.uploadModel(event);
+    await uploadFile(makeFakeFile('model.mdl', 'vensim contents'));
 
     expect(openVensim).toHaveBeenCalledTimes(1);
     expect(dispose).toHaveBeenCalledTimes(1);
@@ -126,16 +132,12 @@ describe('NewProject.uploadModel', () => {
 
   test('disposes the engine project even when serializeProtobuf rejects', async () => {
     serializeProtobuf.mockRejectedValueOnce(new Error('boom'));
-    const component = makeComponent();
-    const event = buildEvent(makeFakeFile('model.xmile', '<xmile/>'));
 
-    await component.uploadModel(event);
+    await uploadFile(makeFakeFile('model.xmile', '<xmile/>'));
 
     // Dispose must run regardless of the inner failure to avoid leaking the
-    // WASM handle. The error is surfaced via setState (errorMsg); we don't
-    // assert on errorMsg here because setState on an unmounted component is
-    // a no-op test-side, but the dispose discipline is the load-bearing
-    // behavior.
+    // WASM handle. The error is surfaced via setErrorMsg; the dispose
+    // discipline is the load-bearing behavior under test here.
     expect(open).toHaveBeenCalledTimes(1);
     expect(dispose).toHaveBeenCalledTimes(1);
   });
@@ -144,10 +146,8 @@ describe('NewProject.uploadModel', () => {
     projectFromJson.mockImplementationOnce(() => {
       throw new Error('bad json');
     });
-    const component = makeComponent();
-    const event = buildEvent(makeFakeFile('model.xmile', '<xmile/>'));
 
-    await component.uploadModel(event);
+    await uploadFile(makeFakeFile('model.xmile', '<xmile/>'));
 
     expect(dispose).toHaveBeenCalledTimes(1);
   });

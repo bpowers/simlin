@@ -20,36 +20,34 @@ interface IconButtonProps {
   children?: React.ReactNode;
 }
 
-export default class IconButton extends React.PureComponent<IconButtonProps> {
-  render() {
-    const { color, edge = false, size = 'medium', disabled, onClick, className, style, children, ...rest } = this.props;
+export default function IconButton(props: IconButtonProps): React.ReactElement {
+  const { color, edge = false, size = 'medium', disabled, onClick, className, style, children, ...rest } = props;
 
-    const sizeClassMap: Record<NonNullable<IconButtonProps['size']>, string> = {
-      small: styles.sizeSmall,
-      medium: styles.sizeMedium,
-      large: styles.sizeLarge,
-    };
-    const sizeClass = sizeClassMap[size];
+  const sizeClassMap: Record<NonNullable<IconButtonProps['size']>, string> = {
+    small: styles.sizeSmall,
+    medium: styles.sizeMedium,
+    large: styles.sizeLarge,
+  };
+  const sizeClass = sizeClassMap[size];
 
-    return (
-      <button
-        className={clsx(
-          styles.iconButton,
-          color === 'inherit' && styles.colorInherit,
-          edge === 'start' && styles.edgeStart,
-          edge === 'end' && styles.edgeEnd,
-          sizeClass,
-          disabled && styles.disabled,
-          className,
-        )}
-        disabled={disabled}
-        onClick={onClick}
-        style={style}
-        type="button"
-        {...rest}
-      >
-        {children}
-      </button>
-    );
-  }
+  return (
+    <button
+      className={clsx(
+        styles.iconButton,
+        color === 'inherit' && styles.colorInherit,
+        edge === 'start' && styles.edgeStart,
+        edge === 'end' && styles.edgeEnd,
+        sizeClass,
+        disabled && styles.disabled,
+        className,
+      )}
+      disabled={disabled}
+      onClick={onClick}
+      style={style}
+      type="button"
+      {...rest}
+    >
+      {children}
+    </button>
+  );
 }

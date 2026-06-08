@@ -6,32 +6,34 @@ import * as React from 'react';
 import { render, fireEvent, screen, waitFor, act } from '@testing-library/react';
 import Autocomplete from '../components/Autocomplete';
 
-// Simple controlled component to test Autocomplete with external value changes
-class ControlledAutocomplete extends React.Component<
-  { initialValue?: string; options: string[] },
-  { value: string | null }
-> {
-  state = { value: this.props.initialValue || null };
-
-  setValue = (newValue: string | null) => {
-    this.setState({ value: newValue });
-  };
-
-  render() {
-    return (
-      <Autocomplete
-        value={this.state.value}
-        options={this.props.options}
-        onChange={(_event, newValue) => this.setValue(newValue)}
-        renderInput={(params) => (
-          <div ref={params.InputProps.ref}>
-            <input {...params.inputProps} data-testid="autocomplete-input" />
-          </div>
-        )}
-      />
-    );
-  }
+// Simple controlled component to test Autocomplete with external value changes.
+// Exposes a `setValue` imperative handle so tests can drive the value prop from
+// outside, matching the old class component's public surface.
+interface ControlledAutocompleteHandle {
+  setValue: (newValue: string | null) => void;
 }
+
+const ControlledAutocomplete = React.forwardRef<
+  ControlledAutocompleteHandle,
+  { initialValue?: string; options: string[] }
+>(function ControlledAutocomplete({ initialValue, options }, ref) {
+  const [value, setValue] = React.useState<string | null>(initialValue || null);
+
+  React.useImperativeHandle(ref, () => ({ setValue }), []);
+
+  return (
+    <Autocomplete
+      value={value}
+      options={options}
+      onChange={(_event, newValue) => setValue(newValue)}
+      renderInput={(params) => (
+        <div ref={params.InputProps.ref}>
+          <input {...params.inputProps} data-testid="autocomplete-input" />
+        </div>
+      )}
+    />
+  );
+});
 
 describe('Autocomplete', () => {
   test('renders input element', () => {
@@ -76,7 +78,7 @@ describe('Autocomplete', () => {
   });
 
   test('syncs inputValue when value prop changes externally', async () => {
-    const ref = React.createRef<ControlledAutocomplete>();
+    const ref = React.createRef<ControlledAutocompleteHandle>();
     render(<ControlledAutocomplete ref={ref} options={['apple', 'banana', 'cherry']} />);
 
     const input = screen.getByTestId('autocomplete-input') as HTMLInputElement;
@@ -94,7 +96,7 @@ describe('Autocomplete', () => {
   });
 
   test('inputValue syncs when value prop changes from one value to another', async () => {
-    const ref = React.createRef<ControlledAutocomplete>();
+    const ref = React.createRef<ControlledAutocompleteHandle>();
     render(<ControlledAutocomplete ref={ref} initialValue="apple" options={['apple', 'banana', 'cherry']} />);
 
     const input = screen.getByTestId('autocomplete-input') as HTMLInputElement;
@@ -114,7 +116,7 @@ describe('Autocomplete', () => {
   });
 
   test('inputValue clears when value prop is set to null', async () => {
-    const ref = React.createRef<ControlledAutocomplete>();
+    const ref = React.createRef<ControlledAutocompleteHandle>();
     render(<ControlledAutocomplete ref={ref} initialValue="apple" options={['apple', 'banana', 'cherry']} />);
 
     const input = screen.getByTestId('autocomplete-input') as HTMLInputElement;

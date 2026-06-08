@@ -32,15 +32,6 @@ interface NewProjectProps {
   onProjectCreated: (project: Project) => void;
 }
 
-interface NewProjectState {
-  projectNameField: string;
-  descriptionField: string;
-  errorMsg?: string;
-  expanded: boolean;
-  projectPB?: Uint8Array;
-  isPublic?: boolean;
-}
-
 const readFile = (file: Blob): Promise<string> => {
   const reader = new FileReader();
 
@@ -57,44 +48,62 @@ const readFile = (file: Blob): Promise<string> => {
   });
 };
 
-export class NewProject extends React.Component<NewProjectProps, NewProjectState> {
-  state: NewProjectState;
+export function NewProject(props: NewProjectProps): React.JSX.Element {
+  const [projectNameField, setProjectNameField] = React.useState('');
+  const [descriptionField, setDescriptionField] = React.useState('');
+  const [errorMsg, setErrorMsg] = React.useState<string | undefined>(undefined);
+  const [projectPB, setProjectPB] = React.useState<Uint8Array | undefined>(undefined);
+  const [isPublic, setIsPublic] = React.useState<boolean | undefined>(undefined);
 
-  constructor(props: NewProjectProps) {
-    super(props);
-    this.state = {
-      projectNameField: '',
-      descriptionField: '',
-      expanded: false,
-    };
-  }
-
-  handleProjectNameChanged = (event: React.ChangeEvent<HTMLInputElement>): void => {
-    this.setState({
-      projectNameField: event.target.value,
-    });
+  // The deferred setProjectName() (scheduled via setTimeout from handleClose)
+  // and the async uploadModel continuation read the freshest form values and
+  // the onProjectCreated callback through this ref, so they observe current
+  // values rather than those captured when they were kicked off.
+  const latest = React.useRef<{
+    projectNameField: string;
+    descriptionField: string;
+    projectPB: Uint8Array | undefined;
+    isPublic: boolean | undefined;
+    onProjectCreated: (project: Project) => void;
+  }>(
+    undefined as unknown as {
+      projectNameField: string;
+      descriptionField: string;
+      projectPB: Uint8Array | undefined;
+      isPublic: boolean | undefined;
+      onProjectCreated: (project: Project) => void;
+    },
+  );
+  latest.current = {
+    projectNameField,
+    descriptionField,
+    projectPB,
+    isPublic,
+    onProjectCreated: props.onProjectCreated,
   };
 
-  handleDescriptionChanged = (event: React.ChangeEvent<HTMLInputElement>): void => {
-    this.setState({
-      descriptionField: event.target.value,
-    });
+  const handleProjectNameChanged = (event: React.ChangeEvent<HTMLInputElement>): void => {
+    setProjectNameField(event.target.value);
   };
 
-  setProjectName = async (): Promise<void> => {
+  const handleDescriptionChanged = (event: React.ChangeEvent<HTMLInputElement>): void => {
+    setDescriptionField(event.target.value);
+  };
+
+  const setProjectName = async (): Promise<void> => {
     const bodyContents: {
       projectName: string;
       description: string;
       projectPB?: string;
       isPublic?: boolean;
     } = {
-      projectName: this.state.projectNameField,
-      description: this.state.descriptionField,
+      projectName: latest.current.projectNameField,
+      description: latest.current.descriptionField,
     };
-    if (this.state.projectPB) {
-      bodyContents.projectPB = fromUint8Array(this.state.projectPB);
+    if (latest.current.projectPB) {
+      bodyContents.projectPB = fromUint8Array(latest.current.projectPB);
     }
-    if (this.state.isPublic) {
+    if (latest.current.isPublic) {
       bodyContents.isPublic = true;
     }
     const response = await fetch('/api/projects', {
@@ -112,38 +121,34 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
       const body = await response.json();
       const errorMsg =
         body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
-      this.setState({
-        errorMsg,
-      });
+      setErrorMsg(errorMsg);
       return;
     }
 
     const project = (await response.json()) as Project;
-    this.props.onProjectCreated(project);
+    latest.current.onProjectCreated(project);
   };
 
-  handleKeyPress = (event: React.KeyboardEvent<HTMLDivElement>) => {
+  const handleClose = (): void => {
+    if (latest.current.projectNameField === '') {
+      setErrorMsg('Please give your project a non-empty name');
+    } else {
+      setTimeout(setProjectName);
+    }
+  };
+
+  const handleKeyPress = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Enter') {
       event.preventDefault();
-      this.handleClose();
+      handleClose();
     }
   };
 
-  handleClose = (): void => {
-    if (this.state.projectNameField === '') {
-      this.setState({
-        errorMsg: 'Please give your project a non-empty name',
-      });
-    } else {
-      setTimeout(this.setProjectName);
-    }
+  const handlePublicChecked = (checked: boolean): void => {
+    setIsPublic(checked);
   };
 
-  handlePublicChecked = (checked: boolean): void => {
-    this.setState({ isPublic: checked });
-  };
-
-  uploadModel = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const uploadModel = async (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!event.target || !event.target.files || event.target.files.length <= 0) {
       console.log('expected non-empty list of files?');
       return;
@@ -159,9 +164,7 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
       }
     } catch (e) {
       // The engine never produced a handle, so there's nothing to dispose.
-      this.setState({
-        errorMsg: `${e}`,
-      });
+      setErrorMsg(`${e}`);
       return;
     }
 
@@ -175,108 +178,100 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
       const activeProject = projectFromJson(json);
       const views = activeProject.models.get('main')?.views;
       if (!views || views.length === 0) {
-        this.setState({
-          errorMsg: `can't import model with no view at this time.`,
-        });
+        setErrorMsg(`can't import model with no view at this time.`);
         return;
       }
 
-      this.setState({
-        projectPB,
-        errorMsg: undefined,
-      });
+      setProjectPB(projectPB);
+      setErrorMsg(undefined);
     } catch (e) {
-      this.setState({
-        errorMsg: `${e}`,
-      });
+      setErrorMsg(`${e}`);
     } finally {
       await engineProject.dispose();
     }
   };
 
-  render() {
-    const warningText = this.state.errorMsg || '';
-    return (
-      <div>
-        <h2 className={typography.heading2}>Create a project</h2>
-        <div className={styles.subtitle}>
-          <p className={typography.subtitle1}>A project holds models and data, along with simulation results.</p>
-        </div>
-        <br />
-        <TextField
-          onChange={this.handleProjectNameChanged}
-          autoFocus
-          id="projectName"
-          label="Project Name"
-          type="text"
-          error={this.state.errorMsg !== undefined}
-          onKeyPress={this.handleKeyPress}
-          fullWidth
-          InputProps={{
-            startAdornment: <InputAdornment position="start">{this.props.user.id}/</InputAdornment>,
-          }}
-        />
-        <br />
-        <br />
-        <TextField
-          onChange={this.handleDescriptionChanged}
-          id="description"
-          label="Project Description"
-          type="text"
-          onKeyPress={this.handleKeyPress}
-          fullWidth
-        />
-
-        <br />
-        <br />
-
-        <Accordion>
-          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-            <div>
-              <span>Advanced</span>
-            </div>
-          </AccordionSummary>
-          <AccordionDetails>
-            <form>
-              <div className={styles.advancedGrid}>
-                <div className={styles.gridCol8}>
-                  <span>Use existing model</span>
-                </div>
-                <div className={styles.gridCol4}>
-                  <Button variant="contained" className="NewProject-upload-button" color="secondary" component="label">
-                    Select
-                    <input
-                      style={{ display: 'none' }}
-                      accept=".stmx,.itmx,.xmile,.mdl"
-                      id="xmile-model-file"
-                      type="file"
-                      onChange={this.uploadModel}
-                    />
-                  </Button>
-                </div>
-                <div className={styles.gridCol12}>
-                  <FormControlLabel
-                    control={<Checkbox checked={this.state.isPublic} onChange={this.handlePublicChecked} />}
-                    label="Publicly accessible"
-                  />
-                </div>
-              </div>
-            </form>
-          </AccordionDetails>
-        </Accordion>
-
-        <br />
-        <br />
-        <br />
-        <p className={typography.subtitle2} style={{ whiteSpace: 'pre-wrap' }}>
-          <b>{warningText || '\xa0'}</b>
-        </p>
-        <p className={typography.textRight}>
-          <Button onClick={this.handleClose} color="primary">
-            Create
-          </Button>
-        </p>
+  const warningText = errorMsg || '';
+  return (
+    <div>
+      <h2 className={typography.heading2}>Create a project</h2>
+      <div className={styles.subtitle}>
+        <p className={typography.subtitle1}>A project holds models and data, along with simulation results.</p>
       </div>
-    );
-  }
+      <br />
+      <TextField
+        onChange={handleProjectNameChanged}
+        autoFocus
+        id="projectName"
+        label="Project Name"
+        type="text"
+        error={errorMsg !== undefined}
+        onKeyPress={handleKeyPress}
+        fullWidth
+        InputProps={{
+          startAdornment: <InputAdornment position="start">{props.user.id}/</InputAdornment>,
+        }}
+      />
+      <br />
+      <br />
+      <TextField
+        onChange={handleDescriptionChanged}
+        id="description"
+        label="Project Description"
+        type="text"
+        onKeyPress={handleKeyPress}
+        fullWidth
+      />
+
+      <br />
+      <br />
+
+      <Accordion>
+        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+          <div>
+            <span>Advanced</span>
+          </div>
+        </AccordionSummary>
+        <AccordionDetails>
+          <form>
+            <div className={styles.advancedGrid}>
+              <div className={styles.gridCol8}>
+                <span>Use existing model</span>
+              </div>
+              <div className={styles.gridCol4}>
+                <Button variant="contained" className="NewProject-upload-button" color="secondary" component="label">
+                  Select
+                  <input
+                    style={{ display: 'none' }}
+                    accept=".stmx,.itmx,.xmile,.mdl"
+                    id="xmile-model-file"
+                    type="file"
+                    onChange={uploadModel}
+                  />
+                </Button>
+              </div>
+              <div className={styles.gridCol12}>
+                <FormControlLabel
+                  control={<Checkbox checked={isPublic} onChange={handlePublicChecked} />}
+                  label="Publicly accessible"
+                />
+              </div>
+            </div>
+          </form>
+        </AccordionDetails>
+      </Accordion>
+
+      <br />
+      <br />
+      <br />
+      <p className={typography.subtitle2} style={{ whiteSpace: 'pre-wrap' }}>
+        <b>{warningText || '\xa0'}</b>
+      </p>
+      <p className={typography.textRight}>
+        <Button onClick={handleClose} color="primary">
+          Create
+        </Button>
+      </p>
+    </div>
+  );
 }

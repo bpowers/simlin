@@ -35,133 +35,74 @@ interface TextFieldProps {
   onKeyPress?: (event: React.KeyboardEvent<HTMLInputElement>) => void;
 }
 
-interface TextFieldState {
-  isFocused: boolean;
-  generatedId: string;
-}
+export default function TextField(props: TextFieldProps): React.ReactElement {
+  const {
+    id,
+    variant = 'outlined',
+    label,
+    value,
+    onChange,
+    type,
+    margin,
+    fullWidth,
+    error,
+    helperText,
+    placeholder,
+    className,
+    autoFocus,
+    autoComplete,
+    name,
+    InputProps,
+    inputProps,
+    onKeyPress,
+    ...rest
+  } = props;
 
-export default class TextField extends React.PureComponent<TextFieldProps, TextFieldState> {
-  constructor(props: TextFieldProps) {
-    super(props);
-    this.state = {
-      isFocused: false,
-      generatedId: `textfield-${++textFieldIdCounter}`,
-    };
-  }
+  const [isFocused, setIsFocused] = React.useState(false);
+  // Generate a stable fallback id exactly once per mount (lazy initializer),
+  // mirroring the old constructor's one-shot counter bump.
+  const [generatedId] = React.useState(() => `textfield-${++textFieldIdCounter}`);
 
-  handleFocus = (event: React.FocusEvent<HTMLInputElement>) => {
-    this.setState({ isFocused: true });
+  const handleFocus = (event: React.FocusEvent<HTMLInputElement>): void => {
+    setIsFocused(true);
     // Chain with any external handler from inputProps
-    this.props.inputProps?.onFocus?.(event);
+    inputProps?.onFocus?.(event);
   };
 
-  handleBlur = (event: React.FocusEvent<HTMLInputElement>) => {
-    this.setState({ isFocused: false });
+  const handleBlur = (event: React.FocusEvent<HTMLInputElement>): void => {
+    setIsFocused(false);
     // Chain with any external handler from inputProps
-    this.props.inputProps?.onBlur?.(event);
+    inputProps?.onBlur?.(event);
   };
 
-  render() {
-    const {
-      id,
-      variant = 'outlined',
-      label,
-      value,
-      onChange,
-      type,
-      margin,
-      fullWidth,
-      error,
-      helperText,
-      placeholder,
-      className,
-      autoFocus,
-      autoComplete,
-      name,
-      InputProps,
-      inputProps,
-      onKeyPress,
-      ...rest
-    } = this.props;
-    const { isFocused, generatedId } = this.state;
+  const inputId = id || generatedId;
 
-    const inputId = id || generatedId;
+  // Extract onFocus/onBlur from inputProps since we chain them in our handlers
+  const { onFocus: _onFocus, onBlur: _onBlur, ...restInputProps } = inputProps || {};
 
-    // Extract onFocus/onBlur from inputProps since we chain them in our handlers
-    const { onFocus: _onFocus, onBlur: _onBlur, ...restInputProps } = inputProps || {};
+  const startAdornment = InputProps?.startAdornment;
 
-    const startAdornment = InputProps?.startAdornment;
+  const rootClasses = clsx(
+    styles.root,
+    fullWidth && styles.fullWidth,
+    margin === 'normal' && styles.marginNormal,
+    margin === 'dense' && styles.marginDense,
+    className,
+  );
 
-    const rootClasses = clsx(
-      styles.root,
-      fullWidth && styles.fullWidth,
-      margin === 'normal' && styles.marginNormal,
-      margin === 'dense' && styles.marginDense,
-      className,
-    );
+  if (variant === 'standard') {
+    const disableUnderline = InputProps?.disableUnderline;
+    const wrapperRef = InputProps?.ref;
 
-    if (variant === 'standard') {
-      const disableUnderline = InputProps?.disableUnderline;
-      const wrapperRef = InputProps?.ref;
-
-      const wrapperClasses = clsx(
-        styles.standardWrapper,
-        disableUnderline && styles.standardNoUnderline,
-        isFocused && !disableUnderline && styles.standardFocused,
-        error && !disableUnderline && styles.standardError,
-      );
-
-      const labelClasses = label
-        ? clsx(styles.standardLabel, isFocused && styles.standardLabelFocused, error && styles.standardLabelError)
-        : undefined;
-
-      return (
-        <div className={rootClasses}>
-          {label && (
-            <label htmlFor={inputId} className={labelClasses}>
-              {label}
-            </label>
-          )}
-          <div className={wrapperClasses} ref={wrapperRef}>
-            <div className={styles.inputContainer}>
-              {startAdornment}
-              <input
-                className={styles.standardInput}
-                value={value}
-                onChange={onChange}
-                type={type}
-                placeholder={placeholder}
-                onFocus={this.handleFocus}
-                onBlur={this.handleBlur}
-                autoFocus={autoFocus}
-                autoComplete={autoComplete}
-                name={name}
-                onKeyPress={onKeyPress}
-                {...rest}
-                {...restInputProps}
-                // After the spreads: restInputProps (downshift's
-                // getInputProps() when used inside Autocomplete) must win for
-                // value/onChange/keyboard handling, but the rendered id has
-                // to stay inputId so <label htmlFor={inputId}> keeps pointing
-                // at this input.
-                id={inputId}
-              />
-            </div>
-          </div>
-          {helperText && <p className={clsx(styles.helperText, error && styles.helperTextError)}>{helperText}</p>}
-        </div>
-      );
-    }
-
-    // outlined variant
     const wrapperClasses = clsx(
-      styles.outlinedWrapper,
-      isFocused && styles.outlinedFocused,
-      error && styles.outlinedError,
+      styles.standardWrapper,
+      disableUnderline && styles.standardNoUnderline,
+      isFocused && !disableUnderline && styles.standardFocused,
+      error && !disableUnderline && styles.standardError,
     );
 
     const labelClasses = label
-      ? clsx(styles.outlinedLabel, isFocused && styles.outlinedLabelFocused, error && styles.outlinedLabelError)
+      ? clsx(styles.standardLabel, isFocused && styles.standardLabelFocused, error && styles.standardLabelError)
       : undefined;
 
     return (
@@ -171,25 +112,28 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
             {label}
           </label>
         )}
-        <div className={wrapperClasses}>
+        <div className={wrapperClasses} ref={wrapperRef}>
           <div className={styles.inputContainer}>
             {startAdornment}
             <input
-              className={styles.outlinedInput}
+              className={styles.standardInput}
               value={value}
               onChange={onChange}
               type={type}
               placeholder={placeholder}
-              onFocus={this.handleFocus}
-              onBlur={this.handleBlur}
+              onFocus={handleFocus}
+              onBlur={handleBlur}
               autoFocus={autoFocus}
               autoComplete={autoComplete}
               name={name}
               onKeyPress={onKeyPress}
               {...rest}
               {...restInputProps}
-              // See the standard variant: id must survive the spreads so the
-              // label association holds.
+              // After the spreads: restInputProps (downshift's
+              // getInputProps() when used inside Autocomplete) must win for
+              // value/onChange/keyboard handling, but the rendered id has
+              // to stay inputId so <label htmlFor={inputId}> keeps pointing
+              // at this input.
               id={inputId}
             />
           </div>
@@ -198,4 +142,49 @@ export default class TextField extends React.PureComponent<TextFieldProps, TextF
       </div>
     );
   }
+
+  // outlined variant
+  const wrapperClasses = clsx(
+    styles.outlinedWrapper,
+    isFocused && styles.outlinedFocused,
+    error && styles.outlinedError,
+  );
+
+  const labelClasses = label
+    ? clsx(styles.outlinedLabel, isFocused && styles.outlinedLabelFocused, error && styles.outlinedLabelError)
+    : undefined;
+
+  return (
+    <div className={rootClasses}>
+      {label && (
+        <label htmlFor={inputId} className={labelClasses}>
+          {label}
+        </label>
+      )}
+      <div className={wrapperClasses}>
+        <div className={styles.inputContainer}>
+          {startAdornment}
+          <input
+            className={styles.outlinedInput}
+            value={value}
+            onChange={onChange}
+            type={type}
+            placeholder={placeholder}
+            onFocus={handleFocus}
+            onBlur={handleBlur}
+            autoFocus={autoFocus}
+            autoComplete={autoComplete}
+            name={name}
+            onKeyPress={onKeyPress}
+            {...rest}
+            {...restInputProps}
+            // See the standard variant: id must survive the spreads so the
+            // label association holds.
+            id={inputId}
+          />
+        </div>
+      </div>
+      {helperText && <p className={clsx(styles.helperText, error && styles.helperTextError)}>{helperText}</p>}
+    </div>
+  );
 }

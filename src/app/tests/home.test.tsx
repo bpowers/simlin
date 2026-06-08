@@ -100,15 +100,27 @@ describe('Home logout', () => {
 });
 
 describe('Home.getProjects lifecycle', () => {
-  it('does not fetch from the constructor alone (StrictMode safety)', () => {
+  it('does not fetch during render and fetches once under StrictMode (StrictMode safety)', async () => {
     jest.useFakeTimers();
     const fetchMock = mockFetch(okProjects);
 
-    // Constructing without mounting must not schedule the fetch.
-    new (Home as unknown as new (props: unknown) => unknown)({ user, isNewProject: false, onLogout: () => {} });
-    jest.runAllTimers();
+    // Render under StrictMode, which double-invokes the render phase and runs
+    // mount -> unmount -> mount on the committed fiber. The deferred fetch
+    // lives in a mount effect (cancelled by its cleanup), not a render side
+    // effect, so rendering alone schedules nothing observable until timers run,
+    // and the StrictMode mount/unmount/mount nets exactly one surviving fetch.
+    render(
+      <React.StrictMode>
+        <Home user={user} isNewProject={false} onLogout={() => {}} />
+      </React.StrictMode>,
+    );
 
     expect(fetchMock).not.toHaveBeenCalled();
+    await act(async () => {
+      jest.runAllTimers();
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('fetches after mount', async () => {

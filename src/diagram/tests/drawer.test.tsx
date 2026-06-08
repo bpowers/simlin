@@ -6,26 +6,33 @@ import * as React from 'react';
 import { render, fireEvent, waitFor, act } from '@testing-library/react';
 import Drawer from '../components/Drawer';
 
-// Controlled wrapper for Drawer to test open/close behavior
-class ControlledDrawer extends React.Component<{ children?: React.ReactNode }, { open: boolean; closeCount: number }> {
-  state = { open: false, closeCount: 0 };
+// Controlled wrapper for Drawer to test open/close behavior. Exposes the same
+// imperative surface the old class component did -- `setOpen` plus a live
+// `state` object -- so tests can drive and inspect it through a ref.
+interface ControlledDrawerHandle {
+  setOpen: (open: boolean) => void;
+  state: { open: boolean; closeCount: number };
+}
 
-  setOpen = (open: boolean) => {
-    this.setState({ open });
-  };
+const ControlledDrawer = React.forwardRef<ControlledDrawerHandle, { children?: React.ReactNode }>(
+  function ControlledDrawer({ children }, ref) {
+    const [open, setOpen] = React.useState(false);
+    const [closeCount, setCloseCount] = React.useState(0);
 
-  handleClose = () => {
-    this.setState((prev) => ({ open: false, closeCount: prev.closeCount + 1 }));
-  };
+    const handleClose = () => {
+      setOpen(false);
+      setCloseCount((prev) => prev + 1);
+    };
 
-  render() {
+    React.useImperativeHandle(ref, () => ({ setOpen, state: { open, closeCount } }), [open, closeCount]);
+
     return (
-      <Drawer open={this.state.open} onClose={this.handleClose}>
-        {this.props.children}
+      <Drawer open={open} onClose={handleClose}>
+        {children}
       </Drawer>
     );
-  }
-}
+  },
+);
 
 describe('Drawer', () => {
   test('renders children when open', () => {
@@ -67,7 +74,7 @@ describe('Drawer', () => {
   });
 
   test('calls onClose when backdrop is clicked', () => {
-    const ref = React.createRef<ControlledDrawer>();
+    const ref = React.createRef<ControlledDrawerHandle>();
     render(
       <ControlledDrawer ref={ref}>
         <div>Content</div>
@@ -87,7 +94,7 @@ describe('Drawer', () => {
   });
 
   test('calls onClose when Escape key is pressed', () => {
-    const ref = React.createRef<ControlledDrawer>();
+    const ref = React.createRef<ControlledDrawerHandle>();
     render(
       <ControlledDrawer ref={ref}>
         <div>Content</div>
@@ -106,7 +113,7 @@ describe('Drawer', () => {
   });
 
   test('does not call onClose when Escape key is pressed while closed', () => {
-    const ref = React.createRef<ControlledDrawer>();
+    const ref = React.createRef<ControlledDrawerHandle>();
     render(
       <ControlledDrawer ref={ref}>
         <div>Content</div>
@@ -119,7 +126,7 @@ describe('Drawer', () => {
   });
 
   test('focuses the panel when opened', async () => {
-    const ref = React.createRef<ControlledDrawer>();
+    const ref = React.createRef<ControlledDrawerHandle>();
     render(
       <ControlledDrawer ref={ref}>
         <div>Content</div>
@@ -139,7 +146,7 @@ describe('Drawer', () => {
   test('restores focus to previous element when closed', async () => {
     // Create a button that will have focus before the drawer opens
     const buttonRef = React.createRef<HTMLButtonElement>();
-    const ref = React.createRef<ControlledDrawer>();
+    const ref = React.createRef<ControlledDrawerHandle>();
 
     render(
       <>
@@ -167,6 +174,55 @@ describe('Drawer', () => {
     // Close the drawer
     act(() => {
       ref.current!.setOpen(false);
+    });
+
+    await waitFor(() => {
+      expect(document.activeElement).toBe(buttonRef.current);
+    });
+  });
+
+  test('restores focus to the pre-open element when mounted open under StrictMode', async () => {
+    // Regression guard: StrictMode double-invokes the mount effect, so the focus
+    // effect's body runs twice for a Drawer that mounts with open===true. The
+    // first run saves the real prior focus and focuses the panel; without the
+    // `activeElement === panel` guard the second run would overwrite
+    // previousActiveElement with the panel itself, so a later close would
+    // "restore" focus to the hidden drawer instead of the button focused before
+    // the drawer mounted.
+    const buttonRef = React.createRef<HTMLButtonElement>();
+    const openRef = React.createRef<{ close: () => void }>();
+
+    // Wrapper that mounts the Drawer ALREADY OPEN (the case the double-invoked
+    // mount effect exercises) and exposes a way to close it.
+    function MountOpenDrawer(): React.ReactElement {
+      const [open, setOpen] = React.useState(true);
+      React.useImperativeHandle(openRef, () => ({ close: () => setOpen(false) }));
+      return (
+        <Drawer open={open} onClose={() => setOpen(false)}>
+          <button>Inside Button</button>
+        </Drawer>
+      );
+    }
+
+    // Focus the outside button before the StrictMode subtree (with the open
+    // Drawer) mounts.
+    render(<button ref={buttonRef}>Outside Button</button>);
+    buttonRef.current!.focus();
+    expect(document.activeElement).toBe(buttonRef.current);
+
+    render(
+      <React.StrictMode>
+        <MountOpenDrawer />
+      </React.StrictMode>,
+    );
+
+    await waitFor(() => {
+      const panel = document.querySelector('[role="dialog"]');
+      expect(document.activeElement).toBe(panel);
+    });
+
+    act(() => {
+      openRef.current!.close();
     });
 
     await waitFor(() => {

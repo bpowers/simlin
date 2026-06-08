@@ -40,52 +40,53 @@ interface TooltipState {
   seriesValues: Array<{ name: string; color: string; value: number }>;
 }
 
-interface LineChartState {
-  containerWidth: number;
-  tooltip: TooltipState;
-}
-
 let nextId = 0;
 
-export class LineChart extends React.PureComponent<LineChartProps, LineChartState> {
-  private readonly clipId: string;
-  private readonly containerRef: React.RefObject<HTMLDivElement | null>;
-  private resizeObserver: ResizeObserver | undefined;
-  private dragging = false;
+export function LineChart(props: LineChartProps): React.ReactElement {
+  const { height, series, gridLines: gridLinesProp, tooltipFormatter, onPointDrag, onDragStart, onDragEnd } = props;
 
-  constructor(props: LineChartProps) {
-    super(props);
-    this.clipId = `plot-clip-${nextId++}`;
-    this.containerRef = React.createRef();
-    this.state = {
-      containerWidth: 0,
-      tooltip: { visible: false, x: 0, y: 0, dataX: 0, seriesValues: [] },
-    };
-  }
+  // A stable clip-path id generated once per mount (lazy initializer), mirroring
+  // the old constructor's one-shot counter bump.
+  const [clipId] = React.useState(() => `plot-clip-${nextId++}`);
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+  // The active-drag flag is a plain mutable instance field (not render state),
+  // exactly as the class's `dragging` was: it gates pointer-move handling but
+  // must not trigger a re-render when it flips.
+  const dragging = React.useRef(false);
 
-  componentDidMount() {
-    const el = this.containerRef.current;
-    if (el && typeof ResizeObserver !== 'undefined') {
-      this.resizeObserver = new ResizeObserver((entries) => {
-        for (const entry of entries) {
-          const width = entry.contentRect.width;
-          if (width !== this.state.containerWidth) {
-            this.setState({ containerWidth: width });
-          }
-        }
-      });
-      this.resizeObserver.observe(el);
+  const [containerWidth, setContainerWidth] = React.useState(0);
+  const [tooltip, setTooltip] = React.useState<TooltipState>({
+    visible: false,
+    x: 0,
+    y: 0,
+    dataX: 0,
+    seriesValues: [],
+  });
+
+  // Mount/unmount: observe the container's width. The ResizeObserver setState
+  // re-derives layout on resize; the cleanup is symmetric so a StrictMode
+  // mount/unmount/mount cycle leaves no dangling observer.
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') {
+      return undefined;
     }
-  }
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const width = entry.contentRect.width;
+        // setContainerWidth bails on identical values, so the `!==` guard the
+        // class used to avoid redundant setState is preserved by React itself.
+        setContainerWidth(width);
+      }
+    });
+    resizeObserver.observe(el);
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
 
-  componentWillUnmount() {
-    this.resizeObserver?.disconnect();
-    this.resizeObserver = undefined;
-  }
-
-  private getLayout() {
-    const { height, yDomain, series } = this.props;
-    const { containerWidth } = this.state;
+  function getLayout() {
+    const { yDomain } = props;
 
     let yMin = yDomain[0];
     let yMax = yDomain[1];
@@ -128,7 +129,7 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     return { margin, plotWidth, plotHeight, xScale, yScale, yInvert, xTicks, yTicks, xMin, xMax };
   }
 
-  private buildPath(
+  function buildPath(
     points: ReadonlyArray<{ x: number; y: number }>,
     xScale: (v: number) => number,
     yScale: (v: number) => number,
@@ -152,8 +153,8 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     return parts.join('');
   }
 
-  private handlePointerMove = (e: React.PointerEvent<SVGRectElement>) => {
-    const layout = this.getLayout();
+  const handlePointerMove = (e: React.PointerEvent<SVGRectElement>): void => {
+    const layout = getLayout();
     const { margin, plotWidth, plotHeight, xScale, yInvert, xMin, xMax } = layout;
 
     if (plotWidth <= 0 || plotHeight <= 0) return;
@@ -172,7 +173,7 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     const rawDataX = xMin + (clampedX / plotWidth) * (xMax - xMin);
     let snappedDataX = rawDataX;
     let snappedIdx = -1;
-    for (const s of this.props.series) {
+    for (const s of series) {
       if (s.points.length === 0) continue;
       snappedIdx = findNearestPointIndex(s.points, rawDataX);
       if (snappedIdx >= 0) {
@@ -184,7 +185,7 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
     // Build tooltip values using the cached index.
     const seriesValues: TooltipState['seriesValues'] = [];
     if (snappedIdx >= 0) {
-      for (const s of this.props.series) {
+      for (const s of series) {
         if (snappedIdx < s.points.length) {
           seriesValues.push({ name: s.name, color: s.color, value: s.points[snappedIdx].y });
         }
@@ -193,238 +194,220 @@ export class LineChart extends React.PureComponent<LineChartProps, LineChartStat
 
     const crosshairX = margin.left + xScale(snappedDataX);
 
-    this.setState({
-      tooltip: {
-        visible: true,
-        x: crosshairX,
-        y: margin.top + clampedY,
-        dataX: snappedDataX,
-        seriesValues,
-      },
+    setTooltip({
+      visible: true,
+      x: crosshairX,
+      y: margin.top + clampedY,
+      dataX: snappedDataX,
+      seriesValues,
     });
 
     // handle drag
-    if (this.dragging && this.props.onPointDrag && snappedIdx >= 0) {
+    if (dragging.current && onPointDrag && snappedIdx >= 0) {
       let newY = yInvert(clampedY);
-      const [yLo, yHi] = this.props.yDomain;
+      const [yLo, yHi] = props.yDomain;
       newY = Math.max(yLo, Math.min(yHi, newY));
 
-      for (let si = 0; si < this.props.series.length; si++) {
-        if (snappedIdx < this.props.series[si].points.length) {
-          this.props.onPointDrag(si, snappedIdx, newY);
+      for (let si = 0; si < series.length; si++) {
+        if (snappedIdx < series[si].points.length) {
+          onPointDrag(si, snappedIdx, newY);
         }
       }
     }
   };
 
-  private handlePointerLeave = () => {
-    if (!this.dragging) {
-      this.setState({
-        tooltip: { ...this.state.tooltip, visible: false },
-      });
+  const handlePointerLeave = (): void => {
+    if (!dragging.current) {
+      setTooltip((prev) => ({ ...prev, visible: false }));
     }
   };
 
-  private handlePointerDown = (e: React.PointerEvent<SVGRectElement>) => {
-    if (!this.props.onPointDrag) return;
+  const handlePointerDown = (e: React.PointerEvent<SVGRectElement>): void => {
+    if (!onPointDrag) return;
 
-    this.dragging = true;
+    dragging.current = true;
     e.currentTarget.setPointerCapture(e.pointerId);
-    this.props.onDragStart?.();
+    onDragStart?.();
 
     // also process this as a move to update the point
-    this.handlePointerMove(e);
+    handlePointerMove(e);
   };
 
-  private handlePointerUp = (e: React.PointerEvent<SVGRectElement>) => {
-    if (!this.dragging) return;
+  const handlePointerUp = (e: React.PointerEvent<SVGRectElement>): void => {
+    if (!dragging.current) return;
     e.currentTarget.releasePointerCapture(e.pointerId);
-    this.dragging = false;
-    this.props.onDragEnd?.();
+    dragging.current = false;
+    onDragEnd?.();
   };
 
-  private handlePointerCancel = (e: React.PointerEvent<SVGRectElement>) => {
-    if (!this.dragging) return;
+  const handlePointerCancel = (e: React.PointerEvent<SVGRectElement>): void => {
+    if (!dragging.current) return;
     e.currentTarget.releasePointerCapture(e.pointerId);
-    this.dragging = false;
-    this.props.onDragEnd?.();
+    dragging.current = false;
+    onDragEnd?.();
   };
 
-  render() {
-    const { height, series } = this.props;
-    const { containerWidth, tooltip } = this.state;
-    const gridLines = this.props.gridLines ?? 'horizontal';
+  const gridLines = gridLinesProp ?? 'horizontal';
 
-    if (containerWidth === 0) {
-      return <div ref={this.containerRef} className={styles.container} />;
-    }
+  if (containerWidth === 0) {
+    return <div ref={containerRef} className={styles.container} />;
+  }
 
-    const layout = this.getLayout();
-    const { margin, plotWidth, plotHeight, xScale, yScale, xTicks, yTicks } = layout;
+  const layout = getLayout();
+  const { margin, plotWidth, plotHeight, xScale, yScale, xTicks, yTicks } = layout;
 
-    const defaultFormatter = (v: number) => v.toString();
-    const fmt = this.props.tooltipFormatter ?? defaultFormatter;
+  const defaultFormatter = (v: number) => v.toString();
+  const fmt = tooltipFormatter ?? defaultFormatter;
 
-    // tooltip position clamped to container bounds
-    let tooltipLeft = tooltip.x + 12;
-    const tooltipEstWidth = 150;
-    if (tooltipLeft + tooltipEstWidth > containerWidth) {
-      tooltipLeft = tooltip.x - tooltipEstWidth - 12;
-    }
-    if (tooltipLeft < 0) tooltipLeft = 0;
+  // tooltip position clamped to container bounds
+  let tooltipLeft = tooltip.x + 12;
+  const tooltipEstWidth = 150;
+  if (tooltipLeft + tooltipEstWidth > containerWidth) {
+    tooltipLeft = tooltip.x - tooltipEstWidth - 12;
+  }
+  if (tooltipLeft < 0) tooltipLeft = 0;
 
-    return (
-      <div ref={this.containerRef} className={styles.container}>
-        <svg width={containerWidth} height={height}>
-          <defs>
-            <clipPath id={this.clipId}>
-              <rect x={0} y={0} width={plotWidth} height={plotHeight} />
-            </clipPath>
-          </defs>
+  return (
+    <div ref={containerRef} className={styles.container}>
+      <svg width={containerWidth} height={height}>
+        <defs>
+          <clipPath id={clipId}>
+            <rect x={0} y={0} width={plotWidth} height={plotHeight} />
+          </clipPath>
+        </defs>
 
-          {/* Grid lines */}
-          {gridLines === 'horizontal' && (
-            <g className="grid">
-              {yTicks.map((tick, i) => {
-                const y = margin.top + yScale(tick);
-                return (
-                  <line
-                    key={i}
-                    x1={margin.left}
-                    y1={y}
-                    x2={margin.left + plotWidth}
-                    y2={y}
-                    stroke="#e0e0e0"
-                    strokeWidth={1}
-                  />
-                );
-              })}
-            </g>
-          )}
-
-          {/* X axis */}
-          <g className="x-axis">
-            <line
-              x1={margin.left}
-              y1={margin.top + plotHeight}
-              x2={margin.left + plotWidth}
-              y2={margin.top + plotHeight}
-              stroke="#666"
-              strokeWidth={1}
-            />
-            {xTicks.map((tick, i) => {
-              const x = margin.left + xScale(tick);
-              return (
-                <g key={i}>
-                  <line
-                    x1={x}
-                    y1={margin.top + plotHeight}
-                    x2={x}
-                    y2={margin.top + plotHeight + 5}
-                    stroke="#666"
-                    strokeWidth={1}
-                  />
-                  <text x={x} y={margin.top + plotHeight + 18} textAnchor="middle" fontSize={11} fill="#666">
-                    {formatTickLabel(tick)}
-                  </text>
-                </g>
-              );
-            })}
-          </g>
-
-          {/* Y axis */}
-          <g className="y-axis">
-            <line
-              x1={margin.left}
-              y1={margin.top}
-              x2={margin.left}
-              y2={margin.top + plotHeight}
-              stroke="#666"
-              strokeWidth={1}
-            />
+        {/* Grid lines */}
+        {gridLines === 'horizontal' && (
+          <g className="grid">
             {yTicks.map((tick, i) => {
               const y = margin.top + yScale(tick);
               return (
-                <g key={i}>
-                  <line x1={margin.left - 5} y1={y} x2={margin.left} y2={y} stroke="#666" strokeWidth={1} />
-                  <text x={margin.left - 8} y={y} textAnchor="end" dominantBaseline="middle" fontSize={11} fill="#666">
-                    {formatTickLabel(tick)}
-                  </text>
-                </g>
+                <line
+                  key={i}
+                  x1={margin.left}
+                  y1={y}
+                  x2={margin.left + plotWidth}
+                  y2={y}
+                  stroke="#e0e0e0"
+                  strokeWidth={1}
+                />
               );
             })}
           </g>
-
-          {/* Series lines */}
-          <g
-            className="series-lines"
-            clipPath={`url(#${this.clipId})`}
-            transform={`translate(${margin.left},${margin.top})`}
-          >
-            {series.map((s, i) => (
-              <path
-                key={i}
-                d={this.buildPath(s.points, xScale, yScale)}
-                fill="none"
-                stroke={s.color}
-                strokeWidth={1.5}
-              />
-            ))}
-          </g>
-
-          {/* Crosshair */}
-          <line
-            className="crosshair"
-            x1={tooltip.x}
-            y1={margin.top}
-            x2={tooltip.x}
-            y2={margin.top + plotHeight}
-            stroke="#999"
-            strokeWidth={1}
-            strokeDasharray="3,3"
-            visibility={tooltip.visible ? 'visible' : 'hidden'}
-          />
-
-          {/* Overlay for pointer events */}
-          <rect
-            className="overlay"
-            x={margin.left}
-            y={margin.top}
-            width={plotWidth}
-            height={plotHeight}
-            fill="none"
-            pointerEvents="all"
-            style={{ touchAction: 'none' }}
-            onPointerMove={this.handlePointerMove}
-            onPointerLeave={this.handlePointerLeave}
-            onPointerDown={this.handlePointerDown}
-            onPointerUp={this.handlePointerUp}
-            onPointerCancel={this.handlePointerCancel}
-          />
-        </svg>
-
-        {/* HTML Tooltip */}
-        {tooltip.visible && tooltip.seriesValues.length > 0 && (
-          <div
-            data-testid="chart-tooltip"
-            className={styles.tooltip}
-            style={{
-              left: tooltipLeft,
-              top: Math.max(0, tooltip.y - 10),
-            }}
-          >
-            <div className={styles.tooltipHeader}>{formatTickLabel(tooltip.dataX)}</div>
-            {tooltip.seriesValues.map((sv, i) => (
-              <div key={i} className={styles.tooltipRow}>
-                <span className={styles.tooltipSwatch} style={{ backgroundColor: sv.color }} />
-                <span>
-                  {sv.name}: {fmt(sv.value)}
-                </span>
-              </div>
-            ))}
-          </div>
         )}
-      </div>
-    );
-  }
+
+        {/* X axis */}
+        <g className="x-axis">
+          <line
+            x1={margin.left}
+            y1={margin.top + plotHeight}
+            x2={margin.left + plotWidth}
+            y2={margin.top + plotHeight}
+            stroke="#666"
+            strokeWidth={1}
+          />
+          {xTicks.map((tick, i) => {
+            const x = margin.left + xScale(tick);
+            return (
+              <g key={i}>
+                <line
+                  x1={x}
+                  y1={margin.top + plotHeight}
+                  x2={x}
+                  y2={margin.top + plotHeight + 5}
+                  stroke="#666"
+                  strokeWidth={1}
+                />
+                <text x={x} y={margin.top + plotHeight + 18} textAnchor="middle" fontSize={11} fill="#666">
+                  {formatTickLabel(tick)}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+
+        {/* Y axis */}
+        <g className="y-axis">
+          <line
+            x1={margin.left}
+            y1={margin.top}
+            x2={margin.left}
+            y2={margin.top + plotHeight}
+            stroke="#666"
+            strokeWidth={1}
+          />
+          {yTicks.map((tick, i) => {
+            const y = margin.top + yScale(tick);
+            return (
+              <g key={i}>
+                <line x1={margin.left - 5} y1={y} x2={margin.left} y2={y} stroke="#666" strokeWidth={1} />
+                <text x={margin.left - 8} y={y} textAnchor="end" dominantBaseline="middle" fontSize={11} fill="#666">
+                  {formatTickLabel(tick)}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+
+        {/* Series lines */}
+        <g className="series-lines" clipPath={`url(#${clipId})`} transform={`translate(${margin.left},${margin.top})`}>
+          {series.map((s, i) => (
+            <path key={i} d={buildPath(s.points, xScale, yScale)} fill="none" stroke={s.color} strokeWidth={1.5} />
+          ))}
+        </g>
+
+        {/* Crosshair */}
+        <line
+          className="crosshair"
+          x1={tooltip.x}
+          y1={margin.top}
+          x2={tooltip.x}
+          y2={margin.top + plotHeight}
+          stroke="#999"
+          strokeWidth={1}
+          strokeDasharray="3,3"
+          visibility={tooltip.visible ? 'visible' : 'hidden'}
+        />
+
+        {/* Overlay for pointer events */}
+        <rect
+          className="overlay"
+          x={margin.left}
+          y={margin.top}
+          width={plotWidth}
+          height={plotHeight}
+          fill="none"
+          pointerEvents="all"
+          style={{ touchAction: 'none' }}
+          onPointerMove={handlePointerMove}
+          onPointerLeave={handlePointerLeave}
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+        />
+      </svg>
+
+      {/* HTML Tooltip */}
+      {tooltip.visible && tooltip.seriesValues.length > 0 && (
+        <div
+          data-testid="chart-tooltip"
+          className={styles.tooltip}
+          style={{
+            left: tooltipLeft,
+            top: Math.max(0, tooltip.y - 10),
+          }}
+        >
+          <div className={styles.tooltipHeader}>{formatTickLabel(tooltip.dataX)}</div>
+          {tooltip.seriesValues.map((sv, i) => (
+            <div key={i} className={styles.tooltipRow}>
+              <span className={styles.tooltipSwatch} style={{ backgroundColor: sv.color }} />
+              <span>
+                {sv.name}: {fmt(sv.value)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }

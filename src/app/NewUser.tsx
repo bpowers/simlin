@@ -23,36 +23,29 @@ interface NewUserProps {
   onUsernameChanged: () => void;
 }
 
-interface NewUserState {
-  usernameField: string;
-  errorMsg?: string;
-  agreedToTerms: boolean;
-}
+export function NewUser(props: NewUserProps): React.JSX.Element {
+  const [usernameField, setUsernameField] = React.useState('');
+  const [errorMsg, setErrorMsg] = React.useState<string | undefined>(undefined);
+  const [agreedToTerms, setAgreedToTerms] = React.useState(false);
 
-export class NewUser extends React.Component<NewUserProps, NewUserState> {
-  state: NewUserState;
+  // The escaped setTimeout(setUsername) continuation reads the freshest
+  // username/agreement (and the onUsernameChanged callback) through this
+  // ref so a deferred submit observes current values, not those captured
+  // when handleClose scheduled it.
+  const latest = React.useRef<{ usernameField: string; agreedToTerms: boolean; onUsernameChanged: () => void }>(
+    undefined as unknown as { usernameField: string; agreedToTerms: boolean; onUsernameChanged: () => void },
+  );
+  latest.current = { usernameField, agreedToTerms, onUsernameChanged: props.onUsernameChanged };
 
-  constructor(props: NewUserProps) {
-    super(props);
-    this.state = {
-      usernameField: '',
-      agreedToTerms: false,
-    };
-  }
-
-  handleUsernameChanged = (event: React.ChangeEvent<HTMLInputElement>): void => {
-    this.setState({
-      usernameField: event.target.value,
-    });
+  const handleUsernameChanged = (event: React.ChangeEvent<HTMLInputElement>): void => {
+    setUsernameField(event.target.value);
   };
 
-  handleAgreedToTerms = (checked: boolean): void => {
-    this.setState({
-      agreedToTerms: checked,
-    });
+  const handleAgreedToTerms = (checked: boolean): void => {
+    setAgreedToTerms(checked);
   };
 
-  setUsername = async (): Promise<void> => {
+  const setUsername = async (): Promise<void> => {
     const response = await fetch('/api/user', {
       credentials: 'same-origin',
       method: 'PATCH',
@@ -61,8 +54,8 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        username: this.state.usernameField,
-        agreeToTermsAndPrivacyPolicy: this.state.agreedToTerms,
+        username: latest.current.usernameField,
+        agreeToTermsAndPrivacyPolicy: latest.current.agreedToTerms,
       }),
     });
 
@@ -71,99 +64,91 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
       const body = await response.json();
       const errorMsg =
         body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
-      this.setState({
-        errorMsg,
-      });
+      setErrorMsg(errorMsg);
       return;
     }
 
-    this.props.onUsernameChanged();
+    latest.current.onUsernameChanged();
   };
 
-  handleKeyPress = (event: React.KeyboardEvent<HTMLDivElement>): void => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      this.handleClose();
-    }
-  };
-
-  handleClose = (): void => {
-    if (this.state.usernameField === '') {
-      this.setState({
-        errorMsg: 'Simlin requires a non-empty username',
-      });
-    } else if (!this.state.agreedToTerms) {
+  const handleClose = (): void => {
+    if (latest.current.usernameField === '') {
+      setErrorMsg('Simlin requires a non-empty username');
+    } else if (!latest.current.agreedToTerms) {
       // Enter (and previously a backdrop click) routes here too -- it must
       // not bypass the agreed-to-terms gate that disables the Submit button.
-      this.setState({
-        errorMsg: 'Please agree to the Terms and Privacy Policy to continue',
-      });
+      setErrorMsg('Please agree to the Terms and Privacy Policy to continue');
     } else {
-      setTimeout(this.setUsername);
+      setTimeout(setUsername);
     }
   };
 
-  render(): React.JSX.Element {
-    const warningText = this.state.errorMsg || '';
+  const handleKeyPress = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      handleClose();
+    }
+  };
 
-    const termsLabel = (
-      <span>
-        I agree to the&nbsp;
-        <a href="https://simlin.com/terms" target="_blank" rel="noreferrer">
-          Terms and Conditions
-        </a>
-        &nbsp;and&nbsp;
-        <a href="https://simlin.com/privacy" target="_blank" rel="noreferrer">
-          Privacy Policy
-        </a>
-        .
-      </span>
-    );
-    return (
-      <div>
-        <Dialog
-          open={true}
-          disableEscapeKeyDown={true}
-          disableBackdropClick={true}
-          onClose={this.handleClose}
-          aria-labelledby="form-dialog-title"
-        >
-          <DialogTitle id="form-dialog-title">Welcome!</DialogTitle>
-          <DialogContent>
-            <DialogContentText>Please choose a username (think of this like a GitHub username).</DialogContentText>
-            <TextField
-              onChange={this.handleUsernameChanged}
-              autoFocus
-              margin="dense"
-              id="username"
-              label="Username"
-              type="text"
-              error={this.state.errorMsg !== undefined}
-              onKeyPress={this.handleKeyPress}
-              fullWidth
-            />
-            <DialogContentText>
-              <b>&nbsp;{warningText}</b>
-            </DialogContentText>
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={this.state.agreedToTerms}
-                  onChange={this.handleAgreedToTerms}
-                  name="Agree to terms and conditions"
-                  color="primary"
-                />
-              }
-              label={termsLabel}
-            />
-          </DialogContent>
-          <DialogActions>
-            <Button onClick={this.handleClose} color="primary" disabled={!this.state.agreedToTerms}>
-              Submit
-            </Button>
-          </DialogActions>
-        </Dialog>
-      </div>
-    );
-  }
+  const warningText = errorMsg || '';
+
+  const termsLabel = (
+    <span>
+      I agree to the&nbsp;
+      <a href="https://simlin.com/terms" target="_blank" rel="noreferrer">
+        Terms and Conditions
+      </a>
+      &nbsp;and&nbsp;
+      <a href="https://simlin.com/privacy" target="_blank" rel="noreferrer">
+        Privacy Policy
+      </a>
+      .
+    </span>
+  );
+  return (
+    <div>
+      <Dialog
+        open={true}
+        disableEscapeKeyDown={true}
+        disableBackdropClick={true}
+        onClose={handleClose}
+        aria-labelledby="form-dialog-title"
+      >
+        <DialogTitle id="form-dialog-title">Welcome!</DialogTitle>
+        <DialogContent>
+          <DialogContentText>Please choose a username (think of this like a GitHub username).</DialogContentText>
+          <TextField
+            onChange={handleUsernameChanged}
+            autoFocus
+            margin="dense"
+            id="username"
+            label="Username"
+            type="text"
+            error={errorMsg !== undefined}
+            onKeyPress={handleKeyPress}
+            fullWidth
+          />
+          <DialogContentText>
+            <b>&nbsp;{warningText}</b>
+          </DialogContentText>
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={agreedToTerms}
+                onChange={handleAgreedToTerms}
+                name="Agree to terms and conditions"
+                color="primary"
+              />
+            }
+            label={termsLabel}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleClose} color="primary" disabled={!agreedToTerms}>
+            Submit
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </div>
+  );
 }
