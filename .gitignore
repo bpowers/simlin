@@ -63,7 +63,7 @@ yarn-error.log*
 
 /test/*.js
 
-/tarpaulin*
+/lcov.info
 
 /website/.docusaurus
 /website/.cache-loader
