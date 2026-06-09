@@ -1885,6 +1885,12 @@ fn expand_a2a_hoisted(
                     temp_id = temp_id.max(max + 1);
                 }
 
+                // GH #578: fold any scalar-source / constant-offset ELM MAP
+                // nested in this element's expression to a direct read before
+                // the array-builtin hoister runs; whatever array-producing
+                // builtins remain are hoisted normally.
+                let elem_main = fold_scalar_source_elm_maps(ctx, elem_main);
+
                 let mut hoisted = Vec::new();
                 let elem_rewritten = replace_nested_builtins_for_element(
                     elem_main,
@@ -1940,6 +1946,80 @@ fn expand_a2a_hoisted(
     }
 }
 
+/// GH #578: fold a single element of `VECTOR ELM MAP(scalar_source, offset)`
+/// into a direct read when the source is a fully-collapsed element reference
+/// and the per-element offset is a compile-time constant.
+///
+/// Genuine Vensim maps the result over the source variable's FULL row-major
+/// storage from the base the element reference establishes:
+/// `result = source_full[base + round(offset)]`. When `source` is a scalar
+/// `StaticSubscript` (its `view.offset` is the element's flat index and `off`
+/// is the variable base) and `offset` folds to a constant, the whole read is
+/// known at compile time: it is the variable slot `off + base + round(offset)`,
+/// or `:NA:` (NaN) if that flat index is outside `[0, full_source_len)`.
+///
+/// This is what lets a scalar-source / expression-offset ELM MAP compile at
+/// all: the array-producing ELM MAP opcode needs a *view* offset, but here the
+/// per-element offset lowers to a `Const` (e.g. `(DimA - 1)` -> `0, 1, 2`),
+/// which is not a view. Returns `None` for any shape this fold does not cover
+/// (non-scalar source, non-constant offset), leaving the normal path to run.
+fn try_fold_scalar_source_elm_map(ctx: &Context, main_expr: &Expr) -> Option<Expr> {
+    let Expr::App(BuiltinFn::VectorElmMap(source, offset), loc) = main_expr else {
+        return None;
+    };
+    // Source must be a fully-collapsed (scalar) element reference carrying its
+    // base: a StaticSubscript with no remaining dimensions, whose `off` is the
+    // variable base and `view.offset` the element's flat index within it.
+    let (base_off, elem_flat) = match source.as_ref() {
+        Expr::StaticSubscript(off, view, _) if view.dims.is_empty() => (*off, view.offset),
+        _ => return None,
+    };
+    // The per-element offset must be a compile-time constant (it is not a view,
+    // so the ELM MAP opcode could not consume it anyway).
+    let Expr::Const(offset_val, _) = fold::fold_constants((**offset).clone()) else {
+        return None;
+    };
+    let full_len = ctx.full_var_len_for_base(base_off)?;
+    // round() matches the VM's `vm_vector_elm_map` per-element offset rounding.
+    let flat = elem_flat as i64 + offset_val.round() as i64;
+    if flat < 0 || flat >= full_len as i64 {
+        Some(Expr::Const(f64::NAN, *loc))
+    } else {
+        Some(Expr::Var(base_off + flat as usize, *loc))
+    }
+}
+
+/// Recursively apply [`try_fold_scalar_source_elm_map`] through the
+/// scalar-value wrappers of a per-element expression, so a scalar-source ELM
+/// MAP nested in arithmetic (`10 + VECTOR ELM MAP(x[three], (DimA-1))`) folds
+/// too (GH #578).
+///
+/// Recursion is restricted to `Op2`/`If`, which propagate a scalar-value
+/// context to their operands in this per-element lowering (unary minus is
+/// already lowered to `Op2(Sub, 0, x)`). It deliberately does NOT descend into
+/// `Expr::App` arguments: a reducer like `SUM(elm_map_array)` consumes the ELM
+/// MAP as an *array*, and folding it to a single element there would be wrong.
+fn fold_scalar_source_elm_maps(ctx: &Context, expr: Expr) -> Expr {
+    if let Some(folded) = try_fold_scalar_source_elm_map(ctx, &expr) {
+        return folded;
+    }
+    match expr {
+        Expr::Op2(op, l, r, loc) => Expr::Op2(
+            op,
+            Box::new(fold_scalar_source_elm_maps(ctx, *l)),
+            Box::new(fold_scalar_source_elm_maps(ctx, *r)),
+            loc,
+        ),
+        Expr::If(c, t, f, loc) => Expr::If(
+            Box::new(fold_scalar_source_elm_maps(ctx, *c)),
+            Box::new(fold_scalar_source_elm_maps(ctx, *t)),
+            Box::new(fold_scalar_source_elm_maps(ctx, *f)),
+            loc,
+        ),
+        other => other,
+    }
+}
+
 /// Per-element hoisting for array-producing builtins whose scalar arguments
 /// depend on the active dimension (e.g. `vector_sort_order(vals[*], dir[D])`).
 /// Each element gets its own AssignTemp so the builtin is re-evaluated with
@@ -1990,6 +2070,19 @@ fn expand_a2a_per_element_hoisted(
             }
             main
         };
+
+        // GH #578: a scalar-source ELM MAP with a per-element constant offset
+        // folds to a direct slot read (or :NA:), so the array-producing opcode
+        // -- which requires a *view* offset the constant cannot supply -- is
+        // skipped entirely. If the fold collapses the whole element expression
+        // to a scalar (no array-producing builtin left), emit it directly with
+        // no temp consumed.
+        let main_expr = fold_scalar_source_elm_maps(ctx, main_expr);
+        if !is_array_producing_builtin(&main_expr) && !contains_array_producing_builtin(&main_expr)
+        {
+            result.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
+            continue;
+        }
 
         let temp_id = next_tid;
         next_tid = temp_id + 1;

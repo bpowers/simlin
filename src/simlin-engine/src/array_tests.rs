@@ -3474,6 +3474,106 @@ mod vector_select_action_tests {
 mod vector_elm_map_tests {
     use crate::test_common::TestProject;
 
+    // GH #578: a SCALAR source element reference (`x[three]`, a single
+    // fully-collapsed element) plus an arithmetic per-element OFFSET
+    // expression (`(DimA - 1)`, a dimension-position term). Genuine Vensim
+    // maps over the source variable's FULL storage from the base the element
+    // reference establishes: result[i] = x_full[base(three) + round(off_i)].
+    //
+    //   x[DimX] = 1,2,3,4,5  (DimX = one,two,three,four,five; full storage
+    //                         flat 0..4)
+    //   base(three) = 2 (0-based flat index of element `three`)
+    //   off_i = (DimA - 1): A1->0, A2->1, A3->2  (DimA is the 1-based position)
+    //   y[A1] = x_full[2+0] = 3
+    //   y[A2] = x_full[2+1] = 4
+    //   y[A3] = x_full[2+2] = 5
+    // This is the `y` variable of test/sdeverywhere/models/vector/vector.dat
+    // (y[A1]=3, y[A2]=4, y[A3]=5), previously excluded from the genuine gate.
+    fn make_scalar_source_dim_offset_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimX", &["one", "two", "three", "four", "five"])
+            .array_with_ranges(
+                "x[DimX]",
+                vec![
+                    ("one", "1"),
+                    ("two", "2"),
+                    ("three", "3"),
+                    ("four", "4"),
+                    ("five", "5"),
+                ],
+            )
+            .array_aux("y[DimA]", "vector_elm_map(x[three], (DimA - 1))")
+    }
+
+    #[test]
+    fn scalar_source_dim_offset_vm() {
+        let project = make_scalar_source_dim_offset_project("vem_scalar_src_vm");
+        project.assert_vm_result_incremental("y", &[3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn scalar_source_dim_offset_monolithic() {
+        let project = make_scalar_source_dim_offset_project("vem_scalar_src_mono");
+        project.assert_vm_result("y", &[3.0, 4.0, 5.0]);
+    }
+
+    // GH #578 nested: the same scalar-source ELM MAP wrapped in arithmetic
+    // (`10 + ...`). The fold recurses through the surrounding expression, so
+    // each element becomes `10 + x_full[2 + off_i]` = 13, 14, 15.
+    #[test]
+    fn scalar_source_dim_offset_nested_vm() {
+        let project = TestProject::new("vem_scalar_src_nested_vm")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimX", &["one", "two", "three", "four", "five"])
+            .array_with_ranges(
+                "x[DimX]",
+                vec![
+                    ("one", "1"),
+                    ("two", "2"),
+                    ("three", "3"),
+                    ("four", "4"),
+                    ("five", "5"),
+                ],
+            )
+            .array_aux("z[DimA]", "10 + vector_elm_map(x[three], (DimA - 1))");
+        project.assert_vm_result_incremental("z", &[13.0, 14.0, 15.0]);
+    }
+
+    // GH #578 out-of-range: a scalar source whose base + per-element offset
+    // walks off the end of the source's full storage yields :NA: (NaN). Here
+    // base(four) = 3, off_i = (DimA-1) = 0,1,2 -> flat 3,4,5; flat 5 is past
+    // x's 5-element storage -> NaN.
+    //   y2[A1] = x_full[3] = 4
+    //   y2[A2] = x_full[4] = 5
+    //   y2[A3] = x_full[5] = :NA: (NaN)
+    #[test]
+    fn scalar_source_dim_offset_oob_returns_nan_vm() {
+        let project = TestProject::new("vem_scalar_src_oob_vm")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimX", &["one", "two", "three", "four", "five"])
+            .array_with_ranges(
+                "x[DimX]",
+                vec![
+                    ("one", "1"),
+                    ("two", "2"),
+                    ("three", "3"),
+                    ("four", "4"),
+                    ("five", "5"),
+                ],
+            )
+            .array_aux("y2[DimA]", "vector_elm_map(x[four], (DimA - 1))");
+        let vals = project.vm_result_incremental("y2");
+        assert_eq!(vals.len(), 3);
+        assert!((vals[0] - 4.0).abs() < 1e-9, "y2[A1]: {}", vals[0]);
+        assert!((vals[1] - 5.0).abs() < 1e-9, "y2[A2]: {}", vals[1]);
+        assert!(
+            vals[2].is_nan(),
+            "y2[A3] (flat 5 OOB): expected NaN, got {}",
+            vals[2]
+        );
+    }
+
     // source[D] = [10, 20, 30] (3 elements, valid indices 0..2)
     // offsets[D] = [0, 2, 5]   -- index 5 exceeds source length, so third element -> NaN
     fn make_oob_project(name: &str) -> TestProject {
