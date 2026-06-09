@@ -50,6 +50,9 @@ circuit count, and must decide **before** calling
   `LTM_BENCH_TRACE=1` (commit `567a61bc`, denser early cadence in
   `2ea9c2b5`). Emits cumulative loop_score / rel_loop_score equation
   bytes and RSS at power-of-two sample points plus every 10,000 loops.
+  (Since GH #464 this trace is gated by the `ltm_bench` cargo feature
+  rather than the `LTM_BENCH_TRACE` env var; to reproduce, add
+  `--features ltm_bench` to the run command below.)
 - Model: `test/metasd/WRLD3-03/wrld3-03.mdl` (1 model, 311 root
   variables, 483 causal edges, 15 stocks, 1 non-trivial 166-node SCC).
 - Run command:
