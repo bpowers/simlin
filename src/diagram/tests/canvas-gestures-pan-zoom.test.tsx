@@ -209,6 +209,58 @@ describe('Canvas gestures: embedded mode is viewport-inert (issue #707)', () => 
   });
 });
 
+describe('Canvas gestures: external override during an active pointer gesture (issue #707)', () => {
+  it('abandons an active drag-pan so it cannot commit over the external view', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+    const clock = installFakeClock();
+    try {
+      pointerDown(h.svg, 500, 500, { shiftKey: true });
+      clock.tick(10);
+      pointerMove(h.svg, 530, 540, { shiftKey: true, buttons: 1 });
+      expect(translate(h.getTransform())).toMatchObject({ x: 30, y: 40 });
+
+      // An external view change arrives mid-drag (undo / centerVariable / nav).
+      h.setViewport({ x: 200, y: 300, zoom: 1 });
+      expect(translate(h.getTransform())).toMatchObject({ x: 200, y: 300 });
+
+      // Continuing to drag must NOT recreate the pan from the now-stale baseline.
+      clock.tick(10);
+      pointerMove(h.svg, 560, 580, { shiftKey: true, buttons: 1 });
+      expect(translate(h.getTransform())).toMatchObject({ x: 200, y: 300 });
+
+      // Releasing must NOT commit the abandoned gesture over the external view.
+      clock.tick(50);
+      pointerUp(h.svg, 560, 580, { shiftKey: true });
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+    } finally {
+      clock.restore();
+    }
+  });
+
+  it('abandons an active pinch so it cannot commit over the external view', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    pointerDown(h.svg, 100, 100, { pointerId: 1, pointerType: 'touch', isPrimary: true });
+    pointerDown(h.svg, 200, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false });
+    pointerMove(h.svg, 300, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false, buttons: 1 });
+    expect(translate(h.getTransform()).zoom).toBeCloseTo(2, 5);
+
+    // External view change mid-pinch.
+    h.setViewport({ x: 200, y: 300, zoom: 1 });
+    expect(translate(h.getTransform())).toMatchObject({ x: 200, y: 300, zoom: 1 });
+
+    // Continuing the pinch must NOT recreate the viewport from the stale ref.
+    pointerMove(h.svg, 400, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false, buttons: 1 });
+    expect(translate(h.getTransform())).toMatchObject({ x: 200, y: 300, zoom: 1 });
+
+    // Lifting a finger must NOT commit the abandoned pinch over the external view.
+    pointerUp(h.svg, 400, 100, { pointerId: 2, pointerType: 'touch', isPrimary: false });
+    expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+  });
+});
+
 describe('Canvas gestures: resize (issue #707)', () => {
   it('commits the re-centered viewBox immediately when no gesture is in flight', () => {
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });

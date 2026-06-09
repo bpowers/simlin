@@ -2345,6 +2345,23 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         cancelDeferredCommit();
         setLiveViewport(undefined);
         r.viewBaseline = current;
+        // If a pointer-driven viewport gesture (drag-pan or pinch) is still
+        // physically in progress, abandon it too. Clearing only liveViewport is
+        // not enough: a continued pointer move would recreate it from the now
+        // stale press-time anchor (panBaseOffset) / pinch reference and the
+        // pointer-up could then commit that abandoned gesture back over the
+        // external view. Resetting the interaction to idle and dropping the
+        // pointer anchors makes handleMovingCanvas/handlePinchMove no-op and the
+        // release a clean no-commit. (Non-viewport gestures don't touch
+        // liveViewport, so they're left alone.)
+        const mode = latest.current.interaction.mode;
+        if (mode === 'panning' || mode === 'pinching') {
+          setInteraction(idleState);
+          r.mouseDownPoint = undefined;
+          r.panBaseOffset = undefined;
+          r.pointerId = undefined;
+          r.activePointers.clear();
+        }
       }
     } else {
       // Idle: track props.view as the baseline for the next gesture.
