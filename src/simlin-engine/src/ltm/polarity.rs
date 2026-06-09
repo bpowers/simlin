@@ -750,26 +750,64 @@ pub(super) fn analyze_graphical_function_polarity(table: &crate::variable::Table
     let mut all_decreasing = true;
     let mut all_constant = true;
 
-    // y-range-relative tolerance so tables that are monotone modulo round-trip
-    // numeric-import noise keep their polarity (#492); the non-uniform-x-spacing
-    // concern -- `dy` vs slope `dy/dx` -- is out of scope (GH #536).
+    // Classify each segment by its SLOPE `dy/dx`, not the raw y-delta `dy`
+    // (#536). Comparing `dy` against a y-range-relative epsilon (#492) is wrong
+    // for non-uniform x-spacing: a small `dy` over a small `dx` is a large
+    // slope (a real, fast change) yet reads as a plateau, while a small `dy`
+    // over a wide `dx` is a negligible slope yet reads as a real change. Either
+    // way the monotonicity verdict can be wrong.
+    //
+    // The slope tolerance stays noise-tolerant the way #492's y-range-relative
+    // epsilon is, by scaling against the table's average-magnitude slope
+    // `(y_max - y_min) / (x_max - x_min)` (with a small absolute floor for a
+    // degenerate flat or zero-width table). On a uniformly-spaced table every
+    // `dx` equals the average x-spacing, so this reduces to exactly the old
+    // y-delta behavior -- the existing uniform-spacing tests stay green.
     let y_min = table.y.iter().copied().fold(f64::INFINITY, f64::min);
     let y_max = table.y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let epsilon = (1e-6 * (y_max - y_min)).max(1e-12);
+    let x_min = table.x.iter().copied().fold(f64::INFINITY, f64::min);
+    let x_max = table.x.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let x_span = x_max - x_min;
+    let avg_slope_mag = if x_span > 0.0 {
+        (y_max - y_min) / x_span
+    } else {
+        0.0
+    };
+    let slope_epsilon = (1e-6 * avg_slope_mag).max(1e-12);
 
-    // Check consecutive pairs of points
-    for i in 1..table.y.len() {
+    // Check consecutive pairs of points. `x.len() == y.len()` after
+    // `parse_table` (an absent `x_points` is filled with a uniform ramp), so
+    // index `i` is in bounds for both; iterate the common length defensively
+    // anyway in case a `Table` is ever built with mismatched columns.
+    let n = table.x.len().min(table.y.len());
+    for i in 1..n {
+        let dx = table.x[i] - table.x[i - 1];
         let dy = table.y[i] - table.y[i - 1];
 
-        if dy > epsilon {
+        if dx == 0.0 {
+            // Degenerate vertical segment. A duplicate point (dy == 0 too) is
+            // redundant -- skip it as non-determining. A genuine vertical step
+            // (dy != 0) is an ambiguous lookup (two outputs for one input) with
+            // an undefined slope, so bail to Unknown rather than guess a
+            // polarity.
+            if dy == 0.0 {
+                continue;
+            }
+            return LinkPolarity::Unknown;
+        }
+
+        let slope = dy / dx;
+
+        if slope > slope_epsilon {
             all_decreasing = false;
             all_constant = false;
-        } else if dy < -epsilon {
+        } else if slope < -slope_epsilon {
             all_increasing = false;
             all_constant = false;
         } else {
-            // dy is approximately 0 (within epsilon)
-            // This doesn't break monotonicity but isn't strictly increasing/decreasing
+            // slope is approximately 0 (within tolerance): an effectively-flat
+            // segment. It doesn't break monotonicity but isn't strictly
+            // increasing/decreasing either.
         }
     }
 

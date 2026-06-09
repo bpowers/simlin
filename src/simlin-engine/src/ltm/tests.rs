@@ -1342,6 +1342,84 @@ fn test_graphical_function_polarity_tolerates_import_noise() {
 }
 
 #[test]
+fn test_graphical_function_polarity_uses_slope_not_y_delta() {
+    use crate::variable::Table;
+
+    // Non-uniform x-spacing where the y-delta heuristic and the slope heuristic
+    // DISAGREE on the verdict (#536). The middle segment is a genuine, steep,
+    // local DECREASE over a very narrow x-interval (dx = 0.001), so the table is
+    // NOT monotone -- the correct answer is Unknown.
+    //
+    //   x = [0, 100, 100.001, 200]
+    //   y = [0,  10,  9.99999,  20]
+    //
+    //   y-range = 20, so the y-range-relative dy epsilon is 1e-6 * 20 = 2e-5.
+    //   The middle dy is -1e-5, which is *below* that epsilon, so the y-delta
+    //   heuristic SUPPRESSES the dip as a plateau and -- seeing only the two
+    //   surrounding increases -- wrongly classifies the table as Positive.
+    //
+    //   The middle segment's SLOPE, however, is -1e-5 / 0.001 = -0.01, far
+    //   steeper (in magnitude) than the table's average slope (20/200 = 0.1)
+    //   times the relative tolerance, so the slope heuristic correctly sees a
+    //   real local decrease and returns Unknown.
+    let narrow_dip_table = Table::new_for_test(
+        vec![0.0, 100.0, 100.001, 200.0],
+        vec![0.0, 10.0, 9.99999, 20.0],
+    );
+    assert_eq!(
+        analyze_graphical_function_polarity(&narrow_dip_table),
+        LinkPolarity::Unknown,
+        "a steep narrow local decrease must be caught by the slope heuristic, not \
+         smoothed over by the y-delta heuristic"
+    );
+
+    // The mirror case: a steep narrow local INCREASE in an otherwise-decreasing
+    // table must likewise flip a naive Negative to Unknown.
+    let narrow_bump_table = Table::new_for_test(
+        vec![0.0, 100.0, 100.001, 200.0],
+        vec![20.0, 10.0, 10.00001, 0.0],
+    );
+    assert_eq!(
+        analyze_graphical_function_polarity(&narrow_bump_table),
+        LinkPolarity::Unknown,
+        "a steep narrow local increase must flip an otherwise-decreasing table to Unknown"
+    );
+
+    // A genuinely monotone table with non-uniform x-spacing (no sign change in
+    // slope) must still classify correctly: every segment slopes up, so the
+    // verdict is Positive even though the dx values vary by orders of magnitude.
+    let monotone_nonuniform_table =
+        Table::new_for_test(vec![0.0, 0.001, 100.0, 200.0], vec![0.0, 5.0, 10.0, 20.0]);
+    assert_eq!(
+        analyze_graphical_function_polarity(&monotone_nonuniform_table),
+        LinkPolarity::Positive,
+        "a monotone table with non-uniform x-spacing stays Positive"
+    );
+
+    // Degenerate vertical segment (x[i] == x[i-1]) with differing y: two outputs
+    // for one input is an ambiguous lookup with undefined slope, so bail to
+    // Unknown.
+    let vertical_segment_table =
+        Table::new_for_test(vec![0.0, 1.0, 1.0, 2.0], vec![0.0, 1.0, 5.0, 6.0]);
+    assert_eq!(
+        analyze_graphical_function_polarity(&vertical_segment_table),
+        LinkPolarity::Unknown,
+        "a vertical (dx == 0, dy != 0) segment has undefined slope and must read as Unknown"
+    );
+
+    // A duplicated point (x[i] == x[i-1] AND y[i] == y[i-1]) is redundant, not
+    // ambiguous: it must be skipped as non-determining and not poison an
+    // otherwise-monotone verdict.
+    let duplicate_point_table =
+        Table::new_for_test(vec![0.0, 1.0, 1.0, 2.0], vec![0.0, 1.0, 1.0, 2.0]);
+    assert_eq!(
+        analyze_graphical_function_polarity(&duplicate_point_table),
+        LinkPolarity::Positive,
+        "a redundant duplicate point must not flip a monotone-increasing table"
+    );
+}
+
+#[test]
 fn test_lookup_table_polarity_in_links() {
     use crate::datamodel;
 
