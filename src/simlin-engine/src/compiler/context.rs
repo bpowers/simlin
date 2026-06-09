@@ -937,6 +937,21 @@ impl Context<'_> {
         sim_err!(DoesNotExist, "Variable not found by offset".to_string())
     }
 
+    /// Full element count of the variable whose storage *begins* at `base_off`
+    /// (the product of its declared dimensions; 1 for a scalar). Returns `None`
+    /// if no variable owns that exact base offset. This is the compile-time
+    /// twin of `codegen::full_source_len`, used by the GH #578 scalar-source
+    /// VECTOR ELM MAP fold to bound the per-element static read.
+    pub(super) fn full_var_len_for_base(&self, base_off: usize) -> Option<usize> {
+        let md = self.get_variable_metadata_by_offset(base_off).ok()?;
+        Some(
+            md.var
+                .get_dimensions()
+                .map(|dims| dims.iter().map(|d| d.len()).product::<usize>().max(1))
+                .unwrap_or(1),
+        )
+    }
+
     pub(super) fn build_stock_update_expr(&self, stock_off: usize, var: &Variable) -> Result<Expr> {
         if let Variable::Stock {
             inflows, outflows, ..
@@ -1387,33 +1402,25 @@ impl Context<'_> {
                             return Ok(Expr::StaticSubscript(off, preserved_result.view, *loc));
                         } else {
                             if view.dims.is_empty() {
-                                // Inside array-producing builtins, a fully-collapsed
-                                // subscript like b[B1] should be promoted back to the
-                                // full source array. The Single ops came from named
-                                // element subscripts (not ActiveDimRef resolution), so
-                                // promoting them to Wildcard restores the array view
-                                // that VectorElmMap/VectorSortOrder expect.
-                                let has_single_ops = self.promote_active_dim_ref
-                                    && operations.iter().any(|op| matches!(op, IndexOp::Single(_)));
-                                if has_single_ops {
-                                    let promoted_ops: Vec<IndexOp> = operations
-                                        .iter()
-                                        .map(|op| match op {
-                                            IndexOp::Single(_) => IndexOp::Wildcard,
-                                            other => other.clone(),
-                                        })
-                                        .collect();
-                                    let promoted_result = build_view_from_ops(
-                                        &promoted_ops,
-                                        &orig_dims,
-                                        &orig_strides,
-                                        &view_config,
-                                    )?;
-                                    return Ok(Expr::StaticSubscript(
-                                        off,
-                                        promoted_result.view,
-                                        *loc,
-                                    ));
+                                // Inside an array-producing builtin a fully-
+                                // collapsed source element reference (e.g.
+                                // `x[three]` or `b[B1]`) must keep the element's
+                                // base offset so the builtin maps over the source
+                                // variable's FULL storage starting from that base
+                                // (genuine-Vensim VECTOR ELM MAP, GH #578).
+                                // Return the collapsed scalar view as a
+                                // StaticSubscript -- its `view.offset` is the
+                                // element's flat index, and the variable base
+                                // (`off`) lets `codegen::full_source_len` recover
+                                // the full source length. The earlier code
+                                // promoted the Single ops back to a whole-array
+                                // Wildcard view, which discarded the base and was
+                                // only correct when the element is index 0 (the
+                                // historical `b[B1]` case, where base == 0).
+                                if self.promote_active_dim_ref
+                                    && operations.iter().any(|op| matches!(op, IndexOp::Single(_)))
+                                {
+                                    return Ok(Expr::StaticSubscript(off, view, *loc));
                                 }
                                 return Ok(Expr::Var(off + view.offset, *loc));
                             }

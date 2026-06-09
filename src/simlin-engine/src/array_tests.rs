@@ -3474,6 +3474,106 @@ mod vector_select_action_tests {
 mod vector_elm_map_tests {
     use crate::test_common::TestProject;
 
+    // GH #578: a SCALAR source element reference (`x[three]`, a single
+    // fully-collapsed element) plus an arithmetic per-element OFFSET
+    // expression (`(DimA - 1)`, a dimension-position term). Genuine Vensim
+    // maps over the source variable's FULL storage from the base the element
+    // reference establishes: result[i] = x_full[base(three) + round(off_i)].
+    //
+    //   x[DimX] = 1,2,3,4,5  (DimX = one,two,three,four,five; full storage
+    //                         flat 0..4)
+    //   base(three) = 2 (0-based flat index of element `three`)
+    //   off_i = (DimA - 1): A1->0, A2->1, A3->2  (DimA is the 1-based position)
+    //   y[A1] = x_full[2+0] = 3
+    //   y[A2] = x_full[2+1] = 4
+    //   y[A3] = x_full[2+2] = 5
+    // This is the `y` variable of test/sdeverywhere/models/vector/vector.dat
+    // (y[A1]=3, y[A2]=4, y[A3]=5), previously excluded from the genuine gate.
+    fn make_scalar_source_dim_offset_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimX", &["one", "two", "three", "four", "five"])
+            .array_with_ranges(
+                "x[DimX]",
+                vec![
+                    ("one", "1"),
+                    ("two", "2"),
+                    ("three", "3"),
+                    ("four", "4"),
+                    ("five", "5"),
+                ],
+            )
+            .array_aux("y[DimA]", "vector_elm_map(x[three], (DimA - 1))")
+    }
+
+    #[test]
+    fn scalar_source_dim_offset_vm() {
+        let project = make_scalar_source_dim_offset_project("vem_scalar_src_vm");
+        project.assert_vm_result_incremental("y", &[3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn scalar_source_dim_offset_monolithic() {
+        let project = make_scalar_source_dim_offset_project("vem_scalar_src_mono");
+        project.assert_vm_result("y", &[3.0, 4.0, 5.0]);
+    }
+
+    // GH #578 nested: the same scalar-source ELM MAP wrapped in arithmetic
+    // (`10 + ...`). The fold recurses through the surrounding expression, so
+    // each element becomes `10 + x_full[2 + off_i]` = 13, 14, 15.
+    #[test]
+    fn scalar_source_dim_offset_nested_vm() {
+        let project = TestProject::new("vem_scalar_src_nested_vm")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimX", &["one", "two", "three", "four", "five"])
+            .array_with_ranges(
+                "x[DimX]",
+                vec![
+                    ("one", "1"),
+                    ("two", "2"),
+                    ("three", "3"),
+                    ("four", "4"),
+                    ("five", "5"),
+                ],
+            )
+            .array_aux("z[DimA]", "10 + vector_elm_map(x[three], (DimA - 1))");
+        project.assert_vm_result_incremental("z", &[13.0, 14.0, 15.0]);
+    }
+
+    // GH #578 out-of-range: a scalar source whose base + per-element offset
+    // walks off the end of the source's full storage yields :NA: (NaN). Here
+    // base(four) = 3, off_i = (DimA-1) = 0,1,2 -> flat 3,4,5; flat 5 is past
+    // x's 5-element storage -> NaN.
+    //   y2[A1] = x_full[3] = 4
+    //   y2[A2] = x_full[4] = 5
+    //   y2[A3] = x_full[5] = :NA: (NaN)
+    #[test]
+    fn scalar_source_dim_offset_oob_returns_nan_vm() {
+        let project = TestProject::new("vem_scalar_src_oob_vm")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimX", &["one", "two", "three", "four", "five"])
+            .array_with_ranges(
+                "x[DimX]",
+                vec![
+                    ("one", "1"),
+                    ("two", "2"),
+                    ("three", "3"),
+                    ("four", "4"),
+                    ("five", "5"),
+                ],
+            )
+            .array_aux("y2[DimA]", "vector_elm_map(x[four], (DimA - 1))");
+        let vals = project.vm_result_incremental("y2");
+        assert_eq!(vals.len(), 3);
+        assert!((vals[0] - 4.0).abs() < 1e-9, "y2[A1]: {}", vals[0]);
+        assert!((vals[1] - 5.0).abs() < 1e-9, "y2[A2]: {}", vals[1]);
+        assert!(
+            vals[2].is_nan(),
+            "y2[A3] (flat 5 OOB): expected NaN, got {}",
+            vals[2]
+        );
+    }
+
     // source[D] = [10, 20, 30] (3 elements, valid indices 0..2)
     // offsets[D] = [0, 2, 5]   -- index 5 exceeds source length, so third element -> NaN
     fn make_oob_project(name: &str) -> TestProject {
@@ -3641,6 +3741,79 @@ mod vector_elm_map_tests {
                 "f[{i}] (genuine Vensim): expected {want}, got {got} (full vals: {vals:?})"
             );
         }
+    }
+
+    // GH #579: end-to-end numeric gate on `full_source_len` for a STRICT-SLICE
+    // ELM MAP source (the cross-dimension `d[DimA,B1]` shape, base != 0). The
+    // existing `out_of_bounds_element_returns_nan_*` tests use a *full-array*
+    // source (`source[*]`, base 0, `source_is_full_array == true`); this one
+    // covers the other branch, where `full_source_len` drives BOTH the
+    // full-array-vs-strict-slice decision AND the out-of-range -> :NA: guard.
+    //
+    // Fixture: same `d`/shape as `cross_dimension_source_resolves_full_array`,
+    // but `a[A3] = 5` pushes the A3 row's lookup past the source's full
+    // 6-element storage:
+    //   d full storage (row-major [DimA,DimB], strides [2,1]):
+    //     0=d11=1  1=d12=4  2=d21=2  3=d22=5  4=d31=3  5=d32=6
+    //   A1,* : base = 0, offset 0 -> flat 0 -> d[0]=1
+    //   A2,* : base = 2, offset 1 -> flat 3 -> d[3]=5
+    //   A3,* : base = 4, offset 5 -> flat 9 >= full_source_len(6) -> :NA: (NaN)
+    // f row-major [DimA,DimB], broadcast across DimB: [1,1, 5,5, NaN,NaN].
+    //
+    // Why this catches a corrupted `full_source_len`: inflating it (e.g. to 99)
+    // makes flat 9 pass the `[0, full_len)` guard and read past `d`'s storage
+    // instead of yielding NaN; deflating it to the 3-element slice size flips
+    // `source_is_full_array` to true (base forced to 0), changing every row.
+    // Either way the A3 elements stop being NaN, so the assertion fails --
+    // unlike the genuine-Vensim `.dat` simulate corpus, which has no
+    // out-of-range offset on a strict-slice source.
+    fn make_strict_slice_oob_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimB", &["B1", "B2"])
+            .array_with_ranges("a[DimA]", vec![("A1", "0"), ("A2", "1"), ("A3", "5")])
+            .array_with_ranges(
+                "d[DimA,DimB]",
+                vec![
+                    ("A1,B1", "1"),
+                    ("A2,B1", "2"),
+                    ("A3,B1", "3"),
+                    ("A1,B2", "4"),
+                    ("A2,B2", "5"),
+                    ("A3,B2", "6"),
+                ],
+            )
+            .array_aux("f[DimA,DimB]", "vector_elm_map(d[DimA,B1], a[DimA])")
+    }
+
+    fn assert_strict_slice_oob(vals: &[f64]) {
+        assert_eq!(vals.len(), 6, "expected 6 elements (DimA x DimB)");
+        let finite_expected = [(0usize, 1.0), (1, 1.0), (2, 5.0), (3, 5.0)];
+        for &(i, want) in &finite_expected {
+            assert!(
+                (vals[i] - want).abs() < 1e-9,
+                "f[{i}]: expected {want}, got {} (full vals: {vals:?})",
+                vals[i]
+            );
+        }
+        assert!(
+            vals[4].is_nan() && vals[5].is_nan(),
+            "f[A3,*] (base 4 + offset 5 = flat 9 >= full source len 6): expected NaN, got [{}, {}]",
+            vals[4],
+            vals[5]
+        );
+    }
+
+    #[test]
+    fn strict_slice_source_oob_returns_nan_vm() {
+        let project = make_strict_slice_oob_project("vem_slice_oob_vm");
+        assert_strict_slice_oob(&project.vm_result_incremental("f"));
+    }
+
+    #[test]
+    fn strict_slice_source_oob_returns_nan_monolithic() {
+        let project = make_strict_slice_oob_project("vem_slice_oob_mono");
+        assert_strict_slice_oob(&project.vm_result("f"));
     }
 
     // AC6.4 defense-in-depth: a 1-D source[*] argument has base = 0 for all

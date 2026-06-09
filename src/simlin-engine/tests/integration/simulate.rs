@@ -1102,9 +1102,12 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
 /// not-yet-supported variable does not block the whole model from
 /// compiling -- and (b) skipped in every comparison path (VM, protobuf
 /// round-trip, XMILE round-trip). Every *other* variable stays a hard
-/// genuine-Vensim equality gate. Used to keep `vector.xmile`'s ELM MAP
-/// base/full-source variables (`c`/`f`/`g`) as hard gates while excluding
-/// only `y` (GitHub #578), rather than weakening the whole comparison.
+/// genuine-Vensim equality gate. This is the general narrowing mechanism for
+/// gating a model on the variables it DOES support while a separately-tracked
+/// gap on one variable is fixed; no corpus model currently needs it (the last
+/// user, `vector.xmile`'s `y`, became a full gate once GitHub #578 closed), but
+/// it is kept as the backing implementation of [`simulate_path`] (`excluded`
+/// = `&[]`) and for the next such gap.
 fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: &[&str]) {
     eprintln!("model: {xmile_path}");
 
@@ -1695,17 +1698,13 @@ corpus_tests! {
     // VECTOR ELM MAP now matches genuine Vensim (per-element base + full
     // source array, out-of-range -> :NA:, no modulo). vector.xmile is
     // exercised through all three comparison paths by the dedicated
-    // `simulates_vector_xmile_genuine` test below, NOT here: that test keeps
-    // c/f/g (the ELM MAP base/full-source variables) and every other
-    // variable as hard genuine-Vensim gates against
-    // test/sdeverywhere/models/vector/vector.dat, narrowing the comparison
-    // to exclude only two pre-existing, separately-tracked, out-of-scope
-    // variables -- `y` (GitHub #578: scalar-source/expression-offset ELM MAP
-    // does not compile) and `p` (GitHub #576: dormant/unverified 2-D VECTOR
-    // SORT ORDER fixture data; a different builtin, unchanged here). This
-    // list runs an unconditional full comparison, which cannot carve out
-    // those variables; the narrowed gate lives in its own test instead of
-    // weakening every model's comparison.
+    // `simulates_vector_xmile_genuine` test below, NOT here: that test gates
+    // EVERY variable in the model (including the ELM MAP base/full-source
+    // variables c/f/g, the scalar-source ELM MAP `y`, and the 2-D VECTOR SORT
+    // ORDER `p`) as a hard genuine-Vensim equality against
+    // test/sdeverywhere/models/vector/vector.dat, with no exclusions. It lives
+    // in its own test only so its provenance can be documented; the comparison
+    // is the same full one this list would run.
     // "test/sdeverywhere/models/vector/vector.xmile",  // -> simulates_vector_xmile_genuine
     //
     // --- Permanently excluded (not test models) ---
@@ -1736,36 +1735,24 @@ corpus_tests! {
 /// exercises (1-D VSO `l`/`m`, VECTOR SELECT `q`/`r`/`s`, reducers
 /// `u`/`v`/`w`, and the rest).
 ///
-/// Exactly two variables are carved out, both pre-existing and
-/// separately-tracked gaps unrelated to the ELM MAP base/full-source fix
-/// (per the phase file's "prefer full inclusion; narrow only with a tracked
-/// issue" guidance). First, `y[DimA] = VECTOR ELM MAP(x[three], (DimA-1))`
-/// (GitHub #578): a scalar source plus an arithmetic (expression) offset
-/// from which ELM MAP cannot yet infer a result shape, so `y` does not
-/// compile at all -- a compiler shape-inference gap, NOT the base/stride
-/// numeric bug fixed here; its genuine value `y[A1]=3,y[A2]=4,y[A3]=5` is
-/// in `vector.dat`, and closing #578 lets `y` rejoin this gate. Second,
-/// `p[DimA,DimB] = VECTOR SORT ORDER(o[DimA,DimB], ASCENDING)` (GitHub
-/// #576): a genuinely 2-D VSO whose `vector.dat` `p` block is internally
-/// inconsistent / encodes an sdeverywhere per-row semantic, with
-/// genuine-Vensim multi-dimensional VSO semantics unverified by any live
-/// fixture -- a different builtin (VSO, unchanged by this phase) out of
-/// Phase 5's ELM MAP scope.
+/// The 2-D `p[DimA,DimB] = VECTOR SORT ORDER(o[DimA,DimB], ASCENDING)` is a
+/// hard gate (GitHub #576, closed): the #585 fix made VECTOR SORT ORDER rank
+/// *per iterated row* (innermost dim = sorted axis, 0-based), so the engine
+/// produces `p = [0,1,1,0,0,1]`, matching `vector.dat` exactly. Real-Vensim
+/// multi-dimensional VSO semantics are independently confirmed by C-LEARN
+/// (`simulates_clearn` vs `Ref.vdf`).
 ///
-/// Excluded variables are dropped from the compiled model (so #578's
-/// non-compiling `y` cannot abort the project) and skipped in every
-/// comparison; the genuine gate on `c`/`f`/`g` (and all other variables)
-/// is NOT weakened.
+/// The scalar-source / expression-offset `y[DimA] = VECTOR ELM MAP(x[three],
+/// (DimA-1))` is also a hard gate now (GitHub #578, closed): a fully-collapsed
+/// source element reference keeps its base offset, and the per-element constant
+/// offset folds to a direct read of the source's full storage
+/// (`y[A1]=3,y[A2]=4,y[A3]=5` in `vector.dat`).
+///
+/// No variables are carved out: every variable in `vector.xmile` is a hard
+/// genuine-Vensim equality gate.
 #[test]
 fn simulates_vector_xmile_genuine() {
-    simulate_path_with_excluding(
-        "../../test/sdeverywhere/models/vector/vector.xmile",
-        compile_vm,
-        // y: GitHub #578 (scalar-source/expression-offset ELM MAP compile
-        // gap). p: GitHub #576 (dormant/unverified 2-D VSO fixture data).
-        // Both pre-existing and out of Phase 5's ELM MAP scope.
-        &["y", "p"],
-    );
+    simulate_path("../../test/sdeverywhere/models/vector/vector.xmile");
 }
 
 #[test]
