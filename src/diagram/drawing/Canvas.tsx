@@ -583,6 +583,21 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
   };
 
+  // Stop an in-flight momentum coast that something is interrupting, and -- only
+  // if a coast was actually running -- arm a deferred commit so the now-orphaned
+  // live viewport still has a settle path. Whatever interrupted then either
+  // re-arms (a wheel/pan that moves), makes the deferred callback skip (it becomes
+  // a pan/pinch/coast), or lets the timer fire (a click, or a wheel that was a
+  // clamped no-op). Every caller that stops a coast must go through this so the
+  // coasted pan is never silently dropped.
+  const interruptCoast = (): void => {
+    const wasCoasting = r.momentumAnimationId !== undefined;
+    stopMomentumAnimation();
+    if (wasCoasting) {
+      scheduleDeferredCommit();
+    }
+  };
+
   const getElementByUid = (uid: UID): ViewElement => {
     let element: ViewElement | undefined;
     if (uid === inCreationUid) {
@@ -1073,8 +1088,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     // Always prevent default to stop browser zoom, even at zoom limits
     e.preventDefault();
 
-    // Stop any momentum animation when user starts interacting
-    stopMomentumAnimation();
+    // Stop any momentum coast this wheel interrupts, arming a deferred commit so
+    // its offset still settles even if this wheel event turns out to be a no-op
+    // (a zoom already clamped at MIN/MAX returns early below without committing).
+    interruptCoast();
 
     // On Mac trackpads, pinch-to-zoom is reported as wheel events with ctrlKey
     if (e.ctrlKey || e.metaKey) {
@@ -1506,20 +1523,13 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     e.preventDefault();
     e.stopPropagation();
 
-    // A new press interrupts an in-flight momentum coast: stop it without
-    // committing -- the live viewport is preserved, and a pan or pinch started by
-    // this press inherits it (via panBaseOffset / the pinch reference reads) and
-    // commits the combined result on its own settle. If the press instead turns
-    // out NOT to be a viewport gesture (a click/selection), the deferred commit
-    // armed here persists the coasted viewport rather than stranding it; its
-    // callback skips when a viewport gesture is active, so there is no double
-    // commit. (A pending wheel commit is likewise left armed, not cancelled, for
-    // the same reason.)
-    const wasCoasting = r.momentumAnimationId !== undefined;
-    stopMomentumAnimation();
-    if (wasCoasting) {
-      scheduleDeferredCommit();
-    }
+    // A new press interrupts an in-flight momentum coast. The live viewport is
+    // preserved: a pan or pinch started by this press inherits it (via
+    // panBaseOffset / the pinch reference reads) and commits the combined result
+    // on its own settle, while a press that is NOT a viewport gesture (a
+    // click/selection) lets interruptCoast's deferred commit persist the coasted
+    // viewport. (A pending wheel commit is likewise left armed, not cancelled.)
+    interruptCoast();
 
     // Track this pointer for multi-touch detection
     r.activePointers.set(e.pointerId, {

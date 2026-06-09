@@ -18,6 +18,7 @@
 import { act } from '@testing-library/react';
 
 import { dispatchWheel, makeAux, pointerDown, pointerMove, pointerUp, renderCanvas } from './canvas-gesture-harness';
+import { MAX_ZOOM } from '../drawing/viewport';
 
 function translate(transform: string | null): { x: number; y: number; zoom: number } {
   const m = /matrix\(([^)]+)\)/.exec(transform ?? '');
@@ -156,6 +157,49 @@ describe('Canvas gestures: external view change overrides a live gesture (issue 
         jest.advanceTimersByTime(200);
       });
       expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('Canvas gestures: a clamped wheel zoom interrupting a coast still settles (issue #707)', () => {
+  it('commits the coasted offset when a clamped (no-op) zoom stops the coast', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+    jest.useFakeTimers();
+    try {
+      // Pin zoom at MAX so a ctrl+wheel zoom-in is clamped to a no-op.
+      h.setViewport({ zoom: MAX_ZOOM });
+
+      // Flick to start a momentum coast, then advance a couple of frames.
+      pointerDown(h.svg, 500, 500, { pointerType: 'touch', isPrimary: true });
+      act(() => {
+        jest.advanceTimersByTime(10);
+      });
+      pointerMove(h.svg, 560, 560, { pointerType: 'touch', isPrimary: true, buttons: 1 });
+      act(() => {
+        jest.advanceTimersByTime(5);
+      });
+      pointerUp(h.svg, 560, 560, { pointerType: 'touch', isPrimary: true });
+      act(() => {
+        jest.advanceTimersByTime(32);
+      });
+      const coasted = translate(h.getTransform());
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+
+      // A ctrl+wheel zoom-in while already at MAX_ZOOM is clamped to a no-op, but
+      // it still stops the coast. The coasted offset must not be stranded.
+      dispatchWheel(h.svg, { deltaY: -100, ctrlKey: true, clientX: 0, clientY: 0 });
+      expect(h.callbacks.onViewBoxChange).not.toHaveBeenCalled();
+
+      // The deferred commit fires once idle, persisting the coasted offset / zoom.
+      act(() => {
+        jest.advanceTimersByTime(200);
+      });
+      expect(h.callbacks.onViewBoxChange).toHaveBeenCalledTimes(1);
+      expect(h.callbacks.onViewBoxChange.mock.calls[0][0].x).toBeCloseTo(coasted.x, 3);
+      expect(h.callbacks.onViewBoxChange.mock.calls[0][1]).toBeCloseTo(MAX_ZOOM, 5);
     } finally {
       jest.useRealTimers();
     }
