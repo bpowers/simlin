@@ -1296,19 +1296,35 @@ pub(crate) fn generate_agg_to_scalar_target_equation(
 /// those keys is replaced by a `Var(agg_name)` node, then the whole tree is
 /// re-printed. The match is on the parsed AST subtree, not a substring of the
 /// text, so a reducer text that is a textual prefix of a *different* reducer
-/// subexpression (`sum(p[*])` vs `sum(p[*] + 1)`) is never falsely matched. A
-/// parse failure degrades to the input text unchanged.
+/// subexpression (`sum(p[*])` vs `sum(p[*] + 1)`) is never falsely matched.
+///
+/// Returns `Err([`PartialEquationError`])` when `equation_text` does not parse
+/// (a genuine parse error, or an empty/whitespace equation that yields no AST)
+/// *and there are reducers to substitute*: with no AST there is no reducer
+/// subexpression to replace, so returning the input unchanged would let the
+/// inline reducer survive into the `agg → target` partial -- a partial that
+/// references the live reducer instead of the hoisted aggregate node, a
+/// wrong-but-clean-compiling link score (the agg-substitution-omission sibling
+/// of the GH #311 PREVIOUS-omission hazard; GH #661). The db-bearing caller
+/// converts the error into a `Warning` (via `emit_ltm_partial_equation_warning`)
+/// and skips the variable. The failure is effectively unreachable in production
+/// (the input is a `print_eqn` re-print of an already-parsed AST), so this is
+/// defense-in-depth.
+///
+/// The empty-`reducers` case is a pure pass-through that never parses (there
+/// is nothing to substitute), so it returns `Ok` with the text unchanged even
+/// for otherwise-unparseable input.
 pub(crate) fn substitute_reducers_in_equation(
     equation_text: &str,
     reducers: &HashMap<String, String>,
-) -> String {
+) -> Result<String, PartialEquationError> {
     if reducers.is_empty() {
-        return equation_text.to_string();
+        return Ok(equation_text.to_string());
     }
     let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
-        return equation_text.to_string();
+        return Err(PartialEquationError::new(equation_text));
     };
-    print_eqn(&substitute_reducers_in_expr0(ast, reducers))
+    Ok(print_eqn(&substitute_reducers_in_expr0(ast, reducers)))
 }
 
 fn substitute_reducers_in_expr0(expr: Expr0, reducers: &HashMap<String, String>) -> Expr0 {

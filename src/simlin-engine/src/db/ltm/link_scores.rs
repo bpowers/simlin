@@ -1170,15 +1170,19 @@ pub(super) fn emit_agg_to_target_link_scores(
         }
     };
 
-    // Helper: substitute the reducers in a slot expr's canonical text and
-    // build the agg→target link-score equation for one target element (or
-    // the scalar case when `element` is `None`).
-    let slot_text = |expr: &crate::ast::Expr2| -> String {
-        crate::ltm_augment::substitute_reducers_in_equation(
-            &crate::patch::expr2_to_string(expr),
-            &reducer_subst,
-        )
-    };
+    // Helper: substitute the reducers in a slot expr's canonical text, to
+    // build the agg→target link-score equation for one target element (or the
+    // scalar case when `element` is `None`). Propagates a `PartialEquationError`
+    // when the reducer substitution can't parse its input -- the caller skips
+    // the variable and warns rather than emitting a partial that keeps the
+    // inline reducer live instead of the hoisted agg node (GH #661).
+    let slot_text =
+        |expr: &crate::ast::Expr2| -> Result<String, crate::ltm_augment::PartialEquationError> {
+            crate::ltm_augment::substitute_reducers_in_equation(
+                &crate::patch::expr2_to_string(expr),
+                &reducer_subst,
+            )
+        };
 
     match ast {
         Ast::Scalar(expr) => {
@@ -1186,11 +1190,17 @@ pub(super) fn emit_agg_to_target_link_scores(
             // the agg arrayed (a scalar target has no iterated dims), so
             // the agg is always scalar here.
             debug_assert!(!agg_is_arrayed, "a scalar target implies a scalar agg");
-            let substituted = slot_text(expr);
             let name = format!(
                 "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
                 agg.name, to
             );
+            let substituted = match slot_text(expr) {
+                Ok(substituted) => substituted,
+                Err(err) => {
+                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    return;
+                }
+            };
             match crate::ltm_augment::generate_agg_to_scalar_target_equation(
                 &agg.name,
                 to,
@@ -1209,8 +1219,22 @@ pub(super) fn emit_agg_to_target_link_scores(
             }
         }
         Ast::ApplyToAll(_, expr) => {
-            // One shared body; emit one per-target-element scalar var.
-            let substituted = slot_text(expr);
+            // One shared body; emit one per-target-element scalar var. A
+            // substitution parse failure here fails the whole edge (the body
+            // is shared across every element), so warn once on the base
+            // `agg → to` name and skip rather than emit a partial that keeps
+            // the inline reducer live (GH #661).
+            let substituted = match slot_text(expr) {
+                Ok(substituted) => substituted,
+                Err(err) => {
+                    let name = format!(
+                        "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
+                        agg.name, to
+                    );
+                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    return;
+                }
+            };
             if to_dims.is_empty() {
                 return;
             }
@@ -1268,8 +1292,11 @@ pub(super) fn emit_agg_to_target_link_scores(
                 // iff there is no slot expression.
                 let equation = match per_elem.get(&canonical_elem).or(default_expr.as_ref()) {
                     None => Ok("0".to_string()),
-                    Some(slot_expr) => {
-                        let substituted = slot_text(slot_expr);
+                    // A substitution parse failure rides the same `Result` the
+                    // equation builder returns, so the `match equation` below
+                    // converts it into the per-element `Warning` + skip (GH
+                    // #661) -- no separate error handling needed here.
+                    Some(slot_expr) => slot_text(slot_expr).and_then(|substituted| {
                         // Re-derive per-slot deps (the union over all slots
                         // would over-freeze refs absent from this slot),
                         // then extend with this agg's name and every other
@@ -1296,7 +1323,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             Some(&agg_source_ref_for_target(element)),
                             Some(project_dimensions_context(db, project)),
                         )
-                    }
+                    }),
                 };
                 let name = format!(
                     "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
