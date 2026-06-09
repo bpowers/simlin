@@ -9,7 +9,6 @@ import {
   GoogleAuthProvider,
   OAuthProvider,
   Auth as FirebaseAuth,
-  fetchSignInMethodsForEmail,
   createUserWithEmailAndPassword,
   updateProfile,
   sendPasswordResetEmail,
@@ -32,7 +31,19 @@ import typography from './typography.module.css';
 
 import styles from './Login.module.css';
 
-type EmailLoginStates = 'showEmail' | 'showPassword' | 'showSignup' | 'showProviderRedirect' | 'showRecover';
+// The email flow is a single combined sign-in card rather than a method-prefetch
+// router. We deliberately do NOT call Firebase's deprecated
+// fetchSignInMethodsForEmail: it enables email enumeration, and when a project
+// turns on Email Enumeration Protection it returns [] for every address, which
+// the old flow misread as "no account" and used to route every existing
+// password user to the signup card -- a silent, total lockout (issue #692).
+// Removing the prefetch makes the flow correct whether that protection is on or
+// off, at the cost of no longer being able to tell a returning OAuth-only user
+// which provider they used: a wrong password and an OAuth-only account both
+// surface as auth/invalid-credential under protection, so we show one generic
+// message and point such users back to the provider buttons on the landing
+// screen.
+type EmailLoginStates = 'signin' | 'signup' | 'recover' | 'recoverSent';
 
 export interface LoginProps {
   disabled: boolean;
@@ -47,7 +58,10 @@ interface LoginState {
   passwordError: string | undefined;
   fullName: string;
   fullNameError: string | undefined;
-  provider: 'google.com' | 'apple.com' | undefined;
+  // Card-level credential failure on the combined sign-in card (kept separate
+  // from the per-field emailError/passwordError so it can be announced via
+  // role=alert and cleared when the user edits either field).
+  signinError: string | undefined;
 }
 
 function appleProvider(): OAuthProvider {
@@ -55,6 +69,22 @@ function appleProvider(): OAuthProvider {
   provider.addScope('email');
   provider.addScope('name');
   return provider;
+}
+
+/**
+ * Firebase Auth errors carry a string `code` (e.g. 'auth/invalid-credential')
+ * on top of the Error shape. Read it defensively: a non-Firebase throw (a bare
+ * network TypeError, say) has no `code` and must fall through to the generic
+ * branch rather than crash the handler.
+ */
+function firebaseErrorCode(err: unknown): string | undefined {
+  if (typeof err === 'object' && err !== null) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'string') {
+      return code;
+    }
+  }
+  return undefined;
 }
 
 export const GoogleIcon: React.FunctionComponent = (props) => {
@@ -73,13 +103,13 @@ const initialState: LoginState = {
   passwordError: undefined,
   fullName: '',
   fullNameError: undefined,
-  provider: undefined,
+  signinError: undefined,
 };
 
 export function Login(props: LoginProps): React.JSX.Element {
   // One useState object with a class-parity merging `setState` helper preserves
-  // the class's behavior for handlers that issue several setState calls in one
-  // turn (each merges a partial patch onto the previous state).
+  // the behavior for handlers that issue several setState calls in one turn
+  // (each merges a partial patch onto the previous state).
   const [state, setStateRaw] = React.useState<LoginState>(() => ({ ...initialState }));
 
   const setState = React.useCallback((patch: Partial<LoginState>): void => {
@@ -89,17 +119,14 @@ export function Login(props: LoginProps): React.JSX.Element {
   // The async auth handlers escape the render that created them (they await
   // firebase calls), so they read the freshest props/state through this ref:
   // a prop change (auth) or an interleaved state edit between handler creation
-  // and the await's resolution is observed correctly, matching the class's
-  // this.props / this.state reads.
+  // and the await's resolution is observed correctly.
   const latest = React.useRef<{ props: LoginProps; state: LoginState }>(
     undefined as unknown as { props: LoginProps; state: LoginState },
   );
   latest.current = { props, state };
 
   // Surface OAuth redirect failures (provider misconfig, popup blocked,
-  // network errors, expired auth domain) into emailError so the user sees
-  // them. The previous setTimeout-around-async pattern silently swallowed
-  // rejections because nothing awaited or .catch'd the inner promise.
+  // network errors, expired auth domain) into emailError so the user sees them.
   const appleLoginClick = async () => {
     const provider = appleProvider();
     try {
@@ -121,59 +148,90 @@ export function Login(props: LoginProps): React.JSX.Element {
       });
     }
   };
+  // Entering the email flow lands directly on the combined sign-in card. Clear
+  // any stale OAuth error from the landing screen so it doesn't reappear under
+  // the email field.
   const emailLoginClick = () => {
-    setState({ emailLoginFlow: 'showEmail' });
+    setState({ emailLoginFlow: 'signin', emailError: undefined, passwordError: undefined, signinError: undefined });
   };
-  // Editing a field clears its stale error: once the user starts correcting
-  // the value, keeping the old red message would be misleading (it described
-  // the previous submission, not the text on screen).
+  // Editing a field clears its stale error: once the user starts correcting the
+  // value, keeping the old red message would be misleading. The combined
+  // credential error (signinError) is about "email OR password", so editing
+  // either field clears it.
   const onFullNameChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
     setState({ fullName: event.target.value, fullNameError: undefined });
   };
   const onPasswordChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setState({ password: event.target.value, passwordError: undefined });
+    setState({ password: event.target.value, passwordError: undefined, signinError: undefined });
   };
   const onEmailChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setState({ email: event.target.value, emailError: undefined });
+    setState({ email: event.target.value, emailError: undefined, signinError: undefined });
   };
-  const onEmailCancel = () => {
-    setState({ emailLoginFlow: undefined });
+  const onCancel = () => {
+    setState({
+      emailLoginFlow: undefined,
+      emailError: undefined,
+      passwordError: undefined,
+      fullNameError: undefined,
+      signinError: undefined,
+    });
   };
-  const onSubmitEmail = async () => {
+  const onTroubleSigningIn = () => {
+    setState({ emailLoginFlow: 'recover', emailError: undefined, passwordError: undefined, signinError: undefined });
+  };
+  const onCreateAccount = () => {
+    setState({
+      emailLoginFlow: 'signup',
+      emailError: undefined,
+      passwordError: undefined,
+      fullNameError: undefined,
+      signinError: undefined,
+    });
+  };
+  const onSignInInstead = () => {
+    setState({
+      emailLoginFlow: 'signin',
+      emailError: undefined,
+      passwordError: undefined,
+      fullNameError: undefined,
+      signinError: undefined,
+    });
+  };
+  // Combined sign-in: attempt the password sign-in directly and branch on the
+  // Firebase error code. On success App's onAuthStateChanged observer takes
+  // over (exchanges the id token for a session), so there's nothing to do here.
+  const onSignIn = async () => {
     const email = latest.current.state.email.trim();
     if (!email) {
       setState({ emailError: 'Enter your email address to continue' });
       return;
     }
-
-    // fetchSignInMethodsForEmail rejects on network errors, rate limiting,
-    // and Firebase's email-enumeration protection; the sibling auth handlers
-    // all surface failures, so this one must too (it used to escape as an
-    // unhandled rejection and the form just sat there).
-    let methods: string[];
-    try {
-      methods = await fetchSignInMethodsForEmail(latest.current.props.auth, email);
-    } catch (err) {
-      setState({
-        emailError: err instanceof Error ? err.message : 'unable to look up that email address; try again',
-      });
+    const password = latest.current.state.password.trim();
+    if (!password) {
+      setState({ passwordError: 'Enter your password to continue' });
       return;
     }
-    if (methods.includes('password')) {
-      setState({ emailLoginFlow: 'showPassword' });
-    } else if (methods.length === 0) {
-      setState({ emailLoginFlow: 'showSignup' });
-    } else {
-      // we only allow 1 method
-      const method = methods[0];
-      if (method === 'google.com' || method === 'apple.com') {
-        setState({
-          emailLoginFlow: 'showProviderRedirect',
-          provider: methods[0] as 'google.com' | 'apple.com',
-        });
+
+    try {
+      await signInWithEmailAndPassword(latest.current.props.auth, email, password);
+    } catch (err) {
+      const code = firebaseErrorCode(err);
+      if (code === 'auth/invalid-email') {
+        setState({ signinError: "That doesn't look like a valid email address." });
+      } else if (code === 'auth/network-request-failed' || code === 'auth/too-many-requests') {
+        // Transient, account-agnostic failures: Firebase returns these whether
+        // or not the account exists, so reporting them honestly leaks nothing --
+        // and it avoids telling a user with correct credentials that their
+        // password is wrong during a network outage or rate-limit.
+        setState({ signinError: "We couldn't sign you in right now. Please try again in a moment." });
       } else {
+        // auth/invalid-credential (the unified wrong-password / no-such-user /
+        // OAuth-only error under Email Enumeration Protection),
+        // auth/wrong-password, auth/user-not-found, and any non-Firebase throw
+        // all collapse to one enumeration-safe message.
         setState({
-          emailError: 'an unknown error occurred; try a different email address',
+          signinError:
+            'Incorrect email or password. If you used Google or Apple to sign up, go back and use those buttons.',
         });
       }
     }
@@ -188,18 +246,27 @@ export function Login(props: LoginProps): React.JSX.Element {
     try {
       await sendPasswordResetEmail(latest.current.props.auth, email);
     } catch (err) {
-      // Stay on the recovery card with a visible error rather than advancing
-      // as if the reset email had been sent.
+      // Stay on the recovery card with a visible error rather than advancing as
+      // if the reset email had been sent.
       setState({
         emailError: err instanceof Error ? err.message : 'sending the recovery email failed; try again',
       });
       return;
     }
 
+    // Neutral confirmation only: sendPasswordResetEmail succeeds even for
+    // addresses with no account when Email Enumeration Protection is on, so we
+    // must not assert an email was actually sent to a real account.
+    setState({ emailLoginFlow: 'recoverSent' });
+  };
+  const onRecoverDone = () => {
     setState({
-      emailLoginFlow: 'showPassword',
+      emailLoginFlow: 'signin',
       password: '',
       passwordError: undefined,
+      emailError: undefined,
+      fullNameError: undefined,
+      signinError: undefined,
     });
   };
   const onSubmitNewUser = async () => {
@@ -225,11 +292,15 @@ export function Login(props: LoginProps): React.JSX.Element {
       const userCred = await createUserWithEmailAndPassword(latest.current.props.auth, email, password);
       await updateProfile(userCred.user, { displayName: fullName });
     } catch (err) {
-      console.log(err);
-      if (err instanceof Error) {
-        setState({ passwordError: err.message });
+      const code = firebaseErrorCode(err);
+      if (code === 'auth/email-already-in-use') {
+        setState({ emailError: 'An account with this email already exists.' });
+      } else if (code === 'auth/weak-password') {
+        setState({ passwordError: 'Choose a password with at least 6 characters.' });
+      } else if (code === 'auth/invalid-email') {
+        setState({ emailError: "That doesn't look like a valid email address." });
       } else {
-        setState({ passwordError: 'something unknown went wrong' });
+        setState({ passwordError: err instanceof Error ? err.message : 'something unknown went wrong' });
       }
     }
   };
@@ -237,43 +308,18 @@ export function Login(props: LoginProps): React.JSX.Element {
     event.preventDefault();
     return false;
   };
-  const onEmailHelp = () => {
-    setState({ emailLoginFlow: 'showRecover' });
-  };
-  const onEmailLogin = async () => {
-    const email = latest.current.state.email.trim();
-    if (!email) {
-      setState({ emailError: 'Enter your email address to continue' });
-      return;
-    }
-
-    const password = latest.current.state.password.trim();
-    if (!password) {
-      setState({ passwordError: 'Enter your email address to continue' });
-      return;
-    }
-
-    try {
-      await signInWithEmailAndPassword(latest.current.props.auth, email, password);
-    } catch (err) {
-      console.log(err);
-      if (err instanceof Error) {
-        setState({ passwordError: err.message });
-      }
-    }
-  };
 
   const disabledClass = props.disabled ? styles.disabled : styles.innerInner;
 
   let loginUI: React.JSX.Element | undefined = undefined;
   if (!props.disabled) {
     switch (state.emailLoginFlow) {
-      case 'showEmail':
+      case 'signin':
         loginUI = (
           <Card variant="outlined" className={styles.emailForm}>
             <form onSubmit={onNullSubmit}>
               <CardContent>
-                <h6 className={typography.heading6}>Sign in with email</h6>
+                <h6 className={typography.heading6}>Sign in to Simlin</h6>
                 <TextField
                   label="Email"
                   value={state.email}
@@ -284,37 +330,9 @@ export function Login(props: LoginProps): React.JSX.Element {
                   error={state.emailError !== undefined}
                   helperText={state.emailError}
                   fullWidth
-                  autoFocus
-                />
-              </CardContent>
-              <CardActions>
-                <Button style={{ marginLeft: 'auto' }} onClick={onEmailCancel}>
-                  Cancel
-                </Button>
-                <Button type="submit" variant="contained" onClick={onSubmitEmail}>
-                  Next
-                </Button>
-              </CardActions>
-            </form>
-          </Card>
-        );
-        break;
-      case 'showPassword':
-        loginUI = (
-          <Card variant="outlined" className={styles.emailForm}>
-            <form onSubmit={onNullSubmit}>
-              <CardContent>
-                <h6 className={typography.heading6}>Sign in</h6>
-                <TextField
-                  label="Email"
-                  value={state.email}
-                  onChange={onEmailChanged}
-                  type="email"
-                  margin="normal"
-                  variant="standard"
-                  error={state.emailError !== undefined}
-                  helperText={state.emailError}
-                  fullWidth
+                  // Focus the empty field: email on first entry, password when
+                  // an email was carried in from another card.
+                  autoFocus={state.email === ''}
                 />
                 <TextField
                   label="Password"
@@ -327,16 +345,28 @@ export function Login(props: LoginProps): React.JSX.Element {
                   error={state.passwordError !== undefined}
                   helperText={state.passwordError}
                   fullWidth
-                  autoFocus
+                  autoFocus={state.email !== ''}
                 />
-              </CardContent>
-              <CardActions>
-                <span className={typography.body2} style={{ marginRight: 'auto' }}>
-                  <TextLink style={{ cursor: 'help' }} underline="hover" onClick={onEmailHelp}>
+                {state.signinError !== undefined && (
+                  <p role="alert" className={typography.body2}>
+                    {state.signinError}
+                  </p>
+                )}
+                <p className={typography.body2}>
+                  <TextLink underline="hover" onClick={onTroubleSigningIn}>
                     Trouble signing in?
                   </TextLink>
-                </span>
-                <Button type="submit" variant="contained" onClick={onEmailLogin}>
+                  {' '}
+                  <TextLink underline="hover" onClick={onCreateAccount}>
+                    Create account
+                  </TextLink>
+                </p>
+              </CardContent>
+              <CardActions>
+                <Button style={{ marginLeft: 'auto' }} onClick={onCancel}>
+                  Cancel
+                </Button>
+                <Button type="submit" variant="contained" onClick={onSignIn}>
                   Sign in
                 </Button>
               </CardActions>
@@ -344,12 +374,12 @@ export function Login(props: LoginProps): React.JSX.Element {
           </Card>
         );
         break;
-      case 'showSignup':
+      case 'signup':
         loginUI = (
           <Card variant="outlined" className={styles.emailForm}>
             <form onSubmit={onNullSubmit}>
               <CardContent>
-                <h6 className={typography.heading6}>Create account</h6>
+                <h6 className={typography.heading6}>Create your account</h6>
                 <TextField
                   label="Email"
                   value={state.email}
@@ -377,16 +407,21 @@ export function Login(props: LoginProps): React.JSX.Element {
                   value={state.password}
                   onChange={onPasswordChanged}
                   type="password"
-                  autoComplete="current-password"
+                  autoComplete="new-password"
                   margin="normal"
                   variant="standard"
                   error={state.passwordError !== undefined}
                   helperText={state.passwordError}
                   fullWidth
                 />
+                <p className={typography.body2}>
+                  <TextLink underline="hover" onClick={onSignInInstead}>
+                    Already have an account? Sign in instead
+                  </TextLink>
+                </p>
               </CardContent>
               <CardActions>
-                <Button style={{ marginLeft: 'auto' }} onClick={onEmailCancel}>
+                <Button style={{ marginLeft: 'auto' }} onClick={onCancel}>
                   Cancel
                 </Button>
                 <Button type="submit" variant="contained" onClick={onSubmitNewUser}>
@@ -397,43 +432,7 @@ export function Login(props: LoginProps): React.JSX.Element {
           </Card>
         );
         break;
-      case 'showProviderRedirect': {
-        const provider = state.provider === 'google.com' ? 'Google' : 'Apple';
-        loginUI = (
-          <Card variant="outlined" className={styles.emailForm}>
-            <form onSubmit={onNullSubmit}>
-              <CardContent>
-                <h6 className={typography.heading6}>Sign in - you already have an account</h6>
-                <p className={styles.recoverInstructions}>
-                  You've already used {provider} to sign up with <b>{state.email}</b>. Sign in with {provider} to
-                  continue.
-                </p>
-                {/* The "Sign in with {provider}" button calls googleLoginClick /
-                 * appleLoginClick, whose signInWithRedirect rejection is surfaced
-                 * via emailError -- render it here so the failure is visible (this
-                 * card has no helperText-bearing TextField like the other flows). */}
-                {state.emailError !== undefined && (
-                  <p role="alert" className={typography.body2}>
-                    {state.emailError}
-                  </p>
-                )}
-              </CardContent>
-              <CardActions>
-                <Button
-                  style={{ marginLeft: 'auto' }}
-                  type="submit"
-                  variant="contained"
-                  onClick={state.provider === 'google.com' ? googleLoginClick : appleLoginClick}
-                >
-                  Sign in with {provider}
-                </Button>
-              </CardActions>
-            </form>
-          </Card>
-        );
-        break;
-      }
-      case 'showRecover':
+      case 'recover':
         loginUI = (
           <Card variant="outlined" className={styles.emailForm}>
             <form onSubmit={onNullSubmit}>
@@ -456,7 +455,7 @@ export function Login(props: LoginProps): React.JSX.Element {
                 />
               </CardContent>
               <CardActions>
-                <Button style={{ marginLeft: 'auto' }} onClick={onEmailCancel}>
+                <Button style={{ marginLeft: 'auto' }} onClick={onCancel}>
                   Cancel
                 </Button>
                 <Button type="submit" variant="contained" onClick={onSubmitRecovery}>
@@ -464,6 +463,24 @@ export function Login(props: LoginProps): React.JSX.Element {
                 </Button>
               </CardActions>
             </form>
+          </Card>
+        );
+        break;
+      case 'recoverSent':
+        loginUI = (
+          <Card variant="outlined" className={styles.emailForm}>
+            <CardContent>
+              <h6 className={typography.heading6}>Check your email</h6>
+              <p className={styles.recoverInstructions}>
+                If an account exists for <b>{state.email}</b>, we&apos;ve sent password-reset instructions. Follow the
+                link in that email to choose a new password.
+              </p>
+            </CardContent>
+            <CardActions>
+              <Button style={{ marginLeft: 'auto' }} variant="contained" onClick={onRecoverDone}>
+                Done
+              </Button>
+            </CardActions>
           </Card>
         );
         break;
@@ -491,8 +508,8 @@ export function Login(props: LoginProps): React.JSX.Element {
             </Button>
             {/* Visible error sink for OAuth click handlers. Without this, a
              * rejected signInWithRedirect (popup blocked, provider misconfig,
-             * network failure) would set emailError but stay invisible until
-             * the user enters the email-flow path. */}
+             * network failure) would set emailError but stay invisible because
+             * no email-flow card is mounted to render it. */}
             {state.emailError !== undefined && (
               <p role="alert" className={typography.body2}>
                 {state.emailError}
