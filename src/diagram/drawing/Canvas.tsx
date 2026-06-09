@@ -58,6 +58,18 @@ import { anyModuleHasModelReference } from '../module-warning';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 import { isDragMovement, shouldShowVariableDetails } from './pointer-utils';
+import {
+  VELOCITY_THRESHOLD,
+  calculateVelocity as computeVelocity,
+  isMomentumDone,
+  momentumOffsetAt,
+  pinchOffset,
+  pinchZoom,
+  resizeViewBox,
+  wheelPanOffset,
+  wheelZoom,
+  zoomAroundPoint,
+} from './viewport';
 import { pointerStateReset, resolveSelectionForReattachment } from '../selection-logic';
 import {
   computeDragSelection,
@@ -148,27 +160,17 @@ function computeElementBounds(
 
 const ZMax = 6;
 
-// Momentum scrolling physics for macOS-native feel.
-// macOS apps (Finder, Safari, Maps) have snappier deceleration than iOS.
-// A friction coefficient of 0.05 means velocity retains 5% after 1 second,
-// giving a ~0.5-0.8 second coast for typical pan gestures.
-const FRICTION_COEFFICIENT = 0.05;
-const FRICTION_LOG = Math.log(FRICTION_COEFFICIENT); // ≈ -3.0
+// Momentum physics, zoom limits, and the wheel/pinch math live in `viewport.ts`
+// (the pure functional core); this shell resolves screen->canvas points and the
+// rAF/timer lifecycle, then calls those pure transforms.
 
-// Stop momentum when velocity drops below this threshold.
-// At 60fps, 15 px/s = 0.25 px/frame - imperceptible motion.
-// Lower values make the stop feel more gradual and natural.
-const VELOCITY_THRESHOLD = 15;
-
-// Pinch-to-zoom uses exponential scaling for natural feel.
-// A divisor of 100 means cumulative deltaY of ~100 results in 2x zoom.
-// This matches native macOS apps like Maps and Preview.
-const PINCH_ZOOM_DIVISOR = 100;
-
-// MIN_ZOOM matches the 0.2 floor used in render() to avoid mismatch between
-// view state and actual rendering (which clamps zoom < 0.2 to 1.0)
-const MIN_ZOOM = 0.2;
-const MAX_ZOOM = 5.0;
+// How long an "orphaned" live viewport waits before being committed to the
+// controller. Two cases produce one with no natural settle event of its own: a
+// wheel/trackpad gesture (a stream of discrete events, no end event -- coalesce
+// the burst), and a momentum coast interrupted by a press that does not become a
+// viewport gesture. The deferred commit is guarded so a pan/pinch/momentum that
+// DID take over commits instead (see scheduleDeferredCommit).
+const DEFERRED_COMMIT_DELAY_MS = 200;
 
 // Tracked pointer for multi-touch pinch detection
 interface TrackedPointer {
@@ -303,12 +305,46 @@ interface CanvasRefs {
   // Multi-touch tracking for pinch gestures
   activePointers: Map<number, TrackedPointer>;
 
+  // The canvas offset captured when a drag-pan begins. handleMovingCanvas
+  // anchors each move against this rather than props.view.viewBox, so a pan that
+  // interrupts an in-flight momentum coast (whose offset has not been committed
+  // back to props.view) starts from the on-screen position instead of jumping
+  // back to the last committed viewBox.
+  panBaseOffset: Point | undefined;
+
+  // Trailing-debounce timer that commits an "orphaned" live viewport -- one left
+  // by a wheel/trackpad gesture (no native end event) or by a momentum coast that
+  // a non-viewport press interrupted. Re-armed per wheel event / on interruption;
+  // its callback is guarded so an active pan/pinch/coast commits instead. Cleared
+  // on unmount and by an external-view override.
+  deferredCommitTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // The props.view offset/zoom VALUE observed while no gesture was live. The
+  // external-override effect compares props.view against this to detect a
+  // non-gesture view change (centerVariable, navigation, undo) mid-gesture.
+  // Compared by value (not identity) so a content-equal republished snapshot does
+  // not look like an external change.
+  viewBaseline: { x: number; y: number; zoom: number } | undefined;
+
   // Momentum/inertia animation
   velocityTracker: VelocityTracker;
   momentumAnimationId: number | undefined;
   momentumStartTime: number | undefined;
   momentumInitialVelocity: Point | undefined;
   momentumStartOffset: Point | undefined;
+}
+
+// The local "live viewport" the canvas owns DURING a gesture (pan, momentum,
+// wheel, pinch, resize). While set, the render transform and all gesture math
+// read offset+zoom from here instead of `props.view`, so a multi-event gesture
+// stays fully local and only notifies the controller once, on settle. `undefined`
+// means "no gesture in flight -- read from props.view". It carries zoom as well
+// as offset because pinch/wheel-zoom change zoom mid-gesture and there is
+// otherwise no local home for it.
+interface LiveViewport {
+  x: number;
+  y: number;
+  zoom: number;
 }
 
 // The snapshot of props + discrete/continuous state that event-time readers
@@ -322,7 +358,7 @@ interface LatestState {
   editingName: Array<Descendant>;
   dragSelectionPoint: Point | undefined;
   moveDelta: Point | undefined;
-  movingCanvasOffset: Point | undefined;
+  liveViewport: LiveViewport | undefined;
   svgSize: Readonly<{ width: number; height: number }> | undefined;
   inCreation: ViewElement | undefined;
   inCreationCloud: CloudViewElement | undefined;
@@ -344,7 +380,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   const [editingName, setEditingName] = React.useState<Array<Descendant>>([]);
   const [dragSelectionPoint, setDragSelectionPoint] = React.useState<Point | undefined>(undefined);
   const [moveDelta, setMoveDelta] = React.useState<Point | undefined>(undefined);
-  const [movingCanvasOffset, setMovingCanvasOffset] = React.useState<Point | undefined>(undefined);
+  const [liveViewport, setLiveViewport] = React.useState<LiveViewport | undefined>(undefined);
   const [initialBounds, setInitialBounds] = React.useState<ViewRect>(viewRectDefault);
   const [svgSize, setSvgSize] = React.useState<Readonly<{ width: number; height: number }> | undefined>(undefined);
   const [inCreation, setInCreation] = React.useState<ViewElement | undefined>(undefined);
@@ -373,6 +409,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         draggedLinkArc: undefined,
       },
       activePointers: new Map<number, TrackedPointer>(),
+      panBaseOffset: undefined,
+      deferredCommitTimer: undefined,
+      viewBaseline: undefined,
       velocityTracker: { positions: [] },
       momentumAnimationId: undefined,
       momentumStartTime: undefined,
@@ -398,7 +437,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     editingName,
     dragSelectionPoint,
     moveDelta,
-    movingCanvasOffset,
+    liveViewport,
     svgSize,
     inCreation,
     inCreationCloud,
@@ -476,7 +515,88 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     setInCreationCloud(reset.inCreationCloud);
   };
 
-  const getCanvasOffset = (): Readonly<Point> => latest.current.movingCanvasOffset ?? latest.current.props.view.viewBox;
+  // Offset/zoom resolve from the live viewport while a gesture is in flight,
+  // else from props.view. Every gesture-math and render read goes through these
+  // so a live gesture never has to round-trip through the controller to see its
+  // own in-progress viewport.
+  const getCanvasOffset = (): Readonly<Point> => latest.current.liveViewport ?? latest.current.props.view.viewBox;
+
+  const getCanvasZoom = (): number => latest.current.liveViewport?.zoom ?? latest.current.props.view.zoom;
+
+  // Push the live viewport to the controller exactly once and clear it. This is
+  // the single settle-time commit shared by every gesture tail (pan release with
+  // no momentum, momentum end, wheel debounce, pinch exit). Clearing the live
+  // state in the same synchronous stretch as onViewBoxChange -- whose controller
+  // path applies the optimistic view synchronously -- keeps props.view and the
+  // cleared live state consistent in one React commit, so the diagram does not
+  // snap back. A no-op when nothing is live.
+  const commitLiveViewport = (): void => {
+    const live = latest.current.liveViewport;
+    if (!live) {
+      return;
+    }
+    // Source the viewBox width/height from the live measured size, not
+    // props.view.viewBox: a resize that fired during this gesture updated
+    // `svgSize` but (by design) did not commit, so props.view still holds the
+    // pre-resize dimensions. viewBox width/height are pixel dimensions == the
+    // measured canvas size, so this settles the gesture with the current size.
+    const size = latest.current.svgSize ?? latest.current.props.view.viewBox;
+    const newViewBox = {
+      ...latest.current.props.view.viewBox,
+      x: live.x,
+      y: live.y,
+      width: size.width,
+      height: size.height,
+    };
+    latest.current.props.onViewBoxChange(newViewBox, live.zoom);
+    setLiveViewport(undefined);
+  };
+
+  // (Re)arm the deferred commit for an orphaned live viewport (a wheel/trackpad
+  // gesture, or a momentum coast a press just interrupted). The commit fires once
+  // things have been idle for DEFERRED_COMMIT_DELAY_MS.
+  const scheduleDeferredCommit = (): void => {
+    if (r.deferredCommitTimer !== undefined) {
+      clearTimeout(r.deferredCommitTimer);
+    }
+    r.deferredCommitTimer = setTimeout(() => {
+      r.deferredCommitTimer = undefined;
+      // If a viewport gesture (drag-pan, pinch, or a momentum coast) is now in
+      // flight, it owns the live viewport (which it inherited) and will commit on
+      // its own settle -- don't double-commit. Otherwise commit now, so a plain
+      // click/selection that interrupted a wheel scroll or a coast still persists
+      // the viewport rather than stranding it in local state.
+      const mode = latest.current.interaction.mode;
+      const viewportGestureActive = r.momentumAnimationId !== undefined || mode === 'panning' || mode === 'pinching';
+      if (!viewportGestureActive) {
+        commitLiveViewport();
+      }
+    }, DEFERRED_COMMIT_DELAY_MS);
+  };
+
+  // Cancel a pending deferred commit WITHOUT committing -- used on unmount and by
+  // an external-view override that supersedes the abandoned gesture.
+  const cancelDeferredCommit = (): void => {
+    if (r.deferredCommitTimer !== undefined) {
+      clearTimeout(r.deferredCommitTimer);
+      r.deferredCommitTimer = undefined;
+    }
+  };
+
+  // Stop an in-flight momentum coast that something is interrupting, and -- only
+  // if a coast was actually running -- arm a deferred commit so the now-orphaned
+  // live viewport still has a settle path. Whatever interrupted then either
+  // re-arms (a wheel/pan that moves), makes the deferred callback skip (it becomes
+  // a pan/pinch/coast), or lets the timer fire (a click, or a wheel that was a
+  // clamped no-op). Every caller that stops a coast must go through this so the
+  // coasted pan is never silently dropped.
+  const interruptCoast = (): void => {
+    const wasCoasting = r.momentumAnimationId !== undefined;
+    stopMomentumAnimation();
+    if (wasCoasting) {
+      scheduleDeferredCommit();
+    }
+  };
 
   const getElementByUid = (uid: UID): ViewElement => {
     let element: ViewElement | undefined;
@@ -498,7 +618,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       x -= bounds.x;
       y -= bounds.y;
     }
-    return screenToCanvasPoint(x, y, latest.current.props.view.zoom);
+    return screenToCanvasPoint(x, y, getCanvasZoom());
   };
 
   // Helper to get canvas point with a specific zoom level
@@ -771,64 +891,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
   // ---- Momentum / velocity physics (shell-internal, escapes render) -------
 
-  // Flutter-style friction simulation: calculates position at time t
-  // Based on Flutter's FrictionSimulation class
-  // x(t) = x0 + v0 * (friction^t - 1) / ln(friction)
-  const frictionPosition = (velocity: number, time: number): number => {
-    return (velocity * (Math.pow(FRICTION_COEFFICIENT, time) - 1)) / FRICTION_LOG;
-  };
-
-  // Velocity at time t: v(t) = v0 * friction^t
-  const frictionVelocity = (velocity: number, time: number): number => {
-    return velocity * Math.pow(FRICTION_COEFFICIENT, time);
-  };
-
-  // Calculate velocity from recent positions for momentum scrolling.
-  // Returns zero if the pointer was stationary before release (intentional stop).
-  const calculateVelocity = (): Point => {
-    const positions = r.velocityTracker.positions;
-    if (positions.length < 2) {
-      return { x: 0, y: 0 };
-    }
-
-    const now = window.performance.now();
-    const lastPosition = positions[positions.length - 1];
-
-    // If the pointer has been stationary for more than 40ms before release,
-    // the user intentionally stopped - don't start momentum.
-    // 40ms ≈ 2.5 frames at 60fps, enough to detect intentional stops
-    // while still capturing quick flick-and-release gestures.
-    const timeSinceLastMove = now - lastPosition.timestamp;
-    if (timeSinceLastMove > 40) {
-      return { x: 0, y: 0 };
-    }
-
-    // Use last 100ms of samples for velocity calculation
-    const recentPositions = positions.filter((p) => now - p.timestamp < 100);
-
-    if (recentPositions.length < 2) {
-      // Fall back to last two positions
-      const lastP = positions[positions.length - 1];
-      const prev = positions[positions.length - 2];
-      const dt = (lastP.timestamp - prev.timestamp) / 1000; // seconds
-      if (dt <= 0) return { x: 0, y: 0 };
-      return {
-        x: (lastP.x - prev.x) / dt,
-        y: (lastP.y - prev.y) / dt,
-      };
-    }
-
-    // Calculate average velocity over recent samples
-    const firstP = recentPositions[0];
-    const lastP = recentPositions[recentPositions.length - 1];
-    const dt = (lastP.timestamp - firstP.timestamp) / 1000; // seconds
-    if (dt <= 0) return { x: 0, y: 0 };
-
-    return {
-      x: (lastP.x - firstP.x) / dt,
-      y: (lastP.y - firstP.y) / dt,
-    };
-  };
+  // Estimate release velocity from the tracked pointer samples. The decision
+  // logic (too-few-samples / stationary-stop / recent-average) lives in the pure
+  // `computeVelocity`; this shell only supplies the samples and the clock.
+  const calculateVelocity = (): Point => computeVelocity(r.velocityTracker.positions, window.performance.now());
 
   const stopMomentumAnimation = (): void => {
     if (r.momentumAnimationId !== undefined) {
@@ -851,54 +917,44 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
 
     const elapsed = (timestamp - r.momentumStartTime) / 1000; // seconds
-    const vx = r.momentumInitialVelocity.x;
-    const vy = r.momentumInitialVelocity.y;
+    const v0 = r.momentumInitialVelocity;
 
-    // Calculate current velocity
-    const currentVx = frictionVelocity(vx, elapsed);
-    const currentVy = frictionVelocity(vy, elapsed);
-    const currentSpeed = Math.sqrt(currentVx * currentVx + currentVy * currentVy);
-
-    // Stop when velocity drops below threshold
-    if (currentSpeed < VELOCITY_THRESHOLD) {
+    // Natural end: the decayed speed dropped below threshold. This is the single
+    // commit point for a coasted pan -- push the final live viewport once, then
+    // stop. (An interruption, by contrast, stops without committing and lets the
+    // interrupting gesture inherit the live viewport.)
+    if (isMomentumDone(v0, elapsed)) {
+      commitLiveViewport();
       stopMomentumAnimation();
       return;
     }
 
-    // Calculate new position using friction simulation
-    // Note: We ADD the friction position because higher offset = view moves in positive direction
-    // but velocity is in screen coordinates where dragging right should move view left
-    const dx = frictionPosition(vx, elapsed);
-    const dy = frictionPosition(vy, elapsed);
-
-    const newOffset = {
-      x: r.momentumStartOffset.x + dx,
-      y: r.momentumStartOffset.y + dy,
-    };
-
-    // Update viewBox with new offset
-    const newViewBox = {
-      ...latest.current.props.view.viewBox,
-      x: newOffset.x,
-      y: newOffset.y,
-    };
-    latest.current.props.onViewBoxChange(newViewBox, latest.current.props.view.zoom);
+    // Note: the friction displacement is ADDED because a higher offset moves the
+    // view in the positive direction, while velocity is in screen coordinates
+    // where dragging right should move the view left. The coasted offset is held
+    // in the live viewport (immediate render) -- no per-frame controller
+    // round-trip; that is the whole point of issue #707.
+    const newOffset = momentumOffsetAt(r.momentumStartOffset, v0, elapsed);
+    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom: getCanvasZoom() });
 
     // Continue animation
     r.momentumAnimationId = window.requestAnimationFrame(animateMomentum);
   };
 
-  // Start momentum animation after pan release
-  const startMomentumAnimation = (): void => {
+  // Start a momentum coast after pan release. Returns whether a coast actually
+  // started: the caller commits the pan immediately when it did NOT (a stationary
+  // release), and defers the single commit to the coast's natural end when it
+  // did. The two are mutually exclusive, so a gesture commits exactly once.
+  const startMomentumAnimation = (): boolean => {
     // Cancel any existing momentum animation first (defensive)
     stopMomentumAnimation();
 
     const velocity = calculateVelocity();
-    const speed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+    const speed = Math.hypot(velocity.x, velocity.y);
 
     // Don't start animation if velocity is at or below threshold
     if (speed <= VELOCITY_THRESHOLD) {
-      return;
+      return false;
     }
 
     r.momentumInitialVelocity = velocity;
@@ -906,6 +962,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     r.momentumStartTime = window.performance.now();
 
     r.momentumAnimationId = window.requestAnimationFrame(animateMomentum);
+    return true;
   };
 
   // Track position for velocity calculation during pan
@@ -959,114 +1016,66 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       return;
     }
 
-    // Calculate scale factor
+    // Scale the starting zoom by the finger-distance ratio (clamped).
     const scale = currentDistance / interactionNow.initialDistance;
-    let newZoom = interactionNow.initialZoom * scale;
+    const newZoom = pinchZoom(interactionNow.initialZoom, scale);
 
-    // Clamp zoom level
-    newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
-
-    // Get current pinch center in screen coordinates, then convert to canvas
-    // coordinates at the NEW zoom level
+    // Get the current pinch center in screen coordinates, then convert to canvas
+    // coordinates at the NEW zoom level. The fixed model point (under the fingers
+    // when the pinch began) is re-anchored under that center.
     const currentCenter = getPinchCenter();
     const currentCenterCanvas = getCanvasPointWithZoom(currentCenter.x, currentCenter.y, newZoom);
+    const newOffset = pinchOffset(currentCenterCanvas, interactionNow.modelPoint);
 
-    // The pinchModelPoint is fixed in model space - it's the point that was
-    // under the user's fingers when the pinch started. We want that same
-    // model point to remain under the current screen center.
-    // newOffset = currentCenterCanvas - pinchModelPoint
-    const modelPoint = interactionNow.modelPoint;
-    const newOffset = {
-      x: currentCenterCanvas.x - modelPoint.x,
-      y: currentCenterCanvas.y - modelPoint.y,
-    };
-
-    const newViewBox = {
-      ...latest.current.props.view.viewBox,
-      x: newOffset.x,
-      y: newOffset.y,
-    };
-
-    latest.current.props.onViewBoxChange(newViewBox, newZoom);
+    // Update the live viewport (immediate render); the single commit happens on
+    // pinch exit, not per move.
+    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom: newZoom });
   };
 
   // ---- Native wheel / Safari-gesture listeners (registered at mount) ------
 
   const handleWheelPan = (e: WheelEvent): void => {
-    const zoom = latest.current.props.view.zoom;
+    const zoom = getCanvasZoom();
+    const base = getCanvasOffset();
     const viewBox = latest.current.props.view.viewBox;
 
-    // Convert wheel delta to canvas coordinates
-    // deltaMode: 0 = pixels, 1 = lines, 2 = pages
-    let deltaX = e.deltaX;
-    let deltaY = e.deltaY;
-
-    if (e.deltaMode === 1) {
-      // Lines - multiply by line height (typically ~16-20px)
-      deltaX *= 16;
-      deltaY *= 16;
-    } else if (e.deltaMode === 2) {
-      // Pages - use actual viewport dimensions from DOM, not stored viewBox
-      // which may be stale during resize transitions
-      const viewportWidth = svgRef.current?.clientWidth ?? viewBox.width;
-      const viewportHeight = svgRef.current?.clientHeight ?? viewBox.height;
-      deltaX *= viewportWidth;
-      deltaY *= viewportHeight;
-    }
-
-    // Scale delta by zoom level (inverse because higher zoom = smaller view area)
-    deltaX /= zoom;
-    deltaY /= zoom;
-
-    const newViewBox = {
-      ...viewBox,
-      x: viewBox.x - deltaX,
-      y: viewBox.y - deltaY,
+    // Page deltas (deltaMode 2) scroll a full viewport; measure it from the DOM
+    // since the stored viewBox size may be stale during a resize transition.
+    const viewportPx = {
+      width: svgRef.current?.clientWidth ?? viewBox.width,
+      height: svgRef.current?.clientHeight ?? viewBox.height,
     };
+    const newOffset = wheelPanOffset(base, { x: e.deltaX, y: e.deltaY, mode: e.deltaMode }, zoom, viewportPx);
 
-    latest.current.props.onViewBoxChange(newViewBox, zoom);
+    // Update the live viewport and (re)arm the trailing commit; do NOT round-trip
+    // to the controller per event.
+    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom });
+    scheduleDeferredCommit();
   };
 
   // Native wheel zoom handler using exponential scaling for natural macOS feel.
   // Exponential scaling ensures symmetric behavior: zoom in 2x then out 2x returns to original.
   const handleNativeWheelZoom = (e: WheelEvent): void => {
-    const zoom = latest.current.props.view.zoom;
+    const zoom = getCanvasZoom();
 
-    // Exponential scaling: deltaY of PINCH_ZOOM_DIVISOR results in 2x zoom change.
-    // Negative deltaY = pinch out = zoom in, so we negate to get correct direction.
-    const scale = Math.pow(2, -e.deltaY / PINCH_ZOOM_DIVISOR);
-    let newZoom = zoom * scale;
-
-    // Clamp zoom level
-    newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
-
-    // Use epsilon comparison for floating point
-    if (Math.abs(newZoom - zoom) < 0.0001) {
+    // Exponential scaling (negative deltaY = pinch out = zoom in), clamped, with
+    // an epsilon no-op at the zoom limits.
+    const { zoom: newZoom, changed } = wheelZoom(zoom, e.deltaY);
+    if (!changed) {
       return;
     }
 
-    // Get cursor position in canvas coordinates
+    // Keep the model point under the cursor fixed across the zoom change: map the
+    // same screen pixel into canvas space at both the old (current live) and new
+    // zoom. getCanvasPoint reads the live zoom, so the old mapping is correct
+    // even mid-gesture.
     const cursorCanvas = getCanvasPoint(e.clientX, e.clientY);
-    const viewBox = latest.current.props.view.viewBox;
-
-    // Calculate the point under cursor in model coordinates
-    const modelX = cursorCanvas.x - viewBox.x;
-    const modelY = cursorCanvas.y - viewBox.y;
-
-    // Calculate new offset to keep the point under cursor stable
+    const base = getCanvasOffset();
     const newCursorCanvas = getCanvasPointWithZoom(e.clientX, e.clientY, newZoom);
-    const newOffset = {
-      x: newCursorCanvas.x - modelX,
-      y: newCursorCanvas.y - modelY,
-    };
+    const newOffset = zoomAroundPoint(base, cursorCanvas, newCursorCanvas);
 
-    const newViewBox = {
-      ...viewBox,
-      x: newOffset.x,
-      y: newOffset.y,
-    };
-
-    latest.current.props.onViewBoxChange(newViewBox, newZoom);
+    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom: newZoom });
+    scheduleDeferredCommit();
   };
 
   // Native wheel event handler with { passive: false } to ensure preventDefault works.
@@ -1079,8 +1088,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     // Always prevent default to stop browser zoom, even at zoom limits
     e.preventDefault();
 
-    // Stop any momentum animation when user starts interacting
-    stopMomentumAnimation();
+    // Stop any momentum coast this wheel interrupts, arming a deferred commit so
+    // its offset still settles even if this wheel event turns out to be a no-op
+    // (a zoom already clamped at MIN/MAX returns early below without committing).
+    interruptCoast();
 
     // On Mac trackpads, pinch-to-zoom is reported as wheel events with ctrlKey
     if (e.ctrlKey || e.metaKey) {
@@ -1121,19 +1132,17 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       height: contentRect.height,
     };
     const oldSize = latest.current.svgSize;
-    if (oldSize) {
+    // Re-center + commit only when idle. Embedded mode draws to tight element
+    // bounds and ignores viewBox. While a viewport gesture owns the live viewport,
+    // the gesture keeps full control of the offset -- a resize must not shift it
+    // (that would fight the user / coast, and the shift would be discarded by the
+    // next move/frame anyway). Only `svgSize` updates here; the gesture's settle
+    // commit reads the new size from it (see commitLiveViewport).
+    if (oldSize && !latest.current.props.embedded && !latest.current.liveViewport) {
       const dWidth = contentRect.width - oldSize.width;
       const dHeight = contentRect.height - oldSize.height;
-      const canvasOffset = getCanvasOffset();
-
-      const newViewBox: ViewRect = {
-        x: canvasOffset.x + dWidth / 4,
-        y: canvasOffset.y + dHeight / 4,
-        width: contentRect.width,
-        height: contentRect.height,
-      };
-
-      latest.current.props.onViewBoxChange(newViewBox, latest.current.props.view.zoom);
+      const newViewBox = resizeViewBox(getCanvasOffset(), dWidth, dHeight, contentRect.width, contentRect.height);
+      latest.current.props.onViewBoxChange(newViewBox, getCanvasZoom());
     }
 
     setSvgSize(newSvgSize);
@@ -1145,6 +1154,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     r.pointerId = undefined;
     r.mouseDownPoint = undefined;
     r.selectionCenterOffset = undefined;
+    r.panBaseOffset = undefined;
 
     applyPointerStateReset();
 
@@ -1168,6 +1178,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
     // Handle end of pinch gesture
     if (latest.current.interaction.mode === 'pinching') {
+      // Commit the pinched viewport once, on exit (handlePinchMove kept it local
+      // throughout the gesture).
+      commitLiveViewport();
       // When exiting pinch mode, clear all gesture state for a clean restart.
       // Continuing with a single finger after pinch leads to confusing UX.
       const { state: nextInteraction } = reduceInteraction(
@@ -1362,18 +1375,15 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       return;
     }
 
-    if (interactionNow.mode === 'panning' && latest.current.movingCanvasOffset) {
-      const newViewBox = {
-        ...latest.current.props.view.viewBox,
-        x: latest.current.movingCanvasOffset.x,
-        y: latest.current.movingCanvasOffset.y,
-      };
-
-      latest.current.props.onViewBoxChange(newViewBox, latest.current.props.view.zoom);
-      setMovingCanvasOffset(undefined);
-
-      // Start momentum animation for smooth deceleration
-      startMomentumAnimation();
+    if (interactionNow.mode === 'panning' && latest.current.liveViewport) {
+      // Start the momentum coast first. If it starts, the live viewport stays set
+      // and the single commit is deferred to the coast's natural end; if it does
+      // not (a stationary release), commit the pan now. Exactly one commit either
+      // way.
+      const didStartMomentum = startMomentumAnimation();
+      if (!didStartMomentum) {
+        commitLiveViewport();
+      }
     }
 
     if (!r.mouseDownPoint) {
@@ -1438,7 +1448,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       return;
     }
 
-    const base = latest.current.props.view.viewBox;
+    // Anchor against the offset captured at pan start (see refs.panBaseOffset),
+    // not props.view.viewBox, so an interrupted-momentum -> pan does not jump.
+    const base = r.panBaseOffset ?? latest.current.props.view.viewBox;
     const curr = getCanvasPoint(e.clientX, e.clientY);
 
     const newOffset = {
@@ -1450,9 +1462,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     trackPosition(newOffset.x, newOffset.y);
 
     // The panning mode was already entered on pointer-down; re-affirm it (it is
-    // the move-guard in handlePointerMove) alongside the continuous offset.
+    // the move-guard in handlePointerMove) alongside the continuous offset. A pan
+    // does not change zoom, so the live viewport keeps the current zoom.
     setInteraction({ mode: 'panning' });
-    setMovingCanvasOffset(newOffset);
+    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom: getCanvasZoom() });
   };
 
   const handleDragSelection = (e: React.PointerEvent<SVGElement>): void => {
@@ -1510,8 +1523,13 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     e.preventDefault();
     e.stopPropagation();
 
-    // Stop any momentum animation when user starts interacting
-    stopMomentumAnimation();
+    // A new press interrupts an in-flight momentum coast. The live viewport is
+    // preserved: a pan or pinch started by this press inherits it (via
+    // panBaseOffset / the pinch reference reads) and commits the combined result
+    // on its own settle, while a press that is NOT a viewport gesture (a
+    // click/selection) lets interruptCoast's deferred commit persist the coasted
+    // viewport. (A pending wheel commit is likewise left armed, not cancelled.)
+    interruptCoast();
 
     // Track this pointer for multi-touch detection
     r.activePointers.set(e.pointerId, {
@@ -1534,32 +1552,34 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       const distance = getPinchDistance();
       const center = getPinchCenter();
       const centerCanvas = getCanvasPoint(center.x, center.y);
-      const viewBox = latest.current.props.view.viewBox;
+      // Anchor against the live viewport (= a prior pan's offset if one was in
+      // flight, else props.view), so a pinch that follows a pan keeps its place.
+      const base = getCanvasOffset();
 
       // Calculate the MODEL point under the pinch center. This is the fixed
       // point in model space that should remain under the user's fingers
       // throughout the pinch gesture.
       const pinchModelPoint = {
-        x: centerCanvas.x - viewBox.x,
-        y: centerCanvas.y - viewBox.y,
+        x: centerCanvas.x - base.x,
+        y: centerCanvas.y - base.y,
       };
 
       // Entering pinch mode supersedes any single-finger panning/dragSelecting
       // mode; the reducer returns the pinching variant carrying the fixed
-      // reference. Clear movingCanvasOffset so exiting pinch can't start momentum.
+      // reference. The live viewport is intentionally NOT cleared: handlePinchMove
+      // writes it each move and pinch exit commits it once.
       const { state: nextInteraction, effects } = reduceInteraction(
         latest.current.interaction,
         {
           kind: 'pinchStart',
           initialDistance: distance,
-          initialZoom: latest.current.props.view.zoom,
+          initialZoom: getCanvasZoom(),
           modelPoint: pinchModelPoint,
         },
         interactionContext(),
       );
       runEffects(effects, e.target as Element | undefined, e.pointerId);
       setInteraction(nextInteraction);
-      setMovingCanvasOffset(undefined);
       return;
     }
 
@@ -1715,6 +1735,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       // Initialize velocity tracking for momentum
       r.velocityTracker.positions = [];
       const canvasOffsetPan = getCanvasOffset();
+      // Anchor the pan against the on-screen offset at press time (= the live
+      // viewport if a momentum coast was interrupted, else props.view.viewBox).
+      r.panBaseOffset = { x: canvasOffsetPan.x, y: canvasOffsetPan.y };
       trackPosition(canvasOffsetPan.x, canvasOffsetPan.y);
     }
     // The pan-vs-drag-select mode came from the reducer; the in-creation
@@ -2301,6 +2324,56 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     return zLayers;
   };
 
+  // ---- External-view override (issue #707) --------------------------------
+  // While a gesture owns the live viewport, props.view is expected to stay put
+  // (a gesture does not commit mid-flight). If props.view's offset/zoom VALUE
+  // nonetheless changes, some other source moved the view -- centerVariable,
+  // module navigation, or an undo that restored a different viewport -- and that
+  // external view must win: drop the live viewport and cancel any pending
+  // momentum/wheel commit, with no stray commit of the abandoned gesture. A
+  // self-commit clears the live viewport in the same React commit as its
+  // optimistic props.view update, so it is never observed here as still-live.
+  // Comparison is by value against a baseline tracked while idle, so a
+  // content-equal republished snapshot (new identity, same viewport) is ignored.
+  React.useEffect(() => {
+    const pv = props.view;
+    const current = { x: pv.viewBox.x, y: pv.viewBox.y, zoom: pv.zoom };
+    if (liveViewport) {
+      const baseline = r.viewBaseline;
+      if (baseline && (baseline.x !== current.x || baseline.y !== current.y || baseline.zoom !== current.zoom)) {
+        stopMomentumAnimation();
+        cancelDeferredCommit();
+        setLiveViewport(undefined);
+        r.viewBaseline = current;
+        // If a pointer-driven viewport gesture (drag-pan or pinch) is still
+        // physically in progress, abandon it too. Clearing only liveViewport is
+        // not enough: a continued pointer move would recreate it from the now
+        // stale press-time anchor (panBaseOffset) / pinch reference and the
+        // pointer-up could then commit that abandoned gesture back over the
+        // external view. Resetting the interaction to idle and dropping the
+        // pointer anchors makes handleMovingCanvas/handlePinchMove no-op and the
+        // release a clean no-commit. (Non-viewport gestures don't touch
+        // liveViewport, so they're left alone.)
+        const mode = latest.current.interaction.mode;
+        if (mode === 'panning' || mode === 'pinching') {
+          setInteraction(idleState);
+          r.mouseDownPoint = undefined;
+          r.panBaseOffset = undefined;
+          r.pointerId = undefined;
+          r.activePointers.clear();
+        }
+      }
+    } else {
+      // Idle: track props.view as the baseline for the next gesture.
+      r.viewBaseline = current;
+    }
+    // Triggers: props.view (the external change) and liveViewport (gesture
+    // start/end, which moves the baseline). The handler functions are stable
+    // shell closures read directly and are intentionally not deps. (The repo lint
+    // config does not enable react-hooks/exhaustive-deps, so no disable directive
+    // is needed.)
+  }, [props.view, liveViewport]);
+
   // ---- Mount / unmount effect ---------------------------------------------
   // componentDidMount -> mount effect; componentWillUnmount -> the cleanup.
   // Runs once (empty deps); reads the latest props/state through `latest`.
@@ -2440,6 +2513,11 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       }
       // Cancel any running momentum animation and clear all momentum state
       stopMomentumAnimation();
+      // Cancel a pending deferred commit WITHOUT firing it: committing during
+      // teardown would call onViewBoxChange (-> a setState on the unmounting
+      // host). The dropped commit is harmless -- viewBox is presentational and
+      // re-persisted on the next interaction.
+      cancelDeferredCommit();
       // Clear velocity tracking and pointer data
       r.velocityTracker.positions = [];
       r.activePointers.clear();
@@ -2502,7 +2580,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   if (!isEditingNameNow || props.selection.size === 0) {
     overlayClass += ' ' + styles.noPointerEvents;
   } else {
-    const zoom = props.view.zoom;
+    const zoom = getCanvasZoom();
     const editingUid = only(props.selection);
     const editingElement = getElementByUid(editingUid) as NamedViewElement;
     const { rw, rh } = labelRadii(editingElement.type);
@@ -2538,7 +2616,8 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       viewBox = `${left} ${top} ${width} ${height}`;
     }
   } else {
-    const zoom = props.view.zoom >= 0.2 ? props.view.zoom : 1;
+    const liveZoom = getCanvasZoom();
+    const zoom = liveZoom >= 0.2 ? liveZoom : 1;
     const offset = getCanvasOffset();
 
     transform = `matrix(${zoom} 0 0 ${zoom} ${offset.x * zoom} ${offset.y * zoom})`;

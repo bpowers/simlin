@@ -134,6 +134,48 @@ const CANVAS_RECT: DOMRect = {
   toJSON: () => ({}),
 };
 
+// A ResizeObserver that records its callback + observed targets so a test can
+// synthesize a resize (jsdom never fires real ones). The Canvas reads the new
+// size from `entry.target.clientWidth/Height`, so `triggerResize` sets those on
+// each observed element before invoking the callback.
+const liveResizeObservers = new Set<FakeResizeObserver>();
+
+class FakeResizeObserver {
+  private readonly callback: ResizeObserverCallback;
+  readonly targets = new Set<Element>();
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+  }
+  observe(target: Element): void {
+    this.targets.add(target);
+    liveResizeObservers.add(this);
+  }
+  unobserve(target: Element): void {
+    this.targets.delete(target);
+  }
+  disconnect(): void {
+    this.targets.clear();
+    liveResizeObservers.delete(this);
+  }
+  fire(width: number, height: number): void {
+    for (const target of this.targets) {
+      Object.defineProperty(target, 'clientWidth', { configurable: true, value: width });
+      Object.defineProperty(target, 'clientHeight', { configurable: true, value: height });
+      const entry = { target, contentRect: { width, height } } as unknown as ResizeObserverEntry;
+      this.callback([entry], this as unknown as ResizeObserver);
+    }
+  }
+}
+
+/** Synthesize a resize to `width`x`height` on every live observed element. */
+export function triggerResize(width: number, height: number): void {
+  act(() => {
+    for (const obs of liveResizeObservers) {
+      obs.fire(width, height);
+    }
+  });
+}
+
 let polyfillsInstalled = false;
 
 /**
@@ -158,11 +200,6 @@ export function installCanvasPolyfills(): void {
     g.DOMPoint = FakeDOMPoint as unknown as typeof DOMPoint;
   }
   if (typeof g.ResizeObserver !== 'function') {
-    class FakeResizeObserver {
-      observe(): void {}
-      unobserve(): void {}
-      disconnect(): void {}
-    }
     g.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver;
   }
 
@@ -407,6 +444,21 @@ export interface CanvasHarness {
    * calls.
    */
   clearMountCalls: () => void;
+  /**
+   * The current `transform` attribute on the canvas content `<g>` -- the live
+   * viewport (offset+zoom) the user actually sees. Use this to assert that a
+   * gesture updates the view immediately, without (yet) committing through
+   * `onViewBoxChange`.
+   */
+  getTransform: () => string | null;
+  /** Synthesize a container resize to `width`x`height` (drives handleSvgResize). */
+  resize: (width: number, height: number) => void;
+  /**
+   * Push a new `props.view` with an overridden viewBox offset / zoom, modeling an
+   * EXTERNAL viewport change (centerVariable, module navigation, undo) -- i.e. one
+   * that did not originate from a canvas gesture.
+   */
+  setViewport: (next: { x?: number; y?: number; zoom?: number }) => void;
 }
 
 /**
@@ -493,7 +545,135 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
         fn.mockClear();
       }
     },
+    getTransform: () => result.container.querySelector('svg g[transform]')?.getAttribute('transform') ?? null,
+    resize: (width: number, height: number) => triggerResize(width, height),
+    setViewport: (next: { x?: number; y?: number; zoom?: number }) => {
+      const nextView: StockFlowView = {
+        ...currentView,
+        viewBox: {
+          ...currentView.viewBox,
+          x: next.x ?? currentView.viewBox.x,
+          y: next.y ?? currentView.viewBox.y,
+        },
+        zoom: next.zoom ?? currentView.zoom,
+      };
+      setProps({ view: nextView });
+    },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic clock + animation-frame control
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls `window.performance.now`, `requestAnimationFrame`, and
+ * `cancelAnimationFrame` so momentum (an rAF loop) and velocity estimation
+ * (which reads the clock) are deterministic. Opt-in per test: install before the
+ * gesture, `restore()` in a finally/afterEach. Tests that don't install it keep
+ * jsdom's real timers, so the momentum loop never fires (the historical default).
+ *
+ *  - `tick(ms)` advances virtual time WITHOUT running frames -- use it between
+ *    pointer events to set their timestamps (e.g. tick past 40ms before release
+ *    to model a deliberate, non-flick stop that starts no momentum).
+ *  - `frame(ms)` advances time and runs the currently-pending rAF callbacks once.
+ *  - `flush()` runs frames until the rAF queue drains (momentum coasts to its
+ *    natural end), bounded by `maxFrames`.
+ */
+export interface FakeClock {
+  tick: (ms: number) => void;
+  frame: (ms?: number) => void;
+  flush: (maxFrames?: number, ms?: number) => void;
+  now: () => number;
+  restore: () => void;
+}
+
+export function installFakeClock(start = 1000): FakeClock {
+  const origRaf = window.requestAnimationFrame;
+  const origCancel = window.cancelAnimationFrame;
+  const perf = window.performance;
+  const origNow = perf.now.bind(perf);
+
+  let now = start;
+  let nextId = 1;
+  const pending = new Map<number, FrameRequestCallback>();
+
+  window.requestAnimationFrame = ((cb: FrameRequestCallback): number => {
+    const id = nextId++;
+    pending.set(id, cb);
+    return id;
+  }) as typeof window.requestAnimationFrame;
+  window.cancelAnimationFrame = ((id: number): void => {
+    pending.delete(id);
+  }) as typeof window.cancelAnimationFrame;
+  Object.defineProperty(perf, 'now', { configurable: true, writable: true, value: () => now });
+
+  const runDue = (): void => {
+    const due = Array.from(pending.values());
+    pending.clear();
+    if (due.length === 0) {
+      return;
+    }
+    act(() => {
+      for (const cb of due) {
+        cb(now);
+      }
+    });
+  };
+
+  return {
+    tick: (ms: number) => {
+      now += ms;
+    },
+    frame: (ms = 16) => {
+      now += ms;
+      runDue();
+    },
+    flush: (maxFrames = 1000, ms = 16) => {
+      let i = 0;
+      while (pending.size > 0 && i < maxFrames) {
+        now += ms;
+        runDue();
+        i++;
+      }
+    },
+    now: () => now,
+    restore: () => {
+      window.requestAnimationFrame = origRaf;
+      window.cancelAnimationFrame = origCancel;
+      Object.defineProperty(perf, 'now', { configurable: true, writable: true, value: origNow });
+    },
+  };
+}
+
+/**
+ * Dispatch a native `wheel` event (the canvas registers a non-passive native
+ * wheel listener on the `<svg>`, so React's synthetic `onWheel` would not reach
+ * it). Trackpad pinch-zoom arrives as a wheel event with `ctrlKey`/`metaKey`.
+ */
+export function dispatchWheel(
+  target: Element,
+  init: {
+    deltaX?: number;
+    deltaY?: number;
+    deltaMode?: number;
+    clientX?: number;
+    clientY?: number;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+  } = {},
+): void {
+  act(() => {
+    fireEvent.wheel(target, {
+      deltaX: init.deltaX ?? 0,
+      deltaY: init.deltaY ?? 0,
+      deltaMode: init.deltaMode ?? 0,
+      clientX: init.clientX ?? 0,
+      clientY: init.clientY ?? 0,
+      ctrlKey: init.ctrlKey ?? false,
+      metaKey: init.metaKey ?? false,
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------

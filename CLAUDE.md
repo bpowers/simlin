@@ -78,6 +78,12 @@ Lean on the pre-commit hook: run `git commit ...` and fix reported problems rath
 - Body: 1-2 paragraphs explaining "why", highlighting assumptions and non-obvious decisions
 - DO NOT use "fixes"/"resolves" or emoji in commit messages
 
+## Pull Requests
+
+- The PR description MUST include a GitHub closing keyword -- `Fixes #<n>` (or `Closes #<n>`) -- for every issue the PR resolves, so merging auto-closes those issues. List one per line when a PR resolves several.
+- Keep the closing keywords in the PR description, NOT in commit messages (commit messages deliberately avoid "fixes"/"resolves" per the style above; the auto-close should fire once, on merge, from the PR).
+- The body should explain "why" and call out non-obvious decisions, mirroring the commit-message guidance.
+
 ## Hard Rules
 
 IMPORTANT: Simple, general, testable, maintainable code is better than preserving an interface. There are NO places where VM bytecode is serialized to disk; backwards compatibility is ONLY needed for protobufs.
