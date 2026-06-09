@@ -757,29 +757,44 @@ pub(super) fn analyze_graphical_function_polarity(table: &crate::variable::Table
     // over a wide `dx` is a negligible slope yet reads as a real change. Either
     // way the monotonicity verdict can be wrong.
     //
-    // The slope tolerance stays noise-tolerant the way #492's y-range-relative
-    // epsilon is, by scaling against the table's average-magnitude slope
-    // `(y_max - y_min) / (x_max - x_min)` (with a small absolute floor for a
-    // degenerate flat or zero-width table). On a uniformly-spaced table every
-    // `dx` equals the average x-spacing, so this reduces to exactly the old
-    // y-delta behavior -- the existing uniform-spacing tests stay green.
+    // The slope tolerance is set as `1e-6 * (y_max - y_min) / avg_dx` where
+    // `avg_dx = x_span / (n - 1)` is the average x-spacing. The per-segment
+    // noise threshold then becomes `slope_epsilon * dx = 1e-6 * (y_max - y_min)
+    // * (dx / avg_dx)`. On uniformly-spaced tables every segment has `dx ==
+    // avg_dx`, so the threshold reduces EXACTLY to `1e-6 * (y_max - y_min)` --
+    // the same y-range-relative dy epsilon #492 used, preserving import-noise
+    // tolerance for finely-sampled tables. For non-uniform tables the threshold
+    // scales proportionally with segment width, so a narrow steep segment (small
+    // dx, large slope) is still caught by the slope comparison while a wide
+    // gentle segment (large dx, small slope) keeps the same proportional
+    // tolerance -- the original #536 motivation.
+    //
+    // Ascending x is the VM binary-search lookup precondition (vm.rs `Lookup`),
+    // so dx > 0 on any runtime-valid table and the slope sign equals the dy sign.
     let y_min = table.y.iter().copied().fold(f64::INFINITY, f64::min);
     let y_max = table.y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let x_min = table.x.iter().copied().fold(f64::INFINITY, f64::min);
     let x_max = table.x.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let x_span = x_max - x_min;
-    let avg_slope_mag = if x_span > 0.0 {
-        (y_max - y_min) / x_span
-    } else {
-        0.0
-    };
-    let slope_epsilon = (1e-6 * avg_slope_mag).max(1e-12);
 
     // Check consecutive pairs of points. `x.len() == y.len()` after
     // `parse_table` (an absent `x_points` is filled with a uniform ramp), so
     // index `i` is in bounds for both; iterate the common length defensively
     // anyway in case a `Table` is ever built with mismatched columns.
     let n = table.x.len().min(table.y.len());
+    // avg_dx: average x-spacing over the n-1 segments in the iterated range.
+    // When x_span == 0 or n < 2 the table is degenerate; slope_epsilon falls
+    // back to the absolute floor.
+    let avg_dx = if n >= 2 && x_span > 0.0 {
+        x_span / (n - 1) as f64
+    } else {
+        0.0
+    };
+    let slope_epsilon = if avg_dx > 0.0 {
+        (1e-6 * (y_max - y_min) / avg_dx).max(1e-12)
+    } else {
+        1e-12
+    };
     for i in 1..n {
         let dx = table.x[i] - table.x[i - 1];
         let dy = table.y[i] - table.y[i - 1];
@@ -796,6 +811,9 @@ pub(super) fn analyze_graphical_function_polarity(table: &crate::variable::Table
             return LinkPolarity::Unknown;
         }
 
+        // Ascending x is the VM binary-search lookup precondition (vm.rs
+        // `Lookup`), so on any runtime-valid table dx > 0 and slope sign == dy
+        // sign.
         let slope = dy / dx;
 
         if slope > slope_epsilon {

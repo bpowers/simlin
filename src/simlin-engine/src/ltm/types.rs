@@ -304,20 +304,20 @@ impl LoopPolarity {
                     // negative_sum_abs implies the ratio numerator is 0, hence
                     // confidence == 0 -- which contradicts the threshold check
                     // above for any threshold > 0.  So this arm is unreachable
-                    // with the production threshold.  Enforce that invariant at
-                    // compile time (the threshold is a const, so the assertion
-                    // is const-evaluable): if someone sets the threshold to 0
-                    // the build fails here rather than silently letting an exact
-                    // magnitude tie classify as Balancing -- a "balancing wins
-                    // ties" rule the LTM literature does not justify.  The
-                    // `Undetermined` fallback is the safe classification if the
-                    // arm ever does become reachable.
+                    // when the production threshold is positive.  The const
+                    // assert enforces that invariant: it pins threshold > 0,
+                    // which makes this tie arm structurally unreachable and
+                    // forces a human to revisit the classification rules if the
+                    // threshold is ever zeroed (a zero threshold would let every
+                    // near-tie fall through to the Undetermined return here
+                    // instead of to MostlyReinforcing/MostlyBalancing above).
+                    // The `Undetermined` fallback is the safe classification if
+                    // the arm ever does become reachable.
                     const {
                         assert!(
                             POLARITY_CONFIDENCE_THRESHOLD > 0.0,
-                            "tie-case (positive_sum == negative_sum_abs) with threshold == 0 \
-                             would silently classify as Balancing; update the classification \
-                             rules if you set the threshold to 0"
+                            "threshold == 0 makes the tie arm reachable and changes \
+                             classification; update the rules if you set the threshold to 0"
                         );
                     }
                     LoopPolarity::Undetermined
