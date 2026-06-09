@@ -2101,6 +2101,24 @@ fn test_loop_polarity_from_runtime_scores_mostly_balancing() {
 }
 
 #[test]
+fn test_loop_polarity_from_runtime_scores_strictly_dominant_balancing() {
+    // Both signs occur, confidence >= threshold, and balancing magnitude
+    // STRICTLY dominates (|b| > r, not a tie).  This is the case the explicit
+    // `negative_sum_abs > positive_sum` arm handles after the #506 restructure;
+    // it must classify MostlyBalancing, never fall into the unreachable
+    // exact-tie arm.  r = 0.001, |b| = 5 + 4 + 1 = 10:
+    // confidence = |0.001 - 10| / (0.001 + 10) ~= 0.9998 (>= 0.99).
+    let scores = vec![f64::NAN, 0.001, -5.0, -4.0, -1.0];
+    let (polarity, confidence) =
+        LoopPolarity::from_runtime_scores(&scores).expect("mixed but valid scores");
+    assert_eq!(polarity, LoopPolarity::MostlyBalancing);
+    assert!(
+        (POLARITY_CONFIDENCE_THRESHOLD..1.0).contains(&confidence),
+        "strictly-dominant balancing should sit between the threshold and 1.0, got {confidence}"
+    );
+}
+
+#[test]
 fn test_loop_polarity_from_runtime_scores_undetermined() {
     // Symmetric mix of positive and negative scores -> Undetermined,
     // confidence near 0.0
