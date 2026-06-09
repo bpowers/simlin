@@ -303,6 +303,96 @@ fn test_ltm_module_with_non_standard_output_name() {
     );
 }
 
+/// GH #680: a module with several output ports must return its port set in a
+/// deterministic (canonical-name-sorted) order. `find_model_output_ports`
+/// historically drained an unordered `HashSet`, so the pathway enumeration,
+/// magnitude-tie winner selection, and `$⁚ltm⁚path⁚{port}⁚{idx}` indices all
+/// inherited process-random ordering -- byte-unstable salsa cache values for
+/// multi-output modules with tied pathway scores. The fix sorts before
+/// returning; this test pins that contract through the `sub_model_output_ports`
+/// wrapper (which delegates straight to `find_model_output_ports` for a
+/// non-stdlib model). `main` reads three distinct internal ports of the
+/// `multi_out` sub-model in *reverse*-alphabetical source order, so an
+/// unsorted drain would be observably wrong; the returned vector must be the
+/// canonical-name-sorted port list regardless of read or hash order.
+#[test]
+fn test_multi_output_port_module_ports_are_sorted() {
+    let project = datamodel::Project {
+        name: "multi_output_ports".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            x_model(
+                "main",
+                vec![
+                    x_stock("level", "50", &["adjustment"], &[], None),
+                    // Read the three output ports in reverse-alphabetical order
+                    // so a non-deterministic (unsorted) drain could not pass by
+                    // accident -- the sort must reorder them to out_a, out_b,
+                    // out_c.
+                    x_aux("read_c", "multi_out.out_c", None),
+                    x_aux("read_b", "multi_out.out_b", None),
+                    x_aux("read_a", "multi_out.out_a", None),
+                    x_aux("gap", "100 - read_a - read_b - read_c + level", None),
+                    x_flow("adjustment", "gap / 5", None),
+                    x_module("multi_out", &[("level", "multi_out.input")], None),
+                ],
+            ),
+            x_model(
+                "multi_out",
+                vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    // Three independent internal output ports; declared in yet
+                    // another order (a, c, b) so neither declaration nor read
+                    // order matches the expected sorted result.
+                    x_aux("out_a", "input * 2", None),
+                    x_aux("out_c", "input * 4", None),
+                    x_aux("out_b", "input * 3", None),
+                ],
+            ),
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let (source_project, sub_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["multi_out"].source)
+    };
+
+    // `find_model_output_ports` reads structural deps (no `ltm_enabled` needed):
+    // it scans parent models for `multi_out·{port}` references.
+    let ports = sub_model_output_ports(&db, sub_model, source_project);
+    let port_names: Vec<&str> = ports.iter().map(|p| p.as_str()).collect();
+    assert_eq!(
+        port_names,
+        vec!["out_a", "out_b", "out_c"],
+        "find_model_output_ports must return its multi-output-port set in \
+         canonical-name-sorted order regardless of read/declaration/hash order"
+    );
+}
+
 /// Discovery mode now uses the same composite link-score reference for a
 /// DynamicModule input port that exhaustive mode does (GH #675): since
 /// GH #548 the sub-model's `$⁚ltm⁚composite⁚{port}` var is laid out in the
