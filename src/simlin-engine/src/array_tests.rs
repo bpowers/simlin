@@ -3643,6 +3643,79 @@ mod vector_elm_map_tests {
         }
     }
 
+    // GH #579: end-to-end numeric gate on `full_source_len` for a STRICT-SLICE
+    // ELM MAP source (the cross-dimension `d[DimA,B1]` shape, base != 0). The
+    // existing `out_of_bounds_element_returns_nan_*` tests use a *full-array*
+    // source (`source[*]`, base 0, `source_is_full_array == true`); this one
+    // covers the other branch, where `full_source_len` drives BOTH the
+    // full-array-vs-strict-slice decision AND the out-of-range -> :NA: guard.
+    //
+    // Fixture: same `d`/shape as `cross_dimension_source_resolves_full_array`,
+    // but `a[A3] = 5` pushes the A3 row's lookup past the source's full
+    // 6-element storage:
+    //   d full storage (row-major [DimA,DimB], strides [2,1]):
+    //     0=d11=1  1=d12=4  2=d21=2  3=d22=5  4=d31=3  5=d32=6
+    //   A1,* : base = 0, offset 0 -> flat 0 -> d[0]=1
+    //   A2,* : base = 2, offset 1 -> flat 3 -> d[3]=5
+    //   A3,* : base = 4, offset 5 -> flat 9 >= full_source_len(6) -> :NA: (NaN)
+    // f row-major [DimA,DimB], broadcast across DimB: [1,1, 5,5, NaN,NaN].
+    //
+    // Why this catches a corrupted `full_source_len`: inflating it (e.g. to 99)
+    // makes flat 9 pass the `[0, full_len)` guard and read past `d`'s storage
+    // instead of yielding NaN; deflating it to the 3-element slice size flips
+    // `source_is_full_array` to true (base forced to 0), changing every row.
+    // Either way the A3 elements stop being NaN, so the assertion fails --
+    // unlike the genuine-Vensim `.dat` simulate corpus, which has no
+    // out-of-range offset on a strict-slice source.
+    fn make_strict_slice_oob_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimB", &["B1", "B2"])
+            .array_with_ranges("a[DimA]", vec![("A1", "0"), ("A2", "1"), ("A3", "5")])
+            .array_with_ranges(
+                "d[DimA,DimB]",
+                vec![
+                    ("A1,B1", "1"),
+                    ("A2,B1", "2"),
+                    ("A3,B1", "3"),
+                    ("A1,B2", "4"),
+                    ("A2,B2", "5"),
+                    ("A3,B2", "6"),
+                ],
+            )
+            .array_aux("f[DimA,DimB]", "vector_elm_map(d[DimA,B1], a[DimA])")
+    }
+
+    fn assert_strict_slice_oob(vals: &[f64]) {
+        assert_eq!(vals.len(), 6, "expected 6 elements (DimA x DimB)");
+        let finite_expected = [(0usize, 1.0), (1, 1.0), (2, 5.0), (3, 5.0)];
+        for &(i, want) in &finite_expected {
+            assert!(
+                (vals[i] - want).abs() < 1e-9,
+                "f[{i}]: expected {want}, got {} (full vals: {vals:?})",
+                vals[i]
+            );
+        }
+        assert!(
+            vals[4].is_nan() && vals[5].is_nan(),
+            "f[A3,*] (base 4 + offset 5 = flat 9 >= full source len 6): expected NaN, got [{}, {}]",
+            vals[4],
+            vals[5]
+        );
+    }
+
+    #[test]
+    fn strict_slice_source_oob_returns_nan_vm() {
+        let project = make_strict_slice_oob_project("vem_slice_oob_vm");
+        assert_strict_slice_oob(&project.vm_result_incremental("f"));
+    }
+
+    #[test]
+    fn strict_slice_source_oob_returns_nan_monolithic() {
+        let project = make_strict_slice_oob_project("vem_slice_oob_mono");
+        assert_strict_slice_oob(&project.vm_result("f"));
+    }
+
     // AC6.4 defense-in-depth: a 1-D source[*] argument has base = 0 for all
     // result elements (no ActiveDimRef element reference), so genuine Vensim
     // reduces to result[i] = source[round(offset[i])] over the full source.

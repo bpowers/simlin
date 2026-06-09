@@ -1185,24 +1185,27 @@ pub(crate) fn resolve_opcode(
             // `renumber_opcode` and copied through unchanged on fragment
             // concatenation (see the matching arm in `renumber_opcode`).
             //
-            // Roundtrip coverage of this invariant lives in the unit tests,
-            // NOT the end-to-end simulate gates, and intentionally so:
-            // `vm_vector_elm_map` only consumes `full_source_len` for those
-            // two purposes, and the genuine-Vensim corpus
-            // (`vector_simple.dat` / `vector.dat`) deliberately has no
-            // out-of-range offset and no shape that flips the full-array
-            // branch, so an inflated `full_source_len` is behaviorally
-            // invisible through `simulates_vector_simple_mdl` /
-            // `simulates_vector_xmile_genuine` (verified: those gates pass
-            // even with `full_source_len` hard-forced to a wrong constant in
-            // `renumber_opcode`). The authoritative regression coverage is
-            // therefore the symbolic path itself:
-            // `test_renumber_vector_builtin_temp_ids` (isolated
-            // `renumber_opcode`) and
-            // `test_vector_elm_map_full_source_len_survives_fragment_roundtrip`
-            // (the full `symbolize` -> `concatenate_fragments` (renumber at a
-            // non-zero temp offset) -> `resolve_bytecode` merge path), which
-            // fail loudly if this field is ever shifted.
+            // The genuine-Vensim `.dat` simulate corpus (`vector_simple.dat` /
+            // `vector.dat`) deliberately has no out-of-range offset and no
+            // shape that flips the full-array branch, so a wrong
+            // `full_source_len` is invisible through `simulates_vector_simple_mdl`
+            // / `simulates_vector_xmile_genuine` alone. The NUMERIC end-to-end
+            // coverage (GH #579) therefore lives in `array_tests`: the
+            // full-array-source `out_of_bounds_element_returns_nan_{vm,
+            // monolithic}` (base 0, `source_is_full_array == true`) and the
+            // strict-slice-source `strict_slice_source_oob_returns_nan_{vm,
+            // monolithic}` (base != 0, the other branch) both feed an
+            // out-of-range offset, so a `full_source_len` corrupted in EITHER
+            // the codegen computation (`codegen::full_source_len`) OR this
+            // `resolve`/`renumber_opcode` path stops yielding the expected NaN
+            // and the assertions fail loudly (verified by hard-forcing a wrong
+            // constant in both sites). The structural symbolic round-trip --
+            // `test_renumber_vector_builtin_temp_ids` (isolated `renumber_opcode`)
+            // and `test_vector_elm_map_full_source_len_survives_fragment_roundtrip`
+            // (the full `symbolize` -> `concatenate_fragments` -> `resolve_bytecode`
+            // merge path) -- complements them by pinning that this field is
+            // invariant under renumbering (it is NOT a renumber-able resource id
+            // like temp/lit/gf/view/dim_list/module).
             full_source_len: *full_source_len,
         }),
         SymbolicOpcode::VectorSortOrder { write_temp_id } => Ok(Opcode::VectorSortOrder {
