@@ -1786,6 +1786,201 @@ fn arrayed_agg_scalar_feeder_loop_scores_sustained() {
     );
 }
 
+/// GH #745: a scored loop through an ARRAYED synthetic agg must classify
+/// concretely (r/b), not Undetermined, when its agg-hop polarities are
+/// statically derivable.
+///
+/// An arrayed agg's element-graph hops carry a slot subscript
+/// (`scale → $⁚ltm⁚agg⁚0[a]` / `$⁚ltm⁚agg⁚0[a] → growth[a]`), but
+/// `recover_agg_hop_polarities` compared the bare synthetic agg name
+/// against the link's FULL ident, so neither endpoint ever matched: the
+/// hops stayed `Unknown` and every per-slot loop through an arrayed agg
+/// degraded to `u{n}` -- while the detected surface (whose spliced agg
+/// hops are bare-named) recovered the same hops fine, a cross-surface
+/// polarity disagreement (GH #746).
+///
+/// Hand-derived polarities for the reinforcing fixture (per slot `e`):
+///  - `pool[e] → $⁚ltm⁚agg⁚1` (`SUM(pool[*])`, scalar agg): SUM is
+///    monotone increasing in every element it reads -> Positive;
+///  - `$⁚ltm⁚agg⁚1 → scale` (`scale = 0.001*agg1 + 0.01`): Positive;
+///  - `scale → $⁚ltm⁚agg⁚0[e]` (`SUM(matrix[e,*] * scale)`):
+///    d(agg0[e])/d(scale) = SUM(matrix[e,*]) = 4 > 0 (matrix = 2) ->
+///    Positive;
+///  - `$⁚ltm⁚agg⁚0[e] → growth[e]` (`growth = 0.01*pool + agg0`):
+///    Positive;
+///  - `growth[e] → pool[e]`: flow into stock -> Positive.
+///
+/// Zero negative links -> Reinforcing. The balancing variant negates only
+/// the scalar-feeder hop (d(agg0[e])/d(scale) = -SUM(matrix[e,*]) < 0 via
+/// the `(1 - scale)` co-factor) -> exactly one negative link -> Balancing.
+#[test]
+fn arrayed_agg_feeder_loops_classify_concretely() {
+    struct Case {
+        growth_eqn: &'static str,
+        want_prefix: char,
+        detected: DetectedLoopPolarity,
+    }
+    let cases = [
+        Case {
+            growth_eqn: "0.01 * pool[r1] + SUM(matrix[r1,*] * scale)",
+            want_prefix: 'r',
+            detected: DetectedLoopPolarity::Reinforcing,
+        },
+        Case {
+            growth_eqn: "0.01 * pool[r1] + SUM(matrix[r1,*] * (1 - scale))",
+            want_prefix: 'b',
+            detected: DetectedLoopPolarity::Balancing,
+        },
+    ];
+
+    for case in &cases {
+        let project = TestProject::new("arrayed_agg_polarity")
+            .with_sim_time(0.0, 6.0, 1.0)
+            .named_dimension("r1", &["a", "b"])
+            .named_dimension("r2", &["x", "y"])
+            .array_aux("matrix[r1,r2]", "2")
+            .array_stock("pool[r1]", "100", &["growth"], &[], None)
+            .array_flow("growth[r1]", case.growth_eqn, None)
+            // Closes the per-slot feeder loops:
+            // pool[e] -> $agg1 -> scale -> $agg0[e] -> growth[e] -> pool[e].
+            .scalar_aux("scale", "0.001 * SUM(pool[*]) + 0.01")
+            .build_datamodel();
+
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let source_model = sync.models["main"].source_model;
+        let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+        // Scored surface: the per-slot loops referencing the arrayed agg's
+        // scalar-feeder link score must carry the derived polarity prefix.
+        let feeder_score_name =
+            "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0";
+        let feeder_loop_ids: Vec<&str> = ltm
+            .vars
+            .iter()
+            .filter(|v| {
+                v.name.starts_with(LOOP_SCORE_PREFIX)
+                    && v.equation.source_text().contains(feeder_score_name)
+            })
+            .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+            .collect();
+        assert_eq!(
+            feeder_loop_ids.len(),
+            2,
+            "[{}] one per-slot feeder loop per r1 element; loop scores: {:?}",
+            case.growth_eqn,
+            ltm.vars
+                .iter()
+                .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        for id in &feeder_loop_ids {
+            assert!(
+                id.starts_with(case.want_prefix),
+                "[{}] per-slot arrayed-agg feeder loop must classify {} (every hop is \
+                 statically derivable -- see the hand derivation above), not Undetermined; \
+                 got id {id:?}",
+                case.growth_eqn,
+                case.want_prefix
+            );
+        }
+
+        // Cross-surface agreement (GH #746): the detected surface's spliced
+        // agg hops are bare-named and were always recovered; post-fix the
+        // scored surface must agree with it rather than reporting U.
+        let detected = model_detected_loops(&db, source_model, sync.project).clone();
+        let feeder = detected
+            .loops
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "scale"))
+            .expect("the feeder loop must be detected");
+        assert_eq!(
+            feeder.polarity, case.detected,
+            "[{}] the detected surface derives the same hop polarities from the same \
+             recovery pass",
+            case.growth_eqn
+        );
+    }
+}
+
+/// GH #745, agg-identity probe: stripping the slot subscript before the
+/// agg-endpoint match must NOT confuse WHICH arrayed agg a hop belongs to
+/// -- `$⁚ltm⁚agg⁚0[a]` strips to `$⁚ltm⁚agg⁚0`, keeping the agg index
+/// significant. Two arrayed aggs of OPPOSING feeder-hop signs in one
+/// equation pin this: if the strip aliased the aggs, the per-slot loops
+/// through `SUM(matrix[e,*] * scale)` (d/d scale > 0, reinforcing) and
+/// `SUM(matrix2[e,*] * (1 - scale))` (d/d scale < 0, balancing) could be
+/// analyzed against the WRONG agg body and come back with swapped or
+/// Unknown polarities. (Same hand derivation as
+/// `arrayed_agg_feeder_loops_classify_concretely`; only the scalar-feeder
+/// hop's sign differs between the two agg routes.)
+#[test]
+fn opposing_arrayed_multi_agg_loops_keep_agg_identity() {
+    let project = TestProject::new("opposing_arrayed_multi_agg")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("r1", &["a", "b"])
+        .named_dimension("r2", &["x", "y"])
+        .array_aux("matrix[r1,r2]", "2")
+        .array_aux("matrix2[r1,r2]", "3")
+        .array_stock("pool[r1]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[r1]",
+            "0.01 * pool[r1] + SUM(matrix[r1,*] * scale) + SUM(matrix2[r1,*] * (1 - scale))",
+            None,
+        )
+        .scalar_aux("scale", "0.001 * SUM(pool[*]) + 0.01")
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // agg⚚0 = SUM(matrix[r1,*] * scale) (left-to-right minting order),
+    // agg⚚1 = SUM(matrix2[r1,*] * (1 - scale)); both arrayed over r1.
+    let cases = [
+        (
+            "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0",
+            'r',
+        ),
+        (
+            "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}1",
+            'b',
+        ),
+    ];
+    for (feeder_score_name, want_prefix) in cases {
+        let ids: Vec<&str> = ltm
+            .vars
+            .iter()
+            .filter(|v| {
+                v.name.starts_with(LOOP_SCORE_PREFIX)
+                    && v.equation.source_text().contains(feeder_score_name)
+            })
+            .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+            .collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "one per-slot loop per r1 element through {feeder_score_name}; loop scores: {:?}",
+            ltm.vars
+                .iter()
+                .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        for id in &ids {
+            assert!(
+                id.starts_with(want_prefix),
+                "loops through {feeder_score_name} must be {want_prefix}-prefixed (the agg \
+                 index decides which body the hop analysis reads); got id {id:?}"
+            );
+        }
+    }
+}
+
 /// GH #737 follow-up (review C1): the structural FFI loop surface
 /// (`model_detected_loops`) and the scored surface (`model_ltm_variables`)
 /// must assign IDENTICAL ids (and matching structural polarities) to the

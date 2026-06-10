@@ -1591,9 +1591,20 @@ pub(crate) fn recover_agg_hop_polarities(
             if link.polarity != LinkPolarity::Unknown {
                 continue;
             }
+            // Both endpoint matches compare the bare synthetic agg name
+            // against the link ident with any element subscript stripped: an
+            // ARRAYED agg's element-graph hops carry a slot subscript
+            // (`$⁚ltm⁚agg⁚0[a]`), which the bare name would never match
+            // (GH #745). Stripping only removes the trailing `[...]` -- the
+            // agg index (`agg⁚0` vs `agg⁚1`) stays significant, so two
+            // arrayed aggs never alias.
+            let to_var_level = strip_subscript(link.to.as_str());
+            let from_var_level = strip_subscript(link.from.as_str());
             // `source → agg`: the agg is this link's target.
-            if let Some((_, agg)) = synthetic.iter().find(|(name, _)| name == &link.to) {
-                let from_var_level = strip_subscript(link.from.as_str());
+            if let Some((_, agg)) = synthetic
+                .iter()
+                .find(|(name, _)| name.as_str() == to_var_level)
+            {
                 let p =
                     source_to_agg_hop_polarity(db, model, project, var_graph, from_var_level, agg);
                 if p != LinkPolarity::Unknown {
@@ -1603,8 +1614,11 @@ pub(crate) fn recover_agg_hop_polarities(
                 continue;
             }
             // `agg → consumer`: the agg is this link's source.
-            if let Some((agg_ident, agg)) = synthetic.iter().find(|(name, _)| name == &link.from) {
-                let consumer = Ident::new(strip_subscript(link.to.as_str()));
+            if let Some((agg_ident, agg)) = synthetic
+                .iter()
+                .find(|(name, _)| name.as_str() == from_var_level)
+            {
+                let consumer = Ident::new(to_var_level);
                 let p = var_graph.agg_consumer_polarity(&consumer, &agg.equation_text, agg_ident);
                 if p != LinkPolarity::Unknown {
                     link.polarity = p;
