@@ -21,8 +21,9 @@
 //! of the `scale -> agg` hop projects to the SAME variable edge), so the
 //! properties additionally assert per-reducer agg-hop routing derived from
 //! the spec: every inlined reducer must have ONE agg node carrying all its
-//! source-row / scalar-feeder / target hops, and a pure ThroughAgg feeder
-//! must have NO direct element edge to the target
+//! source-row / scalar-feeder / target hops, and NO reducer source (arrayed
+//! row or scalar feeder -- all reference their target solely inside the
+//! reducer) may have a direct element edge to any target node
 //! (`check_spec_agg_expectations`).
 //!
 //! Vacuity guard (GH #739): the base `project_spec_strategy` only sometimes
@@ -427,14 +428,34 @@ fn project_to_variable_edges(elem_edges: &ElementCausalEdgesResult) -> BTreeSet<
 
 /// One inlined reducer's expected agg routing, derived from the spec:
 /// every node in `sources` must feed the SAME synthetic agg node, which
-/// must feed every node in `targets`; and each pair in
-/// `forbidden_direct` (a pure-`ThroughAgg` scalar feeder and its target)
+/// must feed every node in `targets`; and each pair in `forbidden_direct`
 /// must have NO direct element edge.
+///
+/// `forbidden_direct` is the FULL `sources x targets` cross product: every
+/// generated inlined-reducer equation references its sources (the arrayed
+/// rows AND the scalar feeder) solely inside the reducer -- each generated
+/// variable has exactly one pattern, so no spec can give the same
+/// `(source, target)` pair a second, non-reducer reference site -- which
+/// makes every direct source->target element edge illegitimate. Forbidding
+/// them closes both regression directions: the swap direction (GH #533: an
+/// agg hop replaced by a direct edge) and the additive direction (correct
+/// hops PLUS a spurious direct edge, which the projection invariant cannot
+/// see because both graphs collapse to the same variable edge and the
+/// agg-hop existence check uses subset semantics).
 #[derive(Debug)]
 struct ExpectedAggRouting {
     sources: Vec<String>,
     targets: Vec<String>,
     forbidden_direct: Vec<(String, String)>,
+}
+
+/// The full `sources x targets` cross product, for
+/// [`ExpectedAggRouting::forbidden_direct`].
+fn cross_product(sources: &[String], targets: &[String]) -> Vec<(String, String)> {
+    sources
+        .iter()
+        .flat_map(|s| targets.iter().map(move |t| (s.clone(), t.clone())))
+        .collect()
 }
 
 /// Derive every inlined reducer's expected agg routing from the spec.
@@ -451,34 +472,26 @@ fn expected_agg_routings(spec: &ProjectSpec) -> Vec<ExpectedAggRouting> {
         if let Some((j, feeder)) = var_spec.pattern.inlined_reducer_parts() {
             let mut sources = source_rows(j);
             let targets: Vec<String> = elems.iter().map(|e| format!("v{i}[{e}]")).collect();
-            let mut forbidden_direct = Vec::new();
             if feeder {
                 sources.push("scalar_const".to_string());
-                // The feeder's ONLY reference site is inside the reducer,
-                // so it must route through the agg with no direct edge to
-                // any target element.
-                for t in &targets {
-                    forbidden_direct.push(("scalar_const".to_string(), t.clone()));
-                }
             }
             routings.push(ExpectedAggRouting {
+                forbidden_direct: cross_product(&sources, &targets),
                 sources,
                 targets,
-                forbidden_direct,
             });
         }
     }
     if let Some(target) = &spec.scalar_reducer_target {
         let mut sources = source_rows(target.var_idx);
-        let mut forbidden_direct = Vec::new();
         if target.with_scalar_feeder {
             sources.push("scalar_const".to_string());
-            forbidden_direct.push(("scalar_const".to_string(), "total".to_string()));
         }
+        let targets = vec!["total".to_string()];
         routings.push(ExpectedAggRouting {
+            forbidden_direct: cross_product(&sources, &targets),
             sources,
-            targets: vec!["total".to_string()],
-            forbidden_direct,
+            targets,
         });
     }
     routings
@@ -502,7 +515,9 @@ fn has_element_edge(elem_edges: &ElementCausalEdgesResult, from: &str, to: &str)
 /// class: a fast path that swaps the `scalar_const -> agg` hop for a direct
 /// `scalar_const -> total` edge preserves the projection invariant (both
 /// graphs project to the same variable edge) but fails BOTH halves of this
-/// check.
+/// check. The `forbidden_direct` half ALSO covers the additive direction --
+/// correct agg hops plus a spurious direct `source -> target` edge -- which
+/// the agg-hop existence half alone would miss (subset semantics).
 fn check_spec_agg_expectations(
     spec: &ProjectSpec,
     elem_edges: &ElementCausalEdgesResult,
@@ -535,7 +550,9 @@ fn check_spec_agg_expectations(
         for (from, to) in &routing.forbidden_direct {
             if has_element_edge(elem_edges, from, to) {
                 return Err(format!(
-                    "pure ThroughAgg feeder has a direct element edge {from} -> {to} (GH #533 bug class)"
+                    "reducer source has a direct element edge {from} -> {to} \
+                     (must route only through the agg; GH #533 bug class or a \
+                     spurious additive edge)"
                 ));
             }
         }
