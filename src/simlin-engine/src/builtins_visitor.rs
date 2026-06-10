@@ -621,9 +621,10 @@ impl<'a> BuiltinVisitor<'a> {
             // reducer table but is ARRAY-valued (Vensim's VECTOR RANK), so a
             // bare arrayed name inside it MUST take the arrayed-helper path:
             // captured into a scalar helper, `rank(pop, 1)` is ill-typed and
-            // the helper fragment fails (GH #742). The name is lowercased
-            // because parsed `Expr0` builtin names keep their source casing
-            // while `reducer_kind_from_name` matches lowercase.
+            // the helper fragment fails (GH #742). The lowercasing is
+            // defensive belt-and-suspenders: parsed `Expr0` function names
+            // are already lowercase by construction (the parser lowercases
+            // function-call identifiers).
             App(UntypedBuiltinFn(func, args), _) => {
                 !crate::ltm_agg::reducer_collapses_to_scalar(&func.to_ascii_lowercase(), args.len())
                     && args.iter().any(|a| self.arg_has_bare_var_ref(a))

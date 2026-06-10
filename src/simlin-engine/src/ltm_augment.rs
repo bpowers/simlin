@@ -293,9 +293,11 @@ fn classify_expr0_subscript_shape(
 /// form that collapses an array dimension? `SUM`/`STDDEV`/`SIZE`/`RANK`
 /// reduce at any arity (`RANK(arr, n)`, etc.); `MEAN`/`MIN`/`MAX` reduce an
 /// array dimension only in their single-argument form (their multi-argument
-/// forms are element-wise). Parsed `Expr0` builtin names keep their source
-/// casing, generated ones are uppercase, so the comparison is
-/// case-insensitive. A thin reader of [`crate::ltm_agg::reducer_kind_from_name`]
+/// forms are element-wise). The lowercasing is defensive belt-and-suspenders:
+/// parsed `Expr0` builtin names are already lowercase by construction (the
+/// parser lowercases function-call identifiers; LTM-generated uppercase
+/// reducer text is re-parsed before any of these predicates see it).
+/// A thin reader of [`crate::ltm_agg::reducer_kind_from_name`]
 /// -- the one reducer table -- so this `Expr0`-walk-time check and the agg
 /// enumerator agree on the set (including `SIZE`, which is recognized here
 /// even though it is never hoisted).
@@ -2724,6 +2726,15 @@ fn scalar_or_a2a_target_equation_text(target_var: &Variable) -> String {
 /// function has no dims for them); [`wrap_index_non_matching_in_previous`]'s
 /// element-name (GH #587) and dimension-name (GH #759) guards are the
 /// backstop that keeps those verbatim.
+///
+/// Boundary: the source-token strip is name-based, so a real model variable
+/// named identically to a source dimension ELEMENT, referenced OUTSIDE any
+/// subscript, is over-stripped and left unfrozen (live) in the partial.
+/// This is a pre-existing characteristic shared with
+/// [`build_arrayed_link_score_equation`]'s identical per-slot strip and with
+/// the engine's own dependency extraction (`classify_dependencies` filters
+/// the same names against its dims) -- not a new failure class introduced
+/// here.
 fn scalar_or_a2a_target_deps(
     to_var: &Variable,
     source_dim_elements: &[Vec<String>],

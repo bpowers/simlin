@@ -152,6 +152,12 @@ pub(crate) fn reducer_kind_from_name(name: &str, arity: usize) -> Option<Reducer
 /// names an array builtin whose RESULT is a scalar -- the genuinely reducing
 /// set (`SUM`, 1-arg `MEAN`/`MIN`/`MAX`, `STDDEV`, `SIZE`).
 ///
+/// Callers lowercase the name before calling; that normalization is
+/// defensive belt-and-suspenders, not load-bearing -- parsed `Expr0`
+/// function names are already lowercase by construction (the parser
+/// lowercases function-call identifiers, and LTM-generated uppercase
+/// reducer text is re-parsed before any of these predicates see it).
+///
 /// `RANK` is recognized as a reducer by [`reducer_kind_from_name`] (the agg
 /// machinery enumerates and scores it like one), but `RANK(arr, dir)` is
 /// ARRAY-valued -- the rank of each element, Vensim's VECTOR RANK -- so any

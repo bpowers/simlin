@@ -4147,12 +4147,23 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
 /// -- because `pop` is `row_sum`'s only dependency -- the score is exactly
 /// `+1` per element.
 ///
-/// Residual #525 conservatism, deliberately NOT pinned here: the
-/// `DynamicIndex` classification expands to cross-product element edges
-/// (`pop[a,*] -> row_sum[b]`), so the enumerator also reports cross-element
-/// "loops" that don't exist causally. Extending
+/// Residual #525 conservatism, pinned LOUDLY below (the repo convention for
+/// degraded behavior): the `DynamicIndex` classification expands to
+/// cross-product element edges (`pop[a,*] -> row_sum[b]`), so the
+/// enumerator also reports cross-element "loops" that do not exist
+/// causally -- and they are SILENT CONFIDENT PHANTOMS, not zeros: each
+/// phantom's loop-score product composes per-slot link scores across the
+/// non-causal pathway (the cross edge reads the WRONG element's real link
+/// score at the target slot), so it carries a plausible-looking sustained
+/// value (~0.245 here) with no diagnostic. They also dilute the shared
+/// cycle partition's rel-score denominator (~20% in this repro), shrinking
+/// every REAL loop's relative importance. Extending
 /// `classify_iterated_dim_shape` to the iterated+literal mix (a per-element
-/// family pinned on the literal axes) would remove them; tracked on GH #525.
+/// family pinned on the literal axes) removes them; tracked on GH #525
+/// (rescoped to exactly this residual). The exact-value pin below makes
+/// the phantoms visible in the suite so the future classifier fix must
+/// consciously flip these assertions (phantoms no longer enumerated)
+/// rather than silently changing scores.
 #[test]
 fn gh525_two_reference_partially_iterated_row_sum_scores() {
     let project = TestProject::new("gh525_repro")
@@ -4206,6 +4217,12 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
     // row_sum (dimensioned over the full Region x Age space) carries real
     // non-zero values once the startup guard clears.
     let mut saw_row_sum_loop = false;
+    // The PHANTOM loops (see the doc comment): the conservative
+    // cross-product enumerates SCALAR loops whose 6-factor cycle traverses
+    // pop -> row_sum at MIXED elements (two cross edges, each reading the
+    // other element's real per-slot link score). They are identifiable as
+    // the scalar (dimension-less) loop scores referencing pop->row_sum.
+    let mut phantom_count = 0usize;
     for lv in ltm
         .vars
         .iter()
@@ -4219,6 +4236,30 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
                 "loop score {} slot {slot} must stay finite; got {series:?}",
                 lv.name
             );
+        }
+        if lv.dimensions.is_empty()
+            && let datamodel::Equation::Scalar(text) = &lv.equation
+            && text.contains("pop\u{2192}row_sum")
+        {
+            phantom_count += 1;
+            // Each phantom is a 6-factor product in which the four
+            // growth->pop / pop->row_sum factors are ~1 and the two
+            // row_sum->growth factors are each ~0.4949 (row_sum supplies
+            // about half of delta-growth in this symmetric repro), so the
+            // phantom reads ~0.4949^2 ~= 0.245 -- a confident, sustained,
+            // completely non-causal loop score. FLIP NOTE: when GH #525's
+            // classifier fix lands these loops are no longer enumerated;
+            // delete this block and assert no scalar pop->row_sum loop
+            // score exists.
+            let series = series_at(&results, offset_of(&results, &lv.name));
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
+                assert!(
+                    (v - 0.245).abs() < 1e-3,
+                    "phantom cross-element loop {} step {step} must read the \
+                     documented ~0.245 composed-cross-edge value; got {series:?}",
+                    lv.name
+                );
+            }
         }
         if lv.dimensions == vec!["Region".to_string(), "Age".to_string()] {
             let eqn_text = match &lv.equation {
@@ -4242,6 +4283,15 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
     assert!(
         saw_row_sum_loop,
         "an A2A loop through row_sum must be enumerated; vars: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    // Four phantoms: the a<->b cross circuit instantiated at the 2x2 Age-slot
+    // pairings of its two row_sum->growth hops ({young,old} per region).
+    assert_eq!(
+        phantom_count,
+        4,
+        "the conservative cross-product enumerates exactly four phantom \
+         cross-element loops in this repro (GH #525 residual); vars: {:?}",
         ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
 }
