@@ -1587,9 +1587,10 @@ fn source_to_agg_hop_polarity(
 /// comes back `Unknown`, forcing every agg-traversing loop to `Undetermined`.
 /// For the derivable cases, patch it here:
 ///
-/// - `source → agg`: [`source_to_agg_hop_polarity`] (the monotone arm for the
-///   reducer's own arrayed rows; the discriminating feeder analysis for a
-///   scalar feeder).
+/// - `source → agg`: [`source_to_agg_hop_polarity`] (the discriminating
+///   `analyze_source_to_agg_polarity` body analysis, applied uniformly to
+///   arrayed rows and scalar feeders alike; indeterminate bodies stay
+///   `Unknown`, never a blanket monotone label).
 /// - `agg → consumer`: the polarity of `consumer`'s equation with respect to
 ///   the reducer subexpression, computed by substituting the reducer with the
 ///   agg name and running ordinary static polarity analysis
