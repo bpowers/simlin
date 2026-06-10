@@ -203,6 +203,60 @@ pub fn link_score_equation_text_shaped<'db>(
     })
 }
 
+/// Result of [`lower_ltm_variable`]: the lowered variable plus the
+/// dependency classification of its lowered AST, computed once during
+/// lowering. Callers reuse `dep_idents`/`referenced_tables` to build their
+/// metadata stubs instead of re-running `classify_dependencies` on the
+/// returned variable -- the classification is a per-fragment AST walk, and
+/// duplicating it across every LTM fragment was a measurable slice of
+/// C-LEARN's LTM compile time.
+struct LoweredLtmVariable {
+    variable: crate::variable::Variable,
+    /// `classify_dependencies(..).all` of the lowered dt AST (falling back
+    /// to the init AST for stock-shaped helpers). Identifier sets are
+    /// lowering-scope-independent, so this is valid for the returned
+    /// `variable` whether or not the scoped re-lower ran.
+    dep_idents: HashSet<Ident<Canonical>>,
+    /// `classify_dependencies(..).referenced_tables` of the same AST.
+    referenced_tables: BTreeSet<String>,
+}
+
+/// `true` when one of `equation`'s texts could contain a hoistable
+/// array-reducer call (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/`RANK` -- the
+/// [`crate::ltm_agg::reducer_kind_from_name`] set minus the never-hoisted
+/// `SIZE`), checked case-insensitively as `name(`.
+///
+/// This is the cheap syntactic gate for [`lower_ltm_variable`]'s scoped
+/// re-lower. Soundness: the Expr2 `ArrayBounds` the re-lower recovers are
+/// consumed by Pass-1 temp decomposition, which fires only on a reducer's
+/// argument -- the GH #738 class. LTM equation text is always
+/// engine-generated (`print_eqn` / `expr2_to_string` re-prints), both of
+/// which format every call as `name(args)` with no space before the paren,
+/// so a reducer call always matches one of these substrings. The other,
+/// rarer bounds consumers (the arrayed-GF apply decomposition, non-A2A Op2
+/// dimension reordering) behave for a gated-out fragment exactly as they
+/// did before GH #738 -- never worse. False positives (a scalar 2-arg
+/// `MIN(a, b)`, or a call whose name merely ends in a reducer name, e.g.
+/// `vitamin(x)` matching `min(`) just run the arrayedness analysis and
+/// cost nothing in correctness.
+fn equation_may_contain_reducer(equation: &datamodel::Equation) -> bool {
+    fn text_mentions_reducer(text: &str) -> bool {
+        const HOISTABLE_REDUCER_CALLS: [&str; 6] =
+            ["sum(", "mean(", "min(", "max(", "stddev(", "rank("];
+        let lower = text.to_ascii_lowercase();
+        HOISTABLE_REDUCER_CALLS.iter().any(|n| lower.contains(n))
+    }
+    match equation {
+        datamodel::Equation::Scalar(s) | datamodel::Equation::ApplyToAll(_, s) => {
+            text_mentions_reducer(s)
+        }
+        datamodel::Equation::Arrayed(_, elements, default, _) => {
+            elements.iter().any(|(_, s, _, _)| text_mentions_reducer(s))
+                || default.as_deref().is_some_and(text_mentions_reducer)
+        }
+    }
+}
+
 /// Lower a parsed LTM Stage0 variable with a lowering scope that can
 /// resolve the dimensions of its model-variable dependencies (GH #738).
 ///
@@ -220,11 +274,12 @@ pub fn link_score_equation_text_shaped<'db>(
 /// Strategy: lower once with an empty scope (cheap, and byte-identical to
 /// the populated-scope lowering when no dependency is arrayed -- the scope
 /// only feeds `get_dimensions`, which returns `None` for scalars either
-/// way); only when an arrayed dependency is present, re-lower with a scope
-/// carrying the parsed Stage0 variables of self plus the deps. The
-/// dependency identifier set is scope-independent (the scope affects only
-/// bounds metadata), so the preliminary lowering sees the same deps the
-/// final one does.
+/// way); only when the equation can contain a reducer
+/// ([`equation_may_contain_reducer`]) AND an arrayed dependency is present,
+/// re-lower with a scope carrying the parsed Stage0 variables of self plus
+/// the deps. The dependency identifier set is scope-independent (the scope
+/// affects only bounds metadata), so the classification computed on the
+/// preliminary lowering is returned alongside whichever lowering wins.
 ///
 /// An arrayed dependency can be a model source variable OR an arrayed
 /// implicit helper aux synthesized while parsing an LTM equation (the GH
@@ -232,13 +287,24 @@ pub fn link_score_equation_text_shaped<'db>(
 /// link score references inside its reducer). `equation_implicits` carries
 /// the implicits from the caller's own parse; cross-equation helper refs
 /// resolve through the cached `model_ltm_implicit_var_info` registry.
+///
+/// Boundary: dependencies that are neither model source variables nor LTM
+/// parse-time implicit helpers stay OUTSIDE the lowering scope and lower
+/// with unresolved (scalar) bounds, exactly as before GH #738. That
+/// notably includes other LTM *synthetic* variables -- e.g. an A2A link
+/// score referenced by a loop score -- which is sound because loop and
+/// relative-score equations reference those deps only in plain products,
+/// never inside reducers; their multi-slot layout is handled separately by
+/// the compile stage's dimension-aware metadata stubs (the LTM-var dep
+/// branch in `compile_ltm_equation_fragment`, tech-debt #34). `·`-dotted
+/// module-output refs likewise stay outside (they are not flat variables).
 fn lower_ltm_variable(
     db: &dyn Db,
     parsed_variable: &crate::model::VariableStage0,
     equation_implicits: &[datamodel::Variable],
     model: SourceModel,
     project: SourceProject,
-) -> crate::variable::Variable {
+) -> LoweredLtmVariable {
     let dim_context = project_dimensions_context(db, project);
     let empty_models = HashMap::new();
     let empty_scope = crate::model::ScopeStage0 {
@@ -248,24 +314,52 @@ fn lower_ltm_variable(
     };
     let prelim = crate::model::lower_variable(&empty_scope, parsed_variable);
 
+    // Classify dependencies ONCE on the preliminary lowering; the set is
+    // scope-independent, so it serves both the re-lower decision below and
+    // the caller's metadata-stub construction. The dt AST is the phase LTM
+    // fragments compile; a stock-shaped helper (no dt AST) falls back to
+    // its init AST.
+    let classification = prelim
+        .ast()
+        .or_else(|| prelim.init_ast())
+        .map(|ast| crate::variable::classify_dependencies(ast, &[], None));
+    let (dep_idents, referenced_tables) = match classification {
+        Some(c) => (c.all, c.referenced_tables),
+        None => (HashSet::new(), BTreeSet::new()),
+    };
+
+    // Cheap syntactic gate: without a reducer call in the equation text,
+    // the Expr2 bounds the scoped re-lower would recover cannot change the
+    // compile outcome -- skip the per-dep arrayedness lookups and the
+    // second lowering entirely (the common case: most link/loop scores
+    // contain no reducer even on heavily arrayed models).
+    let stage0_equation: Option<&datamodel::Equation> = match parsed_variable {
+        crate::variable::Variable::Stock { eqn, .. }
+        | crate::variable::Variable::Var { eqn, .. } => eqn.as_ref(),
+        crate::variable::Variable::Module { .. } => None,
+    };
+    if !stage0_equation.is_some_and(equation_may_contain_reducer) {
+        return LoweredLtmVariable {
+            variable: prelim,
+            dep_idents,
+            referenced_tables,
+        };
+    }
+
     // Dependencies of the LTM equation (data-flow deps plus referenced
     // lookup tables -- an arrayed graphical function's per-element apply
     // also needs its dimensions resolved). `·`-dotted module-output refs
     // are not flat variables and keep resolving to scalar (None) exactly
     // as before.
-    let mut dep_names: BTreeSet<String> = BTreeSet::new();
-    for ast in [prelim.ast(), prelim.init_ast()].into_iter().flatten() {
-        let classification = crate::variable::classify_dependencies(ast, &[], None);
-        for dep in classification
-            .all
-            .iter()
-            .map(|d| d.as_str())
-            .chain(classification.referenced_tables.iter().map(|s| s.as_str()))
-        {
-            let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-            if !effective.contains('\u{00B7}') {
-                dep_names.insert(effective.to_string());
-            }
+    let mut dep_names: BTreeSet<&str> = BTreeSet::new();
+    for dep in dep_idents
+        .iter()
+        .map(|d| d.as_str())
+        .chain(referenced_tables.iter().map(|s| s.as_str()))
+    {
+        let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
+        if !effective.contains('\u{00B7}') {
+            dep_names.insert(effective);
         }
     }
 
@@ -294,12 +388,16 @@ fn lower_ltm_variable(
 
     let any_arrayed_dep = dep_names.iter().any(|name| {
         source_vars
-            .get(name.as_str())
+            .get(*name)
             .is_some_and(|sv| !variable_dimensions(db, *sv, project).is_empty())
             || find_implicit_dm(name).is_some_and(dm_var_is_arrayed)
     });
     if !any_arrayed_dep {
-        return prelim;
+        return LoweredLtmVariable {
+            variable: prelim,
+            dep_idents,
+            referenced_tables,
+        };
     }
 
     let model_name_str = model.name(db);
@@ -309,7 +407,7 @@ fn lower_ltm_variable(
     let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> = HashMap::new();
     stage0_vars.insert(Ident::new(parsed_variable.ident()), parsed_variable.clone());
     for dep_name in &dep_names {
-        if let Some(dep_sv) = source_vars.get(dep_name.as_str()) {
+        if let Some(dep_sv) = source_vars.get(*dep_name) {
             let dep_parsed =
                 parse_source_variable_with_module_context(db, *dep_sv, project, module_ctx);
             stage0_vars.insert(Ident::new(dep_name), dep_parsed.variable.clone());
@@ -342,7 +440,11 @@ fn lower_ltm_variable(
         dimensions: dim_context,
         model_name: model_name_str,
     };
-    crate::model::lower_variable(&scope, parsed_variable)
+    LoweredLtmVariable {
+        variable: crate::model::lower_variable(&scope, parsed_variable),
+        dep_idents,
+        referenced_tables,
+    }
 }
 
 /// Compile an arbitrary LTM `Equation` to symbolic bytecodes.
@@ -403,8 +505,13 @@ pub(crate) fn compile_ltm_equation_fragment(
     // compiler's expand_a2a_with_hoisting handles automatically.
     // `lower_ltm_variable` threads the dependencies (model variables and
     // arrayed parse-time helpers) into the lowering scope so array bounds
-    // resolve (GH #738).
-    let lowered = lower_ltm_variable(db, &parsed.variable, &parsed.implicit_vars, model, project);
+    // resolve (GH #738), and hands back the dependency classification it
+    // computed so we don't re-walk the lowered AST below.
+    let LoweredLtmVariable {
+        variable: lowered,
+        dep_idents,
+        referenced_tables,
+    } = lower_ltm_variable(db, &parsed.variable, &parsed.implicit_vars, model, project);
 
     let model_name_ident = Ident::new(model.name(db));
     let var_name_canonical = canonicalize(var_name).into_owned();
@@ -537,17 +644,11 @@ pub(crate) fn compile_ltm_equation_fragment(
     );
     mini_offset += var_size;
 
-    // Collect dependency variable names from the lowered AST. Lookup-table
-    // references are not data-flow deps (issue #606 keeps them in
-    // `referenced_tables`, off the causal graph), but the fragment still
-    // needs them: see the referenced-tables pass below.
-    let (dep_idents, referenced_tables) = if let Some(ast) = lowered.ast() {
-        let classification = crate::variable::classify_dependencies(ast, &[], None);
-        (classification.all, classification.referenced_tables)
-    } else {
-        (HashSet::new(), std::collections::BTreeSet::new())
-    };
-
+    // `dep_idents`/`referenced_tables` came back from `lower_ltm_variable`
+    // (classified once during lowering). Lookup-table references are not
+    // data-flow deps (issue #606 keeps them in `referenced_tables`, off the
+    // causal graph), but the fragment still needs them: see the
+    // referenced-tables pass below.
     let source_vars = model.variables(db);
     let project_models = project.models(db);
     let implicit_info = model_implicit_var_info(db, model, project);
@@ -1369,6 +1470,11 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         return None;
     }
 
+    // Dependency classification handed back by `lower_ltm_variable` for the
+    // non-module path, reused by the dep-collection pass below (the module
+    // path constructs its deps from the dm_module references instead).
+    let mut ltm_lowered_deps: Option<(HashSet<Ident<Canonical>>, BTreeSet<String>)> = None;
+
     // Module-type implicit vars need direct Module construction
     let lowered = if meta.is_module {
         if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
@@ -1410,7 +1516,9 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         // `compile_ltm_equation_fragment` (GH #738): a synthesized helper aux
         // whose equation embeds a reducer over an array expression needs its
         // deps' dimensions resolvable for Pass-1 temp decomposition.
-        lower_ltm_variable(db, &parsed_implicit, &dummy_implicits, model, project)
+        let ll = lower_ltm_variable(db, &parsed_implicit, &dummy_implicits, model, project);
+        ltm_lowered_deps = Some((ll.dep_idents, ll.referenced_tables));
+        ll.variable
     };
 
     let model_name_ident = Ident::new(model.name(db));
@@ -1640,11 +1748,15 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         // data-flow deps -- issue #606 -- but the fragment needs their layout
         // stub and graphical-function data so a `lookup(table, ...)` inside a
         // synthesized helper compiles; see compile_ltm_equation_fragment).
-        let (dep_idents, referenced_tables) = if let Some(ast) = lowered.ast() {
-            let classification = crate::variable::classify_dependencies(ast, &[], None);
-            (classification.all, classification.referenced_tables)
+        //
+        // The classification was computed once inside `lower_ltm_variable`;
+        // the `lowered.ast().is_some()` guard preserves the long-standing
+        // dt-AST-only scope of this pass (a stock-shaped helper, whose only
+        // AST is its init equation, keeps its empty dep set here).
+        let (dep_idents, referenced_tables) = if lowered.ast().is_some() {
+            ltm_lowered_deps.take().unwrap_or_default()
         } else {
-            (HashSet::new(), std::collections::BTreeSet::new())
+            (HashSet::new(), BTreeSet::new())
         };
 
         let implicit_info = model_implicit_var_info(db, model, project);

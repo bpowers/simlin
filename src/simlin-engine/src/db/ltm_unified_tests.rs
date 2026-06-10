@@ -4006,7 +4006,10 @@ fn ltm_fragment_failures_with_agg_present(project: &datamodel::Project) -> Vec<S
 /// context captures a wildcard-subscripted arrayed arg into an ill-typed
 /// *scalar* helper). That residual is a separate defect from #738 -- the
 /// loop score consuming that direct link stays 0 pending GH #737's
-/// routing fix anyway -- and pinning it here keeps it observable.
+/// routing fix anyway. The second assertion TOLERATES the residual rather
+/// than REQUIRING it: any unexpected failure still trips it, but fixing
+/// the #541-class gap later leaves it passing (an empty failure list
+/// satisfies the `all`), so the assertion cannot rot.
 fn assert_agg_fragments_compile(eqn: &str, failures: &[String]) {
     assert!(
         failures.iter().all(|f| !f.contains("\u{205A}agg\u{205A}")),
