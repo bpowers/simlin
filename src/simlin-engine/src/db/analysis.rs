@@ -190,9 +190,12 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// read-slice rows). After #514 the `Direct` not-hoistable-reducer carve-out
 /// (`SUM(pop[idx,*])`) is reclassified by the IR as `DynamicIndex`, so a
 /// `Direct` `Wildcard` site is now only a variable-backed reducer's whole-RHS
-/// argument (`total = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`)
-/// or a (rare) non-reducer whole-array reference; the conservative cross
-/// product is the right semantics for all of those.
+/// argument (`total = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`),
+/// a (rare) non-reducer whole-array reference, or a mapped sliced reducer the
+/// correspondence declines (element-mapped -- GH #756 -- or reverse-declared
+/// -- GH #757). The conservative cross product is sound for the element
+/// EDGES in all of those (a superset, never fewer); note the declined
+/// mapped-reducer cases' link SCORES are separately broken (GH #758).
 #[allow(clippy::too_many_arguments)]
 fn emit_edges_for_reference(
     from_name: &str,
@@ -651,8 +654,10 @@ fn emit_agg_routed_edges(
     // dimensions), and -- when the reducer reads its arrayed source by the
     // matching iterated subscript -- a subset of the arrayed source's dims too,
     // so we can recover the `Dimension` from `from_dims` (preferred -- it's the
-    // source row axis) or from `to_dims` (the only place to look when `from` is
-    // a *scalar* feeder of the agg). `read_slice_ok` keys the source-row layout
+    // source row axis) or from `to_dims` (needed when `from` is a *scalar*
+    // feeder of the agg, and for a mapped sliced reducer -- GH #534 -- whose
+    // result dim is the target's iterated dim, absent from the source's
+    // declared dims). `read_slice_ok` keys the source-row layout
     // machinery below off the well-formed slice; it is independent of where the
     // `Iterated` `Dimension`s come from.
     let read_slice_ok = !from_dims.is_empty() && agg.read_slice.len() == from_dims.len();

@@ -1578,8 +1578,11 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 ///   variable-backed reducer's argument (`total = SUM(population[*])`), a
 ///   bare dynamic index (`arr[i+1]`), the dynamic-index reducer carve-out
 ///   (`SUM(pop[idx, *])`), or a mapped sliced reducer the correspondence
-///   declines (element-mapped -- GH #756 -- or reverse-declared -- GH #757)
-///   -- a coarse conservative score is the right semantics for all of those.
+///   declines (element-mapped -- GH #756 -- or reverse-declared -- GH #757).
+///   A coarse conservative score is the intended semantics for all of those,
+///   but for the declined mapped-reducer cases the emitted scalar score
+///   currently references A2A idents and fails fragment compilation, so the
+///   loop scores through it stub to 0 with Assembly warnings (GH #758).
 ///
 /// The Unicode separators `\u{205A}` (TWO DOT PUNCTUATION) and `\u{2192}`
 /// (RIGHTWARDS ARROW) are intentional: they collide with no legal
