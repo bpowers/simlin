@@ -570,6 +570,64 @@ fn test_get_errors_no_ltm_diagnostics_when_ltm_never_requested() {
     }
 }
 
+/// GH #741: an LTM *implicit-helper* compile failure must flow through the
+/// same `LtmEnabledGuard` harvest as the auto-flip warning above -- it rides
+/// the identical `model_all_diagnostics` -> `model_ltm_fragment_diagnostics`
+/// accumulator, so `simlin_project_get_errors` surfaces it after an
+/// LTM-enabled sim was created.
+///
+/// The fixture is the GH #759 pinned-index repro (`growth[D1] =
+/// matrix[D1, c1] * frac[D1]` in a feedback loop), whose `frac -> growth`
+/// link-score partial mints PREVIOUS-capture helpers that genuinely fail to
+/// compile today. When #759 is fixed those helpers will compile cleanly --
+/// update this test then (the engine-side guard-injected test keeps the
+/// diagnostic leg covered independently of #759's lifetime).
+#[test]
+fn test_get_errors_surfaces_ltm_implicit_helper_failure_after_ltm_sim() {
+    let datamodel = TestProject::new("get_errors_helper_fail")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+        .array_aux("growth[D1]", "matrix[D1, c1] * frac[D1]")
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("grow[D1]", "growth[D1]", None)
+        .array_stock("pop[D1]", "100", &["grow"], &[], None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut model_err: *mut SimlinError = ptr::null_mut();
+        let model =
+            simlin_project_get_model(proj, ptr::null(), &mut model_err as *mut *mut SimlinError);
+        assert!(model_err.is_null());
+        assert!(!model.is_null());
+
+        // Create an LTM-enabled sim so the project records the LTM request.
+        let mut sim_err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut sim_err as *mut *mut SimlinError);
+        assert!(sim_err.is_null(), "LTM sim creation should succeed");
+        assert!(!sim.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "get_errors must return the implicit-helper failure warning"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "LTM implicit helper"),
+            "implicit-helper compile-failure warning must reach get_errors after an LTM sim"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// The LTM-requested flag must survive subsequent non-LTM operations on the
 /// project: after an LTM sim and then a plain non-LTM sim, the auto-flip
 /// warning must still be reachable through `get_errors`.

@@ -3782,3 +3782,255 @@ fn positional_mapped_twin_of_declined_edge_scores_cleanly() {
         "at least one positional-twin loop score must carry real non-zero values"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GH #741: failed implicit-helper fragment compiles must warn
+// ---------------------------------------------------------------------------
+
+/// The double-namespaced prefix of the implicit helpers LTM equation parsing
+/// synthesizes (`builtins_visitor::make_temp_arg`'s PREVIOUS/INIT captures):
+/// the helper of an LTM synthetic variable prepends a second `$⁚`.
+const LTM_HELPER_PREFIX: &str = "$\u{205A}$\u{205A}ltm\u{205A}";
+
+/// The GH #759 pinned-index fixture: `growth[D1] = matrix[D1, c1] * frac[D1]`
+/// -- a mundane Bare-shape apply-to-all equation with a pinned literal
+/// co-source index -- inside the feedback loop `pop -> frac -> growth ->
+/// grow -> pop`. The ceteris-paribus partial for the `frac -> growth` link
+/// score freezes the co-source as `PREVIOUS(matrix[PREVIOUS(d1), d2·c1])`,
+/// PREVIOUS-wrapping the iterated-dimension NAME inside the subscript index
+/// (the GH #759 defect); the PREVIOUS-capture helpers minted for that
+/// expression (`$⁚$⁚ltm⁚link_score⁚frac→growth⁚0⁚arg0⁚{r1,r2}`) therefore
+/// fail to compile.
+fn gh759_pinned_index_fixture() -> datamodel::Project {
+    TestProject::new("gh759_pinned_index")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+        .array_aux("growth[D1]", "matrix[D1, c1] * frac[D1]")
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("grow[D1]", "growth[D1]", None)
+        .array_stock("pop[D1]", "100", &["grow"], &[], None)
+        .build_datamodel()
+}
+
+/// GH #741: an LTM implicit helper whose fragment fails to compile must
+/// surface a Warning naming the helper and its parent score variable.
+/// Before the fix `model_ltm_fragment_diagnostics` covered only the LTM
+/// synthetic variables themselves, so this fixture produced ZERO
+/// diagnostics while its `frac -> growth` link score silently read a
+/// constant wrong value (-40 with these constants) off the 0-stubbed
+/// helpers.
+///
+/// NOTE: this pins the currently-reachable REAL failure (GH #759). When
+/// #759 is fixed the helpers will compile cleanly -- update this test then
+/// to assert no warning and a correct score; the guard-injected
+/// `test_model_ltm_fragment_diagnostics_covers_implicit_helpers` (in
+/// `ltm_unified_tests.rs`) keeps the diagnostic pass itself covered
+/// independently of #759's lifetime.
+#[test]
+fn implicit_helper_compile_failure_warns() {
+    let project = gh759_pinned_index_fixture();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // One Warning per doomed helper (one per D1 element's capture), each
+    // carrying the helper name in `variable` and the parent score variable
+    // in the message -- both actionable handles.
+    let warnings = assembly_warnings(&db, sync.project);
+    let helper_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|d| {
+            d.variable
+                .as_deref()
+                .is_some_and(|v| v.starts_with(LTM_HELPER_PREFIX))
+        })
+        .collect();
+    assert_eq!(
+        helper_warnings.len(),
+        2,
+        "each doomed PREVIOUS-capture helper must warn; got: {warnings:?}"
+    );
+    for w in &helper_warnings {
+        let DiagnosticError::Assembly(msg) = &w.error else {
+            unreachable!("assembly_warnings filtered to Assembly");
+        };
+        assert!(
+            msg.contains("failed to compile")
+                && msg.contains("$\u{205A}ltm\u{205A}link_score\u{205A}frac\u{2192}growth"),
+            "the warning must name the parent score variable; got: {msg}"
+        );
+    }
+    // ...and nothing else warns: the helper failures are the fixture's only
+    // degradation.
+    assert_eq!(
+        warnings.len(),
+        2,
+        "only the two helper-failure warnings may be accumulated; got: {warnings:?}"
+    );
+
+    // The degraded runtime state itself is unchanged -- #741 makes it
+    // VISIBLE, #759 will fix the value: each warned helper reads the
+    // documented constant-0 stub.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for w in &helper_warnings {
+        let name = w.variable.as_deref().unwrap();
+        let base = offset_of(&results, name);
+        let series = series_at(&results, base);
+        assert!(
+            series.iter().all(|&v| v == 0.0),
+            "warned helper {name} must read the documented 0 stub; got {series:?}"
+        );
+    }
+}
+
+/// GH #748 x #741 joint end-to-end: a module-only root whose sub-model
+/// contains the GH #759 helper-doomed shape. Two previously-silent gaps,
+/// exercised together:
+///
+/// * #748: `main`'s only state lives inside the `sub` module (`level` and
+///   `pop` stocks), so before the module-state-aware early-return gate the
+///   root's LTM pass emitted NOTHING -- the `driver -> sub -> reader ->
+///   driver` loop went unscored with no diagnostic.
+/// * #741: `sub` has input ports, so its own LTM pass scores ALL its edges
+///   -- including `frac -> growth`, whose PREVIOUS-capture helpers fail to
+///   compile. Before the implicit-helper diagnostic leg those failures were
+///   silent.
+///
+/// Asserts the root loop IS scored AND the sub-model helper failures DO
+/// warn. Also exercises the diagnostic pass's empty-input-set probe against
+/// a sub-model that assembly instantiates with a non-empty input set
+/// (`{input}`): the probe must report exactly the failures assembly hits.
+#[test]
+fn module_only_root_with_doomed_helper_scores_and_warns() {
+    let mut project = TestProject::new("joint_748_741")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .aux("driver", "100 + reader * 0.5", None)
+        .aux("reader", "sub.level", None)
+        .build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Module(datamodel::Module {
+            ident: "sub".to_string(),
+            model_name: "sub".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![datamodel::ModuleReference {
+                src: "driver".to_string(),
+                dst: "sub.input".to_string(),
+            }],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    // The sub-model: a scalar smooth-like input->chg->level chain (the state
+    // the parent loop traverses) plus the GH #759 doomed shape, disjoint
+    // from the chain. Built via a second TestProject purely for the
+    // variable-construction helpers; dimensions stay on the real project.
+    let sub_body = TestProject::new("sub_body")
+        .aux("input", "0", None)
+        .flow("chg", "(input - level) / 3", None)
+        .stock("level", "0", &["chg"], &[], None)
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+        .array_aux("growth[D1]", "matrix[D1, c1] * frac[D1]")
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("grow[D1]", "growth[D1]", None)
+        .array_stock("pop[D1]", "100", &["grow"], &[], None)
+        .build_datamodel();
+    let mut sub_model = sub_body.models.into_iter().next().expect("one model");
+    sub_model.name = "sub".to_string();
+    project.models.push(sub_model);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // #748 leg: the module-only root runs the pass and scores its loop.
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "the module-only root must score the driver/sub/reader loop; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // #741 leg: the sub-model's doomed helpers warn, attributed to `sub`.
+    //
+    // Because `sub` has input ports it scores ALL its edges (not just loop
+    // edges), so the #759 defect surfaces on BOTH growth-feeding edges:
+    // `frac -> growth` (2 doomed helpers, one per D1 element -- the same
+    // pair the root-only fixture above pins) and `matrix -> growth` (4
+    // doomed helpers: two capture sites x two elements; that edge's
+    // synthetic link-score variable also fails, which the pre-existing
+    // synthetic leg covers separately). All six helper warnings are genuine
+    // newly-visible failures of the same class, not noise.
+    let warnings = assembly_warnings(&db, sync.project);
+    let sub_helper_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|d| {
+            d.model == "sub"
+                && d.variable
+                    .as_deref()
+                    .is_some_and(|v| v.starts_with(LTM_HELPER_PREFIX))
+        })
+        .collect();
+    assert_eq!(
+        sub_helper_warnings.len(),
+        6,
+        "the sub-model's doomed helpers must all warn; got: {warnings:?}"
+    );
+    let parent_named = |needle: &str| {
+        sub_helper_warnings
+            .iter()
+            .filter(|w| {
+                let DiagnosticError::Assembly(msg) = &w.error else {
+                    unreachable!("assembly_warnings filtered to Assembly");
+                };
+                msg.contains(needle)
+            })
+            .count()
+    };
+    assert_eq!(
+        parent_named("$\u{205A}ltm\u{205A}link_score\u{205A}frac\u{2192}growth"),
+        2,
+        "two helper warnings name the frac->growth score; got: {sub_helper_warnings:?}"
+    );
+    assert_eq!(
+        parent_named("$\u{205A}ltm\u{205A}link_score\u{205A}matrix\u{2192}growth"),
+        4,
+        "four helper warnings name the matrix->growth score; got: {sub_helper_warnings:?}"
+    );
+
+    // End to end: the model simulates and the root loop score carries real
+    // (finite, eventually non-zero) values.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    let root_loop = ltm
+        .vars
+        .iter()
+        .find(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .unwrap();
+    let series = series_at(&results, offset_of(&results, &root_loop.name));
+    assert!(
+        series.iter().all(|v| v.is_finite()),
+        "root loop score must stay finite; got {series:?}"
+    );
+    assert!(
+        series.iter().any(|&v| v != 0.0),
+        "root loop score must carry signal once behavior begins; got {series:?}"
+    );
+}

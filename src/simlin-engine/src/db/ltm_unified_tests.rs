@@ -867,6 +867,81 @@ fn test_model_ltm_fragment_diagnostics_emits_warning() {
     );
 }
 
+/// GH #741: `model_ltm_fragment_diagnostics` must also cover the LTM
+/// *implicit helpers* (the PREVIOUS/INIT-capture auxes synthesized while
+/// parsing LTM equations, `$⁚$⁚ltm⁚…⁚arg{n}`). `assemble_module` drops a
+/// failed helper fragment exactly as it drops a failed synthetic-var
+/// fragment -- the helper keeps its layout slot and reads a constant 0,
+/// corrupting every link score that consumes it -- but before #741 NO
+/// warning was emitted anywhere for the helper leg.
+///
+/// The failure is injected via `LtmFragmentFailureGuard` (the same GH #547
+/// mechanism the synthetic-var tests use, extended to the helper compile
+/// path) so this test survives every real helper-compile bug being fixed.
+/// The fixture's flow-to-stock link score genuinely mints `arg0` helpers
+/// (its `PREVIOUS(PREVIOUS(cap_flow))` nested capture), pinned below so the
+/// guard pattern cannot silently match nothing.
+#[test]
+fn test_model_ltm_fragment_diagnostics_covers_implicit_helpers() {
+    use crate::db::{CompilationDiagnostic, LtmFragmentFailureGuard, model_ltm_implicit_var_info};
+    use salsa::Setter;
+
+    let project = build_chain_scc_project("implicit_frag_fail", 5);
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    // Vacuity guard: the fixture must genuinely synthesize implicit
+    // helpers, or the forced-failure pattern below matches nothing.
+    let info = model_ltm_implicit_var_info(&db, model, source_project);
+    assert!(
+        info.keys().any(|k| k.contains("arg0")),
+        "fixture must mint PREVIOUS-capture (arg0) helpers; got: {:?}",
+        info.keys().collect::<Vec<_>>()
+    );
+
+    // `arg0` matches only the implicit helpers (no LTM synthetic variable
+    // name carries it), so the synthetic-var loop emits nothing and any
+    // warning below is the helper leg's.
+    let _force_failure = LtmFragmentFailureGuard::new("arg0");
+    model_ltm_fragment_diagnostics(&db, model, source_project);
+    let diags = model_ltm_fragment_diagnostics::accumulated::<CompilationDiagnostic>(
+        &db,
+        model,
+        source_project,
+    );
+
+    let helper_failures: Vec<_> = diags
+        .iter()
+        .filter(|CompilationDiagnostic(d)| is_ltm_fragment_failure(d))
+        .collect();
+    assert!(
+        !helper_failures.is_empty(),
+        "a failed LTM implicit-helper fragment must surface a Warning; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+    // Each warning names the helper (the `variable` field) AND its parent
+    // LTM score variable (in the message), so a caller can locate both the
+    // stubbed slot and the score it degrades.
+    for CompilationDiagnostic(d) in &helper_failures {
+        assert!(
+            d.variable.as_deref().is_some_and(|v| v.contains("arg0")),
+            "helper-failure warning must name the helper; got: {d:?}"
+        );
+        let crate::db::DiagnosticError::Assembly(msg) = &d.error else {
+            panic!("helper-failure warning must be an Assembly diagnostic: {d:?}");
+        };
+        assert!(
+            msg.contains("synthesized while parsing LTM variable")
+                && msg.contains("$\u{205A}ltm\u{205A}"),
+            "helper-failure message must name the parent LTM variable; got: {msg}"
+        );
+    }
+}
+
 /// Regression guard: a model whose LTM synthetic fragments all compile
 /// cleanly (a plain scalar feedback loop) must emit ZERO
 /// fragment-failure warnings. Surfacing failures must not become a

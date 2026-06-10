@@ -20,13 +20,14 @@ use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
 use crate::db::{
-    Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, RefShape, SourceModel, SourceProject,
-    SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
+    Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, ModuleInputSet, RefShape, SourceModel,
+    SourceProject, SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
     build_submodel_metadata, canonical_module_input_set, compute_layout,
-    extract_tables_from_source_var, link_score_equation_text, model_implicit_var_info,
-    model_module_ident_context, model_module_map, parse_source_variable_with_module_context,
-    project_converted_dimensions, project_datamodel_dims, project_dimensions_context,
-    project_units_context, reconstruct_single_variable, variable_dimensions, variable_size,
+    extract_tables_from_source_var, link_score_equation_text, model_dependency_graph,
+    model_implicit_var_info, model_module_ident_context, model_module_map,
+    parse_source_variable_with_module_context, project_converted_dimensions,
+    project_datamodel_dims, project_dimensions_context, project_units_context,
+    reconstruct_single_variable, variable_dimensions, variable_size,
 };
 
 use super::parse::{ltm_equation_dimensions, parse_ltm_equation};
@@ -1484,10 +1485,11 @@ pub(crate) fn compile_ltm_synthetic_fragment(
 #[cfg(test)]
 thread_local! {
     /// Test-only forced-failure pattern for
-    /// [`compile_ltm_synthetic_fragment`], scoped by an active
-    /// [`LtmFragmentFailureGuard`] (GH #547): any LTM synthetic variable
-    /// whose name contains the pattern is treated as a compile failure
-    /// (`None`), so the positive tests for
+    /// [`compile_ltm_synthetic_fragment`] and (GH #741)
+    /// [`compile_ltm_implicit_var_fragment`], scoped by an active
+    /// [`LtmFragmentFailureGuard`] (GH #547): any LTM synthetic variable or
+    /// implicit helper whose (canonical) name contains the pattern is
+    /// treated as a compile failure (`None`), so the positive tests for
     /// [`model_ltm_fragment_diagnostics`] are decoupled from the lifetime
     /// of any real fragment-compile bug. Mirrors `AGG_LOOP_BUDGET_OVERRIDE`
     /// in `db/ltm/loops.rs`.
@@ -1495,11 +1497,11 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// RAII guard (test-only) that forces [`compile_ltm_synthetic_fragment`] to
-/// fail for any synthetic variable whose name contains `pattern`, for the
-/// current thread for the guard's lifetime; the previous override is
-/// restored on drop (so a panicking test does not leak it to the next test
-/// reusing the thread).
+/// RAII guard (test-only) that forces [`compile_ltm_synthetic_fragment`] and
+/// [`compile_ltm_implicit_var_fragment`] to fail for any synthetic variable
+/// or implicit helper whose name contains `pattern`, for the current thread
+/// for the guard's lifetime; the previous override is restored on drop (so a
+/// panicking test does not leak it to the next test reusing the thread).
 ///
 /// Because `model_ltm_fragment_diagnostics` (and `assemble_module`) are
 /// salsa-memoized, the guard must outlive every call in the test whose
@@ -1527,8 +1529,9 @@ impl Drop for LtmFragmentFailureGuard {
 }
 
 /// Salsa-tracked diagnostic pass that compiles every LTM synthetic
-/// variable the way `assemble_module` does and emits a `Warning` for
-/// each one whose fragment fails to compile.
+/// variable -- and every LTM *implicit helper* (GH #741) -- the way
+/// `assemble_module` does and emits a `Warning` for each one whose
+/// fragment fails to compile.
 ///
 /// Why this exists: `assemble_module` silently drops a synthetic
 /// fragment that fails to compile -- the variable keeps its layout slot
@@ -1537,7 +1540,11 @@ impl Drop for LtmFragmentFailureGuard {
 /// arrayed flow-to-stock link score that compiled to 0 and produced
 /// plausible-but-wrong loop scores went unnoticed precisely because of
 /// this). Surfacing the failure makes a degraded LTM analysis *visible*
-/// instead of silently wrong.
+/// instead of silently wrong. The implicit helpers (the PREVIOUS/INIT
+/// capture auxes `builtins_visitor::make_temp_arg` synthesizes while
+/// parsing LTM equations, `$⁚$⁚ltm⁚…⁚arg{n}`) ride the exact same
+/// silent-drop assembly path, and a dropped helper corrupts every link
+/// score that reads it -- with, before GH #741, no diagnostic anywhere.
 ///
 /// Severity is `Warning`, not `Error`: LTM is opt-in, the rest of the
 /// model still simulates, and a hard error would break compilation of
@@ -1592,6 +1599,71 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
         })
         .accumulate(db);
     }
+
+    // GH #741: probe the LTM implicit helpers the same way. `assemble_module`
+    // compiles each via `compile_ltm_implicit_var_fragment` and silently
+    // skips a `None` (or a fragment with no bytecode for the helper's
+    // value-bearing phase), so the helper keeps its layout slot, nothing
+    // writes it, and it reads a constant 0 at runtime.
+    //
+    // Input-set boundary: assembly compiles each helper with the module
+    // INSTANCE's input names. This pass is keyed per (model, project) -- no
+    // instance context -- so it probes with the empty input set, mirroring
+    // `model_all_diagnostics`' `compile_var_fragment` probe ("module inputs
+    // are empty because we are not in an assembly context"). For the ROOT
+    // model assembly's input set IS empty, so the probe is byte-identical to
+    // assembly there. For a sub-model instance with inputs the probe is an
+    // approximation, but compile success cannot diverge: the input set only
+    // flips how a resolved name is loaded (`ModuleInput` slot vs a stubbed
+    // scalar var -- every dependency is stubbed into the fragment's
+    // mini-layout either way), never whether the equation compiles.
+    //
+    // Iteration is name-sorted so warning order is deterministic, matching
+    // the assembly loop.
+    let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
+    if ltm_implicit.is_empty() {
+        return;
+    }
+    let dep_graph = model_dependency_graph(db, model, project, ModuleInputSet::empty(db));
+    let mut implicit_names: Vec<&String> = ltm_implicit.keys().collect();
+    implicit_names.sort();
+    for im_name in implicit_names {
+        let meta = &ltm_implicit[im_name];
+        let fragment = compile_ltm_implicit_var_fragment(db, meta, model, project, dep_graph, &[]);
+        // The helper's value-bearing phase must have produced bytecode:
+        // `compile_ltm_implicit_var_fragment` returns `Some` even when every
+        // phase failed (each phase is compiled independently and a failed one
+        // is just `None` in the fragment), and `assemble_module` appends only
+        // the phases that exist to the runlists. A plain aux helper (the
+        // PREVIOUS-capture case, the only kind LTM parsing produces today) is
+        // recomputed each step via its flow bytecode; a stock or module
+        // helper is advanced via its stock bytecode.
+        let compiled_ok = fragment.as_ref().is_some_and(|r| {
+            if meta.is_stock || meta.is_module {
+                r.fragment.stock_bytecodes.is_some()
+            } else {
+                r.fragment.flow_bytecodes.is_some()
+            }
+        });
+        if compiled_ok {
+            continue;
+        }
+        let msg = format!(
+            "LTM implicit helper '{}' (synthesized while parsing LTM variable \
+             '{}') failed to compile; it keeps a layout slot but no bytecode, \
+             so it evaluates to a constant 0. Every link or loop score that \
+             reads it is silently degraded. This usually means the LTM \
+             augmentation layer emitted an equation the compiler rejected.",
+            im_name, meta.ltm_parent_name,
+        );
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(im_name.clone()),
+            error: DiagnosticError::Assembly(msg),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    }
 }
 
 /// Compile a single implicit variable from an
@@ -1619,6 +1691,25 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     // time by `model_ltm_implicit_var_info`), so no parent re-parse is needed.
     let implicit_dm_var = &meta.variable;
     let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+
+    // GH #741: the same test-scoped forced failure as
+    // `compile_ltm_synthetic_fragment` (GH #547), extended to the implicit-
+    // helper path so the positive tests for the implicit-helper leg of
+    // `model_ltm_fragment_diagnostics` are decoupled from the lifetime of any
+    // real helper-compile bug. Both assembly and the diagnostic pass call
+    // through here, so a forced failure produces the same silently-stubbed
+    // helper assembly would (and the Warning that now covers it).
+    #[cfg(test)]
+    {
+        let forced = LTM_FRAGMENT_FAILURE_OVERRIDE.with(|c| {
+            c.borrow()
+                .as_deref()
+                .is_some_and(|pat| implicit_name.contains(pat))
+        });
+        if forced {
+            return None;
+        }
+    }
 
     // Project-global dims (datamodel form needed by `parse_var`) plus the
     // canonicalized context + converted dims, from the salsa-cached queries.

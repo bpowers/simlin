@@ -706,10 +706,10 @@ pub(super) fn emit_unscoreable_conservative_edge_warning(
 /// so the caller skips emitting the variable and calls this to make the
 /// degradation visible. This is the "loud failure" sibling of
 /// [`emit_unscoreable_disjoint_edge_warning`] -- and it is *not* redundant
-/// with `model_ltm_fragment_diagnostics`: that pass only catches synthetic
-/// equations that fail to *compile*, whereas the silent-fallback bug this
-/// replaces produced an equation that compiled cleanly while computing a
-/// constant `|Δz/Δz| = 1` magnitude.
+/// with `model_ltm_fragment_diagnostics`: that pass only catches LTM
+/// equations (synthetic vars and implicit helpers) that fail to *compile*,
+/// whereas the silent-fallback bug this replaces produced an equation that
+/// compiled cleanly while computing a constant `|Δz/Δz| = 1` magnitude.
 pub(crate) fn emit_ltm_partial_equation_warning(
     db: &dyn Db,
     model: SourceModel,
