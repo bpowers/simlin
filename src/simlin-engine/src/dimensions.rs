@@ -630,6 +630,66 @@ impl DimensionsContext {
         None
     }
 
+    /// Element-level correspondence between a target equation's iterated
+    /// dimension and a referenced source variable's (differently-named)
+    /// declared dimension, per the project's dimension mappings (GH #527).
+    ///
+    /// Returns, for each element of `iterated_dim` in declared order, the
+    /// `source_dim` element the compiler's mapping resolution reads for it
+    /// -- i.e. exactly the per-element dataflow of an A2A reference like
+    /// `target[State] = x[State] * c` (or the bare `x * c`) where `x` is
+    /// declared over `Region` and a `State`/`Region` mapping exists. This
+    /// is the correspondence the LTM element-graph projection
+    /// (`expand_same_element`) and the link-score emitters use so the
+    /// element edges/scores match what the simulation actually computes.
+    ///
+    /// Semantics (kept in lockstep with the compiler and the LTM
+    /// classifier):
+    /// - **Direction**: both declaration directions are honored, mirroring
+    ///   [`Self::translate_via_mapping`] (which the compiler's subscript /
+    ///   A2A resolution uses): a mapping declared on `iterated_dim` toward
+    ///   `source_dim` -- the direction `classify_iterated_dim_shape`'s
+    ///   mapped-`Bare` arm accepts via `has_mapping_to(iterated, source)`
+    ///   -- or one declared on `source_dim` toward `iterated_dim` (which
+    ///   only arises for *bare* references; a subscripted reference with a
+    ///   reverse-declared mapping classifies `DynamicIndex` upstream and
+    ///   never consults this correspondence).
+    /// - **Transitivity**: single-hop only, matching `has_mapping_to`. A
+    ///   chained `A→B→C` mapping yields `None` for the `(A, C)` pair, just
+    ///   as the classifier declines it.
+    /// - **Cardinality**: an explicit element map may be many-to-one onto
+    ///   `source_dim` (`State{s1,s2,s3}→Region{a,b}`); the result still has
+    ///   exactly one source element per *iterated* element. A positional
+    ///   mapping (empty element map) requires equal sizes, per
+    ///   `translate_via_mapping`.
+    /// - **Fallback**: `None` when no direct mapping exists in either
+    ///   direction, either dimension is indexed, or any iterated element
+    ///   fails to translate (a partial/malformed element map, or a
+    ///   positional size mismatch). Callers treat `None` as "no
+    ///   correspondence" and keep their conservative broadcast.
+    pub fn mapped_element_correspondence(
+        &self,
+        iterated_dim: &CanonicalDimensionName,
+        source_dim: &CanonicalDimensionName,
+    ) -> Option<Vec<CanonicalElementName>> {
+        // Cheap pre-check so the common no-mapping case doesn't pay the
+        // per-element translation attempts below.
+        if !self.has_mapping_to(iterated_dim, source_dim)
+            && !self.has_mapping_to(source_dim, iterated_dim)
+        {
+            return None;
+        }
+        let iterated_named = match self.dimensions.get(iterated_dim)? {
+            Dimension::Named(_, named) => named,
+            Dimension::Indexed(_, _) => return None,
+        };
+        iterated_named
+            .elements
+            .iter()
+            .map(|elem| self.translate_via_mapping(source_dim, iterated_dim, elem))
+            .collect()
+    }
+
     /// Check if child is a subdimension of parent.
     /// For named dimensions, checks element containment. For indexed dimensions,
     /// uses the declared `parent` field.
@@ -1314,6 +1374,200 @@ mod tests {
         let b2 = CanonicalElementName::from_raw("B2");
         let result = ctx.translate_via_mapping(&dim_a_name, &dim_b_name, &b2);
         assert_eq!(result, Some(CanonicalElementName::from_raw("a1")));
+    }
+
+    // ========== Tests for mapped_element_correspondence (GH #527) ==========
+
+    fn canon_elems(names: &[&str]) -> Vec<CanonicalElementName> {
+        names
+            .iter()
+            .map(|n| CanonicalElementName::from_raw(n))
+            .collect()
+    }
+
+    /// Positional mapping declared on the iterated dimension (the
+    /// classifier-accepted direction): one source element per iterated
+    /// element, by position.
+    #[test]
+    fn test_mapped_correspondence_positional_forward() {
+        use crate::common::CanonicalDimensionName;
+
+        let mut state = datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["s1".to_string(), "s2".to_string()],
+        );
+        state.set_maps_to("Region".to_string());
+        let region = datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        let ctx = DimensionsContext::from(&[state, region]);
+
+        let result = ctx.mapped_element_correspondence(
+            &CanonicalDimensionName::from_raw("State"),
+            &CanonicalDimensionName::from_raw("Region"),
+        );
+        assert_eq!(result, Some(canon_elems(&["a", "b"])));
+    }
+
+    /// Positional mapping declared on the SOURCE dimension (the reverse
+    /// declaration direction, which arises for bare references): still a
+    /// positional correspondence.
+    #[test]
+    fn test_mapped_correspondence_positional_reverse_declared() {
+        use crate::common::CanonicalDimensionName;
+
+        let state = datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["s1".to_string(), "s2".to_string()],
+        );
+        let mut region = datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        region.set_maps_to("State".to_string());
+        let ctx = DimensionsContext::from(&[state, region]);
+
+        let result = ctx.mapped_element_correspondence(
+            &CanonicalDimensionName::from_raw("State"),
+            &CanonicalDimensionName::from_raw("Region"),
+        );
+        assert_eq!(result, Some(canon_elems(&["a", "b"])));
+    }
+
+    /// Many-to-one explicit element map (`State{s1,s2,s3}→Region{a,b}`):
+    /// exactly one source element per ITERATED element -- 3 entries, not
+    /// min(m,n).
+    #[test]
+    fn test_mapped_correspondence_element_map_many_to_one() {
+        use crate::common::CanonicalDimensionName;
+
+        let mut state = datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["s1".to_string(), "s2".to_string(), "s3".to_string()],
+        );
+        state.mappings = vec![datamodel::DimensionMapping {
+            target: "Region".to_string(),
+            element_map: vec![
+                ("s1".to_string(), "a".to_string()),
+                ("s2".to_string(), "a".to_string()),
+                ("s3".to_string(), "b".to_string()),
+            ],
+        }];
+        let region = datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        let ctx = DimensionsContext::from(&[state, region]);
+
+        let result = ctx.mapped_element_correspondence(
+            &CanonicalDimensionName::from_raw("State"),
+            &CanonicalDimensionName::from_raw("Region"),
+        );
+        assert_eq!(result, Some(canon_elems(&["a", "a", "b"])));
+    }
+
+    /// A positional mapping between different-size dimensions cannot
+    /// translate (no element-level map to disambiguate): None, so callers
+    /// keep the conservative broadcast.
+    #[test]
+    fn test_mapped_correspondence_positional_size_mismatch_is_none() {
+        use crate::common::CanonicalDimensionName;
+
+        let mut state = datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["s1".to_string(), "s2".to_string(), "s3".to_string()],
+        );
+        state.set_maps_to("Region".to_string());
+        let region = datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        let ctx = DimensionsContext::from(&[state, region]);
+
+        let result = ctx.mapped_element_correspondence(
+            &CanonicalDimensionName::from_raw("State"),
+            &CanonicalDimensionName::from_raw("Region"),
+        );
+        assert_eq!(result, None);
+    }
+
+    /// A partial element map (an iterated element with no pair) cannot
+    /// give every iterated element a source: None.
+    #[test]
+    fn test_mapped_correspondence_partial_element_map_is_none() {
+        use crate::common::CanonicalDimensionName;
+
+        let mut state = datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["s1".to_string(), "s2".to_string()],
+        );
+        state.mappings = vec![datamodel::DimensionMapping {
+            target: "Region".to_string(),
+            element_map: vec![("s1".to_string(), "a".to_string())],
+        }];
+        let region = datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        let ctx = DimensionsContext::from(&[state, region]);
+
+        let result = ctx.mapped_element_correspondence(
+            &CanonicalDimensionName::from_raw("State"),
+            &CanonicalDimensionName::from_raw("Region"),
+        );
+        assert_eq!(result, None);
+    }
+
+    /// No declared mapping in either direction: None.
+    #[test]
+    fn test_mapped_correspondence_unmapped_is_none() {
+        use crate::common::CanonicalDimensionName;
+
+        let state = datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["s1".to_string(), "s2".to_string()],
+        );
+        let region = datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        let ctx = DimensionsContext::from(&[state, region]);
+
+        let result = ctx.mapped_element_correspondence(
+            &CanonicalDimensionName::from_raw("State"),
+            &CanonicalDimensionName::from_raw("Region"),
+        );
+        assert_eq!(result, None);
+    }
+
+    /// Single-hop only, matching `has_mapping_to` (and the LTM
+    /// classifier): a chained `A→B→C` mapping yields None for `(A, C)`.
+    #[test]
+    fn test_mapped_correspondence_transitive_chain_is_none() {
+        use crate::common::CanonicalDimensionName;
+
+        let mut dim_a = datamodel::Dimension::named(
+            "DimA".to_string(),
+            vec!["a1".to_string(), "a2".to_string()],
+        );
+        dim_a.set_maps_to("DimB".to_string());
+        let mut dim_b = datamodel::Dimension::named(
+            "DimB".to_string(),
+            vec!["b1".to_string(), "b2".to_string()],
+        );
+        dim_b.set_maps_to("DimC".to_string());
+        let dim_c = datamodel::Dimension::named(
+            "DimC".to_string(),
+            vec!["c1".to_string(), "c2".to_string()],
+        );
+        let ctx = DimensionsContext::from(&[dim_a, dim_b, dim_c]);
+
+        let result = ctx.mapped_element_correspondence(
+            &CanonicalDimensionName::from_raw("DimA"),
+            &CanonicalDimensionName::from_raw("DimC"),
+        );
+        assert_eq!(result, None);
     }
 
     // ========== Existing tests ==========

@@ -103,16 +103,34 @@ pub(super) fn link_score_dimensions(
     // - Same-dimension A2A: from_dims == to_dims
     // - Partial-collapse: to_dims ⊆ from_dims (e.g., [D1,D2]→[D1])
     // - Broadcast: from_dims ⊆ to_dims (e.g., [D1]→[D1,D2])
+    // - Mapped dimensions (GH #527): a differently-named pair related by
+    //   a declared dimension mapping counts as corresponding, the same
+    //   element correspondence the element graph's diagonal projection
+    //   uses. Without this the mapped Bare A2A edge got a SCALAR link
+    //   score whose equation referenced arrayed variables in scalar
+    //   context (a compile failure, silently stubbed to 0) while the
+    //   loop-score equations subscript the Bare name per slot -- the
+    //   arrayed form both compiles (the equation's references resolve
+    //   through the same mapping the model's own equations use) and
+    //   resolves those per-slot references.
     //
     // In all these cases, the link score inherits the target's
     // dimensions so per-element values are computed via A2A expansion.
+    let dim_ctx = project_dimensions_context(db, project);
+    let dims_correspond =
+        |td: &crate::dimensions::Dimension, fd: &crate::dimensions::Dimension| -> bool {
+            td.name() == fd.name()
+                || dim_ctx
+                    .mapped_element_correspondence(td.canonical_name(), fd.canonical_name())
+                    .is_some()
+        };
     let dims_compatible = from_dims == *to_dims
         || to_dims
             .iter()
-            .all(|td| from_dims.iter().any(|fd| fd.name() == td.name()))
+            .all(|td| from_dims.iter().any(|fd| dims_correspond(td, fd)))
         || from_dims
             .iter()
-            .all(|fd| to_dims.iter().any(|td| td.name() == fd.name()));
+            .all(|fd| to_dims.iter().any(|td| dims_correspond(td, fd)));
 
     if dims_compatible {
         // Map canonical dimension names back to their original

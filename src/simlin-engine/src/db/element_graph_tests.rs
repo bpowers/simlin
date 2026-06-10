@@ -1297,16 +1297,17 @@ fn element_graph_iterated_dim_subscript_same_element_projection() {
     assert_no_edge(&result, "row_sum[b]", "growth[a,old]");
 }
 
-/// AC3.5: a mapped-dimension iterated subscript (`x` over `Region`,
+/// AC3.5 / GH #527: a mapped-dimension iterated subscript (`x` over `Region`,
 /// `target` over `State`, a `State→Region` mapping, `target[State] =
 /// x[State] * c`) classifies `x[State]` as `Bare` (see
-/// `ltm_ir_tests::ir_mapped_iterated_dim_subscript_is_bare`), so the
-/// element graph is *identical* to the one a bare `x` reference (`target[State]
-/// = x * c`) produces -- no new dimension-mapping behavior. `expand_same_element`
-/// matches dimension *names*, so a disjoint-named pair like `Region`/`State`
-/// is the broadcast case (every source element feeds every target element)
-/// for both the subscripted and the bare form; the assertion below pins
-/// "subscripted iterated == bare", not the projection shape.
+/// `ltm_ir_tests::ir_mapped_iterated_dim_subscript_is_bare`), and
+/// `expand_same_element` projects it along the mapping's element
+/// correspondence: with the positional `State→Region` mapping (s1↦a, s2↦b)
+/// the element graph is the DIAGONAL `x[a]→target[s1]`, `x[b]→target[s2]` --
+/// NOT the `Region × State` cross-product the pre-#527 name-only matching
+/// broadcast to. The bare form (`target[State] = x * c`) resolves through
+/// the same compiler mapping correspondence, so it must produce the
+/// identical diagonal.
 #[test]
 fn element_graph_mapped_iterated_dim_matches_bare_baseline() {
     let subscripted = TestProject::new("mapped_iterated_subscripted")
@@ -1328,4 +1329,135 @@ fn element_graph_mapped_iterated_dim_matches_bare_baseline() {
         "a mapped-dimension iterated subscript `x[State]` must produce the \
          same element edges as a bare `x` reference into the same target"
     );
+
+    // The positional mapping's diagonal, and nothing else.
+    assert_edge(&sub_result, "x[a]", "target[s1]");
+    assert_edge(&sub_result, "x[b]", "target[s2]");
+    assert_no_edge(&sub_result, "x[a]", "target[s2]");
+    assert_no_edge(&sub_result, "x[b]", "target[s1]");
+}
+
+/// GH #527: the mapping declared in the REVERSE direction -- on the
+/// *source's* dimension (`Region→State`) rather than the target equation's
+/// iterated dimension. A bare `x` reference still classifies `Bare` (no
+/// subscript to inspect), and the compiler resolves it through
+/// `translate_via_mapping`'s forward branch, so the expansion projects the
+/// same diagonal.
+#[test]
+fn element_graph_mapped_reverse_declared_bare_is_diagonal() {
+    let project = TestProject::new("mapped_reverse_bare")
+        .named_dimension_with_mapping("Region", &["a", "b"], "State")
+        .named_dimension("State", &["s1", "s2"])
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x * 0.5", None);
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "x[a]", "target[s1]");
+    assert_edge(&result, "x[b]", "target[s2]");
+    assert_no_edge(&result, "x[a]", "target[s2]");
+    assert_no_edge(&result, "x[b]", "target[s1]");
+}
+
+/// GH #527 (classifier consistency): a SUBSCRIPTED iterated-dim reference
+/// whose mapping is declared only in the reverse direction (`Region→State`,
+/// i.e. on the source's dimension) is NOT accepted by
+/// `classify_iterated_dim_shape`'s mapped arm (which checks
+/// `has_mapping_to(index_dim, source_dim)` only), so it classifies
+/// `DynamicIndex` and keeps the conservative cross-product. This pins the
+/// classification ⟺ expansion agreement: the diagonal is only emitted for
+/// shapes the classifier calls `Bare`.
+#[test]
+fn element_graph_mapped_reverse_declared_subscripted_stays_cross_product() {
+    let project = TestProject::new("mapped_reverse_subscripted")
+        .named_dimension_with_mapping("Region", &["a", "b"], "State")
+        .named_dimension("State", &["s1", "s2"])
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x[State] * 0.5", None);
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "x[a]", "target[s1]");
+    assert_edge(&result, "x[a]", "target[s2]");
+    assert_edge(&result, "x[b]", "target[s1]");
+    assert_edge(&result, "x[b]", "target[s2]");
+}
+
+/// GH #527: a different-cardinality element-level mapping
+/// (`State{s1,s2,s3}→Region{a,b}` with the explicit element map s1↦a, s2↦a,
+/// s3↦b) projects one source element per TARGET element -- three edges, not
+/// min(m,n) and not the 2×3 cross-product. `x[a]` feeds both `target[s1]`
+/// and `target[s2]` (two State elements map to it); `x[b]` feeds only
+/// `target[s3]`.
+#[test]
+fn element_graph_mapped_element_map_many_to_one_diagonal() {
+    let project = TestProject::new("mapped_element_map_3_to_2")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension_with_element_mapping(
+            "State",
+            &["s1", "s2", "s3"],
+            "Region",
+            &[("s1", "a"), ("s2", "a"), ("s3", "b")],
+        )
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x[State] * 0.5", None);
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "x[a]", "target[s1]");
+    assert_edge(&result, "x[a]", "target[s2]");
+    assert_edge(&result, "x[b]", "target[s3]");
+    assert_no_edge(&result, "x[a]", "target[s3]");
+    assert_no_edge(&result, "x[b]", "target[s1]");
+    assert_no_edge(&result, "x[b]", "target[s2]");
+}
+
+/// GH #527: the mapped diagonal composes with the target-only-dimension
+/// broadcast. `target[State,Age] = x[State] * c` (`x` over `Region`,
+/// `State→Region` positional mapping): the State axis projects along the
+/// mapping while the Age axis broadcasts -- `x[a]` feeds `target[s1,*]`
+/// only, never `target[s2,*]`.
+#[test]
+fn element_graph_mapped_diagonal_with_broadcast_dim() {
+    let project = TestProject::new("mapped_diag_broadcast")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .named_dimension("Age", &["young", "old"])
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct(
+            "target",
+            vec!["State".into(), "Age".into()],
+            "x[State] * 0.5",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "x[a]", "target[s1,young]");
+    assert_edge(&result, "x[a]", "target[s1,old]");
+    assert_edge(&result, "x[b]", "target[s2,young]");
+    assert_edge(&result, "x[b]", "target[s2,old]");
+    assert_no_edge(&result, "x[a]", "target[s2,young]");
+    assert_no_edge(&result, "x[a]", "target[s2,old]");
+    assert_no_edge(&result, "x[b]", "target[s1,young]");
+    assert_no_edge(&result, "x[b]", "target[s1,old]");
+}
+
+/// GH #527: two dimensions with the same shape but NO declared mapping must
+/// keep the conservative broadcast -- the mapped diagonal only applies when
+/// the model declares the correspondence.
+#[test]
+fn element_graph_unmapped_disjoint_dims_stay_broadcast() {
+    let project = TestProject::new("unmapped_disjoint_broadcast")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("State", &["s1", "s2"])
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x * 0.5", None);
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "x[a]", "target[s1]");
+    assert_edge(&result, "x[a]", "target[s2]");
+    assert_edge(&result, "x[b]", "target[s1]");
+    assert_edge(&result, "x[b]", "target[s2]");
 }

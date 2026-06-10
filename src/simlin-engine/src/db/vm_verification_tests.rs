@@ -596,6 +596,117 @@ fn test_ltm_incremental_simulation_produces_scores() {
     );
 }
 
+/// GH #527 end-to-end: a feedback loop that crosses a DIMENSION MAPPING
+/// (`stock`/`inflow` over `State`, `x` over `Region`, positional
+/// `State↔Region` mappings declared both ways) produces exactly the
+/// mapping-diagonal loops, with link scores that compile (arrayed over
+/// each edge's TARGET dims, resolving their per-slot loop-score
+/// references) and loop scores that are finite and sustained non-zero.
+///
+/// Before #527 the element graph emitted the `State × Region`
+/// cross-product (6 enumerated loops, 4 spurious), and the mapped edges'
+/// link scores were emitted as SCALAR variables whose equations
+/// referenced arrayed variables in scalar context -- a fragment compile
+/// failure silently stubbed to constant 0, so every loop score was 0.
+#[test]
+fn test_ltm_mapped_dimension_loop_scores_diagonal_and_nonzero() {
+    use crate::test_common::TestProject;
+    use salsa::Setter;
+
+    let tp = TestProject::new("mapped_loop_e2e")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension_with_mapping("Region", &["r1", "r2"], "State")
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_stock("stock[State]", "100", &["inflow"], &[], None)
+        .array_flow("inflow[State]", "x[State] * 0.1", None)
+        .array_aux_direct("x", vec!["Region".into()], "stock[Region] * 2", None);
+    let project = tp.build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+    let source_model = sync.models["main"].source;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    // The mapped Bare edges' link scores carry the TARGET's dimensions
+    // (the mapped pair counts as corresponding -- `link_score_dimensions`
+    // consults `mapped_element_correspondence`), so the per-slot
+    // references in the loop-score equations resolve.
+    let ltm_vars = crate::db::model_ltm_variables(&db, source_model, source_project);
+    let dims_of = |name: &str| -> &[String] {
+        &ltm_vars
+            .vars
+            .iter()
+            .find(|v| v.name == name)
+            .unwrap_or_else(|| panic!("missing LTM var {name}"))
+            .dimensions
+    };
+    assert_eq!(
+        dims_of("$\u{205A}ltm\u{205A}link_score\u{205A}stock\u{2192}x"),
+        &["Region".to_string()],
+        "mapped edge stock[State]→x[Region] gets the target's dims"
+    );
+    assert_eq!(
+        dims_of("$\u{205A}ltm\u{205A}link_score\u{205A}x\u{2192}inflow"),
+        &["State".to_string()],
+        "mapped edge x[Region]→inflow[State] gets the target's dims"
+    );
+
+    // Exactly the two mapping-diagonal loops (s1↔r1, s2↔r2) -- not the 6
+    // loops the pre-#527 cross-product element graph enumerated.
+    let loop_score_names: Vec<&str> = ltm_vars
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .map(|v| v.name.as_str())
+        .collect();
+    assert_eq!(
+        loop_score_names.len(),
+        2,
+        "expected exactly the two diagonal loops, got {loop_score_names:?}"
+    );
+
+    // No LTM fragment-compile warnings: the arrayed link-score equations
+    // genuinely compile (their references resolve through the same
+    // dimension mapping the model's own equations use). Before #527 the
+    // scalar forms failed to compile and were silently stubbed to 0.
+    let diags = crate::db::collect_model_diagnostics(&db, source_model, source_project);
+    assert!(
+        diags.is_empty(),
+        "expected no diagnostics for the mapped-loop fixture, got {diags:?}"
+    );
+
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM compile of the mapped-dim loop model should succeed");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+    let results = vm.into_results();
+
+    let score_offsets: Vec<(String, usize)> = compiled
+        .offsets
+        .iter()
+        .filter(|(k, _)| k.as_str().contains("\u{205A}loop_score\u{205A}"))
+        .map(|(k, &off)| (k.to_string(), off))
+        .collect();
+    assert_eq!(score_offsets.len(), 2, "two loop scores in the layout");
+
+    for (name, offset) in &score_offsets {
+        let series: Vec<f64> = results.iter().map(|row| row[*offset]).collect();
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "loop score {name} must be finite everywhere: {series:?}"
+        );
+        // The loop-score machinery needs two steps of history (PREVIOUS of
+        // PREVIOUS); from t=2 on the reinforcing loop must score non-zero
+        // at every step (sustained, not a transient blip).
+        assert!(
+            series.iter().skip(2).all(|v| v.abs() > 1e-6),
+            "loop score {name} must be sustained non-zero from t=2: {series:?}"
+        );
+    }
+}
+
 #[test]
 fn compute_link_polarities_stock_flow_model() {
     // A stock-flow model where "births" feeds into "population" (positive)

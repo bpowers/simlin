@@ -171,6 +171,7 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// | non-empty   | []         | Bare                          | `from[d] -> to` for each cartesian d          |
 /// | non-empty   | non-empty (same dims)  | Bare              | `from[d] -> to[d]` per shared element         |
 /// | non-empty   | non-empty (partial collapse) | Bare        | `from[d1,d2] -> to[d1]` (delegates to `expand_same_element`)|
+/// | non-empty   | non-empty (mapped dims, GH #527) | Bare    | the mapping's diagonal `from[mapped(d)] -> to[d]` per target element (via `expand_same_element` + `dim_ctx`) |
 /// | non-empty   | any        | Wildcard / DynamicIndex       | full cross product (NxM)                      |
 /// | non-empty   | []         | FixedIndex(elems)             | `from[elems] -> to` (one edge)                |
 /// | non-empty   | non-empty  | FixedIndex(elems)             | `from[elems] -> to[d]` for each cartesian d   |
@@ -190,6 +191,7 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// argument (`total = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`)
 /// or a (rare) non-reducer whole-array reference; the conservative cross
 /// product is the right semantics for all of those.
+#[allow(clippy::too_many_arguments)]
 fn emit_edges_for_reference(
     from_name: &str,
     to_name: &str,
@@ -197,6 +199,7 @@ fn emit_edges_for_reference(
     to_dims: &[crate::dimensions::Dimension],
     shape: &RefShape,
     target_element: Option<&str>,
+    dim_ctx: &crate::dimensions::DimensionsContext,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
     let from_is_scalar = from_dims.is_empty();
@@ -260,7 +263,14 @@ fn emit_edges_for_reference(
                 // full diagonal into a scratch map and then keep only
                 // edges whose target appears in `target_nodes`.
                 let mut scratch: HashMap<String, BTreeSet<String>> = HashMap::new();
-                expand_same_element(from_name, to_name, from_dims, to_dims, &mut scratch);
+                expand_same_element(
+                    from_name,
+                    to_name,
+                    from_dims,
+                    to_dims,
+                    dim_ctx,
+                    &mut scratch,
+                );
                 let target_set: BTreeSet<String> = target_nodes.iter().cloned().collect();
                 for (from_node, tos) in scratch {
                     let filtered: BTreeSet<String> =
@@ -273,7 +283,14 @@ fn emit_edges_for_reference(
                     }
                 }
             } else {
-                expand_same_element(from_name, to_name, from_dims, to_dims, element_edges);
+                expand_same_element(
+                    from_name,
+                    to_name,
+                    from_dims,
+                    to_dims,
+                    dim_ctx,
+                    element_edges,
+                );
             }
         }
         RefShape::FixedIndex(elems) => {
@@ -358,18 +375,33 @@ fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]
 
 /// Expand same-element edges with possible partial dimension collapse.
 ///
-/// For each source element tuple, constructs the target element tuple by
-/// matching shared dimension names. Dimensions in the source that are not
-/// present in the target are collapsed (their elements are iterated but
-/// do not appear in the target subscript).
+/// For each source element tuple, constructs the target element tuple(s) by
+/// matching shared dimension names -- or, when names differ, a declared
+/// dimension MAPPING between a target dimension and a source dimension
+/// (GH #527; the correspondence comes from
+/// [`crate::dimensions::DimensionsContext::mapped_element_correspondence`],
+/// the same one `classify_iterated_dim_shape`'s mapped-`Bare` arm and the
+/// compiler's subscript resolution honor, so classification, expansion, and
+/// simulation can't disagree). Dimensions in the source that correspond to
+/// no target dimension are collapsed (their elements are iterated but do
+/// not appear in the target subscript); target dimensions that correspond
+/// to no source dimension broadcast over all their elements.
 ///
-/// Example: from[D1,D2] -> to[D1] with SameElement produces
-/// from[d1,d2] -> to[d1] for all (d1,d2).
+/// Examples:
+/// - `from[D1,D2] -> to[D1]`: `from[d1,d2] -> to[d1]` for all `(d1,d2)`
+///   (partial collapse).
+/// - `from[Region] -> to[State]` with a `State→Region` mapping: the
+///   mapping's diagonal -- `from[mapped(s)] -> to[s]` for each State
+///   element `s` (a many-to-one element map gives one source element per
+///   TARGET element, e.g. 3 edges for `State{s1,s2,s3}→Region{a,b}`).
+/// - `from[Region] -> to[State]` with NO mapping: the conservative
+///   broadcast (every source element feeds every target element).
 fn expand_same_element(
     from_name: &str,
     to_name: &str,
     from_dims: &[crate::dimensions::Dimension],
     to_dims: &[crate::dimensions::Dimension],
+    dim_ctx: &crate::dimensions::DimensionsContext,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
     // Build a map of target dimension name -> position for matching
@@ -380,12 +412,69 @@ fn expand_same_element(
         .collect();
 
     // For each source dimension, record which target dimension position
-    // it corresponds to (if any). Dimensions in the source not found in
-    // the target are "collapsed" (iterated but not projected).
-    let from_to_target_pos: Vec<Option<usize>> = from_dims
+    // it corresponds to (if any) -- by name first, then by a declared
+    // dimension mapping. Source dimensions with no correspondence are
+    // "collapsed" (iterated but not projected).
+    #[derive(Clone)]
+    enum Correspondence {
+        /// Same-named target dimension at this position: target element =
+        /// same index as the source element.
+        SameName(usize),
+        /// Mapped target dimension at this position. The Vec is indexed by
+        /// TARGET element index and holds the corresponding SOURCE element
+        /// index (the diagonal direction `mapped_element_correspondence`
+        /// defines); the expansion below inverts it per source element.
+        Mapped(usize, Vec<usize>),
+        /// No corresponding target dimension: collapse.
+        Collapsed,
+    }
+
+    // Name matches first (every source dim gets a chance before mapped
+    // matching claims a position), so adding a mapping to a model can
+    // never change which dimensions pair up by name.
+    let mut correspondence: Vec<Correspondence> = from_dims
         .iter()
-        .map(|d| to_dim_positions.get(d.name()).copied())
+        .map(|d| match to_dim_positions.get(d.name()) {
+            Some(&pos) => Correspondence::SameName(pos),
+            None => Correspondence::Collapsed,
+        })
         .collect();
+    let mut claimed: Vec<bool> = vec![false; to_dims.len()];
+    for c in &correspondence {
+        if let Correspondence::SameName(pos) = c {
+            claimed[*pos] = true;
+        }
+    }
+    for (i, c) in correspondence.iter_mut().enumerate() {
+        if !matches!(c, Correspondence::Collapsed) {
+            continue;
+        }
+        let from_canon = from_dims[i].canonical_name();
+        for (pos, to_dim) in to_dims.iter().enumerate() {
+            if claimed[pos] {
+                continue;
+            }
+            let Some(elems) =
+                dim_ctx.mapped_element_correspondence(to_dim.canonical_name(), from_canon)
+            else {
+                continue;
+            };
+            // Resolve the per-target-element source names to source element
+            // indices. `mapped_element_correspondence` only returns elements
+            // of the source dimension, so the lookup can't fail for a
+            // well-formed context; bail to Collapsed (broadcast) if it does.
+            let Some(idxs) = elems
+                .iter()
+                .map(|e| from_dims[i].get_offset(e))
+                .collect::<Option<Vec<usize>>>()
+            else {
+                continue;
+            };
+            *c = Correspondence::Mapped(pos, idxs);
+            claimed[pos] = true;
+            break;
+        }
+    }
 
     // Build element name lists for each dimension
     let from_dim_elements: Vec<Vec<String>> =
@@ -420,77 +509,86 @@ fn expand_same_element(
             format_multi_element_name(from_name, &from_elems)
         };
 
-        // Build target element name by projecting shared dimensions
-        let mut to_elems: Vec<&str> = vec![""; to_dim_count];
-        let mut all_mapped = true;
-        for (src_dim_idx, target_pos) in from_to_target_pos.iter().enumerate() {
-            if let Some(pos) = target_pos {
-                let src_elem_idx = from_indices[src_dim_idx];
-                // Use the element name from the target dimension at the
-                // corresponding position. If the source element index is
-                // out of range for the target dimension (dimension size
-                // mismatch), fall back to the source element name.
-                to_elems[*pos] = if src_elem_idx < to_dim_elements[*pos].len() {
-                    &to_dim_elements[*pos][src_elem_idx]
+        // Per target position, the candidate element names this source
+        // tuple connects to: a singleton for a SameName position, the
+        // (possibly empty) preimage of the source element for a Mapped
+        // position, and every element for an unclaimed (broadcast)
+        // position. The target node set is the cartesian product.
+        let mut to_elem_options: Vec<Vec<&str>> = to_dim_elements
+            .iter()
+            .enumerate()
+            .map(|(pos, elems)| {
+                if claimed[pos] {
+                    Vec::new() // filled from the correspondence below
                 } else {
-                    from_dim_elements[src_dim_idx][src_elem_idx].as_str()
-                };
-            }
-        }
-
-        // Check if all target dimensions got filled from shared source dims
-        for elem in to_elems.iter().take(to_dim_count) {
-            if elem.is_empty() {
-                all_mapped = false;
-                break;
-            }
-        }
-
-        if all_mapped {
-            let to_node = if to_elems.len() == 1 {
-                format_element_name(to_name, to_elems[0])
-            } else {
-                format_multi_element_name(to_name, &to_elems)
-            };
-            element_edges.entry(from_node).or_default().insert(to_node);
-        } else {
-            // If some target dimensions are not covered by the source,
-            // we need to iterate over those target dimensions too (broadcast).
-            // Collect the unfilled target dimension indices and their elements.
-            let unfilled: Vec<(usize, &Vec<String>)> = (0..to_dim_count)
-                .filter(|&pos| to_elems[pos].is_empty())
-                .map(|pos| (pos, &to_dim_elements[pos]))
-                .collect();
-
-            // Cartesian product of unfilled target dimensions
-            let mut unfilled_tuples: Vec<Vec<(usize, usize)>> = vec![vec![]];
-            for &(pos, elements) in &unfilled {
-                let mut new_tuples = Vec::with_capacity(unfilled_tuples.len() * elements.len());
-                for existing in &unfilled_tuples {
-                    for elem_idx in 0..elements.len() {
-                        let mut extended = existing.clone();
-                        extended.push((pos, elem_idx));
-                        new_tuples.push(extended);
+                    elems.iter().map(String::as_str).collect()
+                }
+            })
+            .collect();
+        for (src_dim_idx, c) in correspondence.iter().enumerate() {
+            let src_elem_idx = from_indices[src_dim_idx];
+            match c {
+                Correspondence::SameName(pos) => {
+                    // Use the element name from the target dimension at the
+                    // corresponding position. If the source element index is
+                    // out of range for the target dimension (dimension size
+                    // mismatch), fall back to the source element name.
+                    let name = if src_elem_idx < to_dim_elements[*pos].len() {
+                        to_dim_elements[*pos][src_elem_idx].as_str()
+                    } else {
+                        from_dim_elements[src_dim_idx][src_elem_idx].as_str()
+                    };
+                    to_elem_options[*pos].push(name);
+                }
+                Correspondence::Mapped(pos, target_to_source) => {
+                    // Preimage: every target element whose mapped source
+                    // element is this source element. May be empty (a
+                    // source element nothing maps to feeds no target
+                    // element on this axis), or hold several elements for
+                    // a many-to-one element map.
+                    for (target_idx, &src_idx) in target_to_source.iter().enumerate() {
+                        if src_idx == src_elem_idx {
+                            to_elem_options[*pos].push(to_dim_elements[*pos][target_idx].as_str());
+                        }
                     }
                 }
-                unfilled_tuples = new_tuples;
+                Correspondence::Collapsed => {}
             }
+        }
 
-            for fill in &unfilled_tuples {
-                let mut filled = to_elems.clone();
-                for &(pos, elem_idx) in fill {
-                    filled[pos] = &to_dim_elements[pos][elem_idx];
+        // Cartesian product over the per-position options. An empty
+        // option list at any position (an unmapped source element on a
+        // Mapped axis) yields no target tuples, i.e. no edges for this
+        // source tuple.
+        let mut to_tuples: Vec<Vec<&str>> = vec![vec![]];
+        for options in to_elem_options.iter().take(to_dim_count) {
+            let mut next = Vec::with_capacity(to_tuples.len() * options.len());
+            for existing in &to_tuples {
+                for &opt in options {
+                    let mut extended = existing.clone();
+                    extended.push(opt);
+                    next.push(extended);
                 }
-                let to_node = if filled.len() == 1 {
-                    format_element_name(to_name, filled[0])
-                } else {
-                    format_multi_element_name(to_name, &filled)
-                };
-                element_edges
-                    .entry(from_node.clone())
-                    .or_default()
-                    .insert(to_node);
             }
+            to_tuples = next;
+        }
+        if to_tuples.is_empty() {
+            // An empty option list at some position emptied the product:
+            // this source element feeds no target element. Don't create an
+            // empty adjacency entry for it.
+            continue;
+        }
+
+        let entry = element_edges.entry(from_node).or_default();
+        for to_elems in &to_tuples {
+            let to_node = if to_dim_count == 0 {
+                to_name.to_string()
+            } else if to_elems.len() == 1 {
+                format_element_name(to_name, to_elems[0])
+            } else {
+                format_multi_element_name(to_name, to_elems)
+            };
+            entry.insert(to_node);
         }
     }
 }
@@ -519,6 +617,7 @@ fn expand_same_element(
 /// always should for a hoisted agg whose `source_vars` includes `from`), fall
 /// back to the conservative "every source element → agg" form so a stale
 /// invariant can't drop edges.
+#[allow(clippy::too_many_arguments)]
 fn emit_agg_routed_edges(
     from_name: &str,
     to_name: &str,
@@ -526,6 +625,7 @@ fn emit_agg_routed_edges(
     to_dims: &[crate::dimensions::Dimension],
     agg: &crate::ltm_agg::AggNode,
     target_element: Option<&str>,
+    dim_ctx: &crate::dimensions::DimensionsContext,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
     use crate::ltm_agg::AxisRead;
@@ -720,7 +820,19 @@ fn emit_agg_routed_edges(
             !to_dims.is_empty() && target_element.is_none(),
             "an Iterated-axis agg implies an A2A target"
         );
-        expand_same_element(&agg.name, to_name, &iterated_dims, to_dims, element_edges);
+        // The agg's result dims come from the target equation's own iterated
+        // dims (`compute_read_slice` declines a mapped iterated axis -- GH
+        // #534), so the name-match path always applies here today; the
+        // `dim_ctx` is threaded for signature uniformity and #534's future
+        // mapped-axis support.
+        expand_same_element(
+            &agg.name,
+            to_name,
+            &iterated_dims,
+            to_dims,
+            dim_ctx,
+            element_edges,
+        );
     }
 }
 
@@ -1525,6 +1637,11 @@ pub fn model_element_causal_edges(
     // full cross-product there.
     let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
+    // The dimension-mapping element correspondence for the mapped-`Bare`
+    // diagonal projection (GH #527) -- the same context the IR's
+    // `classify_iterated_dim_shape` consults, so classification and
+    // expansion can't disagree.
+    let dim_ctx = project_dimensions_context(db, project);
 
     // Cache dimension lookups to avoid repeated calls for the same variable
     let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
@@ -1627,6 +1744,7 @@ pub fn model_element_causal_edges(
                     &to_dims,
                     &RefShape::Bare,
                     None,
+                    dim_ctx,
                     &mut element_edges,
                 );
                 continue;
@@ -1642,6 +1760,7 @@ pub fn model_element_causal_edges(
                             &to_dims,
                             &site.shape,
                             site.target_element.as_deref(),
+                            dim_ctx,
                             &mut element_edges,
                         );
                     }
@@ -1666,6 +1785,7 @@ pub fn model_element_causal_edges(
                             &to_dims,
                             agg_node,
                             site.target_element.as_deref(),
+                            dim_ctx,
                             &mut element_edges,
                         );
                     }
@@ -2976,12 +3096,27 @@ mod emit_edges_for_reference_tests {
         )
     }
 
+    /// An empty `DimensionsContext` for tests that don't exercise the
+    /// mapped-dimension correspondence.
+    fn empty_dim_ctx() -> crate::dimensions::DimensionsContext {
+        crate::dimensions::DimensionsContext::from(&[])
+    }
+
     /// Scalar source -> scalar target with `Bare` shape: a single
     /// from -> to edge, no expansion.
     #[test]
     fn scalar_to_scalar_bare_passthrough() {
         let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
-        emit_edges_for_reference("a", "b", &[], &[], &RefShape::Bare, None, &mut edges);
+        emit_edges_for_reference(
+            "a",
+            "b",
+            &[],
+            &[],
+            &RefShape::Bare,
+            None,
+            &empty_dim_ctx(),
+            &mut edges,
+        );
 
         let from = edges.get("a").expect("expected 'a' as a source key");
         assert_eq!(from.len(), 1);
@@ -3004,6 +3139,7 @@ mod emit_edges_for_reference_tests {
             dims,
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             None,
+            &empty_dim_ctx(),
             &mut edges,
         );
 
@@ -3029,7 +3165,16 @@ mod emit_edges_for_reference_tests {
         let dims = std::slice::from_ref(&region);
         let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
 
-        emit_edges_for_reference("pop", "rel", dims, dims, &RefShape::Bare, None, &mut edges);
+        emit_edges_for_reference(
+            "pop",
+            "rel",
+            dims,
+            dims,
+            &RefShape::Bare,
+            None,
+            &empty_dim_ctx(),
+            &mut edges,
+        );
 
         let nyc = edges.get("pop[nyc]").expect("from key 'pop[nyc]'");
         assert_eq!(nyc.len(), 1, "diagonal: one outgoing edge");
@@ -3057,6 +3202,7 @@ mod emit_edges_for_reference_tests {
             dims,
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             Some("boston"),
+            &empty_dim_ctx(),
             &mut edges,
         );
 
@@ -3084,6 +3230,7 @@ mod emit_edges_for_reference_tests {
             dims,
             &RefShape::Bare,
             Some("boston"),
+            &empty_dim_ctx(),
             &mut edges,
         );
 
@@ -3113,6 +3260,61 @@ mod emit_edges_for_reference_tests {
                 "pop[nyc] -> rel[nyc] must be excluded when target_element = boston"
             );
         }
+    }
+
+    /// GH #527: `expand_same_element` projects a `Bare` edge between
+    /// differently-named MAPPED dimensions along the mapping's element
+    /// correspondence -- here a many-to-one element map
+    /// (`State{s1,s2,s3}→Region{a,b}`: s1↦a, s2↦a, s3↦b), exercised
+    /// directly so the source-element preimage logic (one source element
+    /// feeding several target elements, another feeding one) is pinned
+    /// without the salsa pipeline.
+    #[test]
+    fn bare_mapped_dims_project_element_map_diagonal() {
+        let mut state = crate::datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["s1".to_string(), "s2".to_string(), "s3".to_string()],
+        );
+        state.mappings = vec![crate::datamodel::DimensionMapping {
+            target: "Region".to_string(),
+            element_map: vec![
+                ("s1".to_string(), "a".to_string()),
+                ("s2".to_string(), "a".to_string()),
+                ("s3".to_string(), "b".to_string()),
+            ],
+        }];
+        let region = crate::datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        let dim_ctx = crate::dimensions::DimensionsContext::from(&[state.clone(), region.clone()]);
+        let from_dims = vec![crate::dimensions::Dimension::from(&region)];
+        let to_dims = vec![crate::dimensions::Dimension::from(&state)];
+
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+        emit_edges_for_reference(
+            "x",
+            "target",
+            &from_dims,
+            &to_dims,
+            &RefShape::Bare,
+            None,
+            &dim_ctx,
+            &mut edges,
+        );
+
+        let from_a = edges.get("x[a]").expect("x[a] must be a source");
+        assert_eq!(
+            from_a,
+            &BTreeSet::from(["target[s1]".to_string(), "target[s2]".to_string()]),
+            "x[a] feeds exactly the two State elements mapped to it"
+        );
+        let from_b = edges.get("x[b]").expect("x[b] must be a source");
+        assert_eq!(
+            from_b,
+            &BTreeSet::from(["target[s3]".to_string()]),
+            "x[b] feeds exactly the one State element mapped to it"
+        );
     }
 }
 

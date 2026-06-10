@@ -604,8 +604,9 @@ mod model_ltm_reference_sites_tests {
     /// AC3.5: a *mapped*-dimension iterated subscript is handled the same way
     /// -- `Region` over `{a,b}`, `State` over `{s1,s2}` with a `State→Region`
     /// mapping, `x` over `Region`, `target[State] = x[State] * c`: `x[State]`
-    /// is `Bare` (no new dimension-mapping code -- just don't exclude the
-    /// mapped case from the iterated-dim recognition).
+    /// is `Bare`. Downstream, `expand_same_element` projects the `Bare` edge
+    /// along the mapping's element correspondence (the GH #527 diagonal --
+    /// see `element_graph_tests::element_graph_mapped_iterated_dim_matches_bare_baseline`).
     #[test]
     fn ir_mapped_iterated_dim_subscript_is_bare() {
         let project = TestProject::new("mapped_iterated_dim_ir")
