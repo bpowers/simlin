@@ -2701,6 +2701,90 @@ fn runtime_loops_reclassify_sign_flipping_loop() {
     }
 }
 
+/// #679: the runtime loops surface must be able to report a DEFINITE
+/// `MostlyReinforcing` (Rux) with its real dominance-ratio confidence -- the
+/// sibling test above (`runtime_loops_reclassify_sign_flipping_loop`) only
+/// pins that a sign-straddling series leaves the {Rux, Bux, U} family, while
+/// this one pins the Rux outcome itself through the C ABI.
+///
+/// The fixture (shared shape with the engine's
+/// `exhaustive_mixed_sign_dominant_loop_reclassifies_to_rux`): `f = s*g + d`
+/// where the marginal gain `g` is +0.02 for t < 100 (loop score +1 per step,
+/// ~400 steps) then -0.0001 while an exogenous ramp `d` dominates the
+/// per-step change in `f` (40 negative samples of magnitude ~1e-4..1e-3).
+/// The dominance ratio lands at ~0.9999: above the 0.99 Rux gate, strictly
+/// below 1.0. Structurally the loop is Undetermined (the sign of `g` is not
+/// statically derivable), so Rux through this surface is precisely the label
+/// the issue says was unreachable.
+#[test]
+fn runtime_loops_report_definite_rux() {
+    let test_project = TestProject::new("rux_mixed_sign")
+        .with_sim_time(0.0, 110.0, 0.25)
+        .aux("g", "IF TIME < 100 THEN 0.02 ELSE -0.0001", None)
+        .aux("d", "IF TIME < 100 THEN 0 ELSE 50 * (TIME - 100)", None)
+        .stock("s", "100", &["f"], &[], None)
+        .flow("f", "s * g + d", None);
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(!proj.is_null());
+        assert!(err.is_null());
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(!model.is_null());
+        assert!(err.is_null());
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(!sim.is_null());
+        assert!(err.is_null());
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        // Structural baseline: one loop, Undetermined at confidence 0.0.
+        let structural = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        assert!(!structural.is_null());
+        assert_eq!((*structural).count, 1, "the fixture has exactly one loop");
+        let struct_loop = &std::slice::from_raw_parts((*structural).loops, 1)[0];
+        assert!(struct_loop.polarity == SimlinLoopPolarity::Undetermined);
+        assert_eq!(struct_loop.polarity_confidence, 0.0);
+
+        // Runtime surface: the same loop reports the definite Rux variant
+        // with the real (>= 0.99, < 1.0) dominance ratio.
+        err = ptr::null_mut();
+        let runtime = simlin_analyze_get_loops_runtime(sim, &mut err);
+        assert!(err.is_null());
+        assert!(!runtime.is_null());
+        assert_eq!((*runtime).count, 1);
+        let rt_loop = &std::slice::from_raw_parts((*runtime).loops, 1)[0];
+        assert!(
+            rt_loop.polarity == SimlinLoopPolarity::MostlyReinforcing,
+            "an overwhelmingly-positive mixed-sign loop_score must surface as \
+             MostlyReinforcing through the C ABI (confidence {})",
+            rt_loop.polarity_confidence
+        );
+        assert!(
+            rt_loop.polarity_confidence >= 0.99 && rt_loop.polarity_confidence < 1.0,
+            "the Rux confidence is the real dominance ratio (>= the 0.99 gate, \
+             strictly < 1.0 because both signs are present); got {}",
+            rt_loop.polarity_confidence
+        );
+        // The loop id is stable across the two surfaces.
+        let struct_id = CStr::from_ptr(struct_loop.id).to_str().unwrap();
+        let rt_id = CStr::from_ptr(rt_loop.id).to_str().unwrap();
+        assert_eq!(struct_id, rt_id);
+
+        simlin_free_loops(structural);
+        simlin_free_loops(runtime);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// The runtime loops FFI requires a run sim: calling it on a freshly-created
 /// (un-run) sim reports an error and returns NULL rather than panicking.
 #[test]

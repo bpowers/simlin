@@ -10362,6 +10362,207 @@ fn exhaustive_never_active_loop_keeps_structural_polarity() {
     );
 }
 
+/// GH #679 fixture: a single-stock loop whose runtime loop score genuinely
+/// MIXES signs with overwhelming positive dominance, so runtime
+/// reclassification must produce `MostlyReinforcing` (the LTM papers' "Rux")
+/// -- the variant that is structurally unreachable on the exhaustive
+/// pre-simulation surface.
+///
+/// Construction: `f = s * g + d` with a sign-flipping marginal gain `g` and
+/// an exogenous drive `d`.
+///
+/// * Phase 1 (t < 100): `g = 0.02`, `d = 0`. The flow depends on `s` alone,
+///   so the per-step `s -> f` link score is exactly +1 (the ceteris-paribus
+///   partial equals the full change) and the loop score is +1 at each of the
+///   ~400 steps.
+/// * Phase 2 (t >= 100): `g = -0.0001` (the marginal gain flips sign, so the
+///   loop genuinely becomes balancing) while `d = 50*(TIME-100)` ramps. The
+///   per-step change in `f` is dominated by the exogenous `delta d = 12.5`,
+///   so each of the 40 negative loop-score samples has magnitude
+///   `|g * delta s / delta f|` of only ~1e-4..1e-3.
+///
+/// The dominance ratio `|r - |b|| / (r + |b|)` lands at ~0.9999 -- above the
+/// 0.99 Rux gate but strictly below 1.0 (both signs are present). The
+/// `s -> f` link polarity is statically Unknown (the sign of `g` is not
+/// derivable), so the structural label is Undetermined/0.0.
+fn mixed_sign_dominant_loop_project() -> simlin_engine::datamodel::Project {
+    TestProject::new("rux_mixed_sign")
+        .with_sim_time(0.0, 110.0, 0.25)
+        .aux("g", "IF TIME < 100 THEN 0.02 ELSE -0.0001", None)
+        .aux("d", "IF TIME < 100 THEN 0 ELSE 50 * (TIME - 100)", None)
+        .stock("s", "100", &["f"], &[], None)
+        .flow("f", "s * g + d", None)
+        .build_datamodel()
+}
+
+/// GH #679: the exhaustive surface must be able to report the mixed-sign
+/// `MostlyReinforcing` (Rux) classification with its REAL dominance-ratio
+/// confidence -- not just the single-signed R/B flip that
+/// `exhaustive_module_loop_polarity_reclassified_from_runtime` pins.
+/// This is the canonical case from the issue: a loop whose polarity
+/// genuinely changes sign during simulation, where the honest post-sim
+/// answer is Rux with a concrete confidence, not a blanket Undetermined.
+#[test]
+fn exhaustive_mixed_sign_dominant_loop_reclassifies_to_rux() {
+    use simlin_engine::ltm::POLARITY_CONFIDENCE_THRESHOLD;
+
+    let project = mixed_sign_dominant_loop_project();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    assert_eq!(detected.loops.len(), 1, "the fixture has exactly one loop");
+    assert_eq!(
+        detected.loops[0].polarity,
+        DetectedLoopPolarity::Undetermined,
+        "the sign of g is not statically derivable, so the structural label is Undetermined"
+    );
+    assert_eq!(
+        detected.loops[0].polarity_confidence, 0.0,
+        "structural Undetermined carries the binary 0.0 confidence"
+    );
+
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    let mut loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
+
+    assert_eq!(
+        loops[0].polarity,
+        DetectedLoopPolarity::MostlyReinforcing,
+        "a mixed-sign series with >=0.99 positive dominance must classify Rux \
+         (got {:?} at confidence {})",
+        loops[0].polarity,
+        loops[0].polarity_confidence
+    );
+    assert!(
+        loops[0].polarity_confidence >= POLARITY_CONFIDENCE_THRESHOLD
+            && loops[0].polarity_confidence < 1.0,
+        "the Rux confidence is the REAL dominance ratio: at or above the {} gate but \
+         strictly below 1.0 (both signs are present in the series); got {}",
+        POLARITY_CONFIDENCE_THRESHOLD,
+        loops[0].polarity_confidence
+    );
+}
+
+/// GH #679, the sub-threshold side of the Rux gate: a loop whose score
+/// spends comparable magnitude on both signs stays `Undetermined` after
+/// runtime reclassification -- but with a real (non-zero, sub-0.99)
+/// dominance ratio instead of the structural 0.0 sentinel, proving the
+/// reclassifier ran and measured the series rather than leaving the
+/// structural label untouched.
+#[test]
+fn exhaustive_mixed_sign_balanced_loop_stays_undetermined() {
+    use simlin_engine::ltm::POLARITY_CONFIDENCE_THRESHOLD;
+
+    // Two phases of equal length and comparable per-step magnitude (the
+    // score is +1 then -1 per step), so the dominance ratio is far below
+    // the 0.99 gate.
+    let project = TestProject::new("u_mixed_sign")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .aux("g", "IF TIME < 10 THEN 0.02 ELSE -0.02", None)
+        .stock("s", "100", &["f"], &[], None)
+        .flow("f", "s * g", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    assert_eq!(detected.loops.len(), 1, "the fixture has exactly one loop");
+
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    let mut loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
+
+    assert_eq!(
+        loops[0].polarity,
+        DetectedLoopPolarity::Undetermined,
+        "comparable-magnitude mixed signs stay Undetermined below the Rux gate"
+    );
+    assert!(
+        loops[0].polarity_confidence > 0.0
+            && loops[0].polarity_confidence < POLARITY_CONFIDENCE_THRESHOLD,
+        "the runtime U confidence is the real sub-threshold dominance ratio, not the \
+         structural 0.0 sentinel; got {}",
+        loops[0].polarity_confidence
+    );
+}
+
+/// GH #679 parity: discovery mode and the exhaustive runtime-reclassification
+/// path must agree on the Rux fixture -- same `MostlyReinforcing` label and
+/// the same dominance-ratio confidence. Both classify via
+/// `LoopPolarity::from_runtime_scores`; for this single-loop fixture the
+/// discovery strongest-path score series is the same per-step product of
+/// link scores the exhaustive `loop_score` variable computes, so the two
+/// modes must not disagree about the same model.
+#[test]
+fn discovery_rux_classification_matches_exhaustive() {
+    use simlin_engine::ltm::{LoopPolarity, POLARITY_CONFIDENCE_THRESHOLD};
+
+    let project = mixed_sign_dominant_loop_project();
+
+    // Exhaustive: reclassify the detected loop from the simulated series.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("exhaustive simulation should run");
+    let results = vm.into_results();
+    let mut exhaustive_loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut exhaustive_loops, &results, &loop_partitions);
+    assert_eq!(
+        exhaustive_loops[0].polarity,
+        DetectedLoopPolarity::MostlyReinforcing
+    );
+    let exhaustive_confidence = exhaustive_loops[0].polarity_confidence;
+
+    // Discovery: run the strongest-path search over the discovery-mode sim.
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("discovery simulation should run");
+    let discovery_results = vm.into_results();
+    let proj = Project::from(project);
+    let found =
+        ltm_finding::discover_loops(&discovery_results, &proj).expect("discovery should succeed");
+    assert_eq!(found.len(), 1, "discovery finds the single feedback loop");
+
+    assert_eq!(
+        found[0].loop_info.polarity,
+        LoopPolarity::MostlyReinforcing,
+        "discovery must report the same Rux label exhaustive reclassification does"
+    );
+    assert!(
+        found[0].polarity_confidence >= POLARITY_CONFIDENCE_THRESHOLD
+            && found[0].polarity_confidence < 1.0,
+        "discovery Rux confidence must clear the gate and stay below 1.0; got {}",
+        found[0].polarity_confidence
+    );
+    // Both modes classify the same per-step product of the same link-score
+    // series, so the confidences agree to float precision -- a loose 1e-6
+    // tolerance allows for the two paths' different accumulation order.
+    assert!(
+        (found[0].polarity_confidence - exhaustive_confidence).abs() < 1e-6,
+        "discovery confidence {} must match exhaustive confidence {}",
+        found[0].polarity_confidence,
+        exhaustive_confidence
+    );
+}
+
 /// GROUND TRUTH PROBE / acceptance invariant for GH #675: an isolated
 /// feedback loop routed through a module->module link must have raw loop
 /// score exactly +1 at every settled step, regardless of the gain the
