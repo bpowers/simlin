@@ -142,8 +142,13 @@ pub(super) fn effective_non_euler_method(
 /// flow-to-stock score". `link_score_edge_endpoints` strips any element
 /// subscript, so an arrayed stock's per-element score matches its base name.
 ///
-/// Cheap on the guard's path: `model_ltm_variables` is already salsa-computed
-/// during `assemble_module`, so this is a cache hit plus a linear scan.
+/// Bounded on the guard's path: `model_ltm_variables` is the same query the
+/// Euler assembly path runs unconditionally (its cost is capped by the
+/// auto-flip-to-discovery gate and the circuit budget), so the guard is not
+/// adding an unbounded computation. On the rejection path the guard runs BEFORE
+/// `assemble_module`, so it computes the query rather than hitting a cache; but
+/// it pays that at most once per instantiated stock-bearing model, and any
+/// later assembly of the same model gets the salsa cache hit.
 pub(super) fn model_emits_flow_to_stock_score(
     db: &dyn Db,
     model: SourceModel,

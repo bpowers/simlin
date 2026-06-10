@@ -1350,6 +1350,91 @@ mod tests {
         assert!((rel_b[2]).abs() < 1e-12);
     }
 
+    /// GH #468 consumer-side guard: `compute_rel_loop_scores` must accumulate
+    /// its per-partition `Σ|loop_score|` denominator in the `loop_partitions`
+    /// IndexMap's *emission* (insertion) order, NOT a re-sort of the loop ids.
+    /// IEEE-754 addition is non-associative, so a lex re-sort would perturb the
+    /// denominator at the ULP and break bit-for-bit parity with the pre-#461
+    /// compile-time emitter.
+    ///
+    /// The fixture puts 12 same-prefix loops (`r1..r12`) in one partition with
+    /// scores chosen so the emission-order abs-sum and the lex-order abs-sum are
+    /// bit-DIFFERENT: eleven `1.0`s plus one `1e16` (at `r12`). In emission order
+    /// the eleven `1.0`s accumulate to `11.0` BEFORE the `1e16` swamps them, so
+    /// `1e16 + 11.0` keeps more of them; in lex order (`r1, r10, r11, r12, r2,
+    /// ...`) the `1e16` lands 4th and absorbs the trailing `1.0`s. The test
+    /// asserts the production output matches the emission-order denominator
+    /// bit-for-bit, and that the emission-order denominator differs bit-for-bit
+    /// from the lex-order one (so the equality assertion has teeth -- a
+    /// reintroduced lex sort would fail the first assertion).
+    #[test]
+    fn rel_loop_scores_accumulate_in_emission_order_not_lex() {
+        // r1..r11 score 1.0; r12 scores 1e16. All in partition 0. The fixture
+        // (and `mapping` below) inserts them in emission order r1..r12.
+        let ids: Vec<String> = (1..=12).map(|i| format!("r{i}")).collect();
+        let scores: Vec<f64> = (1..=12).map(|i| if i == 12 { 1e16 } else { 1.0 }).collect();
+
+        // Single-timestep series, one value per loop.
+        let series_storage: Vec<[f64; 1]> = scores.iter().map(|&s| [s]).collect();
+        let result_pairs: Vec<(&str, &[f64])> = ids
+            .iter()
+            .zip(series_storage.iter())
+            .map(|(id, ser)| (id.as_str(), &ser[..]))
+            .collect();
+        let results = make_results_for_loops(&result_pairs);
+
+        // Insert into `loop_partitions` in emission order r1..r12, all part 0.
+        let partition_pairs: Vec<(&str, Option<usize>)> =
+            ids.iter().map(|id| (id.as_str(), Some(0))).collect();
+        let partitions = mapping(&partition_pairs);
+
+        let scored = compute_rel_loop_scores(&results, &partitions);
+
+        // Reference denominator accumulated in EMISSION order (r1..r12): this is
+        // exactly the order `compute_rel_loop_scores` must walk.
+        let mut emission_denom = 0.0_f64;
+        for &s in &scores {
+            emission_denom += s.abs();
+        }
+
+        // Reference denominator accumulated in LEX order of the ids (r1, r10,
+        // r11, r12, r2, ..., r9): what a re-sort would (wrongly) produce.
+        let mut lex_idx: Vec<usize> = (0..ids.len()).collect();
+        lex_idx.sort_by(|&a, &b| ids[a].cmp(&ids[b]));
+        let mut lex_denom = 0.0_f64;
+        for &i in &lex_idx {
+            lex_denom += scores[i].abs();
+        }
+
+        // Teeth: the two orders must genuinely differ at the bit level, else
+        // the equality assertion below could pass under either accumulation
+        // order and the test would not be guarding emission order at all.
+        assert_ne!(
+            emission_denom.to_bits(),
+            lex_denom.to_bits(),
+            "fixture must make emission-order and lex-order abs-sums bit-different; \
+             without that this test has no teeth (emission={emission_denom:?}, \
+             lex={lex_denom:?})"
+        );
+
+        // Each loop's relative score must equal its raw score over the
+        // EMISSION-order denominator, bit-for-bit. A reintroduced lex sort would
+        // accumulate `lex_denom` instead and fail here.
+        for (id, &score) in ids.iter().zip(scores.iter()) {
+            let rel = scored
+                .get(id)
+                .unwrap_or_else(|| panic!("loop {id} missing"));
+            let expected = score / emission_denom;
+            assert_eq!(
+                rel[0].to_bits(),
+                expected.to_bits(),
+                "loop {id}: rel score must use the emission-order denominator \
+                 bit-for-bit (got {:?}, expected {expected:?}; lex denom would be {lex_denom:?})",
+                rel[0]
+            );
+        }
+    }
+
     #[test]
     fn zero_denominator_yields_zero() {
         // Single loop whose loop_score is identically zero: without the

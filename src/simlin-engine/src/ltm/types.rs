@@ -308,11 +308,18 @@ impl LoopPolarity {
                     // assert enforces that invariant: it pins threshold > 0,
                     // which makes this tie arm structurally unreachable and
                     // forces a human to revisit the classification rules if the
-                    // threshold is ever zeroed (a zero threshold would let every
-                    // near-tie fall through to the Undetermined return here
-                    // instead of to MostlyReinforcing/MostlyBalancing above).
-                    // The `Undetermined` fallback is the safe classification if
-                    // the arm ever does become reachable.
+                    // threshold is ever zeroed.  Only an EXACT tie
+                    // (positive_sum == negative_sum_abs) reaches this arm even
+                    // with a zero threshold -- strict near-ties still route to
+                    // MostlyReinforcing/MostlyBalancing above via the `>`
+                    // checks.  What a zero threshold actually changes is the
+                    // FIRST arm: `confidence < 0` is never true (confidence is
+                    // non-negative), so low-confidence mixed cases would stop
+                    // returning `Undetermined` there and would instead be
+                    // classified MostlyReinforcing/MostlyBalancing by sign
+                    // dominance.  The `Undetermined` fallback below is the safe
+                    // classification if this exact-tie arm ever does become
+                    // reachable.
                     const {
                         assert!(
                             POLARITY_CONFIDENCE_THRESHOLD > 0.0,

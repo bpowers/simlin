@@ -56,7 +56,7 @@ circuit count, and must decide **before** calling
 - Model: `test/metasd/WRLD3-03/wrld3-03.mdl` (1 model, 311 root
   variables, 483 causal edges, 15 stocks, 1 non-trivial 166-node SCC).
 - Run command:
-  `LTM_BENCH_ABORT_MIB=6000 LTM_BENCH_TRACE=1 cargo run --release -p
+  `LTM_BENCH_ABORT_MIB=6000 cargo run --release --features ltm_bench -p
   simlin-engine --example ltm_full_bench -- test/metasd/WRLD3-03/wrld3-03.mdl
   2000000`.  The 6 GiB abort ceiling is a stage-boundary check only
   (`Tracker::record`), so it does not fire inside the long-running

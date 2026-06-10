@@ -2082,6 +2082,11 @@ fn loop_partitions_iterate_in_emission_order() {
     // The independent oracle: the emission order is `assign_loop_ids`'
     // content-sorted order, which `model_detected_loops` reproduces
     // (it runs the same enumeration + id assignment, with no pins here).
+    // NOTE: this oracle shares `assign_loop_ids` with the code under test, so
+    // it pins that `loop_partitions` agrees with `model_detected_loops` but
+    // CANNOT catch an `assign_loop_ids`-internal ordering bug (both would shift
+    // together); the dedicated `assign_loop_ids_is_order_independent_*` tests
+    // cover that.
     let detected = model_detected_loops(&db, model, sync.project);
     let emission_order: Vec<String> = detected.loops.iter().map(|l| l.id.clone()).collect();
     assert_eq!(
@@ -3784,6 +3789,53 @@ fn test_ltm_euler_open_loop_stock_in_discovery_mode_compiles() {
     assert!(
         ltm_euler_rejection(&db, source_project).is_none(),
         "Euler + LTM + forced-discovery on an open-loop stock must compile"
+    );
+}
+
+/// An ARRAYED open-loop stock with a DECORATED flow-to-stock `to` endpoint. A
+/// scalar flow `rate` (a constant, never reading the stock back) broadcasts into
+/// an arrayed stock `tank[D]`, so there is no feedback loop through any element.
+/// Under RK4 + LTM with FORCED DISCOVERY, discovery scores every causal edge, so
+/// a flow-to-stock score IS emitted for the `rate → tank` edge -- and because
+/// the target is arrayed, the score is emitted PER ELEMENT with a decorated `to`
+/// endpoint: `$⁚ltm⁚link_score⁚rate→tank[a]`, `…→tank[b]`, `…→tank[c]`. The bare
+/// stock set is `{"tank"}`, so the guard must strip the `[a]` element decoration
+/// off the `to` endpoint before matching. This pins the full decode chain on a
+/// decorated `to` endpoint: `link_score_edge_endpoints` parses the name,
+/// `strip_subscript` strips the element decoration, and `stocks.contains`
+/// matches the bare stock base name. A guard that compared the decorated `to`
+/// endpoint (`"tank[a]"`) against the bare stock set (`{"tank"}`) directly would
+/// miss the arrayed score entirely and wrongly accept the non-Euler model.
+#[test]
+fn test_ltm_rk4_arrayed_open_loop_stock_in_discovery_mode_is_rejected() {
+    use salsa::Setter;
+
+    let project = TestProject::new("arrayed_open_loop")
+        .with_sim_method(datamodel::SimMethod::RungeKutta4)
+        .named_dimension("D", &["a", "b", "c"])
+        // `tank[D]` accumulates the scalar `rate` (broadcast across D), but
+        // `rate` is a constant that never reads `tank` -> no cycle. The arrayed
+        // target makes the flow-to-stock score per-element, so the `to` endpoint
+        // carries an `[a]`/`[b]`/`[c]` decoration the guard must strip.
+        .array_stock("tank[D]", "0", &["rate"], &[], None)
+        .flow("rate", "fill_rate", None)
+        .aux("fill_rate", "5", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+    // Force discovery mode: ALL edges get link scores, so the arrayed open-loop
+    // stock's `rate → tank[d]` flow-to-stock edges ARE scored (per element).
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let details = ltm_euler_rejection(&db, source_project).expect(
+        "RK4 + LTM + forced-discovery on an ARRAYED open-loop stock must be rejected: \
+         discovery scores the per-element flow-to-stock edge with a decorated `to` endpoint",
+    );
+    assert!(
+        details.contains("RK4") || details.contains("Runge"),
+        "the rejection must name the offending method: {details}"
     );
 }
 

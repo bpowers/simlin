@@ -58,13 +58,14 @@ pub struct ModelAnalysis {
     /// partition-by-partition.
     pub partitions: Vec<crate::ltm_finding::DiscoveredPartition>,
     pub dominant_loops_by_period: Vec<DominantPeriod>,
-    /// `Some(message)` when the model could **not** be compiled for LTM
-    /// analysis, so the loop fields are empty *because of a failure* rather
-    /// than because the model genuinely has no loops.  This is the actionable
-    /// diagnostic the caller should surface: most notably the GH #486 Euler
-    /// guidance when a model with stocks in a loop selects a non-Euler
+    /// `Some(message)` when the model could **not** be compiled or simulated
+    /// for LTM analysis, so the loop fields are empty *because of a failure*
+    /// rather than because the model genuinely has no loops.  This is the
+    /// actionable diagnostic the caller should surface: most notably the GH #486
+    /// Euler guidance when a model with stocks in a loop selects a non-Euler
     /// integrator with LTM enabled, but also any other compile error
-    /// (unresolved references, etc.).  `None` means the pipeline either
+    /// (unresolved references, etc.) or a `Vm::new`/`run_to_end` failure.
+    /// `None` means the pipeline either
     /// succeeded or degraded gracefully for a non-compile reason (a structural
     /// edge case), so an empty `loop_dominance` with `analysis_error == None`
     /// means "no loops", not "could not analyse" (GH #660).
@@ -110,12 +111,13 @@ fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json
 /// the `datamodel::Project` for model snapshot construction and UID
 /// resolution.
 ///
-/// A failure to *compile* the model for LTM analysis (a malformed equation,
-/// an unresolved reference, or the GH #486 non-Euler hard-fail) is NOT
-/// collapsed into a silent empty result: `Ok` is returned with the model
-/// snapshot, empty loop fields, AND `ModelAnalysis::analysis_error` set to the
-/// actionable compile-error message, so a caller asking "what loops does this
-/// model have?" can tell "could not analyse" apart from "no loops" (GH #660).
+/// A failure to *compile or simulate* the model for LTM analysis (a malformed
+/// equation, an unresolved reference, the GH #486 non-Euler hard-fail, or a
+/// `Vm::new`/`run_to_end` failure) is NOT collapsed into a silent empty result:
+/// `Ok` is returned with the model snapshot, empty loop fields, AND
+/// `ModelAnalysis::analysis_error` set to the actionable error message, so a
+/// caller asking "what loops does this model have?" can tell "could not
+/// analyse" apart from "no loops" (GH #660).
 /// A non-compile structural edge case (e.g. the model is absent from the
 /// causal graph) still degrades gracefully to empty loop fields with
 /// `analysis_error == None`.
@@ -287,8 +289,13 @@ fn run_ltm_pipeline(
             // fall back to the code's Display when a bare error has no details.
             e.details.unwrap_or_else(|| e.code.to_string())
         })?;
-    let mut vm = crate::vm::Vm::new(compiled_sim).map_err(|e| e.to_string())?;
-    vm.run_to_end().map_err(|e| e.to_string())?;
+    // `Vm::new`/`run_to_end` failures land in `analysis_error` too, so format
+    // them the same way as the compile path: prefer the rich `details`, fall
+    // back to the code's Display when a bare error carries none.
+    let mut vm = crate::vm::Vm::new(compiled_sim)
+        .map_err(|e| e.details.unwrap_or_else(|| e.code.to_string()))?;
+    vm.run_to_end()
+        .map_err(|e| e.details.unwrap_or_else(|| e.code.to_string()))?;
     let results = vm.into_results();
 
     // Build an element-level CausalGraph for loop discovery. This ensures
