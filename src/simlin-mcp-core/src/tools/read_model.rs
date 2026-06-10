@@ -65,6 +65,13 @@ pub struct ReadModelOutput {
     pub agg_recovery_truncated: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<ErrorOutput>,
+    /// `Some(message)` when the model could not be compiled for LTM loop
+    /// analysis, so `loop_dominance` is empty *because of a failure*, not
+    /// because the model has no loops (GH #660).  The message is actionable --
+    /// most notably the GH #486 Euler guidance for a non-Euler model with LTM
+    /// enabled.  Elided from the wire shape when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis_error: Option<String>,
 }
 
 /// Read a model and return its JSON snapshot.
@@ -144,5 +151,6 @@ pub async fn read_model<A: ProjectAccess>(
         dominant_loops_by_period,
         agg_recovery_truncated,
         errors,
+        analysis_error: analysis.analysis_error,
     })
 }

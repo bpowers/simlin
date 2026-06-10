@@ -210,6 +210,12 @@ pub struct EditModelOutput {
     /// elided when false to preserve the stable wire shape.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub agg_recovery_truncated: bool,
+    /// `Some(message)` when the just-edited model could not be compiled for
+    /// LTM loop analysis (so `loop_dominance` is empty because of a failure,
+    /// not an absence of loops); see `ReadModelOutput::analysis_error` and
+    /// GH #660.  Elided from the wire shape when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis_error: Option<String>,
     pub dry_run: bool,
 }
 
@@ -365,6 +371,7 @@ pub async fn edit_model<A: ProjectAccess>(
         partitions,
         dominant_loops_by_period,
         agg_recovery_truncated,
+        analysis_error: analysis.analysis_error,
         dry_run,
     })
 }

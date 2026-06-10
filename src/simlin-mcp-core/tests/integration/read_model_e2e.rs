@@ -194,3 +194,64 @@ async fn read_model_surfaces_cycle_partitions() {
         "partition must appear on the loopDominance wire shape"
     );
 }
+
+/// GH #660: an RK4 model with a stock in a loop cannot be compiled for LTM
+/// analysis (the flow-to-stock link-score formula assumes Euler; GH #486).
+/// Before #660 the read_model surface returned an empty `loopDominance` with
+/// no hint why; now the actionable Euler guidance must reach the caller via
+/// the `analysisError` field so an agent asking "what loops?" understands the
+/// model needs Euler (or LTM disabled).
+#[tokio::test]
+async fn read_model_rk4_loop_surfaces_euler_analysis_error() {
+    let rk4_model = serde_json::json!({
+        "name": "rk4_loop",
+        "simSpecs": {
+            "startTime": 0.0,
+            "endTime": 10.0,
+            "dt": "1",
+            "method": "rk4"
+        },
+        "models": [{
+            "name": "main",
+            "stocks": [
+                {"uid": 1, "name": "population", "initialEquation": "100",
+                 "inflows": ["births"], "outflows": []}
+            ],
+            "flows": [
+                {"uid": 2, "name": "births", "equation": "population * 0.02"}
+            ]
+        }]
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rk4_loop.sd.json");
+    std::fs::write(&path, rk4_model.to_string()).unwrap();
+
+    let input = ReadModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+    };
+    let output = read_model(&TestFileSystemAccess, input).await.unwrap();
+
+    let msg = output
+        .analysis_error
+        .as_deref()
+        .expect("RK4 + LTM read_model must surface an analysisError");
+    assert!(
+        msg.contains("Euler"),
+        "analysisError must reference the Euler assumption, got: {msg}"
+    );
+    assert!(
+        output.loop_dominance.is_empty(),
+        "loop_dominance must be empty when the model can't be compiled for LTM"
+    );
+
+    // It must also reach the wire (serialized) shape under camelCase.
+    let value = serde_json::to_value(&output).unwrap();
+    assert!(
+        value["analysisError"]
+            .as_str()
+            .is_some_and(|s| s.contains("Euler")),
+        "serialized analysisError must carry the Euler guidance"
+    );
+}
