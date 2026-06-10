@@ -1606,6 +1606,12 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
     // value-bearing phase), so the helper keeps its layout slot, nothing
     // writes it, and it reads a constant 0 at runtime.
     //
+    // Like the synthetic-var leg above, only the COMPILE failure is reported:
+    // a helper that compiles but is then dropped by assembly's layout check
+    // (`fragment_vars_in_layout` in `db/assemble.rs`'s LTM-implicit loop) is
+    // still silent -- the #683-class gap (absent cross-module idents), which
+    // remains open for the helper leg too.
+    //
     // Input-set boundary: assembly compiles each helper with the module
     // INSTANCE's input names. This pass is keyed per (model, project) -- no
     // instance context -- so it probes with the empty input set, mirroring
@@ -1638,6 +1644,13 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
         // PREVIOUS-capture case, the only kind LTM parsing produces today) is
         // recomputed each step via its flow bytecode; a stock or module
         // helper is advanced via its stock bytecode.
+        //
+        // Defense-in-depth boundary: this is deliberately blind to the INIT
+        // phase. A helper whose flow phase compiles while its init phase
+        // fails would pass unchecked and `PREVIOUS(helper)` would read 0 at
+        // t=0 only. Both phases compile from the same lowered equation, so a
+        // divergent failure is likely unreachable; if one ever surfaces,
+        // extend this check to `initial_bytecodes`.
         let compiled_ok = fragment.as_ref().is_some_and(|r| {
             if meta.is_stock || meta.is_module {
                 r.fragment.stock_bytecodes.is_some()

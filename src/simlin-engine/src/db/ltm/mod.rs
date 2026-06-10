@@ -201,29 +201,50 @@ pub(super) fn ltm_non_euler_diagnostic_message(method: datamodel::SimMethod) -> 
     )
 }
 
+/// THE shared stateless predicate for the LTM early-return gates (GH #748):
+/// a model is stateless when it has no parent-level stocks AND no
+/// (transitively) stock-carrying module instance.
+///
+/// Both `model_ltm_mode`'s stateless ⇒ `Exhaustive` arm and
+/// `model_ltm_variables`' early return consume THIS function (the latter
+/// adding its `!has_input_ports` leg on top), so the two gates cannot drift
+/// apart: a future state source added here is seen by both queries -- and
+/// therefore by `model_detected_loops`, which reads `model_ltm_mode`. #748
+/// itself was exactly such a two-site predicate change, and the
+/// `test_ltm_mode_and_variables_agree_on_stateless_gate` parity guard pins
+/// the agreement.
+///
+/// `edges.stocks` is parent-level only, so the parent-level test alone is
+/// wrong for a root like `driver -> sub_model(with internal INTEG) ->
+/// reader -> driver`: genuine feedback and genuine state, zero parent-level
+/// stocks -- bailing on it made LTM silently emit nothing for that model
+/// class (no link scores, no loop scores, and pinned loops were never even
+/// validated). The module leg only runs for parent-stock-free models (the
+/// `&&` short-circuits on the common stock-bearing case).
+fn model_is_stateless(
+    db: &dyn Db,
+    project: SourceProject,
+    edges: &super::CausalEdgesResult,
+) -> bool {
+    edges.stocks.is_empty() && !modules_carry_state(db, project, edges)
+}
+
 /// Whether any module instance this model references (transitively) carries
 /// state: a stock in the instance's sub-model, or in any module that
-/// sub-model references in turn.
+/// sub-model references in turn. The module leg of [`model_is_stateless`] --
+/// call that, not this, in gate logic.
 ///
-/// `model_ltm_variables`' and `model_ltm_mode`'s stock-free early returns use
-/// this to distinguish a genuinely stateless model from one whose only state
-/// lives INSIDE modules (GH #748). `edges.stocks` is parent-level only, so a
-/// root like `driver -> sub_model(with internal INTEG) -> reader -> driver`
-/// has genuine feedback and genuine state but zero parent-level stocks;
-/// bailing on the parent-level test alone made LTM silently emit nothing for
-/// that model class (no link scores, no loop scores, and pinned loops were
-/// never even validated). Checking `dynamic_modules` non-emptiness instead
-/// would be over-inclusive: a model whose only module is a stockless
-/// passthrough has no state anywhere, so any causal cycle through it is an
-/// instantaneous algebraic loop (a `CircularDependency` compile error, not
-/// feedback) and the early bail -- with its "always Exhaustive, no mode flip
-/// possible" invariant -- remains correct for it.
+/// Checking `dynamic_modules` non-emptiness instead would be over-inclusive:
+/// a model whose only module is a stockless passthrough has no state
+/// anywhere, so any causal cycle through it is an instantaneous algebraic
+/// loop (a `CircularDependency` compile error, not feedback) and the early
+/// bail -- with its "always Exhaustive, no mode flip possible" invariant --
+/// remains correct for it.
 ///
 /// The walk visits each distinct sub-MODEL definition once (not each
 /// instance), guarded by a visited set so module recursion (invalid, but
 /// defended against) cannot loop. `model_causal_edges` is salsa-cached, so
-/// each step is a map lookup; the walk itself only runs for parent-stock-free
-/// models (the callers short-circuit on the common stock-bearing case).
+/// each step is a map lookup.
 fn modules_carry_state(
     db: &dyn Db,
     project: SourceProject,
@@ -911,12 +932,15 @@ pub fn model_ltm_var_name_index(
 ///   4. the cross-element / mixed slow-path subgraph's largest SCC exceeds
 ///      `MAX_LTM_SCC_NODES` (the late flip).
 ///
-/// A stateless model -- no parent-level stocks AND no module-internal state
-/// (`modules_carry_state`) -- has no feedback loops, so no flip can occur: it
-/// is always `Exhaustive`, matching `model_ltm_variables`'s stock-free early
-/// return. A parent-stock-free model whose state lives inside modules is NOT
-/// stateless (GH #748): feedback through a stock-carrying module is genuine,
-/// so it falls through to the normal gates like any stock-bearing model.
+/// A stateless model -- the shared `model_is_stateless` predicate: no
+/// parent-level stocks AND no module-internal state -- has no feedback loops,
+/// so no flip can occur: it is always `Exhaustive`. `model_ltm_variables`'
+/// stateless early return consumes the SAME predicate (plus its
+/// `!has_input_ports` leg) and reads its bail `mode` from this query, so the
+/// two gates cannot drift. A parent-stock-free model whose state lives inside
+/// modules is NOT stateless (GH #748): feedback through a stock-carrying
+/// module is genuine, so it falls through to the normal gates like any
+/// stock-bearing model.
 /// This query intentionally accumulates NO diagnostics -- the
 /// auto-flip `Warning`s stay in `model_ltm_variables` so they are emitted once
 /// (a `returns(ref)` tracked query read by multiple callers would otherwise
@@ -927,7 +951,7 @@ pub fn model_ltm_mode(db: &dyn Db, model: SourceModel, project: SourceProject) -
     use super::{LtmMode, causal_graph_from_edges, model_causal_edges, model_loop_circuits_tiered};
 
     let edges_result = model_causal_edges(db, model, project);
-    if edges_result.stocks.is_empty() && !modules_carry_state(db, project, edges_result) {
+    if model_is_stateless(db, project, edges_result) {
         return LtmMode::Exhaustive;
     }
 
@@ -1003,10 +1027,11 @@ pub fn model_ltm_variables(
     // stocks. A stateless ROOT model has no parent reading `module·var`, so
     // `sub_model_output_ports` is empty and `has_input_ports` is false -- the
     // early return below still fires for it. "Stateless" means no
-    // parent-level stocks AND no module-internal state: a parent-stock-free
-    // root whose only state lives inside modules (a SMOOTH/DELAY instance or
-    // a stock-carrying user sub-model) has genuine feedback, so the
-    // `modules_carry_state` leg of the gate lets it through (GH #748).
+    // parent-level stocks AND no module-internal state (the shared
+    // `model_is_stateless` predicate, also consumed by `model_ltm_mode`): a
+    // parent-stock-free root whose only state lives inside modules (a
+    // SMOOTH/DELAY instance or a stock-carrying user sub-model) has genuine
+    // feedback, so the predicate's module leg lets it through (GH #748).
     let output_ports = sub_model_output_ports(db, model, project);
     let (pathways, truncated_pathway_ports) = if output_ports.is_empty() {
         (HashMap::new(), Vec::new())
@@ -1015,22 +1040,25 @@ pub fn model_ltm_variables(
     };
     let has_input_ports = !pathways.is_empty();
 
-    if edges_result.stocks.is_empty()
-        && !has_input_ports
-        && !modules_carry_state(db, project, edges_result)
-    {
+    if !has_input_ports && model_is_stateless(db, project, edges_result) {
         // A stateless model (no stocks anywhere, parent-level or
         // module-internal) with no input-port pathways has nothing to score:
         // no feedback loops to enumerate (any causal cycle would be an
         // instantaneous algebraic loop, which is a compile error -- so no
-        // mode flip can occur) and no module interface to expose. Report the
-        // exhaustive default.
+        // mode flip can occur) and no module interface to expose.
+        //
+        // `mode` is read from `model_ltm_mode` rather than hardcoded: its
+        // stateless arm fires on the SAME `model_is_stateless` predicate, so
+        // by construction this reads `Exhaustive` -- but reading the shared
+        // query keeps this surface and `model_detected_loops` (another
+        // `model_ltm_mode` reader) structurally incapable of drifting, same
+        // as the non-bail `mode` read at the bottom of this function.
         return LtmVariablesResult {
             vars: vec![],
             loop_partitions: indexmap::IndexMap::new(),
             agg_recovery_truncated: false,
             pathways_truncated: false,
-            mode: LtmMode::Exhaustive,
+            mode: model_ltm_mode(db, model, project),
         };
     }
 

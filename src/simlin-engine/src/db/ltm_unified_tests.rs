@@ -611,6 +611,98 @@ fn test_model_ltm_variables_circuit_budget_truncation_flips_to_discovery() {
     );
 }
 
+/// GH #748 parity guard: `model_ltm_mode` and `model_ltm_variables` must
+/// agree across the STATELESS gate boundary -- both consume the shared
+/// `model_is_stateless` predicate, and the variables query's stateless bail
+/// reads its `mode` from `model_ltm_mode` rather than hardcoding -- so a
+/// future edit that adds a state source to one site cannot make
+/// `model_detected_loops` (a `model_ltm_mode` reader) and the emitted
+/// vars/mode diverge (the #761-class two-surface drift; #748 itself was a
+/// two-site predicate change).
+///
+/// Sweeps the 2x2 of {stateless passthrough, module-internal state} x
+/// {exhaustive, user-forced discovery} on the same module-only-root shape
+/// (`driver -> sub -> reader -> driver`, zero parent-level stocks). The
+/// queries operate on the causal graph, so the stateless CYCLIC fixture is
+/// fine here even though it would fail compilation (algebraic circular
+/// dependency) -- that keeps the two fixtures structurally identical except
+/// for the state.
+#[test]
+fn test_ltm_mode_and_variables_agree_on_stateless_gate() {
+    use crate::db::{LtmMode, model_ltm_mode};
+    use salsa::Setter;
+
+    for sub_has_stock in [false, true] {
+        for discovery in [false, true] {
+            let sub_vars = if sub_has_stock {
+                vec![
+                    x_aux("input", "0", None),
+                    x_flow("chg", "(input - output) / 3", None),
+                    x_stock("output", "0", &["chg"], &[], None),
+                ]
+            } else {
+                vec![
+                    x_aux("input", "0", None),
+                    x_aux("output", "input * 2", None),
+                ]
+            };
+            let main = x_model(
+                "main",
+                vec![
+                    x_aux("driver", "100 + reader * 0.5", None),
+                    x_aux("reader", "sub.output", None),
+                    x_module("sub", &[("driver", "sub.input")], None),
+                ],
+            );
+            let project = crate::testutils::x_project(
+                datamodel::SimSpecs::default(),
+                &[main, x_model("sub", sub_vars)],
+            );
+
+            let mut db = SimlinDb::default();
+            let (source_project, model) = {
+                let sync = sync_from_datamodel(&db, &project);
+                (sync.project, sync.models["main"].source)
+            };
+            source_project.set_ltm_enabled(&mut db).to(true);
+            source_project.set_ltm_discovery_mode(&mut db).to(discovery);
+
+            let mode = model_ltm_mode(&db, model, source_project);
+            let ltm = model_ltm_variables(&db, model, source_project);
+            assert_eq!(
+                ltm.mode, mode,
+                "model_ltm_variables.mode must equal model_ltm_mode \
+                 (sub_has_stock={sub_has_stock}, discovery={discovery})"
+            );
+            if sub_has_stock {
+                // Module-internal state: the pass runs (the #748 positive
+                // side) and the user discovery flag is honored.
+                let expected = if discovery {
+                    LtmMode::Discovery
+                } else {
+                    LtmMode::Exhaustive
+                };
+                assert_eq!(mode, expected);
+                assert!(
+                    !ltm.vars.is_empty(),
+                    "module-state root must emit LTM vars (discovery={discovery})"
+                );
+            } else {
+                // Stateless: the early bail fires on both queries -- always
+                // Exhaustive (no feedback is possible, so no flip), zero
+                // vars, EVEN under the user discovery flag (the stateless
+                // arm precedes the flag in model_ltm_mode's gate order).
+                assert_eq!(mode, LtmMode::Exhaustive);
+                assert!(
+                    ltm.vars.is_empty(),
+                    "stateless root must emit no LTM vars (discovery={discovery}); got: {:?}",
+                    ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+}
+
 /// Auto-flip must surface a `CompilationDiagnostic::Warning` so the
 /// caller can explain the mode change to the user.  The diagnostic is
 /// accumulated by `model_ltm_variables` itself (not via
