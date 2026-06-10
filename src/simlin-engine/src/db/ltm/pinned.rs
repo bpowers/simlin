@@ -21,8 +21,8 @@ use std::collections::{HashMap, HashSet};
 use crate::common::{Canonical, Ident};
 use crate::db::{
     CycleClass, Db, LoopCircuitsResult, SourceModel, SourceProject, SourceVariable,
-    causal_graph_with_modules, classify_cycle, model_causal_edges, model_edge_shapes,
-    model_element_causal_edges, project_datamodel_dims, variable_dimensions,
+    causal_graph_with_modules, classify_cycle, model_edge_shapes, model_element_causal_edges,
+    project_datamodel_dims, variable_dimensions,
 };
 use crate::ltm::{Loop, strip_subscript};
 
@@ -73,8 +73,13 @@ pub struct PinnedLoopsResult {
 ///
 /// For each non-deleted pin (already projected to canonical variable names at
 /// sync time), this recovers the loop's cyclic order from the causal graph,
-/// confirms the named set forms a closed cycle containing at least one stock,
-/// and assigns a stable `pin{n}` id (n = declaration index, so ids never
+/// confirms the named set forms a closed cycle containing at least one stock
+/// -- where stocks INSIDE a module instance the cycle traverses count (GH
+/// #673), via the same `enrich_with_module_stocks` enrichment the enumerator
+/// applies, so a loop whose only state lives in a SMOOTH/DELAY instance or
+/// stock-carrying user sub-model validates while a purely-instantaneous cycle
+/// (including one through a stockless passthrough module) is still rejected
+/// -- and assigns a stable `pin{n}` id (n = declaration index, so ids never
 /// collide with the enumerator's `r{n}`/`b{n}`/`u{n}` namespace). Pins that
 /// fail any check land in `invalid` rather than producing a garbage score.
 ///
@@ -115,8 +120,6 @@ pub(crate) fn model_pinned_loops(
         return PinnedLoopsResult::default();
     }
 
-    // A stock-free model has no feedback loops at all; every pin is invalid.
-    let edges = model_causal_edges(db, model, project);
     let graph = causal_graph_with_modules(db, model, project);
     // Classification inputs: per-edge access shapes and per-variable
     // dimensions, the same data the tiered enumerator classifies cycles with.
@@ -160,7 +163,19 @@ pub(crate) fn model_pinned_loops(
         // A standard feedback loop includes at least one stock (LTM ref 2.1).
         // A purely-instantaneous cycle would be a compile-time circular
         // dependency, not a feedback loop, so reject it with a clear message.
-        let has_stock = cycle.iter().any(|n| edges.stocks.contains(n.as_str()));
+        //
+        // "Stock" here counts state INSIDE any module instance the cycle
+        // traverses (GH #673): a SMOOTH/DELAY instance or user sub-model whose
+        // internal stock is the loop's only state is a genuine feedback loop,
+        // and the enumerator scores exactly this cycle (its
+        // `build_loop_from_cycle` attaches module-internal stocks via the same
+        // `enrich_with_module_stocks` enrichment instead of filtering). A
+        // cycle through a stockless *passthrough* module enriches to nothing
+        // and is still rejected -- it is instantaneous end to end.
+        let parent_stocks = graph.find_stocks_in_loop(&cycle);
+        let has_stock = !graph
+            .enrich_with_module_stocks(&cycle, parent_stocks)
+            .is_empty();
         if !has_stock {
             result.invalid.push((
                 spec.name.clone(),

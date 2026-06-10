@@ -520,9 +520,12 @@ impl CausalGraph {
     /// internal pathway from the relevant input port to the output, and collect
     /// all stocks along that pathway.
     ///
-    /// `pub(super)` (not private) so the `ltm::tests` sibling module can drive
-    /// the GH #649 truncation-fallback path directly.
-    pub(super) fn enrich_with_module_stocks(
+    /// `pub(crate)` (not private) so the `ltm::tests` sibling module can drive
+    /// the GH #649 truncation-fallback path directly, and so the pinned-loop
+    /// validation (`db::ltm::pinned::model_pinned_loops`) can apply the SAME
+    /// stock semantics the enumerator does when checking that a pinned cycle
+    /// passes through state (GH #673).
+    pub(crate) fn enrich_with_module_stocks(
         &self,
         circuit: &[Ident<Canonical>],
         mut stocks: Vec<Ident<Canonical>>,

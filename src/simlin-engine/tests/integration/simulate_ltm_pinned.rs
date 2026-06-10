@@ -1365,3 +1365,195 @@ fn pinned_loop_carries_cycle_partition_in_discovery_mode() {
         "the pinned loop's partition must not contain the disjoint ring stocks"
     );
 }
+
+/// Two-model fixture for the GH #673 pin-through-module tests: `main` has the
+/// 3-node cycle `driver -> sub (module) -> reader -> driver` whose only state
+/// (if any) lives inside the `sub` sub-model, supplied by `sub_vars` so each
+/// test picks a stock-carrying smooth or a stockless passthrough body. The
+/// disjoint `bystander` stock keeps the parent model stock-bearing so
+/// `model_ltm_variables` runs at all (its stock-free early return looks only
+/// at parent-level stocks).
+fn module_pin_project(sub_vars: Vec<datamodel::Variable>) -> datamodel::Project {
+    let mut p = TestProject::new("module_pin")
+        .with_sim_time(0.0, 12.0, 0.25)
+        .aux("driver", "100 + reader * 0.5", None)
+        .aux("reader", "sub.output", None)
+        .stock("bystander", "10", &["bg"], &[], None)
+        .flow("bg", "1", None)
+        .build_datamodel();
+    p.models[0]
+        .variables
+        .push(datamodel::Variable::Module(datamodel::Module {
+            ident: "sub".to_string(),
+            model_name: "sub".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![datamodel::ModuleReference {
+                src: "driver".to_string(),
+                dst: "sub.input".to_string(),
+            }],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    p.models.push(datamodel::Model {
+        name: "sub".to_string(),
+        sim_specs: None,
+        variables: sub_vars,
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+    assign_uids(&mut p);
+    p
+}
+
+fn sub_aux(ident: &str, eqn: &str) -> datamodel::Variable {
+    datamodel::Variable::Aux(datamodel::Aux {
+        ident: ident.to_string(),
+        equation: datamodel::Equation::Scalar(eqn.to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    })
+}
+
+/// A smooth-like sub-model body: `output` (a stock) chases `input` with a
+/// 3-time-unit adjustment, so the sub-model carries the loop's only state.
+fn smooth_sub_vars() -> Vec<datamodel::Variable> {
+    vec![
+        sub_aux("input", "0"),
+        datamodel::Variable::Flow(datamodel::Flow {
+            ident: "chg".to_string(),
+            equation: datamodel::Equation::Scalar("(input - output) / 3".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }),
+        datamodel::Variable::Stock(datamodel::Stock {
+            ident: "output".to_string(),
+            equation: datamodel::Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["chg".to_string()],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }),
+    ]
+}
+
+/// GH #673: a pinned loop whose ONLY stock lives inside a module it traverses
+/// (a smooth-like sub-model) must validate and be scored. The old `has_stock`
+/// validation compared the pin's cycle against the PARENT-level stock set
+/// only, so the module-borne state was invisible and the pin was rejected as
+/// "contains no stock" -- even though the enumerator finds and scores the
+/// same cycle (it enriches module-internal stocks instead of filtering).
+/// Discovery mode makes the defect observable end-to-end: the pin is the only
+/// way to score the loop there.
+#[test]
+fn pinned_loop_through_module_internal_stock_scored() {
+    let mut project = module_pin_project(smooth_sub_vars());
+    pin_loop(
+        &mut project,
+        "main",
+        "module smooth loop",
+        &["driver", "sub", "reader"],
+    );
+
+    let (results, loop_partitions, _ltm_vars) = run_ltm_discovery(&project);
+
+    let pin_loop_var = "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1";
+    assert!(
+        results.offsets.contains_key(pin_loop_var),
+        "a pin whose only stock is module-internal must emit its loop_score; \
+         loop-score offsets: {:?}",
+        results
+            .offsets
+            .keys()
+            .filter(|k| k.as_str().contains("loop_score"))
+            .collect::<Vec<_>>()
+    );
+
+    // The simulated score must be finite at every saved step and non-zero
+    // once behavior begins (the smooth chases the rising driver, so the loop
+    // genuinely transfers signal).
+    let off = results.offsets[pin_loop_var];
+    let mut saw_nonzero = false;
+    for step in 0..results.step_count {
+        let v = results.data[step * results.step_size + off];
+        assert!(
+            v.is_finite(),
+            "pinned loop_score must be finite at every step; step {step} = {v}"
+        );
+        if v != 0.0 {
+            saw_nonzero = true;
+        }
+    }
+    assert!(
+        saw_nonzero,
+        "pinned loop_score should be non-zero at some step once behavior begins"
+    );
+
+    // The pin registers a partition entry; its only stock is module-internal,
+    // which the parent-level partition map deliberately does not key (see
+    // `CyclePartitions::partition_for_loop`), so the single slot resolves to
+    // `None` rather than being dropped.
+    assert_eq!(
+        loop_partitions.get("pin1"),
+        Some(&vec![None]),
+        "module-internal-stock pin registers a single unresolved partition slot"
+    );
+}
+
+/// GH #673 (the rejection direction): a pinned cycle through a stockless
+/// PASSTHROUGH module -- no stock anywhere on the cycle, inside the module or
+/// out -- is a purely-instantaneous circular dependency, not a feedback loop.
+/// It must STILL be rejected with the clear "contains no stock" diagnostic
+/// and emit no (silent-zero) pin loop_score.
+#[test]
+fn pinned_loop_through_stockless_passthrough_rejected() {
+    let mut project =
+        module_pin_project(vec![sub_aux("input", "0"), sub_aux("output", "input * 2")]);
+    pin_loop(
+        &mut project,
+        "main",
+        "instantaneous",
+        &["driver", "sub", "reader"],
+    );
+
+    // The passthrough cycle is an algebraic circular dependency, so the model
+    // does not compile; pin validation happens at the causal-graph level and
+    // must surface its own clear diagnostic alongside the compile error.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+
+    let has_no_stock_warning = diagnostics.iter().any(|d| {
+        let msg = format!("{:?}", d.error);
+        msg.contains("instantaneous") && msg.contains("contains no stock")
+    });
+    assert!(
+        has_no_stock_warning,
+        "a stockless passthrough pin must surface the no-stock diagnostic; got: {:?}",
+        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("loop_score\u{205A}pin")),
+        "a rejected pin must not emit a loop_score var"
+    );
+}
