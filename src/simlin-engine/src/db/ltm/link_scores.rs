@@ -37,6 +37,12 @@ use super::parse::{
 /// `try_cross_dimensional_link_scores` which generates N separate
 /// scalar variables).
 ///
+/// `model` is consulted (via `model_edge_shapes`) only by the
+/// mapped-dimension compatibility arm, which requires the edge to have a
+/// `Bare`-classified reference site -- the exact condition under which the
+/// element graph expands the edge as the mapped DIAGONAL rather than the
+/// conservative cross-product (see the GH #527 comment in the body).
+///
 /// The returned names use the original datamodel casing (e.g.,
 /// "Region" not "region") because `parse_ltm_equation` feeds them
 /// into `Equation::ApplyToAll`, which `get_dimensions` resolves by
@@ -46,6 +52,7 @@ pub(super) fn link_score_dimensions(
     source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
+    model: SourceModel,
     project: SourceProject,
     dm_dims: &[crate::datamodel::Dimension],
 ) -> Vec<String> {
@@ -117,12 +124,39 @@ pub(super) fn link_score_dimensions(
     // In all these cases, the link score inherits the target's
     // dimensions so per-element values are computed via A2A expansion.
     let dim_ctx = project_dimensions_context(db, project);
+    // PR #761 review (r3389029131): the mapped arm is additionally gated on
+    // the edge having a `Bare`-classified reference site -- the exact
+    // condition under which `expand_same_element` emits the mapped DIAGONAL
+    // element edges, so "score arrayed over the target's dims" ⟺ "element
+    // edges are the diagonal". `mapped_element_correspondence` deliberately
+    // accepts BOTH declaration directions (the bare-reference case needs
+    // the source-declared one), but `classify_iterated_dim_shape` accepts a
+    // SUBSCRIPTED mapped reference only in the forward direction: a
+    // reverse-declared subscripted reference classifies `DynamicIndex` (GH
+    // #757) and the element graph emits the conservative CROSS-PRODUCT, so
+    // retargeting its (Bare-named, since Wildcard/DynamicIndex collapse
+    // onto the Bare name) score to the target's dims would shape per-slot
+    // DIAGONAL partials that the off-diagonal loop links then read by
+    // target-element subscript -- wrong-slot values instead of the
+    // conservative scalar stub (GH #758). A mixed edge (a Bare site AND a
+    // DynamicIndex site on the same `(from, to)`) keeps the arrayed score
+    // -- the Bare site needs it -- while its cross-product links still read
+    // diagonal slots; that is the pre-existing mixed-shape conservatism
+    // family, not changed here. The same-NAME arms below stay
+    // shape-independent. Absent-edge lookups (a `(from, to)` not in the
+    // causal graph, which the emitters never produce) fail the gate, which
+    // errs toward the conservative scalar.
+    let edge_has_bare_site = crate::db::model_edge_shapes(db, model, project)
+        .edge_shapes
+        .get(&(from.to_string(), to.to_string()))
+        .is_some_and(|shapes| shapes.contains(&RefShape::Bare));
     let dims_correspond =
         |td: &crate::dimensions::Dimension, fd: &crate::dimensions::Dimension| -> bool {
             td.name() == fd.name()
-                || dim_ctx
-                    .mapped_element_correspondence(td.canonical_name(), fd.canonical_name())
-                    .is_some()
+                || (edge_has_bare_site
+                    && dim_ctx
+                        .mapped_element_correspondence(td.canonical_name(), fd.canonical_name())
+                        .is_some())
         };
     let dims_compatible = from_dims == *to_dims
         || to_dims
@@ -869,7 +903,7 @@ pub(super) fn emit_per_shape_link_scores(
         emitted_names.insert(crate::ltm_augment::link_score_var_name(from, to, shape))
     });
 
-    let target_dims = link_score_dimensions(db, source_vars, from, to, project, dm_dims);
+    let target_dims = link_score_dimensions(db, source_vars, from, to, model, project, dm_dims);
 
     for shape in shapes {
         let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
