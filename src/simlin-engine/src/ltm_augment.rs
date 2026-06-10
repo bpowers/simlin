@@ -1986,10 +1986,14 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 ///   bare dynamic index (`arr[i+1]`), the dynamic-index reducer carve-out
 ///   (`SUM(pop[idx, *])`), or a mapped sliced reducer the correspondence
 ///   declines (element-mapped -- GH #756 -- or reverse-declared -- GH #757).
-///   A coarse conservative score is the intended semantics for all of those,
-///   but for the declined mapped-reducer cases the emitted scalar score
-///   currently references A2A idents and fails fragment compilation, so the
-///   loop scores through it stub to 0 with Assembly warnings (GH #758).
+///   A coarse conservative score is the intended semantics where the
+///   endpoint dimensions correspond; when both endpoints are arrayed and
+///   they do NOT (the declined mapped-reducer cases above), no compilable
+///   conservative shape exists (a scalar equation cannot reference the
+///   arrayed endpoints; an arrayed one would be read at wrong slots by the
+///   cross-product loop links), so `emit_per_shape_link_scores` skips the
+///   edge with one Warning and no link-score variable, and loop scores
+///   through it are dropped (GH #758).
 ///
 /// The Unicode separators `\u{205A}` (TWO DOT PUNCTUATION) and `\u{2192}`
 /// (RIGHTWARDS ARROW) are intentional: they collide with no legal

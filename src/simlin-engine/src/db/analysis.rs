@@ -105,7 +105,10 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// GH #756 -- or reverse-declared -- GH #757; `enumerate_agg_nodes` declines
 /// those, so the reference stays `Direct` and is reclassified
 /// `DynamicIndex`), or a direct `pop[idx]` alongside a `SUM(pop[*])` --
-/// keeps a conservative edge and a Bare-named link score.
+/// keeps a conservative edge and a Bare-named link score, EXCEPT when both
+/// endpoints are arrayed with non-corresponding dimensions (the declined
+/// mapped-reducer cases): no compilable conservative score exists there, so
+/// the edge is skipped loudly with no link-score variable (GH #758).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
@@ -202,8 +205,10 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// (rare) non-reducer whole-array reference, or a mapped sliced reducer the
 /// correspondence declines (element-mapped -- GH #756 -- or reverse-declared
 /// -- GH #757). The conservative cross product is sound for the element
-/// EDGES in all of those (a superset, never fewer); note the declined
-/// mapped-reducer cases' link SCORES are separately broken (GH #758).
+/// EDGES in all of those (a superset, never fewer); the declined
+/// mapped-reducer cases' link SCORES have no compilable conservative shape,
+/// so the emitter skips them loudly and loop scores through the edge are
+/// dropped (GH #758, `emit_unscoreable_conservative_edge_warning`).
 #[allow(clippy::too_many_arguments)]
 fn emit_edges_for_reference(
     from_name: &str,

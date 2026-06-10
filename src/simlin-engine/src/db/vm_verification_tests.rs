@@ -731,12 +731,14 @@ fn test_ltm_mapped_dimension_loop_scores_diagonal_and_nonzero() {
 ///
 /// With the gate, the mapped-correspondence arm only fires when the edge
 /// has a Bare-classified site -- exactly when `expand_same_element` emits
-/// the diagonal -- so `x→inflow` keeps the scalar score. That scalar
-/// equation references arrayed variables in scalar context, fails to
-/// compile, and is stubbed to constant 0 with a Warning (GH #758), so
-/// every loop through the edge scores a conservative 0 (including the
-/// positionally-true diagonal loops -- the residual conservatism GH #757
-/// tracks lifting by fixing the classification itself).
+/// the diagonal -- so `x→inflow` is denied the arrayed retarget. A scalar
+/// score for it would reference arrayed variables in scalar context and
+/// never compile, so since GH #758 the emitter skips the edge entirely:
+/// ONE Warning naming it, NO `x→inflow` link-score variable, and the loop
+/// scores through the edge dropped (including the positionally-true
+/// diagonal loops -- the residual conservatism GH #757 tracks lifting by
+/// fixing the classification itself). Before #758 this was a warned
+/// constant-0 stub plus a cascade of per-loop fragment-failure warnings.
 #[test]
 fn test_ltm_reverse_declared_subscripted_link_score_stays_scalar() {
     use crate::test_common::TestProject;
@@ -758,64 +760,75 @@ fn test_ltm_reverse_declared_subscripted_link_score_stays_scalar() {
     source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm_vars = crate::db::model_ltm_variables(&db, source_model, source_project);
-    let dims_of = |name: &str| -> &[String] {
-        &ltm_vars
+    // The DynamicIndex-classified reverse-declared edge is denied the
+    // arrayed retarget, and its scalar form can't compile, so NO x→inflow
+    // link score is emitted at all (GH #758 loud skip).
+    assert!(
+        !ltm_vars
             .vars
             .iter()
-            .find(|v| v.name == name)
-            .unwrap_or_else(|| panic!("missing LTM var {name}"))
-            .dimensions
-    };
-    // The DynamicIndex-classified reverse-declared edge: scalar score
-    // (matching the cross-product element edges), not ApplyToAll[State].
-    assert_eq!(
-        dims_of("$\u{205A}ltm\u{205A}link_score\u{205A}x\u{2192}inflow"),
-        &[] as &[String],
+            .any(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}x\u{2192}inflow"),
         "reverse-declared subscripted x[State] classifies DynamicIndex \
-         (cross-product element edges), so its link score must stay scalar"
+         (cross-product element edges); its conservative score has no \
+         compilable shape, so the edge must be skipped loudly (GH #758)"
     );
     // The Bare-classified forward edge keeps the arrayed (diagonal) score.
     assert_eq!(
-        dims_of("$\u{205A}ltm\u{205A}link_score\u{205A}stock\u{2192}x"),
-        &["Region".to_string()],
+        ltm_vars
+            .vars
+            .iter()
+            .find(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}stock\u{2192}x")
+            .expect("missing LTM var stock→x")
+            .dimensions,
+        vec!["Region".to_string()],
         "forward-declared Bare edge stock[Region]→x keeps the target's dims"
     );
 
-    // Behavioral: every enumerated loop traverses the x→inflow edge, whose
-    // scalar equation references arrayed variables in scalar context and is
-    // stubbed to constant 0 (GH #758) -- so no loop score (off-diagonal OR
-    // diagonal) may be sustained non-zero. Before the gate, the off-diagonal
-    // circuits read wrong-slot diagonal partials and scored spuriously
-    // non-zero.
+    // Behavioral: every enumerated loop traverses the unscoreable x→inflow
+    // edge, so no loop scores are emitted (GH #758 -- the loops are dropped
+    // from scoring rather than stubbed to warned zeros). Before the
+    // PR #761 gate, the off-diagonal circuits read wrong-slot diagonal
+    // partials and scored spuriously non-zero.
+    assert!(
+        !ltm_vars
+            .vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+        "every loop traverses the unscoreable edge, so no loop score may be \
+         emitted; got: {:?}",
+        ltm_vars
+            .vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // The single unscoreable-edge Warning names the edge.
+    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    assert!(
+        diags.iter().any(|d| {
+            d.severity == crate::db::DiagnosticSeverity::Warning
+                && matches!(&d.error, crate::db::DiagnosticError::Assembly(msg)
+                    if msg.contains("x -> inflow"))
+        }),
+        "the unscoreable x→inflow edge must surface a Warning; got: {diags:?}"
+    );
+
+    // The model still compiles and simulates with LTM enabled.
     let compiled = compile_project_incremental(&db, source_project, "main")
         .expect("LTM compile of the reverse-declared mapped model should succeed");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
-    let results = vm.into_results();
 
-    let score_offsets: Vec<(String, usize)> = compiled
-        .offsets
-        .iter()
-        .filter(|(k, _)| k.as_str().contains("\u{205A}loop_score\u{205A}"))
-        .map(|(k, &off)| (k.to_string(), off))
-        .collect();
+    // No loop-score series exist in the layout either.
     assert!(
-        !score_offsets.is_empty(),
-        "the fixture must enumerate feedback loops"
+        !compiled
+            .offsets
+            .keys()
+            .any(|k| k.as_str().contains("\u{205A}loop_score\u{205A}")),
+        "no loop-score slots should be laid out"
     );
-    for (name, offset) in &score_offsets {
-        let series: Vec<f64> = results.iter().map(|row| row[*offset]).collect();
-        assert!(
-            series.iter().all(|v| v.is_finite()),
-            "loop score {name} must be finite everywhere: {series:?}"
-        );
-        assert!(
-            series.iter().all(|v| v.abs() < 1e-12),
-            "loop score {name} must be the conservative 0 (its x→inflow \
-             link is the GH #758 scalar stub), got: {series:?}"
-        );
-    }
 }
 
 #[test]

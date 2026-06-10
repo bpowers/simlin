@@ -3495,3 +3495,290 @@ fn un_hoisted_iterated_dim_feeder_co_source_closure_stays_loud() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// GH #758: declined element-mapped sliced reducer -> loud unscoreable edge
+// ---------------------------------------------------------------------------
+
+/// The GH #758 fixture: an inline sliced reducer over an ELEMENT-mapped
+/// dimension pair -- `growth[State] = 1 + SUM(matrix[State,*])` where
+/// `matrix` is declared over `Region` and `State` carries an explicit
+/// element map to `Region` (not a positional correspondence).
+/// `mapped_element_correspondence` declines it (the GH #756
+/// positional-only gate), so the reducer is NOT hoisted and the
+/// `matrix → growth` reference stays on the conservative path. The
+/// feedback loops close through `pop → matrix → growth → SUM(growth[*])
+/// → inflow → pop`, so every enumerated loop traverses the declined edge.
+///
+/// With `with_drain`, a second, independent loop `pop → drain → pop`
+/// (A2A over Region, not traversing the declined edge) is added so tests
+/// can pin that the degradation is surgical.
+fn gh758_element_mapped_fixture(with_drain: bool) -> datamodel::Project {
+    let mut p = TestProject::new("gh758_element_mapped")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["west", "east"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_element_mapping(
+            "State",
+            &["CA", "NY"],
+            "Region",
+            &[("CA", "east"), ("NY", "west")],
+        )
+        .array_aux_direct(
+            "matrix",
+            vec!["Region".into(), "D2".into()],
+            "pop[Region] * 0.05",
+            None,
+        )
+        .array_aux("growth[State]", "1 + SUM(matrix[State, *])")
+        .array_flow("inflow[Region]", "SUM(growth[*]) * 0.01", None);
+    if with_drain {
+        p = p
+            .array_stock("pop[Region]", "100", &["inflow"], &["drain"], None)
+            .array_flow("drain[Region]", "pop[Region] * 0.01", None);
+    } else {
+        p = p.array_stock("pop[Region]", "100", &["inflow"], &[], None);
+    }
+    p.build_datamodel()
+}
+
+/// The Assembly warnings of a compiled project's diagnostics.
+fn assembly_warnings(
+    db: &SimlinDb,
+    project: simlin_engine::db::SourceProject,
+) -> Vec<simlin_engine::db::Diagnostic> {
+    collect_all_diagnostics(db, project)
+        .into_iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(d.error, DiagnosticError::Assembly(_))
+        })
+        .collect()
+}
+
+/// GH #758: the declined element-mapped sliced-reducer edge must degrade
+/// LOUDLY -- one Warning naming the edge, NO link-score variable, and NO
+/// loop scores through it -- instead of emitting a broken-by-construction
+/// scalar link score (a scalar equation referencing the arrayed `matrix` /
+/// `growth` idents) that failed fragment compile and dragged every loop
+/// score through the edge into a warned 0-stub (17 Assembly warnings on
+/// this fixture before the fix).
+#[test]
+fn declined_element_mapped_reducer_edge_skips_loudly() {
+    let project = gh758_element_mapped_fixture(false);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    // The declined edge must not mint the uncompilable scalar link score.
+    let doomed = format!("{LINK_SCORE_PREFIX}matrix\u{2192}growth");
+    assert!(
+        !ltm.vars.iter().any(|v| v.name == doomed),
+        "the declined element-mapped edge must NOT emit the uncompilable scalar \
+         link score {doomed:?}; got vars: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // Every enumerated loop traverses the unscoreable edge, so no loop
+    // scores are emitted at all (and the partition map is empty).
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the unscoreable edge must not emit loop scores; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        ltm.loop_partitions.is_empty(),
+        "no scored loops => no loop partitions; got: {:?}",
+        ltm.loop_partitions.keys().collect::<Vec<_>>()
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // Exactly ONE Assembly warning: the unscoreable-edge diagnostic naming
+    // both endpoints. (Before the fix: 17 -- the link score's
+    // fragment-compile failure plus one per stubbed loop score.)
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable edge); got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("matrix") && msg.contains("growth"),
+        "the warning must name the unscoreable edge's endpoints; got: {msg}"
+    );
+
+    // The model still simulates, and every emitted score series is finite
+    // (no garbage values anywhere).
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    let score_names = ltm_score_var_names(&results);
+    assert!(
+        score_names
+            .iter()
+            .all(|n| !n.starts_with(LOOP_SCORE_PREFIX)),
+        "no loop-score series should exist in the results; got: {score_names:?}"
+    );
+    for name in &score_names {
+        let var = ltm_var(&ltm.vars, name);
+        let base = offset_of(&results, name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "emitted score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+/// GH #758 (surgical degradation): a second feedback loop that does NOT
+/// traverse the unscoreable edge keeps its real loop score while the
+/// doomed loops are dropped -- the skip is per-loop, not a blanket
+/// collapse of LTM output.
+#[test]
+fn declined_element_mapped_reducer_keeps_unaffected_loops() {
+    let project = gh758_element_mapped_fixture(true);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // Still exactly one warning: the unscoreable edge.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable edge); got: {warnings:?}"
+    );
+
+    // Exactly one loop score survives: the pop -> drain -> pop loop, A2A
+    // over Region (it never touches matrix -> growth).
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_vars.len(),
+        1,
+        "exactly the drain loop must keep its score; got: {:?}",
+        loop_vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        loop_vars[0].dimensions,
+        vec!["Region".to_string()],
+        "the surviving loop is the A2A pop/drain loop"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // The surviving loop score is real: finite everywhere, non-zero past
+    // startup.
+    let base = offset_of(&results, &loop_vars[0].name);
+    for slot in 0..slot_count(loop_vars[0], &project.dimensions) {
+        let series = series_at(&results, base + slot);
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "surviving loop score slot {slot} must be finite; got {series:?}"
+        );
+        assert!(
+            series.iter().skip(STARTUP_STEPS + 1).any(|&v| v != 0.0),
+            "surviving loop score slot {slot} must carry real values; got {series:?}"
+        );
+    }
+}
+
+/// GH #758 regression guard for the POSITIONAL twin: the same model shape
+/// with a positional `State -> Region` mapping is hoisted per GH #534
+/// (never reaches the conservative path), compiles every LTM fragment
+/// cleanly, and scores its loops end-to-end -- the new unscoreable-edge
+/// gate must not fire for it.
+#[test]
+fn positional_mapped_twin_of_declined_edge_scores_cleanly() {
+    let project = TestProject::new("gh758_positional_twin")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["west", "east"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_mapping("State", &["CA", "NY"], "Region")
+        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["Region".into(), "D2".into()],
+            "pop[Region] * 0.05",
+            None,
+        )
+        .array_aux("growth[State]", "1 + SUM(matrix[State, *])")
+        .array_flow("inflow[Region]", "SUM(growth[*]) * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The positionally-mapped sliced reducer is hoisted: no conservative
+    // matrix->growth score and no unscoreable-edge warning.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the positional twin must compile every LTM fragment cleanly; got: {warnings:?}"
+    );
+
+    // Loops through the hoisted reducer ARE scored.
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !loop_vars.is_empty(),
+        "the positional twin's loops must be scored; vars: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    let mut saw_nonzero = false;
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "loop score {} slot {slot} must be finite; got {series:?}",
+                lv.name
+            );
+            if series.iter().skip(STARTUP_STEPS + 1).any(|&v| v != 0.0) {
+                saw_nonzero = true;
+            }
+        }
+    }
+    assert!(
+        saw_nonzero,
+        "at least one positional-twin loop score must carry real non-zero values"
+    );
+}

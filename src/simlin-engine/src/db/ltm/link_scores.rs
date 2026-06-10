@@ -654,6 +654,43 @@ pub(super) fn emit_unscoreable_disjoint_edge_warning(
     .accumulate(db);
 }
 
+/// Accumulate the GH #758 `Warning` for an arrayed -> arrayed conservative
+/// edge whose endpoint dimensions do not correspond (so
+/// [`link_score_dimensions`] returned empty). The conservative per-shape
+/// link score for such an edge has no compilable shape: the scalar form's
+/// guard references the multi-slot target (and the partial body the arrayed
+/// deps) in scalar context -- a fragment-compile failure stubbed to a
+/// constant 0 -- while an arrayed (target-dims) form would compile but
+/// mis-attribute: the element graph expands these edges as the conservative
+/// CROSS-PRODUCT, so off-diagonal loop links would read the per-slot
+/// DIAGONAL partial of the wrong slot (silent wrong numbers; the PR #761
+/// Bare-site gate exists precisely to prevent that). The edge therefore
+/// gets *no* link-score variable and the caller drops loop scores through
+/// it -- one clear diagnostic instead of a cascade of per-fragment
+/// warnings over guaranteed-zero stubs.
+pub(super) fn emit_unscoreable_conservative_edge_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    from: &str,
+    to: &str,
+) {
+    use salsa::Accumulator;
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: both variables \
+         are arrayed but their dimensions do not correspond (e.g. an element-mapped or \
+         unmapped dimension pair), so the conservative score has no compilable shape; \
+         this edge will have no link-score variable and feedback loops through it will \
+         not be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
 /// Surface a `Warning` for a ceteris-paribus partial-equation parse failure
 /// (GH #311), naming the synthetic link-score variable and the original
 /// (untransformed) equation text that could not be parsed.
@@ -891,6 +928,13 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
 /// resulting name and keep the first occurrence -- the AST walk records
 /// `Bare` before any subscripted reference, so the canonical-Bare link
 /// score wins the slot when both a bare and a subscripted reference exist.
+///
+/// `unscoreable_edges` collects the (from, to) edges the GH #758 gate
+/// declines to score (arrayed endpoints whose dimensions don't correspond
+/// -- see [`emit_unscoreable_conservative_edge_warning`]); the caller
+/// (`model_ltm_variables`) drops loop scores traversing them. The warning
+/// is accumulated only on first insertion, so an edge re-visited by the
+/// pinned-loop pass doesn't warn twice.
 #[allow(clippy::too_many_arguments)] // helper threads through emission context
 pub(super) fn emit_per_shape_link_scores(
     db: &dyn Db,
@@ -903,6 +947,7 @@ pub(super) fn emit_per_shape_link_scores(
     dm_dims: &[crate::datamodel::Dimension],
     skip_reducer_shapes: bool,
     vars: &mut Vec<LtmSyntheticVar>,
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) {
     let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
     // The distinct `shape` fields of `(from, to)`'s classified sites,
@@ -933,8 +978,44 @@ pub(super) fn emit_per_shape_link_scores(
     shapes.retain(|shape| {
         emitted_names.insert(crate::ltm_augment::link_score_var_name(from, to, shape))
     });
+    if shapes.is_empty() {
+        // Every shape was a suppressed reducer-arg Wildcard: nothing to
+        // emit (the agg halves carry the edge's scores).
+        return;
+    }
 
     let target_dims = link_score_dimensions(db, source_vars, from, to, model, project, dm_dims);
+
+    // GH #758: when BOTH endpoints are arrayed non-module variables but
+    // `link_score_dimensions` found no correspondence (`target_dims`
+    // empty), every per-shape equation this loop would emit is
+    // broken-by-construction -- `retarget_ltm_equation_dims` collapses it
+    // to a SCALAR equation whose guard form references the multi-slot
+    // target (and whose partial body references the arrayed deps) in
+    // scalar context, so the fragment never compiles and the score is
+    // silently stubbed to 0 while every loop score through the edge
+    // fail-warns in a cascade. The arrayed alternative is forbidden by the
+    // PR #761 Bare-site gate (the element edges are the conservative
+    // cross-product, so per-slot diagonal partials would be read at wrong
+    // slots). Degrade loudly instead: one Warning naming the edge, no
+    // link-score variable, and (via `unscoreable_edges`) no loop scores
+    // through it. The declined mapped sliced reducers (element-mapped GH
+    // #756, reverse-declared GH #757) land here, as do disjoint-dim
+    // ApplyToAll-target references and incompatible-dim dynamic-index
+    // reducers -- all previously warned zero-stubs.
+    let arrayed_non_module = |name: &str| -> bool {
+        source_vars
+            .get(name)
+            .filter(|sv| sv.kind(db) != SourceVariableKind::Module)
+            .map(|sv| !variable_dimensions(db, *sv, project).is_empty())
+            .unwrap_or(false)
+    };
+    if target_dims.is_empty() && arrayed_non_module(from) && arrayed_non_module(to) {
+        if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+            emit_unscoreable_conservative_edge_warning(db, model, from, to);
+        }
+        return;
+    }
 
     for shape in shapes {
         let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
@@ -1569,6 +1650,9 @@ pub(super) fn emit_agg_to_target_link_scores(
 /// `LtmSyntheticVar`s into the `Vec`. The discovery / sub-model caller
 /// passes `false` since it iterates causal edges (not loop links) and the
 /// `from → agg`/`agg → to` edges aren't separately visited there.
+///
+/// `unscoreable_edges` is threaded to [`emit_per_shape_link_scores`]'s
+/// GH #758 gate; see its doc.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_link_scores_for_edge(
     db: &dyn Db,
@@ -1581,6 +1665,7 @@ pub(super) fn emit_link_scores_for_edge(
     dm_dims: &[crate::datamodel::Dimension],
     skip_agg_halves: bool,
     vars: &mut Vec<LtmSyntheticVar>,
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) {
     // The set of synthetic aggs `(from, to)` routes through, read off
     // the reference-site IR (the unique `ThroughAgg` `AggRef`s of this
@@ -1636,6 +1721,7 @@ pub(super) fn emit_link_scores_for_edge(
             dm_dims,
             /* skip_reducer_shapes = */ true,
             vars,
+            unscoreable_edges,
         );
         return;
     }
@@ -1679,5 +1765,6 @@ pub(super) fn emit_link_scores_for_edge(
         dm_dims,
         /* skip_reducer_shapes = */ false,
         vars,
+        unscoreable_edges,
     );
 }

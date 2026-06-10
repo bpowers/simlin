@@ -1990,6 +1990,14 @@ statically, so it isn't hoisted: its contribution shows up as a coarse conservat
 This is rare in practice; the model still simulates correctly, but the loop attribution
 through such a term is approximate.
 
+When both endpoints of such a conservative edge are arrayed and their dimensions do
+*not* correspond (an explicit element-mapped pair, a reverse-declared mapping, or a
+disjoint dimension pair), even the coarse score has no compilable shape: a scalar
+score cannot reference the arrayed endpoints, and a per-element score would be read
+at the wrong slots by the conservative cross-product loop links. Simlin then emits
+*no* link score for the edge and drops the loop scores through it, surfacing a single
+`Warning` naming the edge -- a loud degradation, never a silently wrong number.
+
 ### 16.9 RANK Link Scores Are Approximate
 
 RANK is an order statistic -- a discrete jump function with no useful derivative -- and it

@@ -1289,6 +1289,16 @@ pub fn model_ltm_variables(
     let mut loop_partitions: indexmap::IndexMap<String, Vec<Option<usize>>> =
         indexmap::IndexMap::new();
 
+    // GH #758: the (from, to) edges the conservative per-shape emitter
+    // declined to score (arrayed endpoints whose dimensions don't
+    // correspond -- see `emit_unscoreable_conservative_edge_warning`).
+    // Such an edge has no link-score variable, so a loop-score product
+    // through it could only be a guaranteed-zero stub (its fragment either
+    // fail-warns on the subscripted missing name or silently multiplies a
+    // 0 stub-dep): loop scores traversing any of these edges are dropped
+    // below, covered by the edge's single Warning.
+    let mut unscoreable_edges: HashSet<(String, String)> = HashSet::new();
+
     // Part 1: Link scores.
     // Sub-models and discovery mode need scores for ALL edges (pathways
     // reference arbitrary edges). Exhaustive root models only need
@@ -1314,6 +1324,7 @@ pub fn model_ltm_variables(
                     dm_dims,
                     /* skip_agg_halves = */ false,
                     &mut vars,
+                    &mut unscoreable_edges,
                 );
             }
         }
@@ -1386,6 +1397,7 @@ pub fn model_ltm_variables(
                         dm_dims,
                         /* skip_agg_halves = */ true,
                         &mut vars,
+                        &mut unscoreable_edges,
                     );
                 }
             }
@@ -1400,7 +1412,45 @@ pub fn model_ltm_variables(
     // Uses element-level cycle partitions so that cross-element feedback
     // is detected correctly (e.g., population[NYC] and population[Boston]
     // in the same partition when connected through migration).
+
+    // Whether a loop traverses an edge the GH #758 gate declined to score
+    // (checking both the representative link cycle and any per-slot link
+    // cycles). Such a loop's score product would multiply a never-emitted
+    // link-score name -- a guaranteed-zero stub -- so it is dropped from
+    // scoring; the edge's single Warning covers the degradation. Takes the
+    // edge set as a parameter (rather than capturing `unscoreable_edges`)
+    // because the pinned-loop pass below still mutates the set between
+    // calls.
+    fn traverses_unscoreable(
+        l: &crate::ltm::Loop,
+        unscoreable_edges: &HashSet<(String, String)>,
+    ) -> bool {
+        let link_hits = |links: &[crate::ltm::Link]| {
+            links.iter().any(|link| {
+                unscoreable_edges.contains(&(
+                    strip_subscript(link.from.as_str()).to_string(),
+                    strip_subscript(link.to.as_str()).to_string(),
+                ))
+            })
+        };
+        link_hits(&l.links) || l.slot_links.iter().any(|(_, links)| link_hits(links))
+    }
+
     if let Some(ref detected_loops) = loops {
+        // GH #758: drop loops through unscoreable edges. The common case
+        // (no unscoreable edge) borrows `detected_loops` unfiltered so the
+        // hot path allocates nothing.
+        let filtered_loops: Vec<crate::ltm::Loop>;
+        let detected_loops: &[crate::ltm::Loop] = if unscoreable_edges.is_empty() {
+            detected_loops
+        } else {
+            filtered_loops = detected_loops
+                .iter()
+                .filter(|l| !traverses_unscoreable(l, &unscoreable_edges))
+                .cloned()
+                .collect();
+            &filtered_loops
+        };
         let partitions_result = model_element_cycle_partitions(db, model, project);
         let partitions = CyclePartitions {
             partitions: partitions_result
@@ -1638,8 +1688,32 @@ pub fn model_ltm_variables(
                             dm_dims,
                             /* skip_agg_halves = */ true,
                             &mut vars,
+                            &mut unscoreable_edges,
                         );
                     }
+                }
+
+                // GH #758: a pin whose cycle traverses an unscoreable edge
+                // has no link score to multiply -- its loop score could only
+                // be a guaranteed-zero stub (or a warned fragment failure).
+                // Warn naming the pin (mirroring the invalid-pin treatment)
+                // and skip it. Checked AFTER the link-score emission above
+                // so the gate has classified this cycle's edges even when
+                // no enumerated loop visited them.
+                if traverses_unscoreable(pin_loop, &unscoreable_edges) {
+                    CompilationDiagnostic(Diagnostic {
+                        model: model.name(db).clone(),
+                        variable: None,
+                        error: DiagnosticError::Assembly(format!(
+                            "pinned loop '{}' traverses a causal edge whose link score \
+                             could not be computed (see the unscoreable-edge warning) \
+                             and is not scored",
+                            pin_loop.id
+                        )),
+                        severity: DiagnosticSeverity::Warning,
+                    })
+                    .accumulate(db);
+                    continue;
                 }
 
                 // Register this loop's cycle partition(s): a per-slot vector
