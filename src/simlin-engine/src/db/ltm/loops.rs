@@ -1086,16 +1086,15 @@ pub(crate) fn build_element_level_loops(
 /// all synthetic aggregate nodes), Phase 5 / GH #515.
 ///
 /// With `k` disjoint petals through one agg the recoverable loop count is
-/// `Σ_{m=2}^{k} C(k,m)·orderings(m)` where `orderings(m)` is 1 for m=2 and
-/// `(m-1)!/2` for m≥3 -- it grows super-exponentially, so a budget is
+/// `Σ_{m=2}^{k} C(k,m) = 2^k - k - 1` (one canonical loop per disjoint
+/// petal subset, GH #676) -- still exponential in `k`, so a budget is
 /// mandatory. When recovery hits this budget it stops, sets the truncation
 /// flag, and the caller emits a `Warning`; the deterministic petal priority
 /// (fewest internal nodes first, then a stable joined-name tiebreaker)
 /// makes *which* loops survive truncation reproducible. The prior implicit
 /// ceiling was `2^8 - 8 - 1 = 247` per agg (the old `MAX_AGG_PETALS = 8`
 /// hard drop); 256 keeps roughly that order of magnitude as a model-wide
-/// total. Because the budget is modest, recovery never reaches a subset
-/// large enough for `cyclic_orderings(m)` to blow up in practice.
+/// total.
 pub(crate) const MAX_CROSS_AGG_LOOPS: usize = 256;
 
 /// Soft per-aggregate cap on the petals considered when stitching them into
@@ -1164,72 +1163,6 @@ impl Drop for AggLoopBudgetGuard {
     }
 }
 
-/// Distinct orderings of `[0, 1, ..., n-1]` modulo rotation (index `0`
-/// pinned first to kill rotations) and modulo mirror reversal (the loop
-/// score is a commutative product over the edge multiset, so a directed
-/// cycle and its reverse share a score; the design enumerates only one of
-/// each mirror pair). Count: `1` for `n ∈ {0, 1, 2}`, `(n-1)!/2` for
-/// `n ≥ 3` (`(n-1)!` rotation classes, halved by the mirror involution --
-/// which has no fixed point for `n ≥ 3` since a length-`(n-1)` permutation
-/// of distinct indices is never a palindrome; for `n = 2` reversing the
-/// 2-cycle gives the same sequence, so there is nothing to quotient).
-///
-/// "Mirror" here is the petal-sequence reversed with the first petal still
-/// pinned -- `[0, p1, .., p_{n-1}] ↦ [0, p_{n-1}, .., p1]` -- so the rule
-/// is: enumerate the permutations of `[1, .., n-1]` via Heap's algorithm
-/// (deterministic order, which `assign_loop_ids`' stable sort relies on for
-/// stable distinct loop ids), and keep a permutation `tail` iff it is
-/// lexicographically `<= reverse(tail)` (equivalently: track the emitted
-/// canonicals in a set -- the lex test is the cheaper involution).
-///
-/// Pure: depends only on `n`. Only called from `recover_cross_agg_loops`
-/// with `n` = a disjoint petal-subset size (≥ 2, ≤ `MAX_AGG_PETALS`), and
-/// the loop budget stops recovery long before it reaches a subset large
-/// enough for `(n-1)!/2` to be a concern.
-pub(crate) fn cyclic_orderings(n: usize) -> Vec<Vec<usize>> {
-    if n <= 1 {
-        return vec![(0..n).collect()];
-    }
-    // Generate every permutation of the tail `[1, .., n-1]` via Heap's
-    // algorithm, in its canonical order.
-    let mut tail: Vec<usize> = (1..n).collect();
-    let mut perms: Vec<Vec<usize>> = Vec::new();
-    heaps_permutations(tail.len(), &mut tail, &mut perms);
-
-    let mut orderings: Vec<Vec<usize>> = Vec::with_capacity(perms.len().div_ceil(2));
-    for perm in perms {
-        // Skip a permutation whose mirror (the tail reversed, with 0 still
-        // pinned) sorts strictly before it -- we keep one of each mirror pair.
-        let rev: Vec<usize> = perm.iter().rev().copied().collect();
-        if perm > rev {
-            continue;
-        }
-        let mut ordering = Vec::with_capacity(n);
-        ordering.push(0);
-        ordering.extend(perm);
-        orderings.push(ordering);
-    }
-    orderings
-}
-
-/// Recursive Heap's algorithm: append every permutation of `a[0..k]` (with
-/// `a[k..]` held fixed) to `out`, in Heap's canonical order. Called with
-/// `k == a.len()`.
-fn heaps_permutations(k: usize, a: &mut [usize], out: &mut Vec<Vec<usize>>) {
-    if k <= 1 {
-        out.push(a.to_vec());
-        return;
-    }
-    for i in 0..k {
-        heaps_permutations(k - 1, a, out);
-        if k.is_multiple_of(2) {
-            a.swap(i, k - 1);
-        } else {
-            a.swap(0, k - 1);
-        }
-    }
-}
-
 /// A single agg petal for the mode-agnostic stitching core
 /// [`stitch_cross_agg_petals`]: the node sequence rotated to start at the
 /// aggregate node (`[A, x_1, ..., x_m]`) plus its internal node set.
@@ -1261,13 +1194,25 @@ pub(crate) struct StitchPetal<T> {
 /// priority (fewest internal nodes first, then a stable joined-name
 /// tiebreaker), keep the smallest [`MAX_AGG_PETALS`] (clipping flags the agg as
 /// truncated), then walk pairwise-disjoint petal subsets of size `≥ 2`
-/// smallest-cardinality-first; for each subset emit every distinct
-/// [`cyclic_orderings`] as one stitched sequence `[A, p1_x..., A, p2_x..., ...]`
-/// (the caller turns each sequence into its own loop -- `build_element_…_links`
-/// /`circuit_to_links` reconstitutes the `... → A → p1_x → A → p2_x → ... → A`
-/// cycle). A running count is checked against `budget`; once hit, enumeration
+/// smallest-cardinality-first; for each subset emit ONE canonical stitched
+/// sequence `[A, p1_x..., A, p2_x..., ...]` -- the chosen petals concatenated
+/// in priority order (the caller turns each sequence into its own loop --
+/// `build_element_…_links`/`circuit_to_links` reconstitutes the
+/// `... → A → p1_x → A → p2_x → ... → A` cycle).
+///
+/// One loop per disjoint petal subset (GH #676): for a fixed subset, EVERY
+/// cyclic ordering of the petals produces the same edge multiset -- each
+/// petal contributes the same `agg→head`, internal, and `tail→agg` edges
+/// regardless of its position in the concatenation -- and the loop score is
+/// a commutative product over that multiset, so all orderings share one
+/// `loop_score`. Distinct orderings are distinct directed circuits but are
+/// indistinguishable for dominance analysis; emitting them would only burn
+/// the loop budget on duplicates and truncate genuinely-distinct subsets
+/// earlier.
+///
+/// A running count is checked against `budget`; once hit, enumeration
 /// stops and every not-yet-enumerated agg with `≥ 2` petals is reported as
-/// truncated. The deterministic agg/petal/subset/ordering walk makes the
+/// truncated. The deterministic agg/petal/subset walk makes the
 /// *truncated* output reproducible rather than HashMap-iteration dependent.
 ///
 /// Returns the stitched node sequences (each starting at an agg) and the
@@ -1344,19 +1289,21 @@ where
             {
                 continue;
             }
-            let m = chosen.len();
-            for ord in cyclic_orderings(m) {
-                let seq: Vec<T> = ord
-                    .iter()
-                    .flat_map(|&j| petals[chosen[j]].nodes.iter().cloned())
-                    .collect();
-                stitched.push(seq);
-                emitted += 1;
-                if emitted >= budget {
-                    truncated.insert(_agg.clone());
-                    budget_clip_idx = Some(agg_idx);
-                    break 'outer;
-                }
+            // One canonical ordering per subset: the chosen petals in
+            // priority order (`chosen` is ascending over the sorted petals).
+            // All cyclic orderings of a fixed subset share the same edge
+            // multiset and hence the same loop score (see the fn doc), so a
+            // single representative suffices.
+            let seq: Vec<T> = chosen
+                .iter()
+                .flat_map(|&i| petals[i].nodes.iter().cloned())
+                .collect();
+            stitched.push(seq);
+            emitted += 1;
+            if emitted >= budget {
+                truncated.insert(_agg.clone());
+                budget_clip_idx = Some(agg_idx);
+                break 'outer;
             }
         }
     }
@@ -1384,7 +1331,8 @@ where
 /// rest of the cycle). Two petals are disjoint when their internal node sets
 /// don't overlap. For a pairwise-disjoint subset of `m ≥ 2` petals of `A`,
 /// the recovered loop's element-level node sequence concatenates the petals'
-/// `nodes` (each of which starts with `A`) in some order:
+/// `nodes` (each of which starts with `A`) in the canonical priority order
+/// (one loop per subset -- see [`stitch_cross_agg_petals`]):
 /// `[A, p1_x..., A, p2_x..., ...]` -- `build_element_subscripted_links`
 /// builds `seq[i] → seq[(i+1) % n]`, so this is exactly the cyclic sequence
 /// `... → A → p1_x... → A → p2_x... → ... → A` (the last internal node wraps

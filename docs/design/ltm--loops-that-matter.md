@@ -1351,12 +1351,15 @@ arrayed agg `[<slot>]`-subscripted) agg node more than once, so neither Johnson
 (exhaustive) nor the strongest-path DFS (discovery) emits it directly -- both
 enumerate only elementary circuits. The recovery is shared: the combinatorial
 core `stitch_cross_agg_petals` reconstructs the loop from the agg-touching
-elementary "petals" (`agg → … → agg`), stitching pairwise-disjoint petal
-subsets of size ≥ 2 in every distinct *cyclic ordering*: `cyclic_orderings(m)`
-pins index 0 to kill rotations and skips mirror reversals (`1` for m = 2,
-`(m-1)!/2` for m ≥ 3, via a hand-rolled Heap's algorithm), so each disjoint
-subset of `m` petals yields `(m-1)!/2` distinct directed cycles that share a
-`loop_score` (same edge multiset ⇒ same commutative product). It is bounded
+elementary "petals" (`agg → … → agg`), stitching each pairwise-disjoint petal
+subset of size ≥ 2 into ONE canonical loop -- the chosen petals concatenated
+in priority order (GH #676). One loop per subset is exact for dominance
+analysis: every cyclic ordering of a fixed subset traverses the same edge
+multiset (each petal contributes the same `agg→head`/internal/`tail→agg`
+edges regardless of its position in the concatenation), and the loop score is
+a commutative product over that multiset, so all orderings share one
+`loop_score`; emitting more orderings would only burn the loop budget on
+dominance-indistinguishable duplicates. It is bounded
 by a deterministic petal priority (fewest internal nodes first, then a stable
 joined-name tiebreaker -- makes truncation reproducible), a soft per-agg petal
 cap (`MAX_AGG_PETALS = 8`, bounding the `2^k` subset enumeration), and a
@@ -1409,9 +1412,10 @@ When `ltm_discovery_mode = true`, element-level discovery proceeds as:
    after the per-step sweep, `discover_loops_with_graph` treats each discovered
    single-agg path as a *petal* and feeds them to the SHARED combinatorial core
    `stitch_cross_agg_petals` (`src/db/ltm/loops.rs`) -- the same petal priority,
-   pairwise-disjoint-internal-node rule, `MAX_AGG_PETALS` / `cyclic_orderings`
-   enumeration, and `cross_agg_loop_budget()` that `recover_cross_agg_loops`
-   uses, so discovery recovers exactly the loops exhaustive does. The stitched
+   pairwise-disjoint-internal-node rule, `MAX_AGG_PETALS` cap,
+   one-canonical-loop-per-subset emission, and `cross_agg_loop_budget()` that
+   `recover_cross_agg_loops` uses, so discovery recovers exactly the loops
+   exhaustive does. The stitched
    element-level node sequences are appended to `all_paths` (deduped by
    canonical rotation against the elementary ones) and flow through the
    identical FoundLoop construction / score-product / trim / rank pipeline; a

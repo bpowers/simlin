@@ -8929,19 +8929,19 @@ fn test_inline_reducer_gets_synthetic_agg_despite_var_backed_sibling() {
     vm.run_to_end().expect("should simulate");
 }
 
-/// AC5.2 / AC5.4 (#515, end-to-end): a 4-element-dim `share[r] = pop[r] /
-/// SUM(pop[*])` model with `update[r] = share[r] * pop[r] * c` and
-/// *heterogeneous* stock initials (so loop scores don't degenerate to zero
-/// under symmetry) hoists `SUM(pop[*])` into `$⁚ltm⁚agg⁚0`; each region has
-/// one disjoint petal through it. `recover_cross_agg_loops` reconstructs the
-/// full 4-petal subset's `(4-1)!/2 = 3` distinct cyclic orderings as
-/// distinct loops -- distinct ids, distinct `loop_score` equation texts
-/// (different edge sequences) -- but, because all three traverse the same
-/// edge *multiset*, their simulated `loop_score` time series are equal
-/// (to within floating-point round-off; multiplication is commutative, so
-/// the products coincide up to FP reassociation), and non-degenerate.
+/// AC5.2 / AC5.4 (#515, end-to-end; one-loop-per-subset per GH #676): a
+/// 4-element-dim `share[r] = pop[r] / SUM(pop[*])` model with `update[r] =
+/// share[r] * pop[r] * c` and *heterogeneous* stock initials (so loop
+/// scores don't degenerate to zero under symmetry) hoists `SUM(pop[*])`
+/// into `$⁚ltm⁚agg⁚0`; each region has one disjoint petal through it.
+/// `recover_cross_agg_loops` reconstructs the full 4-petal subset as
+/// exactly ONE canonical loop (every cyclic ordering of a fixed subset
+/// traverses the same edge multiset, so additional orderings would be
+/// score-identical duplicates), and its simulated `loop_score` series is
+/// non-degenerate and equals the product of its 16 link scores at every
+/// step.
 #[test]
-fn test_four_petal_cyclic_orderings_share_loop_score_series() {
+fn test_four_petal_canonical_loop_score_is_link_score_product() {
     use simlin_engine::datamodel::{self, Equation, Variable};
 
     let regions = ["A", "B", "C", "D"];
@@ -9038,9 +9038,8 @@ fn test_four_petal_cyclic_orderings_share_loop_score_series() {
 
     let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
     // The full-4-petal loop_score vars: those whose equation references all
-    // four `pop[r]→agg` factors. There must be exactly 3 (the 3 cyclic
-    // orderings of the full subset), with distinct names and distinct
-    // equation texts.
+    // four `pop[r]→agg` factors. There must be exactly 1 -- one canonical
+    // loop per disjoint petal subset (GH #676).
     let four_petal_loop_vars: Vec<&simlin_engine::db::LtmSyntheticVar> = ltm
         .vars
         .iter()
@@ -9060,27 +9059,12 @@ fn test_four_petal_cyclic_orderings_share_loop_score_series() {
         .collect();
     assert_eq!(
         four_petal_loop_vars.len(),
-        3,
-        "the full 4-petal subset must give exactly (4-1)!/2 = 3 cyclic-ordering loops; \
-         got {:?}",
+        1,
+        "the full 4-petal subset must give exactly one canonical loop; got {:?}",
         four_petal_loop_vars
             .iter()
             .map(|v| v.name.as_str())
             .collect::<Vec<_>>()
-    );
-    let names: std::collections::HashSet<&str> = four_petal_loop_vars
-        .iter()
-        .map(|v| v.name.as_str())
-        .collect();
-    assert_eq!(names.len(), 3, "distinct ids for the 3 cyclic orderings");
-    let eqs: std::collections::HashSet<String> = four_petal_loop_vars
-        .iter()
-        .map(|v| v.equation.source_text())
-        .collect();
-    assert_eq!(
-        eqs.len(),
-        3,
-        "the 3 cyclic orderings must have distinct edge sequences (loop_score equation texts)"
     );
 
     let compiled = compile_project_incremental(&db, sync.project, "main").expect("should compile");
@@ -9088,35 +9072,19 @@ fn test_four_petal_cyclic_orderings_share_loop_score_series() {
     vm.run_to_end().expect("should simulate");
     let results = vm.into_results();
 
-    let offsets: Vec<usize> = four_petal_loop_vars
-        .iter()
-        .map(|v| {
-            *results
-                .offsets
-                .get(&Ident::<Canonical>::new(&v.name))
-                .unwrap_or_else(|| panic!("missing offset for {}", v.name))
-        })
-        .collect();
+    let loop_offset = *results
+        .offsets
+        .get(&Ident::<Canonical>::new(&four_petal_loop_vars[0].name))
+        .unwrap_or_else(|| panic!("missing offset for {}", four_petal_loop_vars[0].name));
 
-    // The three series must be equal step-by-step -- they traverse the same
-    // edge multiset, and the loop score is `∏ link_score(e)`, so the products
-    // coincide up to FP reassociation of the factor order -- and the loop
-    // must be non-degenerate (genuinely computed: non-zero and finite at some
-    // step, not stubbed to a constant zero). It is a product of 16 link
-    // scores (each O(1e-3..1)), so the value is small but not zero.
+    // The loop must be non-degenerate (genuinely computed: non-zero and
+    // finite at some step, not stubbed to a constant zero). It is a product
+    // of 16 link scores (each O(1e-3..1)), so the value is small but not
+    // zero.
     let mut saw_nonzero = false;
     let mut all_finite = true;
     for step in 0..results.step_count {
-        let base = step * results.step_size;
-        let v0 = results.data[base + offsets[0]];
-        for &o in &offsets[1..] {
-            let v = results.data[base + o];
-            let both_nan = v.is_nan() && v0.is_nan();
-            assert!(
-                both_nan || (v - v0).abs() <= 1e-12 * v0.abs().max(1e-300),
-                "step {step}: cyclic-ordering loop scores diverge: {v0} vs {v}"
-            );
-        }
+        let v0 = results.data[step * results.step_size + loop_offset];
         if !v0.is_finite() {
             all_finite = false;
         } else if v0 != 0.0 {
@@ -9169,7 +9137,7 @@ fn test_four_petal_cyclic_orderings_share_loop_score_series() {
                 .iter()
                 .map(|&o| results.data[base + o])
                 .product();
-            let loop_val = results.data[base + offsets[0]];
+            let loop_val = results.data[base + loop_offset];
             let both_nan = loop_val.is_nan() && product.is_nan();
             assert!(
                 both_nan || (loop_val - product).abs() <= 1e-9 * product.abs().max(1e-300),

@@ -77,9 +77,7 @@ pub(crate) use pinned::model_pinned_loops;
 #[cfg(test)]
 pub(crate) use compile::compile_ltm_equation_fragment;
 #[cfg(test)]
-pub(crate) use loops::{
-    AggLoopBudgetGuard, MAX_CROSS_AGG_LOOPS, build_element_level_loops, cyclic_orderings,
-};
+pub(crate) use loops::{AggLoopBudgetGuard, MAX_CROSS_AGG_LOOPS, build_element_level_loops};
 
 // Bare names used by `model_ltm_variables`'s body (kept call-site-identical
 // after lifting the link-score emitters and moving loop/parse helpers out).

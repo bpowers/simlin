@@ -2990,12 +2990,9 @@ fn cross_agg_loop_recovery_truncates_at_budget() {
 
 /// AC5.3 (no regression): a model whose reducer-in-a-loop has 3 disjoint
 /// petals (under the production budget) recovers exactly the 3 pairwise
-/// combinations (`{p0,p1}`, `{p0,p2}`, `{p1,p2}`, one cyclic ordering each)
-/// plus the single ordering of the full 3-petal subset -- 4 recovered loops
-/// -- with `agg_recovery_truncated == false` and no truncation `Warning`.
-/// The two-petal combinations each have exactly one cyclic ordering, which
-/// is the per-subset ordering the pre-#515 `2^k`-bitmask enumeration also
-/// produced.
+/// combinations (`{p0,p1}`, `{p0,p2}`, `{p1,p2}`) plus the full 3-petal
+/// subset -- one canonical loop per disjoint subset, 4 recovered loops --
+/// with `agg_recovery_truncated == false` and no truncation `Warning`.
 #[test]
 fn cross_agg_loop_recovery_three_petals_no_truncation() {
     use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
@@ -3024,8 +3021,7 @@ fn cross_agg_loop_recovery_three_petals_no_truncation() {
     let three_petal = count_loops_through_agg(ltm, 3);
     assert_eq!(
         three_petal, 1,
-        "the full 3-petal subset has exactly one cyclic ordering under the \
-         mirror-skip rule; got {three_petal}"
+        "the full 3-petal subset yields exactly one canonical loop; got {three_petal}"
     );
 
     let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
@@ -3169,18 +3165,19 @@ fn cross_agg_two_petal_loops_match_pre_fix_content() {
     }
 }
 
-/// AC5.2: a 4-petal reducer-in-a-loop fixture recovers every disjoint petal
-/// subset's distinct cyclic orderings within the (production) budget -- the
-/// 6 two-petal pairs (1 ordering each) + the 4 three-petal triples (1
-/// ordering each) + the 3 distinct cyclic orderings of the full 4-petal
-/// subset (`(4-1)!/2 = 3`), all present as distinct directed cycles. The
-/// pre-#515 `2^k`-bitmask enumeration produced one ordering per subset, so
-/// it gave only `1` loop for the full 4-subset instead of 3. (The k=4
-/// fixture, not k=3, is what surfaces the multiple-cyclic-orderings
-/// behavior: a 3-petal subset has `(3-1)!/2 = 1` ordering -- `[0,1,2]` and
-/// `[0,2,1]` are mirrors.)
+/// AC5.2 (GH #676): a 4-petal reducer-in-a-loop fixture recovers exactly ONE
+/// loop per disjoint petal subset -- the 6 two-petal pairs + the 4
+/// three-petal triples + the 1 full 4-petal subset = 11 loops. For a fixed
+/// petal subset every cyclic ordering yields the SAME edge multiset (each
+/// petal contributes its `agg→head`/internal/`tail→agg` edges regardless of
+/// its position in the concatenation), and the loop score is a commutative
+/// product over that multiset -- so additional orderings would be
+/// dominance-indistinguishable duplicates that only waste the
+/// `MAX_CROSS_AGG_LOOPS` budget. (The k=4 fixture, not k=3, is what would
+/// surface multiple orderings if they were emitted: a 3-petal subset has
+/// only one ordering class either way.)
 #[test]
-fn cross_agg_loop_recovery_four_petals_enumerates_cyclic_orderings() {
+fn cross_agg_loop_recovery_four_petals_one_loop_per_subset() {
     let project = share_reducer_loop_fixture(4);
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
@@ -3193,25 +3190,23 @@ fn cross_agg_loop_recovery_four_petals_enumerates_cyclic_orderings() {
     );
 
     // All recovered cross-agg loops (>= 2 distinct `pop[*]→agg` factors):
-    // C(4,2)=6 two-petal + C(4,3)=4 three-petal + 3 four-petal orderings = 13.
+    // C(4,2)=6 two-petal + C(4,3)=4 three-petal + 1 four-petal = 11.
     let recovered = count_loops_through_agg(ltm, 2);
     assert_eq!(
-        recovered, 13,
-        "expected 6 (m=2) + 4 (m=3) + 3 (m=4 cyclic orderings) = 13 recovered cross-agg loops; got {recovered}"
+        recovered, 11,
+        "expected 6 (m=2) + 4 (m=3) + 1 (m=4) = 11 recovered cross-agg loops; got {recovered}"
     );
-    // Loops through the agg >= 3 times: 4 three-petal + 3 four-petal = 7.
-    assert_eq!(count_loops_through_agg(ltm, 3), 7);
-    // Loops through the agg >= 4 times: only the 3 four-petal cyclic orderings.
+    // Loops through the agg >= 3 times: 4 three-petal + 1 four-petal = 5.
+    assert_eq!(count_loops_through_agg(ltm, 3), 5);
+    // Loops through the agg >= 4 times: only the single full-subset loop.
     assert_eq!(
         count_loops_through_agg(ltm, 4),
-        3,
-        "the full 4-petal subset must yield exactly (4-1)!/2 = 3 distinct cyclic orderings"
+        1,
+        "the full 4-petal subset must yield exactly one canonical loop"
     );
 
-    // The 3 four-petal cyclic orderings are distinct loops: their
-    // `loop_score` equations list the same set of link-score factors (the
-    // edge multiset of the petal subset is ordering-invariant) but in
-    // distinct sequences, and they get distinct ids.
+    // The full-subset loop is unique: exactly one `loop_score` equation
+    // references all four `pop[r]→agg` factors.
     let four_petal_loop_scores: Vec<(&str, String)> = ltm
         .vars
         .iter()
@@ -3230,32 +3225,10 @@ fn cross_agg_loop_recovery_four_petals_enumerates_cyclic_orderings() {
         })
         .map(|v| (v.name.as_str(), v.equation.source_text()))
         .collect();
-    assert_eq!(four_petal_loop_scores.len(), 3);
-    let distinct_ids: std::collections::HashSet<&str> =
-        four_petal_loop_scores.iter().map(|(n, _)| *n).collect();
     assert_eq!(
-        distinct_ids.len(),
-        3,
-        "the 3 four-petal orderings need distinct ids"
-    );
-    let distinct_eqs: std::collections::HashSet<&str> = four_petal_loop_scores
-        .iter()
-        .map(|(_, eq)| eq.as_str())
-        .collect();
-    assert_eq!(
-        distinct_eqs.len(),
-        3,
-        "the 3 four-petal cyclic orderings must have distinct edge sequences \
-         (distinct loop_score equation texts); got: {four_petal_loop_scores:?}"
-    );
-    // ... but the same multiset of factors (so they will share a loop_score).
-    let factor_sets: Vec<std::collections::BTreeSet<String>> = four_petal_loop_scores
-        .iter()
-        .map(|(_, eq)| extract_quoted_refs(eq).into_iter().collect())
-        .collect();
-    assert!(
-        factor_sets.windows(2).all(|w| w[0] == w[1]),
-        "the 3 four-petal cyclic orderings must reference the same factor set; got: {factor_sets:?}"
+        four_petal_loop_scores.len(),
+        1,
+        "exactly one loop per disjoint petal subset; got: {four_petal_loop_scores:?}"
     );
 }
 
