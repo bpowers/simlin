@@ -749,6 +749,92 @@ fn scalar_target_agg_value_matches_inlined_reducer() {
     }
 }
 
+/// GH #738 round 2: the syntactic gate that decides whether an LTM
+/// fragment's lowering needs the dependency-aware scope must cover EVERY
+/// Pass-1 temp-decomposition site, not just the agg-hoistable reducer set.
+/// `SIZE` is the demonstrated divergence: it is never hoisted into a
+/// `$⁚ltm⁚agg⁚{n}` (its link score is constant 0), but Pass-1 decomposes
+/// its argument exactly like `SUM`'s, so a fragment whose equation embeds
+/// `SIZE(<array expression>)` still needs Expr2 bounds.
+///
+/// The reachable shape: `grow = scale * SIZE(pop[*] * 2)`. The
+/// ceteris-paribus partial for `scale→grow` wraps the non-live reducer
+/// subtree atomically as `PREVIOUS(SIZE(pop[*] * 2), 0)`; LTM parsing
+/// captures the argument into a scalar helper aux whose equation is
+/// exactly `size(pop[*] * 2)` (well-typed -- SIZE of an array is a
+/// scalar -- so the GH #541 scalar-helper limitation does NOT mask it).
+/// With the gate keyed on the wrong (agg-hoistable) builtin set, the
+/// helper skipped the scoped re-lower, lost its bounds, failed codegen,
+/// and was stubbed to constant 0 -- doubly silently, since failed
+/// implicit-HELPER fragments get no `model_ltm_fragment_diagnostics`
+/// Warning (that pass covers only `model_ltm_variables().vars`; the
+/// assemble-time drop of helper fragments is tracked separately).
+///
+/// Pins the runtime values: the helper series is the element count (2.0)
+/// at every step, and the `scale→grow` link score is 0 at step 0 (the
+/// TIME = INITIAL_TIME guard) and exactly 1 thereafter (`scale` is the
+/// only driver of `grow` and is strictly increasing).
+#[test]
+fn size_reducer_previous_helper_compiles_and_is_correct() {
+    let project = TestProject::new("size_helper")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "scale * SIZE(pop[*] * 2)", None)
+        .build_datamodel();
+
+    let (results, _ltm_vars) = run_ltm(&project);
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // The PREVIOUS-capture helper for the scale→grow partial holds
+    // `size(pop[*] * 2)` == the region element count.
+    let helper_offsets: Vec<(String, usize)> = results
+        .offsets
+        .iter()
+        .filter(|(k, _)| k.as_str().contains("scale\u{2192}grow") && k.as_str().contains("arg0"))
+        .map(|(k, &o)| (k.as_str().to_string(), o))
+        .collect();
+    assert!(
+        !helper_offsets.is_empty(),
+        "expected a PREVIOUS-capture helper for the scale→grow partial; offsets: {:?}",
+        results
+            .offsets
+            .keys()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+    );
+    for (name, off) in &helper_offsets {
+        for (step, &v) in series_at(&results, *off).iter().enumerate() {
+            assert!(
+                (v - 2.0).abs() < 1e-12,
+                "step {step}: helper {name} = {v}, expected SIZE(pop[*] * 2) = 2.0 \
+                 (a 0 here means the helper fragment was silently stubbed)"
+            );
+        }
+    }
+
+    // grow = scale * 2 exactly, so the scale→grow ceteris-paribus link
+    // score is 1 at every step past the initial-time guard.
+    let ls = series_at(
+        &results,
+        offset_of(
+            &results,
+            "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}grow",
+        ),
+    );
+    assert_eq!(ls[0], 0.0, "step 0 is pinned to 0 by the TIME guard");
+    for (step, &v) in ls.iter().enumerate().skip(1) {
+        assert!(
+            (v - 1.0).abs() < 1e-9,
+            "step {step}: scale\u{2192}grow link score = {v}, expected exactly 1 \
+             (scale is grow's only driver)"
+        );
+    }
+}
+
 /// Positive regression test for GH #541 (flipped from the prior
 /// characterization tripwire): a plain apply-to-all equation with a *bare*
 /// (unsubscripted) arrayed name inside a *nested* `PREVIOUS` now compiles,

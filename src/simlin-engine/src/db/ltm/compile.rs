@@ -212,47 +212,161 @@ pub fn link_score_equation_text_shaped<'db>(
 /// C-LEARN's LTM compile time.
 struct LoweredLtmVariable {
     variable: crate::variable::Variable,
-    /// `classify_dependencies(..).all` of the lowered dt AST (falling back
-    /// to the init AST for stock-shaped helpers). Identifier sets are
-    /// lowering-scope-independent, so this is valid for the returned
-    /// `variable` whether or not the scoped re-lower ran.
+    /// `classify_dependencies(..).all` of the lowered AST
+    /// (`Variable::ast()`, which for the Aux-parsed Vars LTM produces is
+    /// the dt AST). Identifier sets are lowering-scope-independent, so
+    /// this is valid for the returned `variable` whether or not the
+    /// scoped re-lower ran.
     dep_idents: HashSet<Ident<Canonical>>,
     /// `classify_dependencies(..).referenced_tables` of the same AST.
     referenced_tables: BTreeSet<String>,
 }
 
-/// `true` when one of `equation`'s texts could contain a hoistable
-/// array-reducer call (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/`RANK` -- the
-/// [`crate::ltm_agg::reducer_kind_from_name`] set minus the never-hoisted
-/// `SIZE`), checked case-insensitively as `name(`.
+/// `true` when the lowered AST contains a construct whose compilation
+/// consumes the Expr2 `ArrayBounds` that only the dependency-aware
+/// lowering scope can recover -- i.e. a Pass-1 temp-decomposition site.
 ///
-/// This is the cheap syntactic gate for [`lower_ltm_variable`]'s scoped
-/// re-lower. Soundness: the Expr2 `ArrayBounds` the re-lower recovers are
-/// consumed by Pass-1 temp decomposition, which fires only on a reducer's
-/// argument -- the GH #738 class. LTM equation text is always
-/// engine-generated (`print_eqn` / `expr2_to_string` re-prints), both of
-/// which format every call as `name(args)` with no space before the paren,
-/// so a reducer call always matches one of these substrings. The other,
-/// rarer bounds consumers (the arrayed-GF apply decomposition, non-A2A Op2
-/// dimension reordering) behave for a gated-out fragment exactly as they
-/// did before GH #738 -- never worse. False positives (a scalar 2-arg
-/// `MIN(a, b)`, or a call whose name merely ends in a reducer name, e.g.
-/// `vitamin(x)` matching `min(`) just run the arrayedness analysis and
-/// cost nothing in correctness.
-fn equation_may_contain_reducer(equation: &datamodel::Equation) -> bool {
-    fn text_mentions_reducer(text: &str) -> bool {
-        const HOISTABLE_REDUCER_CALLS: [&str; 6] =
-            ["sum(", "mean(", "min(", "max(", "stddev(", "rank("];
-        let lower = text.to_ascii_lowercase();
-        HOISTABLE_REDUCER_CALLS.iter().any(|n| lower.contains(n))
-    }
-    match equation {
-        datamodel::Equation::Scalar(s) | datamodel::Equation::ApplyToAll(_, s) => {
-            text_mentions_reducer(s)
+/// This is [`lower_ltm_variable`]'s gate for the scoped re-lower, and it
+/// must be sound against `ast::expr3`'s Pass-1 decomposition set -- NOT
+/// the agg-hoistable reducer set (`ltm_agg::reducer_kind_from_name`),
+/// which differs in both directions: `SIZE` is never hoisted into an agg
+/// (its link score is constant 0) yet Pass-1 decomposes its argument
+/// exactly like `SUM`'s, while `RANK` is agg-hoistable yet Pass-1 never
+/// decomposes its arguments. Deriving the original (text-scan) gate from
+/// the wrong set silently stubbed any fragment embedding
+/// `SIZE(<array expression>)` -- the demonstrated GH #738 round-2
+/// regression, pinned by
+/// `ltm_array_agg::size_reducer_previous_helper_compiles_and_is_correct`.
+fn ast_contains_pass1_decomposition_site(ast: &crate::ast::Ast<crate::ast::Expr2>) -> bool {
+    use crate::ast::Ast;
+    match ast {
+        Ast::Scalar(e) | Ast::ApplyToAll(_, e) => expr_contains_pass1_decomposition_site(e),
+        Ast::Arrayed(_, elements, default, _) => {
+            elements
+                .values()
+                .any(expr_contains_pass1_decomposition_site)
+                || default
+                    .as_ref()
+                    .is_some_and(expr_contains_pass1_decomposition_site)
         }
-        datamodel::Equation::Arrayed(_, elements, default, _) => {
-            elements.iter().any(|(_, s, _, _)| text_mentions_reducer(s))
-                || default.as_deref().is_some_and(text_mentions_reducer)
+    }
+}
+
+/// Expression-level walk for [`ast_contains_pass1_decomposition_site`].
+///
+/// Sound BY CONSTRUCTION: the builtin match below is exhaustive (no
+/// wildcard arm), with the `true` arms mirroring exactly the places
+/// `ast::expr3` decomposes an argument into an `AssignTemp`:
+/// `transform_builtin_inner`'s `maybe_decompose_array_arg_inner` calls
+/// (`SUM` / `MEAN` (every arg, any arity) / `STDDEV` / `SIZE` / 1-arg
+/// `MIN` / 1-arg `MAX` / `VECTOR SELECT` / `VECTOR ELM MAP` /
+/// `VECTOR SORT ORDER` / `ALLOCATE AVAILABLE` / `ALLOCATE BY PRIORITY`)
+/// plus `transform_inner`'s arrayed-GF apply decomposition (a
+/// LOOKUP-family call whose *table* operand carries multi-element bounds;
+/// flagged for every lookup since the table's arrayedness is exactly what
+/// the recovered bounds determine). Adding a `BuiltinFn` variant fails
+/// compilation HERE, forcing the author to classify it against Pass-1 --
+/// the loud-divergence guard the retired text-scan lacked.
+/// `pass1_gate_covers_each_decomposition_builtin` pins the classification.
+///
+/// The one bounds consumer deliberately NOT gated on is the non-A2A Op2
+/// dimension-reordering pass (`compiler::context`'s Op2 lowering): it
+/// requires a whole-array Op2 *result* outside any reducer, which in a
+/// scalar LTM equation is ill-typed under either lowering, and in an
+/// A2A/per-element LTM equation is unreachable (per-element expansion
+/// lowers with `active_dimension` set, which skips the pass). A gated-out
+/// fragment therefore compiles byte-identically to its empty-scope
+/// (pre-GH #738) lowering.
+fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
+    use crate::ast::{Expr2, IndexExpr2};
+    use crate::builtins::BuiltinFn;
+    match expr {
+        Expr2::Const(..) | Expr2::Var(..) => false,
+        Expr2::Subscript(_, indices, _, _) => indices.iter().any(|idx| match idx {
+            IndexExpr2::Expr(e) => expr_contains_pass1_decomposition_site(e),
+            IndexExpr2::Range(l, r, _) => {
+                expr_contains_pass1_decomposition_site(l)
+                    || expr_contains_pass1_decomposition_site(r)
+            }
+            IndexExpr2::Wildcard(_)
+            | IndexExpr2::StarRange(_, _)
+            | IndexExpr2::DimPosition(_, _) => false,
+        }),
+        Expr2::App(builtin, _, _) => {
+            let is_decomposition_site = match builtin {
+                // `transform_builtin_inner`'s decomposition sites.
+                BuiltinFn::Sum(_)
+                | BuiltinFn::Stddev(_)
+                | BuiltinFn::Size(_)
+                | BuiltinFn::Mean(_)
+                | BuiltinFn::Min(_, None)
+                | BuiltinFn::Max(_, None)
+                | BuiltinFn::VectorSelect(_, _, _, _, _)
+                | BuiltinFn::VectorElmMap(_, _)
+                | BuiltinFn::VectorSortOrder(_, _)
+                | BuiltinFn::AllocateAvailable(_, _, _)
+                | BuiltinFn::AllocateByPriority(_, _, _, _, _) => true,
+                // `transform_inner`'s arrayed-GF apply decomposition.
+                BuiltinFn::Lookup(_, _, _)
+                | BuiltinFn::LookupForward(_, _, _)
+                | BuiltinFn::LookupBackward(_, _, _) => true,
+                // Non-decomposing: 2-arg MIN/MAX are scalar element-wise ops,
+                // and RANK's arguments are transformed but never decomposed
+                // (`expr3.rs`'s Rank arm calls `transform_inner`, not
+                // `maybe_decompose_array_arg_inner`).
+                BuiltinFn::Min(_, Some(_)) | BuiltinFn::Max(_, Some(_)) | BuiltinFn::Rank(_, _) => {
+                    false
+                }
+                BuiltinFn::Abs(_)
+                | BuiltinFn::Arccos(_)
+                | BuiltinFn::Arcsin(_)
+                | BuiltinFn::Arctan(_)
+                | BuiltinFn::Cos(_)
+                | BuiltinFn::Exp(_)
+                | BuiltinFn::Inf
+                | BuiltinFn::Int(_)
+                | BuiltinFn::IsModuleInput(_, _)
+                | BuiltinFn::Ln(_)
+                | BuiltinFn::Log10(_)
+                | BuiltinFn::Pi
+                | BuiltinFn::Pulse(_, _, _)
+                | BuiltinFn::Quantum(_, _)
+                | BuiltinFn::Ramp(_, _, _)
+                | BuiltinFn::SafeDiv(_, _, _)
+                | BuiltinFn::Sign(_)
+                | BuiltinFn::Sshape(_, _, _)
+                | BuiltinFn::Sin(_)
+                | BuiltinFn::Sqrt(_)
+                | BuiltinFn::Step(_, _)
+                | BuiltinFn::Tan(_)
+                | BuiltinFn::Time
+                | BuiltinFn::TimeStep
+                | BuiltinFn::StartTime
+                | BuiltinFn::FinalTime
+                | BuiltinFn::Previous(_, _)
+                | BuiltinFn::Init(_) => false,
+            };
+            if is_decomposition_site {
+                return true;
+            }
+            // A decomposition site can hide anywhere in a non-decomposing
+            // builtin's arguments (`ABS(SUM(a[*] * 2))`).
+            let mut found = false;
+            builtin.for_each_expr_ref(|e| {
+                if !found {
+                    found = expr_contains_pass1_decomposition_site(e);
+                }
+            });
+            found
+        }
+        Expr2::Op1(_, e, _, _) => expr_contains_pass1_decomposition_site(e),
+        Expr2::Op2(_, l, r, _, _) => {
+            expr_contains_pass1_decomposition_site(l) || expr_contains_pass1_decomposition_site(r)
+        }
+        Expr2::If(c, t, f, _, _) => {
+            expr_contains_pass1_decomposition_site(c)
+                || expr_contains_pass1_decomposition_site(t)
+                || expr_contains_pass1_decomposition_site(f)
         }
     }
 }
@@ -274,12 +388,13 @@ fn equation_may_contain_reducer(equation: &datamodel::Equation) -> bool {
 /// Strategy: lower once with an empty scope (cheap, and byte-identical to
 /// the populated-scope lowering when no dependency is arrayed -- the scope
 /// only feeds `get_dimensions`, which returns `None` for scalars either
-/// way); only when the equation can contain a reducer
-/// ([`equation_may_contain_reducer`]) AND an arrayed dependency is present,
-/// re-lower with a scope carrying the parsed Stage0 variables of self plus
-/// the deps. The dependency identifier set is scope-independent (the scope
-/// affects only bounds metadata), so the classification computed on the
-/// preliminary lowering is returned alongside whichever lowering wins.
+/// way); only when the lowered AST contains a Pass-1 temp-decomposition
+/// site ([`ast_contains_pass1_decomposition_site`]) AND an arrayed
+/// dependency is present, re-lower with a scope carrying the parsed Stage0
+/// variables of self plus the deps. The dependency identifier set is
+/// scope-independent (the scope affects only bounds metadata), so the
+/// classification computed on the preliminary lowering is returned
+/// alongside whichever lowering wins.
 ///
 /// An arrayed dependency can be a model source variable OR an arrayed
 /// implicit helper aux synthesized while parsing an LTM equation (the GH
@@ -316,29 +431,28 @@ fn lower_ltm_variable(
 
     // Classify dependencies ONCE on the preliminary lowering; the set is
     // scope-independent, so it serves both the re-lower decision below and
-    // the caller's metadata-stub construction. The dt AST is the phase LTM
-    // fragments compile; a stock-shaped helper (no dt AST) falls back to
-    // its init AST.
+    // the caller's metadata-stub construction. `Variable::ast()` is the
+    // right (and only needed) source: every LTM Stage0 input here is an
+    // Aux-parsed Var whose dt AST is its sole AST, and even a hypothetical
+    // stock-shaped input is covered because `ast()` returns a Stock's init
+    // AST.
     let classification = prelim
         .ast()
-        .or_else(|| prelim.init_ast())
         .map(|ast| crate::variable::classify_dependencies(ast, &[], None));
     let (dep_idents, referenced_tables) = match classification {
         Some(c) => (c.all, c.referenced_tables),
         None => (HashSet::new(), BTreeSet::new()),
     };
 
-    // Cheap syntactic gate: without a reducer call in the equation text,
-    // the Expr2 bounds the scoped re-lower would recover cannot change the
-    // compile outcome -- skip the per-dep arrayedness lookups and the
-    // second lowering entirely (the common case: most link/loop scores
-    // contain no reducer even on heavily arrayed models).
-    let stage0_equation: Option<&datamodel::Equation> = match parsed_variable {
-        crate::variable::Variable::Stock { eqn, .. }
-        | crate::variable::Variable::Var { eqn, .. } => eqn.as_ref(),
-        crate::variable::Variable::Module { .. } => None,
-    };
-    if !stage0_equation.is_some_and(equation_may_contain_reducer) {
+    // Structural gate: without a Pass-1 temp-decomposition site in the
+    // lowered AST, the Expr2 bounds the scoped re-lower would recover
+    // cannot change the compile outcome -- skip the per-dep arrayedness
+    // lookups and the second lowering entirely (the common case: most
+    // link/loop scores contain no reducer even on heavily arrayed models).
+    if !prelim
+        .ast()
+        .is_some_and(ast_contains_pass1_decomposition_site)
+    {
         return LoweredLtmVariable {
             variable: prelim,
             dep_idents,
@@ -1749,10 +1863,12 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         // stub and graphical-function data so a `lookup(table, ...)` inside a
         // synthesized helper compiles; see compile_ltm_equation_fragment).
         //
-        // The classification was computed once inside `lower_ltm_variable`;
-        // the `lowered.ast().is_some()` guard preserves the long-standing
-        // dt-AST-only scope of this pass (a stock-shaped helper, whose only
-        // AST is its init equation, keeps its empty dep set here).
+        // The classification was computed once inside `lower_ltm_variable`
+        // (on the same `Variable::ast()` source this pass always used).
+        // The `lowered.ast().is_some()` guard preserves the long-standing
+        // "no lowered AST -> no dep stubs" behavior: if the scoped re-lower
+        // surfaced an equation error, `lowered.ast()` is `None` and the
+        // fragment compiles to nothing anyway.
         let (dep_idents, referenced_tables) = if lowered.ast().is_some() {
             ltm_lowered_deps.take().unwrap_or_default()
         } else {
@@ -2123,4 +2239,124 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         // run-invariance.
         flow_invariance: None,
     })
+}
+
+#[cfg(test)]
+mod pass1_gate_tests {
+    use super::expr_contains_pass1_decomposition_site;
+    use crate::ast::{Expr2, IndexExpr2, Loc};
+    use crate::builtins::BuiltinFn;
+    use crate::common::{Canonical, Ident};
+
+    fn c() -> Box<Expr2> {
+        Box::new(Expr2::Const("0".to_string(), 0.0, Loc::default()))
+    }
+
+    fn app(builtin: BuiltinFn<Expr2>) -> Expr2 {
+        Expr2::App(builtin, None, Loc::default())
+    }
+
+    /// The guard test tying the gate to Pass-1's decomposition set
+    /// (`ast::expr3::Pass1Context::transform_builtin_inner` /
+    /// `transform_inner`'s arrayed-GF apply): every builtin Pass-1
+    /// decomposes must flag the gate, and the documented non-decomposing
+    /// near-misses (RANK, 2-arg MIN/MAX) must not flag it on their own.
+    /// The exhaustive (no-wildcard) match in the gate is the compile-time
+    /// half of this guard -- a new `BuiltinFn` variant fails to build
+    /// until classified -- while this test pins the classification of the
+    /// existing variants so a refactor cannot silently flip one (the
+    /// round-2 GH #738 regression was exactly such a divergence: the gate
+    /// was derived from the agg-hoistable reducer set, which omits SIZE).
+    #[test]
+    fn pass1_gate_covers_each_decomposition_builtin() {
+        let decomposing: Vec<(&str, BuiltinFn<Expr2>)> = vec![
+            ("sum", BuiltinFn::Sum(c())),
+            ("mean_1arg", BuiltinFn::Mean(vec![*c()])),
+            ("mean_2arg", BuiltinFn::Mean(vec![*c(), *c()])),
+            ("stddev", BuiltinFn::Stddev(c())),
+            ("size", BuiltinFn::Size(c())),
+            ("min_1arg", BuiltinFn::Min(c(), None)),
+            ("max_1arg", BuiltinFn::Max(c(), None)),
+            (
+                "vector_select",
+                BuiltinFn::VectorSelect(c(), c(), c(), c(), c()),
+            ),
+            ("vector_elm_map", BuiltinFn::VectorElmMap(c(), c())),
+            ("vector_sort_order", BuiltinFn::VectorSortOrder(c(), c())),
+            (
+                "allocate_available",
+                BuiltinFn::AllocateAvailable(c(), c(), c()),
+            ),
+            (
+                "allocate_by_priority",
+                BuiltinFn::AllocateByPriority(c(), c(), c(), c(), c()),
+            ),
+            ("lookup", BuiltinFn::Lookup(c(), c(), Loc::default())),
+            (
+                "lookup_forward",
+                BuiltinFn::LookupForward(c(), c(), Loc::default()),
+            ),
+            (
+                "lookup_backward",
+                BuiltinFn::LookupBackward(c(), c(), Loc::default()),
+            ),
+        ];
+        for (name, builtin) in decomposing {
+            assert!(
+                expr_contains_pass1_decomposition_site(&app(builtin)),
+                "{name} is a Pass-1 decomposition site and must flag the gate"
+            );
+        }
+
+        let non_decomposing: Vec<(&str, BuiltinFn<Expr2>)> = vec![
+            ("rank", BuiltinFn::Rank(c(), c())),
+            ("min_2arg", BuiltinFn::Min(c(), Some(c()))),
+            ("max_2arg", BuiltinFn::Max(c(), Some(c()))),
+            ("abs", BuiltinFn::Abs(c())),
+            ("previous", BuiltinFn::Previous(c(), c())),
+            ("init", BuiltinFn::Init(c())),
+        ];
+        for (name, builtin) in non_decomposing {
+            assert!(
+                !expr_contains_pass1_decomposition_site(&app(builtin)),
+                "{name} is not a Pass-1 decomposition site and must not flag the gate alone"
+            );
+        }
+    }
+
+    /// A decomposition site nested inside a non-decomposing construct
+    /// (a builtin argument, an Op2 operand, a subscript index) must still
+    /// flag the gate -- the walk recurses everywhere Pass-1's transform
+    /// recurses.
+    #[test]
+    fn pass1_gate_finds_nested_decomposition_sites() {
+        let nested_in_builtin = app(BuiltinFn::Abs(Box::new(app(BuiltinFn::Sum(c())))));
+        assert!(expr_contains_pass1_decomposition_site(&nested_in_builtin));
+
+        let nested_in_op2 = Expr2::Op2(
+            crate::ast::BinaryOp::Mul,
+            c(),
+            Box::new(app(BuiltinFn::Size(c()))),
+            None,
+            Loc::default(),
+        );
+        assert!(expr_contains_pass1_decomposition_site(&nested_in_op2));
+
+        let nested_in_subscript = Expr2::Subscript(
+            Ident::<Canonical>::new("a"),
+            vec![IndexExpr2::Expr(app(BuiltinFn::Sum(c())))],
+            None,
+            Loc::default(),
+        );
+        assert!(expr_contains_pass1_decomposition_site(&nested_in_subscript));
+
+        let plain = Expr2::Op2(
+            crate::ast::BinaryOp::Add,
+            c(),
+            Box::new(app(BuiltinFn::Previous(c(), c()))),
+            None,
+            Loc::default(),
+        );
+        assert!(!expr_contains_pass1_decomposition_site(&plain));
+    }
 }
