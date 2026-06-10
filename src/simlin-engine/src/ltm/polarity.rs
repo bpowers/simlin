@@ -26,36 +26,44 @@ pub(super) fn analyze_link_polarity(
     analyze_ast_polarity(ast, from_var, variables, /* mul_convention = */ false)
 }
 
-/// Polarity of a hoisted reducer's body with respect to a *scalar feeder*
+/// Polarity of a hoisted reducer's body with respect to ONE source variable
 /// referenced inside it -- the discriminating polarity of a
-/// `feeder -> $⁚ltm⁚agg⁚{n}` hop (GH #737 review follow-up).
+/// `source -> $⁚ltm⁚agg⁚{n}` hop (GH #737 review follow-ups I1/I1b). The
+/// source may be a scalar feeder (`scale` in `SUM(pop[*] * scale)`) or an
+/// arrayed row / co-source (`pop` or `weight` in
+/// `SUM(pop[*] * (1 - weight[*]))`): either way the hop's sign is the sign
+/// of d(body)/d(source), which only the body's composition determines --
+/// "the reducer is monotone in its summands" says nothing about a variable
+/// the summand body negates.
 ///
 /// This is `analyze_link_polarity` with the positive-by-convention Mul rule
-/// enabled (`mul_convention`): a Mul whose feeder-independent co-factor is a
+/// enabled (`mul_convention`): a Mul whose source-independent co-factor is a
 /// bare named quantity (`pop[*]` in `SUM(pop[*] * scale)`) passes the
-/// feeder's derivative sign through, the same SD labeling convention the Div
+/// source's derivative sign through, the same SD labeling convention the Div
 /// arm and the both-sides-dependent Mul/Div rules already apply. So
-/// `SUM(pop[*] * scale)` is Positive, `SUM(pop[*] * (1 - scale))` is
-/// Negative, and an indeterminate body (a compound co-factor like
-/// `(k - pop[*])`, or a non-monotone reducer) stays Unknown -- never a
-/// confident wrong label.
+/// `SUM(pop[*])` and `SUM(pop[*] * scale)` w.r.t. `pop` are Positive,
+/// `SUM(pop[*] * scale)` w.r.t. `scale` is Positive,
+/// `SUM(pop[*] * (1 - weight[*]))` w.r.t. `weight` is Negative, and an
+/// indeterminate body (a compound co-factor like `(k - pop[*])`, or a
+/// non-monotone reducer like STDDEV) stays Unknown -- never a confident
+/// wrong label.
 ///
 /// The convention rule is deliberately NOT part of the general analyzer:
 /// applied to arbitrary model equations it would relabel sign-indefinite
 /// links (the logistic-growth class the Mul both-sides comment documents).
-/// An agg's body is the one context where the blanket monotone-Positive
+/// An agg's body is the one context where a blanket monotone-Positive
 /// label was previously applied unconditionally, so a convention-scoped
 /// analysis is strictly more accurate there.
-pub(super) fn analyze_feeder_to_agg_polarity(
+pub(super) fn analyze_source_to_agg_polarity(
     agg_ast: &Ast<Expr2>,
-    feeder: &Ident<Canonical>,
+    source: &Ident<Canonical>,
     variables: &HashMap<Ident<Canonical>, Variable>,
 ) -> LinkPolarity {
-    analyze_ast_polarity(agg_ast, feeder, variables, /* mul_convention = */ true)
+    analyze_ast_polarity(agg_ast, source, variables, /* mul_convention = */ true)
 }
 
 /// Shared AST-level dispatch for [`analyze_link_polarity`] /
-/// [`analyze_feeder_to_agg_polarity`]: per-element equations fold like the
+/// [`analyze_source_to_agg_polarity`]: per-element equations fold like the
 /// `Ast::Arrayed` rule (first concrete polarity wins; a direction
 /// disagreement collapses to Unknown).
 fn analyze_ast_polarity(
@@ -261,7 +269,7 @@ pub(super) fn analyze_expr_polarity_with_context(
 
 /// The recursive polarity walk. `mul_convention` enables the
 /// positive-by-convention Mul one-side rule (feeder-hop analysis ONLY; see
-/// [`analyze_feeder_to_agg_polarity`]); `false` reproduces the general
+/// [`analyze_source_to_agg_polarity`]); `false` reproduces the general
 /// analyzer exactly.
 fn analyze_expr_polarity_impl(
     expr: &Expr2,
@@ -563,7 +571,7 @@ fn analyze_expr_polarity_impl(
                             && operand_positive_by_convention(right, variables)
                         {
                             // Feeder-hop analysis only (see
-                            // `analyze_feeder_to_agg_polarity`): a bare named
+                            // `analyze_source_to_agg_polarity`): a bare named
                             // co-factor independent of `from_var` is positive
                             // by the SD labeling convention -- the same
                             // convention the Div arm and the both-sides rules

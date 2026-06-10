@@ -1269,14 +1269,14 @@ impl CausalGraph {
     /// own lowered equation (the caller reconstructs it from
     /// `AggNode::equation_text`, since the agg has no node in this
     /// variable-level graph). See
-    /// [`super::polarity::analyze_feeder_to_agg_polarity`] for the
+    /// [`super::polarity::analyze_source_to_agg_polarity`] for the
     /// positive-by-convention Mul rule and the Unknown fallback.
-    pub(crate) fn feeder_to_agg_polarity(
+    pub(crate) fn source_to_agg_polarity(
         &self,
         feeder: &Ident<Canonical>,
         agg_ast: &crate::ast::Ast<crate::ast::Expr2>,
     ) -> LinkPolarity {
-        super::polarity::analyze_feeder_to_agg_polarity(agg_ast, feeder, &self.variables)
+        super::polarity::analyze_source_to_agg_polarity(agg_ast, feeder, &self.variables)
     }
 
     /// Compute per-link polarity for all edges in the causal graph.
@@ -1399,27 +1399,22 @@ fn all_module_stocks(
 ///   fully orders any tied group, making `assign_loop_ids` a pure function of
 ///   loop content rather than enumeration order.
 ///
-/// Synthetic `$⁚ltm⁚agg⁚{n}` nodes are EXCLUDED from both components (GH #737
-/// / review C1): the scored surface's loops traverse the agg node
-/// (`scale → $⁚ltm⁚agg⁚0 → grow`) while `model_detected_loops`' enumerated
-/// loops carry the same cycle as variable-level links (`scale → grow`).
-/// Keeping the agg names in the key would sort the same cycle differently on
-/// the two surfaces (the `$`-prefixed name sorts before every letter), so
-/// the polarity-prefixed ids -- the key the runtime join reads
-/// `$⁚ltm⁚loop_score⁚{id}` with -- could number apart even when the loop
-/// sets biject. Two scored loops that differ ONLY in which agg they route
-/// through (one cycle through two hoisted reducers of the same target) do
-/// collapse to one key; the stable sort then keeps the builders'
-/// deterministic emission order, so their relative numbering stays
-/// deterministic (such a cycle has no 1:1 variable-level counterpart on the
-/// detected surface anyway -- the documented non-bijective residual).
+/// Synthetic `$⁚ltm⁚agg⁚{n}` nodes are INCLUDED in the key like any other
+/// node (GH #737 / review C1b). Both id-bearing surfaces now carry the agg
+/// hops explicitly in their links -- the scored loops are built from the
+/// element graph and `model_detected_loops` splices its ThroughAgg-routed
+/// edges through the same agg nodes
+/// (`db::ltm::expand_loops_through_routed_aggs`) -- so the keys match
+/// EXACTLY across surfaces, two loops differing only in WHICH agg they route
+/// through stay totally ordered (`agg⁚0` vs `agg⁚1`), and the cross-surface
+/// numbering never leans on a tied-key stable-sort fallback. (A round-1 fix
+/// stripped agg names here to reconcile the then-agg-free detected surface;
+/// that left multi-agg sibling loops key-tied and is reverted.)
 fn loop_id_sort_key(loop_item: &Loop) -> (String, Vec<String>) {
-    let is_agg = |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
     let mut vars: Vec<String> = loop_item
         .links
         .iter()
         .flat_map(|link| vec![link.from.as_str().to_string(), link.to.as_str().to_string()])
-        .filter(|n| !is_agg(n))
         .collect();
     vars.sort();
     vars.dedup();
@@ -1429,7 +1424,6 @@ fn loop_id_sort_key(loop_item: &Loop) -> (String, Vec<String>) {
         .links
         .iter()
         .map(|link| link.from.as_str().to_string())
-        .filter(|n| !is_agg(n))
         .collect();
     let secondary = super::canonical_rotation(&edge_seq);
 

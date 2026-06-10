@@ -278,8 +278,9 @@ re-evaluation per input per variable).
 > and complexity tradeoff, not an impossibility). Instead Simlin emits the algebraically
 > dual **"changed-last"** attribution for that one hop:
 > `Delta_x(z) = z(x_current, w_current) - z(x_previous, w_current)` -- only the scalar
-> feeder is frozen, every array reference stays live. Both conventions are first-order
-> -equal discrete attributions of `Delta(z)` to `Delta(x)`; for a bilinear body such as
+> feeder is frozen, every array reference stays live. Both conventions are
+> first-order-equal discrete attributions of `Delta(z)` to `Delta(x)`; for a bilinear
+> body such as
 > `SUM(pop[*] * scale)` the feeder's changed-last half is exactly complementary to the
 > array rows' changed-first halves (the per-input deltas sum identically to `Delta(z)`),
 > so the loop-score product loses nothing. The two renderings differ only in which

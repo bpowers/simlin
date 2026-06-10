@@ -146,21 +146,6 @@ pub(crate) fn reducer_kind<E>(builtin: &BuiltinFn<E>) -> Option<ReducerKind> {
     reducer_kind_from_name(builtin.name(), arity)
 }
 
-/// `true` when a reducer named `name` is monotone *non-decreasing* in each of
-/// its source elements: `SUM`, `MEAN`, `MIN`, `MAX`. Raising any one element
-/// can only raise (or leave unchanged) the result, so a `source[d] → agg` hop
-/// through such a reducer has `Positive` polarity.
-///
-/// Monotonicity is keyed on the reducer *name* rather than carried by
-/// [`ReducerKind`] because `Nonlinear` lumps the monotone single-argument
-/// `MIN`/`MAX` together with the non-monotone `STDDEV`/`RANK` -- but it lives
-/// here next to [`reducer_kind`], so AC1.2's "the array-reducer set and its
-/// `Linear`/`Nonlinear`/`Constant` + `is_monotone` classification are defined
-/// in exactly one place" still holds.
-pub(crate) fn reducer_name_is_monotone(name: &str) -> bool {
-    matches!(name, "sum" | "mean" | "min" | "max")
-}
-
 /// `true` when `builtin` is a recognized array reducer that is *hoisted* into
 /// an aggregate node -- i.e. recognized AND not [`ReducerKind::Constant`].
 ///
@@ -1014,34 +999,6 @@ fn result_dims_from_read_slice(
 /// `true` when `name` is a synthetic aggregate-node name (`$⁚ltm⁚agg⁚{n}`).
 pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
     name.starts_with(AGG_NAME_PREFIX)
-}
-
-/// `true` when an aggregate node's reducer is monotone *non-decreasing* in
-/// each of its source elements (`SUM`, `MEAN`, `MIN`, `MAX`), so a
-/// `source[d] → agg` hop through it has `Positive` polarity. `STDDEV` and
-/// `RANK` are not monotone, so a hop through them stays `Unknown`-polarity.
-///
-/// Keyed on the canonical reducer text (`AggNode::equation_text`, which is
-/// `print_eqn` output -- function names lowercased, no space before `(`). The
-/// leading-name extraction (everything up to the first `(`, trimmed) is
-/// intentionally lenient: it also accepts an optional `(` and surrounding
-/// whitespace (`"sum (x)"`, or even a bare `"sum"`), so it never accidentally
-/// reads past the function name. That widening is harmless because the input is
-/// always `print_eqn` output (no space before `(`) and an aggregate's equation
-/// always *has* a `(`, so in practice only the exact-`name(` shape ever
-/// occurs; documenting the leniency is cheaper than restating the literal
-/// `"sum(" | "mean(" | ...` set the consolidation removed. The monotone set
-/// itself comes from [`reducer_name_is_monotone`] so this stays a thin reader
-/// of the one reducer table. Only the single-argument `MIN`/`MAX` forms are
-/// ever hoisted into an aggregate node, so a leading `min` / `max` here is
-/// always the reducer form.
-pub(crate) fn agg_reducer_is_monotone(equation_text: &str) -> bool {
-    let name = equation_text
-        .split('(')
-        .next()
-        .unwrap_or(equation_text)
-        .trim();
-    reducer_name_is_monotone(name)
 }
 
 /// Collect the canonical names of all model variables referenced (directly or
@@ -1898,21 +1855,9 @@ mod tests {
         assert!(synthetic[0].result_dims.is_empty());
     }
 
-    /// The `BuiltinFn`-form companion to [`reducer_name_is_monotone`]: `true`
-    /// when `builtin` is a recognized array reducer (so a 2-arg `MIN(a, b)` --
-    /// not an array reducer at all -- is never "monotone" here) *and* that
-    /// reducer is monotone non-decreasing. Only the classification test needs
-    /// the builtin-keyed shape; the production monotone consumer
-    /// (`recover_agg_hop_polarities`) has the agg's printed equation text and
-    /// uses [`agg_reducer_is_monotone`], so this lives in the tests rather than
-    /// at module scope.
-    fn reducer_is_monotone<E>(builtin: &BuiltinFn<E>) -> bool {
-        reducer_kind(builtin).is_some() && reducer_name_is_monotone(builtin.name())
-    }
-
     /// AC1.2: the consolidated `reducer_kind` table classifies every array
-    /// reducer the LTM machinery cares about, and `reducer_is_monotone` /
-    /// `reducer_is_hoistable` derive the right subsets. `reducer_kind` is
+    /// reducer the LTM machinery cares about, and `reducer_is_hoistable`
+    /// derives the right hoisted subset. `reducer_kind` is
     /// generic over the contained expression type, so `BuiltinFn::<i32>`
     /// literals suffice -- it only inspects structure and arity.
     #[test]
@@ -1944,32 +1889,6 @@ mod tests {
         assert_eq!(reducer_kind(&rank), Some(ReducerKind::Nonlinear));
         assert_eq!(reducer_kind(&size), Some(ReducerKind::Constant));
         assert_eq!(reducer_kind(&abs), None);
-
-        // Monotone: SUM / 1-arg MEAN / 1-arg MIN / 1-arg MAX. STDDEV, RANK,
-        // SIZE are not (raising one element can move the result either way,
-        // or not at all). 2-arg MIN/MAX are not reducers, so not monotone.
-        assert!(reducer_is_monotone(&sum));
-        assert!(reducer_is_monotone(&mean_1));
-        assert!(reducer_is_monotone(&min_1));
-        assert!(reducer_is_monotone(&max_1));
-        assert!(!reducer_is_monotone(&mean_2));
-        assert!(!reducer_is_monotone(&min_2));
-        assert!(!reducer_is_monotone(&max_2));
-        assert!(!reducer_is_monotone(&stddev));
-        assert!(!reducer_is_monotone(&rank));
-        assert!(!reducer_is_monotone(&size));
-        assert!(!reducer_is_monotone(&abs));
-
-        // The name-keyed predicate agrees with the builtin-keyed one for the
-        // recognized names.
-        assert!(reducer_name_is_monotone("sum"));
-        assert!(reducer_name_is_monotone("mean"));
-        assert!(reducer_name_is_monotone("min"));
-        assert!(reducer_name_is_monotone("max"));
-        assert!(!reducer_name_is_monotone("stddev"));
-        assert!(!reducer_name_is_monotone("rank"));
-        assert!(!reducer_name_is_monotone("size"));
-        assert!(!reducer_name_is_monotone("abs"));
 
         // Hoistable: recognized AND not Constant -- SUM / 1-arg MEAN /
         // 1-arg MIN / 1-arg MAX / STDDEV / RANK. SIZE is recognized but never

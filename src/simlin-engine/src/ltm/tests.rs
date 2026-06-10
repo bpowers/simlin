@@ -6,9 +6,9 @@ use super::graph::{CausalGraph, assign_loop_ids, get_variable_dependencies};
 use super::indexed::IndexedGraph;
 use super::partitions::CyclePartitions;
 use super::polarity::{
-    analyze_expr_polarity_with_context, analyze_feeder_to_agg_polarity,
-    analyze_graphical_function_polarity, analyze_link_polarity, expr_references_var, flip_polarity,
-    is_negative_constant, is_positive_constant,
+    analyze_expr_polarity_with_context, analyze_graphical_function_polarity, analyze_link_polarity,
+    analyze_source_to_agg_polarity, expr_references_var, flip_polarity, is_negative_constant,
+    is_positive_constant,
 };
 use super::types::{
     Link, LinkPolarity, Loop, LoopPolarity, POLARITY_CONFIDENCE_THRESHOLD, TruncatedByBudget,
@@ -5907,7 +5907,7 @@ proptest! {
 /// Negative, and an indeterminate body falls back to Unknown -- NOT
 /// Positive.
 #[test]
-fn test_feeder_to_agg_polarity_discriminates_body_sign() {
+fn test_source_to_agg_polarity_discriminates_body_sign() {
     use crate::ast::{Ast, Expr2, IndexExpr2};
     let loc = crate::ast::Loc::default();
     let scale: Ident<Canonical> = Ident::new("scale");
@@ -5930,7 +5930,7 @@ fn test_feeder_to_agg_polarity_discriminates_body_sign() {
     // positive by the SD labeling convention -> Positive.
     let headline = Ast::Scalar(sum(op2(BinaryOp::Mul, pop_wild(), var("scale"))));
     assert_eq!(
-        analyze_feeder_to_agg_polarity(&headline, &scale, &empty_vars),
+        analyze_source_to_agg_polarity(&headline, &scale, &empty_vars),
         LinkPolarity::Positive,
         "SUM(pop[*] * scale) w.r.t. scale must be Positive under the convention Mul rule"
     );
@@ -5944,7 +5944,7 @@ fn test_feeder_to_agg_polarity_discriminates_body_sign() {
         op2(BinaryOp::Sub, cnst(1.0), var("scale")),
     )));
     assert_eq!(
-        analyze_feeder_to_agg_polarity(&negating, &scale, &empty_vars),
+        analyze_source_to_agg_polarity(&negating, &scale, &empty_vars),
         LinkPolarity::Negative,
         "SUM(pop[*] * (1 - scale)) w.r.t. scale must be Negative"
     );
@@ -5959,7 +5959,7 @@ fn test_feeder_to_agg_polarity_discriminates_body_sign() {
         var("scale"),
     )));
     assert_eq!(
-        analyze_feeder_to_agg_polarity(&compound, &scale, &empty_vars),
+        analyze_source_to_agg_polarity(&compound, &scale, &empty_vars),
         LinkPolarity::Unknown,
         "a compound co-factor defeats the value convention -> Unknown"
     );
@@ -5972,7 +5972,7 @@ fn test_feeder_to_agg_polarity_discriminates_body_sign() {
         loc,
     ));
     assert_eq!(
-        analyze_feeder_to_agg_polarity(&stddev, &scale, &empty_vars),
+        analyze_source_to_agg_polarity(&stddev, &scale, &empty_vars),
         LinkPolarity::Unknown,
         "a non-monotone reducer (STDDEV) stays Unknown"
     );

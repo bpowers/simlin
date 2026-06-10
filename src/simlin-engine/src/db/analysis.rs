@@ -1866,7 +1866,7 @@ pub fn model_detected_loops(
     // for any residual structural divergence between the two graphs: on
     // truncation, degrade to the same pins-only result the discovery
     // branch returns rather than OOMing or panicking.
-    let Ok(mut loops) = graph.find_loops_with_limit(crate::ltm::ltm_circuit_budget()) else {
+    let Ok(loops) = graph.find_loops_with_limit(crate::ltm::ltm_circuit_budget()) else {
         debug_assert!(
             false,
             "model_detected_loops: circuit budget bound in exhaustive mode; \
@@ -1893,33 +1893,46 @@ pub fn model_detected_loops(
             partitions: parts,
         };
     };
-    // GH #737 (review C1): recover the polarity of ThroughAgg-routed
-    // variable-level edges (e.g. a scalar feeder of a hoisted reducer) by
-    // composing the same two agg-hop polarities the scored surface
-    // (`model_ltm_variables` -> `recover_agg_hop_polarities`) assigns. The
-    // polarity-prefixed loop ids this surface reports are the key the
-    // runtime join (`reclassify_loops_from_results`,
-    // `get_relative_loop_score`) reads `$⁚ltm⁚loop_score⁚{id}` with, so the
-    // two surfaces deriving DIFFERENT polarities for the same cycle made the
-    // ids diverge and collide -- classifying one loop from another loop's
-    // series. Re-assigns ids internally when anything was patched.
-    crate::db::ltm::recover_agg_routed_edge_polarities(&mut loops, &graph, db, model, project);
+    // GH #737 (review C1/C1b): make this surface's loop set agree with the
+    // scored surface's for agg-routed cycles. The polarity-prefixed loop ids
+    // reported here are the key the runtime join
+    // (`reclassify_loops_from_results`, pysimlin's
+    // `get_relative_loop_score`) reads `$⁚ltm⁚loop_score⁚{id}` with, so a
+    // loop-count or polarity divergence makes a detected loop read ANOTHER
+    // loop's series. Two steps, sharing the scored surface's machinery:
+    //
+    // 1. splice each ThroughAgg-routed edge into explicit
+    //    `from → $⁚ltm⁚agg⁚{n} → to` hops, ONE LOOP PER ROUTED AGG (a
+    //    feeder read by two hoisted reducers is two scored loops);
+    // 2. run the SAME `recover_agg_hop_polarities` pass the scored/pinned
+    //    surfaces run, so the spliced hops get identical polarities.
+    //
+    // With the links now speaking the same node language on both surfaces,
+    // `assign_loop_ids`' content sort orders them identically wherever the
+    // loop sets biject (every all-scalar cycle; arrayed cycles remain the
+    // pre-existing variable-level-vs-element-level divergent class).
+    let had_loops = !loops.is_empty();
+    let mut loops =
+        crate::db::ltm::expand_loops_through_routed_aggs(loops, &graph, db, model, project);
+    if had_loops {
+        crate::ltm::assign_loop_ids(&mut loops);
+        crate::db::ltm::recover_agg_hop_polarities(&mut loops, &graph, db, model, project);
+    }
     // Variable-level canonical rotation of a scored loop, used both to dedup a
     // pin's loops against the enumerated set and to transfer the pin's name
     // onto the surviving enumerated loop it duplicates.
     //
-    // Synthetic `$⁚ltm⁚agg⁚{n}` nodes are filtered out: a pin whose cycle
-    // routes through a hoisted reducer carries the agg hop in its links
-    // (`scale → $⁚ltm⁚agg⁚0 → grow`), while the enumerated cycles here come
-    // from the *variable-level* graph and never contain agg nodes. Comparing
-    // raw rotations would treat the pin as a distinct loop -- surfacing the
-    // same cycle twice and dropping the name transfer (GH #737).
+    // Both sides keep their synthetic `$⁚ltm⁚agg⁚{n}` nodes in the rotation
+    // (GH #737 / C1b): the enumerated loops are agg-spliced above and a
+    // pin's element-graph expansion carries the agg hops too, so raw
+    // rotations match exactly -- and a multi-agg cycle's per-agg pin variants
+    // dedup against (and transfer the pin's name onto) their OWN enumerated
+    // counterparts rather than collapsing onto one.
     let loop_rotation = |l: &crate::ltm::Loop| -> Vec<String> {
         let seq: Vec<String> = l
             .links
             .iter()
             .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
-            .filter(|n| !crate::ltm_agg::is_synthetic_agg_name(n))
             .collect();
         crate::ltm::canonical_rotation(&seq)
     };
@@ -1935,8 +1948,6 @@ pub fn model_detected_loops(
         .collect();
     // Canonical rotations of the enumerated loops, so a pinned loop that
     // duplicates one is not surfaced twice (its name is transferred instead).
-    // (`loop_rotation` filters synthetic agg nodes -- a no-op for these
-    // variable-level cycles, but it keeps the two key derivations identical.)
     let enumerated: std::collections::HashSet<Vec<String>> =
         loops.iter().map(&loop_rotation).collect();
     // The extra pins (those not duplicating an enumerated loop), kept as
@@ -1966,18 +1977,24 @@ pub fn model_detected_loops(
         resolve_loop_partitions(&final_loops, &partitions, dims.as_slice());
 
     let enumerated_loops = loops.into_iter().map(|l| {
-        // Extract variable names from the loop's links
+        // Extract variable names from the loop's links. Spliced
+        // `$⁚ltm⁚agg⁚{n}` hops are an LTM scoring implementation detail and
+        // are trimmed from the user-facing list (mirroring
+        // `detected_loop_from_loop`); they stay in the links so the id sort
+        // key and the pin-dedup rotation see them.
+        let is_agg =
+            |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
         let mut vars = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let loop_key = loop_rotation(&l);
         if !l.links.is_empty() {
             let first = l.links[0].from.to_string();
-            if seen.insert(first.clone()) {
+            if !is_agg(&first) && seen.insert(first.clone()) {
                 vars.push(first);
             }
             for link in &l.links {
                 let to = link.to.to_string();
-                if seen.insert(to.clone()) {
+                if !is_agg(&to) && seen.insert(to.clone()) {
                     vars.push(to);
                 }
             }

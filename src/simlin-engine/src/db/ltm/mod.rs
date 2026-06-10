@@ -56,10 +56,14 @@ pub(crate) use loops::build_loops_from_tiered;
 // exhaustive recovery (`recover_cross_agg_loops`) and discovery
 // (`ltm_finding`, GH #696) so both enumerate exactly the same cross-agg loops.
 pub(crate) use loops::sub_model_output_ports;
-// The detected-FFI-surface polarity recovery for ThroughAgg-routed
-// variable-level edges, consumed by `db::analysis::model_detected_loops` so
-// its loop polarities/ids agree with the scored surface (GH #737 / C1).
-pub(crate) use loops::recover_agg_routed_edge_polarities;
+// The detected-FFI-surface agg-routing expansion + the shared agg-hop
+// polarity recovery, consumed by `db::analysis::model_detected_loops` so its
+// loop set, polarities, and ids agree with the scored surface (GH #737 /
+// C1b): the expansion splices ThroughAgg-routed edges into explicit
+// `from → $⁚ltm⁚agg⁚{n} → to` hops (one loop per routed agg), and the SAME
+// `recover_agg_hop_polarities` pass the scored/pinned surfaces run patches
+// the spliced hops.
+pub(crate) use loops::expand_loops_through_routed_aggs;
 pub(crate) use loops::{
     StitchPetal, collect_agg_petals, cross_agg_loop_budget, stitch_cross_agg_petals,
 };
@@ -82,7 +86,7 @@ pub(crate) use loops::{
 use link_scores::{
     emit_agg_to_target_link_scores, emit_link_scores_for_edge, emit_source_to_agg_link_scores,
 };
-use loops::recover_agg_hop_polarities;
+pub(crate) use loops::recover_agg_hop_polarities;
 use parse::parse_ltm_equation;
 
 /// The single integration method the assembled simulation actually runs, when

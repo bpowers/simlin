@@ -1527,71 +1527,55 @@ where
     petals_by_agg
 }
 
-/// Polarity of one `source → agg` hop, shared by [`recover_agg_hop_polarities`]
-/// (the scored / pinned surfaces, where the hop is a literal loop link) and
-/// [`recover_agg_routed_edge_polarities`] (the detected FFI surface, where the
-/// hop is half of a composed variable-level edge). Funneling both surfaces
-/// through this one decision is what keeps their loop polarities -- and hence
-/// the polarity-prefixed loop ids the runtime join is keyed on -- identical
-/// by construction for agg-routed cycles.
+/// Polarity of one `source → agg` hop: the *discriminating* analysis of the
+/// agg's own lowered body with respect to the source variable
+/// ([`crate::ltm::CausalGraph::source_to_agg_polarity`], the
+/// positive-by-convention Mul rule), applied uniformly to scalar feeders and
+/// arrayed rows / co-sources (GH #737 review follow-ups I1/I1b):
 ///
-/// Two arms by the source's shape:
+/// - `SUM(pop[*])` / `SUM(pop[*] * scale)` w.r.t. `pop` → Positive (the
+///   genuinely-monotone row cases keep their label),
+/// - `SUM(pop[*] * scale)` w.r.t. `scale` → Positive,
+/// - `SUM(pop[*] * (1 - weight[*]))` w.r.t. `weight` → Negative (the I1b
+///   co-source case the old blanket monotone-Positive arm mislabeled --
+///   "monotone in each summand" is not "monotone in every variable the
+///   summand body composes"),
+/// - indeterminate bodies (compound co-factors, STDDEV/RANK, lookups of
+///   unknown direction) → Unknown, never a confident wrong label.
 ///
-/// - an ARRAYED source is one of the reducer's own reduced rows:
-///   `SUM`/`MEAN`/`MIN`/`MAX` are monotone non-decreasing in each source
-///   element (raising any one element raises-or-holds the result), so the hop
-///   is `Positive`; `STDDEV`/`RANK` are not monotone -- `Unknown`.
-/// - a SCALAR feeder (`scale` in `SUM(pop[*] * scale)`, GH #737) gets the
-///   *discriminating* analysis of the agg's own lowered body
-///   ([`crate::ltm::CausalGraph::feeder_to_agg_polarity`], the
-///   positive-by-convention Mul rule): `pop[*] * scale` → Positive,
-///   `pop[*] * (1 - scale)` → Negative, indeterminate bodies → `Unknown`
-///   (never a confident wrong label -- the blanket monotone-Positive arm is
-///   NOT sound for a feeder, whose sign rides on how the body composes it).
+/// `recover_agg_hop_polarities` is the single consumer; the scored, pinned,
+/// and detected surfaces all run that one recovery pass (the detected
+/// surface splices its ThroughAgg-routed edges into explicit agg hops
+/// first), so the hop polarity -- and hence the polarity-prefixed loop ids
+/// the runtime join is keyed on -- is decided in exactly one place.
 fn source_to_agg_hop_polarity(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     var_graph: &crate::ltm::CausalGraph,
-    source_vars: &HashMap<String, SourceVariable>,
     from_var_level: &str,
     agg: &crate::ltm_agg::AggNode,
 ) -> crate::ltm::LinkPolarity {
     use crate::ltm::LinkPolarity;
 
-    let from_is_arrayed = source_vars
-        .get(from_var_level)
-        .map(|sv| {
-            sv.kind(db) != SourceVariableKind::Module
-                && !variable_dimensions(db, *sv, project).is_empty()
-        })
-        .unwrap_or(false);
-    if from_is_arrayed {
-        if crate::ltm_agg::agg_reducer_is_monotone(&agg.equation_text) {
-            LinkPolarity::Positive
-        } else {
-            LinkPolarity::Unknown
-        }
+    // Reconstruct the agg's lowered AST from its equation text (the agg is
+    // not a model variable, so the graph's variable map has no AST for it).
+    // Mirrors `emit_source_to_agg_link_scores`' reconstruction.
+    let agg_eqn = if agg.result_dims.is_empty() {
+        datamodel::Equation::Scalar(agg.equation_text.clone())
     } else {
-        // Reconstruct the agg's lowered AST from its equation text (the agg
-        // is not a model variable, so the graph's variable map has no AST
-        // for it). Mirrors `emit_source_to_agg_link_scores`' reconstruction.
-        let agg_eqn = if agg.result_dims.is_empty() {
-            datamodel::Equation::Scalar(agg.equation_text.clone())
-        } else {
-            datamodel::Equation::ApplyToAll(agg.result_dims.clone(), agg.equation_text.clone())
-        };
-        let Some(agg_var) =
-            super::parse::reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project)
-        else {
-            return LinkPolarity::Unknown;
-        };
-        let Some(agg_ast) = agg_var.ast() else {
-            return LinkPolarity::Unknown;
-        };
-        let feeder = Ident::<Canonical>::new(from_var_level);
-        var_graph.feeder_to_agg_polarity(&feeder, agg_ast)
-    }
+        datamodel::Equation::ApplyToAll(agg.result_dims.clone(), agg.equation_text.clone())
+    };
+    let Some(agg_var) =
+        super::parse::reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project)
+    else {
+        return LinkPolarity::Unknown;
+    };
+    let Some(agg_ast) = agg_var.ast() else {
+        return LinkPolarity::Unknown;
+    };
+    let source = Ident::<Canonical>::new(from_var_level);
+    var_graph.source_to_agg_polarity(&source, agg_ast)
 }
 
 /// Recover the polarity of synthetic-aggregate-node hops in `loops` (GH #516).
@@ -1614,7 +1598,7 @@ fn source_to_agg_hop_polarity(
 /// Any loop whose links change is re-classified via `calculate_polarity`.
 /// If anything was patched, loop IDs are re-assigned (the `r`/`b`/`u` prefix
 /// is polarity-derived).
-pub(super) fn recover_agg_hop_polarities(
+pub(crate) fn recover_agg_hop_polarities(
     loops: &mut [crate::ltm::Loop],
     var_graph: &crate::ltm::CausalGraph,
     db: &dyn Db,
@@ -1636,7 +1620,6 @@ pub(super) fn recover_agg_hop_polarities(
     if synthetic.is_empty() {
         return;
     }
-    let source_vars = model.variables(db);
 
     let mut any_patched = false;
     for lp in loops.iter_mut() {
@@ -1648,15 +1631,8 @@ pub(super) fn recover_agg_hop_polarities(
             // `source → agg`: the agg is this link's target.
             if let Some((_, agg)) = synthetic.iter().find(|(name, _)| name == &link.to) {
                 let from_var_level = strip_subscript(link.from.as_str());
-                let p = source_to_agg_hop_polarity(
-                    db,
-                    model,
-                    project,
-                    var_graph,
-                    source_vars,
-                    from_var_level,
-                    agg,
-                );
+                let p =
+                    source_to_agg_hop_polarity(db, model, project, var_graph, from_var_level, agg);
                 if p != LinkPolarity::Unknown {
                     link.polarity = p;
                     patched = true;
@@ -1684,132 +1660,193 @@ pub(super) fn recover_agg_hop_polarities(
     }
 }
 
-/// Recover the polarity of `ThroughAgg`-routed *variable-level* edges in
-/// `loops` -- the detected-FFI-surface twin of [`recover_agg_hop_polarities`]
-/// (GH #737 review follow-up, C1).
+/// Expand each variable-level loop's `ThroughAgg`-routed edges into explicit
+/// agg-node hops, one loop variant per routed agg -- the detected-FFI-surface
+/// bijection with the scored loop set (GH #737 round-2 review, C1b).
 ///
 /// `model_detected_loops` enumerates loops on the variable-level graph, whose
 /// links never traverse agg nodes: an edge like `scale → grow` (where `grow`
-/// hoists `SUM(pop[*] * scale)`) carries the whole through-agg composition as
-/// ONE link, and `analyze_link_polarity` on `grow`'s raw equation returns
-/// `Unknown` for it. The scored surface meanwhile routes the same cycle
-/// through the agg and recovers both hop polarities -- so the two surfaces'
-/// loop polarities (and the polarity-prefixed ids `assign_loop_ids` derives,
-/// which key the runtime join: `reclassify_loops_from_results` and
-/// `get_relative_loop_score` read `$⁚ltm⁚loop_score⁚{id}`) would diverge AND
-/// collide, classifying one loop from another loop's series.
+/// hoists `SUM(pop[*] * scale)`) carries the whole through-agg routing as ONE
+/// link. The scored surface (`model_ltm_variables`) instead enumerates the
+/// element graph, where that edge is `scale → $⁚ltm⁚agg⁚{n} → grow` -- one
+/// loop PER routed agg when the same feeder is read by several hoisted
+/// reducers of the target. The polarity-prefixed loop ids `assign_loop_ids`
+/// derives are the key the runtime join reads `$⁚ltm⁚loop_score⁚{id}` with
+/// (`reclassify_loops_from_results`, pysimlin's `get_relative_loop_score`),
+/// so a count or polarity mismatch between the surfaces makes a detected
+/// loop read ANOTHER loop's series. Composing the hop polarities onto the
+/// single variable-level link (the round-1 fix) was not enough: a multi-agg
+/// edge still left the detected surface one loop short (id collision), and
+/// hop polarities that DISAGREE across the routed aggs collapsed to one
+/// Unknown loop where the scored surface has two definite ones.
 ///
-/// So: for each Unknown variable-level link whose reference sites are ALL
-/// `ThroughAgg`-routed (a mixed Direct+ThroughAgg edge is left Unknown -- the
-/// agg path alone doesn't determine it), compose the two hop polarities the
-/// scored surface would assign -- [`source_to_agg_hop_polarity`] into the agg
-/// and `agg_consumer_polarity` out of it -- per routed agg, requiring
-/// agreement across multiple routed aggs. The product over the patched edge
-/// equals the product of the scored loop's two patched hops, so loop
-/// polarities agree across surfaces by algebra, and the ids agree wherever
-/// the two surfaces' loop sets biject (every scalar-cycle model; the
-/// per-element cross-element classes were already divergent pre-#737 and are
-/// tracked separately).
-pub(crate) fn recover_agg_routed_edge_polarities(
-    loops: &mut [crate::ltm::Loop],
+/// So: rebuild each loop as the cartesian product, over its links, of that
+/// link's routing variants -- the direct link itself when the edge has any
+/// `Direct` site (a mixed Direct+ThroughAgg edge genuinely has both
+/// pathways; the element graph emits both, so Johnson finds both loop
+/// variants on the scored side too), plus one `from → agg → to` splice per
+/// distinct routed agg. Spliced hops start `Unknown`; the caller runs the
+/// SAME `recover_agg_hop_polarities` pass the scored surface uses, so the
+/// polarities -- and with both surfaces' links now speaking the same node
+/// language, the `loop_id_sort_key` orderings -- agree by construction.
+///
+/// Bijection boundary, precisely: for a cycle whose variables are all
+/// SCALAR, this expansion is isomorphic to the element-graph circuits the
+/// scored surface enumerates (scalar nodes don't expand per element; every
+/// agg hoisted from a scalar-consumer equation is itself scalar; and the
+/// scored cross-agg petal stitching never fires for scalar cycles -- all of
+/// one agg's petals pass through the agg's single host variable, so no two
+/// petals are disjoint). Cycles involving ARRAYED variables remain
+/// variable-level here while the scored surface enumerates them per element
+/// -- the pre-existing divergent class (`reclassify_loops_from_results`
+/// skips ids with no score series; durable cross-surface identity for them
+/// is the stock set, not the id).
+///
+/// Defensive bound: a loop whose variant product exceeds
+/// [`MAX_DETECTED_AGG_VARIANTS_PER_LOOP`] is kept unexpanded (its ids may
+/// then diverge from the scored surface for that pathological model, which
+/// enumerates under its own `MAX_LTM_CIRCUITS` budget).
+pub(crate) fn expand_loops_through_routed_aggs(
+    loops: Vec<crate::ltm::Loop>,
     var_graph: &crate::ltm::CausalGraph,
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
-) {
+) -> Vec<crate::ltm::Loop> {
     use crate::common::{Canonical, Ident};
-    use crate::ltm::LinkPolarity;
+    use crate::ltm::{Link, LinkPolarity, Loop};
 
     let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
     if !aggs.aggs.iter().any(|a| a.is_synthetic) {
-        return;
+        return loops;
     }
     let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
-    let source_vars = model.variables(db);
 
-    let mut any_patched = false;
-    for lp in loops.iter_mut() {
-        let mut patched = false;
-        for link in lp.links.iter_mut() {
-            if link.polarity != LinkPolarity::Unknown {
-                continue;
-            }
-            let from_var_level = strip_subscript(link.from.as_str());
-            let to_var_level = strip_subscript(link.to.as_str());
-            let Some(sites) = ir
-                .sites
-                .get(&(from_var_level.to_string(), to_var_level.to_string()))
-            else {
-                continue;
-            };
-            if sites.is_empty() {
-                continue;
-            }
-            // Every site must route through an agg: a Direct site means part
-            // of the edge's effect bypasses the agg, and the variable-level
-            // analysis already returned Unknown for that combination.
-            let mut agg_idxs: Vec<usize> = Vec::new();
-            let mut all_through_agg = true;
-            for s in sites {
-                match &s.routing {
-                    crate::db::ltm_ir::SiteRouting::ThroughAgg { agg } => {
-                        if !agg_idxs.contains(&agg.0) {
-                            agg_idxs.push(agg.0);
+    /// One way a variable-level link can be realized.
+    enum LinkVariant {
+        /// Keep the original link (a Direct pathway exists, or no routing).
+        Direct,
+        /// Splice through the routed agg at this index in `aggs.aggs`.
+        ViaAgg(usize),
+    }
+
+    let mut expanded: Vec<Loop> = Vec::with_capacity(loops.len());
+    for lp in loops {
+        // Per link, the realization variants in deterministic order
+        // (Direct first, then aggs in first-occurrence site order).
+        let per_link: Vec<Vec<LinkVariant>> = lp
+            .links
+            .iter()
+            .map(|link| {
+                let from_var_level = strip_subscript(link.from.as_str());
+                let to_var_level = strip_subscript(link.to.as_str());
+                let Some(sites) = ir
+                    .sites
+                    .get(&(from_var_level.to_string(), to_var_level.to_string()))
+                else {
+                    return vec![LinkVariant::Direct];
+                };
+                let mut has_direct = sites.is_empty();
+                let mut agg_idxs: Vec<usize> = Vec::new();
+                for s in sites {
+                    match &s.routing {
+                        crate::db::ltm_ir::SiteRouting::ThroughAgg { agg } => {
+                            if !agg_idxs.contains(&agg.0) {
+                                agg_idxs.push(agg.0);
+                            }
                         }
-                    }
-                    crate::db::ltm_ir::SiteRouting::Direct => {
-                        all_through_agg = false;
-                        break;
+                        crate::db::ltm_ir::SiteRouting::Direct => has_direct = true,
                     }
                 }
-            }
-            if !all_through_agg || agg_idxs.is_empty() {
-                continue;
-            }
-            // Compose the two hop polarities per routed agg; multiple routed
-            // aggs (the same feeder read by two hoisted reducers of the same
-            // target) must agree, else Unknown.
-            let consumer = Ident::<Canonical>::new(to_var_level);
-            let mut combined = LinkPolarity::Unknown;
-            let mut consistent = true;
-            for idx in &agg_idxs {
-                let agg = &aggs.aggs[*idx];
-                let agg_ident = Ident::<Canonical>::new(agg.name.as_str());
-                let hop_in = source_to_agg_hop_polarity(
-                    db,
-                    model,
-                    project,
-                    var_graph,
-                    source_vars,
-                    from_var_level,
-                    agg,
-                );
-                let hop_out =
-                    var_graph.agg_consumer_polarity(&consumer, &agg.equation_text, &agg_ident);
-                let composed = hop_in.compose(hop_out);
-                if composed == LinkPolarity::Unknown {
-                    consistent = false;
-                    break;
+                let mut variants: Vec<LinkVariant> = Vec::with_capacity(1 + agg_idxs.len());
+                if has_direct || agg_idxs.is_empty() {
+                    variants.push(LinkVariant::Direct);
                 }
-                if combined == LinkPolarity::Unknown {
-                    combined = composed;
-                } else if combined != composed {
-                    consistent = false;
-                    break;
-                }
-            }
-            if consistent && combined != LinkPolarity::Unknown {
-                link.polarity = combined;
-                patched = true;
-            }
+                variants.extend(agg_idxs.into_iter().map(LinkVariant::ViaAgg));
+                variants
+            })
+            .collect();
+
+        // A loop none of whose links route through an agg is kept verbatim
+        // (ids/polarities untouched). NOTE: a single pure-ThroughAgg variant
+        // still has a product of 1, so the gate is "any non-Direct variant",
+        // not the product size.
+        let all_direct = per_link
+            .iter()
+            .all(|v| v.len() == 1 && matches!(v[0], LinkVariant::Direct));
+        if all_direct {
+            expanded.push(lp);
+            continue;
         }
-        if patched {
-            lp.polarity = var_graph.calculate_polarity(&lp.links);
-            any_patched = true;
+        let n_variants: usize = per_link.iter().map(|v| v.len()).product();
+        if n_variants > MAX_DETECTED_AGG_VARIANTS_PER_LOOP {
+            expanded.push(lp);
+            continue;
+        }
+
+        // Cartesian product over the per-link variants, in row-major order
+        // (deterministic: per_link orders are deterministic and the product
+        // walk is positional).
+        let mut choices: Vec<usize> = vec![0; per_link.len()];
+        loop {
+            let mut links: Vec<Link> = Vec::with_capacity(lp.links.len());
+            for (i, link) in lp.links.iter().enumerate() {
+                match per_link[i][choices[i]] {
+                    LinkVariant::Direct => links.push(link.clone()),
+                    LinkVariant::ViaAgg(idx) => {
+                        let agg_ident = Ident::<Canonical>::new(aggs.aggs[idx].name.as_str());
+                        // Spliced hops start Unknown; the caller's
+                        // `recover_agg_hop_polarities` pass patches them
+                        // exactly as it does for the scored surface's loops.
+                        links.push(Link {
+                            from: link.from.clone(),
+                            to: agg_ident.clone(),
+                            polarity: LinkPolarity::Unknown,
+                        });
+                        links.push(Link {
+                            from: agg_ident,
+                            to: link.to.clone(),
+                            polarity: LinkPolarity::Unknown,
+                        });
+                    }
+                }
+            }
+            let polarity = var_graph.calculate_polarity(&links);
+            expanded.push(Loop {
+                id: String::new(),
+                links,
+                stocks: lp.stocks.clone(),
+                polarity,
+                dimensions: lp.dimensions.clone(),
+                slot_links: vec![],
+            });
+
+            // Advance the mixed-radix counter.
+            let mut pos = 0;
+            loop {
+                if pos == per_link.len() {
+                    break;
+                }
+                choices[pos] += 1;
+                if choices[pos] < per_link[pos].len() {
+                    break;
+                }
+                choices[pos] = 0;
+                pos += 1;
+            }
+            if pos == per_link.len() {
+                break;
+            }
         }
     }
 
-    if any_patched {
-        crate::ltm::assign_loop_ids(loops);
-    }
+    expanded
 }
+
+/// Defensive cap on the per-loop routing-variant product in
+/// [`expand_loops_through_routed_aggs`]: a loop with `k` ThroughAgg-routed
+/// links of `a_i` aggs each expands into `Π (a_i + direct_i)` variants. Real
+/// models have a handful of reducers per equation and short cycles, so this
+/// is far above anything reachable; a loop over the cap stays unexpanded
+/// rather than blowing up the FFI loop list.
+const MAX_DETECTED_AGG_VARIANTS_PER_LOOP: usize = 64;

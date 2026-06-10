@@ -1930,3 +1930,313 @@ fn scalar_feeder_loop_cross_surface_ids_and_polarity_agree() {
         );
     }
 }
+
+/// GH #737 round-2 review, probe A (C1b): MULTI-AGG edges must keep the two
+/// surfaces bijective. `grow = 1 + SUM(pop[*] * scale) + SUM(q[*] * scale)`
+/// hoists TWO synthetic aggs, both reading `scale`, so the scored surface
+/// has TWO feeder loops (one per agg) -- the detected surface must expand
+/// the ThroughAgg-routed `scale → grow` edge into one loop per routed agg,
+/// or the id sets diverge and every id after the divergence joins the wrong
+/// loop's series (the round-1 failure mode again: detected r2 = pop loop
+/// read scored r2 = feeder-via-agg1's series).
+#[test]
+fn multi_agg_feeder_edge_cross_surface_ids_agree() {
+    let project = TestProject::new("multi_agg_feeder")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .array_stock("q[region]", "200", &["qgrow"], &[], None)
+        .array_flow("qgrow[region]", "q[region] * 0.04", None)
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * scale) + SUM(q[*] * scale)", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    let scored_ids: std::collections::BTreeSet<String> = ltm
+        .vars
+        .iter()
+        .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+        .map(|id| id.to_string())
+        .collect();
+    let detected = model_detected_loops(&db, source_model, sync.project).clone();
+    let detected_ids: std::collections::BTreeSet<String> =
+        detected.loops.iter().map(|l| l.id.clone()).collect();
+    assert_eq!(
+        detected_ids, scored_ids,
+        "multi-agg edge: detected ids must equal the scored loop-score ids"
+    );
+
+    // The feeder cycle must surface once PER ROUTED AGG (the bijection), and
+    // the user-facing variable lists must not leak the agg nodes.
+    let feeder_loops: Vec<_> = detected
+        .loops
+        .iter()
+        .filter(|l| l.variables.iter().any(|v| v == "scale"))
+        .collect();
+    assert_eq!(
+        feeder_loops.len(),
+        2,
+        "the feeder cycle routes through two hoisted reducers, so it must surface as two \
+         detected loops; got: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
+    );
+    for l in &detected.loops {
+        assert!(
+            !l.variables
+                .iter()
+                .any(|v| v.contains("\u{205A}agg\u{205A}")),
+            "DetectedLoop.variables must not leak synthetic agg nodes; {:?}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    // The runtime join: every detected loop reads its OWN series. All four
+    // loops here are reinforcing with sustained-positive scores, so the
+    // joint assertion with teeth is the id-set equality above plus every
+    // runtime classification staying in the reinforcing family.
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    let mut runtime_loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut runtime_loops, &results, &ltm.loop_partitions);
+    for l in &runtime_loops {
+        assert!(
+            matches!(
+                l.polarity,
+                DetectedLoopPolarity::Reinforcing | DetectedLoopPolarity::MostlyReinforcing
+            ),
+            "loop {} ({:?}) must classify reinforcing from its own series; got {:?}",
+            l.id,
+            l.variables,
+            l.polarity
+        );
+    }
+}
+
+/// GH #737 round-2 review, probe B (C1b): a feeder edge through two aggs of
+/// OPPOSING signs, plus an unrelated genuinely-Undetermined loop. Pre-fix
+/// the detected surface collapsed the feeder cycle into one Unknown loop
+/// (u1) while the scored surface had it as two definite loops (r/b) plus
+/// the unrelated loop as u1 -- so after simulation the feeder cycle was
+/// confidently classified FROM THE UNRELATED LOOP'S SERIES. With the
+/// per-agg expansion the surfaces are bijective: the feeder surfaces as one
+/// reinforcing and one balancing loop on BOTH sides, and the only
+/// u-prefixed loop is the genuinely-undetermined one.
+#[test]
+fn opposing_multi_agg_feeder_does_not_misjoin_undetermined_loop() {
+    let project = TestProject::new("opposing_multi_agg")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .array_stock("q[region]", "200", &["qgrow"], &[], None)
+        .array_flow("qgrow[region]", "q[region] * 0.04", None)
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow(
+            "grow",
+            "1 + SUM(pop[*] * scale) + SUM(q[*] * (1 - scale))",
+            None,
+        )
+        // An unrelated, genuinely structurally-Undetermined loop: the
+        // SIN(TIME) factor defeats static polarity analysis.
+        .stock("u_s", "100", &["u_f"], &[], None)
+        .flow("u_f", "u_s * 0.01 * SIN(TIME)", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    let scored_ids: std::collections::BTreeSet<String> = ltm
+        .vars
+        .iter()
+        .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+        .map(|id| id.to_string())
+        .collect();
+    let detected = model_detected_loops(&db, source_model, sync.project).clone();
+    let detected_ids: std::collections::BTreeSet<String> =
+        detected.loops.iter().map(|l| l.id.clone()).collect();
+    assert_eq!(
+        detected_ids, scored_ids,
+        "opposing multi-agg: detected ids must equal the scored loop-score ids"
+    );
+
+    // Exactly one u-prefixed loop, and it is the unrelated SIN loop -- the
+    // feeder cycle must NOT degrade to Undetermined (its two agg variants
+    // have definite, opposing polarities).
+    let u_loops: Vec<_> = detected
+        .loops
+        .iter()
+        .filter(|l| l.id.starts_with('u'))
+        .collect();
+    assert_eq!(
+        u_loops.len(),
+        1,
+        "exactly one genuinely-Undetermined loop; got: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        u_loops[0].variables.iter().any(|v| v == "u_s"),
+        "the u-prefixed loop must be the unrelated SIN loop, not the feeder cycle; got {:?}",
+        u_loops[0].variables
+    );
+    let feeder_polarities: std::collections::BTreeSet<&str> = detected
+        .loops
+        .iter()
+        .filter(|l| l.variables.iter().any(|v| v == "scale"))
+        .map(|l| match l.polarity {
+            DetectedLoopPolarity::Reinforcing => "R",
+            DetectedLoopPolarity::Balancing => "B",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        feeder_polarities,
+        ["R", "B"].into_iter().collect(),
+        "the feeder cycle surfaces as one reinforcing (via SUM(pop[*]*scale)) and one \
+         balancing (via SUM(q[*]*(1-scale))) loop"
+    );
+
+    // Runtime join: the two feeder loops classify from their OWN series with
+    // their structural signs (pre-fix the feeder read the SIN loop's series
+    // and came back confidently wrong).
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    let mut runtime_loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut runtime_loops, &results, &ltm.loop_partitions);
+    for l in &runtime_loops {
+        if !l.variables.iter().any(|v| v == "scale") {
+            continue;
+        }
+        let structural = detected
+            .loops
+            .iter()
+            .find(|d| d.id == l.id)
+            .map(|d| d.polarity)
+            .unwrap();
+        match structural {
+            DetectedLoopPolarity::Reinforcing => assert!(
+                matches!(
+                    l.polarity,
+                    DetectedLoopPolarity::Reinforcing | DetectedLoopPolarity::MostlyReinforcing
+                ),
+                "feeder loop {} runtime polarity must match its reinforcing series; got {:?}",
+                l.id,
+                l.polarity
+            ),
+            DetectedLoopPolarity::Balancing => assert!(
+                matches!(
+                    l.polarity,
+                    DetectedLoopPolarity::Balancing | DetectedLoopPolarity::MostlyBalancing
+                ),
+                "feeder loop {} runtime polarity must match its balancing series; got {:?}",
+                l.id,
+                l.polarity
+            ),
+            other => panic!(
+                "feeder loop {} has unexpected structural polarity {other:?}",
+                l.id
+            ),
+        }
+    }
+}
+
+/// GH #737 round-2 review, I1b: an ARRAYED CO-SOURCE feeder of a hoisted
+/// reducer must not get the blanket monotone-Positive hop label.
+/// `grow = 1 + SUM(pop[*] * (1 - weight[*]))` with
+/// `weight[region] = 0.001 * total + 0.01` fed back from the stock `total`:
+/// ∂agg/∂weight[e] = -pop[e] < 0, so the total → weight → grow → total loop
+/// is genuinely BALANCING. The discriminating source-hop analysis must label
+/// it Balancing on both surfaces (pre-fix: the detected surface reported
+/// Reinforcing at confidence 1.0; at the base commit it was Undetermined --
+/// strictly worse after the round-1 change).
+#[test]
+fn arrayed_co_source_feeder_loop_is_balancing() {
+    let project = TestProject::new("co_source_feeder")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .array_aux("weight[region]", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * (1 - weight[*]))", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let source_model = sync.models["main"].source_model;
+
+    // Detected surface: the weight loop must be Balancing -- and above all
+    // NOT a confident Reinforcing (the runtime weight→agg series for this
+    // fixture is wrong-signed pending a separately-tracked fix, so a wrong
+    // static label here could "agree" with wrong runtime data).
+    let detected = model_detected_loops(&db, source_model, sync.project).clone();
+    let weight_loop = detected
+        .loops
+        .iter()
+        .find(|l| l.variables.iter().any(|v| v == "weight"))
+        .expect("the weight loop must be detected");
+    assert_eq!(
+        weight_loop.polarity,
+        DetectedLoopPolarity::Balancing,
+        "∂agg/∂weight[e] = -pop[e] < 0: the weight loop is balancing; a Reinforcing label \
+         here is the I1b confidently-wrong-label regression"
+    );
+
+    // Scored surface: the per-element weight loops' ids must carry the b
+    // prefix (same discriminating hop analysis, shared helper).
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let weight_loop_ids: Vec<&str> = ltm
+        .vars
+        .iter()
+        .filter(|v| {
+            v.name.starts_with(LOOP_SCORE_PREFIX)
+                && v.equation.source_text().contains(agg_name)
+                && v.equation.source_text().contains("weight")
+        })
+        .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !weight_loop_ids.is_empty(),
+        "scored weight loops must exist; loop vars: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| (&v.name, v.equation.source_text()))
+            .collect::<Vec<_>>()
+    );
+    for id in &weight_loop_ids {
+        assert!(
+            id.starts_with('b'),
+            "scored weight loop id must be b-prefixed (balancing); got {id:?}"
+        );
+    }
+}
