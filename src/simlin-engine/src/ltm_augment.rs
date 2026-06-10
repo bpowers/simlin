@@ -131,7 +131,7 @@ fn is_live_source_iterated_dim_subscript(
 /// similarly over-collapses to the `D1`-element rather than the mapped
 /// `D2`-element. Such models are already not statically scoreable in
 /// pre-#511 LTM; the precise non-natural-position handling is a known
-/// limitation tracked separately.
+/// limitation tracked as GH #762.
 fn is_other_dep_iterated_dim_subscript(
     indices: &[IndexExpr0],
     ctx: Option<&IteratedDimCtx<'_>>,
@@ -3852,7 +3852,7 @@ fn generate_linear_partial(
 /// produces a partial in the wrong units (raw `pop` vs the scaled agg) and
 /// a garbage score. The body-aware treatment that fixed the Linear arm
 /// ([`generate_linear_body_partial`]'s pin/freeze machinery) would extend
-/// here by building each term from the row-pinned body; tracked separately.
+/// here by building each term from the row-pinned body; tracked as GH #762.
 ///
 /// - **MIN/MAX**: nests 2-argument calls to enumerate every element with
 ///   selective `PREVIOUS` wrapping (`MIN(s[d], MIN(PREVIOUS(s[e]), ...))`).
