@@ -1222,7 +1222,7 @@ pub(crate) struct StitchPetal<T> {
 /// (both modes sort the keys before calling).
 ///
 /// Pure: no db, no I/O. The only shared invariant with the exhaustive path is
-/// the petal priority / subset / ordering walk, which now lives here once.
+/// the petal priority / subset walk, which now lives here once.
 pub(crate) fn stitch_cross_agg_petals<T, K>(
     petals_by_agg: Vec<(K, Vec<StitchPetal<T>>)>,
     budget: usize,
