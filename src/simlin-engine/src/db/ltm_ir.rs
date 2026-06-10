@@ -256,15 +256,18 @@ fn classify_iterated_dim_shape(
         // special-case it, just don't exclude it. The element-graph side
         // (`expand_same_element`) projects the resulting `Bare` edge along
         // the mapping's element correspondence
-        // (`DimensionsContext::mapped_element_correspondence`, GH #527) --
-        // the diagonal, not a broadcast -- so accepting the mapped case
-        // here and projecting it there use the SAME correspondence data
-        // and cannot disagree. Note the direction: only a mapping declared
-        // on the index dimension `d` toward the source's dimension is
-        // accepted (`has_mapping_to(d, src)`); a reverse-declared mapping
-        // keeps the conservative `DynamicIndex` classification (the
-        // expansion's correspondence is consulted only for `Bare` shapes,
-        // so the two stay consistent).
+        // (`DimensionsContext::mapped_element_correspondence`, GH #527):
+        // the diagonal WHEN a usable correspondence exists (today,
+        // positional mappings only -- explicit element maps are declined
+        // because the executed lowering resolves positionally; see the
+        // helper's gate), else the conservative broadcast -- a superset of
+        // the simulation's reads either way, so accepting the mapped case
+        // here never under-approximates downstream. Note the direction:
+        // only a mapping declared on the index dimension `d` toward the
+        // source's dimension is accepted (`has_mapping_to(d, src)`); a
+        // reverse-declared mapping keeps the conservative `DynamicIndex`
+        // classification (the expansion's correspondence is consulted only
+        // for `Bare` shapes, so the two stay consistent).
         let d_canon = CanonicalDimensionName::from_raw(d);
         let src_canon = CanonicalDimensionName::from_raw(src_dim_name);
         if dim_ctx.has_mapping_to(&d_canon, &src_canon) {

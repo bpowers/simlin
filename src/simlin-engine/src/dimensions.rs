@@ -635,16 +635,31 @@ impl DimensionsContext {
     /// declared dimension, per the project's dimension mappings (GH #527).
     ///
     /// Returns, for each element of `iterated_dim` in declared order, the
-    /// `source_dim` element the compiler's mapping resolution reads for it
-    /// -- i.e. exactly the per-element dataflow of an A2A reference like
-    /// `target[State] = x[State] * c` (or the bare `x * c`) where `x` is
-    /// declared over `Region` and a `State`/`Region` mapping exists. This
-    /// is the correspondence the LTM element-graph projection
-    /// (`expand_same_element`) and the link-score emitters use so the
-    /// element edges/scores match what the simulation actually computes.
+    /// `source_dim` element the EXECUTED simulation reads for it -- i.e.
+    /// the per-element dataflow of an A2A reference like `target[State] =
+    /// x[State] * c` (or the bare `x * c`) where `x` is declared over
+    /// `Region` and a `State`/`Region` mapping exists. This is the
+    /// correspondence the LTM element-graph projection
+    /// (`expand_same_element`) and the link-score dimension rule
+    /// (`link_score_dimensions`) use; an LTM consumer falls back to the
+    /// conservative broadcast (a superset of the true edges) whenever this
+    /// returns `None`, so the classifier's mapped-`Bare` recognition stays
+    /// safe: a `Bare` classification yields the mapping diagonal WHEN a
+    /// usable correspondence exists, else the broadcast -- never fewer
+    /// edges than the simulation's reads.
     ///
-    /// Semantics (kept in lockstep with the compiler and the LTM
-    /// classifier):
+    /// Semantics:
+    /// - **Positional mappings only**: a mapping with a non-empty explicit
+    ///   `element_map` returns `None`. The engine's executed A2A lowering
+    ///   resolves mapped references POSITIONALLY and ignores the element
+    ///   map (different-cardinality maps don't compile at all -- GH #753;
+    ///   the broader positional-vs-element-map execution inconsistency is
+    ///   tracked separately), so a map-following diagonal would DROP the
+    ///   true positionally-read edges. Re-enable element-map diagonals
+    ///   here only once the engine honors element maps in execution; the
+    ///   graph-vs-simulation parity test
+    ///   (`element_graph_mapped_element_map_edges_superset_of_simulation_reads`)
+    ///   is written to keep passing across that change.
     /// - **Direction**: both declaration directions are honored, mirroring
     ///   [`Self::translate_via_mapping`] (which the compiler's subscript /
     ///   A2A resolution uses): a mapping declared on `iterated_dim` toward
@@ -657,14 +672,11 @@ impl DimensionsContext {
     /// - **Transitivity**: single-hop only, matching `has_mapping_to`. A
     ///   chained `A→B→C` mapping yields `None` for the `(A, C)` pair, just
     ///   as the classifier declines it.
-    /// - **Cardinality**: an explicit element map may be many-to-one onto
-    ///   `source_dim` (`State{s1,s2,s3}→Region{a,b}`); the result still has
-    ///   exactly one source element per *iterated* element. A positional
-    ///   mapping (empty element map) requires equal sizes, per
-    ///   `translate_via_mapping`.
+    /// - **Cardinality**: equal sizes required (positional), per
+    ///   `translate_via_mapping`'s positional path.
     /// - **Fallback**: `None` when no direct mapping exists in either
-    ///   direction, either dimension is indexed, or any iterated element
-    ///   fails to translate (a partial/malformed element map, or a
+    ///   direction, either dimension is indexed, a non-empty element map
+    ///   is declared, or any iterated element fails to translate (a
     ///   positional size mismatch). Callers treat `None` as "no
     ///   correspondence" and keep their conservative broadcast.
     pub fn mapped_element_correspondence(
@@ -677,6 +689,18 @@ impl DimensionsContext {
         if !self.has_mapping_to(iterated_dim, source_dim)
             && !self.has_mapping_to(source_dim, iterated_dim)
         {
+            return None;
+        }
+        // Decline explicit (non-positional) element maps: the executed A2A
+        // lowering resolves mapped references positionally, IGNORING the
+        // element map (see the rustdoc's "Positional mappings only" gate),
+        // so following the map here would emit a diagonal missing the true
+        // positionally-read edges. `None` keeps the broadcast superset.
+        let has_element_map = |a: &CanonicalDimensionName, b: &CanonicalDimensionName| -> bool {
+            self.find_mapping_info(a, b)
+                .is_some_and(|m| !m.element_map.is_empty())
+        };
+        if has_element_map(iterated_dim, source_dim) || has_element_map(source_dim, iterated_dim) {
             return None;
         }
         let iterated_named = match self.dimensions.get(iterated_dim)? {
@@ -1435,11 +1459,14 @@ mod tests {
         assert_eq!(result, Some(canon_elems(&["a", "b"])));
     }
 
-    /// Many-to-one explicit element map (`State{s1,s2,s3}→Region{a,b}`):
-    /// exactly one source element per ITERATED element -- 3 entries, not
-    /// min(m,n).
+    /// An EXPLICIT (non-positional) element map -- here a many-to-one
+    /// `State{s1,s2,s3}→Region{a,b}` -- returns None: the executed A2A
+    /// lowering resolves mapped references positionally, ignoring the
+    /// element map (GH #753; element-map diagonals are gated on the engine
+    /// honoring them in execution), so callers must keep the conservative
+    /// broadcast.
     #[test]
-    fn test_mapped_correspondence_element_map_many_to_one() {
+    fn test_mapped_correspondence_element_map_is_none() {
         use crate::common::CanonicalDimensionName;
 
         let mut state = datamodel::Dimension::named(
@@ -1464,7 +1491,48 @@ mod tests {
             &CanonicalDimensionName::from_raw("State"),
             &CanonicalDimensionName::from_raw("Region"),
         );
-        assert_eq!(result, Some(canon_elems(&["a", "a", "b"])));
+        assert_eq!(result, None);
+    }
+
+    /// Even a same-size, well-formed (permuted) explicit element map is
+    /// declined -- the executed lowering would read positionally, so a
+    /// map-following diagonal would drop the true edges. Also pins the
+    /// REVERSE declaration direction (map declared on the source dim).
+    #[test]
+    fn test_mapped_correspondence_permuted_element_map_is_none_both_directions() {
+        use crate::common::CanonicalDimensionName;
+
+        let mut state = datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["s1".to_string(), "s2".to_string()],
+        );
+        state.mappings = vec![datamodel::DimensionMapping {
+            target: "Region".to_string(),
+            element_map: vec![
+                ("s1".to_string(), "b".to_string()),
+                ("s2".to_string(), "a".to_string()),
+            ],
+        }];
+        let region = datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        let ctx = DimensionsContext::from(&[state, region]);
+
+        let state_name = CanonicalDimensionName::from_raw("State");
+        let region_name = CanonicalDimensionName::from_raw("Region");
+        // Declared on the iterated dim (State -> Region).
+        assert_eq!(
+            ctx.mapped_element_correspondence(&state_name, &region_name),
+            None
+        );
+        // Same pair queried with State as the SOURCE dim: the element map
+        // is then on the source side (the reverse declaration direction)
+        // and must be declined the same way.
+        assert_eq!(
+            ctx.mapped_element_correspondence(&region_name, &state_name),
+            None
+        );
     }
 
     /// A positional mapping between different-size dimensions cannot
@@ -1492,8 +1560,10 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    /// A partial element map (an iterated element with no pair) cannot
-    /// give every iterated element a source: None.
+    /// A partial element map (an iterated element with no pair) is None --
+    /// it is an explicit element map (declined wholesale by the positional-
+    /// only gate), and even without the gate it could not give every
+    /// iterated element a source.
     #[test]
     fn test_mapped_correspondence_partial_element_map_is_none() {
         use crate::common::CanonicalDimensionName;

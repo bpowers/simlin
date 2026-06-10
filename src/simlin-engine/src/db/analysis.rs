@@ -171,7 +171,7 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// | non-empty   | []         | Bare                          | `from[d] -> to` for each cartesian d          |
 /// | non-empty   | non-empty (same dims)  | Bare              | `from[d] -> to[d]` per shared element         |
 /// | non-empty   | non-empty (partial collapse) | Bare        | `from[d1,d2] -> to[d1]` (delegates to `expand_same_element`)|
-/// | non-empty   | non-empty (mapped dims, GH #527) | Bare    | the mapping's diagonal `from[mapped(d)] -> to[d]` per target element (via `expand_same_element` + `dim_ctx`) |
+/// | non-empty   | non-empty (mapped dims, GH #527) | Bare    | the mapping's diagonal `from[mapped(d)] -> to[d]` per target element when a usable (positional) correspondence exists, else broadcast (via `expand_same_element` + `dim_ctx`) |
 /// | non-empty   | any        | Wildcard / DynamicIndex       | full cross product (NxM)                      |
 /// | non-empty   | []         | FixedIndex(elems)             | `from[elems] -> to` (one edge)                |
 /// | non-empty   | non-empty  | FixedIndex(elems)             | `from[elems] -> to[d]` for each cartesian d   |
@@ -379,10 +379,11 @@ fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]
 /// matching shared dimension names -- or, when names differ, a declared
 /// dimension MAPPING between a target dimension and a source dimension
 /// (GH #527; the correspondence comes from
-/// [`crate::dimensions::DimensionsContext::mapped_element_correspondence`],
-/// the same one `classify_iterated_dim_shape`'s mapped-`Bare` arm and the
-/// compiler's subscript resolution honor, so classification, expansion, and
-/// simulation can't disagree). Dimensions in the source that correspond to
+/// [`crate::dimensions::DimensionsContext::mapped_element_correspondence`]
+/// and is the diagonal WHEN a usable correspondence exists -- today,
+/// positional mappings only -- else the conservative broadcast, a superset
+/// of the simulation's true reads; see that helper's rustdoc for the
+/// positional-only gate). Dimensions in the source that correspond to
 /// no target dimension are collapsed (their elements are iterated but do
 /// not appear in the target subscript); target dimensions that correspond
 /// to no source dimension broadcast over all their elements.
@@ -390,12 +391,13 @@ fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]
 /// Examples:
 /// - `from[D1,D2] -> to[D1]`: `from[d1,d2] -> to[d1]` for all `(d1,d2)`
 ///   (partial collapse).
-/// - `from[Region] -> to[State]` with a `State→Region` mapping: the
-///   mapping's diagonal -- `from[mapped(s)] -> to[s]` for each State
-///   element `s` (a many-to-one element map gives one source element per
-///   TARGET element, e.g. 3 edges for `State{s1,s2,s3}→Region{a,b}`).
-/// - `from[Region] -> to[State]` with NO mapping: the conservative
-///   broadcast (every source element feeds every target element).
+/// - `from[Region] -> to[State]` with a positional `State→Region` mapping:
+///   the mapping's diagonal -- `from[mapped(s)] -> to[s]` for each State
+///   element `s`.
+/// - `from[Region] -> to[State]` with NO mapping -- or one declared via an
+///   explicit element map (declined by the positional-only gate): the
+///   conservative broadcast (every source element feeds every target
+///   element).
 fn expand_same_element(
     from_name: &str,
     to_name: &str,
@@ -424,6 +426,11 @@ fn expand_same_element(
         /// TARGET element index and holds the corresponding SOURCE element
         /// index (the diagonal direction `mapped_element_correspondence`
         /// defines); the expansion below inverts it per source element.
+        /// Today the helper only returns positional (bijective)
+        /// correspondences, but the inversion below is written for the
+        /// general (many-to-one) shape so re-enabling element-map
+        /// diagonals (see the helper's positional-only gate) needs no
+        /// emitter change.
         Mapped(usize, Vec<usize>),
         /// No corresponding target dimension: collapse.
         Collapsed,
@@ -542,10 +549,12 @@ fn expand_same_element(
                 }
                 Correspondence::Mapped(pos, target_to_source) => {
                     // Preimage: every target element whose mapped source
-                    // element is this source element. May be empty (a
-                    // source element nothing maps to feeds no target
-                    // element on this axis), or hold several elements for
-                    // a many-to-one element map.
+                    // element is this source element. With today's
+                    // positional-only correspondences this is always a
+                    // singleton, but the general form (empty for a source
+                    // element nothing maps to; several elements for a
+                    // many-to-one element map) is kept for the element-map
+                    // re-enable gate.
                     for (target_idx, &src_idx) in target_to_source.iter().enumerate() {
                         if src_idx == src_elem_idx {
                             to_elem_options[*pos].push(to_dim_elements[*pos][target_idx].as_str());
@@ -3262,27 +3271,21 @@ mod emit_edges_for_reference_tests {
         }
     }
 
-    /// GH #527: `expand_same_element` projects a `Bare` edge between
-    /// differently-named MAPPED dimensions along the mapping's element
-    /// correspondence -- here a many-to-one element map
-    /// (`State{s1,s2,s3}→Region{a,b}`: s1↦a, s2↦a, s3↦b), exercised
-    /// directly so the source-element preimage logic (one source element
-    /// feeding several target elements, another feeding one) is pinned
-    /// without the salsa pipeline.
+    /// GH #527: a `Bare` edge between dimensions related by a POSITIONAL
+    /// mapping projects the diagonal; a pair related only by an EXPLICIT
+    /// element map keeps the conservative broadcast (the executed A2A
+    /// lowering resolves positionally, ignoring the element map -- see
+    /// `mapped_element_correspondence`'s positional-only gate / GH #753).
+    /// Exercised directly (no salsa pipeline) so both arms of the
+    /// correspondence decision are pinned at the emitter level.
     #[test]
-    fn bare_mapped_dims_project_element_map_diagonal() {
+    fn bare_mapped_dims_positional_diagonal_element_map_broadcast() {
+        // Positional mapping: diagonal.
         let mut state = crate::datamodel::Dimension::named(
             "State".to_string(),
-            vec!["s1".to_string(), "s2".to_string(), "s3".to_string()],
+            vec!["s1".to_string(), "s2".to_string()],
         );
-        state.mappings = vec![crate::datamodel::DimensionMapping {
-            target: "Region".to_string(),
-            element_map: vec![
-                ("s1".to_string(), "a".to_string()),
-                ("s2".to_string(), "a".to_string()),
-                ("s3".to_string(), "b".to_string()),
-            ],
-        }];
+        state.set_maps_to("Region".to_string());
         let region = crate::datamodel::Dimension::named(
             "Region".to_string(),
             vec!["a".to_string(), "b".to_string()],
@@ -3302,18 +3305,54 @@ mod emit_edges_for_reference_tests {
             &dim_ctx,
             &mut edges,
         );
-
-        let from_a = edges.get("x[a]").expect("x[a] must be a source");
         assert_eq!(
-            from_a,
-            &BTreeSet::from(["target[s1]".to_string(), "target[s2]".to_string()]),
-            "x[a] feeds exactly the two State elements mapped to it"
+            edges.get("x[a]"),
+            Some(&BTreeSet::from(["target[s1]".to_string()])),
+            "positional mapping: x[a] feeds only its positional twin"
         );
-        let from_b = edges.get("x[b]").expect("x[b] must be a source");
         assert_eq!(
-            from_b,
-            &BTreeSet::from(["target[s3]".to_string()]),
-            "x[b] feeds exactly the one State element mapped to it"
+            edges.get("x[b]"),
+            Some(&BTreeSet::from(["target[s2]".to_string()])),
+            "positional mapping: x[b] feeds only its positional twin"
+        );
+
+        // Explicit element map (permuted s1↦b, s2↦a): broadcast.
+        let mut state_em = crate::datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["s1".to_string(), "s2".to_string()],
+        );
+        state_em.mappings = vec![crate::datamodel::DimensionMapping {
+            target: "Region".to_string(),
+            element_map: vec![
+                ("s1".to_string(), "b".to_string()),
+                ("s2".to_string(), "a".to_string()),
+            ],
+        }];
+        let dim_ctx_em =
+            crate::dimensions::DimensionsContext::from(&[state_em.clone(), region.clone()]);
+        let to_dims_em = vec![crate::dimensions::Dimension::from(&state_em)];
+
+        let mut edges_em: HashMap<String, BTreeSet<String>> = HashMap::new();
+        emit_edges_for_reference(
+            "x",
+            "target",
+            &from_dims,
+            &to_dims_em,
+            &RefShape::Bare,
+            None,
+            &dim_ctx_em,
+            &mut edges_em,
+        );
+        let broadcast = BTreeSet::from(["target[s1]".to_string(), "target[s2]".to_string()]);
+        assert_eq!(
+            edges_em.get("x[a]"),
+            Some(&broadcast),
+            "element map: x[a] keeps the conservative broadcast"
+        );
+        assert_eq!(
+            edges_em.get("x[b]"),
+            Some(&broadcast),
+            "element map: x[b] keeps the conservative broadcast"
         );
     }
 }

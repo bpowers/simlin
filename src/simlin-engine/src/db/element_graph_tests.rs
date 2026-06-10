@@ -1383,14 +1383,18 @@ fn element_graph_mapped_reverse_declared_subscripted_stays_cross_product() {
     assert_edge(&result, "x[b]", "target[s2]");
 }
 
-/// GH #527: a different-cardinality element-level mapping
-/// (`State{s1,s2,s3}→Region{a,b}` with the explicit element map s1↦a, s2↦a,
-/// s3↦b) projects one source element per TARGET element -- three edges, not
-/// min(m,n) and not the 2×3 cross-product. `x[a]` feeds both `target[s1]`
-/// and `target[s2]` (two State elements map to it); `x[b]` feeds only
-/// `target[s3]`.
+/// GH #527: an EXPLICIT element-level mapping (here the different-
+/// cardinality many-to-one `State{s1,s2,s3}→Region{a,b}`: s1↦a, s2↦a,
+/// s3↦b) keeps the conservative BROADCAST, not a map-following diagonal:
+/// the engine's executed A2A lowering resolves mapped references
+/// positionally, ignoring the element map (this 3→2 model doesn't compile
+/// at all -- GH #753 -- so the graph-level pin is all we can have here;
+/// the same positional-execution inconsistency is why
+/// `mapped_element_correspondence` declines element maps wholesale, see
+/// its rustdoc gate). The broadcast is a superset of whatever the engine
+/// would read, so no true edge can be missing.
 #[test]
-fn element_graph_mapped_element_map_many_to_one_diagonal() {
+fn element_graph_mapped_element_map_stays_broadcast() {
     let project = TestProject::new("mapped_element_map_3_to_2")
         .named_dimension("Region", &["a", "b"])
         .named_dimension_with_element_mapping(
@@ -1404,12 +1408,15 @@ fn element_graph_mapped_element_map_many_to_one_diagonal() {
 
     let result = element_edges(&project);
 
-    assert_edge(&result, "x[a]", "target[s1]");
-    assert_edge(&result, "x[a]", "target[s2]");
-    assert_edge(&result, "x[b]", "target[s3]");
-    assert_no_edge(&result, "x[a]", "target[s3]");
-    assert_no_edge(&result, "x[b]", "target[s1]");
-    assert_no_edge(&result, "x[b]", "target[s2]");
+    for region in ["a", "b"] {
+        for state in ["s1", "s2", "s3"] {
+            assert_edge(
+                &result,
+                &format!("x[{region}]"),
+                &format!("target[{state}]"),
+            );
+        }
+    }
 }
 
 /// GH #527: the mapped diagonal composes with the target-only-dimension
@@ -1441,6 +1448,67 @@ fn element_graph_mapped_diagonal_with_broadcast_dim() {
     assert_no_edge(&result, "x[a]", "target[s2,old]");
     assert_no_edge(&result, "x[b]", "target[s1,young]");
     assert_no_edge(&result, "x[b]", "target[s1,old]");
+}
+
+/// Graph-vs-SIMULATION parity for an ASYMMETRIC explicit element map.
+///
+/// `Region{a,b}`, `State{s1,s2}` with the PERMUTED element map s1↦b, s2↦a,
+/// distinct per-element source values (`x[a]=10`, `x[b]=20`), and
+/// `target[State] = x[State] * 1`. The element graph's edges must be a
+/// SUPERSET of the edges the simulation's actual reads imply (derived here
+/// from which `x` element's value each `target` element equals) -- the LTM
+/// contract is "more edges than necessary, never fewer".
+///
+/// Today the engine's executed A2A lowering resolves mapped references
+/// POSITIONALLY, ignoring the explicit element map (target[s1] = x[a], the
+/// map notwithstanding; see GH #753 for the related different-cardinality
+/// compile failure), so a map-following diagonal would DROP the true
+/// positionally-read edges -- which is why `mapped_element_correspondence`
+/// declines explicit element maps (conservative broadcast). The test
+/// derives the implied edges from the run itself, so it keeps passing if
+/// the engine later honors element maps in execution and the element-map
+/// diagonal is re-enabled.
+#[test]
+fn element_graph_mapped_element_map_edges_superset_of_simulation_reads() {
+    let project = TestProject::new("mapped_element_map_parity")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension_with_element_mapping(
+            "State",
+            &["s1", "s2"],
+            "Region",
+            &[("s1", "b"), ("s2", "a")],
+        )
+        .array_with_ranges_direct(
+            "x",
+            vec!["Region".into()],
+            vec![("a", "10"), ("b", "20")],
+            None,
+        )
+        .array_aux_direct("target", vec!["State".into()], "x[State] * 1", None);
+
+    let sim = project.run_vm_incremental();
+    let graph = element_edges(&project);
+
+    let region_elems = ["a", "b"];
+    for state_elem in ["s1", "s2"] {
+        let target_key = format!("target[{state_elem}]");
+        let target_val = sim
+            .get(&target_key)
+            .unwrap_or_else(|| panic!("{target_key} missing from sim results"))[0];
+        // The source element the simulation ACTUALLY read for this target
+        // element (source values are distinct, so the match is unique).
+        let read_from: Vec<&str> = region_elems
+            .iter()
+            .copied()
+            .filter(|r| (sim[&format!("x[{r}]")][0] - target_val).abs() < 1e-9)
+            .collect();
+        assert_eq!(
+            read_from.len(),
+            1,
+            "exactly one x element should match {target_key}={target_val}"
+        );
+        assert_edge(&graph, &format!("x[{}]", read_from[0]), &target_key);
+    }
 }
 
 /// GH #527: two dimensions with the same shape but NO declared mapping must
