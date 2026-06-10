@@ -3583,3 +3583,234 @@ fn test_ltm_submodel_rk4_override_main_euler_is_accepted() {
     let mut vm = crate::vm::Vm::new(compiled.unwrap()).expect("VM creation should succeed");
     vm.run_to_end().expect("Euler sim should run to completion");
 }
+
+// ── GH #663: the non-Euler guard must not over-reject loop-free models ───
+//
+// #486's guard rejected RK2/RK4 + LTM whenever ANY instantiated model had a
+// stock. But LTM only emits a flow-to-stock link score for a stock that
+// participates in a feedback loop; a stock in NO loop (an open-loop
+// accumulation -- a constant inflow that never reads the stock back) produces
+// zero flow-to-stock scores, so the non-Euler method has nothing to corrupt
+// and the rejection is a false positive. The refined guard fires only when an
+// instantiated model has a feedback loop (which, in a well-formed SD model,
+// necessarily passes through a stock).
+
+/// An open-loop accumulation model: a stock fed by a CONSTANT inflow. The
+/// inflow `rate` does not read the stock back, so there is no feedback loop
+/// and LTM emits no flow-to-stock link score for `tank`. With the requested
+/// integration method on the project specs.
+#[cfg(test)]
+fn open_loop_project_with_method(method: datamodel::SimMethod) -> datamodel::Project {
+    let mut project = feedback_loop_project();
+    project.sim_specs.sim_method = method;
+    project.models = vec![x_model(
+        "main",
+        vec![
+            // `tank` accumulates `rate`, but nothing reads `tank` -> no cycle.
+            x_stock("tank", "0", &["rate"], &[], None),
+            x_flow("rate", "fill_rate", None),
+            x_aux("fill_rate", "5", None),
+        ],
+    )];
+    project
+}
+
+#[test]
+fn test_ltm_rk4_open_loop_stock_compiles() {
+    // The RED case for GH #663: a stock with no feedback loop under RK4 + LTM
+    // emits no flow-to-stock scores, so the non-Euler guard must NOT reject it.
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = open_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let compiled = compile_project_incremental(&db, source_project, "main");
+    assert!(
+        compiled.is_ok(),
+        "RK4 + LTM on a loop-free (open-loop accumulation) model must compile: {:?}",
+        compiled.err()
+    );
+    // And it simulates -- the stock genuinely accumulates under RK4.
+    let mut vm = crate::vm::Vm::new(compiled.unwrap()).expect("VM creation should succeed");
+    vm.run_to_end().expect("RK4 sim should run to completion");
+}
+
+#[test]
+fn test_ltm_rk2_open_loop_stock_compiles() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = open_loop_project_with_method(datamodel::SimMethod::RungeKutta2);
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    assert!(
+        compile_project_incremental(&db, source_project, "main").is_ok(),
+        "RK2 + LTM on a loop-free model must compile"
+    );
+}
+
+#[test]
+fn test_ltm_euler_open_loop_stock_compiles() {
+    // The Euler control: a loop-free model under Euler always compiled and
+    // still must -- this pins that the refined guard didn't change the Euler
+    // path or break loop-free models generally.
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = open_loop_project_with_method(datamodel::SimMethod::Euler);
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    assert!(
+        compile_project_incremental(&db, source_project, "main").is_ok(),
+        "Euler + LTM on a loop-free model must compile"
+    );
+}
+
+/// The soundness corner of GH #663: an open-loop stock has NO feedback loop,
+/// but DISCOVERY mode (here user-forced) scores EVERY causal edge -- including
+/// the open-loop `rate → tank` flow-to-stock edge. That flow-to-stock score is
+/// exactly the Euler-only formula, so under RK4 the model must STILL be
+/// rejected even though it has no loop. A guard that keyed on "has any feedback
+/// loop" would wrongly accept this (the stock is in no loop); the guard must
+/// key on "actually emits a flow-to-stock score".
+#[test]
+fn test_ltm_rk4_open_loop_stock_in_discovery_mode_is_rejected() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = open_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+    // Force discovery mode: now ALL edges get link scores, so the open-loop
+    // stock's flow-to-stock edge IS scored.
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let details = ltm_euler_rejection(&db, source_project).expect(
+        "RK4 + LTM + forced-discovery on an open-loop stock must be rejected: discovery \
+         scores the flow-to-stock edge",
+    );
+    assert!(
+        details.contains("RK4") || details.contains("Runge"),
+        "the rejection must name the offending method: {details}"
+    );
+}
+
+/// The Euler control for the forced-discovery open-loop case: Euler is the
+/// supported integration, so even though a flow-to-stock score IS emitted, the
+/// combination compiles. Pins that the discovery-mode rejection is gated on the
+/// non-Euler method, not on the mere emission of a flow-to-stock score.
+#[test]
+fn test_ltm_euler_open_loop_stock_in_discovery_mode_compiles() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = open_loop_project_with_method(datamodel::SimMethod::Euler);
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    assert!(
+        ltm_euler_rejection(&db, source_project).is_none(),
+        "Euler + LTM + forced-discovery on an open-loop stock must compile"
+    );
+}
+
+/// A stock-free RK4 main that instantiates a submodel whose stock is in NO
+/// internal loop, but which the parent reads through an input/output port.
+/// A module with input ports scores ALL its causal edges (the pathway/composite
+/// machinery needs them), so `model_ltm_variables` emits the submodel's
+/// `fill → level` flow-to-stock score even though `level` is in no loop. That
+/// score is the Euler-only formula, so under the main-governed RK4 the model
+/// must be rejected. This pins that the refined guard reads the EMITTED scores
+/// (a loop-presence proxy would wrongly accept this -- the submodel stock has
+/// no loop).
+#[test]
+fn test_ltm_main_rk4_input_port_submodel_stock_is_rejected() {
+    use salsa::Setter;
+
+    let mut main = x_model(
+        "main",
+        vec![
+            x_module("sub", &[("driver", "input")], None),
+            x_aux("driver", "1", None),
+            x_aux("observed", "sub.output", None),
+        ],
+    );
+    main.sim_specs = Some(datamodel::SimSpecs {
+        sim_method: datamodel::SimMethod::RungeKutta4,
+        ..feedback_loop_project().sim_specs
+    });
+
+    // `level` accumulates `fill` (= the `input` port), never read back, so the
+    // submodel has no internal feedback loop -- but its input port forces
+    // all-edge scoring, which emits the `fill → level` flow-to-stock score.
+    let mut sub = x_model(
+        "sub",
+        vec![
+            x_aux("input", "0", None),
+            x_stock("level", "0", &["fill"], &[], None),
+            x_flow("fill", "input", None),
+            x_aux("output", "level", None),
+        ],
+    );
+    sub.sim_specs = None;
+
+    let mut project = feedback_loop_project();
+    project.models = vec![main, sub];
+    project.sim_specs.sim_method = datamodel::SimMethod::Euler;
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let details = ltm_euler_rejection(&db, source_project).expect(
+        "main-RK4 + input-port submodel-stock LTM must be rejected: an input-port submodel \
+         scores its flow-to-stock edge even without a loop",
+    );
+    assert!(
+        details.contains("RK4") || details.contains("Runge"),
+        "the rejection must name the main-governed method: {details}"
+    );
+}
+
+/// The same stock-free RK4 main, but the submodel's stock IS in a feedback
+/// loop. A flow-to-stock score IS emitted for the submodel instance, so the
+/// refined guard must STILL reject. (This is the #663 analogue of the existing
+/// #486 `test_ltm_main_rk4_submodel_stock_is_rejected` false-negative probe.)
+#[test]
+fn test_ltm_main_rk4_looped_submodel_is_rejected() {
+    use salsa::Setter;
+
+    let mut main = x_model(
+        "main",
+        vec![
+            x_module("sub", &[("driver", "input")], None),
+            x_aux("driver", "1", None),
+            x_aux("observed", "sub.output", None),
+        ],
+    );
+    main.sim_specs = Some(datamodel::SimSpecs {
+        sim_method: datamodel::SimMethod::RungeKutta4,
+        ..feedback_loop_project().sim_specs
+    });
+
+    let mut project = feedback_loop_project();
+    // `feedback_submodel` has the internal `level <-> adjust` feedback loop.
+    project.models = vec![main, feedback_submodel(None)];
+    project.sim_specs.sim_method = datamodel::SimMethod::Euler;
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let details = ltm_euler_rejection(&db, source_project)
+        .expect("main-RK4 + looped submodel-stock LTM must be rejected");
+    assert!(
+        details.contains("RK4") || details.contains("Runge"),
+        "the rejection must name the main-governed method: {details}"
+    );
+}
