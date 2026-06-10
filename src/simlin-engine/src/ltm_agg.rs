@@ -854,7 +854,7 @@ fn reducer_source_vars(
 ///   dimension -- matching `classify_subscript_shape`'s AC1.4 treatment of an
 ///   all-`StarRange` subscript as `Wildcard`. The element-graph reroute then
 ///   over-approximates the unread rows, exactly as before; tightening this is
-///   tracked as GH #765.)
+///   tracked as GH #766.)
 /// - `IndexExpr2::Expr(Expr2::Var(d, ..))` where `d` (canonical) is one of
 ///   the *target equation's* iterated dimensions AND matches the source's
 ///   `i`-th declared dimension either *by name* or via a positional
