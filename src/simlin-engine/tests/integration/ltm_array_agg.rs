@@ -2389,9 +2389,10 @@ fn arrayed_co_source_feeder_loop_is_balancing() {
     let source_model = sync.models["main"].source_model;
 
     // Detected surface: the weight loop must be Balancing -- and above all
-    // NOT a confident Reinforcing (the runtime weight→agg series for this
-    // fixture is wrong-signed pending a separately-tracked fix, so a wrong
-    // static label here could "agree" with wrong runtime data).
+    // NOT a confident Reinforcing. (The runtime weight→agg series for this
+    // fixture is pinned NEGATIVE by the GH #744 body-aware partial -- see
+    // `co_source_weight_to_agg_link_score_tracks_true_partial` -- so the
+    // static label and the runtime series now agree in sign.)
     let detected = model_detected_loops(&db, source_model, sync.project).clone();
     let weight_loop = detected
         .loops
@@ -2560,5 +2561,361 @@ fn broadcast_agg_loop_scores_are_finite_and_sustained() {
                  score is the GH #528 degradation. series: {s:?}"
             );
         }
+    }
+}
+
+// ── GH #744: source→agg per-row link scores must honor the reducer body's
+// coefficient on the source ──────────────────────────────────────────────
+//
+// The SUM/MEAN linear shortcut used to score every co-source row of a
+// hoisted reducer as if the body were the bare source element (implicit
+// ∂agg/∂source[e] = 1), ignoring the body's coefficient on that source --
+// which can be negative. The per-row changed-first partial now evaluates
+// the reducer's BODY at the row with the source's reference live and every
+// other model reference frozen at PREVIOUS, so the score tracks the true
+// per-row partial (sign and magnitude).
+
+/// The GH #744 repro fixture: `grow = 1 + SUM(pop[*] * (1 - weight[*]))`
+/// with `weight` fed back from the stock `total` (the same fixture as
+/// `arrayed_co_source_feeder_loop_is_balancing`, which pins the STATIC
+/// label; these tests pin the runtime series).
+fn co_source_weight_fixture() -> datamodel::Project {
+    TestProject::new("co_source_744")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .array_aux("weight[region]", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * (1 - weight[*]))", None)
+        .build_datamodel()
+}
+
+/// The bilinear feeder fixture: `grow = 1 + SUM(pop[*] * scale)` with the
+/// scalar feeder `scale` fed back from `total` (the GH #737 shape) AND the
+/// pop rows on a loop through the agg (`pgrow` reads `grow`), so both the
+/// per-row changed-first scores and the feeder's changed-last score are
+/// emitted. Per-row gains differ so the two rows' dynamics (and scores)
+/// are not symmetric.
+fn bilinear_feeder_fixture() -> datamodel::Project {
+    TestProject::new("bilinear_744")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_with_ranges("gain[region]", vec![("north", "0.04"), ("south", "0.07")])
+        .array_flow("pgrow[region]", "pop * gain * 0.001 * grow", None)
+        .aux("scale", "0.001 * total + 0.01", None)
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * scale)", None)
+        .build_datamodel()
+}
+
+/// Relative-tolerance float comparison for series-derived expectations.
+fn assert_close(actual: f64, expected: f64, rel_tol: f64, what: &str) {
+    let scale = expected.abs().max(1e-12);
+    assert!(
+        (actual - expected).abs() <= rel_tol * scale,
+        "{what}: got {actual}, expected {expected} (rel tol {rel_tol})"
+    );
+}
+
+/// GH #744 (i): the `weight[e] → agg` runtime link-score series must track
+/// the true per-row partial `∂agg/∂weight[e] = -pop[e] < 0` -- a sustained
+/// NEGATIVE series whose value is the changed-first numerator
+/// `PREVIOUS(pop[e]) * (PREVIOUS(weight[e]) - weight[e])` normalized by
+/// `|Δagg|` and signed by `SIGN(Δweight[e])`. Pre-fix the linear shortcut
+/// scored the row as the bare `Δweight[e]` -- a sustained POSITIVE series
+/// (wrong sign AND wrong magnitude) that runtime polarity reclassification
+/// then rubber-stamped. Post-fix the runtime series AGREES with the static
+/// Balancing label pinned by `arrayed_co_source_feeder_loop_is_balancing`.
+#[test]
+fn co_source_weight_to_agg_link_score_tracks_true_partial() {
+    let project = co_source_weight_fixture();
+    let (results, _) = run_ltm(&project);
+    let agg = series_at(
+        &results,
+        offset_of(&results, "$\u{205A}ltm\u{205A}agg\u{205A}0"),
+    );
+
+    for elem in ["north", "south"] {
+        let score_name =
+            format!("{LINK_SCORE_PREFIX}weight[{elem}]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0");
+        let score = series_at(&results, offset_of(&results, &score_name));
+        let pop = series_at(&results, offset_of(&results, &format!("pop[{elem}]")));
+        let weight = series_at(&results, offset_of(&results, &format!("weight[{elem}]")));
+
+        let mut contributing = 0usize;
+        for t in 1..score.len() {
+            let d_agg = agg[t] - agg[t - 1];
+            let d_w = weight[t] - weight[t - 1];
+            if d_agg == 0.0 || d_w == 0.0 {
+                assert_eq!(score[t], 0.0, "{score_name} at step {t}: guard must zero");
+                continue;
+            }
+            // Changed-first per-row partial: pop frozen at PREVIOUS, the
+            // other rows cancel against PREVIOUS(agg).
+            let numerator = pop[t - 1] * (weight[t - 1] - weight[t]);
+            let expected = numerator / d_agg.abs() * d_w.signum();
+            assert!(
+                expected < 0.0,
+                "fixture must exercise the negative-partial case at step {t}"
+            );
+            assert!(
+                score[t] < 0.0,
+                "{score_name} at step {t}: the true partial ∂agg/∂weight[e] = -pop[e] < 0, \
+                 so the score must be negative; got {} (the pre-fix shortcut emitted a \
+                 sustained positive series)",
+                score[t]
+            );
+            assert_close(
+                score[t],
+                expected,
+                1e-9,
+                &format!("{score_name} at step {t}"),
+            );
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "{score_name}: expected at least 3 scored steps, got {contributing}"
+        );
+    }
+}
+
+/// GH #744 (ii): for `SUM(pop[*] * scale)` the per-row `pop[e] → agg`
+/// changed-first score must carry the body's coefficient on the row --
+/// `Δpop[e] * PREVIOUS(scale)` normalized by `|Δagg|` -- not the bare
+/// `Δpop[e]` the shortcut asserted (wrong magnitude whenever `scale != 1`;
+/// here `scale` stays far below 1, so the pre-fix value was ~9x too big).
+#[test]
+fn bilinear_row_to_agg_link_score_reflects_body_coefficient() {
+    let project = bilinear_feeder_fixture();
+    let (results, _) = run_ltm(&project);
+    let agg = series_at(
+        &results,
+        offset_of(&results, "$\u{205A}ltm\u{205A}agg\u{205A}0"),
+    );
+    let scale = series_at(&results, offset_of(&results, "scale"));
+
+    for elem in ["north", "south"] {
+        let score_name =
+            format!("{LINK_SCORE_PREFIX}pop[{elem}]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0");
+        let score = series_at(&results, offset_of(&results, &score_name));
+        let pop = series_at(&results, offset_of(&results, &format!("pop[{elem}]")));
+
+        let mut contributing = 0usize;
+        for t in 1..score.len() {
+            let d_agg = agg[t] - agg[t - 1];
+            let d_pop = pop[t] - pop[t - 1];
+            if d_agg == 0.0 || d_pop == 0.0 {
+                assert_eq!(score[t], 0.0, "{score_name} at step {t}: guard must zero");
+                continue;
+            }
+            // The coefficient must genuinely discriminate from the bare
+            // shortcut (which asserted coefficient 1).
+            assert!(
+                (scale[t - 1] - 1.0).abs() > 0.5,
+                "fixture must keep PREVIOUS(scale) far from 1 at step {t}"
+            );
+            let expected = d_pop * scale[t - 1] / d_agg.abs() * d_pop.signum();
+            assert_close(
+                score[t],
+                expected,
+                1e-9,
+                &format!("{score_name} at step {t}"),
+            );
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "{score_name}: expected at least 3 scored steps, got {contributing}"
+        );
+    }
+}
+
+/// GH #744 (iv): the changed-first/changed-last complementarity for a
+/// bilinear body (documented on `generate_scalar_feeder_to_agg_equation`)
+/// must survive the body-aware per-row partial: the per-row changed-first
+/// numerators (`Δpop[e] * PREVIOUS(scale)`) plus the feeder's changed-last
+/// numerator (`Σ_e pop[e] * Δscale`) sum exactly to `Δagg`. Numerators are
+/// reconstructed from the emitted scores (`numerator = score * |Δagg| *
+/// SIGN(Δsource)`), so this pins the additivity of what LTM actually
+/// reports.
+#[test]
+fn bilinear_feeder_plus_row_scores_are_additive() {
+    let project = bilinear_feeder_fixture();
+    let (results, _) = run_ltm(&project);
+    let agg = series_at(
+        &results,
+        offset_of(&results, "$\u{205A}ltm\u{205A}agg\u{205A}0"),
+    );
+    let scale = series_at(&results, offset_of(&results, "scale"));
+    let feeder_score = series_at(
+        &results,
+        offset_of(
+            &results,
+            &format!("{LINK_SCORE_PREFIX}scale\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0"),
+        ),
+    );
+    let row_data: Vec<(Vec<f64>, Vec<f64>)> = ["north", "south"]
+        .iter()
+        .map(|elem| {
+            let score = series_at(
+                &results,
+                offset_of(
+                    &results,
+                    &format!(
+                        "{LINK_SCORE_PREFIX}pop[{elem}]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0"
+                    ),
+                ),
+            );
+            let pop = series_at(&results, offset_of(&results, &format!("pop[{elem}]")));
+            (score, pop)
+        })
+        .collect();
+
+    let mut contributing = 0usize;
+    for t in 1..agg.len() {
+        let d_agg = agg[t] - agg[t - 1];
+        let d_scale = scale[t] - scale[t - 1];
+        if d_agg == 0.0 || d_scale == 0.0 {
+            continue;
+        }
+        let mut sum = feeder_score[t] * d_agg.abs() * d_scale.signum();
+        let mut all_rows_scored = true;
+        for (score, pop) in &row_data {
+            let d_pop = pop[t] - pop[t - 1];
+            if d_pop == 0.0 {
+                all_rows_scored = false;
+                break;
+            }
+            sum += score[t] * d_agg.abs() * d_pop.signum();
+        }
+        if !all_rows_scored {
+            continue;
+        }
+        assert_close(
+            sum,
+            d_agg,
+            1e-9,
+            &format!("sum of source-row + feeder numerators at step {t}"),
+        );
+        contributing += 1;
+    }
+    assert!(
+        contributing >= 3,
+        "expected at least 3 steps where every source scored, got {contributing}"
+    );
+}
+
+/// GH #744 (iii)/(v): shapes the fix must NOT change, pinned byte-for-byte
+/// against the pre-fix emission (recorded at `ltm-fix-batch-2` HEAD
+/// `9517d77e` before the change):
+/// - a BARE reducer body (`SUM(pop[*])`) keeps the legacy linear-shortcut
+///   equation text exactly;
+/// - the scalar feeder's changed-last equation
+///   (`generate_scalar_feeder_to_agg_equation`) is untouched by the
+///   body-aware per-row partial.
+#[test]
+fn bare_body_and_feeder_agg_equations_unchanged() {
+    // Bare body: `grow = 1 + SUM(pop[*])`, pop rows on a loop through the
+    // agg (pgrow reads total, total integrates grow).
+    let bare = TestProject::new("bare_744")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05 * total * 0.001", None)
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*])", None)
+        .build_datamodel();
+    let (_, ltm_vars) = run_ltm(&bare);
+    let bare_score = ltm_var(
+        &ltm_vars,
+        &format!("{LINK_SCORE_PREFIX}pop[north]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0"),
+    );
+    assert_eq!(
+        bare_score.equation.source_text(),
+        "if (TIME = INITIAL_TIME) then 0 else if ((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
+         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")) = 0) OR ((pop[region\u{B7}north] - \
+         PREVIOUS(pop[region\u{B7}north])) = 0) then 0 else \
+         SAFEDIV((PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\") + (pop[region\u{B7}north] - \
+         PREVIOUS(pop[region\u{B7}north])) - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")), \
+         ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"))), 0) * \
+         SIGN((pop[region\u{B7}north] - PREVIOUS(pop[region\u{B7}north])))",
+        "the bare-body linear shortcut must stay byte-identical"
+    );
+
+    // Scalar feeder: changed-last equation untouched.
+    let (_, ltm_vars) = run_ltm(&bilinear_feeder_fixture());
+    let feeder_score = ltm_var(
+        &ltm_vars,
+        &format!("{LINK_SCORE_PREFIX}scale\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0"),
+    );
+    assert_eq!(
+        feeder_score.equation.source_text(),
+        "if (TIME = INITIAL_TIME) then 0 else if ((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
+         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")) = 0) OR ((scale - PREVIOUS(scale)) = 0) \
+         then 0 else SAFEDIV((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - (sum(pop[*] * \
+         PREVIOUS(scale)))), ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
+         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"))), 0) * SIGN((scale - PREVIOUS(scale)))",
+        "the scalar feeder's changed-last equation must stay byte-identical"
+    );
+}
+
+/// GH #744: the same body-coefficient defect existed on the
+/// VARIABLE-BACKED reducer path (`try_cross_dimensional_link_scores`):
+/// a whole-RHS `tp = SUM(pop[*] * (1 - weight[*]))` is not hoisted into a
+/// synthetic agg (the variable is its own agg), but `classify_reducer`'s
+/// `is_bare` only describes arithmetic AROUND the reducer, so the linear
+/// shortcut scored `weight[e] → tp` as bare `Δweight[e]` (sustained
+/// positive). The body-aware partial fixes this site identically.
+#[test]
+fn variable_backed_co_source_link_score_tracks_true_partial() {
+    let project = TestProject::new("var_backed_744")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .array_aux("weight[region]", "0.001 * total + 0.01")
+        .aux("tp", "SUM(pop[*] * (1 - weight[*]))", None)
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "tp * 0.05", None)
+        .build_datamodel();
+    let (results, _) = run_ltm(&project);
+    let tp = series_at(&results, offset_of(&results, "tp"));
+
+    for elem in ["north", "south"] {
+        let score_name = format!("{LINK_SCORE_PREFIX}weight[{elem}]\u{2192}tp");
+        let score = series_at(&results, offset_of(&results, &score_name));
+        let pop = series_at(&results, offset_of(&results, &format!("pop[{elem}]")));
+        let weight = series_at(&results, offset_of(&results, &format!("weight[{elem}]")));
+
+        let mut contributing = 0usize;
+        for t in 1..score.len() {
+            let d_tp = tp[t] - tp[t - 1];
+            let d_w = weight[t] - weight[t - 1];
+            if d_tp == 0.0 || d_w == 0.0 {
+                assert_eq!(score[t], 0.0, "{score_name} at step {t}: guard must zero");
+                continue;
+            }
+            let numerator = pop[t - 1] * (weight[t - 1] - weight[t]);
+            let expected = numerator / d_tp.abs() * d_w.signum();
+            assert!(
+                score[t] < 0.0,
+                "{score_name} at step {t}: must be negative, got {}",
+                score[t]
+            );
+            assert_close(
+                score[t],
+                expected,
+                1e-9,
+                &format!("{score_name} at step {t}"),
+            );
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "{score_name}: expected at least 3 scored steps, got {contributing}"
+        );
     }
 }

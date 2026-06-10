@@ -267,13 +267,29 @@ pub(super) fn try_cross_dimensional_link_scores(
     // The source is a reducer argument. Classify the reducing function
     // in the target's equation.
     let to_var = reconstruct_single_variable(db, model, project, to)?;
-    let (reducer_kind, reducer_name, is_bare) =
-        crate::ltm_augment::classify_reducer(&to_var, from)?;
+    let classified = crate::ltm_augment::classify_reducer(&to_var, from)?;
 
-    if reducer_kind == crate::ltm_augment::ReducerKind::Constant {
+    if classified.kind == crate::ltm_augment::ReducerKind::Constant {
         // SIZE is constant; link score is always 0. Skip entirely.
         return Some(vec![]);
     }
+
+    // The body-aware partial context (GH #744): without it the linear
+    // shortcut would score each row as the bare source element, ignoring
+    // any coefficient the reducer body applies to the source
+    // (`SUM(pop[*] * (1 - weight[*]))` w.r.t. `weight` has the
+    // sign-flipping coefficient `-pop[e]`).
+    let (arrayed_dep_dims, model_deps) =
+        reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
+    let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
+    let body_ctx = crate::ltm_augment::ReducerBodyCtx {
+        body_text: &classified.body_text,
+        live_source: from,
+        arrayed_dep_dims: &arrayed_dep_dims,
+        model_deps: &model_deps,
+        row_dim_names: &row_dim_names,
+        dims_ctx: Some(project_dimensions_context(db, project)),
+    };
 
     // Compute the cartesian product of all source dimensions to get
     // per-element subscripts. For a single dimension, this is just the
@@ -307,9 +323,10 @@ pub(super) fn try_cross_dimensional_link_scores(
                 to,
                 qualified_element,
                 &qualified_elements,
-                &reducer_kind,
-                reducer_name,
-                is_bare,
+                &classified.kind,
+                classified.name,
+                classified.is_bare,
+                Some(&body_ctx),
             );
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
@@ -380,9 +397,10 @@ pub(super) fn try_cross_dimensional_link_scores(
             &crate::ltm_augment::qualify_element_csv(source_elem, from_dims),
             &crate::ltm_augment::qualify_element_csv(&result_elem, to_dims),
             &qualified_coreduced,
-            &reducer_kind,
-            reducer_name,
-            is_bare,
+            &classified.kind,
+            classified.name,
+            classified.is_bare,
+            Some(&body_ctx),
         );
         cross_vars.push(LtmSyntheticVar {
             name: var_name,
@@ -947,6 +965,33 @@ pub(super) fn emit_per_shape_link_scores(
     }
 }
 
+/// Build the owned inputs for a [`crate::ltm_augment::ReducerBodyCtx`]:
+/// for every model variable a reducer body references, its membership in
+/// the freeze set (`model_deps`) and -- when arrayed -- its declared
+/// dimension count (`arrayed_dep_dims`, the row-pinning gate). Identifiers
+/// in the body that are not model variables (dimension/element names in
+/// subscripts, TIME) are excluded, so the body partial leaves them live,
+/// matching `build_partial_equation_shaped`'s deps-only freezing.
+fn reducer_body_ctx_parts(
+    db: &dyn Db,
+    source_vars: &HashMap<String, SourceVariable>,
+    project: SourceProject,
+    body_text: &str,
+) -> (HashMap<String, usize>, HashSet<String>) {
+    let mut arrayed_dep_dims: HashMap<String, usize> = HashMap::new();
+    let mut model_deps: HashSet<String> = HashSet::new();
+    for ident in crate::ltm_augment::expr_reference_idents(body_text) {
+        if let Some(sv) = source_vars.get(&ident) {
+            model_deps.insert(ident.clone());
+            let dims = variable_dimensions(db, *sv, project);
+            if !dims.is_empty() {
+                arrayed_dep_dims.insert(ident, dims.len());
+            }
+        }
+    }
+    (arrayed_dep_dims, model_deps)
+}
+
 /// Emit the `source[<read row>] → agg` link-score half: one scalar
 /// `$⁚ltm⁚link_score⁚{from}[<row>]→{agg}` (when the agg is scalar) or
 /// `$⁚ltm⁚link_score⁚{from}[<row>]→{agg}[<slot>]` (when the agg is arrayed
@@ -960,7 +1005,10 @@ pub(super) fn emit_per_shape_link_scores(
 /// `coreduced` set (the rows mapping to the same agg slot -- the
 /// `from`-slice combined for that slot) is the `all_elements` for the
 /// MEAN divisor / nonlinear expansion. The agg's *own* equation is exactly
-/// the reducer, so the "bare" algebraic shortcut applies.
+/// the reducer call (no surrounding arithmetic), but its argument may
+/// apply a coefficient to `from`, so the SUM/MEAN row partial is built
+/// from the reducer BODY via a `ReducerBodyCtx` (GH #744) rather than the
+/// bare-source algebraic shortcut.
 ///
 /// A *scalar* `from` is the GH #737 scalar-feeder case (`scale` in
 /// `SUM(pop[*] * scale)`): there are no read rows, the element graph emits
@@ -1043,14 +1091,30 @@ pub(super) fn emit_source_to_agg_link_scores(
     let Some(agg_var) = reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project) else {
         return;
     };
-    let Some((reducer_kind, reducer_name, _is_bare)) =
-        crate::ltm_augment::classify_reducer(&agg_var, from)
-    else {
+    let Some(classified) = crate::ltm_augment::classify_reducer(&agg_var, from) else {
         return;
     };
-    if reducer_kind == crate::ltm_augment::ReducerKind::Constant {
+    if classified.kind == crate::ltm_augment::ReducerKind::Constant {
         return;
     }
+    // The body-aware partial context (GH #744). The agg's own equation is
+    // exactly the reducer call (`classified.is_bare` is true by
+    // construction), but its ARGUMENT may apply a coefficient to `from`
+    // (`SUM(pop[*] * (1 - weight[*]))` w.r.t. `weight` has the
+    // sign-flipping coefficient `-pop[e]`); the body context lets the
+    // Linear arm build the true changed-first row partial instead of
+    // asserting ∂agg/∂from[e] = 1.
+    let (arrayed_dep_dims, model_deps) =
+        reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
+    let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
+    let body_ctx = crate::ltm_augment::ReducerBodyCtx {
+        body_text: &classified.body_text,
+        live_source: from,
+        arrayed_dep_dims: &arrayed_dep_dims,
+        model_deps: &model_deps,
+        row_dim_names: &row_dim_names,
+        dims_ctx: Some(project_dimensions_context(db, project)),
+    };
     let dim_element_lists: Vec<Vec<String>> = from_dims
         .iter()
         .map(crate::ltm_augment::dimension_element_names)
@@ -1099,9 +1163,10 @@ pub(super) fn emit_source_to_agg_link_scores(
                     &agg.name,
                     &qualified_row,
                     &qualified_coreduced,
-                    &reducer_kind,
-                    reducer_name,
-                    /* is_bare = */ true,
+                    &classified.kind,
+                    classified.name,
+                    classified.is_bare,
+                    Some(&body_ctx),
                 ),
             )
         } else {
@@ -1116,9 +1181,10 @@ pub(super) fn emit_source_to_agg_link_scores(
                     &qualified_row,
                     slot,
                     &qualified_coreduced,
-                    &reducer_kind,
-                    reducer_name,
-                    /* is_bare = */ true,
+                    &classified.kind,
+                    classified.name,
+                    classified.is_bare,
+                    Some(&body_ctx),
                 ),
             )
         };

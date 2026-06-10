@@ -2965,25 +2965,49 @@ pub(crate) fn qualify_element_csv(
     qualified.join(",")
 }
 
+/// The result of [`classify_reducer`]: which array reducer the target's
+/// equation applies to the source, plus the two pieces of context the
+/// per-element link-score generators need to build a correct partial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClassifiedReducer {
+    pub kind: ReducerKind,
+    /// Uppercase function name (e.g. "SUM", "MIN").
+    pub name: &'static str,
+    /// Whether the reducer call is the target's entire top-level expression.
+    /// `false` means arithmetic AROUND the reducer (`2 * SUM(...)`); it says
+    /// nothing about the reducer's argument, which may itself apply a
+    /// coefficient to the source (`SUM(pop[*] * scale)`) -- that is what
+    /// `body_text` is for (GH #744).
+    pub is_bare: bool,
+    /// Canonical printed text of the reducer's array argument (its "body"),
+    /// e.g. `pop[*] * (1 - weight[*])` for `SUM(pop[*] * (1 - weight[*]))`.
+    pub body_text: String,
+}
+
 /// Examine the target variable's Expr2 AST to find the array-reducing function
 /// applied to the source variable and classify it.
 ///
 /// Walks the Expr2 tree looking for `Expr2::App(builtin, ...)` nodes where
 /// the builtin is an array reducer and the argument references the source
-/// variable (identified by canonical name). Returns the `ReducerKind`, the
-/// uppercase function name (e.g., "SUM", "MIN"), and whether the reducer is
-/// the top-level expression (`is_bare`).
+/// variable (identified by canonical name). Returns the [`ClassifiedReducer`]:
+/// the `ReducerKind`, the uppercase function name (e.g., "SUM", "MIN"),
+/// whether the reducer is the top-level expression (`is_bare`), and the
+/// reducer argument's canonical text (`body_text`).
 ///
 /// When `is_bare` is false, the reducer is nested inside other arithmetic
 /// (e.g., `2 * SUM(population[*])`). Callers should fall back to the
 /// delta-ratio approach for nested reducers, because the algebraic shortcut
 /// ignores the surrounding arithmetic and produces wrong link scores.
+/// Arithmetic INSIDE the reducer argument is a separate concern: the linear
+/// shortcut is exact only for a bare-source body, so callers supply the
+/// generators a [`ReducerBodyCtx`] built from `body_text` and the body-aware
+/// partial handles non-unit coefficients (GH #744).
 ///
 /// Returns `None` if no reducing builtin is found for the given source.
 pub(crate) fn classify_reducer(
     target_var: &Variable,
     source_ident: &str,
-) -> Option<(ReducerKind, &'static str, bool)> {
+) -> Option<ClassifiedReducer> {
     use crate::ast::Ast;
 
     let ast = target_var.ast()?;
@@ -3009,16 +3033,22 @@ fn classify_reducer_in_expr(
     expr: &crate::ast::Expr2,
     source_ident: &str,
     is_top_level: bool,
-) -> Option<(ReducerKind, &'static str, bool)> {
+) -> Option<ClassifiedReducer> {
     use crate::ast::Expr2;
 
     match expr {
         Expr2::App(builtin, _, _) => {
             // Check if this builtin is a reducer whose argument references
             // the source variable.
-            if let Some((kind, name)) = classify_builtin_if_references_source(builtin, source_ident)
+            if let Some((kind, name, body_text)) =
+                classify_builtin_if_references_source(builtin, source_ident)
             {
-                return Some((kind, name, is_top_level));
+                return Some(ClassifiedReducer {
+                    kind,
+                    name,
+                    is_bare: is_top_level,
+                    body_text,
+                });
             }
             // Even if this particular App node isn't the reducer we want,
             // recurse into its arguments to find nested reducers.
@@ -3045,7 +3075,8 @@ fn classify_reducer_in_expr(
 
 /// If `builtin` is a recognized array reducer (per
 /// [`crate::ltm_agg::reducer_kind`]) whose array argument references the source
-/// variable, return its `(ReducerKind, uppercase function name)`.
+/// variable, return its `(ReducerKind, uppercase function name, body text)`,
+/// where the body text is the array argument's canonical printed form.
 ///
 /// For every recognized reducer the array argument is the *first* expression
 /// argument (`SUM(arr)`, `MEAN(arr)`, `MIN(arr)`, `MAX(arr)`, `STDDEV(arr)`,
@@ -3063,7 +3094,7 @@ fn classify_reducer_in_expr(
 fn classify_builtin_if_references_source(
     builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
     source_ident: &str,
-) -> Option<(ReducerKind, &'static str)> {
+) -> Option<(ReducerKind, &'static str, String)> {
     use crate::builtins::BuiltinFn;
 
     let kind = crate::ltm_agg::reducer_kind(builtin)?;
@@ -3090,7 +3121,7 @@ fn classify_builtin_if_references_source(
     if !expr_references_var(array_arg, canonical_source.as_ref()) {
         return None;
     }
-    Some((kind, upper))
+    Some((kind, upper, crate::patch::expr2_to_string(array_arg)))
 }
 
 /// Check if an Expr2 references a variable with the given canonical name,
@@ -3123,6 +3154,428 @@ fn expr_references_var(expr: &crate::ast::Expr2, canonical_name: &str) -> bool {
     }
 }
 
+/// Canonical head identifiers of every `Var`/`Subscript` reference in
+/// `equation_text`, recursing into subscript index expressions. Function
+/// names are not collected (they are `App` nodes, not `Var`s); subscript
+/// *index* identifiers (dimension and element names) ARE collected, so
+/// callers must intersect the result with the model-variable map before
+/// treating an entry as a variable reference. Returns an empty set when the
+/// text does not parse.
+///
+/// Used by the link-score emitters to discover which of a reducer body's
+/// references are arrayed model variables (the [`ReducerBodyCtx`] inputs).
+pub(crate) fn expr_reference_idents(equation_text: &str) -> HashSet<String> {
+    fn walk(expr: &Expr0, out: &mut HashSet<String>) {
+        match expr {
+            Expr0::Const(..) => {}
+            Expr0::Var(ident, _) => {
+                out.insert(canonicalize(ident.as_str()).into_owned());
+            }
+            Expr0::Subscript(ident, indices, _) => {
+                out.insert(canonicalize(ident.as_str()).into_owned());
+                for idx in indices {
+                    match idx {
+                        IndexExpr0::Expr(e) => walk(e, out),
+                        IndexExpr0::Range(l, r, _) => {
+                            walk(l, out);
+                            walk(r, out);
+                        }
+                        IndexExpr0::Wildcard(_)
+                        | IndexExpr0::StarRange(..)
+                        | IndexExpr0::DimPosition(..) => {}
+                    }
+                }
+            }
+            Expr0::App(UntypedBuiltinFn(_, args), _) => {
+                for a in args {
+                    walk(a, out);
+                }
+            }
+            Expr0::Op1(_, inner, _) => walk(inner, out),
+            Expr0::Op2(_, l, r, _) => {
+                walk(l, out);
+                walk(r, out);
+            }
+            Expr0::If(c, t, f, _) => {
+                walk(c, out);
+                walk(t, out);
+                walk(f, out);
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    if let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) {
+        walk(&ast, &mut out);
+    }
+    out
+}
+
+/// Context for the body-aware per-row linear partial (GH #744): everything
+/// [`generate_linear_body_partial`] needs to evaluate a reducer's BODY at one
+/// source row with the live source's reference live and every other model
+/// reference frozen at `PREVIOUS`.
+///
+/// Built by the link-score emitters (`emit_source_to_agg_link_scores` for a
+/// hoisted `$⁚ltm⁚agg⁚{n}`, `try_cross_dimensional_link_scores` for a
+/// variable-backed whole-RHS reducer); all names are canonical.
+pub(crate) struct ReducerBodyCtx<'a> {
+    /// The reducer's array argument, canonical text (from
+    /// [`ClassifiedReducer::body_text`]).
+    pub body_text: &'a str,
+    /// The live source variable (the row whose partial is being built).
+    pub live_source: &'a str,
+    /// Declared dimension count for every ARRAYED model variable referenced
+    /// in the body. Pinning a reference to the row requires its axes to
+    /// correspond positionally to the live source's axes -- guaranteed for a
+    /// hoisted agg by `combined_read_slice`'s slice-agreement gate, and
+    /// validated index-by-index here for the variable-backed path.
+    pub arrayed_dep_dims: &'a HashMap<String, usize>,
+    /// Every model-variable ident the body may reference -- the freeze set.
+    /// References to idents NOT in this set (TIME, function names resolved
+    /// as `App`s, dimension/element names) stay live, matching
+    /// `build_partial_equation_shaped`'s deps-only freezing convention.
+    pub model_deps: &'a HashSet<String>,
+    /// Canonical dimension names of the live source's axes, in declared
+    /// order -- parallel to the row tuple.
+    pub row_dim_names: &'a [String],
+    /// For recognizing a positionally-MAPPED iterated-dim index (GH #534:
+    /// `SUM(matrix[State,*])` over `matrix[Region,..]`); `None` disables the
+    /// mapped recognition (the by-name check still applies).
+    pub dims_ctx: Option<&'a crate::dimensions::DimensionsContext>,
+}
+
+/// Substitute one subscript index of an arrayed body reference with the
+/// row's element at that position (`row_part`, qualified `dim·element` or a
+/// bare indexed-dim ordinal). `None` when the index cannot be proven to
+/// correspond to that axis position -- the caller then bails to the
+/// delta-ratio fallback rather than emitting a mis-pinned equation.
+///
+/// Substitutable index forms at position `j`:
+/// - `*` / `*:SubDim` -- a reduced axis; the row iterates it. (A `StarRange`
+///   over a proper subdimension over-approximates exactly like
+///   `compute_read_slice`'s conservative `Reduced` treatment.)
+/// - a `Var` naming the axis's own dimension (`row_dim_names[j]`), or a
+///   dimension that MAPS to it (`has_mapping_to`, the GH #534 gate) -- an
+///   iterated axis.
+/// - a `Var`/`Const` literal element equal to the row's element at `j` -- a
+///   pinned axis (re-pinned to the qualified form so `PREVIOUS(...)` of the
+///   reference compiles to a direct `LoadPrev`).
+fn pin_body_index(
+    idx: &IndexExpr0,
+    j: usize,
+    ctx: &ReducerBodyCtx<'_>,
+    row_parts: &[String],
+) -> Option<IndexExpr0> {
+    use crate::common::CanonicalDimensionName;
+    let pinned = || {
+        IndexExpr0::Expr(Expr0::Var(
+            RawIdent::new_from_str(&row_parts[j]),
+            crate::ast::Loc::default(),
+        ))
+    };
+    // The row's bare element name at `j` (the part after the `dim·`
+    // qualifier, or the whole part for an indexed dim).
+    let row_element = row_parts[j]
+        .split_once('\u{B7}')
+        .map(|(_, e)| e)
+        .unwrap_or(row_parts[j].as_str());
+    match idx {
+        IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(..) => Some(pinned()),
+        IndexExpr0::Expr(Expr0::Var(name, _)) => {
+            let n = canonicalize(name.as_str());
+            if n.as_ref() == ctx.row_dim_names[j].as_str() {
+                return Some(pinned());
+            }
+            if let Some(dc) = ctx.dims_ctx {
+                let n_dim = CanonicalDimensionName::from_raw(n.as_ref());
+                let row_dim = CanonicalDimensionName::from_raw(ctx.row_dim_names[j].as_str());
+                if dc.has_mapping_to(&n_dim, &row_dim) {
+                    return Some(pinned());
+                }
+            }
+            (n.as_ref() == row_element).then(pinned)
+        }
+        IndexExpr0::Expr(Expr0::Const(s, _, _)) => {
+            // An indexed-dim ordinal; canonicalize via parse-then-format so
+            // `pop[01]` matches the row part `"1"`.
+            let n = s.parse::<u32>().ok()?;
+            (n.to_string() == row_parts[j]).then(pinned)
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite a reducer body so every arrayed reference reads exactly the
+/// given source row: wildcard / iterated-dim / literal indices are replaced
+/// by the row's (qualified) elements, and a bare arrayed-variable reference
+/// gains the full row subscript. `None` when the body cannot be safely
+/// pinned (an index that doesn't correspond to the row's axes, an arrayed
+/// reference with a different axis count, or a nested array reducer) -- the
+/// caller bails to the delta-ratio fallback.
+fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) -> Option<Expr0> {
+    match expr {
+        Expr0::Const(..) => Some(expr),
+        Expr0::Var(ref ident, loc) => {
+            match ctx
+                .arrayed_dep_dims
+                .get(canonicalize(ident.as_str()).as_ref())
+            {
+                // A bare arrayed reference reads the whole array; pin it to
+                // the row (only when its axes match the row's arity).
+                Some(&n_dims) if n_dims == row_parts.len() => {
+                    let indices = row_parts
+                        .iter()
+                        .map(|p| {
+                            IndexExpr0::Expr(Expr0::Var(
+                                RawIdent::new_from_str(p),
+                                crate::ast::Loc::default(),
+                            ))
+                        })
+                        .collect();
+                    Some(Expr0::Subscript(ident.clone(), indices, loc))
+                }
+                Some(_) => None,
+                None => Some(expr),
+            }
+        }
+        Expr0::Subscript(ident, indices, loc) => {
+            if let Some(&n_dims) = ctx
+                .arrayed_dep_dims
+                .get(canonicalize(ident.as_str()).as_ref())
+            {
+                if n_dims != row_parts.len() || indices.len() != row_parts.len() {
+                    return None;
+                }
+                let pinned: Vec<IndexExpr0> = indices
+                    .iter()
+                    .enumerate()
+                    .map(|(j, idx)| pin_body_index(idx, j, ctx, row_parts))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Expr0::Subscript(ident, pinned, loc))
+            } else {
+                // Not an arrayed model variable (e.g. a graphical-function
+                // holder); recurse into expression indices so nested
+                // references are still pinned, leave other index forms.
+                let pinned: Vec<IndexExpr0> = indices
+                    .into_iter()
+                    .map(|idx| match idx {
+                        IndexExpr0::Expr(e) => {
+                            pin_body_to_row(e, ctx, row_parts).map(IndexExpr0::Expr)
+                        }
+                        other => Some(other),
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Expr0::Subscript(ident, pinned, loc))
+            }
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            // A nested array reducer inside the body (`SUM(pop[*] * MIN(q[*]))`)
+            // reduces over the whole slice, not the row -- pinning its
+            // argument to the row would change its meaning. Bail.
+            if is_array_reducer_name(&name, args.len()) {
+                return None;
+            }
+            let args = args
+                .into_iter()
+                .map(|a| pin_body_to_row(a, ctx, row_parts))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr0::App(UntypedBuiltinFn(name, args), loc))
+        }
+        Expr0::Op1(op, arg, loc) => Some(Expr0::Op1(
+            op,
+            Box::new(pin_body_to_row(*arg, ctx, row_parts)?),
+            loc,
+        )),
+        Expr0::Op2(op, l, r, loc) => Some(Expr0::Op2(
+            op,
+            Box::new(pin_body_to_row(*l, ctx, row_parts)?),
+            Box::new(pin_body_to_row(*r, ctx, row_parts)?),
+            loc,
+        )),
+        Expr0::If(c, t, f, loc) => Some(Expr0::If(
+            Box::new(pin_body_to_row(*c, ctx, row_parts)?),
+            Box::new(pin_body_to_row(*t, ctx, row_parts)?),
+            Box::new(pin_body_to_row(*f, ctx, row_parts)?),
+            loc,
+        )),
+    }
+}
+
+/// Wrap every model-variable reference of a row-pinned body in
+/// `PREVIOUS()`, except occurrences of `keep_live` (when given). Subscript
+/// indices are left untouched (after pinning they are literal qualified
+/// elements, not causal references), and the contents of `PREVIOUS`/`INIT`
+/// calls are already lagged/frozen so they are not re-wrapped (mirroring
+/// [`wrap_matching_in_previous`]).
+fn freeze_pinned_body(expr: Expr0, freeze: &HashSet<String>, keep_live: Option<&str>) -> Expr0 {
+    let should_freeze = |ident: &str| -> bool {
+        let c = canonicalize(ident);
+        freeze.contains(c.as_ref()) && Some(c.as_ref()) != keep_live
+    };
+    match expr {
+        Expr0::Const(..) => expr,
+        Expr0::Var(ref ident, loc) => {
+            if should_freeze(ident.as_str()) {
+                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+            } else {
+                expr
+            }
+        }
+        Expr0::Subscript(ref ident, _, loc) => {
+            if should_freeze(ident.as_str()) {
+                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+            } else {
+                expr
+            }
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
+                return Expr0::App(UntypedBuiltinFn(name, args), loc);
+            }
+            let args = args
+                .into_iter()
+                .map(|a| freeze_pinned_body(a, freeze, keep_live))
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, arg, loc) => Expr0::Op1(
+            op,
+            Box::new(freeze_pinned_body(*arg, freeze, keep_live)),
+            loc,
+        ),
+        Expr0::Op2(op, l, r, loc) => Expr0::Op2(
+            op,
+            Box::new(freeze_pinned_body(*l, freeze, keep_live)),
+            Box::new(freeze_pinned_body(*r, freeze, keep_live)),
+            loc,
+        ),
+        Expr0::If(c, t, f, loc) => Expr0::If(
+            Box::new(freeze_pinned_body(*c, freeze, keep_live)),
+            Box::new(freeze_pinned_body(*t, freeze, keep_live)),
+            Box::new(freeze_pinned_body(*f, freeze, keep_live)),
+            loc,
+        ),
+    }
+}
+
+/// Is the pinned body exactly the live source pinned at the row -- i.e. the
+/// original body was the bare source reference (`SUM(pop[*])`,
+/// `SUM(matrix[D1,*])`)? When true the legacy linear shortcut is exact and
+/// [`generate_linear_body_partial`] emits its byte-identical form.
+fn pinned_body_is_bare_source(expr: &Expr0, live_source: &str, row_parts: &[String]) -> bool {
+    let Expr0::Subscript(ident, indices, _) = expr else {
+        return false;
+    };
+    if canonicalize(ident.as_str()).as_ref() != live_source || indices.len() != row_parts.len() {
+        return false;
+    }
+    indices.iter().zip(row_parts).all(|(idx, part)| {
+        matches!(idx, IndexExpr0::Expr(Expr0::Var(name, _))
+            if canonicalize(name.as_str()).as_ref() == part.as_str())
+    })
+}
+
+/// Does the pinned body still reference `live_source` outside
+/// `PREVIOUS`/`INIT`? When it doesn't, the live and frozen evaluations are
+/// identical and the partial would be a constant 0 -- a sign the pinning
+/// went wrong, so the caller bails to the delta-ratio fallback.
+fn pinned_body_references_live(expr: &Expr0, live_source: &str) -> bool {
+    match expr {
+        Expr0::Const(..) => false,
+        Expr0::Var(ident, _) | Expr0::Subscript(ident, _, _) => {
+            canonicalize(ident.as_str()).as_ref() == live_source
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), _) => {
+            if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
+                return false;
+            }
+            args.iter()
+                .any(|a| pinned_body_references_live(a, live_source))
+        }
+        Expr0::Op1(_, inner, _) => pinned_body_references_live(inner, live_source),
+        Expr0::Op2(_, l, r, _) => {
+            pinned_body_references_live(l, live_source)
+                || pinned_body_references_live(r, live_source)
+        }
+        Expr0::If(c, t, f, _) => {
+            pinned_body_references_live(c, live_source)
+                || pinned_body_references_live(t, live_source)
+                || pinned_body_references_live(f, live_source)
+        }
+    }
+}
+
+/// The body-aware changed-first per-row partial for a linear reducer
+/// (SUM/MEAN) -- GH #744.
+///
+/// For source row `e` the true changed-first partial holds every OTHER
+/// input (co-sources, scalar feeders, the other rows of the source) at
+/// `PREVIOUS` and lets `source[e]` move. All fully-frozen rows contribute
+/// exactly their share of `PREVIOUS(target)`, so the partial collapses to
+/// the single-row form
+///
+/// ```text
+/// SUM:  PREVIOUS(target) + (body_e_live - body_e_frozen)
+/// MEAN: PREVIOUS(target) + (body_e_live - body_e_frozen) / N
+/// ```
+///
+/// where `body_e_live` is the reducer body pinned to row `e` with the
+/// source's reference live and every other model reference frozen, and
+/// `body_e_frozen` additionally freezes the source -- only scalar/
+/// fixed-element `PREVIOUS` reads, so it always compiles (no lagged
+/// whole-array read).
+///
+/// When the pinned body is exactly the bare source reference the legacy
+/// [`generate_linear_partial`] string is returned byte-identically. `None`
+/// means the body cannot be safely pinned to the row (see
+/// [`pin_body_to_row`]); the caller falls back to the delta-ratio form.
+fn generate_linear_body_partial(
+    ctx: &ReducerBodyCtx<'_>,
+    source_q: &str,
+    target_ref: &str,
+    current_element: &str,
+    n_elements: usize,
+    reducer_name: &str,
+) -> Option<String> {
+    let Ok(Some(ast)) = Expr0::new(ctx.body_text, LexerType::Equation) else {
+        return None;
+    };
+    let row_parts: Vec<String> = current_element
+        .split(',')
+        .map(|p| p.trim().to_string())
+        .collect();
+    if row_parts.len() != ctx.row_dim_names.len() {
+        return None;
+    }
+    let pinned = pin_body_to_row(ast, ctx, &row_parts)?;
+    if pinned_body_is_bare_source(&pinned, ctx.live_source, &row_parts) {
+        // The shortcut is exact for a bare body; keep its emission
+        // byte-identical to the pre-body-aware form.
+        return Some(generate_linear_partial(
+            source_q,
+            target_ref,
+            current_element,
+            n_elements,
+            reducer_name,
+        ));
+    }
+    if !pinned_body_references_live(&pinned, ctx.live_source) {
+        return None;
+    }
+    let live = print_eqn(&freeze_pinned_body(
+        pinned.clone(),
+        ctx.model_deps,
+        Some(ctx.live_source),
+    ));
+    let frozen = print_eqn(&freeze_pinned_body(pinned, ctx.model_deps, None));
+    let delta = format!("(({live}) - ({frozen}))");
+    match reducer_name.to_uppercase().as_str() {
+        "MEAN" => Some(format!("PREVIOUS({target_ref}) + {delta} / {n_elements}")),
+        // SUM is the default linear case.
+        _ => Some(format!("PREVIOUS({target_ref}) + {delta}")),
+    }
+}
+
 /// Generate a per-element link score equation for an arrayed-to-scalar edge.
 ///
 /// For element `current_element` of source variable `source_var_name`,
@@ -3130,7 +3583,9 @@ fn expr_references_var(expr: &crate::ast::Expr2, canonical_name: &str) -> bool {
 /// while all other elements are held at PREVIOUS values.
 ///
 /// `reducer_kind` determines the generation strategy:
-/// - `Linear`: algebraic shortcut (SUM/MEAN) avoids enumerating all elements
+/// - `Linear`: the body-aware changed-first partial
+///   ([`generate_linear_body_partial`]) when a [`ReducerBodyCtx`] is given,
+///   collapsing to the algebraic shortcut for a bare-source body
 /// - `Nonlinear`: explicit element expansion with selective PREVIOUS wrapping
 /// - `Constant`: caller should skip generation (SIZE always produces 0)
 ///
@@ -3139,9 +3594,13 @@ fn expr_references_var(expr: &crate::ast::Expr2, canonical_name: &str) -> bool {
 ///
 /// `is_bare` indicates whether the reducer is the entire target equation (true)
 /// or is nested inside surrounding arithmetic like `2 * SUM(...)` (false).
-/// When false, the algebraic shortcut would produce wrong link scores because
-/// it ignores the surrounding arithmetic. In that case, the delta-ratio
-/// fallback (using the target variable directly) is used instead.
+/// When false, neither the shortcut nor the body partial accounts for the
+/// surrounding arithmetic, so the delta-ratio fallback (using the target
+/// variable directly) is used instead. Arithmetic INSIDE the reducer argument
+/// is the `body` context's job (GH #744): without it the Linear arm asserts
+/// ∂target/∂source[e] = 1, which is wrong-magnitude (and wrong-signed for a
+/// negative coefficient) whenever the body is not the bare source.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_element_to_scalar_equation(
     source_var_name: &str,
     target_var_name: &str,
@@ -3150,6 +3609,7 @@ pub(crate) fn generate_element_to_scalar_equation(
     reducer_kind: &ReducerKind,
     reducer_name: &str,
     is_bare: bool,
+    body: Option<&ReducerBodyCtx<'_>>,
 ) -> String {
     let source_q = quote_ident(source_var_name);
     let target_ref = quote_ident(target_var_name);
@@ -3161,6 +3621,7 @@ pub(crate) fn generate_element_to_scalar_equation(
         reducer_kind,
         reducer_name,
         is_bare,
+        body,
     )
 }
 
@@ -3198,6 +3659,7 @@ pub(crate) fn generate_element_to_reduced_equation(
     reducer_kind: &ReducerKind,
     reducer_name: &str,
     is_bare: bool,
+    body: Option<&ReducerBodyCtx<'_>>,
 ) -> String {
     let source_q = quote_ident(source_var_name);
     let target_ref = format!("{}[{}]", quote_ident(target_var_name), result_element);
@@ -3209,6 +3671,7 @@ pub(crate) fn generate_element_to_reduced_equation(
         reducer_kind,
         reducer_name,
         is_bare,
+        body,
     )
 }
 
@@ -3222,6 +3685,7 @@ pub(crate) fn generate_element_to_reduced_equation(
 /// (every element for a full reduce; the surviving-axis-fixed slice for a
 /// partial reduce) -- its length is the MEAN divisor and the nonlinear
 /// expansion iterates it.
+#[allow(clippy::too_many_arguments)]
 fn build_element_reducer_link_score(
     source_q: &str,
     target_ref: &str,
@@ -3230,6 +3694,7 @@ fn build_element_reducer_link_score(
     reducer_kind: &ReducerKind,
     reducer_name: &str,
     is_bare: bool,
+    body: Option<&ReducerBodyCtx<'_>>,
 ) -> String {
     let source_elem = format!("{source_q}[{current_element}]");
 
@@ -3242,21 +3707,38 @@ fn build_element_reducer_link_score(
         _ if !is_bare => {
             // The reducer is nested inside surrounding arithmetic (e.g.,
             // `2 * SUM(population[*])` or `MAX(SUM(population[*]), 0)`).
-            // The algebraic shortcut would ignore the surrounding expression
-            // and produce wrong link scores. Fall back to the delta-ratio
-            // approach: use the target variable directly, which measures the
-            // ratio of actual target change to source element change. This is
-            // approximate (like STDDEV/RANK) but avoids the wrong-multiplier
-            // bug that the algebraic shortcut would introduce.
+            // Neither the algebraic shortcut nor the body-aware partial
+            // accounts for the surrounding expression. Fall back to the
+            // delta-ratio approach: use the target variable directly, which
+            // measures the ratio of actual target change to source element
+            // change. This is approximate (like STDDEV/RANK) but avoids the
+            // wrong-multiplier bug the shortcut would introduce.
             target_ref.to_string()
         }
-        ReducerKind::Linear => generate_linear_partial(
-            source_q,
-            target_ref,
-            current_element,
-            all_elements.len(),
-            reducer_name,
-        ),
+        // GH #744: with a body context, build the changed-first partial from
+        // the reducer's BODY at this row (exact for any body linear in the
+        // source, byte-identical to the shortcut for a bare body). An
+        // un-pinnable body degrades to the same delta-ratio fallback the
+        // nested (`!is_bare`) case uses. Without a context (test-only
+        // callers) the bare-source shortcut is asserted as before.
+        ReducerKind::Linear => match body {
+            Some(ctx) => generate_linear_body_partial(
+                ctx,
+                source_q,
+                target_ref,
+                current_element,
+                all_elements.len(),
+                reducer_name,
+            )
+            .unwrap_or_else(|| target_ref.to_string()),
+            None => generate_linear_partial(
+                source_q,
+                target_ref,
+                current_element,
+                all_elements.len(),
+                reducer_name,
+            ),
+        },
         ReducerKind::Nonlinear => generate_nonlinear_partial(
             source_q,
             target_ref,
@@ -3280,10 +3762,18 @@ fn build_element_reducer_link_score(
     )
 }
 
-/// Generate the partial evaluation for a linear reducer (SUM or MEAN).
+/// Generate the partial evaluation for a linear reducer (SUM or MEAN)
+/// whose body is the BARE source reference:
 ///
 /// SUM: PREVIOUS(target) + (source[elem] - PREVIOUS(source[elem]))
 /// MEAN: PREVIOUS(target) + (source[elem] - PREVIOUS(source[elem])) / N
+///
+/// This asserts ∂target/∂source[elem] = 1, which is exact only when the
+/// reducer's argument is the source itself (`SUM(pop[*])`). For any other
+/// body the coefficient on the source is dropped -- wrong magnitude, and
+/// wrong sign when the coefficient is negative (GH #744) -- so production
+/// callers route through [`generate_linear_body_partial`], which collapses
+/// to this form (byte-identically) for the bare case.
 fn generate_linear_partial(
     source_q: &str,
     target_q: &str,
@@ -3306,6 +3796,13 @@ fn generate_linear_partial(
 }
 
 /// Generate the partial evaluation for a nonlinear reducer.
+///
+/// KNOWN LIMITATION: like the pre-GH-#744 linear shortcut, this enumerates
+/// the BARE source elements, so a non-bare body (`MIN(pop[*] * scale)`)
+/// produces a partial in the wrong units (raw `pop` vs the scaled agg) and
+/// a garbage score. The body-aware treatment that fixed the Linear arm
+/// ([`generate_linear_body_partial`]'s pin/freeze machinery) would extend
+/// here by building each term from the row-pinned body; tracked separately.
 ///
 /// - **MIN/MAX**: nests 2-argument calls to enumerate every element with
 ///   selective `PREVIOUS` wrapping (`MIN(s[d], MIN(PREVIOUS(s[e]), ...))`).

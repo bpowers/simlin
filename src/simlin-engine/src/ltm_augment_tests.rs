@@ -437,7 +437,10 @@ fn test_classify_reducer_sum() {
     let expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "population");
-    assert_eq!(result, Some((ReducerKind::Linear, "SUM", true)));
+    let result = result.expect("expected a classified reducer");
+    assert_eq!(result.kind, ReducerKind::Linear);
+    assert_eq!(result.name, "SUM");
+    assert!(result.is_bare);
 }
 
 #[test]
@@ -446,7 +449,10 @@ fn test_classify_reducer_mean() {
     let expr = Expr2::App(BuiltinFn::Mean(vec![inner]), None, Loc::default());
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "population");
-    assert_eq!(result, Some((ReducerKind::Linear, "MEAN", true)));
+    let result = result.expect("expected a classified reducer");
+    assert_eq!(result.kind, ReducerKind::Linear);
+    assert_eq!(result.name, "MEAN");
+    assert!(result.is_bare);
 }
 
 #[test]
@@ -455,7 +461,10 @@ fn test_classify_reducer_min() {
     let expr = Expr2::App(BuiltinFn::Min(Box::new(inner), None), None, Loc::default());
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "population");
-    assert_eq!(result, Some((ReducerKind::Nonlinear, "MIN", true)));
+    let result = result.expect("expected a classified reducer");
+    assert_eq!(result.kind, ReducerKind::Nonlinear);
+    assert_eq!(result.name, "MIN");
+    assert!(result.is_bare);
 }
 
 #[test]
@@ -464,7 +473,10 @@ fn test_classify_reducer_max() {
     let expr = Expr2::App(BuiltinFn::Max(Box::new(inner), None), None, Loc::default());
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "population");
-    assert_eq!(result, Some((ReducerKind::Nonlinear, "MAX", true)));
+    let result = result.expect("expected a classified reducer");
+    assert_eq!(result.kind, ReducerKind::Nonlinear);
+    assert_eq!(result.name, "MAX");
+    assert!(result.is_bare);
 }
 
 #[test]
@@ -473,7 +485,10 @@ fn test_classify_reducer_stddev() {
     let expr = Expr2::App(BuiltinFn::Stddev(Box::new(inner)), None, Loc::default());
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "population");
-    assert_eq!(result, Some((ReducerKind::Nonlinear, "STDDEV", true)));
+    let result = result.expect("expected a classified reducer");
+    assert_eq!(result.kind, ReducerKind::Nonlinear);
+    assert_eq!(result.name, "STDDEV");
+    assert!(result.is_bare);
 }
 
 #[test]
@@ -487,7 +502,10 @@ fn test_classify_reducer_rank() {
     );
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "population");
-    assert_eq!(result, Some((ReducerKind::Nonlinear, "RANK", true)));
+    let result = result.expect("expected a classified reducer");
+    assert_eq!(result.kind, ReducerKind::Nonlinear);
+    assert_eq!(result.name, "RANK");
+    assert!(result.is_bare);
 }
 
 #[test]
@@ -496,7 +514,10 @@ fn test_classify_reducer_size() {
     let expr = Expr2::App(BuiltinFn::Size(Box::new(inner)), None, Loc::default());
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "population");
-    assert_eq!(result, Some((ReducerKind::Constant, "SIZE", true)));
+    let result = result.expect("expected a classified reducer");
+    assert_eq!(result.kind, ReducerKind::Constant);
+    assert_eq!(result.name, "SIZE");
+    assert!(result.is_bare);
 }
 
 #[test]
@@ -548,7 +569,10 @@ fn test_classify_reducer_nested_in_expression() {
     );
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "population");
-    assert_eq!(result, Some((ReducerKind::Linear, "SUM", false)));
+    let result = result.expect("expected a classified reducer");
+    assert_eq!(result.kind, ReducerKind::Linear);
+    assert_eq!(result.name, "SUM");
+    assert!(!result.is_bare);
 }
 
 #[test]
@@ -565,7 +589,10 @@ fn test_classify_reducer_nested_in_scalar_max() {
     );
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "population");
-    assert_eq!(result, Some((ReducerKind::Linear, "SUM", false)));
+    let result = result.expect("expected a classified reducer");
+    assert_eq!(result.kind, ReducerKind::Linear);
+    assert_eq!(result.name, "SUM");
+    assert!(!result.is_bare);
 }
 
 #[test]
@@ -575,7 +602,10 @@ fn test_classify_reducer_var_ref_no_subscript() {
     let expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
     let var = var_with_expr(expr);
     let result = classify_reducer(&var, "population");
-    assert_eq!(result, Some((ReducerKind::Linear, "SUM", true)));
+    let result = result.expect("expected a classified reducer");
+    assert_eq!(result.kind, ReducerKind::Linear);
+    assert_eq!(result.name, "SUM");
+    assert!(result.is_bare);
 }
 
 #[test]
@@ -641,6 +671,7 @@ fn test_generate_sum_equation() {
         &ReducerKind::Linear,
         "SUM",
         true,
+        None,
     );
     // Should contain the algebraic shortcut
     assert!(eq.contains("PREVIOUS(total_pop)"), "equation: {eq}");
@@ -668,6 +699,7 @@ fn test_generate_mean_equation() {
         &ReducerKind::Linear,
         "MEAN",
         true,
+        None,
     );
     // MEAN divides by N
     assert!(eq.contains("/ 3"), "equation: {eq}");
@@ -685,6 +717,7 @@ fn test_generate_min_equation() {
         &ReducerKind::Nonlinear,
         "MIN",
         true,
+        None,
     );
     // Should enumerate all elements with nested binary MIN calls
     assert!(eq.contains("population[nyc]"), "equation: {eq}");
@@ -713,6 +746,7 @@ fn test_generate_max_equation() {
         &ReducerKind::Nonlinear,
         "MAX",
         true,
+        None,
     );
     // boston is the current element, so nyc and la are wrapped
     // Nested binary calls: MAX(a, MAX(b, c))
@@ -741,6 +775,7 @@ fn test_generate_stddev_equation() {
         &ReducerKind::Nonlinear,
         "STDDEV",
         true,
+        None,
     );
     assert_eq!(
         eq,
@@ -794,6 +829,7 @@ fn test_generate_constant_returns_zero() {
         &ReducerKind::Constant,
         "SIZE",
         true,
+        None,
     );
     assert_eq!(eq, "0");
 }
@@ -811,7 +847,8 @@ fn test_generate_nested_reducer_uses_delta_ratio() {
         &elements,
         &ReducerKind::Linear,
         "SUM",
-        false, // nested reducer
+        false, // nested reducer,
+        None,
     );
     // Should NOT use the algebraic shortcut (PREVIOUS(target) + delta)
     assert!(
@@ -839,6 +876,7 @@ fn test_generate_link_score_wrapping() {
         &ReducerKind::Linear,
         "SUM",
         true,
+        None,
     );
     // Should have initial time guard
     assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
@@ -866,9 +904,285 @@ fn test_generate_special_chars_quoted() {
         &ReducerKind::Linear,
         "SUM",
         true,
+        None,
     );
     // Source name with special chars should be quoted
     assert!(eq.contains("\"$\u{205A}ltm\u{205A}var\""), "equation: {eq}");
+}
+
+// -- GH #744: body-aware linear partial (ReducerBodyCtx) tests --
+
+/// Owned backing storage for a [`ReducerBodyCtx`] in tests.
+struct BodyCtxFixture {
+    body_text: String,
+    live_source: String,
+    arrayed_dep_dims: std::collections::HashMap<String, usize>,
+    model_deps: HashSet<String>,
+    row_dim_names: Vec<String>,
+}
+
+impl BodyCtxFixture {
+    fn new(
+        body_text: &str,
+        live_source: &str,
+        arrayed: &[(&str, usize)],
+        scalars: &[&str],
+        row_dims: &[&str],
+    ) -> Self {
+        let arrayed_dep_dims: std::collections::HashMap<String, usize> =
+            arrayed.iter().map(|(n, d)| (n.to_string(), *d)).collect();
+        let model_deps: HashSet<String> = arrayed
+            .iter()
+            .map(|(n, _)| n.to_string())
+            .chain(scalars.iter().map(|s| s.to_string()))
+            .collect();
+        BodyCtxFixture {
+            body_text: body_text.to_string(),
+            live_source: live_source.to_string(),
+            arrayed_dep_dims,
+            model_deps,
+            row_dim_names: row_dims.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn ctx(&self) -> ReducerBodyCtx<'_> {
+        ReducerBodyCtx {
+            body_text: &self.body_text,
+            live_source: &self.live_source,
+            arrayed_dep_dims: &self.arrayed_dep_dims,
+            model_deps: &self.model_deps,
+            row_dim_names: &self.row_dim_names,
+            dims_ctx: None,
+        }
+    }
+}
+
+/// A bare-source body must emit the legacy linear shortcut byte-identically
+/// (the same string the `None`-context path produces).
+#[test]
+fn test_body_aware_bare_source_matches_legacy() {
+    let elements = vec!["region·nyc".to_string(), "region·boston".to_string()];
+    let fixture = BodyCtxFixture::new("pop[*]", "pop", &[("pop", 1)], &[], &["region"]);
+    let with_body = generate_element_to_scalar_equation(
+        "pop",
+        "total",
+        "region·nyc",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
+    let legacy = generate_element_to_scalar_equation(
+        "pop",
+        "total",
+        "region·nyc",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        None,
+    );
+    assert_eq!(with_body, legacy, "bare body must keep the legacy shortcut");
+}
+
+/// A co-source coefficient body (`pop[*] * (1 - weight[*])` w.r.t. `weight`)
+/// must evaluate the body at the row: the live evaluation freezes `pop` and
+/// keeps `weight[row]` live; the frozen evaluation freezes both.
+#[test]
+fn test_body_aware_co_source_partial() {
+    let elements = vec!["region·nyc".to_string(), "region·boston".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "pop[*] * (1 - weight[*])",
+        "weight",
+        &[("pop", 1), ("weight", 1)],
+        &[],
+        &["region"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "weight",
+        "total",
+        "region·nyc",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
+    // Live evaluation: pop frozen, weight[row] live.
+    assert!(
+        eq.contains("PREVIOUS(pop[region·nyc]) * (1 - weight[region·nyc])"),
+        "equation: {eq}"
+    );
+    // Frozen evaluation: both frozen.
+    assert!(
+        eq.contains("PREVIOUS(pop[region·nyc]) * (1 - PREVIOUS(weight[region·nyc]))"),
+        "equation: {eq}"
+    );
+    // The partial is anchored at PREVIOUS(target).
+    assert!(eq.contains("PREVIOUS(total) + "), "equation: {eq}");
+    // The other row never appears (it cancels against PREVIOUS(target)).
+    assert!(!eq.contains("region·boston]"), "equation: {eq}");
+}
+
+/// A scalar feeder coefficient (`pop[*] * scale` w.r.t. `pop`) freezes the
+/// feeder at PREVIOUS in both evaluations, so the numerator carries
+/// `Δpop[row] * PREVIOUS(scale)`.
+#[test]
+fn test_body_aware_scalar_feeder_coefficient() {
+    let elements = vec!["region·nyc".to_string(), "region·boston".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "pop[*] * scale",
+        "pop",
+        &[("pop", 1)],
+        &["scale"],
+        &["region"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "pop",
+        "total",
+        "region·nyc",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(
+        eq.contains("pop[region·nyc] * PREVIOUS(scale)"),
+        "equation: {eq}"
+    );
+    assert!(
+        eq.contains("PREVIOUS(pop[region·nyc]) * PREVIOUS(scale)"),
+        "equation: {eq}"
+    );
+}
+
+/// MEAN divides the body delta by the co-reduced element count.
+#[test]
+fn test_body_aware_mean_divides_by_n() {
+    let elements = vec![
+        "region·nyc".to_string(),
+        "region·boston".to_string(),
+        "region·la".to_string(),
+    ];
+    let fixture = BodyCtxFixture::new(
+        "pop[*] * scale",
+        "pop",
+        &[("pop", 1)],
+        &["scale"],
+        &["region"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "pop",
+        "avg",
+        "region·nyc",
+        &elements,
+        &ReducerKind::Linear,
+        "MEAN",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(eq.contains(" / 3"), "equation: {eq}");
+}
+
+/// An un-pinnable body (an arrayed reference whose axis count doesn't match
+/// the row -- the GH #743 iterated-dim-feeder shape) must degrade to the
+/// delta-ratio fallback, not a mis-pinned equation.
+#[test]
+fn test_body_aware_unpinnable_falls_back_to_delta_ratio() {
+    let elements = vec!["d1·a,d2·x".to_string(), "d1·a,d2·y".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "matrix[d1, *] * frac[d1]",
+        "matrix",
+        &[("matrix", 2), ("frac", 1)],
+        &[],
+        &["d1", "d2"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "matrix",
+        "growth",
+        "d1·a,d2·x",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
+    // Delta-ratio form: the partial IS the target, so the numerator is
+    // (growth - PREVIOUS(growth)) and frac/matrix bodies never appear.
+    assert!(
+        eq.contains("SAFEDIV((growth - PREVIOUS(growth))"),
+        "equation: {eq}"
+    );
+    assert!(!eq.contains("frac"), "equation: {eq}");
+}
+
+/// A nested array reducer inside the body (`pop[*] * MIN(q[*])`) cannot be
+/// row-pinned (the inner reduce spans the whole slice); it must also fall
+/// back to the delta-ratio form.
+#[test]
+fn test_body_aware_nested_reducer_falls_back_to_delta_ratio() {
+    let elements = vec!["region·nyc".to_string(), "region·boston".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "pop[*] * MIN(q[*])",
+        "pop",
+        &[("pop", 1), ("q", 1)],
+        &[],
+        &["region"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "pop",
+        "total",
+        "region·nyc",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(
+        eq.contains("SAFEDIV((total - PREVIOUS(total))"),
+        "equation: {eq}"
+    );
+}
+
+/// `classify_reducer` must surface the reducer argument's canonical text.
+#[test]
+fn test_classify_reducer_returns_body_text() {
+    let pop = subscript_wildcard("pop");
+    let weight = subscript_wildcard("weight");
+    let one = Expr2::Const("1".to_string(), 1.0, Loc::default());
+    let coeff = Expr2::Op2(
+        crate::ast::BinaryOp::Sub,
+        Box::new(one),
+        Box::new(weight),
+        None,
+        Loc::default(),
+    );
+    let body = Expr2::Op2(
+        crate::ast::BinaryOp::Mul,
+        Box::new(pop),
+        Box::new(coeff),
+        None,
+        Loc::default(),
+    );
+    let expr = Expr2::App(BuiltinFn::Sum(Box::new(body)), None, Loc::default());
+    let var = var_with_expr(expr);
+    let result = classify_reducer(&var, "weight").expect("expected a classified reducer");
+    assert_eq!(result.body_text, "pop[*] * (1 - weight[*])");
+}
+
+/// `expr_reference_idents` collects canonical heads (including inside
+/// subscript index expressions) but not function names.
+#[test]
+fn test_expr_reference_idents() {
+    let idents = expr_reference_idents("pop[*] * SAFEDIV(scale, other[idx + 1], 0)");
+    assert!(idents.contains("pop"));
+    assert!(idents.contains("scale"));
+    assert!(idents.contains("other"));
+    assert!(idents.contains("idx"));
+    assert!(!idents.contains("safediv"));
 }
 
 // -- generate_element_to_reduced_equation tests (partial reduce) --
@@ -898,6 +1212,7 @@ fn test_generate_reduced_sum_equation() {
         &ReducerKind::Linear,
         "SUM",
         true,
+        None,
     );
     assert!(
         eq.contains("PREVIOUS(agg[a]) + (matrix[a,x] - PREVIOUS(matrix[a,x]))"),
@@ -938,6 +1253,7 @@ fn test_generate_reduced_mean_equation() {
         &ReducerKind::Linear,
         "MEAN",
         true,
+        None,
     );
     assert!(
         eq.contains("PREVIOUS(row_mean[a]) + (matrix[a,x] - PREVIOUS(matrix[a,x])) / 2"),
@@ -961,6 +1277,7 @@ fn test_generate_reduced_min_equation() {
         &ReducerKind::Nonlinear,
         "MIN",
         true,
+        None,
     );
     assert!(
         eq.contains("MIN(matrix[a,x], PREVIOUS(matrix[a,y]))"),
@@ -986,6 +1303,7 @@ fn test_generate_reduced_max_equation() {
         &ReducerKind::Nonlinear,
         "MAX",
         true,
+        None,
     );
     assert!(
         eq.contains("MAX(PREVIOUS(matrix[b,x]), matrix[b,y])"),
@@ -1005,6 +1323,7 @@ fn test_generate_reduced_constant_returns_zero() {
         &ReducerKind::Constant,
         "SIZE",
         true,
+        None,
     );
     assert_eq!(eq, "0");
 }
@@ -1024,6 +1343,7 @@ fn test_generate_reduced_nested_uses_delta_ratio() {
         &ReducerKind::Linear,
         "SUM",
         false,
+        None,
     );
     assert!(
         !eq.contains("PREVIOUS(row_agg[a]) +"),
@@ -1049,6 +1369,7 @@ fn test_generate_full_reduce_unchanged_after_refactor() {
         &ReducerKind::Linear,
         "SUM",
         true,
+        None,
     );
     // A full reduce is the degenerate partial reduce where the result
     // axis is empty: passing an empty result element and the full
