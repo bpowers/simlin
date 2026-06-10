@@ -935,7 +935,7 @@ fn test_variable_backed_partial_reduce_emits_no_fragment_warning() {
 /// in its read slice (`inflow[D1] = MEAN(cube[D1,x,*])`) is EXCLUDED from
 /// the read-slice routing -- `try_cross_dimensional_link_scores`' co-reduced
 /// slice ignores Pinned axes, so its per-`(row, slot)` values are wrong for
-/// a pinned slice (the MEAN divisor counts unread rows; tracked separately).
+/// a pinned slice (the MEAN divisor counts unread rows; GH #765).
 /// The shape must stay on the LOUD conservative regime: cross-product
 /// element edges whose loop scores reference never-emitted names and surface
 /// fragment-failure Warnings, rather than compiling cleanly against silently

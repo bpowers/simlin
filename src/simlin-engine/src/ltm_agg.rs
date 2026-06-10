@@ -854,7 +854,7 @@ fn reducer_source_vars(
 ///   dimension -- matching `classify_subscript_shape`'s AC1.4 treatment of an
 ///   all-`StarRange` subscript as `Wildcard`. The element-graph reroute then
 ///   over-approximates the unread rows, exactly as before; tightening this is
-///   tracked separately.)
+///   tracked as GH #765.)
 /// - `IndexExpr2::Expr(Expr2::Var(d, ..))` where `d` (canonical) is one of
 ///   the *target equation's* iterated dimensions AND matches the source's
 ///   `i`-th declared dimension either *by name* or via a positional
@@ -1189,7 +1189,7 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
 ///   `try_cross_dimensional_link_scores` derives each slot's co-reduced
 ///   slice from the FULL source cartesian product, ignoring `Pinned` axes,
 ///   so its per-`(row, slot)` values are wrong for a pinned slice (e.g. the
-///   MEAN divisor counts the unread rows -- tracked separately). Accepting
+///   MEAN divisor counts the unread rows -- GH #765). Accepting
 ///   the slice here would trade the loud conservative regime (cross-product
 ///   edges whose loop scores fail fragment compile with `Warning`s) for
 ///   silently wrong numbers; the exclusion goes when that derivation
