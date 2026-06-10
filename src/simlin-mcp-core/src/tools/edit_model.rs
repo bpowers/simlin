@@ -210,6 +210,11 @@ pub struct EditModelOutput {
     /// elided when false to preserve the stable wire shape.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub agg_recovery_truncated: bool,
+    /// Non-fatal diagnostics scoped to the edited model (the LTM auto-flip
+    /// advisory and synthetic-fragment compile-failure warnings, GH #662).
+    /// Empty (and elided from JSON) when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<ErrorOutput>,
     /// `Some(message)` when the just-edited model could not be compiled for
     /// LTM loop analysis (so `loop_dominance` is empty because of a failure,
     /// not an absence of loops); see `ReadModelOutput::analysis_error` and
@@ -273,10 +278,23 @@ pub async fn edit_model<A: ProjectAccess>(
     // variable_name) rather than count means edits that fix one error
     // while introducing a different one are still rejected even though
     // the count stayed the same.
+    //
+    // EditModel always runs LTM loop analysis (via `analyze_model`), so both
+    // diagnostic passes collect with LTM transiently enabled (GH #662) -- the
+    // same shared `LtmEnabledGuard` libsimlin uses (GH #466). Enabling LTM on
+    // the pre- AND post-edit passes keeps the new-error delta symmetric: the
+    // LTM-only diagnostics (advisory Warnings; the GH #486 non-Euler rejection
+    // rides the assemble path, not this accumulator) are computed the same way
+    // on both sides, so they can never spuriously read as a "new error".
     let pre_edit_error_keys: std::collections::HashSet<_> = {
-        let pre_db = simlin_engine::db::SimlinDb::default();
+        let mut pre_db = simlin_engine::db::SimlinDb::default();
         let pre_sync = simlin_engine::db::sync_from_datamodel(&pre_db, &project);
-        let all_diags = simlin_engine::db::collect_all_diagnostics(&pre_db, pre_sync.project);
+        let pre_source_project = pre_sync.project;
+        let all_diags = {
+            let guard =
+                simlin_engine::db::LtmEnabledGuard::enable(&mut pre_db, pre_source_project, true);
+            simlin_engine::db::collect_all_diagnostics(guard.db(), pre_source_project)
+        };
         simlin_engine::errors::collect_formatted_errors(
             all_diags
                 .iter()
@@ -303,8 +321,16 @@ pub async fn edit_model<A: ProjectAccess>(
     // so salsa's caches are reused.
     let mut db = simlin_engine::db::SimlinDb::default();
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
 
-    let all_diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    // Collect post-edit diagnostics with LTM transiently enabled (GH #662), so
+    // LTM advisory Warnings reach the caller. The guard restores `ltm_enabled`
+    // to false on drop -- before the `analyze_model` call below, which runs its
+    // own flag dance -- so the two passes don't interfere.
+    let all_diagnostics = {
+        let guard = simlin_engine::db::LtmEnabledGuard::enable(&mut db, source_project, true);
+        simlin_engine::db::collect_all_diagnostics(guard.db(), source_project)
+    };
     let post_formatted = simlin_engine::errors::collect_formatted_errors(
         all_diagnostics
             .iter()
@@ -316,6 +342,20 @@ pub async fn edit_model<A: ProjectAccess>(
         .iter()
         .filter(|e| e.model_name.as_ref().is_none_or(|name| name == &model_name))
         .collect();
+
+    // Model-scoped non-fatal warnings (e.g. the LTM auto-flip advisory) to
+    // include in the success response (GH #662).
+    let warnings: Vec<ErrorOutput> = simlin_engine::errors::collect_formatted_errors(
+        all_diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Warning)),
+        &project,
+    )
+    .errors
+    .iter()
+    .filter(|e| e.model_name.as_ref().is_none_or(|name| name == &model_name))
+    .map(ErrorOutput::from)
+    .collect();
 
     let has_new_errors = post_edit_model_errors
         .iter()
@@ -331,7 +371,6 @@ pub async fn edit_model<A: ProjectAccess>(
         });
     }
 
-    let source_project = sync.project;
     // No discovery budget here (see the rationale in read_model.rs): EditModel
     // analyses the just-edited model for the MCP response, not a bulk run.
     let analysis = simlin_engine::analysis::analyze_model(
@@ -371,6 +410,7 @@ pub async fn edit_model<A: ProjectAccess>(
         partitions,
         dominant_loops_by_period,
         agg_recovery_truncated,
+        warnings,
         analysis_error: analysis.analysis_error,
         dry_run,
     })

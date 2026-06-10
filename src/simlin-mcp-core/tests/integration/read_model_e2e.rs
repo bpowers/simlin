@@ -11,6 +11,52 @@ use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::test_support::TestFileSystemAccess;
 use simlin_mcp_core::tools::read_model::{ReadModelInput, read_model};
 
+/// Build a native-JSON project whose causal graph has a single SCC of
+/// `total_nodes` nodes (a stock, a flow, and `total_nodes - 2` chained
+/// auxes), which exceeds the engine's `MAX_LTM_SCC_NODES = 50` auto-flip
+/// threshold when `total_nodes >= 51`. With LTM enabled, compiling this model
+/// emits the "auto-switched ... to discovery mode" Warning diagnostic.
+///
+/// Chain: `cap_stock -> aux_{N-3} -> ... -> aux_0 -> cap_flow -> cap_stock`.
+fn chain_scc_project_json(total_nodes: usize) -> serde_json::Value {
+    let aux_count = total_nodes - 2;
+    let auxiliaries: Vec<serde_json::Value> = (0..aux_count)
+        .map(|i| {
+            let equation = if i + 1 == aux_count {
+                "cap_stock".to_string()
+            } else {
+                format!("aux_{}", i + 1)
+            };
+            serde_json::json!({
+                "uid": (i + 10) as i64,
+                "name": format!("aux_{i}"),
+                "equation": equation,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "name": "chain_scc",
+        "simSpecs": {
+            "startTime": 0.0,
+            "endTime": 10.0,
+            "dt": "1",
+            "method": "euler"
+        },
+        "models": [{
+            "name": "main",
+            "stocks": [
+                {"uid": 1, "name": "cap_stock", "initialEquation": "0",
+                 "inflows": ["cap_flow"], "outflows": []}
+            ],
+            "flows": [
+                {"uid": 2, "name": "cap_flow", "equation": "aux_0"}
+            ],
+            "auxiliaries": auxiliaries
+        }]
+    })
+}
+
 #[tokio::test]
 async fn read_model_returns_clean_xmile_snapshot() {
     let path = concat!(
@@ -253,5 +299,56 @@ async fn read_model_rk4_loop_surfaces_euler_analysis_error() {
             .as_str()
             .is_some_and(|s| s.contains("Euler")),
         "serialized analysisError must carry the Euler guidance"
+    );
+}
+
+/// GH #662: read_model collected diagnostics with `ltm_enabled = false`, so the
+/// LTM auto-flip-to-discovery advisory (a Warning that only accumulates when
+/// LTM is enabled) never reached MCP callers, even though read_model always
+/// runs LTM loop analysis via `analyze_model`. Now the diagnostic-collection
+/// pass transiently enables LTM, and LTM warnings surface in the output's
+/// `warnings` field.
+#[tokio::test]
+async fn read_model_surfaces_ltm_auto_flip_warning() {
+    // A 51-node SCC trips the engine's MAX_LTM_SCC_NODES = 50 auto-flip gate.
+    let project = chain_scc_project_json(51);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chain_scc.sd.json");
+    std::fs::write(&path, project.to_string()).unwrap();
+
+    let input = ReadModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+    };
+    let output = read_model(&TestFileSystemAccess, input).await.unwrap();
+
+    // The model compiles cleanly without LTM, so there must be no errors.
+    assert!(
+        output.errors.is_empty(),
+        "auto-flip model compiles without LTM, so it must have no errors: {:?}",
+        output.errors
+    );
+
+    let has_auto_flip = output
+        .warnings
+        .iter()
+        .any(|w| w.message.contains("discovery mode"));
+    assert!(
+        has_auto_flip,
+        "the LTM auto-flip advisory must surface as a warning; got: {:?}",
+        output.warnings
+    );
+
+    // It must also reach the serialized wire shape.
+    let value = serde_json::to_value(&output).unwrap();
+    let warnings = value["warnings"]
+        .as_array()
+        .expect("warnings must serialize as an array");
+    assert!(
+        warnings.iter().any(|w| w["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("discovery mode"))),
+        "serialized warnings must carry the auto-flip advisory"
     );
 }

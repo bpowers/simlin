@@ -473,3 +473,103 @@ async fn upsert_stock_is_full_replacement() {
         "second upsert with no inflows must clear the inflows list: {pop}"
     );
 }
+
+/// Build a native-JSON project whose causal graph is a single SCC of
+/// `total_nodes` nodes (a stock, a flow, and `total_nodes - 2` chained
+/// auxes), which trips the engine's `MAX_LTM_SCC_NODES = 50` auto-flip gate
+/// when `total_nodes >= 51`. Compiling with LTM enabled emits the
+/// "auto-switched ... to discovery mode" Warning diagnostic.
+fn chain_scc_project_json(total_nodes: usize) -> serde_json::Value {
+    let aux_count = total_nodes - 2;
+    let auxiliaries: Vec<serde_json::Value> = (0..aux_count)
+        .map(|i| {
+            let equation = if i + 1 == aux_count {
+                "cap_stock".to_string()
+            } else {
+                format!("aux_{}", i + 1)
+            };
+            serde_json::json!({
+                "uid": (i + 10) as i64,
+                "name": format!("aux_{i}"),
+                "equation": equation,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "name": "chain_scc",
+        "simSpecs": {
+            "startTime": 0.0,
+            "endTime": 10.0,
+            "dt": "1",
+            "saveStep": 1.0,
+            "method": "euler",
+            "timeUnits": ""
+        },
+        "models": [{
+            "name": "main",
+            "stocks": [
+                {"uid": 1, "name": "cap_stock", "initialEquation": "0",
+                 "inflows": ["cap_flow"], "outflows": []}
+            ],
+            "flows": [
+                {"uid": 2, "name": "cap_flow", "equation": "aux_0"}
+            ],
+            "auxiliaries": auxiliaries
+        }]
+    })
+}
+
+/// GH #662: edit_model collected its post-edit diagnostics with
+/// `ltm_enabled = false`, so the LTM auto-flip advisory never reached MCP
+/// callers even though edit_model always runs LTM analysis. The
+/// diagnostic-collection passes now transiently enable LTM, and the advisory
+/// surfaces in the success response's `warnings` field. A dry-run edit that
+/// adds one unrelated aux keeps the 51-node SCC intact and introduces no new
+/// error, so the edit succeeds and carries the warning.
+#[tokio::test]
+async fn edit_model_surfaces_ltm_auto_flip_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_model(dir.path(), "chain_scc.sd.json", &chain_scc_project_json(51));
+
+    let input = EditModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+        dry_run: Some(true),
+        sim_specs: None,
+        operations: Some(vec![EditOperation::UpsertAuxiliary(UpsertAuxiliaryInput {
+            name: "unrelated".into(),
+            equation: "1".into(),
+            units: None,
+            documentation: None,
+            graphical_function: None,
+            arrayed_equation: None,
+        })]),
+    };
+
+    let output = edit_model(&TestFileSystemAccess, input)
+        .await
+        .expect("a clean dry-run edit on an auto-flip model must succeed");
+
+    let has_auto_flip = output
+        .warnings
+        .iter()
+        .any(|w| w.message.contains("discovery mode"));
+    assert!(
+        has_auto_flip,
+        "the LTM auto-flip advisory must surface in edit_model warnings; got: {:?}",
+        output.warnings
+    );
+
+    // And it must reach the serialized wire shape.
+    let value = serde_json::to_value(&output).unwrap();
+    let warnings = value["warnings"]
+        .as_array()
+        .expect("warnings must serialize as an array");
+    assert!(
+        warnings.iter().any(|w| w["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("discovery mode"))),
+        "serialized edit_model warnings must carry the auto-flip advisory"
+    );
+}
