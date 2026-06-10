@@ -58,7 +58,10 @@ pub unsafe extern "C" fn simlin_sim_new(
     // nothing changed since the last patch.
     type CompileSnapshot = (
         std::result::Result<engine::CompiledSimulation, engine::Error>,
-        HashMap<String, Vec<Option<usize>>>,
+        // An `IndexMap` (not a `HashMap`): the engine emits `loop_partitions`
+        // in loop emission order and the post-sim rel-loop-score denominator
+        // sums in that order, so the snapshot preserves it (GH #468).
+        engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
         HashMap<String, engine::ltm_post::LoopElementIndex>,
         Option<engine::db::LtmMode>,
     );
@@ -143,10 +146,10 @@ pub unsafe extern "C" fn simlin_sim_new(
                         Some(ltm_vars.mode),
                     )
                 } else {
-                    (HashMap::new(), HashMap::new(), None)
+                    (engine::indexmap::IndexMap::new(), HashMap::new(), None)
                 }
             } else {
-                (HashMap::new(), HashMap::new(), None)
+                (engine::indexmap::IndexMap::new(), HashMap::new(), None)
             };
             // Always reset ltm_enabled to avoid leaking the flag to
             // subsequent operations (e.g. patch validation) that share
@@ -162,7 +165,7 @@ pub unsafe extern "C" fn simlin_sim_new(
                     code: engine::ErrorCode::NotSimulatable,
                     details: Some("incremental compilation: no sync state available".to_string()),
                 }),
-                HashMap::new(),
+                engine::indexmap::IndexMap::new(),
                 HashMap::new(),
                 None,
             )

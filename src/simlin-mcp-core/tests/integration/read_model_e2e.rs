@@ -8,7 +8,7 @@
 //! `ProjectAccess` impl.
 
 use simlin_mcp_core::errors::AccessError;
-use simlin_mcp_core::test_support::TestFileSystemAccess;
+use simlin_mcp_core::test_support::{TestFileSystemAccess, chain_scc_project_json};
 use simlin_mcp_core::tools::read_model::{ReadModelInput, read_model};
 
 #[tokio::test]
@@ -192,5 +192,117 @@ async fn read_model_surfaces_cycle_partitions() {
     assert!(
         value["loopDominance"][0].get("partition").is_some(),
         "partition must appear on the loopDominance wire shape"
+    );
+}
+
+/// GH #660: an RK4 model with a stock in a loop cannot be compiled for LTM
+/// analysis (the flow-to-stock link-score formula assumes Euler; GH #486).
+/// Before #660 the read_model surface returned an empty `loopDominance` with
+/// no hint why; now the actionable Euler guidance must reach the caller via
+/// the `analysisError` field so an agent asking "what loops?" understands the
+/// model needs Euler (or LTM disabled).
+#[tokio::test]
+async fn read_model_rk4_loop_surfaces_euler_analysis_error() {
+    let rk4_model = serde_json::json!({
+        "name": "rk4_loop",
+        "simSpecs": {
+            "startTime": 0.0,
+            "endTime": 10.0,
+            "dt": "1",
+            "method": "rk4"
+        },
+        "models": [{
+            "name": "main",
+            "stocks": [
+                {"uid": 1, "name": "population", "initialEquation": "100",
+                 "inflows": ["births"], "outflows": []}
+            ],
+            "flows": [
+                {"uid": 2, "name": "births", "equation": "population * 0.02"}
+            ]
+        }]
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rk4_loop.sd.json");
+    std::fs::write(&path, rk4_model.to_string()).unwrap();
+
+    let input = ReadModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+    };
+    let output = read_model(&TestFileSystemAccess, input).await.unwrap();
+
+    let msg = output
+        .analysis_error
+        .as_deref()
+        .expect("RK4 + LTM read_model must surface an analysisError");
+    assert!(
+        msg.contains("Euler"),
+        "analysisError must reference the Euler assumption, got: {msg}"
+    );
+    assert!(
+        output.loop_dominance.is_empty(),
+        "loop_dominance must be empty when the model can't be compiled for LTM"
+    );
+
+    // It must also reach the wire (serialized) shape under camelCase.
+    let value = serde_json::to_value(&output).unwrap();
+    assert!(
+        value["analysisError"]
+            .as_str()
+            .is_some_and(|s| s.contains("Euler")),
+        "serialized analysisError must carry the Euler guidance"
+    );
+}
+
+/// GH #662: read_model collected diagnostics with `ltm_enabled = false`, so the
+/// LTM auto-flip-to-discovery advisory (a Warning that only accumulates when
+/// LTM is enabled) never reached MCP callers, even though read_model always
+/// runs LTM loop analysis via `analyze_model`. Now the diagnostic-collection
+/// pass transiently enables LTM, and LTM warnings surface in the output's
+/// `warnings` field.
+#[tokio::test]
+async fn read_model_surfaces_ltm_auto_flip_warning() {
+    // A 51-node SCC trips the engine's MAX_LTM_SCC_NODES = 50 auto-flip gate.
+    let project = chain_scc_project_json(51);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chain_scc.sd.json");
+    std::fs::write(&path, project.to_string()).unwrap();
+
+    let input = ReadModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+    };
+    let output = read_model(&TestFileSystemAccess, input).await.unwrap();
+
+    // The model compiles cleanly without LTM, so there must be no errors.
+    assert!(
+        output.errors.is_empty(),
+        "auto-flip model compiles without LTM, so it must have no errors: {:?}",
+        output.errors
+    );
+
+    let has_auto_flip = output
+        .warnings
+        .iter()
+        .any(|w| w.message.contains("discovery mode"));
+    assert!(
+        has_auto_flip,
+        "the LTM auto-flip advisory must surface as a warning; got: {:?}",
+        output.warnings
+    );
+
+    // It must also reach the serialized wire shape.
+    let value = serde_json::to_value(&output).unwrap();
+    let warnings = value["warnings"]
+        .as_array()
+        .expect("warnings must serialize as an array");
+    assert!(
+        warnings.iter().any(|w| w["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("discovery mode"))),
+        "serialized warnings must carry the auto-flip advisory"
     );
 }

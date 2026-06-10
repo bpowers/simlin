@@ -1063,6 +1063,17 @@ pub struct CollapsibleLink {
 fn multiply_score_series(a: &Option<Vec<f64>>, b: &Option<Vec<f64>>) -> Option<Vec<f64>> {
     match (a, b) {
         (Some(a), Some(b)) => {
+            // Invariant: both operands are per-timestep link-score series that
+            // span the same `step_count`, so their lengths always match. The
+            // debug_assert fails loudly if a future change ever produces a
+            // mismatch (which would silently misalign every later timestep);
+            // release builds keep the defensive `min` so a mismatch degrades to
+            // a short composite rather than a panic in production (#678).
+            debug_assert_eq!(
+                a.len(),
+                b.len(),
+                "multiply_score_series: link-score operands differ in length; both must span step_count"
+            );
             let n = a.len().min(b.len());
             Some((0..n).map(|i| a[i] * b[i]).collect())
         }
@@ -1081,6 +1092,16 @@ fn multiply_score_series(a: &Option<Vec<f64>>, b: &Option<Vec<f64>>) -> Option<V
 fn max_abs_score_series(a: Option<Vec<f64>>, b: Option<Vec<f64>>) -> Option<Vec<f64>> {
     match (a, b) {
         (Some(a), Some(b)) => {
+            // Same invariant as `multiply_score_series`: both candidate series
+            // span the same `step_count`. Fail loudly in debug/test on a
+            // mismatch (it would silently misalign later timesteps), but keep
+            // the defensive `min` in release so production degrades gracefully
+            // rather than panicking (#678).
+            debug_assert_eq!(
+                a.len(),
+                b.len(),
+                "max_abs_score_series: candidate operands differ in length; both must span step_count"
+            );
             let n = a.len().min(b.len());
             Some(
                 (0..n)

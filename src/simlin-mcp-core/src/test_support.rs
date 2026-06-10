@@ -89,6 +89,58 @@ impl ProjectAccess for TestFileSystemAccess {
     }
 }
 
+/// Build a native-JSON project whose causal graph is a single SCC of
+/// `total_nodes` nodes (a stock, a flow, and `total_nodes - 2` chained auxes),
+/// which trips the engine's `MAX_LTM_SCC_NODES = 50` auto-flip gate when
+/// `total_nodes >= 51`. Compiling with LTM enabled emits the "auto-switched ...
+/// to discovery mode" Warning diagnostic.
+///
+/// Chain: `cap_stock -> aux_{N-3} -> ... -> aux_0 -> cap_flow -> cap_stock`.
+///
+/// Shared by the `read_model` and `edit_model` integration suites, which both
+/// need a model that auto-flips to discovery mode to exercise the GH #662
+/// LTM-warning surfacing.
+pub fn chain_scc_project_json(total_nodes: usize) -> serde_json::Value {
+    let aux_count = total_nodes - 2;
+    let auxiliaries: Vec<serde_json::Value> = (0..aux_count)
+        .map(|i| {
+            let equation = if i + 1 == aux_count {
+                "cap_stock".to_string()
+            } else {
+                format!("aux_{}", i + 1)
+            };
+            serde_json::json!({
+                "uid": (i + 10) as i64,
+                "name": format!("aux_{i}"),
+                "equation": equation,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "name": "chain_scc",
+        "simSpecs": {
+            "startTime": 0.0,
+            "endTime": 10.0,
+            "dt": "1",
+            "saveStep": 1.0,
+            "method": "euler",
+            "timeUnits": ""
+        },
+        "models": [{
+            "name": "main",
+            "stocks": [
+                {"uid": 1, "name": "cap_stock", "initialEquation": "0",
+                 "inflows": ["cap_flow"], "outflows": []}
+            ],
+            "flows": [
+                {"uid": 2, "name": "cap_flow", "equation": "aux_0"}
+            ],
+            "auxiliaries": auxiliaries
+        }]
+    })
+}
+
 fn serialize(project: &datamodel::Project, format: SourceFormat) -> Result<Vec<u8>, AccessError> {
     match format {
         SourceFormat::Xmile => simlin_engine::to_xmile(project)

@@ -1534,17 +1534,40 @@ pub fn model_element_causal_edges(
         for to_name in to_set {
             let to_dims = lookup_dims(to_name, &mut dim_cache);
 
-            // Fast path: both scalar -> direct edge.
-            if from_dims.is_empty() && to_dims.is_empty() {
+            let edge_key = (from_name.clone(), to_name.clone());
+            let classified = ir.sites.get(&edge_key);
+
+            // Whether any classified site for this `(from, to)` pair routes
+            // `ThroughAgg` (a hoisted reducer's synthetic aggregate-node hop).
+            // The both-scalar fast path below must NOT fire when one does: a
+            // *scalar* feeder of a hoisted reducer whose target is also scalar
+            // (`total = base + SUM(pop[*] * scale)`, all of `total`/`scale`
+            // scalar) is classified `ThroughAgg`, and the correct element
+            // edges are `scale → $⁚ltm⁚agg⁚{n}` (+ `$⁚ltm⁚agg⁚{n} → total` via
+            // the arrayed side), not a direct `scale → total` that skips the
+            // agg. We fall through to the normal per-site dispatch, whose
+            // `emit_agg_routed_edges` empty-`from_dims` arm emits the agg hop;
+            // and -- for a mixed pair with both a `Direct` and a `ThroughAgg`
+            // site (`total = scale + SUM(pop[*] * scale)`) -- the dispatch
+            // emits BOTH the direct `scale → total` edge and the agg hop (#533).
+            let has_through_agg = classified.is_some_and(|sites| {
+                sites
+                    .iter()
+                    .any(|s| matches!(s.routing, crate::db::ltm_ir::SiteRouting::ThroughAgg { .. }))
+            });
+
+            // Fast path: both scalar, no agg routing -> direct edge. This is
+            // the common scalar→scalar `Direct` `Bare` case (two scalars with a
+            // plain reference); skipping the per-site dispatch avoids the
+            // `emit_edges_for_reference` call for it. A `ThroughAgg` site
+            // disqualifies the pair (above).
+            if from_dims.is_empty() && to_dims.is_empty() && !has_through_agg {
                 element_edges
                     .entry(from_name.clone())
                     .or_default()
                     .insert(to_name.clone());
                 continue;
             }
-
-            let edge_key = (from_name.clone(), to_name.clone());
-            let classified = ir.sites.get(&edge_key);
 
             // Structural flow->stock edges, or any edge with no AST
             // reference: SameElement diagonal `Bare` emission.
@@ -2068,7 +2091,7 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 pub fn reclassify_loops_from_results(
     loops: &mut [DetectedLoop],
     results: &crate::Results,
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &indexmap::IndexMap<String, Vec<Option<usize>>>,
 ) {
     for loop_item in loops.iter_mut() {
         let Some(&base_off) = results

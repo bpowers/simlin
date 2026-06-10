@@ -25,6 +25,7 @@ use simlin_engine::db::{
     set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel,
     sync_from_datamodel_incremental,
 };
+use simlin_engine::indexmap::IndexMap;
 use simlin_engine::xmile;
 use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm_finding, ltm_post};
 
@@ -44,7 +45,7 @@ fn compile_ltm_incremental(project: &simlin_engine::datamodel::Project) -> Compi
 /// must now invoke `ltm_post::compute_rel_loop_scores(results, loop_partitions)`.
 fn compile_ltm_incremental_with_partitions(
     project: &simlin_engine::datamodel::Project,
-) -> (CompiledSimulation, HashMap<String, Vec<Option<usize>>>) {
+) -> (CompiledSimulation, IndexMap<String, Vec<Option<usize>>>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
@@ -129,7 +130,7 @@ fn ensure_ltm_results(
     expected: &LtmResults,
     actual_results: &Results,
     loops: &[DetectedLoop],
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
 ) {
     let mut errors = Vec::new();
 
@@ -3967,7 +3968,7 @@ fn find_loop_score_offsets(results: &Results) -> Vec<(String, usize)> {
 /// slot count (its `len()`), so no separate slot-count map is threaded.
 fn compute_rel_loop_scores_per_element(
     results: &Results,
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
 ) -> HashMap<String, Vec<f64>> {
     ltm_post::compute_rel_loop_scores_per_element(results, loop_partitions)
 }
@@ -10372,7 +10373,7 @@ fn exhaustive_never_active_loop_keeps_structural_polarity() {
     };
 
     // Every loop is scalar here, so each occupies one slot.
-    let loop_partitions: HashMap<String, Vec<Option<usize>>> = detected
+    let loop_partitions: IndexMap<String, Vec<Option<usize>>> = detected
         .loops
         .iter()
         .map(|l| (l.id.clone(), vec![Some(0)]))

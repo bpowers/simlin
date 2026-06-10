@@ -93,7 +93,7 @@ fn run_ltm(
     project: &datamodel::Project,
 ) -> (
     simlin_engine::Results,
-    std::collections::HashMap<String, Vec<Option<usize>>>,
+    simlin_engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     LtmMode,
 ) {
     let mut db = SimlinDb::default();
@@ -436,7 +436,7 @@ fn run_ltm_discovery(
     project: &datamodel::Project,
 ) -> (
     simlin_engine::Results,
-    std::collections::HashMap<String, Vec<Option<usize>>>,
+    simlin_engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     Vec<LtmSyntheticVar>,
 ) {
     let mut db = SimlinDb::default();

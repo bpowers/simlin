@@ -10,6 +10,12 @@
 //!   cargo run --release --example ltm_full_bench -- \
 //!       test/metasd/WRLD3-03/wrld3-03.mdl
 //!
+//! The per-loop loop-score equation-bytes / RSS tracing inside
+//! `generate_loop_score_variables` is gated behind the `ltm_bench` cargo
+//! feature (GH #464); add `--features ltm_bench` to compile it in. The
+//! per-stage VmPeak/VmHWM/VmRSS readings below are always emitted -- this
+//! harness reads `/proc/self/status` itself, independent of that feature.
+//!
 //! Unlike `ltm_mem_bench` (which stops after circuit enumeration), this
 //! harness drives the full salsa-backed LTM pipeline end-to-end so we
 //! can profile each stage's wall time and memory footprint.  The

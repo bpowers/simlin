@@ -20,6 +20,12 @@ file_io = ["dep:csv"]
 ext_data = ["dep:calamine"]
 png_render = ["dep:resvg"]
 xmutil = ["dep:xmutil"]
+# Compiles in the `generate_loop_score_variables` loop-score tracing
+# instrumentation (per-loop cumulative equation bytes + RSS sampling), a
+# benchmarking/diagnostic aid only. Off by default so production builds carry
+# no /proc/self/status read, env lookup, or eprintln! dead code. Enable with
+# `--features ltm_bench` when running the `ltm_full_bench` example.
+ltm_bench = []
 
 [dependencies]
 unicode-xid = "0.2"
@@ -43,6 +49,11 @@ xmutil = { version = "1", path = "../xmutil", optional = true }
 
 bumpalo = "3"
 salsa = "0.26"
+# Insertion-order-preserving map. Used for `LtmVariablesResult.loop_partitions`
+# so the post-sim rel-loop-score denominator sums in the loops' emission order
+# (bit-for-bit parity with the pre-#461 compile-time emitter; GH #468). Already
+# in the dependency tree via salsa, which also provides its `salsa::Update` impl.
+indexmap = "2"
 
 # WebAssembly code-generation backend (compiles models to wasm as an
 # alternative to the bytecode VM). no_std + alloc only, single transitive

@@ -582,7 +582,7 @@ port's sign -- empirically inverting the loop's polarity (+1.0 in exhaustive vs
 -1.0 in discovery on a `pos = input*0.02` / `neg = -input` repro). The
 cross-mode regression guard is
 `discovery_multi_output_loop_polarity_matches_exhaustive` in
-`tests/simulate_ltm.rs`.
+`tests/integration/simulate_ltm.rs`.
 
 **Deterministic output-port ordering (GH #680)**: `find_model_output_ports`
 sorts its result. The merge-order of the `HashSet` it previously returned was
@@ -1648,8 +1648,11 @@ cases remain deliberate carve-outs:
      from t-1 to t, so `PREVIOUS(flow)` aligns the numerator and denominator to
      the same causal interval. This produces results shifted by one DT compared
      to reference SD software (Stella/iThink). The integration test
-     (`tests/simulate_ltm.rs`) compensates by shifting reference timestamps
-     forward by DT when loading golden data.
+     (`tests/integration/simulate_ltm.rs`) compensates by shifting reference
+     timestamps forward by DT when loading golden data. This convention is also
+     documented for end users in the reference doc's Section 3.2 (the "numerator
+     timing convention" note under
+     [Flow-to-Stock Link Score](../reference/ltm--loops-that-matter.md)).
    - *`time_step` factor*: the denominator (second-order stock change) is
      `dt * (netflow(t-dt) - netflow(t-2dt))` in Euler, carrying one `dt` that the
      raw flow delta in the numerator lacks; without the factor every
@@ -1715,7 +1718,7 @@ cases remain deliberate carve-outs:
 - **`db/tests.rs`** (LTM subset): Salsa LTM caching, discovery vs exhaustive
   variable counts, incremental invalidation, layout slot allocation with LTM
 
-### Integration Tests (`tests/simulate_ltm.rs`)
+### Integration Tests (`tests/integration/simulate_ltm.rs`)
 
 All integration tests use `compile_project_incremental` + VM:
 

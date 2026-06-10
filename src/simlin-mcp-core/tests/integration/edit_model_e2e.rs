@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use simlin_mcp_core::errors::AccessError;
-use simlin_mcp_core::test_support::TestFileSystemAccess;
+use simlin_mcp_core::test_support::{TestFileSystemAccess, chain_scc_project_json};
 use simlin_mcp_core::tools::edit_model::{
     EditModelInput, EditOperation, UpsertAuxiliaryInput, UpsertFlowInput, UpsertStockInput,
     edit_model,
@@ -471,5 +471,59 @@ async fn upsert_stock_is_full_replacement() {
     assert_eq!(
         inflows, 0,
         "second upsert with no inflows must clear the inflows list: {pop}"
+    );
+}
+
+/// GH #662: edit_model collected its post-edit diagnostics with
+/// `ltm_enabled = false`, so the LTM auto-flip advisory never reached MCP
+/// callers even though edit_model always runs LTM analysis. The
+/// diagnostic-collection passes now transiently enable LTM, and the advisory
+/// surfaces in the success response's `warnings` field. A dry-run edit that
+/// adds one unrelated aux keeps the 51-node SCC intact and introduces no new
+/// error, so the edit succeeds and carries the warning.
+#[tokio::test]
+async fn edit_model_surfaces_ltm_auto_flip_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_model(dir.path(), "chain_scc.sd.json", &chain_scc_project_json(51));
+
+    let input = EditModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+        dry_run: Some(true),
+        sim_specs: None,
+        operations: Some(vec![EditOperation::UpsertAuxiliary(UpsertAuxiliaryInput {
+            name: "unrelated".into(),
+            equation: "1".into(),
+            units: None,
+            documentation: None,
+            graphical_function: None,
+            arrayed_equation: None,
+        })]),
+    };
+
+    let output = edit_model(&TestFileSystemAccess, input)
+        .await
+        .expect("a clean dry-run edit on an auto-flip model must succeed");
+
+    let has_auto_flip = output
+        .warnings
+        .iter()
+        .any(|w| w.message.contains("discovery mode"));
+    assert!(
+        has_auto_flip,
+        "the LTM auto-flip advisory must surface in edit_model warnings; got: {:?}",
+        output.warnings
+    );
+
+    // And it must reach the serialized wire shape.
+    let value = serde_json::to_value(&output).unwrap();
+    let warnings = value["warnings"]
+        .as_array()
+        .expect("warnings must serialize as an array");
+    assert!(
+        warnings.iter().any(|w| w["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("discovery mode"))),
+        "serialized edit_model warnings must carry the auto-flip advisory"
     );
 }

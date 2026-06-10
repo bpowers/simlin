@@ -1296,19 +1296,35 @@ pub(crate) fn generate_agg_to_scalar_target_equation(
 /// those keys is replaced by a `Var(agg_name)` node, then the whole tree is
 /// re-printed. The match is on the parsed AST subtree, not a substring of the
 /// text, so a reducer text that is a textual prefix of a *different* reducer
-/// subexpression (`sum(p[*])` vs `sum(p[*] + 1)`) is never falsely matched. A
-/// parse failure degrades to the input text unchanged.
+/// subexpression (`sum(p[*])` vs `sum(p[*] + 1)`) is never falsely matched.
+///
+/// Returns `Err([`PartialEquationError`])` when `equation_text` does not parse
+/// (a genuine parse error, or an empty/whitespace equation that yields no AST)
+/// *and there are reducers to substitute*: with no AST there is no reducer
+/// subexpression to replace, so returning the input unchanged would let the
+/// inline reducer survive into the `agg → target` partial -- a partial that
+/// references the live reducer instead of the hoisted aggregate node, a
+/// wrong-but-clean-compiling link score (the agg-substitution-omission sibling
+/// of the GH #311 PREVIOUS-omission hazard; GH #661). The db-bearing caller
+/// converts the error into a `Warning` (via `emit_ltm_partial_equation_warning`)
+/// and skips the variable. The failure is effectively unreachable in production
+/// (the input is a `print_eqn` re-print of an already-parsed AST), so this is
+/// defense-in-depth.
+///
+/// The empty-`reducers` case is a pure pass-through that never parses (there
+/// is nothing to substitute), so it returns `Ok` with the text unchanged even
+/// for otherwise-unparseable input.
 pub(crate) fn substitute_reducers_in_equation(
     equation_text: &str,
     reducers: &HashMap<String, String>,
-) -> String {
+) -> Result<String, PartialEquationError> {
     if reducers.is_empty() {
-        return equation_text.to_string();
+        return Ok(equation_text.to_string());
     }
     let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
-        return equation_text.to_string();
+        return Err(PartialEquationError::new(equation_text));
     };
-    print_eqn(&substitute_reducers_in_expr0(ast, reducers))
+    Ok(print_eqn(&substitute_reducers_in_expr0(ast, reducers)))
 }
 
 fn substitute_reducers_in_expr0(expr: Expr0, reducers: &HashMap<String, String>) -> Expr0 {
@@ -1462,21 +1478,12 @@ pub(crate) fn generate_loop_score_variables(
 ) -> Vec<(String, datamodel::Equation)> {
     let mut loop_vars = Vec::with_capacity(loops.len());
 
-    // Tracing is opt-in via LTM_BENCH_TRACE=1.  When disabled, the only
-    // per-iteration overhead is an integer add for the byte counter and
-    // one branch-predictor-friendly zero-compare, so production cost is
-    // negligible; when enabled the tracer logs every 10_000 loops so we
-    // can slope-fit equation-text growth and correlate it with RSS.
-    let trace_on = std::env::var("LTM_BENCH_TRACE").is_ok();
-    let mut loop_score_bytes: u64 = 0;
-
-    if trace_on {
-        eprintln!(
-            "[ltm-trace] generate_loop_score_variables start loops={} rss_mib={:.1}",
-            loops.len(),
-            read_rss_mib().unwrap_or(0.0),
-        );
-    }
+    // Loop-score tracing is a benchmarking/diagnostic aid compiled in only
+    // under `--features ltm_bench`; the default build's `LoopScoreTrace` is a
+    // zero-sized no-op whose methods optimize away entirely (no env lookup,
+    // no /proc/self/status read, no byte counter, no eprintln!). See
+    // [`loop_score_trace`].
+    let mut trace = loop_score_trace::LoopScoreTrace::start(loops.len());
 
     for (i, loop_item) in loops.iter().enumerate() {
         let var_name = format!("$⁚ltm⁚loop_score⁚{}", loop_item.id);
@@ -1486,40 +1493,142 @@ pub(crate) fn generate_loop_score_variables(
             dm_dims,
             overrides,
         );
-        loop_score_bytes += equation_text_len(&equation) as u64;
+        trace.record(i + 1, &equation);
         loop_vars.push((var_name, equation));
-        if trace_on && should_trace(i + 1) {
+    }
+
+    trace.done(loops.len());
+
+    loop_vars
+}
+
+/// Loop-score equation-text-growth / RSS tracing for the LTM compile
+/// benchmark, gated entirely behind the `ltm_bench` cargo feature.
+///
+/// The default build's [`LoopScoreTrace`] is a zero-sized no-op so production
+/// carries no `/proc/self/status` read, no env lookup, no byte counter, and no
+/// `eprintln!` dead code (the historical `LTM_BENCH_TRACE` runtime env check
+/// shipped all of that in every build; GH #464). The feature build re-creates
+/// the instrumentation: it logs cumulative loop-score equation bytes and RSS
+/// at power-of-two sample points plus every 10,000 loops. Enable it with
+/// `cargo run --release --example ltm_full_bench --features ltm_bench -- <mdl>`.
+mod loop_score_trace {
+    use crate::datamodel;
+
+    #[cfg(feature = "ltm_bench")]
+    pub(super) struct LoopScoreTrace {
+        loop_score_bytes: u64,
+    }
+
+    #[cfg(feature = "ltm_bench")]
+    impl LoopScoreTrace {
+        pub(super) fn start(loop_count: usize) -> Self {
             eprintln!(
-                "[ltm-trace] pass=loop_score i={} cum_loop_bytes={} rss_mib={:.1}",
-                i + 1,
-                loop_score_bytes,
+                "[ltm-trace] generate_loop_score_variables start loops={} rss_mib={:.1}",
+                loop_count,
+                read_rss_mib().unwrap_or(0.0),
+            );
+            LoopScoreTrace {
+                loop_score_bytes: 0,
+            }
+        }
+
+        /// Accumulate `equation`'s text bytes and, on a sample point, log the
+        /// running total alongside RSS. `n` is the 1-based loop index.
+        pub(super) fn record(&mut self, n: usize, equation: &datamodel::Equation) {
+            self.loop_score_bytes += equation_text_len(equation) as u64;
+            if should_trace(n) {
+                eprintln!(
+                    "[ltm-trace] pass=loop_score i={} cum_loop_bytes={} rss_mib={:.1}",
+                    n,
+                    self.loop_score_bytes,
+                    read_rss_mib().unwrap_or(0.0),
+                );
+            }
+        }
+
+        pub(super) fn done(&self, loop_count: usize) {
+            eprintln!(
+                "[ltm-trace] generate_loop_score_variables done loops={} loop_bytes={} \
+                 rss_mib={:.1}",
+                loop_count,
+                self.loop_score_bytes,
                 read_rss_mib().unwrap_or(0.0),
             );
         }
     }
 
-    if trace_on {
-        eprintln!(
-            "[ltm-trace] generate_loop_score_variables done loops={} loop_bytes={} \
-             rss_mib={:.1}",
-            loops.len(),
-            loop_score_bytes,
-            read_rss_mib().unwrap_or(0.0),
-        );
+    /// Total equation-text bytes of a `datamodel::Equation`.
+    #[cfg(feature = "ltm_bench")]
+    fn equation_text_len(equation: &datamodel::Equation) -> usize {
+        match equation {
+            datamodel::Equation::Scalar(text) | datamodel::Equation::ApplyToAll(_, text) => {
+                text.len()
+            }
+            datamodel::Equation::Arrayed(_, elements, default, _) => {
+                elements.iter().map(|(_, eq, _, _)| eq.len()).sum::<usize>()
+                    + default.as_ref().map(String::len).unwrap_or(0)
+            }
+        }
     }
 
-    loop_vars
-}
-
-/// Total equation-text bytes of a `datamodel::Equation`, for the
-/// `LTM_BENCH_TRACE` instrumentation.
-fn equation_text_len(equation: &datamodel::Equation) -> usize {
-    match equation {
-        datamodel::Equation::Scalar(text) | datamodel::Equation::ApplyToAll(_, text) => text.len(),
-        datamodel::Equation::Arrayed(_, elements, default, _) => {
-            elements.iter().map(|(_, eq, _, _)| eq.len()).sum::<usize>()
-                + default.as_ref().map(String::len).unwrap_or(0)
+    /// Decide whether iteration `n` (1-based) should emit a trace line.
+    ///
+    /// We want early iterations densely (so we see the scaling curve even if we
+    /// OOM before completing the first 10_000 loops on a dense partition) and
+    /// later iterations sparsely (so we don't spam the log for millions of
+    /// loops). Rule: log on every power of two up to and including 8192, then
+    /// every 10_000 after that. Powers of two give ~14 lines of early-curve
+    /// data; 10_000 cadence gives steady-state measurements during long runs.
+    #[cfg(feature = "ltm_bench")]
+    fn should_trace(n: usize) -> bool {
+        if n == 0 {
+            return false;
         }
+        if n <= 8192 {
+            n.is_power_of_two()
+        } else {
+            n.is_multiple_of(10_000) || n.is_power_of_two()
+        }
+    }
+
+    /// Resident-set size in MiB, or `None` if the kernel does not expose
+    /// `/proc/self/status` (e.g. non-Linux or wasm builds). An unavailable
+    /// reading degrades to a zero in the log rather than failing.
+    #[cfg(all(feature = "ltm_bench", target_os = "linux"))]
+    fn read_rss_mib() -> Option<f64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                let kb: u64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
+                return Some(kb as f64 / 1024.0);
+            }
+        }
+        None
+    }
+
+    #[cfg(all(feature = "ltm_bench", not(target_os = "linux")))]
+    fn read_rss_mib() -> Option<f64> {
+        None
+    }
+
+    /// The default build's no-op trace: a zero-sized type whose methods are
+    /// empty, so the optimizer removes every call site (and the whole tracing
+    /// apparatus is `#[cfg]`-ed out of compilation, not merely dead-code
+    /// eliminated).
+    #[cfg(not(feature = "ltm_bench"))]
+    pub(super) struct LoopScoreTrace;
+
+    #[cfg(not(feature = "ltm_bench"))]
+    impl LoopScoreTrace {
+        #[inline(always)]
+        pub(super) fn start(_loop_count: usize) -> Self {
+            LoopScoreTrace
+        }
+        #[inline(always)]
+        pub(super) fn record(&mut self, _n: usize, _equation: &datamodel::Equation) {}
+        #[inline(always)]
+        pub(super) fn done(&self, _loop_count: usize) {}
     }
 }
 
@@ -1605,47 +1714,6 @@ fn generate_dimensioned_loop_score_equation(
         })
         .collect();
     datamodel::Equation::Arrayed(loop_item.dimensions.clone(), elements, None, false)
-}
-
-/// Decide whether iteration `n` (1-based) should emit a trace line.
-///
-/// We want early iterations densely (so we see the scaling curve
-/// even if we OOM before completing the first 10_000 loops on a dense
-/// partition) and later iterations sparsely (so we don't spam the log
-/// for millions of loops).  Rule: log on every power of two up to and
-/// including 8192, then every 10_000 after that.  Powers of two give
-/// ~14 lines of early-curve data; 10_000 cadence gives steady-state
-/// measurements during long runs.
-fn should_trace(n: usize) -> bool {
-    if n == 0 {
-        return false;
-    }
-    if n <= 8192 {
-        n.is_power_of_two()
-    } else {
-        n.is_multiple_of(10_000) || n.is_power_of_two()
-    }
-}
-
-/// Resident-set size in MiB, or `None` if the kernel does not expose
-/// `/proc/self/status` (e.g. non-Linux or wasm builds).  Used only by
-/// the `LTM_BENCH_TRACE` instrumentation above, so an unavailable
-/// reading degrades to a zero in the log rather than failing.
-#[cfg(target_os = "linux")]
-fn read_rss_mib() -> Option<f64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb: u64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
-            return Some(kb as f64 / 1024.0);
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_rss_mib() -> Option<f64> {
-    None
 }
 
 /// The live source's declared dimension names (canonical, in declaration

@@ -1933,28 +1933,51 @@ pub fn assemble_simulation(
     // runs is the SINGLE main-model-governed `Specs.method` resolved below
     // (root override else project specs); a submodel's own override is dead.
     // Resolve it once and reject only when the assembled sim actually produces
-    // flow-to-stock scores -- i.e. SOME instantiated model (root or a
-    // transitively-instantiated submodule) has stocks. The root may be
-    // stock-free while a submodel under the main-governed method is not, which
-    // is exactly the hazard a per-submodel check missed; checking the
-    // instantiated set against the main-governed method covers both
-    // directions. Unused model definitions sitting in the project are never
-    // instantiated, so their specs and stocks are irrelevant. This rejection
-    // rides the `assemble_simulation` `Err`, so it reaches `simlin_sim_new`,
-    // `simlin_project_get_errors` (the `vm_error` channel), and the wasm
-    // backend -- the sim-compile path that, unlike `collect_all_diagnostics`,
-    // is what every runnable consumer goes through.
+    // a flow-to-stock score against that main-governed method.
+    //
+    // GH #663 refinement: the old guard rejected on the mere presence of a
+    // stock in any instantiated model. That is a false positive for a loop-free
+    // model (an open-loop accumulation -- a constant inflow that never reads the
+    // stock back): in exhaustive mode LTM scores only the edges of detected
+    // feedback loops, so such a stock emits NO flow-to-stock score and the
+    // non-Euler method has nothing to corrupt. The refined precondition is the
+    // EXACT thing #486 protects against: "an instantiated model actually emits a
+    // flow-to-stock link score" (`model_emits_flow_to_stock_score`).
+    //
+    // The check iterates the instantiated set (root + every transitively-
+    // instantiated submodule) and asks each model's own
+    // `model_emits_flow_to_stock_score`, so a flow-to-stock score produced
+    // entirely inside a submodel instance is caught -- the assembly emits that
+    // submodel's LTM vars too. The root may be stock-free while a submodel under
+    // the main-governed method scores a flow-to-stock link, exactly the hazard a
+    // per-submodel-specs check missed. Unused model definitions sitting in the
+    // project are never instantiated, so they are irrelevant.
+    //
+    // Reading the emitted var set (rather than a loop-presence proxy) is what
+    // makes the refinement SOUND across modes: in discovery mode (user-forced or
+    // auto-flipped) and in any model with input ports, `model_ltm_variables`
+    // scores ALL causal edges, so it emits a flow-to-stock score for an
+    // open-loop stock's `flow → stock` edge even though no loop contains that
+    // stock. A "has any feedback loop" proxy would under-reject those models; the
+    // direct var-set test cannot. `model_ltm_variables` is already salsa-computed
+    // on this LTM-enabled assembly path, so this is a cache hit plus a linear
+    // scan.
+    //
+    // This rejection rides the `assemble_simulation` `Err`, so it reaches
+    // `simlin_sim_new`, `simlin_project_get_errors` (the `vm_error` channel),
+    // and the wasm backend -- the sim-compile path that, unlike
+    // `collect_all_diagnostics`, is what every runnable consumer goes through.
     if project.ltm_enabled(db)
         && let Some(root_model) = project_models.get(main_model_canonical.as_ref())
         && let Some(method) = ltm::effective_non_euler_method(db, *root_model, project)
     {
-        let any_stocks = module_instances.keys().any(|name| {
+        let any_flow_to_stock_score = module_instances.keys().any(|name| {
             let canonical = canonicalize(name.as_str());
             project_models
                 .get(canonical.as_ref())
-                .is_some_and(|sm| !model_causal_edges(db, *sm, project).stocks.is_empty())
+                .is_some_and(|sm| ltm::model_emits_flow_to_stock_score(db, *sm, project))
         });
-        if any_stocks {
+        if any_flow_to_stock_score {
             return Err(ltm::ltm_non_euler_diagnostic_message(method));
         }
     }

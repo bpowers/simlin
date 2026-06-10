@@ -159,7 +159,7 @@ fn classify_expr0_canonicalizes_integer_literal_subscript() {
 fn substitute_reducers_whole_equation() {
     let mut reducers = HashMap::new();
     reducers.insert("sum(pop[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
-    let out = substitute_reducers_in_equation("SUM(pop[*])", &reducers);
+    let out = substitute_reducers_in_equation("SUM(pop[*])", &reducers).unwrap();
     assert_eq!(out, "\"$⁚ltm⁚agg⁚0\"");
 }
 
@@ -169,7 +169,7 @@ fn substitute_reducers_whole_equation() {
 fn substitute_reducers_nested_in_arithmetic() {
     let mut reducers = HashMap::new();
     reducers.insert("sum(pop[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
-    let out = substitute_reducers_in_equation("base / SUM(pop[*])", &reducers);
+    let out = substitute_reducers_in_equation("base / SUM(pop[*])", &reducers).unwrap();
     assert_eq!(out, "base / \"$⁚ltm⁚agg⁚0\"");
 }
 
@@ -185,7 +185,7 @@ fn substitute_reducers_nested_in_arithmetic() {
 fn substitute_reducers_inside_subscript_index() {
     let mut reducers = HashMap::new();
     reducers.insert("sum(idx[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
-    let out = substitute_reducers_in_equation("stock[SUM(idx[*])]", &reducers);
+    let out = substitute_reducers_in_equation("stock[SUM(idx[*])]", &reducers).unwrap();
     assert_eq!(out, "stock[\"$⁚ltm⁚agg⁚0\"]");
 }
 
@@ -197,7 +197,7 @@ fn substitute_reducers_inside_subscript_index() {
 fn substitute_reducers_inside_subscript_range_bound() {
     let mut reducers = HashMap::new();
     reducers.insert("sum(idx[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
-    let out = substitute_reducers_in_equation("stock[1:SUM(idx[*])]", &reducers);
+    let out = substitute_reducers_in_equation("stock[1:SUM(idx[*])]", &reducers).unwrap();
     assert_eq!(out, "stock[1:\"$⁚ltm⁚agg⁚0\"]");
 }
 
@@ -207,7 +207,7 @@ fn substitute_reducers_inside_subscript_range_bound() {
 fn substitute_reducers_deep_inside_subscript_index() {
     let mut reducers = HashMap::new();
     reducers.insert("sum(idx[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
-    let out = substitute_reducers_in_equation("stock[SUM(idx[*]) + 1]", &reducers);
+    let out = substitute_reducers_in_equation("stock[SUM(idx[*]) + 1]", &reducers).unwrap();
     assert_eq!(out, "stock[\"$⁚ltm⁚agg⁚0\" + 1]");
 }
 
@@ -217,8 +217,74 @@ fn substitute_reducers_deep_inside_subscript_index() {
 fn substitute_reducers_leaves_wildcard_subscript_alone() {
     let mut reducers = HashMap::new();
     reducers.insert("sum(pop[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
-    let out = substitute_reducers_in_equation("pop[*]", &reducers);
+    let out = substitute_reducers_in_equation("pop[*]", &reducers).unwrap();
     assert_eq!(out, "pop[*]");
+}
+
+// -- GH #661: a parse failure in substitute_reducers_in_equation must be a
+//    loud Err, never the input returned unchanged --
+//
+// `substitute_reducers_in_equation` replaces a recognized inline reducer
+// subexpression with its `$⁚ltm⁚agg⁚{n}` aggregate-node name to build the
+// `agg → target` partial. If the parse of its input fails *before*
+// substitution, the historical code returned the input unchanged, so the
+// inline reducer silently survived into the agg→target partial -- the
+// agg-substitution-omission sibling of the GH #311 PREVIOUS-omission hazard.
+// That partial then compiles cleanly while referencing the live reducer
+// instead of the hoisted aggregate node, a wrong-but-clean-compiling link
+// score. The fix returns a structured `Err` so the db-bearing caller skips
+// the variable and surfaces a `Warning`, mirroring the GH #311 treatment.
+
+/// A genuinely unparseable input with reducers to substitute must return
+/// `Err` carrying the offending text, NOT the input unchanged. The dangling
+/// binary operator below is rejected by the parser.
+#[test]
+fn substitute_reducers_parse_error_is_err() {
+    let mut reducers = HashMap::new();
+    reducers.insert("sum(pop[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+    let bad = "SUM(pop[*]) * * base";
+    match substitute_reducers_in_equation(bad, &reducers) {
+        Err(err) => assert_eq!(
+            err.equation_text, bad,
+            "the error must carry the original equation text for the diagnostic"
+        ),
+        Ok(out) => panic!(
+            "a parse failure must be a loud Err so the inline reducer never \
+             silently survives into the agg→target partial; got Ok({out:?})"
+        ),
+    }
+}
+
+/// An empty / whitespace input parses as `Ok(None)` (no AST), which is also
+/// a failure for substitution purposes -- there is nothing to substitute and
+/// returning the empty text would feed an unsubstituted (reducer-free, here
+/// empty) body into the agg→target partial. It must be a loud `Err` once
+/// there are reducers to substitute.
+#[test]
+fn substitute_reducers_empty_equation_is_err() {
+    let mut reducers = HashMap::new();
+    reducers.insert("sum(pop[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+    for empty in ["", "   ", "\t\n"] {
+        let result = substitute_reducers_in_equation(empty, &reducers);
+        assert!(
+            result.is_err(),
+            "an empty/whitespace input must be a loud Err; got {result:?} for {empty:?}"
+        );
+    }
+}
+
+/// The empty-`reducers` early return is unaffected: with no reducers to
+/// substitute the function is a pure pass-through and never parses, so even
+/// an unparseable input returns `Ok` with the text unchanged (the caller has
+/// nothing to skip). This guards the early-return invariant the production
+/// `slot_text` closure relies on.
+#[test]
+fn substitute_reducers_empty_reducers_passes_through_unparseable() {
+    let reducers = HashMap::new();
+    let bad = "SUM(pop[*]) * * base";
+    let out = substitute_reducers_in_equation(bad, &reducers)
+        .expect("an empty reducer map must pass through without parsing");
+    assert_eq!(out, bad);
 }
 
 // -- subscript_idents_at_element tests --

@@ -355,6 +355,20 @@ pub enum LtmMode {
 /// (e.g. a pure module-internal loop).  Populated only in exhaustive LTM
 /// mode; discovery mode leaves it empty.
 ///
+/// It is an `IndexMap` (not a `HashMap`) so iteration order is the loops'
+/// **emission order** -- the content-derived order `assign_loop_ids` produces
+/// and `model_ltm_variables` inserts in (enumerated loops first, then pinned).
+/// The post-sim rel-loop-score denominator (`ltm_post::compute_rel_loop_scores*`)
+/// sums `|loop_score|` in this order, so preserving emission order keeps that
+/// IEEE-754 (non-associative) sum bit-for-bit identical to the pre-#461
+/// compile-time emitter, which accumulated in the same `detected_loops` order
+/// (GH #468). Emission order is itself deterministic across salsa cache
+/// invalidations and across processes because `assign_loop_ids` is a pure
+/// function of loop content (it sorts on the canonical edge-sequence rotation,
+/// not on `HashMap` enumeration order -- see `ltm::graph::loop_id_sort_key`),
+/// so the IndexMap order never flaps even though `IndexMap`'s own `PartialEq`
+/// (used for salsa cache equality) is order-insensitive.
+///
 /// `agg_recovery_truncated` is `true` when reconstruction of the
 /// cross-element-through-aggregate loops (`recover_cross_agg_loops`, GH
 /// #515) hit its loop-count budget (`ltm::MAX_CROSS_AGG_LOOPS`) or its
@@ -377,7 +391,7 @@ pub enum LtmMode {
 #[derive(Clone, PartialEq, salsa::Update)]
 pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
-    pub loop_partitions: HashMap<String, Vec<Option<usize>>>,
+    pub loop_partitions: indexmap::IndexMap<String, Vec<Option<usize>>>,
     pub agg_recovery_truncated: bool,
     pub pathways_truncated: bool,
     pub mode: LtmMode,
@@ -937,6 +951,65 @@ pub fn set_project_ltm_discovery_mode(db: &mut SimlinDb, project: SourceProject,
     use salsa::Setter;
     if project.ltm_discovery_mode(db) != enabled {
         project.set_ltm_discovery_mode(db).to(enabled);
+    }
+}
+
+/// Scope guard: flip a `SourceProject`'s `ltm_enabled` salsa input to a chosen
+/// value on construction and unconditionally restore the prior value on drop.
+///
+/// LTM-specific diagnostics (the auto-flip-to-discovery advisory, the
+/// synthetic-fragment compile-failure warnings) only accumulate through
+/// `model_all_diagnostics` -> `model_ltm_variables` when `ltm_enabled` is true.
+/// A caller that wants to harvest those diagnostics on a db synced with LTM
+/// off must transiently re-enable the flag for the
+/// [`collect_all_diagnostics`] pass and then restore it -- the `SourceProject`
+/// salsa input is shared across every other consumer of the project (patch
+/// validation, the analyze surfaces, subsequent compiles), so leaking
+/// `ltm_enabled = true` past the harvest would silently change the next
+/// consumer's output. Using an RAII guard (rather than an explicit reset line
+/// somewhere down the function) makes the restore structurally unmissable, even
+/// on an early return or a panic in the middle of the queries.
+///
+/// Shared by libsimlin's `simlin_project_get_errors` / from-wasm rel-loop FFIs
+/// (GH #466) and `simlin-mcp-core`'s `read_model` / `edit_model` diagnostic
+/// passes (GH #662), so the transient-enable behaves identically across every
+/// diagnostic-collection surface instead of being re-implemented per consumer.
+pub struct LtmEnabledGuard<'a> {
+    db: &'a mut SimlinDb,
+    project: SourceProject,
+    restore_to: bool,
+}
+
+impl<'a> LtmEnabledGuard<'a> {
+    /// Set `project.ltm_enabled` to `desired`, capturing the prior value so
+    /// `drop` can restore it.
+    pub fn enable(
+        db: &'a mut SimlinDb,
+        project: SourceProject,
+        desired: bool,
+    ) -> LtmEnabledGuard<'a> {
+        let restore_to = project.ltm_enabled(db);
+        set_project_ltm_enabled(db, project, desired);
+        LtmEnabledGuard {
+            db,
+            project,
+            restore_to,
+        }
+    }
+
+    /// Borrow the guarded db for read-only salsa queries during the scope.
+    pub fn db(&self) -> &SimlinDb {
+        self.db
+    }
+}
+
+impl<'a> Drop for LtmEnabledGuard<'a> {
+    fn drop(&mut self) {
+        // Panic-safe: `set_project_ltm_enabled` only mutates the salsa input when
+        // the flag actually changed (its inner `if ltm_enabled(db) != value`
+        // guard), so a no-op restore (flag already matched) never touches salsa
+        // at all. On a valid db handle the setter does not panic.
+        set_project_ltm_enabled(self.db, self.project, self.restore_to);
     }
 }
 

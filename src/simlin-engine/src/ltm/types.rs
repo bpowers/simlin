@@ -286,17 +286,47 @@ impl LoopPolarity {
             (true, false) => LoopPolarity::Reinforcing,
             (false, true) => LoopPolarity::Balancing,
             (true, true) => {
-                if confidence >= POLARITY_CONFIDENCE_THRESHOLD {
-                    if positive_sum > negative_sum_abs {
-                        LoopPolarity::MostlyReinforcing
-                    } else {
-                        // When magnitudes tie at >= threshold confidence the
-                        // ratio is 0, which violates the threshold check above
-                        // for any threshold > 0.  This branch therefore covers
-                        // the strictly-dominant balancing case.
-                        LoopPolarity::MostlyBalancing
-                    }
+                // Make every mixed-sign sub-case explicit rather than nesting a
+                // `positive_sum > negative_sum_abs` test inside the threshold
+                // gate (#506).  The previous nesting made the inner `else`
+                // serve two roles at once -- the strictly-dominant balancing
+                // case AND the (unreachable) exact-tie case -- so a reader had
+                // to reconstruct the threshold arithmetic to see that "balancing
+                // wins ties" was never actually in effect.
+                if confidence < POLARITY_CONFIDENCE_THRESHOLD {
+                    LoopPolarity::Undetermined
+                } else if positive_sum > negative_sum_abs {
+                    LoopPolarity::MostlyReinforcing
+                } else if negative_sum_abs > positive_sum {
+                    LoopPolarity::MostlyBalancing
                 } else {
+                    // confidence >= threshold AND positive_sum ==
+                    // negative_sum_abs implies the ratio numerator is 0, hence
+                    // confidence == 0 -- which contradicts the threshold check
+                    // above for any threshold > 0.  So this arm is unreachable
+                    // when the production threshold is positive.  The const
+                    // assert enforces that invariant: it pins threshold > 0,
+                    // which makes this tie arm structurally unreachable and
+                    // forces a human to revisit the classification rules if the
+                    // threshold is ever zeroed.  Only an EXACT tie
+                    // (positive_sum == negative_sum_abs) reaches this arm even
+                    // with a zero threshold -- strict near-ties still route to
+                    // MostlyReinforcing/MostlyBalancing above via the `>`
+                    // checks.  What a zero threshold actually changes is the
+                    // FIRST arm: `confidence < 0` is never true (confidence is
+                    // non-negative), so low-confidence mixed cases would stop
+                    // returning `Undetermined` there and would instead be
+                    // classified MostlyReinforcing/MostlyBalancing by sign
+                    // dominance.  The `Undetermined` fallback below is the safe
+                    // classification if this exact-tie arm ever does become
+                    // reachable.
+                    const {
+                        assert!(
+                            POLARITY_CONFIDENCE_THRESHOLD > 0.0,
+                            "threshold == 0 makes the tie arm reachable and changes \
+                             classification; update the rules if you set the threshold to 0"
+                        );
+                    }
                     LoopPolarity::Undetermined
                 }
             }

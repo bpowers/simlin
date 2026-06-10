@@ -1104,6 +1104,158 @@ fn element_graph_scalar_feeder_of_arrayed_hoisted_reducer_feeds_every_slot() {
     assert_edge(&result, &format!("{agg}[b]"), "growth[b]");
 }
 
+// ---- #533: both-scalar fast path must not bypass ThroughAgg routing ----
+
+/// #533 (the core scenario): a *scalar* feeder of a hoisted reducer whose
+/// target is *also scalar* -- `total = base + SUM(pop[*] * scale)` with
+/// `total`, `base`, `scale` scalar and `pop[*]` arrayed. The maximal
+/// `SUM(pop[*] * scale)` subexpression is hoisted into a *scalar* synthetic agg
+/// `$⁚ltm⁚agg⁚0` (whole-extent reduce of `pop[*]`, no iterated axis). The
+/// `(scale, total)` causal edge is classified `ThroughAgg` in the IR, so it
+/// must route `scale → $⁚ltm⁚agg⁚0` (then `$⁚ltm⁚agg⁚0 → total` exists via the
+/// arrayed `pop` side) -- NOT a direct `scale → total` edge.
+///
+/// Before the fix, `model_element_causal_edges`'s both-scalar fast path
+/// (`from_dims.is_empty() && to_dims.is_empty()`) short-circuited the
+/// `(scale, total)` edge to a direct `scale → total` edge before the IR's
+/// `ThroughAgg` routing was ever consulted, so the scalar-feeder→agg hop was
+/// silently lost. (The `pop[d] → agg` and `agg → total` hops always existed,
+/// since those edges aren't both-scalar.)
+#[test]
+fn element_graph_scalar_feeder_scalar_target_routes_through_agg() {
+    let project = TestProject::new("scalar_feeder_scalar_target")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_aux("pop[Region]", "100")
+        .scalar_aux("scale", "2")
+        .scalar_aux("base", "5")
+        .scalar_aux("total", "base + SUM(pop[*] * scale)");
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The scalar feeder routes THROUGH the agg, not directly to the target.
+    assert_edge(&result, "scale", agg);
+    assert_no_edge(&result, "scale", "total");
+
+    // The arrayed `pop` side wires the agg the same way it would for an
+    // arrayed target: `pop[d] → agg` reductions and `agg → total` broadcast.
+    assert_edge(&result, "pop[nyc]", agg);
+    assert_edge(&result, "pop[boston]", agg);
+    assert_edge(&result, agg, "total");
+
+    // The scalar feeder must be the bare `scale` node, never a malformed
+    // `scale[]` bracketed node (the `emit_agg_routed_edges` empty-`from_dims`
+    // arm guards this once it is reached).
+    assert!(
+        !result.edges.contains_key("scale[]")
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t == "scale[]")),
+        "the scalar feeder of a hoisted reducer must be the bare `scale` node, never `scale[]`; got: {:?}",
+        result.edges
+    );
+
+    // The plain scalar `base + ...` term keeps its direct scalar edge: `base`
+    // does not feed the reducer, so its `(base, total)` site is `Direct` and
+    // the fast path's behavior is preserved for it.
+    assert_edge(&result, "base", "total");
+}
+
+/// #533 (mixed Direct + ThroughAgg case): a scalar that feeds the scalar
+/// target *both* directly and inside the reducer -- `total = scale +
+/// SUM(pop[*] * scale)` with `total`, `scale` scalar and `pop[*]` arrayed. The
+/// `(scale, total)` pair has TWO classified sites: one `Direct` (the bare
+/// `scale +` term) and one `ThroughAgg` (the `scale` inside the reducer). Both
+/// the direct `scale → total` edge AND the `scale → agg` hop must be emitted,
+/// matching the normal (non-fast-path) dispatch.
+#[test]
+fn element_graph_scalar_feeder_mixed_direct_and_through_agg() {
+    let project = TestProject::new("scalar_feeder_mixed")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_aux("pop[Region]", "100")
+        .scalar_aux("scale", "2")
+        .scalar_aux("total", "scale + SUM(pop[*] * scale)");
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The `ThroughAgg` site routes `scale → agg`.
+    assert_edge(&result, "scale", agg);
+    // The `Direct` site (the bare `scale +` term) keeps the direct edge.
+    assert_edge(&result, "scale", "total");
+    // The arrayed `pop` side wires the agg.
+    assert_edge(&result, "pop[nyc]", agg);
+    assert_edge(&result, "pop[boston]", agg);
+    assert_edge(&result, agg, "total");
+}
+
+/// #533 (fast path preserved): a plain scalar→scalar edge with no reducer
+/// anywhere still takes the both-scalar direct-edge fast path -- `b = a * 2`
+/// with both scalar emits a direct `a → b` edge and never invents a synthetic
+/// agg node. This pins that consulting the IR for the ThroughAgg case does not
+/// regress the common scalar→scalar `Direct` `Bare` case.
+#[test]
+fn element_graph_plain_scalar_to_scalar_keeps_direct_fast_path() {
+    // The model must contain at least one arrayed variable, otherwise the
+    // whole-model `any_arrayed` short-circuit returns the variable graph
+    // verbatim and the per-edge loop (with its fast path) is never entered.
+    let project = TestProject::new("plain_scalar_fast_path")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_aux("unrelated[Region]", "1")
+        .scalar_aux("a", "10")
+        .scalar_aux("b", "a * 2");
+
+    let result = element_edges(&project);
+
+    // The plain scalar→scalar edge is direct.
+    assert_edge(&result, "a", "b");
+    // No synthetic agg node is minted for a reducer-free scalar→scalar edge.
+    assert!(
+        !result
+            .edges
+            .keys()
+            .any(|k| k.contains("\u{205A}agg\u{205A}"))
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t.contains("\u{205A}agg\u{205A}"))),
+        "a reducer-free scalar→scalar edge must not produce a synthetic agg node; got: {:?}",
+        result.edges
+    );
+}
+
+/// #533 (loop level): a feedback loop that runs *through* the scalar-feeder→agg
+/// hop -- `total` (scalar stock) is grown by `grow = 1 + SUM(pop[*] * scale)`,
+/// and `scale` feeds back from `total`. The cross-element-invisible loop
+/// `total → scale → $⁚ltm⁚agg⁚0 → grow → total` must surface at the element
+/// level *with the agg node in the circuit*. Before the fix the both-scalar
+/// fast path replaced `scale → $⁚ltm⁚agg⁚0` with a direct `scale → grow`, so
+/// the loop -- if found at all -- routed around the agg, breaking the
+/// loop-score chain that walks `… → scale → $⁚ltm⁚agg⁚0 → grow → …`.
+///
+/// `SUM(pop[*] * scale)` must be a *sub-expression* (here `1 + ...`) so it is
+/// hoisted into a *synthetic* `$⁚ltm⁚agg⁚0`; a whole-RHS reducer would be a
+/// variable-backed agg (the flow itself) with no synthetic node, and the
+/// `(scale, grow)` edge would stay `Direct`.
+#[test]
+fn element_graph_scalar_feeder_loop_routes_through_agg() {
+    let project = TestProject::new("scalar_feeder_loop")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_aux("pop[Region]", "100")
+        .scalar_aux("scale", "0.001 * total")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * scale)", None);
+
+    let result = element_loop_circuits(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The feedback loop must route through the synthetic agg node. The
+    // scalar-feeder→agg hop (`scale → agg`) is the segment the fast path used
+    // to bypass; with it restored the loop visits the agg.
+    assert_has_circuit(&result, &["total", "scale", agg, "grow"]);
+}
+
 // ---- #511: iterated-dimension subscript -> same-element projection ----
 
 /// AC3.1 (element-graph side): an A2A target that references an arrayed

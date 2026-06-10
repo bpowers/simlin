@@ -1359,7 +1359,7 @@ fn slot_partition_at(pv: &[Option<usize>], k: usize) -> Option<usize> {
 fn ensure_denom_for_element(
     cache: &mut HashMap<(Option<usize>, usize), Vec<f64>>,
     results: &engine::Results,
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     element_index_map: &HashMap<String, engine::ltm_post::LoopElementIndex>,
     partition_key: Option<usize>,
     element_k: usize,
@@ -1427,7 +1427,7 @@ fn ensure_denom_for_element(
 /// reads.
 pub(crate) fn rel_loop_score_series(
     results: &engine::Results,
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     loop_element_index: &HashMap<String, engine::ltm_post::LoopElementIndex>,
     cache: &mut HashMap<(Option<usize>, usize), Vec<f64>>,
     loop_id: &str,
@@ -1576,61 +1576,20 @@ pub(crate) fn results_from_layout_and_slab(
     })
 }
 
-/// Salsa reset guard: flip `ltm_enabled` to a chosen value on construction
-/// and unconditionally restore it on drop.
+/// Salsa reset guard for `ltm_enabled`: now the shared
+/// [`engine::db::LtmEnabledGuard`] (moved into simlin-engine for GH #662 so
+/// `simlin-mcp-core` can reuse the exact same transient-enable behavior).
 ///
-/// The from-wasm rel-loop FFI runs the same salsa queries
-/// `simlin_sim_new` uses to capture `(loop_partitions, loop_element_index)`
-/// (`model_ltm_variables` + `project_datamodel_dims` + `build_loop_element_index`),
-/// which only return non-empty results when the `SourceProject` input has
-/// `ltm_enabled = true`.  We set it true for the duration of those queries
-/// and restore it before returning, mirroring `simlin_sim_new`'s
-/// `set_project_ltm_enabled(.., true)` ... `set_project_ltm_enabled(.., false)`
-/// bookends (`simulation.rs:70` / `:136-138`).
-///
-/// The `SourceProject` salsa input is shared across every consumer of the
-/// project (patch validation, subsequent sim_new calls, the other analyze
-/// FFIs); leaking `ltm_enabled = true` past the snapshot recompute would
-/// silently change the next consumer's analysis output.  A scope guard
-/// (rather than an explicit `set_project_ltm_enabled(.., false)` line
-/// somewhere down the function) makes it impossible for an early return
-/// or a panic in the middle of the queries to skip the reset.
-pub(crate) struct LtmEnabledGuard<'a> {
-    db: &'a mut engine::db::SimlinDb,
-    project: SourceProject,
-    restore_to: bool,
-}
-
-impl<'a> LtmEnabledGuard<'a> {
-    pub(crate) fn enable(
-        db: &'a mut engine::db::SimlinDb,
-        project: SourceProject,
-        desired: bool,
-    ) -> LtmEnabledGuard<'a> {
-        let restore_to = project.ltm_enabled(db);
-        engine::db::set_project_ltm_enabled(db, project, desired);
-        LtmEnabledGuard {
-            db,
-            project,
-            restore_to,
-        }
-    }
-
-    pub(crate) fn db(&self) -> &engine::db::SimlinDb {
-        self.db
-    }
-}
-
-impl<'a> Drop for LtmEnabledGuard<'a> {
-    fn drop(&mut self) {
-        // Panic-safe: `set_project_ltm_enabled` only mutates the salsa input when
-        // the flag actually changed (the inner `if ltm_enabled(db) != value` guard),
-        // so a no-op restore (flag already matched) never touches salsa at all.
-        // On a valid db handle -- which the FFI has been using throughout the guard's
-        // lifetime -- the setter does not panic.
-        engine::db::set_project_ltm_enabled(self.db, self.project, self.restore_to);
-    }
-}
+/// libsimlin keeps this `pub(crate)` re-export so the existing
+/// `crate::analysis::LtmEnabledGuard` call sites (the from-wasm rel-loop FFI
+/// and `project.rs`'s `simlin_project_get_errors`, GH #466) resolve unchanged.
+/// The from-wasm rel-loop FFI runs the same salsa queries `simlin_sim_new`
+/// uses to capture `(loop_partitions, loop_element_index)`
+/// (`model_ltm_variables` + `project_datamodel_dims` +
+/// `build_loop_element_index`), which only return non-empty results when the
+/// `SourceProject` input has `ltm_enabled = true`; the guard sets it true for
+/// the duration of those queries and restores it before returning.
+pub(crate) use engine::db::LtmEnabledGuard;
 
 /// The `(loop_partitions, loop_element_index)` pair `simlin_sim_new` snapshots
 /// off the salsa db (and `recompute_ltm_snapshots` re-derives for the from-wasm
@@ -1639,7 +1598,9 @@ impl<'a> Drop for LtmEnabledGuard<'a> {
 /// loop id and walk the partition denominator cache.  The fields' types match
 /// `SimState::loop_partitions` and `SimState::loop_element_index`.
 pub(crate) type LtmSnapshots = (
-    HashMap<String, Vec<Option<usize>>>,
+    // `IndexMap` to preserve the engine's loop emission order through to the
+    // rel-loop-score denominator summation (GH #468).
+    engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     HashMap<String, engine::ltm_post::LoopElementIndex>,
 );
 
@@ -1704,7 +1665,7 @@ pub(crate) struct ResolvedLoopQuery<'a> {
 /// the error surface as well as the analytic dispatch.
 pub(crate) fn resolve_loop_query<'a>(
     raw_loop_id: &'a str,
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     loop_element_index: &HashMap<String, engine::ltm_post::LoopElementIndex>,
 ) -> Result<ResolvedLoopQuery<'a>, SimlinError> {
     let parsed = match parse_subscripted_loop_id(raw_loop_id) {

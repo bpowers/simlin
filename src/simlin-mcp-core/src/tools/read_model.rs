@@ -65,6 +65,19 @@ pub struct ReadModelOutput {
     pub agg_recovery_truncated: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<ErrorOutput>,
+    /// Non-fatal diagnostics scoped to the requested model: the LTM auto-flip
+    /// advisory and synthetic-fragment compile-failure warnings the engine
+    /// emits when LTM analysis runs (GH #662).  Empty (and elided from JSON)
+    /// when the model has no warnings.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<ErrorOutput>,
+    /// `Some(message)` when the model could not be compiled for LTM loop
+    /// analysis, so `loop_dominance` is empty *because of a failure*, not
+    /// because the model has no loops (GH #660).  The message is actionable --
+    /// most notably the GH #486 Euler guidance for a non-Euler model with LTM
+    /// enabled.  Elided from the wire shape when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis_error: Option<String>,
 }
 
 /// Read a model and return its JSON snapshot.
@@ -90,30 +103,21 @@ pub async fn read_model<A: ProjectAccess>(
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
     let source_project = sync.project;
 
-    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
-    let errors: Vec<ErrorOutput> = {
-        let has_errors = diagnostics
-            .iter()
-            .any(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error));
-        if !has_errors {
-            vec![]
-        } else {
-            simlin_engine::errors::collect_formatted_errors(
-                diagnostics
-                    .iter()
-                    .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error)),
-                &project,
-            )
-            .errors
-            .iter()
-            // Errors from sibling models in a multi-model project would confuse
-            // a client reading a clean model; project-level errors (no model
-            // name) still surface.
-            .filter(|e| e.model_name.as_ref().is_none_or(|name| name == model_name))
-            .map(ErrorOutput::from)
-            .collect()
-        }
+    // ReadModel always runs LTM loop analysis (via `analyze_model` below), so
+    // the diagnostic-collection pass must run with LTM enabled too -- otherwise
+    // the LTM-only advisories (the auto-flip-to-discovery warning, the
+    // synthetic-fragment compile-failure warnings) silently never reach the
+    // caller (GH #662). The `LtmEnabledGuard` transiently flips `ltm_enabled`
+    // on the shared `SourceProject` and unconditionally restores it on drop, so
+    // the subsequent `analyze_model` (which does its own flag dance) sees clean
+    // state. This mirrors the GH #466 latch fix in libsimlin's
+    // `simlin_project_get_errors`, reusing the same engine guard.
+    let diagnostics = {
+        let guard = simlin_engine::db::LtmEnabledGuard::enable(&mut db, source_project, true);
+        simlin_engine::db::collect_all_diagnostics(guard.db(), source_project)
     };
+
+    let (errors, warnings) = format_model_diagnostics(&diagnostics, &project, model_name);
 
     // No discovery budget here: ReadModel runs on user-opened models that are
     // already known-tractable for the MCP surface. The opt-in budgeted path is
@@ -144,5 +148,43 @@ pub async fn read_model<A: ProjectAccess>(
         dominant_loops_by_period,
         agg_recovery_truncated,
         errors,
+        warnings,
+        analysis_error: analysis.analysis_error,
     })
+}
+
+/// Partition the collected diagnostics into model-scoped `(errors, warnings)`.
+///
+/// Both lists keep only the diagnostics relevant to `model_name` (project-level
+/// diagnostics with no model name still surface), so a client reading one model
+/// of a multi-model project is not confused by sibling-model noise.  Splitting
+/// by severity lets the caller present hard errors and advisory warnings (e.g.
+/// the LTM auto-flip-to-discovery notice, GH #662) in distinct output fields.
+///
+/// pattern: Functional Core -- pure over its inputs (no I/O).
+fn format_model_diagnostics(
+    diagnostics: &[simlin_engine::db::Diagnostic],
+    project: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> (Vec<ErrorOutput>, Vec<ErrorOutput>) {
+    use simlin_engine::db::DiagnosticSeverity;
+    let collect = |severity: DiagnosticSeverity| -> Vec<ErrorOutput> {
+        let matching: Vec<&simlin_engine::db::Diagnostic> = diagnostics
+            .iter()
+            .filter(|d| d.severity == severity)
+            .collect();
+        if matching.is_empty() {
+            return vec![];
+        }
+        simlin_engine::errors::collect_formatted_errors(matching, project)
+            .errors
+            .iter()
+            .filter(|e| e.model_name.as_ref().is_none_or(|name| name == model_name))
+            .map(ErrorOutput::from)
+            .collect()
+    };
+    (
+        collect(DiagnosticSeverity::Error),
+        collect(DiagnosticSeverity::Warning),
+    )
 }

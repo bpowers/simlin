@@ -11,6 +11,12 @@
 #![deny(unsafe_code)]
 
 pub use prost;
+// Re-exported so downstream crates (libsimlin, integration tests) can name the
+// `IndexMap` type of `db::LtmVariablesResult.loop_partitions` without taking a
+// direct `indexmap` dependency. The emission-order iteration is load-bearing
+// for the post-sim rel-loop-score denominator (GH #468), so callers thread the
+// `IndexMap` through rather than collapsing it to a `HashMap`.
+pub use indexmap;
 
 #[cfg(feature = "ai_info")]
 pub mod ai_info;

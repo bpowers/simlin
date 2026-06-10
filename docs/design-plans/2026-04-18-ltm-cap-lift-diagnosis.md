@@ -50,10 +50,13 @@ circuit count, and must decide **before** calling
   `LTM_BENCH_TRACE=1` (commit `567a61bc`, denser early cadence in
   `2ea9c2b5`). Emits cumulative loop_score / rel_loop_score equation
   bytes and RSS at power-of-two sample points plus every 10,000 loops.
+  (Since GH #464 this trace is gated by the `ltm_bench` cargo feature
+  rather than the `LTM_BENCH_TRACE` env var; to reproduce, add
+  `--features ltm_bench` to the run command below.)
 - Model: `test/metasd/WRLD3-03/wrld3-03.mdl` (1 model, 311 root
   variables, 483 causal edges, 15 stocks, 1 non-trivial 166-node SCC).
 - Run command:
-  `LTM_BENCH_ABORT_MIB=6000 LTM_BENCH_TRACE=1 cargo run --release -p
+  `LTM_BENCH_ABORT_MIB=6000 cargo run --release --features ltm_bench -p
   simlin-engine --example ltm_full_bench -- test/metasd/WRLD3-03/wrld3-03.mdl
   2000000`.  The 6 GiB abort ceiling is a stage-boundary check only
   (`Tracker::record`), so it does not fire inside the long-running

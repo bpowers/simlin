@@ -115,6 +115,55 @@ pub(super) fn effective_non_euler_method(
     }
 }
 
+/// Whether `model_ltm_variables` emits at least one flow-to-stock link score
+/// for this model -- the EXACT precondition the GH #486/#663 non-Euler guard
+/// must gate on.
+///
+/// A flow-to-stock link score is the only LTM synthetic var the Euler-only
+/// `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` numerator drives; under RK2/RK4
+/// it is mathematically meaningless. The guard previously gated on "the model
+/// has a stock", but that over-rejects a loop-free model (GH #663): in
+/// exhaustive mode LTM scores only the edges of detected feedback loops, so an
+/// open-loop stock (a constant inflow that never reads the stock back) emits
+/// NO flow-to-stock score and nothing is corrupted.
+///
+/// Crucially this is mode-aware where a loop-presence proxy is NOT: in
+/// DISCOVERY mode (user-forced or auto-flipped) and in any model with input
+/// ports, `model_ltm_variables` scores ALL causal edges, so it DOES emit a
+/// flow-to-stock score for an open-loop stock's `flow → stock` edge even
+/// though that stock is in no loop. Reading the emitted var set directly is
+/// therefore the only sound test: it cannot under-reject a discovery-mode
+/// model with a stock the way "has any loop" would.
+///
+/// A causal edge into a stock can only originate from one of its flows
+/// (`model_causal_edges` adds `flow → stock` edges and nothing else points at
+/// a stock -- a stock's equation is its initial value, not `inflow-outflow`),
+/// so "a link-score var whose `to` endpoint is a stock" is exactly "a
+/// flow-to-stock score". `link_score_edge_endpoints` strips any element
+/// subscript, so an arrayed stock's per-element score matches its base name.
+///
+/// Bounded on the guard's path: `model_ltm_variables` is the same query the
+/// Euler assembly path runs unconditionally (its cost is capped by the
+/// auto-flip-to-discovery gate and the circuit budget), so the guard is not
+/// adding an unbounded computation. On the rejection path the guard runs BEFORE
+/// `assemble_module`, so it computes the query rather than hitting a cache; but
+/// it pays that at most once per instantiated stock-bearing model, and any
+/// later assembly of the same model gets the salsa cache hit.
+pub(super) fn model_emits_flow_to_stock_score(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> bool {
+    let stocks = &crate::db::model_causal_edges(db, model, project).stocks;
+    if stocks.is_empty() {
+        return false;
+    }
+    let ltm = model_ltm_variables(db, model, project);
+    ltm.vars
+        .iter()
+        .any(|v| link_score_edge_endpoints(&v.name).is_some_and(|(_from, to)| stocks.contains(&to)))
+}
+
 /// Human-readable name of a non-Euler integration method, used in the GH #486
 /// diagnostic so the message names the offending method concretely.
 fn sim_method_display_name(method: datamodel::SimMethod) -> &'static str {
@@ -908,7 +957,7 @@ pub fn model_ltm_variables(
         // and no module interface to expose. Report the exhaustive default.
         return LtmVariablesResult {
             vars: vec![],
-            loop_partitions: HashMap::new(),
+            loop_partitions: indexmap::IndexMap::new(),
             agg_recovery_truncated: false,
             pathways_truncated: false,
             mode: LtmMode::Exhaustive,
@@ -1162,7 +1211,7 @@ pub fn model_ltm_variables(
                 // was never flipped on this branch, so report exhaustive.
                 return LtmVariablesResult {
                     vars: vec![],
-                    loop_partitions: HashMap::new(),
+                    loop_partitions: indexmap::IndexMap::new(),
                     agg_recovery_truncated: false,
                     pathways_truncated: false,
                     mode: LtmMode::Exhaustive,
@@ -1222,7 +1271,14 @@ pub fn model_ltm_variables(
         None
     };
 
-    let mut loop_partitions: HashMap<String, Vec<Option<usize>>> = HashMap::new();
+    // An `IndexMap` so the iteration order is the loops' emission order:
+    // enumerated loops are inserted below in `detected_loops` order (the
+    // content-sorted order `assign_loop_ids` produced), then pinned loops in
+    // pin order. The post-sim rel-loop-score denominator sums `|loop_score|`
+    // in this order, so emission order keeps that IEEE-754 sum bit-for-bit
+    // identical to the pre-#461 compile-time emitter (GH #468).
+    let mut loop_partitions: indexmap::IndexMap<String, Vec<Option<usize>>> =
+        indexmap::IndexMap::new();
 
     // Part 1: Link scores.
     // Sub-models and discovery mode need scores for ALL edges (pathways

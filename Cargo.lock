@@ -3289,6 +3289,7 @@ dependencies = [
  "csv",
  "ed25519",
  "ed25519-dalek",
+ "indexmap",
  "jsonschema",
  "proptest",
  "prost",

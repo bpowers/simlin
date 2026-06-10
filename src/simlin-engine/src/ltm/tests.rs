@@ -1342,6 +1342,163 @@ fn test_graphical_function_polarity_tolerates_import_noise() {
 }
 
 #[test]
+fn test_graphical_function_polarity_uses_slope_not_y_delta() {
+    use crate::variable::Table;
+
+    // Non-uniform x-spacing where the y-delta heuristic and the slope heuristic
+    // DISAGREE on the verdict (#536). The middle segment is a genuine, steep,
+    // local DECREASE over a very narrow x-interval (dx = 0.001), so the table is
+    // NOT monotone -- the correct answer is Unknown.
+    //
+    //   x = [0, 100, 100.001, 200]
+    //   y = [0,  10,  9.99999,  20]
+    //
+    //   y-range = 20, so the y-range-relative dy epsilon is 1e-6 * 20 = 2e-5.
+    //   The middle dy is -1e-5, which is *below* that epsilon, so the y-delta
+    //   heuristic SUPPRESSES the dip as a plateau and -- seeing only the two
+    //   surrounding increases -- wrongly classifies the table as Positive.
+    //
+    //   The middle segment's SLOPE, however, is -1e-5 / 0.001 = -0.01, far
+    //   steeper (in magnitude) than the table's average slope (20/200 = 0.1)
+    //   times the relative tolerance, so the slope heuristic correctly sees a
+    //   real local decrease and returns Unknown.
+    let narrow_dip_table = Table::new_for_test(
+        vec![0.0, 100.0, 100.001, 200.0],
+        vec![0.0, 10.0, 9.99999, 20.0],
+    );
+    assert_eq!(
+        analyze_graphical_function_polarity(&narrow_dip_table),
+        LinkPolarity::Unknown,
+        "a steep narrow local decrease must be caught by the slope heuristic, not \
+         smoothed over by the y-delta heuristic"
+    );
+
+    // The mirror case: a steep narrow local INCREASE in an otherwise-decreasing
+    // table must likewise flip a naive Negative to Unknown.
+    let narrow_bump_table = Table::new_for_test(
+        vec![0.0, 100.0, 100.001, 200.0],
+        vec![20.0, 10.0, 10.00001, 0.0],
+    );
+    assert_eq!(
+        analyze_graphical_function_polarity(&narrow_bump_table),
+        LinkPolarity::Unknown,
+        "a steep narrow local increase must flip an otherwise-decreasing table to Unknown"
+    );
+
+    // A genuinely monotone table with non-uniform x-spacing (no sign change in
+    // slope) must still classify correctly: every segment slopes up, so the
+    // verdict is Positive even though the dx values vary by orders of magnitude.
+    let monotone_nonuniform_table =
+        Table::new_for_test(vec![0.0, 0.001, 100.0, 200.0], vec![0.0, 5.0, 10.0, 20.0]);
+    assert_eq!(
+        analyze_graphical_function_polarity(&monotone_nonuniform_table),
+        LinkPolarity::Positive,
+        "a monotone table with non-uniform x-spacing stays Positive"
+    );
+
+    // Degenerate vertical segment (x[i] == x[i-1]) with differing y: two outputs
+    // for one input is an ambiguous lookup with undefined slope, so bail to
+    // Unknown.
+    let vertical_segment_table =
+        Table::new_for_test(vec![0.0, 1.0, 1.0, 2.0], vec![0.0, 1.0, 5.0, 6.0]);
+    assert_eq!(
+        analyze_graphical_function_polarity(&vertical_segment_table),
+        LinkPolarity::Unknown,
+        "a vertical (dx == 0, dy != 0) segment has undefined slope and must read as Unknown"
+    );
+
+    // A duplicated point (x[i] == x[i-1] AND y[i] == y[i-1]) is redundant, not
+    // ambiguous: it must be skipped as non-determining and not poison an
+    // otherwise-monotone verdict.
+    let duplicate_point_table =
+        Table::new_for_test(vec![0.0, 1.0, 1.0, 2.0], vec![0.0, 1.0, 1.0, 2.0]);
+    assert_eq!(
+        analyze_graphical_function_polarity(&duplicate_point_table),
+        LinkPolarity::Positive,
+        "a redundant duplicate point must not flip a monotone-increasing table"
+    );
+}
+
+/// GH #536 tolerance regression: a many-point uniformly-spaced monotone table
+/// with a single small import-noise dip must still classify Positive even after
+/// the slope-based tolerance was introduced (#536).
+///
+/// Root cause: the original #536 fix set `slope_epsilon = 1e-6 * (y_max -
+/// y_min) / x_span`, which is `1e-6 * avg_slope_mag`. For a uniformly-spaced
+/// n-point table `dx = x_span / (n - 1)`, so the effective per-segment dy
+/// threshold becomes `slope_epsilon * dx = 1e-6 * (y_max - y_min) / (n - 1)` --
+/// which is `(n - 1)x` tighter than the old #492 threshold `1e-6 * (y_max -
+/// y_min)`. A 50-point table therefore has a threshold ~49x tighter, and a
+/// noise dip that sat safely inside the #492 window now crosses it and flips the
+/// classification to Unknown.
+///
+/// The correct fix scales the tolerance by `avg_dx = x_span / (n - 1)`, giving
+/// `slope_epsilon = 1e-6 * (y_max - y_min) / avg_dx`. Then for uniform spacing
+/// `dx == avg_dx` and the per-segment dy threshold is `slope_epsilon * dx =
+/// 1e-6 * (y_max - y_min)` -- exactly the old #492 behavior. For non-uniform
+/// spacing the threshold still scales by `dx / avg_dx`, so narrow steep segments
+/// still trip correctly (the #536 motivation is preserved).
+#[test]
+fn test_graphical_function_polarity_uniform_50pt_import_noise() {
+    use crate::variable::Table;
+
+    // Build a 50-point uniformly-spaced monotone-increasing table on [0, 49]
+    // with y rising from 0.0 to 1.0. One interior point (index 25) has a
+    // downward import-noise dip of -5e-8.
+    //
+    // With 50 points: y_range = 1.0, x_span = 49.0, avg_dx = 1.0.
+    // Old #492 threshold: 1e-6 * 1.0 = 1e-6. The dip (-5e-8) is far below that
+    // threshold in magnitude, so the old code classified Positive.
+    //
+    // Buggy #536 slope_epsilon = 1e-6 * 1.0 / 49.0 ≈ 2.04e-8.
+    // The dip's slope = -5e-8 / 1.0 = -5e-8, which is < -2.04e-8, so the
+    // buggy code classifies Unknown (the #492 regression).
+    //
+    // Fixed #536 slope_epsilon = 1e-6 * 1.0 / avg_dx = 1e-6 * 1.0 / 1.0 = 1e-6.
+    // The dip's slope (-5e-8) is within [-1e-6, 1e-6], so the fixed code
+    // correctly classifies Positive.
+    let n = 50usize;
+    let x_span = (n - 1) as f64; // 49.0
+    let noise_dip_idx = 25usize;
+    // The noise magnitude must be:
+    //   - within the old #492 threshold: 1e-6 * y_range = 1e-6 * 1.0 = 1e-6
+    //   - outside the buggy #536 threshold: 1e-6 * y_range / (n-1) = 1e-6/49 ≈ 2.04e-8
+    // Choosing 5e-8: between 2.04e-8 and 1e-6, so buggy code fails and correct
+    // code passes.
+    let noise_magnitude = 5e-8_f64;
+
+    // Build a strictly-increasing base curve and then pull y[noise_dip_idx]
+    // BELOW y[noise_dip_idx - 1] by noise_magnitude.  This makes the segment
+    // (noise_dip_idx - 1) -> noise_dip_idx have a genuinely negative slope:
+    //   dy = -noise_magnitude, dx = 1.0, slope = -5e-8.
+    // The following segment noise_dip_idx -> (noise_dip_idx + 1) is then
+    // extra-positive (+2/49 + noise_magnitude), so the table overall is nearly
+    // monotone.
+    let xs: Vec<f64> = (0..n).map(|i| i as f64).collect();
+    let base_y: Vec<f64> = (0..n).map(|i| i as f64 / x_span).collect();
+    let ys: Vec<f64> = (0..n)
+        .map(|i| {
+            if i == noise_dip_idx {
+                // pull this point below its predecessor: slope (i-1)->i is -5e-8
+                base_y[noise_dip_idx - 1] - noise_magnitude
+            } else {
+                base_y[i]
+            }
+        })
+        .collect();
+
+    let table = Table::new_for_test(xs, ys);
+    assert_eq!(
+        analyze_graphical_function_polarity(&table),
+        LinkPolarity::Positive,
+        "a 50-point uniformly-spaced monotone table with a single {noise_magnitude:.0e} \
+         import-noise dip (within the #492 tolerance 1e-6 * y_range = 1e-6) must \
+         classify Positive; slope_epsilon must scale by avg_dx so uniform-spacing \
+         behavior matches the pre-#536 y-delta threshold (GH #536 regression)"
+    );
+}
+
+#[test]
 fn test_lookup_table_polarity_in_links() {
     use crate::datamodel;
 
@@ -2097,6 +2254,24 @@ fn test_loop_polarity_from_runtime_scores_mostly_balancing() {
     assert!(
         (POLARITY_CONFIDENCE_THRESHOLD..1.0).contains(&confidence),
         "confidence {confidence} should sit between the threshold and 1.0 for a mostly-B loop"
+    );
+}
+
+#[test]
+fn test_loop_polarity_from_runtime_scores_strictly_dominant_balancing() {
+    // Both signs occur, confidence >= threshold, and balancing magnitude
+    // STRICTLY dominates (|b| > r, not a tie).  This is the case the explicit
+    // `negative_sum_abs > positive_sum` arm handles after the #506 restructure;
+    // it must classify MostlyBalancing, never fall into the unreachable
+    // exact-tie arm.  r = 0.001, |b| = 5 + 4 + 1 = 10:
+    // confidence = |0.001 - 10| / (0.001 + 10) ~= 0.9998 (>= 0.99).
+    let scores = vec![f64::NAN, 0.001, -5.0, -4.0, -1.0];
+    let (polarity, confidence) =
+        LoopPolarity::from_runtime_scores(&scores).expect("mixed but valid scores");
+    assert_eq!(polarity, LoopPolarity::MostlyBalancing);
+    assert!(
+        (POLARITY_CONFIDENCE_THRESHOLD..1.0).contains(&confidence),
+        "strictly-dominant balancing should sit between the threshold and 1.0, got {confidence}"
     );
 }
 
