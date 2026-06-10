@@ -233,11 +233,14 @@ pub(crate) fn model_pinned_loops(
 }
 
 /// Assign pin-derived ids to a pin's expanded loops: the plain `pin{n}` when
-/// the expansion produced exactly one loop, `pin{n}⁚{j}` (1-based, in the
-/// deterministic order [`build_element_level_loops`] produced) when it
-/// produced several. The `⁚` separator is the reserved synthetic-name
-/// separator, so multi-instance ids can never collide with user content or
-/// the enumerator's id namespace.
+/// the expansion produced exactly one loop, `pin{n}⁚{j}` (1-based) when it
+/// produced several. The `j` ordering is deterministic: the
+/// [`build_element_level_loops`] emission order, content-re-sorted by
+/// `recover_agg_hop_polarities`' internal `assign_loop_ids` when any agg-hop
+/// polarity was patched (the caller runs the patch before this function) --
+/// both orders are pure functions of loop content. The `⁚` separator is
+/// the reserved synthetic-name separator, so multi-instance ids can never
+/// collide with user content or the enumerator's id namespace.
 fn assign_pin_ids(loops: &mut [Loop], pin_id: &str) {
     if loops.len() == 1 {
         loops[0].id = pin_id.to_string();

@@ -1527,6 +1527,73 @@ where
     petals_by_agg
 }
 
+/// Polarity of one `source → agg` hop, shared by [`recover_agg_hop_polarities`]
+/// (the scored / pinned surfaces, where the hop is a literal loop link) and
+/// [`recover_agg_routed_edge_polarities`] (the detected FFI surface, where the
+/// hop is half of a composed variable-level edge). Funneling both surfaces
+/// through this one decision is what keeps their loop polarities -- and hence
+/// the polarity-prefixed loop ids the runtime join is keyed on -- identical
+/// by construction for agg-routed cycles.
+///
+/// Two arms by the source's shape:
+///
+/// - an ARRAYED source is one of the reducer's own reduced rows:
+///   `SUM`/`MEAN`/`MIN`/`MAX` are monotone non-decreasing in each source
+///   element (raising any one element raises-or-holds the result), so the hop
+///   is `Positive`; `STDDEV`/`RANK` are not monotone -- `Unknown`.
+/// - a SCALAR feeder (`scale` in `SUM(pop[*] * scale)`, GH #737) gets the
+///   *discriminating* analysis of the agg's own lowered body
+///   ([`crate::ltm::CausalGraph::feeder_to_agg_polarity`], the
+///   positive-by-convention Mul rule): `pop[*] * scale` → Positive,
+///   `pop[*] * (1 - scale)` → Negative, indeterminate bodies → `Unknown`
+///   (never a confident wrong label -- the blanket monotone-Positive arm is
+///   NOT sound for a feeder, whose sign rides on how the body composes it).
+fn source_to_agg_hop_polarity(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    var_graph: &crate::ltm::CausalGraph,
+    source_vars: &HashMap<String, SourceVariable>,
+    from_var_level: &str,
+    agg: &crate::ltm_agg::AggNode,
+) -> crate::ltm::LinkPolarity {
+    use crate::ltm::LinkPolarity;
+
+    let from_is_arrayed = source_vars
+        .get(from_var_level)
+        .map(|sv| {
+            sv.kind(db) != SourceVariableKind::Module
+                && !variable_dimensions(db, *sv, project).is_empty()
+        })
+        .unwrap_or(false);
+    if from_is_arrayed {
+        if crate::ltm_agg::agg_reducer_is_monotone(&agg.equation_text) {
+            LinkPolarity::Positive
+        } else {
+            LinkPolarity::Unknown
+        }
+    } else {
+        // Reconstruct the agg's lowered AST from its equation text (the agg
+        // is not a model variable, so the graph's variable map has no AST
+        // for it). Mirrors `emit_source_to_agg_link_scores`' reconstruction.
+        let agg_eqn = if agg.result_dims.is_empty() {
+            datamodel::Equation::Scalar(agg.equation_text.clone())
+        } else {
+            datamodel::Equation::ApplyToAll(agg.result_dims.clone(), agg.equation_text.clone())
+        };
+        let Some(agg_var) =
+            super::parse::reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project)
+        else {
+            return LinkPolarity::Unknown;
+        };
+        let Some(agg_ast) = agg_var.ast() else {
+            return LinkPolarity::Unknown;
+        };
+        let feeder = Ident::<Canonical>::new(from_var_level);
+        var_graph.feeder_to_agg_polarity(&feeder, agg_ast)
+    }
+}
+
 /// Recover the polarity of synthetic-aggregate-node hops in `loops` (GH #516).
 ///
 /// The loop builders derive every link's polarity from the *variable-level*
@@ -1534,23 +1601,11 @@ where
 /// *element* graph -- so `analyze_link_polarity` finds no reference to the
 /// agg's name in either endpoint's equation and a hop into or out of an agg
 /// comes back `Unknown`, forcing every agg-traversing loop to `Undetermined`.
-/// For the common (monotone) reducers the polarity is derivable, so patch it
-/// here:
+/// For the derivable cases, patch it here:
 ///
-/// - `source[d] → agg`: `SUM`/`MEAN`/`MIN`/`MAX` are monotone non-decreasing
-///   in each source element (raising any one element raises-or-holds the
-///   result), so the hop is `Positive`. `STDDEV`/`RANK` are not monotone --
-///   left `Unknown`. A *scalar feeder* hop (`scale → agg` for
-///   `SUM(pop[*] * scale)`, GH #737) rides the same arm: strictly, monotone
-///   non-decreasing holds in the source *elements*, not in an arbitrary
-///   feeder the reducer body composes -- but the feeder's sign is not
-///   derivable from the variable graph either (the agg node isn't in it),
-///   and a feeder entering a monotone reducer's body multiplicatively/
-///   additively against non-negative co-factors (the overwhelmingly common
-///   shape) is positive. A negating body (`SUM(pop[*] * (1 - scale))`)
-///   mislabels this hop Positive; the simulated loop score's sign is
-///   unaffected (it is computed numerically), only the static `r`/`b` id
-///   prefix and reported polarity.
+/// - `source → agg`: [`source_to_agg_hop_polarity`] (the monotone arm for the
+///   reducer's own arrayed rows; the discriminating feeder analysis for a
+///   scalar feeder).
 /// - `agg → consumer`: the polarity of `consumer`'s equation with respect to
 ///   the reducer subexpression, computed by substituting the reducer with the
 ///   agg name and running ordinary static polarity analysis
@@ -1581,6 +1636,7 @@ pub(super) fn recover_agg_hop_polarities(
     if synthetic.is_empty() {
         return;
     }
+    let source_vars = model.variables(db);
 
     let mut any_patched = false;
     for lp in loops.iter_mut() {
@@ -1589,10 +1645,20 @@ pub(super) fn recover_agg_hop_polarities(
             if link.polarity != LinkPolarity::Unknown {
                 continue;
             }
-            // `source[d] → agg`: the agg is this link's target.
+            // `source → agg`: the agg is this link's target.
             if let Some((_, agg)) = synthetic.iter().find(|(name, _)| name == &link.to) {
-                if crate::ltm_agg::agg_reducer_is_monotone(&agg.equation_text) {
-                    link.polarity = LinkPolarity::Positive;
+                let from_var_level = strip_subscript(link.from.as_str());
+                let p = source_to_agg_hop_polarity(
+                    db,
+                    model,
+                    project,
+                    var_graph,
+                    source_vars,
+                    from_var_level,
+                    agg,
+                );
+                if p != LinkPolarity::Unknown {
+                    link.polarity = p;
                     patched = true;
                 }
                 continue;
@@ -1605,6 +1671,136 @@ pub(super) fn recover_agg_hop_polarities(
                     link.polarity = p;
                     patched = true;
                 }
+            }
+        }
+        if patched {
+            lp.polarity = var_graph.calculate_polarity(&lp.links);
+            any_patched = true;
+        }
+    }
+
+    if any_patched {
+        crate::ltm::assign_loop_ids(loops);
+    }
+}
+
+/// Recover the polarity of `ThroughAgg`-routed *variable-level* edges in
+/// `loops` -- the detected-FFI-surface twin of [`recover_agg_hop_polarities`]
+/// (GH #737 review follow-up, C1).
+///
+/// `model_detected_loops` enumerates loops on the variable-level graph, whose
+/// links never traverse agg nodes: an edge like `scale → grow` (where `grow`
+/// hoists `SUM(pop[*] * scale)`) carries the whole through-agg composition as
+/// ONE link, and `analyze_link_polarity` on `grow`'s raw equation returns
+/// `Unknown` for it. The scored surface meanwhile routes the same cycle
+/// through the agg and recovers both hop polarities -- so the two surfaces'
+/// loop polarities (and the polarity-prefixed ids `assign_loop_ids` derives,
+/// which key the runtime join: `reclassify_loops_from_results` and
+/// `get_relative_loop_score` read `$⁚ltm⁚loop_score⁚{id}`) would diverge AND
+/// collide, classifying one loop from another loop's series.
+///
+/// So: for each Unknown variable-level link whose reference sites are ALL
+/// `ThroughAgg`-routed (a mixed Direct+ThroughAgg edge is left Unknown -- the
+/// agg path alone doesn't determine it), compose the two hop polarities the
+/// scored surface would assign -- [`source_to_agg_hop_polarity`] into the agg
+/// and `agg_consumer_polarity` out of it -- per routed agg, requiring
+/// agreement across multiple routed aggs. The product over the patched edge
+/// equals the product of the scored loop's two patched hops, so loop
+/// polarities agree across surfaces by algebra, and the ids agree wherever
+/// the two surfaces' loop sets biject (every scalar-cycle model; the
+/// per-element cross-element classes were already divergent pre-#737 and are
+/// tracked separately).
+pub(crate) fn recover_agg_routed_edge_polarities(
+    loops: &mut [crate::ltm::Loop],
+    var_graph: &crate::ltm::CausalGraph,
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::LinkPolarity;
+
+    let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
+    if !aggs.aggs.iter().any(|a| a.is_synthetic) {
+        return;
+    }
+    let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+    let source_vars = model.variables(db);
+
+    let mut any_patched = false;
+    for lp in loops.iter_mut() {
+        let mut patched = false;
+        for link in lp.links.iter_mut() {
+            if link.polarity != LinkPolarity::Unknown {
+                continue;
+            }
+            let from_var_level = strip_subscript(link.from.as_str());
+            let to_var_level = strip_subscript(link.to.as_str());
+            let Some(sites) = ir
+                .sites
+                .get(&(from_var_level.to_string(), to_var_level.to_string()))
+            else {
+                continue;
+            };
+            if sites.is_empty() {
+                continue;
+            }
+            // Every site must route through an agg: a Direct site means part
+            // of the edge's effect bypasses the agg, and the variable-level
+            // analysis already returned Unknown for that combination.
+            let mut agg_idxs: Vec<usize> = Vec::new();
+            let mut all_through_agg = true;
+            for s in sites {
+                match &s.routing {
+                    crate::db::ltm_ir::SiteRouting::ThroughAgg { agg } => {
+                        if !agg_idxs.contains(&agg.0) {
+                            agg_idxs.push(agg.0);
+                        }
+                    }
+                    crate::db::ltm_ir::SiteRouting::Direct => {
+                        all_through_agg = false;
+                        break;
+                    }
+                }
+            }
+            if !all_through_agg || agg_idxs.is_empty() {
+                continue;
+            }
+            // Compose the two hop polarities per routed agg; multiple routed
+            // aggs (the same feeder read by two hoisted reducers of the same
+            // target) must agree, else Unknown.
+            let consumer = Ident::<Canonical>::new(to_var_level);
+            let mut combined = LinkPolarity::Unknown;
+            let mut consistent = true;
+            for idx in &agg_idxs {
+                let agg = &aggs.aggs[*idx];
+                let agg_ident = Ident::<Canonical>::new(agg.name.as_str());
+                let hop_in = source_to_agg_hop_polarity(
+                    db,
+                    model,
+                    project,
+                    var_graph,
+                    source_vars,
+                    from_var_level,
+                    agg,
+                );
+                let hop_out =
+                    var_graph.agg_consumer_polarity(&consumer, &agg.equation_text, &agg_ident);
+                let composed = hop_in.compose(hop_out);
+                if composed == LinkPolarity::Unknown {
+                    consistent = false;
+                    break;
+                }
+                if combined == LinkPolarity::Unknown {
+                    combined = composed;
+                } else if combined != composed {
+                    consistent = false;
+                    break;
+                }
+            }
+            if consistent && combined != LinkPolarity::Unknown {
+                link.polarity = combined;
+                patched = true;
             }
         }
         if patched {

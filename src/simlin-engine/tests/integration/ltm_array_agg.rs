@@ -64,8 +64,9 @@
 
 use simlin_engine::datamodel::{self, Dimension};
 use simlin_engine::db::{
-    DiagnosticError, DiagnosticSeverity, LtmSyntheticVar, SimlinDb, collect_all_diagnostics,
-    compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
+    DetectedLoopPolarity, DiagnosticError, DiagnosticSeverity, LtmSyntheticVar, SimlinDb,
+    collect_all_diagnostics, compile_project_incremental, model_detected_loops,
+    model_ltm_variables, reclassify_loops_from_results, set_project_ltm_enabled,
     sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
@@ -1783,4 +1784,149 @@ fn arrayed_agg_scalar_feeder_loop_scores_sustained() {
         slot_loops, 2,
         "one cross-element loop per r1 slot must reference the feeder score"
     );
+}
+
+/// GH #737 follow-up (review C1): the structural FFI loop surface
+/// (`model_detected_loops`) and the scored surface (`model_ltm_variables`)
+/// must assign IDENTICAL ids (and matching structural polarities) to the
+/// scalar-feeder reducer loops, because the runtime join is keyed purely on
+/// the id: `reclassify_loops_from_results` (and its production caller
+/// `simlin_analyze_get_loops_runtime`, plus pysimlin's
+/// `get_relative_loop_score(loop.id)`) reads `$⁚ltm⁚loop_score⁚{id}` for
+/// each detected loop.
+///
+/// Pre-fix the two surfaces diverged AND collided on these fixtures: the
+/// scored surface routed the feeder loop through the agg and recovered its
+/// polarity (r/b prefix), while the detected surface still derived polarity
+/// from the variable-level `scale→grow` link (Unknown → `u1`) -- so scored
+/// = {r1: feeder, r2: pop} vs detected = {u1: feeder, r1: pop}, and the
+/// runtime join classified the pop-growth loop from the FEEDER loop's
+/// series. On the negating-body variant that reported the pop-growth loop
+/// as confidently Balancing -- a wrong polarity with confidence 1.0 on a
+/// production FFI surface.
+///
+/// Covers both the headline fixture (`SUM(pop[*] * scale)`, feeder loop
+/// reinforcing) and the negating-body variant (`SUM(pop[*] * (1 - scale))`,
+/// feeder loop balancing -- exercising the discriminating feeder-hop
+/// polarity analysis, review I1).
+#[test]
+fn scalar_feeder_loop_cross_surface_ids_and_polarity_agree() {
+    struct Case {
+        grow_eqn: &'static str,
+        feeder_structural: DetectedLoopPolarity,
+        feeder_runtime: [DetectedLoopPolarity; 2],
+    }
+    let cases = [
+        Case {
+            grow_eqn: "1 + SUM(pop[*] * scale)",
+            feeder_structural: DetectedLoopPolarity::Reinforcing,
+            feeder_runtime: [
+                DetectedLoopPolarity::Reinforcing,
+                DetectedLoopPolarity::MostlyReinforcing,
+            ],
+        },
+        Case {
+            grow_eqn: "1 + SUM(pop[*] * (1 - scale))",
+            feeder_structural: DetectedLoopPolarity::Balancing,
+            feeder_runtime: [
+                DetectedLoopPolarity::Balancing,
+                DetectedLoopPolarity::MostlyBalancing,
+            ],
+        },
+    ];
+
+    for case in &cases {
+        let project = TestProject::new("cross_surface_feeder")
+            .with_sim_time(0.0, 6.0, 1.0)
+            .named_dimension("region", &["north", "south"])
+            .array_with_ranges("pop0[region]", vec![("north", "100"), ("south", "300")])
+            .array_stock("pop[region]", "pop0[region]", &["pgrow"], &[], None)
+            .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+            .scalar_aux("scale", "0.001 * total + 0.01")
+            .stock("total", "100", &["grow"], &[], None)
+            .flow("grow", case.grow_eqn, None)
+            .build_datamodel();
+
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("LTM-enabled compilation should succeed");
+        let source_model = sync.models["main"].source_model;
+        let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+        // The scored surface's loop-score ids.
+        let scored_ids: std::collections::BTreeSet<String> = ltm
+            .vars
+            .iter()
+            .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+            .map(|id| id.to_string())
+            .collect();
+
+        // The structural FFI surface's loops.
+        let detected = model_detected_loops(&db, source_model, sync.project).clone();
+        let detected_ids: std::collections::BTreeSet<String> =
+            detected.loops.iter().map(|l| l.id.clone()).collect();
+        assert_eq!(
+            detected_ids, scored_ids,
+            "[{}] the detected-loop ids must equal the scored loop-score ids (the runtime \
+             join and get_relative_loop_score are keyed purely on the id)",
+            case.grow_eqn
+        );
+
+        let feeder = detected
+            .loops
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "scale"))
+            .expect("the feeder loop must be detected");
+        let pop_loop = detected
+            .loops
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "pgrow"))
+            .expect("the pop-growth loop must be detected");
+        assert_eq!(
+            feeder.polarity, case.feeder_structural,
+            "[{}] the feeder loop's structural polarity must match the scored surface",
+            case.grow_eqn
+        );
+        assert_eq!(
+            pop_loop.polarity,
+            DetectedLoopPolarity::Reinforcing,
+            "[{}] the pop-growth loop is reinforcing on both surfaces",
+            case.grow_eqn
+        );
+
+        // The runtime join: reclassify each detected loop from its own
+        // loop_score series. Pre-fix the id collision made the pop-growth
+        // loop read the feeder loop's series here (confidently wrong).
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+        let mut runtime_loops = detected.loops.clone();
+        reclassify_loops_from_results(&mut runtime_loops, &results, &ltm.loop_partitions);
+        let pop_runtime = runtime_loops
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "pgrow"))
+            .unwrap();
+        assert!(
+            matches!(
+                pop_runtime.polarity,
+                DetectedLoopPolarity::Reinforcing | DetectedLoopPolarity::MostlyReinforcing
+            ),
+            "[{}] the pop-growth loop's RUNTIME polarity must stay reinforcing (a wrong \
+             classification here means the id join read another loop's series); got {:?}",
+            case.grow_eqn,
+            pop_runtime.polarity
+        );
+        let feeder_runtime = runtime_loops
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "scale"))
+            .unwrap();
+        assert!(
+            case.feeder_runtime.contains(&feeder_runtime.polarity),
+            "[{}] the feeder loop's runtime polarity must match its series sign; got {:?}",
+            case.grow_eqn,
+            feeder_runtime.polarity
+        );
+    }
 }

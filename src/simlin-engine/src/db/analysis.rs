@@ -1866,7 +1866,7 @@ pub fn model_detected_loops(
     // for any residual structural divergence between the two graphs: on
     // truncation, degrade to the same pins-only result the discovery
     // branch returns rather than OOMing or panicking.
-    let Ok(loops) = graph.find_loops_with_limit(crate::ltm::ltm_circuit_budget()) else {
+    let Ok(mut loops) = graph.find_loops_with_limit(crate::ltm::ltm_circuit_budget()) else {
         debug_assert!(
             false,
             "model_detected_loops: circuit budget bound in exhaustive mode; \
@@ -1893,6 +1893,17 @@ pub fn model_detected_loops(
             partitions: parts,
         };
     };
+    // GH #737 (review C1): recover the polarity of ThroughAgg-routed
+    // variable-level edges (e.g. a scalar feeder of a hoisted reducer) by
+    // composing the same two agg-hop polarities the scored surface
+    // (`model_ltm_variables` -> `recover_agg_hop_polarities`) assigns. The
+    // polarity-prefixed loop ids this surface reports are the key the
+    // runtime join (`reclassify_loops_from_results`,
+    // `get_relative_loop_score`) reads `$⁚ltm⁚loop_score⁚{id}` with, so the
+    // two surfaces deriving DIFFERENT polarities for the same cycle made the
+    // ids diverge and collide -- classifying one loop from another loop's
+    // series. Re-assigns ids internally when anything was patched.
+    crate::db::ltm::recover_agg_routed_edge_polarities(&mut loops, &graph, db, model, project);
     // Variable-level canonical rotation of a scored loop, used both to dedup a
     // pin's loops against the enumerated set and to transfer the pin's name
     // onto the surviving enumerated loop it duplicates.

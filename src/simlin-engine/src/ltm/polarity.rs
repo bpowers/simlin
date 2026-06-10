@@ -23,28 +23,65 @@ pub(super) fn analyze_link_polarity(
     from_var: &Ident<Canonical>,
     variables: &HashMap<Ident<Canonical>, Variable>,
 ) -> LinkPolarity {
+    analyze_ast_polarity(ast, from_var, variables, /* mul_convention = */ false)
+}
+
+/// Polarity of a hoisted reducer's body with respect to a *scalar feeder*
+/// referenced inside it -- the discriminating polarity of a
+/// `feeder -> $⁚ltm⁚agg⁚{n}` hop (GH #737 review follow-up).
+///
+/// This is `analyze_link_polarity` with the positive-by-convention Mul rule
+/// enabled (`mul_convention`): a Mul whose feeder-independent co-factor is a
+/// bare named quantity (`pop[*]` in `SUM(pop[*] * scale)`) passes the
+/// feeder's derivative sign through, the same SD labeling convention the Div
+/// arm and the both-sides-dependent Mul/Div rules already apply. So
+/// `SUM(pop[*] * scale)` is Positive, `SUM(pop[*] * (1 - scale))` is
+/// Negative, and an indeterminate body (a compound co-factor like
+/// `(k - pop[*])`, or a non-monotone reducer) stays Unknown -- never a
+/// confident wrong label.
+///
+/// The convention rule is deliberately NOT part of the general analyzer:
+/// applied to arbitrary model equations it would relabel sign-indefinite
+/// links (the logistic-growth class the Mul both-sides comment documents).
+/// An agg's body is the one context where the blanket monotone-Positive
+/// label was previously applied unconditionally, so a convention-scoped
+/// analysis is strictly more accurate there.
+pub(super) fn analyze_feeder_to_agg_polarity(
+    agg_ast: &Ast<Expr2>,
+    feeder: &Ident<Canonical>,
+    variables: &HashMap<Ident<Canonical>, Variable>,
+) -> LinkPolarity {
+    analyze_ast_polarity(agg_ast, feeder, variables, /* mul_convention = */ true)
+}
+
+/// Shared AST-level dispatch for [`analyze_link_polarity`] /
+/// [`analyze_feeder_to_agg_polarity`]: per-element equations fold like the
+/// `Ast::Arrayed` rule (first concrete polarity wins; a direction
+/// disagreement collapses to Unknown).
+fn analyze_ast_polarity(
+    ast: &Ast<Expr2>,
+    from_var: &Ident<Canonical>,
+    variables: &HashMap<Ident<Canonical>, Variable>,
+    mul_convention: bool,
+) -> LinkPolarity {
     match ast {
-        Ast::Scalar(expr) => analyze_expr_polarity_with_context(
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => analyze_expr_polarity_impl(
             expr,
             from_var,
             LinkPolarity::Positive,
             Some(variables),
-        ),
-        Ast::ApplyToAll(_, expr) => analyze_expr_polarity_with_context(
-            expr,
-            from_var,
-            LinkPolarity::Positive,
-            Some(variables),
+            mul_convention,
         ),
         Ast::Arrayed(_, elements, default_expr, _) => {
             // For arrayed equations, check all elements
             let mut polarity = LinkPolarity::Unknown;
             for expr in elements.values() {
-                let elem_polarity = analyze_expr_polarity_with_context(
+                let elem_polarity = analyze_expr_polarity_impl(
                     expr,
                     from_var,
                     LinkPolarity::Positive,
                     Some(variables),
+                    mul_convention,
                 );
                 if polarity == LinkPolarity::Unknown {
                     polarity = elem_polarity;
@@ -54,11 +91,12 @@ pub(super) fn analyze_link_polarity(
                 }
             }
             if let Some(default_expr) = default_expr {
-                let default_polarity = analyze_expr_polarity_with_context(
+                let default_polarity = analyze_expr_polarity_impl(
                     default_expr,
                     from_var,
                     LinkPolarity::Positive,
                     Some(variables),
+                    mul_convention,
                 );
                 if polarity == LinkPolarity::Unknown {
                     polarity = default_polarity;
@@ -212,6 +250,26 @@ pub(super) fn analyze_expr_polarity_with_context(
     current_polarity: LinkPolarity,
     variables: Option<&HashMap<Ident<Canonical>, Variable>>,
 ) -> LinkPolarity {
+    analyze_expr_polarity_impl(
+        expr,
+        from_var,
+        current_polarity,
+        variables,
+        /* mul_convention = */ false,
+    )
+}
+
+/// The recursive polarity walk. `mul_convention` enables the
+/// positive-by-convention Mul one-side rule (feeder-hop analysis ONLY; see
+/// [`analyze_feeder_to_agg_polarity`]); `false` reproduces the general
+/// analyzer exactly.
+fn analyze_expr_polarity_impl(
+    expr: &Expr2,
+    from_var: &Ident<Canonical>,
+    current_polarity: LinkPolarity,
+    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+    mul_convention: bool,
+) -> LinkPolarity {
     match expr {
         Expr2::Const(_, _, _) => LinkPolarity::Unknown,
         Expr2::Var(ident, _, _) => {
@@ -275,11 +333,12 @@ pub(super) fn analyze_expr_polarity_with_context(
             _,
             _,
         ) => {
-            let arg_polarity = analyze_expr_polarity_with_context(
+            let arg_polarity = analyze_expr_polarity_impl(
                 index_expr,
                 from_var,
                 LinkPolarity::Positive,
                 variables,
+                mul_convention,
             );
 
             if arg_polarity == LinkPolarity::Unknown {
@@ -299,15 +358,25 @@ pub(super) fn analyze_expr_polarity_with_context(
         | Expr2::App(crate::builtins::BuiltinFn::Sqrt(inner), _, _)
         | Expr2::App(crate::builtins::BuiltinFn::Arctan(inner), _, _)
         | Expr2::App(crate::builtins::BuiltinFn::Int(inner), _, _) => {
-            analyze_expr_polarity_with_context(inner, from_var, current_polarity, variables)
+            analyze_expr_polarity_impl(inner, from_var, current_polarity, variables, mul_convention)
         }
         // Max/Min (scalar two-arg form): non-decreasing in each argument
         Expr2::App(crate::builtins::BuiltinFn::Max(a, Some(b)), _, _)
         | Expr2::App(crate::builtins::BuiltinFn::Min(a, Some(b)), _, _) => {
-            let pol_a =
-                analyze_expr_polarity_with_context(a, from_var, current_polarity, variables);
-            let pol_b =
-                analyze_expr_polarity_with_context(b, from_var, current_polarity, variables);
+            let pol_a = analyze_expr_polarity_impl(
+                a,
+                from_var,
+                current_polarity,
+                variables,
+                mul_convention,
+            );
+            let pol_b = analyze_expr_polarity_impl(
+                b,
+                from_var,
+                current_polarity,
+                variables,
+                mul_convention,
+            );
             match (pol_a, pol_b) {
                 // When one side returns Unknown, we must check whether it actually
                 // references from_var. Unknown from an independent expression (e.g.
@@ -341,13 +410,18 @@ pub(super) fn analyze_expr_polarity_with_context(
         // argument, so we combine arg polarities the same way Add does (any
         // disagreement collapses to Unknown).
         Expr2::App(crate::builtins::BuiltinFn::Sum(arg), _, _) => {
-            analyze_expr_polarity_with_context(arg, from_var, current_polarity, variables)
+            analyze_expr_polarity_impl(arg, from_var, current_polarity, variables, mul_convention)
         }
         Expr2::App(crate::builtins::BuiltinFn::Mean(args), _, _) => {
             let mut combined = LinkPolarity::Unknown;
             for arg in args {
-                let arg_pol =
-                    analyze_expr_polarity_with_context(arg, from_var, current_polarity, variables);
+                let arg_pol = analyze_expr_polarity_impl(
+                    arg,
+                    from_var,
+                    current_polarity,
+                    variables,
+                    mul_convention,
+                );
                 // Hoist the self-reference + Unknown short circuit ahead of the
                 // per-arg combiner so that any non-monotone dependence on
                 // from_var (e.g. ABS(x)) collapses the whole mean to Unknown,
@@ -377,7 +451,7 @@ pub(super) fn analyze_expr_polarity_with_context(
         // is monotone, so propagate the inner polarity.
         Expr2::App(crate::builtins::BuiltinFn::Max(a, None), _, _)
         | Expr2::App(crate::builtins::BuiltinFn::Min(a, None), _, _) => {
-            analyze_expr_polarity_with_context(a, from_var, current_polarity, variables)
+            analyze_expr_polarity_impl(a, from_var, current_polarity, variables, mul_convention)
         }
         // STDDEV is non-monotone (variance has no fixed sign w.r.t. inputs).
         // RANK depends on the rest of the array, so its sign w.r.t. one element
@@ -386,10 +460,20 @@ pub(super) fn analyze_expr_polarity_with_context(
         | Expr2::App(crate::builtins::BuiltinFn::Rank(_, _), _, _) => LinkPolarity::Unknown,
         Expr2::App(_, _, _) => LinkPolarity::Unknown,
         Expr2::Op2(op, left, right, _, _) => {
-            let left_pol =
-                analyze_expr_polarity_with_context(left, from_var, current_polarity, variables);
-            let right_pol =
-                analyze_expr_polarity_with_context(right, from_var, current_polarity, variables);
+            let left_pol = analyze_expr_polarity_impl(
+                left,
+                from_var,
+                current_polarity,
+                variables,
+                mul_convention,
+            );
+            let right_pol = analyze_expr_polarity_impl(
+                right,
+                from_var,
+                current_polarity,
+                variables,
+                mul_convention,
+            );
 
             match op {
                 BinaryOp::Add => match (left_pol, right_pol) {
@@ -474,6 +558,21 @@ pub(super) fn analyze_expr_polarity_with_context(
                                 && is_negative_variable(right, variables.unwrap()))
                         {
                             flip_polarity(left_pol)
+                        } else if mul_convention
+                            && !expr_references_var(right, from_var)
+                            && operand_positive_by_convention(right, variables)
+                        {
+                            // Feeder-hop analysis only (see
+                            // `analyze_feeder_to_agg_polarity`): a bare named
+                            // co-factor independent of `from_var` is positive
+                            // by the SD labeling convention -- the same
+                            // convention the Div arm and the both-sides rules
+                            // already apply -- so the dependent side's
+                            // derivative sign passes through. The
+                            // `expr_references_var` guard keeps a co-factor
+                            // that threads `from_var` through an index
+                            // (`pop[from_var]`) on the Unknown path.
+                            left_pol
                         } else {
                             LinkPolarity::Unknown
                         }
@@ -489,6 +588,12 @@ pub(super) fn analyze_expr_polarity_with_context(
                                 && is_negative_variable(left, variables.unwrap()))
                         {
                             flip_polarity(right_pol)
+                        } else if mul_convention
+                            && !expr_references_var(left, from_var)
+                            && operand_positive_by_convention(left, variables)
+                        {
+                            // Mirror of the left-arm convention rule above.
+                            right_pol
                         } else {
                             LinkPolarity::Unknown
                         }
@@ -586,8 +691,13 @@ pub(super) fn analyze_expr_polarity_with_context(
             }
         }
         Expr2::Op1(op, operand, _, _) => {
-            let operand_pol =
-                analyze_expr_polarity_with_context(operand, from_var, current_polarity, variables);
+            let operand_pol = analyze_expr_polarity_impl(
+                operand,
+                from_var,
+                current_polarity,
+                variables,
+                mul_convention,
+            );
             match op {
                 crate::ast::UnaryOp::Not => flip_polarity(operand_pol),
                 crate::ast::UnaryOp::Negative => flip_polarity(operand_pol),
@@ -596,17 +706,19 @@ pub(super) fn analyze_expr_polarity_with_context(
         }
         Expr2::If(_, true_branch, false_branch, _, _) => {
             // For IF-THEN-ELSE, check both branches
-            let true_pol = analyze_expr_polarity_with_context(
+            let true_pol = analyze_expr_polarity_impl(
                 true_branch,
                 from_var,
                 current_polarity,
                 variables,
+                mul_convention,
             );
-            let false_pol = analyze_expr_polarity_with_context(
+            let false_pol = analyze_expr_polarity_impl(
                 false_branch,
                 from_var,
                 current_polarity,
                 variables,
+                mul_convention,
             );
 
             if true_pol == false_pol {

@@ -1263,6 +1263,22 @@ impl CausalGraph {
         analyze_agg_consumer_polarity(ast, reducer_subexpr_text, agg_name, &self.variables)
     }
 
+    /// Polarity of a `feeder → $⁚ltm⁚agg` hop: the discriminating analysis of
+    /// the agg's (lowered) body with respect to a *scalar feeder* referenced
+    /// inside the reducer (GH #737 review follow-up). `agg_ast` is the agg's
+    /// own lowered equation (the caller reconstructs it from
+    /// `AggNode::equation_text`, since the agg has no node in this
+    /// variable-level graph). See
+    /// [`super::polarity::analyze_feeder_to_agg_polarity`] for the
+    /// positive-by-convention Mul rule and the Unknown fallback.
+    pub(crate) fn feeder_to_agg_polarity(
+        &self,
+        feeder: &Ident<Canonical>,
+        agg_ast: &crate::ast::Ast<crate::ast::Expr2>,
+    ) -> LinkPolarity {
+        super::polarity::analyze_feeder_to_agg_polarity(agg_ast, feeder, &self.variables)
+    }
+
     /// Compute per-link polarity for all edges in the causal graph.
     ///
     /// Requires `variables` to be populated for accurate results;
@@ -1382,11 +1398,28 @@ fn all_module_stocks(
 ///   distinguishes per-element cross-element loops on arrayed models), so it
 ///   fully orders any tied group, making `assign_loop_ids` a pure function of
 ///   loop content rather than enumeration order.
+///
+/// Synthetic `$⁚ltm⁚agg⁚{n}` nodes are EXCLUDED from both components (GH #737
+/// / review C1): the scored surface's loops traverse the agg node
+/// (`scale → $⁚ltm⁚agg⁚0 → grow`) while `model_detected_loops`' enumerated
+/// loops carry the same cycle as variable-level links (`scale → grow`).
+/// Keeping the agg names in the key would sort the same cycle differently on
+/// the two surfaces (the `$`-prefixed name sorts before every letter), so
+/// the polarity-prefixed ids -- the key the runtime join reads
+/// `$⁚ltm⁚loop_score⁚{id}` with -- could number apart even when the loop
+/// sets biject. Two scored loops that differ ONLY in which agg they route
+/// through (one cycle through two hoisted reducers of the same target) do
+/// collapse to one key; the stable sort then keeps the builders'
+/// deterministic emission order, so their relative numbering stays
+/// deterministic (such a cycle has no 1:1 variable-level counterpart on the
+/// detected surface anyway -- the documented non-bijective residual).
 fn loop_id_sort_key(loop_item: &Loop) -> (String, Vec<String>) {
+    let is_agg = |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
     let mut vars: Vec<String> = loop_item
         .links
         .iter()
         .flat_map(|link| vec![link.from.as_str().to_string(), link.to.as_str().to_string()])
+        .filter(|n| !is_agg(n))
         .collect();
     vars.sort();
     vars.dedup();
@@ -1396,6 +1429,7 @@ fn loop_id_sort_key(loop_item: &Loop) -> (String, Vec<String>) {
         .links
         .iter()
         .map(|link| link.from.as_str().to_string())
+        .filter(|n| !is_agg(n))
         .collect();
     let secondary = super::canonical_rotation(&edge_seq);
 

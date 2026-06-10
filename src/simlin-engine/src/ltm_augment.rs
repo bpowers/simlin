@@ -1086,22 +1086,34 @@ fn wrap_matching_in_previous(expr: Expr0, target: &Ident<Canonical>) -> Expr0 {
 ///
 /// The standard guard form ([`link_score_guard_form`]) measures the
 /// "changed-first" partial `Δ_x z = z(x_t, w_{t-1}) - z_{t-1}` by holding
-/// every *other* dependency at `PREVIOUS`. For a scalar feeder of a reducer
-/// that partial is INEXPRESSIBLE as compilable equation text: the reducer's
-/// arrayed argument would have to be frozen as a lagged whole-array read
+/// every *other* dependency at `PREVIOUS`. For a scalar feeder of a reducer,
+/// rendering that partial as inline equation text does not compile: the
+/// reducer's arrayed argument would be frozen as a lagged whole-array read
 /// (`SUM(PREVIOUS(pop[*]) * scale)`), which the engine rejects (the GH
 /// #541-class wildcard-subscripted `PREVIOUS` capture -- the same shape that
-/// keeps the direct `scale→grow` link score uncompilable).
+/// keeps the direct `scale→grow` link score uncompilable). Changed-first
+/// COULD still be expressed at extra cost -- e.g. one synthesized
+/// per-element frozen helper per arrayed reference
+/// (`prevpop[Region] = PREVIOUS(pop[Region])`, then
+/// `SUM(prevpop[*] * scale)`), a helper-aux emission machinery this path
+/// doesn't have today -- so this is a cost/complexity tradeoff, not an
+/// impossibility.
 ///
-/// So this half uses the algebraically-dual "changed-last" attribution
-/// instead: `Δ_x z = z_t - z(x_{t-1}, w_t)` -- evaluate the reducer with
+/// Instead this half uses the algebraically-dual "changed-last" attribution:
+/// `Δ_x z = z_t - z(x_{t-1}, w_t)` -- evaluate the reducer with
 /// ONLY the feeder frozen at `PREVIOUS` (a scalar `LoadPrev`, always
 /// compilable; every array reference stays exactly as in the agg's own
 /// equation, which compiles by construction) and subtract from the agg's
 /// current value. Both conventions are first-order-equal discrete
 /// attributions of `Δz` to `Δx` (LTM scores are inherently path-dependent
 /// approximations); for a SUM/MEAN body the two differ only in which step's
-/// co-factor weights the feeder's change.
+/// co-factor weights the feeder's change. For a bilinear body
+/// (`SUM(pop[*] * scale)`) the feeder's changed-last half is exactly
+/// complementary to the rows' changed-first halves --
+/// `Σ_e Δ_pop[e] z + Δ_scale z = Δz` holds identically -- so the mixed
+/// convention loses nothing there. The deviation is called out in
+/// `docs/reference/ltm--loops-that-matter.md` alongside the numerator-timing
+/// convention note.
 ///
 /// The emitted text follows `link_score_guard_form`'s guard structure
 /// (zero at the initial step, zero when `Δtarget` or `Δsource` is zero,
