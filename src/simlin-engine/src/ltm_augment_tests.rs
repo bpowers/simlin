@@ -2431,6 +2431,105 @@ fn partial_equation_same_position_shared_element_qualifies() {
     );
 }
 
+/// GH #759: a subscript index that names a project DIMENSION (`matrix[D1,
+/// c1]`'s `D1` -- the iterated-dim reference form) is a dimension selector,
+/// never a causal reference. The #587 guards cover dimension *elements*; a
+/// dimension *name* is neither an element nor qualifiable, so it fell
+/// through to the recursive wrap whenever the caller's (over-collected) dep
+/// set contained it: the frozen co-source became
+/// `PREVIOUS(matrix[PREVIOUS(d1), d2·c1])`, whose PREVIOUS-capture helper
+/// cannot compile, and the link score read constant garbage off the
+/// 0-stubbed helper (-40 for the GH #759 probe constants).
+#[test]
+fn partial_equation_dimension_name_index_not_wrapped() {
+    // The Bare-shape pinned-index repro: `growth[D1] = matrix[D1, c1] *
+    // frac[D1]`, building the changed-first partial for the `frac -> growth`
+    // edge. `d1` and `c1` are deliberately included in the dep set -- the
+    // wrapper-side guard must hold even when a caller over-collects.
+    let deps = deps_set(&["matrix", "frac", "d1", "c1"]);
+    let live = Ident::new("frac");
+    let shape = RefShape::Bare;
+
+    let dm_dims = vec![
+        crate::datamodel::Dimension::named(
+            "D1".to_string(),
+            vec!["r1".to_string(), "r2".to_string()],
+        ),
+        crate::datamodel::Dimension::named(
+            "D2".to_string(),
+            vec!["c1".to_string(), "c2".to_string()],
+        ),
+    ];
+    let dims_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+
+    let partial = build_partial_equation_shaped(
+        "matrix[D1, c1] * frac",
+        &deps,
+        &live,
+        &shape,
+        &[],
+        None,
+        Some(&dims_ctx),
+    )
+    .unwrap();
+
+    assert!(
+        !partial.to_lowercase().contains("previous(d1)"),
+        "a dimension-name index must not be PREVIOUS-wrapped (GH #759); got: {partial}",
+    );
+    assert_eq!(
+        partial, "PREVIOUS(matrix[d1, d2·c1]) * frac",
+        "the co-source freezes wholesale with its iterated-dim index verbatim",
+    );
+}
+
+/// GH #759, the original Wildcard-path filing: a live `Wildcard` reference
+/// whose non-wildcard index is an iterated-dimension NAME
+/// (`SUM(matrix[State, *])`) must keep that index verbatim --
+/// `matrix[PREVIOUS(state), *]` is meaningless and dooms the fragment.
+#[test]
+fn partial_equation_wildcard_live_iterated_dim_index_not_wrapped() {
+    let deps = deps_set(&["matrix", "state"]);
+    let live = Ident::new("matrix");
+    let shape = RefShape::Wildcard;
+
+    let dm_dims = vec![
+        crate::datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["ca".to_string(), "ny".to_string()],
+        ),
+        crate::datamodel::Dimension::named(
+            "D2".to_string(),
+            vec!["x".to_string(), "y".to_string()],
+        ),
+    ];
+    let dims_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    // The live source's declared dims (mirroring the #534 counterfactual:
+    // `matrix` over State x D2).
+    let source_dims = vec![
+        vec!["ca".to_string(), "ny".to_string()],
+        vec!["x".to_string(), "y".to_string()],
+    ];
+
+    let partial = build_partial_equation_shaped(
+        "SUM(matrix[State, *])",
+        &deps,
+        &live,
+        &shape,
+        &source_dims,
+        None,
+        Some(&dims_ctx),
+    )
+    .unwrap();
+
+    assert!(
+        !partial.to_lowercase().contains("previous(state)"),
+        "a dimension-name index in a live Wildcard reference must stay verbatim (GH #759); \
+         got: {partial}",
+    );
+    assert_eq!(partial, "sum(matrix[state, *])");
+}
+
 /// References that are already inside a PREVIOUS() call's argument are
 /// already lagged: their value is fixed at the prior step and cannot be
 /// affected by the current-step ceteris-paribus perturbation, so the

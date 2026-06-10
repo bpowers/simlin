@@ -570,29 +570,32 @@ fn test_get_errors_no_ltm_diagnostics_when_ltm_never_requested() {
     }
 }
 
-/// GH #741: an LTM *implicit-helper* compile failure must flow through the
+/// GH #741: an LTM *fragment-compile-failure* warning must flow through the
 /// same `LtmEnabledGuard` harvest as the auto-flip warning above -- it rides
 /// the identical `model_all_diagnostics` -> `model_ltm_fragment_diagnostics`
 /// accumulator, so `simlin_project_get_errors` surfaces it after an
 /// LTM-enabled sim was created.
 ///
-/// The fixture is the GH #759 pinned-index repro (`growth[D1] =
-/// matrix[D1, c1] * frac[D1]` in a feedback loop), whose `frac -> growth`
-/// link-score partial mints PREVIOUS-capture helpers that genuinely fail to
-/// compile today. When #759 is fixed those helpers will compile cleanly --
-/// update this test then (the engine-side guard-injected test keeps the
-/// diagnostic leg covered independently of #759's lifetime).
+/// The fixture is the GH #742 RANK shape (`grow[Region] = scale[Region] *
+/// RANK(pop, 1)` in a feedback loop): the array-valued RANK is hoisted into
+/// a scalar `$⁚ltm⁚agg⁚0` aggregate whose own fragment is ill-typed and
+/// genuinely fails to compile today (a real, non-injected failure). The
+/// previous fixture here was the GH #759 pinned-index repro, retired when
+/// #759's fix made its helpers compile; the assertion matches the shared
+/// "failed to compile" wording rather than one diagnostic sub-class, so the
+/// test keeps covering the FFI harvest channel as individual shapes get
+/// fixed (the engine-side guard-injected
+/// `test_model_ltm_fragment_diagnostics_covers_implicit_helpers` covers the
+/// implicit-helper diagnostic leg independently of any real-shape lifetime).
 #[test]
-fn test_get_errors_surfaces_ltm_implicit_helper_failure_after_ltm_sim() {
-    let datamodel = TestProject::new("get_errors_helper_fail")
+fn test_get_errors_surfaces_ltm_fragment_failure_after_ltm_sim() {
+    let datamodel = TestProject::new("get_errors_fragment_fail")
         .with_sim_time(0.0, 8.0, 1.0)
-        .named_dimension("D1", &["r1", "r2"])
-        .named_dimension("D2", &["c1", "c2"])
-        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
-        .array_aux("growth[D1]", "matrix[D1, c1] * frac[D1]")
-        .array_aux("frac[D1]", "pop[D1] * 0.005")
-        .array_flow("grow[D1]", "growth[D1]", None)
-        .array_stock("pop[D1]", "100", &["grow"], &[], None)
+        .named_dimension("Region", &["north", "south"])
+        .array_aux("scale[Region]", "pop[Region] * 0.01")
+        .array_aux("grow[Region]", "scale[Region] * RANK(pop, 1)")
+        .array_flow("inflow[Region]", "grow[Region]", None)
+        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
         .build_datamodel();
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -614,11 +617,11 @@ fn test_get_errors_surfaces_ltm_implicit_helper_failure_after_ltm_sim() {
         assert!(err.is_null());
         assert!(
             !all_errors.is_null(),
-            "get_errors must return the implicit-helper failure warning"
+            "get_errors must return the fragment-failure warning"
         );
         assert!(
-            any_detail_message_contains(all_errors, "LTM implicit helper"),
-            "implicit-helper compile-failure warning must reach get_errors after an LTM sim"
+            any_detail_message_contains(all_errors, "failed to compile"),
+            "the LTM fragment compile-failure warning must reach get_errors after an LTM sim"
         );
 
         simlin_error_free(all_errors);

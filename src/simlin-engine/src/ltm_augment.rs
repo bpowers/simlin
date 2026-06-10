@@ -823,6 +823,32 @@ fn wrap_index_non_matching_in_previous(
     {
         return index;
     }
+    // An index that names a DIMENSION (`matrix[D1, c1]`'s `D1`,
+    // `SUM(matrix[State, *])`'s `State` -- the iterated-dim reference form)
+    // is a dimension selector, never a causal reference (GH #759). The two
+    // guards above cover dimension *elements*; a dimension *name* is
+    // neither an element nor qualifiable, so it previously fell through to
+    // the recursive wrap whenever a caller's (over-collected) dep set
+    // contained it: the frozen reference became `dep[PREVIOUS(d1), ..]`,
+    // whose PREVIOUS-capture helper cannot compile, silently stubbing the
+    // score to 0. Leave it verbatim -- the A2A expansion resolves it per
+    // element downstream, exactly as in the target's own equation. The
+    // `iter_ctx` leg covers callers without a project dims context (the
+    // iterated/source dims are dimension names by construction).
+    if let IndexExpr0::Expr(Expr0::Var(name, _)) = &index {
+        let canonical = canonicalize(name.as_str());
+        let names_project_dim =
+            dims_ctx.is_some_and(|ctx| ctx.is_dimension_name(canonical.as_ref()));
+        let names_iterated_dim = iter_ctx.is_some_and(|ctx| {
+            ctx.target_iterated_dims
+                .iter()
+                .chain(ctx.source_dim_names.iter())
+                .any(|d| d.as_str() == canonical.as_ref())
+        });
+        if names_project_dim || names_iterated_dim {
+            return index;
+        }
+    }
     // Indices are inner content of a live reference (or of a
     // PREVIOUS-wrapped one); a `live_source` occurrence reachable only
     // through an index is not the live reference itself, so do not
@@ -2671,6 +2697,49 @@ fn scalar_or_a2a_target_equation_text(target_var: &Variable) -> String {
     }
 }
 
+/// The dependency set for a Scalar/A2A target's ceteris-paribus partial.
+///
+/// `identifier_set` is called with the target's own AST dimensions so the
+/// target's dimension and element names are filtered out of the dep set --
+/// with empty dims (the pre-GH#759 behavior) subscript-index identifiers
+/// like the iterated dim `D1` in `matrix[D1, c1]` leaked in as phantom
+/// deps, and the PREVIOUS wrapper froze them inside the subscript
+/// (`matrix[PREVIOUS(d1), ..]`), dooming the fragment. The *source*'s
+/// dimension and element names are then stripped as well, mirroring
+/// [`build_arrayed_link_score_equation`]'s per-slot filtering: a literal of
+/// a source-only dimension (`source[m]`, `m ∈ D3` disjoint from the
+/// target's dims) is a dimension reference, not a causal dep.
+///
+/// Dimension/element names of a *co-source* dimension spelled in neither
+/// the target's nor the source's dimension space can still leak in (this
+/// function has no dims for them); [`wrap_index_non_matching_in_previous`]'s
+/// element-name (GH #587) and dimension-name (GH #759) guards are the
+/// backstop that keeps those verbatim.
+fn scalar_or_a2a_target_deps(
+    to_var: &Variable,
+    source_dim_elements: &[Vec<String>],
+    source_dim_names: &[String],
+) -> HashSet<Ident<Canonical>> {
+    use crate::ast::Ast;
+    let Some(ast) = to_var.ast() else {
+        return HashSet::new();
+    };
+    let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
+        Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
+        Ast::Scalar(_) => &[],
+    };
+    let source_dim_token_set: HashSet<&str> = source_dim_elements
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .chain(source_dim_names.iter().map(String::as_str))
+        .collect();
+    identifier_set(ast, target_ast_dims, None)
+        .into_iter()
+        .filter(|d| !source_dim_token_set.contains(d.as_str()))
+        .collect()
+}
+
 /// The target's datamodel `eqn` text when it is a plain `Equation::Scalar`,
 /// else `"0"`. See [`scalar_or_a2a_target_equation_text`] for why this
 /// fallback exists (a variable that failed to lower).
@@ -2731,12 +2800,9 @@ fn generate_auxiliary_to_auxiliary_equation(
     // ensures the identifiers in the equation match those in `deps`.
     let to_equation = scalar_or_a2a_target_equation_text(to_var);
 
-    // Get dependencies of the 'to' variable
-    let deps = if let Some(ast) = to_var.ast() {
-        identifier_set(ast, &[], None)
-    } else {
-        HashSet::new()
-    };
+    // Dependencies of the 'to' variable, with the target's and source's
+    // dimension/element names filtered out (GH #759).
+    let deps = scalar_or_a2a_target_deps(to_var, source_dim_elements, source_dim_names);
 
     // GH #511: an A2A target can reference `from` by one of the target's
     // iterated dimensions (`growth[Region,Age] = row_sum[Region] * c`).
@@ -3017,12 +3083,9 @@ fn generate_stock_to_flow_equation(
     // fall through to "0" and produce a zero link score.
     let flow_equation = scalar_or_a2a_target_equation_text(flow_var);
 
-    // Get dependencies of the flow variable
-    let deps = if let Some(ast) = flow_var.ast() {
-        identifier_set(ast, &[], None)
-    } else {
-        HashSet::new()
-    };
+    // Dependencies of the flow variable, with the flow's and stock's
+    // dimension/element names filtered out (GH #759).
+    let deps = scalar_or_a2a_target_deps(flow_var, source_dim_elements, source_dim_names);
 
     // GH #511: a flow can reference the stock by one of the flow's own
     // iterated dimensions, the same way an A2A aux can.
