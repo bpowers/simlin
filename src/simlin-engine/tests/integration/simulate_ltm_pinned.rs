@@ -1369,17 +1369,22 @@ fn pinned_loop_carries_cycle_partition_in_discovery_mode() {
 /// Two-model fixture for the GH #673 pin-through-module tests: `main` has the
 /// 3-node cycle `driver -> sub (module) -> reader -> driver` whose only state
 /// (if any) lives inside the `sub` sub-model, supplied by `sub_vars` so each
-/// test picks a stock-carrying smooth or a stockless passthrough body. The
-/// disjoint `bystander` stock keeps the parent model stock-bearing so
-/// `model_ltm_variables` runs at all (its stock-free early return looks only
-/// at parent-level stocks).
+/// test picks a stock-carrying smooth or a stockless passthrough body.
+///
+/// `main` deliberately has ZERO parent-level stocks: it is a module-only
+/// root, the GH #748 model class. Before #748 the stock-free early return in
+/// `model_ltm_variables` tested parent-level stocks only, so this fixture
+/// needed a disjoint `bystander` stock purely to make the LTM pass run at
+/// all; the gate is now module-state-aware and the bystander workaround is
+/// gone -- the stock-carrying tests below double as the #748 regression
+/// handle. (A test that needs the pass to run with a genuinely STATELESS
+/// sub-model must add its own parent-level stock; see
+/// `pinned_loop_through_stockless_passthrough_rejected`.)
 fn module_pin_project(sub_vars: Vec<datamodel::Variable>) -> datamodel::Project {
     let mut p = TestProject::new("module_pin")
         .with_sim_time(0.0, 12.0, 0.25)
         .aux("driver", "100 + reader * 0.5", None)
         .aux("reader", "sub.output", None)
-        .stock("bystander", "10", &["bg"], &[], None)
-        .flow("bg", "1", None)
         .build_datamodel();
     p.models[0]
         .variables
@@ -1459,6 +1464,12 @@ fn smooth_sub_vars() -> Vec<datamodel::Variable> {
 /// same cycle (it enriches module-internal stocks instead of filtering).
 /// Discovery mode makes the defect observable end-to-end: the pin is the only
 /// way to score the loop there.
+///
+/// Also the GH #748 regression handle: `main` is a module-only root (zero
+/// parent-level stocks), so this test only reaches pin validation at all
+/// because the stock-free early return is now module-state-aware. Before
+/// #748 the fixture carried a disjoint `bystander` stock purely to sidestep
+/// that early return.
 #[test]
 fn pinned_loop_through_module_internal_stock_scored() {
     let mut project = module_pin_project(smooth_sub_vars());
@@ -1523,6 +1534,38 @@ fn pinned_loop_through_module_internal_stock_scored() {
 fn pinned_loop_through_stockless_passthrough_rejected() {
     let mut project =
         module_pin_project(vec![sub_aux("input", "0"), sub_aux("output", "input * 2")]);
+    // With a stateless passthrough sub-model the whole project carries no
+    // state, so `model_ltm_variables`' stateless early return (the GH #748
+    // gate's negative side, pinned by
+    // `stateless_passthrough_module_root_bails_early`) would fire before pin
+    // validation ever runs. Add a disjoint parent-level stock so the pass
+    // runs and the pin's own "contains no stock" rejection is observable.
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Stock(datamodel::Stock {
+            ident: "bystander".to_string(),
+            equation: datamodel::Equation::Scalar("10".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["bg".to_string()],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Flow(datamodel::Flow {
+            ident: "bg".to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    assign_uids(&mut project);
     pin_loop(
         &mut project,
         "main",
@@ -1556,6 +1599,118 @@ fn pinned_loop_through_stockless_passthrough_rejected() {
             .any(|v| v.name.contains("loop_score\u{205A}pin")),
         "a rejected pin must not emit a loop_score var"
     );
+}
+
+/// GH #748 (the headline case, no pin involved): a module-only root --
+/// feedback `driver -> sub(with internal INTEG) -> reader -> driver`, zero
+/// parent-level stocks -- must run the LTM pass and score the loop in
+/// exhaustive mode. Before the fix, `model_ltm_variables`' stock-free early
+/// return tested parent-level stocks only, so this legal model class
+/// silently emitted NOTHING: no link scores, no loop scores, and not even
+/// the invalid-pin warning for a bad pin (the pass bailed before pin
+/// validation).
+#[test]
+fn module_only_root_loop_scored_in_exhaustive_mode() {
+    let project = module_pin_project(smooth_sub_vars());
+
+    let (results, loop_partitions, mode) = run_ltm(&project);
+    assert_eq!(
+        mode,
+        LtmMode::Exhaustive,
+        "a small module-only root stays exhaustive (no flip)"
+    );
+
+    // Exactly one ROOT-level loop score (the driver/sub/reader loop). The
+    // qualified `sub·$⁚ltm⁚loop_score⁚…` series for the sub-model's own
+    // internal smooth loop is excluded by the unqualified-prefix test.
+    let root_loop_vars: Vec<String> = results
+        .offsets
+        .keys()
+        .map(|k| k.as_str().to_string())
+        .filter(|k| k.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .collect();
+    assert_eq!(
+        root_loop_vars.len(),
+        1,
+        "the module-only root must score its (one) loop; got: {root_loop_vars:?}"
+    );
+
+    // The score is finite at every step and non-zero once behavior begins
+    // (the smooth genuinely transfers signal around the loop).
+    let off = results.offsets[root_loop_vars[0].as_str()];
+    let mut saw_nonzero = false;
+    for step in 0..results.step_count {
+        let v = results.data[step * results.step_size + off];
+        assert!(
+            v.is_finite(),
+            "module-only root loop_score must be finite at every step; step {step} = {v}"
+        );
+        if v != 0.0 {
+            saw_nonzero = true;
+        }
+    }
+    assert!(
+        saw_nonzero,
+        "module-only root loop_score should be non-zero once behavior begins"
+    );
+
+    // The loop registers a single partition slot, unresolved (`None`): its
+    // only stock is module-internal, which the parent-level partition map
+    // deliberately does not key (same contract as the pinned twin above).
+    assert_eq!(loop_partitions.len(), 1);
+    assert_eq!(loop_partitions.values().next(), Some(&vec![None]));
+}
+
+/// GH #748 (the gate's negative side): a root whose only module is a
+/// stockless PASSTHROUGH -- no state anywhere, parent-level or
+/// module-internal -- still takes the stateless early return. Discovery
+/// mode makes the gate's firing observable rather than vacuous: had the
+/// pass run, discovery scores ALL causal edges (vars non-empty); the early
+/// return reports zero vars and the exhaustive default.
+///
+/// `main` is made acyclic (driver does NOT read reader back) because a
+/// stateless CYCLE through a passthrough is an algebraic circular
+/// dependency -- a hard compile error, its own loud signal -- so the
+/// early-bail question only matters for stateless models that compile.
+#[test]
+fn stateless_passthrough_module_root_bails_early() {
+    let mut project =
+        module_pin_project(vec![sub_aux("input", "0"), sub_aux("output", "input * 2")]);
+    let driver = project.models[0]
+        .variables
+        .iter_mut()
+        .find(|v| v.get_ident() == "driver")
+        .expect("fixture has driver");
+    if let datamodel::Variable::Aux(a) = driver {
+        a.equation = datamodel::Equation::Scalar("100 + time".to_string());
+    } else {
+        panic!("driver is an aux");
+    }
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    assert!(
+        ltm.vars.is_empty(),
+        "a stateless passthrough-module root must take the early return and \
+         emit no LTM vars even in discovery mode; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ltm.mode,
+        LtmMode::Exhaustive,
+        "the stateless early return reports the exhaustive default"
+    );
+
+    // The model itself compiles and runs fine (it is acyclic) -- the early
+    // bail is about LTM synthesis only.
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main").expect("acyclic model compiles");
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("simulation runs");
 }
 
 /// GH #758 round 2: a pin whose cycle traverses an UNSCOREABLE edge (here

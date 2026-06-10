@@ -201,6 +201,54 @@ pub(super) fn ltm_non_euler_diagnostic_message(method: datamodel::SimMethod) -> 
     )
 }
 
+/// Whether any module instance this model references (transitively) carries
+/// state: a stock in the instance's sub-model, or in any module that
+/// sub-model references in turn.
+///
+/// `model_ltm_variables`' and `model_ltm_mode`'s stock-free early returns use
+/// this to distinguish a genuinely stateless model from one whose only state
+/// lives INSIDE modules (GH #748). `edges.stocks` is parent-level only, so a
+/// root like `driver -> sub_model(with internal INTEG) -> reader -> driver`
+/// has genuine feedback and genuine state but zero parent-level stocks;
+/// bailing on the parent-level test alone made LTM silently emit nothing for
+/// that model class (no link scores, no loop scores, and pinned loops were
+/// never even validated). Checking `dynamic_modules` non-emptiness instead
+/// would be over-inclusive: a model whose only module is a stockless
+/// passthrough has no state anywhere, so any causal cycle through it is an
+/// instantaneous algebraic loop (a `CircularDependency` compile error, not
+/// feedback) and the early bail -- with its "always Exhaustive, no mode flip
+/// possible" invariant -- remains correct for it.
+///
+/// The walk visits each distinct sub-MODEL definition once (not each
+/// instance), guarded by a visited set so module recursion (invalid, but
+/// defended against) cannot loop. `model_causal_edges` is salsa-cached, so
+/// each step is a map lookup; the walk itself only runs for parent-stock-free
+/// models (the callers short-circuit on the common stock-bearing case).
+fn modules_carry_state(
+    db: &dyn Db,
+    project: SourceProject,
+    edges: &super::CausalEdgesResult,
+) -> bool {
+    let project_models = project.models(db);
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: Vec<String> = edges.dynamic_modules.values().cloned().collect();
+    while let Some(model_name) = queue.pop() {
+        let canonical = canonicalize(&model_name).into_owned();
+        if !visited.insert(canonical.clone()) {
+            continue;
+        }
+        let Some(sub_model) = project_models.get(canonical.as_str()) else {
+            continue;
+        };
+        let sub_edges = model_causal_edges(db, *sub_model, project);
+        if !sub_edges.stocks.is_empty() {
+            return true;
+        }
+        queue.extend(sub_edges.dynamic_modules.values().cloned());
+    }
+    false
+}
+
 /// The model's full variable-name set, for the LTM equation parse path.
 ///
 /// Threaded into `parse_ltm_equation` so PREVIOUS/INIT can accept a
@@ -863,9 +911,13 @@ pub fn model_ltm_var_name_index(
 ///   4. the cross-element / mixed slow-path subgraph's largest SCC exceeds
 ///      `MAX_LTM_SCC_NODES` (the late flip).
 ///
-/// A stock-free model has no feedback loops, so no flip can occur: it is
-/// always `Exhaustive`, matching `model_ltm_variables`'s stock-free early
-/// return. This query intentionally accumulates NO diagnostics -- the
+/// A stateless model -- no parent-level stocks AND no module-internal state
+/// (`modules_carry_state`) -- has no feedback loops, so no flip can occur: it
+/// is always `Exhaustive`, matching `model_ltm_variables`'s stock-free early
+/// return. A parent-stock-free model whose state lives inside modules is NOT
+/// stateless (GH #748): feedback through a stock-carrying module is genuine,
+/// so it falls through to the normal gates like any stock-bearing model.
+/// This query intentionally accumulates NO diagnostics -- the
 /// auto-flip `Warning`s stay in `model_ltm_variables` so they are emitted once
 /// (a `returns(ref)` tracked query read by multiple callers would otherwise
 /// double-accumulate). `model_ltm_variables` sets its returned `mode` from
@@ -875,7 +927,7 @@ pub fn model_ltm_mode(db: &dyn Db, model: SourceModel, project: SourceProject) -
     use super::{LtmMode, causal_graph_from_edges, model_causal_edges, model_loop_circuits_tiered};
 
     let edges_result = model_causal_edges(db, model, project);
-    if edges_result.stocks.is_empty() {
+    if edges_result.stocks.is_empty() && !modules_carry_state(db, project, edges_result) {
         return LtmMode::Exhaustive;
     }
 
@@ -948,9 +1000,13 @@ pub fn model_ltm_variables(
     // input->output pathways the parent's per-exit-port link score needs
     // scored (PR #684): its internals are a pure aux chain LTM scores
     // exactly, so it must emit pathway/composite vars even though it has no
-    // stocks. A genuinely stock-free ROOT model has no parent reading
-    // `module·var`, so `sub_model_output_ports` is empty and
-    // `has_input_ports` is false -- the early return below still fires.
+    // stocks. A stateless ROOT model has no parent reading `module·var`, so
+    // `sub_model_output_ports` is empty and `has_input_ports` is false -- the
+    // early return below still fires for it. "Stateless" means no
+    // parent-level stocks AND no module-internal state: a parent-stock-free
+    // root whose only state lives inside modules (a SMOOTH/DELAY instance or
+    // a stock-carrying user sub-model) has genuine feedback, so the
+    // `modules_carry_state` leg of the gate lets it through (GH #748).
     let output_ports = sub_model_output_ports(db, model, project);
     let (pathways, truncated_pathway_ports) = if output_ports.is_empty() {
         (HashMap::new(), Vec::new())
@@ -959,10 +1015,16 @@ pub fn model_ltm_variables(
     };
     let has_input_ports = !pathways.is_empty();
 
-    if edges_result.stocks.is_empty() && !has_input_ports {
-        // A stock-free model with no input-port pathways has nothing to
-        // score: no feedback loops to enumerate (so no mode flip can occur)
-        // and no module interface to expose. Report the exhaustive default.
+    if edges_result.stocks.is_empty()
+        && !has_input_ports
+        && !modules_carry_state(db, project, edges_result)
+    {
+        // A stateless model (no stocks anywhere, parent-level or
+        // module-internal) with no input-port pathways has nothing to score:
+        // no feedback loops to enumerate (any causal cycle would be an
+        // instantaneous algebraic loop, which is a compile error -- so no
+        // mode flip can occur) and no module interface to expose. Report the
+        // exhaustive default.
         return LtmVariablesResult {
             vars: vec![],
             loop_partitions: indexmap::IndexMap::new(),
