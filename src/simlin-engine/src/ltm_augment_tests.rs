@@ -3830,3 +3830,147 @@ fn test_body_aware_rank_keeps_delta_ratio() {
         "equation: {eq}"
     );
 }
+
+// -- shaped_guard_form_text: attribution-convention chooser (GH #743) --
+//
+// The chooser builds the standard changed-first guard form, but when the
+// changed-first partial would embed `PREVIOUS` of an array slice (a
+// wildcard/star-range-subscripted reference -- no LoadPrev-of-array-view
+// codegen path exists, so the equation can only silently stub or hard-fail),
+// it falls back to the changed-last attribution (only the live source
+// frozen), and errors loudly when both conventions are unfreezable.
+
+/// The GH #743 shape: live `frac` (Bare, iterated-dim feeder) inside a
+/// reducer whose co-source is a wildcard slice. Changed-first would freeze
+/// `matrix[d1,*]` as `PREVIOUS(matrix[..],*])` -- unfreezable -- so the
+/// chooser must emit the changed-last form: only `frac` frozen, the
+/// wildcard slice left verbatim (it compiles exactly like the target's own
+/// equation), numerator `(target - frozen)`.
+#[test]
+fn shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source() {
+    let deps = deps_set(&["matrix", "frac"]);
+    let live = Ident::<Canonical>::new("frac");
+    let source_dims = vec![vec!["r1".to_string(), "r2".to_string()]];
+    let source_dim_names = vec!["d1".to_string()];
+    let target_iterated = vec!["d1".to_string()];
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated,
+        dim_ctx: None,
+    };
+    let text = shaped_guard_form_text(
+        "SUM(matrix[D1, *] * frac[D1])",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &source_dims,
+        &source_dim_names,
+        Some(&iter_ctx),
+        None,
+        "growth",
+    )
+    .unwrap();
+    assert_eq!(
+        text,
+        "if (TIME = INITIAL_TIME) then 0 \
+         else if ((growth - PREVIOUS(growth)) = 0) OR ((frac - PREVIOUS(frac)) = 0) then 0 \
+         else SAFEDIV((growth - (sum(matrix[d1, *] * PREVIOUS(frac)))), \
+         ABS((growth - PREVIOUS(growth))), 0) * SIGN((frac - PREVIOUS(frac)))"
+    );
+}
+
+/// A shape where the changed-first partial is freezable stays byte-identical
+/// to the historical output: the chooser is a pure pass-through to the
+/// changed-first guard form whenever that form compiles.
+#[test]
+fn shaped_guard_form_keeps_changed_first_when_freezable() {
+    let deps = deps_set(&["population"]);
+    let live = Ident::<Canonical>::new("population");
+    // `population / SUM(population[*])`: the live ref is OUTSIDE the
+    // reducer occurrence that matters, and the whole reducer is frozen as
+    // `PREVIOUS(sum(population[*]))` -- PREVIOUS of a scalar, freezable.
+    let text = shaped_guard_form_text(
+        "population / SUM(population[*])",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &[],
+        &[],
+        None,
+        None,
+        "share",
+    )
+    .unwrap();
+    let expected_partial = build_partial_equation_shaped(
+        "population / SUM(population[*])",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &[],
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        expected_partial,
+        "population / PREVIOUS(sum(population[*]))"
+    );
+    assert_eq!(
+        text,
+        format!(
+            "if (TIME = INITIAL_TIME) then 0 \
+             else if ((share - PREVIOUS(share)) = 0) OR ((population - PREVIOUS(population)) = 0) then 0 \
+             else SAFEDIV((({expected_partial}) - PREVIOUS(share)), \
+             ABS((share - PREVIOUS(share))), 0) * SIGN((population - PREVIOUS(population)))"
+        )
+    );
+}
+
+/// When BOTH conventions are unfreezable (the live occurrence is itself a
+/// wildcard slice, so changed-last would freeze `PREVIOUS(arr[*])`), the
+/// chooser fails loudly: the caller skips the score and warns, instead of
+/// emitting an equation whose helper silently stubs to 0 and poisons the
+/// score (the GH #743 -250-class garbage).
+#[test]
+fn shaped_guard_form_errs_when_both_conventions_unfreezable() {
+    let deps = deps_set(&["arr", "brr"]);
+    let live = Ident::<Canonical>::new("arr");
+    let err = shaped_guard_form_text(
+        "SUM(arr[*] * brr[d1, *])",
+        &deps,
+        &live,
+        &RefShape::Wildcard,
+        &[],
+        &[],
+        None,
+        None,
+        "total",
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
+}
+
+/// Defensive: when the changed-first partial is unfreezable and the live
+/// source has NO matching occurrence to freeze, changed-last would emit the
+/// target's own equation verbatim (a silent constant-0 score). The chooser
+/// must error loudly instead.
+#[test]
+fn shaped_guard_form_errs_when_no_live_occurrence_to_freeze() {
+    let deps = deps_set(&["matrix"]);
+    let live = Ident::<Canonical>::new("frac");
+    let err = shaped_guard_form_text(
+        // A naked (non-reducer-enclosed) wildcard slice; `frac` absent.
+        // Not a compilable model equation, but exercises the guard.
+        "matrix[d1, *] * 2",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &[],
+        &[],
+        None,
+        None,
+        "growth",
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
+}

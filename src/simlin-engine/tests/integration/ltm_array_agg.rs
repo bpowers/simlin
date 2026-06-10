@@ -3285,3 +3285,213 @@ fn nonlinear_bare_body_equations_unchanged() {
         "the bare-body STDDEV partial must stay byte-identical"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GH #743: un-hoisted multi-source iterated-dim-feeder reducer
+// ---------------------------------------------------------------------------
+
+/// The GH #743 fixture: an apply-to-all equation over `D1` whose RHS embeds
+/// a multi-source reducer whose per-row feeder is arrayed over the ITERATED
+/// dimension -- `growth[D1] = SUM(matrix[D1,*] * frac[D1])`.
+/// `combined_read_slice` declines to hoist it (the multi-source
+/// slice-disagreement carve-out: `matrix[D1,*]` reads `[Iterated, Reduced]`
+/// while `frac[D1]` reads `[Iterated]`), so the references stay on the
+/// conservative path. The feedback loop closes through `frac`:
+/// `pop[r] -> frac[r] -> growth[r] -> pop[r]`, trivially reinforcing.
+fn gh743_feeder_closure_fixture() -> datamodel::Project {
+    TestProject::new("gh743_feeder")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("growth[D1]", "SUM(matrix[D1, *] * frac[D1])", None)
+        .build_datamodel()
+}
+
+/// GH #743 (the silent-garbage half): the feeder-closure loop must be
+/// CORRECTLY scored on the conservative (un-hoisted) path.
+///
+/// Before the fix, the Bare `frac→growth` link score's changed-first
+/// ceteris-paribus partial froze the wildcard-sliced co-source as
+/// `PREVIOUS(matrix[PREVIOUS(d1), *])`. `PREVIOUS` of an array slice has no
+/// codegen path: as a *user* equation it is a hard compile error, but as an
+/// LTM implicit helper (`$⁚$⁚ltm⁚link_score⁚frac→growth⁚0⁚arg0`) it failed
+/// fragment-compile SILENTLY -- keeping a layout slot with no bytecode, so
+/// it read a constant 0. The partial then evaluated to
+/// `sum(0 * frac) = 0` and the score degenerated to
+/// `-PREVIOUS(growth)/|Δgrowth| = -1/g` (g = the per-step growth rate):
+/// constant `-20` on this fixture, the issue's `-250` at 0.4%/step --
+/// plausible-looking garbage with NO diagnostic.
+///
+/// After the fix the partial uses the changed-last attribution (only the
+/// feeder frozen: `sum(matrix[d1, *] * PREVIOUS(frac))`, which compiles),
+/// and the trivially-reinforcing isolated loop scores exactly +1 per
+/// element -- the LTM isolated-loop invariant.
+#[test]
+fn un_hoisted_iterated_dim_feeder_loop_scores_correct() {
+    let project = gh743_feeder_closure_fixture();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The reducer must STAY un-hoisted (no synthetic agg node): this test
+    // pins the conservative-path fix, not a hoisting change. (GH #743's
+    // direction-1 follow-up -- extending the hoist to feeder-sub-slice
+    // combinations -- would relax this.)
+    assert!(
+        ltm_vars
+            .iter()
+            .all(|v| !v.name.contains("$\u{205A}ltm\u{205A}agg\u{205A}")),
+        "the slice-disagreeing multi-source reducer must not be hoisted; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // The conservative path must be CORRECT here, so there must be no
+    // degradation warnings (a warned skip would mean the loud floor fired
+    // where the changed-last form should have produced a real score).
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .collect();
+    assert!(
+        assembly.is_empty(),
+        "the feeder-closure fixture must compile every LTM fragment cleanly; got: {assembly:?}"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Exactly one loop: pop -> frac -> growth -> pop, A2A over D1.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        1,
+        "expected exactly one loop score; got {loop_names:?}"
+    );
+    let loop_var = ltm_var(&ltm_vars, &loop_names[0]);
+    assert_eq!(
+        loop_var.dimensions,
+        vec!["D1".to_string()],
+        "the feeder-closure loop must be A2A over D1"
+    );
+
+    const TOL: f64 = 1e-9;
+
+    // The Bare frac→growth link score: +1 at every step past the first
+    // (the changed-last numerator `growth - sum(matrix[d1,*]*PREVIOUS(frac))`
+    // equals Δgrowth exactly while matrix is constant).
+    let frac_growth = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
+    let var = ltm_var(&ltm_vars, &frac_growth);
+    let n_slots = slot_count(var, &project.dimensions);
+    let base = offset_of(&results, &frac_growth);
+    for slot in 0..n_slots {
+        let series = series_at(&results, base + slot);
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() <= TOL,
+                "{frac_growth} slot {slot} at step {step}: got {v}, expected +1. \
+                 A constant negative value here (-1/growth-rate) is the GH #743 \
+                 silent-garbage signature: the partial silently lost the frozen \
+                 co-source term."
+            );
+        }
+    }
+
+    // The loop score: +1 per element at every step past startup (the
+    // trivially-reinforcing isolated-loop invariant).
+    let base = offset_of(&results, &loop_names[0]);
+    for slot in 0..2 {
+        let series = series_at(&results, base + slot);
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 1.0).abs() <= TOL,
+                "{} slot {slot} at step {step}: got {v}, expected +1 (isolated \
+                 reinforcing loop). The pre-fix garbage read -20 at every step.",
+                loop_names[0]
+            );
+        }
+    }
+}
+
+/// GH #743 (the loud-floor half, characterization): closing the loop through
+/// the wildcard-read co-source (`matrix`) instead of the feeder keeps the
+/// LOUD degraded behavior -- cross-element loop scores that fail fragment
+/// compile (their equations reference per-(row,slot) link-score names the
+/// emitters never produce for this un-hoisted shape), each surfacing an
+/// Assembly `Warning` and reading a constant 0.
+///
+/// This is the warned sibling of the #758/#764 zero-stub class, NOT silent
+/// garbage; making these loops genuinely scoreable requires hoisting the
+/// feeder-sub-slice combination (GH #743's direction-1 follow-up). This test
+/// pins that the degradation stays visible: if the warnings disappear, the
+/// scores must be real (a silent zero here would be a regression).
+#[test]
+fn un_hoisted_iterated_dim_feeder_co_source_closure_stays_loud() {
+    let project = TestProject::new("gh743_co_source")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1] * 0.05",
+            None,
+        )
+        .array_aux("frac[D1]", "0.5")
+        .array_flow("growth[D1]", "SUM(matrix[D1, *] * frac[D1])", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // Every loop score through the un-hoisted matrix→growth edge fails
+    // fragment compile and is WARNED -- the loud conservative floor.
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let warned_loop_scores: Vec<&str> = diags
+        .iter()
+        .filter(|d| {
+            matches!(d.severity, DiagnosticSeverity::Warning)
+                && matches!(d.error, DiagnosticError::Assembly(_))
+        })
+        .filter_map(|d| d.variable.as_deref())
+        .filter(|v| v.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !warned_loop_scores.is_empty(),
+        "the co-source closure's unscoreable loops must surface Assembly warnings \
+         (silent zero would be a regression); diagnostics: {diags:?}"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Each warned loop score is a stub: constant 0 at every step.
+    for name in &warned_loop_scores {
+        let base = offset_of(&results, name);
+        let series = series_at(&results, base);
+        assert!(
+            series.iter().all(|&v| v == 0.0),
+            "warned loop score {name} must read the documented 0 stub; got {series:?}"
+        );
+    }
+}

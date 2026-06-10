@@ -1033,7 +1033,11 @@ fn test_ltm_disabled_does_not_surface_fragment_failure_warning() {
 fn test_ltm_partial_equation_warning_message_contract() {
     let var_name = "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target";
     let eqn_text = "source * other";
-    let msg = super::ltm::ltm_partial_equation_warning_message(var_name, eqn_text);
+    let parse_err = crate::ltm_augment::PartialEquationError {
+        equation_text: eqn_text.to_string(),
+        kind: crate::ltm_augment::PartialEquationErrorKind::Parse,
+    };
+    let msg = super::ltm::ltm_partial_equation_warning_message(var_name, &parse_err);
 
     assert!(
         msg.contains(var_name),
@@ -1051,6 +1055,26 @@ fn test_ltm_partial_equation_warning_message_contract() {
         msg.contains("magnitude of 1"),
         "the warning must explain the silent magnitude-1 hazard; got: {msg}"
     );
+
+    // GH #743: the unfreezable-partial kind names the variable and the
+    // equation too, and explains the silently-stubbed-helper hazard.
+    let unfreezable_err = crate::ltm_augment::PartialEquationError {
+        equation_text: eqn_text.to_string(),
+        kind: crate::ltm_augment::PartialEquationErrorKind::UnfreezablePartial,
+    };
+    let msg = super::ltm::ltm_partial_equation_warning_message(var_name, &unfreezable_err);
+    assert!(
+        msg.contains(var_name),
+        "the unfreezable warning must name the skipped variable; got: {msg}"
+    );
+    assert!(
+        msg.contains(eqn_text),
+        "the unfreezable warning must include the equation text; got: {msg}"
+    );
+    assert!(
+        msg.contains("array slice"),
+        "the unfreezable warning must explain the unfreezable-slice cause; got: {msg}"
+    );
 }
 
 /// Test-only salsa-tracked query that drives the production accumulating
@@ -1065,6 +1089,7 @@ fn test_ltm_partial_equation_warning_message_contract() {
 fn ltm311_emit_probe(db: &dyn crate::db::Db, model: SourceModel, _project: SourceProject) {
     let err = crate::ltm_augment::PartialEquationError {
         equation_text: "source * other".to_string(),
+        kind: crate::ltm_augment::PartialEquationErrorKind::Parse,
     };
     super::ltm::emit_ltm_partial_equation_warning(
         db,

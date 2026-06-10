@@ -890,18 +890,48 @@ fn wrap_index_non_matching_in_previous(
 /// unreachable in production; `Ok(None)` is reachable for a target with an
 /// empty equation. Either way the failure is rare and unexpected -- exactly
 /// the case where a silent semantics-changing fallback is most dangerous.
+///
+/// `UnfreezablePartial` (GH #743) is the second loud-failure class: the
+/// equation parsed fine, but neither ceteris-paribus convention can be
+/// rendered as a compilable equation -- the changed-first partial would
+/// freeze an array slice (`PREVIOUS(matrix[d1,*])`, which has no
+/// LoadPrev-of-array-view codegen path: a hard compile error in a user
+/// equation, and a SILENTLY-stubbed-to-0 helper in an LTM fragment, which
+/// poisoned the score into plausible-looking garbage like the constant
+/// `-1/growth-rate`), and the changed-last fallback is unfreezable too (or
+/// has no live occurrence to freeze). The caller skips the score and warns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PartialEquationErrorKind {
+    /// The equation text failed to parse (or was empty); there is no AST
+    /// to transform.
+    Parse,
+    /// Neither the changed-first nor the changed-last ceteris-paribus
+    /// convention can be rendered as a compilable equation (GH #743).
+    UnfreezablePartial,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PartialEquationError {
-    /// The original (pre-transform) equation text that failed to parse. The
+    /// The original (pre-transform) equation text the failure is about. The
     /// db-bearing caller embeds this in the diagnostic message so the failure
     /// names the concrete offending equation.
     pub equation_text: String,
+    /// Which loud-failure class this is; selects the diagnostic wording.
+    pub kind: PartialEquationErrorKind,
 }
 
 impl PartialEquationError {
     fn new(equation_text: &str) -> Self {
         PartialEquationError {
             equation_text: equation_text.to_string(),
+            kind: PartialEquationErrorKind::Parse,
+        }
+    }
+
+    fn unfreezable(equation_text: &str) -> Self {
+        PartialEquationError {
+            equation_text: equation_text.to_string(),
+            kind: PartialEquationErrorKind::UnfreezablePartial,
         }
     }
 }
@@ -1010,6 +1040,345 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
         &mut live_ref,
     );
     Ok((print_eqn(&transformed), live_ref))
+}
+
+/// Is `expr` *array-slice-valued* -- does it contain a wildcard/star-range
+/// subscript axis that no enclosing array reducer collapses? Such an
+/// expression evaluates to an array view, not a scalar.
+///
+/// Used by [`contains_unfreezable_previous`] to decide whether a `PREVIOUS`
+/// argument can be frozen: `PREVIOUS` of an array view has no codegen path
+/// (no LoadPrev-of-array-view), so `PREVIOUS(matrix[d1,*])` -- or any
+/// expression embedding such a slice outside a reducer -- cannot compile.
+/// A reducer application (`SUM(matrix[d1,*])`) collapses the slice to a
+/// scalar, so a wildcard *inside* a reducer is fine (`PREVIOUS(SUM(arr[*]))`
+/// is the deliberate GH #517 whole-reducer freeze).
+fn expr_is_array_slice_valued(expr: &Expr0) -> bool {
+    match expr {
+        Expr0::Const(..) | Expr0::Var(..) => false,
+        Expr0::Subscript(_, indices, _) => indices
+            .iter()
+            .any(|idx| matches!(idx, IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(_, _))),
+        Expr0::App(UntypedBuiltinFn(name, args), _) => {
+            // A reducer's result is scalar regardless of slices inside it.
+            if is_array_reducer_name(name, args.len()) {
+                false
+            } else {
+                args.iter().any(expr_is_array_slice_valued)
+            }
+        }
+        Expr0::Op1(_, inner, _) => expr_is_array_slice_valued(inner),
+        Expr0::Op2(_, l, r, _) => expr_is_array_slice_valued(l) || expr_is_array_slice_valued(r),
+        Expr0::If(c, t, e, _) => {
+            expr_is_array_slice_valued(c)
+                || expr_is_array_slice_valued(t)
+                || expr_is_array_slice_valued(e)
+        }
+    }
+}
+
+/// Does the (already PREVIOUS-wrapped) partial contain a `PREVIOUS(...)`
+/// call whose argument is array-slice-valued (see
+/// [`expr_is_array_slice_valued`])?
+///
+/// Such a partial can never evaluate correctly (GH #743): `PREVIOUS` of an
+/// array view has no codegen path. As a *user* equation it is a hard
+/// `NotSimulatable` compile error; as an LTM link-score fragment the doomed
+/// `PREVIOUS` is routed through a synthesized implicit helper
+/// (`$⁚$⁚ltm⁚…⁚arg0`) whose fragment fails to compile SILENTLY -- it keeps
+/// a layout slot with no bytecode and reads a constant 0 -- so the partial
+/// silently loses the frozen term while the outer score still compiles,
+/// producing plausible-looking garbage (the constant `-1/growth-rate`
+/// scores of GH #743). The partial-equation builders therefore treat this
+/// shape as a routing decision: fall back to the changed-last attribution,
+/// or fail loudly.
+fn contains_unfreezable_previous(expr: &Expr0) -> bool {
+    match expr {
+        Expr0::Const(..) | Expr0::Var(..) => false,
+        Expr0::Subscript(_, indices, _) => indices.iter().any(|idx| match idx {
+            IndexExpr0::Expr(e) => contains_unfreezable_previous(e),
+            IndexExpr0::Range(l, r, _) => {
+                contains_unfreezable_previous(l) || contains_unfreezable_previous(r)
+            }
+            IndexExpr0::Wildcard(_)
+            | IndexExpr0::StarRange(_, _)
+            | IndexExpr0::DimPosition(_, _) => false,
+        }),
+        Expr0::App(UntypedBuiltinFn(name, args), _) => {
+            if name.eq_ignore_ascii_case("previous")
+                && args.first().is_some_and(expr_is_array_slice_valued)
+            {
+                return true;
+            }
+            args.iter().any(contains_unfreezable_previous)
+        }
+        Expr0::Op1(_, inner, _) => contains_unfreezable_previous(inner),
+        Expr0::Op2(_, l, r, _) => {
+            contains_unfreezable_previous(l) || contains_unfreezable_previous(r)
+        }
+        Expr0::If(c, t, e, _) => {
+            contains_unfreezable_previous(c)
+                || contains_unfreezable_previous(t)
+                || contains_unfreezable_previous(e)
+        }
+    }
+}
+
+/// Freeze ONLY the matching-shape occurrences of `live_source` at
+/// `PREVIOUS`, leaving every other reference current -- the "changed-last"
+/// attribution dual of [`wrap_non_matching_in_previous`] (cf.
+/// [`generate_scalar_feeder_to_agg_equation`], which established the
+/// convention for scalar feeders of hoisted reducers).
+///
+/// `frozen_ref` records the first matching occurrence (pre-wrap, in
+/// document order) so the caller can build the source-side normalizer; a
+/// live-source iterated-dim subscript (`frac[D1]` under an A2A-over-`D1`
+/// target) is normalized to a bare `Var` before wrapping -- `PREVIOUS(frac)`
+/// compiles per-element (GH #541), while `PREVIOUS(frac[D1])` trips the
+/// codegen assertion (the same GH #511 normalization
+/// `wrap_non_matching_in_previous` applies).
+///
+/// References already inside a `PREVIOUS(...)`/`INIT(...)` call are left
+/// untouched (already lagged/frozen; double-wrapping would read two steps
+/// back). Non-matching occurrences of `live_source` -- and all other
+/// references -- stay current: their influence is attributed by their own
+/// link-score variables.
+fn wrap_live_shaped_in_previous(
+    expr: Expr0,
+    live_source: &Ident<Canonical>,
+    live_shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
+    frozen_ref: &mut Option<Expr0>,
+) -> Expr0 {
+    match expr {
+        Expr0::Const(..) => expr,
+        Expr0::Var(ref ident, loc) => {
+            if &Ident::<Canonical>::new(ident.as_str()) == live_source
+                && matches!(live_shape, RefShape::Bare)
+            {
+                if frozen_ref.is_none() {
+                    *frozen_ref = Some(expr.clone());
+                }
+                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+            } else {
+                expr
+            }
+        }
+        Expr0::Subscript(ident, indices, loc) => {
+            if &Ident::<Canonical>::new(ident.as_str()) == live_source {
+                // GH #511 normalization: an iterated-dim subscript reads the
+                // same element a bare reference would in each slot, and the
+                // IR classifies such a site `Bare`.
+                if matches!(live_shape, RefShape::Bare)
+                    && is_live_source_iterated_dim_subscript(&indices, iter_ctx)
+                {
+                    let bare = Expr0::Var(ident, loc);
+                    if frozen_ref.is_none() {
+                        *frozen_ref = Some(bare.clone());
+                    }
+                    return Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![bare]), loc);
+                }
+                let shape = classify_expr0_subscript_shape(&indices, source_dim_elements, iter_ctx);
+                if &shape == live_shape {
+                    let subscript = Expr0::Subscript(ident, indices, loc);
+                    if frozen_ref.is_none() {
+                        *frozen_ref = Some(subscript.clone());
+                    }
+                    return Expr0::App(
+                        UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
+                        loc,
+                    );
+                }
+                return Expr0::Subscript(ident, indices, loc);
+            }
+            Expr0::Subscript(ident, indices, loc)
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            // Contents of PREVIOUS/INIT are already lagged/frozen.
+            if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
+                return Expr0::App(UntypedBuiltinFn(name, args), loc);
+            }
+            let args = args
+                .into_iter()
+                .map(|a| {
+                    wrap_live_shaped_in_previous(
+                        a,
+                        live_source,
+                        live_shape,
+                        source_dim_elements,
+                        iter_ctx,
+                        frozen_ref,
+                    )
+                })
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, inner, loc) => Expr0::Op1(
+            op,
+            Box::new(wrap_live_shaped_in_previous(
+                *inner,
+                live_source,
+                live_shape,
+                source_dim_elements,
+                iter_ctx,
+                frozen_ref,
+            )),
+            loc,
+        ),
+        Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
+            op,
+            Box::new(wrap_live_shaped_in_previous(
+                *lhs,
+                live_source,
+                live_shape,
+                source_dim_elements,
+                iter_ctx,
+                frozen_ref,
+            )),
+            Box::new(wrap_live_shaped_in_previous(
+                *rhs,
+                live_source,
+                live_shape,
+                source_dim_elements,
+                iter_ctx,
+                frozen_ref,
+            )),
+            loc,
+        ),
+        Expr0::If(c, t, e, loc) => Expr0::If(
+            Box::new(wrap_live_shaped_in_previous(
+                *c,
+                live_source,
+                live_shape,
+                source_dim_elements,
+                iter_ctx,
+                frozen_ref,
+            )),
+            Box::new(wrap_live_shaped_in_previous(
+                *t,
+                live_source,
+                live_shape,
+                source_dim_elements,
+                iter_ctx,
+                frozen_ref,
+            )),
+            Box::new(wrap_live_shaped_in_previous(
+                *e,
+                live_source,
+                live_shape,
+                source_dim_elements,
+                iter_ctx,
+                frozen_ref,
+            )),
+            loc,
+        ),
+    }
+}
+
+/// Build the guard-form link-score text for one target equation, choosing
+/// the ceteris-paribus attribution convention (GH #743):
+///
+/// 1. **Changed-first** (the default; byte-identical to the historical
+///    output): hold the matching-shape `from` occurrences live and freeze
+///    everything else at `PREVIOUS`, numerator
+///    `(partial - PREVIOUS(target))`.
+/// 2. **Changed-last**, when the changed-first partial would embed
+///    `PREVIOUS` of an array slice (see [`contains_unfreezable_previous`]):
+///    freeze ONLY the matching `from` occurrences and keep everything else
+///    current, numerator `(target - frozen)`. This is the
+///    [`generate_scalar_feeder_to_agg_equation`] convention -- a
+///    first-order-equal discrete attribution of `Δz` to `Δx` (see that
+///    function's rustdoc and the convention note in
+///    `docs/reference/ltm--loops-that-matter.md`) -- and is what makes the
+///    un-hoisted iterated-dim-feeder reducer class
+///    (`growth[D1] = SUM(matrix[D1,*] * frac[D1])`, the GH #743 fixture)
+///    genuinely scoreable: the wildcard co-source slice stays verbatim
+///    (compiling exactly like the target's own equation) and only the
+///    feeder is lagged.
+/// 3. `Err(UnfreezablePartial)` when both conventions are doomed (or
+///    changed-last has no matching occurrence to freeze, which would
+///    silently score a constant 0): the caller skips the score variable
+///    and surfaces a `Warning` -- loud degradation, never the
+///    silently-stubbed-helper garbage the pre-fix path produced.
+#[allow(clippy::too_many_arguments)] // threads the link-score generation context
+fn shaped_guard_form_text(
+    equation_text: &str,
+    deps: &HashSet<Ident<Canonical>>,
+    from: &Ident<Canonical>,
+    shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+    source_dim_names: &[String],
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
+    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    target_ref: &str,
+) -> Result<String, PartialEquationError> {
+    let other_deps: HashSet<Ident<Canonical>> = deps
+        .iter()
+        .filter(|d| *d != from && normalize_module_ref(d) != *from)
+        .cloned()
+        .collect();
+    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
+        return Err(PartialEquationError::new(equation_text));
+    };
+
+    let mut live_ref: Option<Expr0> = None;
+    let changed_first = wrap_non_matching_in_previous(
+        ast.clone(),
+        from,
+        shape,
+        &other_deps,
+        source_dim_elements,
+        iter_ctx,
+        dims_ctx,
+        &mut live_ref,
+    );
+    if !contains_unfreezable_previous(&changed_first) {
+        let source_ref = source_ref_for_guard(
+            from,
+            shape,
+            live_ref.as_ref(),
+            source_dim_names,
+            source_dim_elements,
+        );
+        return Ok(link_score_guard_form(
+            &print_eqn(&changed_first),
+            target_ref,
+            &source_ref,
+        ));
+    }
+
+    // Changed-last fallback: freeze only the live source.
+    let mut frozen_ref: Option<Expr0> = None;
+    let changed_last = wrap_live_shaped_in_previous(
+        ast,
+        from,
+        shape,
+        source_dim_elements,
+        iter_ctx,
+        &mut frozen_ref,
+    );
+    let Some(frozen) = frozen_ref else {
+        // No matching occurrence: the "frozen" equation would be the
+        // target's own equation, scoring a silent constant 0.
+        return Err(PartialEquationError::unfreezable(equation_text));
+    };
+    if contains_unfreezable_previous(&changed_last) {
+        return Err(PartialEquationError::unfreezable(equation_text));
+    }
+    let source_ref = source_ref_for_guard(
+        from,
+        shape,
+        Some(&frozen),
+        source_dim_names,
+        source_dim_elements,
+    );
+    let numerator = format!("({target_ref} - ({}))", print_eqn(&changed_last));
+    Ok(link_score_guard_form_with_numerator(
+        &numerator,
+        target_ref,
+        &source_ref,
+    ))
 }
 
 /// Wrap every reference to `target` in `PREVIOUS()` -- the *inverse* of
@@ -1137,12 +1506,9 @@ pub(crate) fn generate_scalar_feeder_to_agg_equation(
     let frozen = print_eqn(&wrap_matching_in_previous(ast, &feeder_ident));
     let agg_q = quote_ident(agg_name);
     let feeder_q = quote_ident(feeder);
-    let target_diff = format!("({agg_q} - PREVIOUS({agg_q}))");
-    let source_diff = format!("({feeder_q} - PREVIOUS({feeder_q}))");
-    Ok(format!(
-        "if (TIME = INITIAL_TIME) then 0 \
-         else if ({target_diff} = 0) OR ({source_diff} = 0) then 0 \
-         else SAFEDIV(({agg_q} - ({frozen})), ABS({target_diff}), 0) * SIGN({source_diff})"
+    let numerator = format!("({agg_q} - ({frozen}))");
+    Ok(link_score_guard_form_with_numerator(
+        &numerator, &agg_q, &feeder_q,
     ))
 }
 
@@ -2028,6 +2394,23 @@ fn generate_link_score_equation(
 /// expressions (already quoted or rendered as subscripts as the caller
 /// requires).
 fn link_score_guard_form(partial_eq: &str, target_ref: &str, source_ref: &str) -> String {
+    // The changed-first numerator: `Δ_x z = z(x_t, w_{t-1}) - z_{t-1}`,
+    // rendered as `(partial - PREVIOUS(target))`.
+    let numerator = format!("(({partial_eq}) - PREVIOUS({target_ref}))");
+    link_score_guard_form_with_numerator(&numerator, target_ref, source_ref)
+}
+
+/// The numerator-parameterized core of [`link_score_guard_form`], shared by
+/// the changed-first form (numerator `(partial - PREVIOUS(target))`), the
+/// changed-last form (numerator `(target - frozen)` -- the
+/// [`shaped_guard_form_text`] fallback and
+/// [`generate_scalar_feeder_to_agg_equation`]), and any future attribution
+/// convention with the same guard structure.
+fn link_score_guard_form_with_numerator(
+    numerator: &str,
+    target_ref: &str,
+    source_ref: &str,
+) -> String {
     // The link score is |Δ_x(z) / Δ(z)| * sign(Δ_x(z) / Δ(x)) (LTM ref §3.1).
     // Within the else branch the guard guarantees Δ(z) != 0 and Δ(x) != 0, so
     // the formula is emitted in the algebraically identical single-numerator
@@ -2041,7 +2424,6 @@ fn link_score_guard_form(partial_eq: &str, target_ref: &str, source_ref: &str) -
     // equation -- appears ONCE instead of twice. This halves the equation
     // text, the helper-aux count for any helper-producing construct inside
     // the partial, and the per-step evaluation cost.
-    let numerator = format!("(({partial_eq}) - PREVIOUS({target_ref}))");
     let target_diff = format!("({target_ref} - PREVIOUS({target_ref}))");
     let source_diff = format!("({source_ref} - PREVIOUS({source_ref}))");
     format!(
@@ -2182,23 +2564,17 @@ fn build_arrayed_link_score_equation(
         .into_iter()
         .filter(|d| !source_dim_token_set.contains(d.as_str()))
         .collect();
-        let (partial_e, live_ref) = build_partial_equation_shaped_with_live_ref(
+        shaped_guard_form_text(
             &elem_eqn_text,
             &deps_e,
             from,
             shape,
             source_dim_elements,
+            source_dim_names,
             Some(&iter_ctx),
             dim_ctx,
-        )?;
-        let source_ref = source_ref_for_guard(
-            from,
-            shape,
-            live_ref.as_ref(),
-            source_dim_names,
-            source_dim_elements,
-        );
-        Ok(link_score_guard_form(&partial_e, target_ref, &source_ref))
+            target_ref,
+        )
     };
 
     // Sort the slots by element name so the resulting `Vec` -- which lands
@@ -2328,25 +2704,17 @@ fn generate_auxiliary_to_auxiliary_equation(
         target_iterated_dims: &target_iterated_dims,
         dim_ctx,
     };
-    let (partial_eq, live_ref) = build_partial_equation_shaped_with_live_ref(
+    let text = shaped_guard_form_text(
         &to_equation,
         &deps,
         from,
         shape,
         source_dim_elements,
+        source_dim_names,
         Some(&iter_ctx),
         dim_ctx,
+        &to_q,
     )?;
-
-    let from_source_q = source_ref_for_guard(
-        from,
-        shape,
-        live_ref.as_ref(),
-        source_dim_names,
-        source_dim_elements,
-    );
-
-    let text = link_score_guard_form(&partial_eq, &to_q, &from_source_q);
     Ok(link_score_equation_for_target(text, to_var))
 }
 
@@ -2622,31 +2990,26 @@ fn generate_stock_to_flow_equation(
         target_iterated_dims: &target_iterated_dims,
         dim_ctx,
     };
-    let (partial_eq, live_ref) = build_partial_equation_shaped_with_live_ref(
-        &flow_equation,
-        &deps,
-        stock,
-        shape,
-        source_dim_elements,
-        Some(&iter_ctx),
-        dim_ctx,
-    )?;
-
     // Link score formula from LTM paper: |Δxz/Δz| × sign(Δxz/Δx)
     // For stock-to-flow: x=stock, z=flow. The stock side respects
     // shape: a FixedIndex(elem) link score must normalize by
     // Δstock[elem], not the variable-level Δstock; a Wildcard /
     // DynamicIndex source slice is scalarized (`SUM(stock[PREVIOUS(idx)])`)
     // because bare arrayed `stock` in a scalar equation is a dimension
-    // error -- see `source_ref_for_guard`.
-    let stock_source_q = source_ref_for_guard(
+    // error -- see `source_ref_for_guard` (applied inside
+    // `shaped_guard_form_text`, which also handles the GH #743
+    // changed-last fallback for an unfreezable changed-first partial).
+    let text = shaped_guard_form_text(
+        &flow_equation,
+        &deps,
         stock,
         shape,
-        live_ref.as_ref(),
-        source_dim_names,
         source_dim_elements,
-    );
-    let text = link_score_guard_form(&partial_eq, target_ref, &stock_source_q);
+        source_dim_names,
+        Some(&iter_ctx),
+        dim_ctx,
+        target_ref,
+    )?;
     Ok(link_score_equation_for_target(text, flow_var))
 }
 

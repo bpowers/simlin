@@ -678,31 +678,42 @@ pub(crate) fn emit_ltm_partial_equation_warning(
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
         variable: Some(variable_name.to_string()),
-        error: DiagnosticError::Assembly(ltm_partial_equation_warning_message(
-            variable_name,
-            &err.equation_text,
-        )),
+        error: DiagnosticError::Assembly(ltm_partial_equation_warning_message(variable_name, err)),
         severity: DiagnosticSeverity::Warning,
     })
     .accumulate(db);
 }
 
-/// The human-readable message body for a GH #311 partial-equation parse
-/// failure. Pure (functional core) so the diagnostic's wording -- which
-/// names the offending variable and equation text and explains the
-/// silent-magnitude-1 hazard the fix prevents -- is testable without driving
-/// a salsa accumulator.
+/// The human-readable message body for a partial-equation failure -- a
+/// GH #311 parse failure, or a GH #743 unfreezable partial (neither
+/// ceteris-paribus convention can be rendered as a compilable equation).
+/// Pure (functional core) so the diagnostic's wording -- which names the
+/// offending variable and equation text and explains the silent-garbage
+/// hazard the loud skip prevents -- is testable without driving a salsa
+/// accumulator.
 pub(crate) fn ltm_partial_equation_warning_message(
     variable_name: &str,
-    equation_text: &str,
+    err: &crate::ltm_augment::PartialEquationError,
 ) -> String {
-    format!(
-        "LTM link-score variable '{variable_name}' could not be generated: the \
-         ceteris-paribus partial requires parsing the target's equation, but \
-         '{equation_text}' did not parse. The variable is skipped rather than \
-         emitted with a non-ceteris-paribus equation (which would silently \
-         score a constant magnitude of 1)."
-    )
+    use crate::ltm_augment::PartialEquationErrorKind;
+    let equation_text = &err.equation_text;
+    match err.kind {
+        PartialEquationErrorKind::Parse => format!(
+            "LTM link-score variable '{variable_name}' could not be generated: the \
+             ceteris-paribus partial requires parsing the target's equation, but \
+             '{equation_text}' did not parse. The variable is skipped rather than \
+             emitted with a non-ceteris-paribus equation (which would silently \
+             score a constant magnitude of 1)."
+        ),
+        PartialEquationErrorKind::UnfreezablePartial => format!(
+            "LTM link-score variable '{variable_name}' could not be generated: the \
+             ceteris-paribus partial of '{equation_text}' would freeze an array \
+             slice inside PREVIOUS(), which cannot compile, and the changed-last \
+             fallback is unfreezable too. The variable is skipped rather than \
+             emitted with a silently-stubbed helper (which would poison the score \
+             with a plausible-looking wrong constant -- GH #743)."
+        ),
+    }
 }
 
 /// Emit per-distinct-source-element link scores for a disjoint-dim
