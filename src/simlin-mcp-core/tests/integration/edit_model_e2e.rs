@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use simlin_mcp_core::errors::AccessError;
-use simlin_mcp_core::test_support::TestFileSystemAccess;
+use simlin_mcp_core::test_support::{TestFileSystemAccess, chain_scc_project_json};
 use simlin_mcp_core::tools::edit_model::{
     EditModelInput, EditOperation, UpsertAuxiliaryInput, UpsertFlowInput, UpsertStockInput,
     edit_model,
@@ -472,52 +472,6 @@ async fn upsert_stock_is_full_replacement() {
         inflows, 0,
         "second upsert with no inflows must clear the inflows list: {pop}"
     );
-}
-
-/// Build a native-JSON project whose causal graph is a single SCC of
-/// `total_nodes` nodes (a stock, a flow, and `total_nodes - 2` chained
-/// auxes), which trips the engine's `MAX_LTM_SCC_NODES = 50` auto-flip gate
-/// when `total_nodes >= 51`. Compiling with LTM enabled emits the
-/// "auto-switched ... to discovery mode" Warning diagnostic.
-fn chain_scc_project_json(total_nodes: usize) -> serde_json::Value {
-    let aux_count = total_nodes - 2;
-    let auxiliaries: Vec<serde_json::Value> = (0..aux_count)
-        .map(|i| {
-            let equation = if i + 1 == aux_count {
-                "cap_stock".to_string()
-            } else {
-                format!("aux_{}", i + 1)
-            };
-            serde_json::json!({
-                "uid": (i + 10) as i64,
-                "name": format!("aux_{i}"),
-                "equation": equation,
-            })
-        })
-        .collect();
-
-    serde_json::json!({
-        "name": "chain_scc",
-        "simSpecs": {
-            "startTime": 0.0,
-            "endTime": 10.0,
-            "dt": "1",
-            "saveStep": 1.0,
-            "method": "euler",
-            "timeUnits": ""
-        },
-        "models": [{
-            "name": "main",
-            "stocks": [
-                {"uid": 1, "name": "cap_stock", "initialEquation": "0",
-                 "inflows": ["cap_flow"], "outflows": []}
-            ],
-            "flows": [
-                {"uid": 2, "name": "cap_flow", "equation": "aux_0"}
-            ],
-            "auxiliaries": auxiliaries
-        }]
-    })
 }
 
 /// GH #662: edit_model collected its post-edit diagnostics with
