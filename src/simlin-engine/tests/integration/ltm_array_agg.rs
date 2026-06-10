@@ -536,6 +536,133 @@ fn whole_extent_sum_agg_loop_scores_are_finite_and_sustained() {
     );
 }
 
+/// GH #533, end-to-end: a feedback loop whose only path back to a *scalar*
+/// stock runs through a *scalar* feeder of a hoisted reducer *with a scalar
+/// target*. The fixture is a scalar stock `total` grown by
+/// `grow = 1 + SUM(pop[*] * scale)`, with `scale = 0.001 * total + 0.01`
+/// feeding back from `total`. `SUM(pop[*] * scale)` is a sub-expression, so it
+/// is hoisted into a synthetic `$⁚ltm⁚agg⁚0`.
+///
+/// #533's well-specified fix is the ELEMENT GRAPH: the `(scale, grow)` causal
+/// edge is classified `ThroughAgg`, but `scale`/`grow` are both scalar, so
+/// before the fix `model_element_causal_edges`'s both-scalar fast path emitted
+/// a direct `scale → grow` element edge instead of `scale → $⁚ltm⁚agg⁚0`. That
+/// element-graph fix is pinned directly by
+/// `element_graph_tests::element_graph_scalar_feeder_*`. This end-to-end test
+/// pins the robustly-observable consequence: with LTM enabled the model still
+/// COMPILES and SIMULATES (no crash, no NaN/Inf) and the loop is enumerated --
+/// the well-formedness the element-graph fix preserves.
+///
+/// CHARACTERIZATION of two pre-existing gaps this scalar-target scenario
+/// exposes (BOTH independent of #533's element-graph fast path -- both behave
+/// identically with and without it, since the element edge the fix adds is
+/// never consumed downstream here):
+///
+/// 1. The synthetic agg `$⁚ltm⁚agg⁚0` for `SUM(pop[*] * scale)` (arrayed `pop`
+///    times scalar `scale`, reduced to a scalar target) currently FAILS to
+///    compile and is stubbed to a constant `0` with an `Assembly` Warning.
+///    This is an agg-augmentation gap (the emitted agg equation is rejected by
+///    the compiler), distinct from the element-graph edge.
+///
+/// 2. Even were the agg computed, the loop-score *builder* would not route the
+///    pure-scalar loop through it: `build_loops_from_tiered` materializes a
+///    `PureScalar` fast-path cycle straight from the *variable-level* circuit
+///    `total → scale → grow → total` (`var_graph.circuit_to_links`), linking
+///    `scale → grow` directly -- never the agg. The
+///    cross-element-through-aggregate recovery (`recover_cross_agg_loops`) runs
+///    only on the slow (cross-element) path.
+///
+/// So the loop score is `0` here -- not because of #533, but because of (1)
+/// and (2). Pinning the current behavior keeps both gaps observable; closing
+/// them is separate, tracked work.
+#[test]
+fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
+    let project = TestProject::new("scalar_feeder_agg_loop")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        // Heterogeneous initial stock values so SUM(pop[*]) is exercised
+        // non-trivially.
+        .array_with_ranges("pop0[region]", vec![("north", "100"), ("south", "300")])
+        .array_stock("pop[region]", "pop0[region]", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        // The scalar feedback variable: depends on the scalar stock `total`.
+        // The `+ 0.01` keeps it strictly positive.
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        // The scalar stock and its flow. `SUM(pop[*] * scale)` is a
+        // sub-expression (the `1 +` keeps it from being a whole-RHS,
+        // variable-backed agg), so it is hoisted into a synthetic agg, and
+        // the `(scale, grow)` edge routes ThroughAgg.
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * scale)", None)
+        .build_datamodel();
+
+    // The model must compile and simulate with LTM enabled -- the baseline
+    // well-formedness the #533 element-graph fix preserves (a bad element edge
+    // never crashes compilation, but enumerating a loop that routes through a
+    // newly-visible agg node must not break LTM assembly either).
+    let (results, ltm_vars) = run_ltm(&project);
+    assert!(
+        results.step_count > STARTUP_STEPS,
+        "the fixture must simulate past the {STARTUP_STEPS}-step startup guard, got {} step(s)",
+        results.step_count
+    );
+
+    // LTM must have hoisted the inlined `SUM(pop[*] * scale)` reducer into a
+    // synthetic aggregate node (the precondition for the ThroughAgg routing
+    // #533 fixes at the element-graph level).
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    assert!(
+        ltm_vars.iter().any(|v| v.name == agg_name),
+        "LTM must hoist the inlined SUM(pop[*] * scale) reducer into a synthetic {agg_name} \
+         node; synthetic vars: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // The pure-scalar loop `total → scale → grow → total` is enumerated and
+    // scored via the direct `scale → grow` link (the variable-level circuit;
+    // gap #2 in the doc comment). Exactly one such loop exists.
+    let u_loops: Vec<&LtmSyntheticVar> = ltm_vars
+        .iter()
+        .filter(|v| {
+            v.name.starts_with(LOOP_SCORE_PREFIX)
+                && v.equation.source_text().contains("scale\u{2192}grow")
+        })
+        .collect();
+    assert_eq!(
+        u_loops.len(),
+        1,
+        "the scalar feedback loop must be enumerated as exactly one loop scored via the \
+         direct scale→grow link; loop vars: {:?}",
+        ltm_vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| (v.name.as_str(), v.equation.source_text()))
+            .collect::<Vec<_>>()
+    );
+
+    // Every LTM score variable must be finite at every timestep -- no NaN/Inf
+    // leaks from the agg wiring or the stubbed link scores. This is the
+    // well-formedness guarantee the #533 element-graph fix preserves; the
+    // characterization of *which* scores are currently 0 (gaps #1/#2) lives in
+    // the doc comment, not as a brittle per-value assertion.
+    for v in ltm_vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX) || v.name.starts_with(LINK_SCORE_PREFIX))
+    {
+        let n_slots = slot_count(v, &project.dimensions);
+        let base = offset_of(&results, &v.name);
+        for slot in 0..n_slots {
+            for (step, &val) in series_at(&results, base + slot).iter().enumerate() {
+                assert!(
+                    val.is_finite(),
+                    "LTM score {} slot {slot} at step {step} is not finite: {val}",
+                    v.name
+                );
+            }
+        }
+    }
+}
+
 /// Positive regression test for GH #541 (flipped from the prior
 /// characterization tripwire): a plain apply-to-all equation with a *bare*
 /// (unsubscripted) arrayed name inside a *nested* `PREVIOUS` now compiles,
