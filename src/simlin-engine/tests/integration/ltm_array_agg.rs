@@ -4039,8 +4039,9 @@ fn previous_of_rank_compiles_per_element() {
 /// `enumerate_agg_nodes` hoists the whole-extent `RANK(pop, 1)` into a
 /// scalar `$⁚ltm⁚agg⁚0` whose own (array-valued) equation cannot compile --
 /// the "RANK as the scored reducer itself" path (docs/tech-debt.md entry
-/// 27's family). That failure is loud (one synthetic-variable Warning,
-/// pinned here) and zeroes only the agg-routed loop scores.
+/// 27's family), tracked as GH #771. That failure is loud (one
+/// synthetic-variable Warning, pinned here) and zeroes only the agg-routed
+/// loop scores.
 #[test]
 fn rank_frozen_subtree_link_score_scores_correctly() {
     let project = TestProject::new("gh742_rank")
