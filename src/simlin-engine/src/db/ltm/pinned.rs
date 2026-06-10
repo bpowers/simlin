@@ -161,17 +161,23 @@ pub(crate) fn model_pinned_loops(
         };
 
         // A standard feedback loop includes at least one stock (LTM ref 2.1).
-        // A purely-instantaneous cycle would be a compile-time circular
-        // dependency, not a feedback loop, so reject it with a clear message.
+        // A stockless cycle is usually a compile-time circular dependency,
+        // not a feedback loop, so reject it with a clear message. (The one
+        // exception is a stockless cycle broken by PREVIOUS: it compiles and
+        // the enumerator currently scores it, so this rejection makes the two
+        // surfaces disagree there -- tracked as GH #749.)
         //
         // "Stock" here counts state INSIDE any module instance the cycle
         // traverses (GH #673): a SMOOTH/DELAY instance or user sub-model whose
-        // internal stock is the loop's only state is a genuine feedback loop,
-        // and the enumerator scores exactly this cycle (its
-        // `build_loop_from_cycle` attaches module-internal stocks via the same
-        // `enrich_with_module_stocks` enrichment instead of filtering). A
-        // cycle through a stockless *passthrough* module enriches to nothing
-        // and is still rejected -- it is instantaneous end to end.
+        // internal stock is the loop's only state is a genuine feedback loop.
+        // The loop-detection surface (`find_loops_with_limit`, behind
+        // `detect_loops` / `model_detected_loops`) attaches module-internal
+        // stocks via the same `enrich_with_module_stocks` enrichment instead
+        // of filtering, as does the PureScalar pin arm's
+        // `build_loop_from_cycle` below -- so validation and the loops both
+        // surfaces construct can never disagree about module-internal state.
+        // A cycle through a stockless *passthrough* module enriches to
+        // nothing and is still rejected -- it is instantaneous end to end.
         let parent_stocks = graph.find_stocks_in_loop(&cycle);
         let has_stock = !graph
             .enrich_with_module_stocks(&cycle, parent_stocks)

@@ -1593,6 +1593,8 @@ fn assign_uids_for_pinning(project: &mut datamodel::Project) {
 }
 
 /// Pin a loop on `model_name` by variable idents, mirroring the `SetLoopName`
+/// patch path: assign UIDs to the named variables and append the
+/// `LoopMetadata` entry those UIDs resolve from at sync time.
 fn pin_loop_by_names(
     project: &mut datamodel::Project,
     model_name: &str,
