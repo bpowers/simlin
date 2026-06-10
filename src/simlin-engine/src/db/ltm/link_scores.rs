@@ -709,9 +709,11 @@ pub(crate) fn ltm_partial_equation_warning_message(
             "LTM link-score variable '{variable_name}' could not be generated: the \
              ceteris-paribus partial of '{equation_text}' would freeze an array \
              slice inside PREVIOUS(), which cannot compile, and the changed-last \
-             fallback is unfreezable too. The variable is skipped rather than \
-             emitted with a silently-stubbed helper (which would poison the score \
-             with a plausible-looking wrong constant -- GH #743)."
+             fallback could not be rendered either (its freeze would also lag an \
+             array slice, or the source has no matching occurrence to freeze). The \
+             variable is skipped rather than emitted with a silently-stubbed helper \
+             (which would poison the score with a plausible-looking wrong constant \
+             -- GH #743)."
         ),
     }
 }

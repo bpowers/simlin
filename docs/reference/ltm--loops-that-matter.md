@@ -266,25 +266,43 @@ After computing one timestep dt, for each non-stock variable `target`:
 This roughly doubles the number of equation evaluations vs. normal simulation (one
 re-evaluation per input per variable).
 
-> **Simlin implementation note: changed-last attribution for scalar reducer feeders.**
+> **Simlin implementation note: the changed-last fallback.**
 > The partial above is the "changed-first" convention: the isolated input `x` is read at
 > its *current* value while every other input is frozen at its *previous* value. Simlin
-> uses changed-first everywhere except one case: the link score for a **scalar feeder of
-> a hoisted array reducer** (`scale` in `SUM(pop[*] * scale)`, scored as the
-> `scale -> $...agg...` half of the routed edge). There the changed-first partial would
-> have to freeze the reducer's arrayed argument as an inline lagged whole-array read
-> (`SUM(PREVIOUS(pop[*]) * scale)`), which Simlin's equation compiler rejects; expressing
-> it would require synthesizing a per-element frozen helper per arrayed reference (a cost
-> and complexity tradeoff, not an impossibility). Instead Simlin emits the algebraically
-> dual **"changed-last"** attribution for that one hop:
-> `Delta_x(z) = z(x_current, w_current) - z(x_previous, w_current)` -- only the scalar
-> feeder is frozen, every array reference stays live. Both conventions are
-> first-order-equal discrete attributions of `Delta(z)` to `Delta(x)`; for a bilinear
-> body such as
-> `SUM(pop[*] * scale)` the feeder's changed-last half is exactly complementary to the
-> array rows' changed-first halves (the per-input deltas sum identically to `Delta(z)`),
-> so the loop-score product loses nothing. The two renderings differ only in which
-> step's co-factor weights the feeder's change.
+> uses changed-first by convention, falling back to the algebraically dual
+> **"changed-last"** attribution --
+> `Delta_x(z) = z(x_current, w_current) - z(x_previous, w_current)`, only the isolated
+> input frozen, every other reference left live -- whenever the changed-first partial
+> cannot be rendered as a compilable equation. That happens exactly when freezing the
+> "everything else" would put an **array slice inside `PREVIOUS()`**
+> (`PREVIOUS(matrix[D1,*])`), which Simlin's equation compiler has no lagged-array-view
+> path for; expressing changed-first there would require synthesizing a per-element
+> frozen helper per arrayed reference (a cost and complexity tradeoff, not an
+> impossibility). Two shapes hit the fallback today:
+>
+> - the link score for a **scalar feeder of a hoisted array reducer** (`scale` in
+>   `SUM(pop[*] * scale)`, scored as the `scale -> $...agg...` half of the routed
+>   edge), the original changed-last case; and
+> - the conservative (un-hoisted) per-shape link scores -- the aux-to-aux,
+>   stock-to-flow, and per-element-slot generators -- when the target's equation
+>   embeds a reducer the aggregate-node machinery declined to hoist and the isolated
+>   input sits *inside* it next to a sliced co-source, e.g. the **iterated-dim feeder**
+>   `frac` in `growth[D1] = SUM(matrix[D1,*] * frac[D1])` (GH #743): changed-first
+>   would freeze `PREVIOUS(matrix[D1,*])`, so Simlin emits
+>   `growth - SUM(matrix[D1,*] * PREVIOUS(frac))` instead.
+>
+> If *both* legs are unrenderable -- the changed-last freeze would itself lag an array
+> slice, or the isolated input has no matching occurrence to freeze (the frozen
+> equation would equal the target's own, silently scoring 0) -- Simlin skips the link
+> score entirely and surfaces a `Warning` naming the variable and equation: a loud
+> degradation, never a silently wrong number.
+>
+> Both conventions are first-order-equal discrete attributions of `Delta(z)` to
+> `Delta(x)`; for a bilinear body such as `SUM(pop[*] * scale)` the feeder's
+> changed-last half is exactly complementary to the array rows' changed-first halves
+> (the per-input deltas sum identically to `Delta(z)`), so the loop-score product
+> loses nothing. The two renderings differ only in which step's co-factor weights the
+> isolated input's change.
 
 ### 3.2 Flow-to-Stock Link Score
 

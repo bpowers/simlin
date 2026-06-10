@@ -1013,17 +1013,48 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
     iter_ctx: Option<&IteratedDimCtx<'_>>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Result<(String, Option<Expr0>), PartialEquationError> {
+    let (transformed, live_ref) = wrap_changed_first_ast(
+        equation_text,
+        deps,
+        live_source,
+        live_shape,
+        source_dim_elements,
+        iter_ctx,
+        dims_ctx,
+    )?;
+    Ok((print_eqn(&transformed), live_ref))
+}
+
+/// The shared changed-first transform: filter `deps` down to the
+/// other-deps set, parse `equation_text`, and PREVIOUS-wrap via
+/// [`wrap_non_matching_in_previous`] -- returning the transformed AST (not
+/// printed text) plus the captured live reference. The single
+/// implementation behind both [`build_partial_equation_shaped_with_live_ref`]
+/// (which prints it) and [`shaped_guard_form_text`] (which doom-checks the
+/// AST before printing), so the two can never drift on dep filtering,
+/// parse-failure handling, or the wrap itself.
+///
+/// A parse failure (`Err`) or an empty equation (`Ok(None)`) leaves no AST
+/// to PREVIOUS-wrap, so the ceteris-paribus partial cannot be built.
+/// Returning the input unchanged would silently produce a non-ceteris-
+/// paribus "partial" identical to the full equation (link score magnitude
+/// == 1); fail loudly instead so the caller skips the variable and warns.
+#[allow(clippy::too_many_arguments)]
+fn wrap_changed_first_ast(
+    equation_text: &str,
+    deps: &HashSet<Ident<Canonical>>,
+    live_source: &Ident<Canonical>,
+    live_shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
+    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+) -> Result<(Expr0, Option<Expr0>), PartialEquationError> {
     let other_deps: HashSet<Ident<Canonical>> = deps
         .iter()
         .filter(|d| *d != live_source && normalize_module_ref(d) != *live_source)
         .cloned()
         .collect();
 
-    // A parse failure (`Err`) or an empty equation (`Ok(None)`) leaves no AST
-    // to PREVIOUS-wrap, so the ceteris-paribus partial cannot be built.
-    // Returning the input unchanged would silently produce a non-ceteris-
-    // paribus "partial" identical to the full equation (link score magnitude
-    // == 1); fail loudly instead so the caller skips the variable and warns.
     let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
         return Err(PartialEquationError::new(equation_text));
     };
@@ -1039,7 +1070,7 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
         dims_ctx,
         &mut live_ref,
     );
-    Ok((print_eqn(&transformed), live_ref))
+    Ok((transformed, live_ref))
 }
 
 /// Is `expr` *array-slice-valued* -- does it contain a wildcard/star-range
@@ -1143,6 +1174,16 @@ fn contains_unfreezable_previous(expr: &Expr0) -> bool {
 /// back). Non-matching occurrences of `live_source` -- and all other
 /// references -- stay current: their influence is attributed by their own
 /// link-score variables.
+///
+/// Boundary: unlike its changed-first dual, this walker never recurses
+/// into subscript INDEX expressions -- a `live_source` occurrence in an
+/// index position of another reference (`other_arr[live_source]`) stays
+/// live (current) in the changed-last partial. That matches the dual's
+/// convention that an index-nested occurrence is never the captured live
+/// ref, but means such an occurrence is not frozen here either; no
+/// reachable shape exercises this today (the fallback only fires when the
+/// changed-first partial is unfreezable, which requires the live ref
+/// inside a reducer next to a sliced co-source).
 fn wrap_live_shaped_in_previous(
     expr: Expr0,
     live_source: &Ident<Canonical>,
@@ -1313,26 +1354,15 @@ fn shaped_guard_form_text(
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
     target_ref: &str,
 ) -> Result<String, PartialEquationError> {
-    let other_deps: HashSet<Ident<Canonical>> = deps
-        .iter()
-        .filter(|d| *d != from && normalize_module_ref(d) != *from)
-        .cloned()
-        .collect();
-    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
-        return Err(PartialEquationError::new(equation_text));
-    };
-
-    let mut live_ref: Option<Expr0> = None;
-    let changed_first = wrap_non_matching_in_previous(
-        ast.clone(),
+    let (changed_first, live_ref) = wrap_changed_first_ast(
+        equation_text,
+        deps,
         from,
         shape,
-        &other_deps,
         source_dim_elements,
         iter_ctx,
         dims_ctx,
-        &mut live_ref,
-    );
+    )?;
     if !contains_unfreezable_previous(&changed_first) {
         let source_ref = source_ref_for_guard(
             from,
@@ -1348,7 +1378,15 @@ fn shaped_guard_form_text(
         ));
     }
 
-    // Changed-last fallback: freeze only the live source.
+    // Changed-last fallback: freeze only the live source. Re-parse the
+    // (already proven parseable) equation text rather than threading the
+    // pristine AST out of `wrap_changed_first_ast` -- this leg is the rare
+    // doomed path, and a second cheap parse keeps the shared helper's
+    // signature identical to `build_partial_equation_shaped_with_live_ref`'s
+    // needs.
+    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
+        return Err(PartialEquationError::new(equation_text));
+    };
     let mut frozen_ref: Option<Expr0> = None;
     let changed_last = wrap_live_shaped_in_previous(
         ast,
