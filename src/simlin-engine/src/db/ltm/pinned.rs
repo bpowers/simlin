@@ -26,7 +26,10 @@ use crate::db::{
 };
 use crate::ltm::{Loop, strip_subscript};
 
-use super::loops::{build_a2a_loop_stocks, build_element_level_loops, cross_agg_loop_budget};
+use super::loops::{
+    build_a2a_loop_stocks, build_element_level_loops, cross_agg_loop_budget,
+    recover_agg_hop_polarities,
+};
 
 /// A pinned loop the LTM pipeline must always score, paired with the user's
 /// chosen name so a caller can map the synthetic `pin{n}` id back to a label.
@@ -79,7 +82,11 @@ pub struct PinnedLoopsResult {
 /// exhaustive enumerator classifies cycles ([`classify_cycle`], GH #653):
 ///
 /// - **PureScalar** -> a scalar `Loop` (the pre-#653 behavior, correct for
-///   scalar models).
+///   scalar models). A cycle traversing a `ThroughAgg`-routed edge (a
+///   scalar feeder of a hoisted reducer) never classifies `PureScalar`
+///   (GH #737): it lands in the CrossElementOrMixed arm below, whose
+///   element-graph expansion routes it through the synthetic
+///   `$⁚ltm⁚agg⁚{n}` node -- the only routing with compilable link scores.
 /// - **PureSameElementA2A** -> the `Loop` carries the cycle's shared
 ///   `dimensions` and element-level stocks, so its loop score is emitted as
 ///   an arrayed (per-element) variable and its cycle partition resolves per
@@ -193,6 +200,16 @@ pub(crate) fn model_pinned_loops(
                     dm_dims,
                 ) {
                     Ok(mut loops) => {
+                        // A pin expanded through a hoisted reducer carries
+                        // synthetic-agg hops, which come back Unknown-polarity
+                        // from the variable-level graph (GH #516, same as the
+                        // enumerator's slow path); patch the derivable cases so
+                        // the pin's reported polarity isn't degraded to
+                        // Undetermined. Must run BEFORE `assign_pin_ids`: the
+                        // patcher re-runs the (content-sorting) enumerator id
+                        // assignment when it changes anything, and the
+                        // pin-derived ids overwrite those positionally.
+                        recover_agg_hop_polarities(&mut loops, &graph, db, model, project);
                         assign_pin_ids(&mut loops, &id);
                         loops
                     }

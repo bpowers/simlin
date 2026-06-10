@@ -1224,6 +1224,18 @@ pub struct EdgeShapesResult {
     /// AST. Keys mirror the `(from, to)` pairs from
     /// `model_causal_edges`.
     pub edge_shapes: HashMap<(String, String), BTreeSet<RefShape>>,
+    /// The variable-level edges with at least one `ThroughAgg`-routed
+    /// reference site: the element graph routes (part of) this edge
+    /// through a synthetic `$⁚ltm⁚agg⁚{n}` node instead of emitting a
+    /// direct `from → to` element edge. A cycle traversing such an edge
+    /// can never be scored from the variable-level circuit alone (the
+    /// direct link has no usable link-score variable -- GH #737), so
+    /// `classify_cycle` must send it to the element-level slow path
+    /// regardless of the edge's `RefShape`s. The distinction matters
+    /// exactly when the routed site's shape is `Bare` (a scalar feeder
+    /// of a hoisted reducer); an arrayed reducer argument is `Wildcard`
+    /// and already classifies as cross-element on shape alone.
+    pub agg_routed_edges: BTreeSet<(String, String)>,
 }
 
 /// Tag every variable-level edge with the set of `RefShape`s observed
@@ -1270,6 +1282,7 @@ pub fn model_edge_shapes(
     }
 
     let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
+    let mut agg_routed_edges: BTreeSet<(String, String)> = BTreeSet::new();
     for (from_name, to_set) in &variable_edges.edges {
         for to_name in to_set {
             // Module edges and structural flow->stock edges short-circuit
@@ -1298,19 +1311,32 @@ pub fn model_edge_shapes(
             // couldn't be reconstructed) has no IR entry -> default to
             // {Bare} so the cycle classifier sees a same-element shape
             // rather than an empty set (which would be ambiguous).
-            let mut set: BTreeSet<RefShape> = ir
-                .sites
-                .get(&(from_name.clone(), to_name.clone()))
+            let sites = ir.sites.get(&(from_name.clone(), to_name.clone()));
+            let mut set: BTreeSet<RefShape> = sites
                 .map(|sites| sites.iter().map(|s| s.shape.clone()).collect())
                 .unwrap_or_default();
             if set.is_empty() {
                 set.insert(RefShape::Bare);
             }
             edge_shapes.insert((from_name.clone(), to_name.clone()), set);
+            // Record edges with a ThroughAgg-routed site: the element graph
+            // routes them through a synthetic agg node, so the cycle
+            // classifier must keep cycles traversing them off the fast path
+            // even when every site's shape is Bare (GH #737).
+            if sites.is_some_and(|sites| {
+                sites
+                    .iter()
+                    .any(|s| matches!(s.routing, crate::db::ltm_ir::SiteRouting::ThroughAgg { .. }))
+            }) {
+                agg_routed_edges.insert((from_name.clone(), to_name.clone()));
+            }
         }
     }
 
-    EdgeShapesResult { edge_shapes }
+    EdgeShapesResult {
+        edge_shapes,
+        agg_routed_edges,
+    }
 }
 
 /// Classification of a variable-level cycle for tiered loop enumeration.
@@ -1322,16 +1348,17 @@ pub fn model_edge_shapes(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CycleClass {
     /// Every variable in the cycle is scalar and every traversed edge
-    /// has a `Bare` reference. The cycle exists exactly once at scalar
-    /// granularity; emit one scalar `Loop` and skip the element-level
-    /// enumerator.
+    /// has a `Bare` reference with no `ThroughAgg` routing. The cycle
+    /// exists exactly once at scalar granularity; emit one scalar
+    /// `Loop` and skip the element-level enumerator.
     PureScalar,
     /// Every variable in the cycle is arrayed over the same dimension
-    /// list and every traversed edge has only `Bare` references. The
-    /// cycle exists at every element of the shared dimensions; emit one
-    /// A2A `Loop` whose `dimensions` field carries those dimensions'
-    /// canonical names (lex-ordered as they appear on the participating
-    /// variables) and skip the element-level enumerator.
+    /// list and every traversed edge has only `Bare` references (none
+    /// `ThroughAgg`-routed). The cycle exists at every element of the
+    /// shared dimensions; emit one A2A `Loop` whose `dimensions` field
+    /// carries those dimensions' canonical names (lex-ordered as they
+    /// appear on the participating variables) and skip the
+    /// element-level enumerator.
     PureSameElementA2A {
         /// Canonical (lower-case) dimension names, in source order from
         /// the participating variables' dimension list. The list is
@@ -1340,10 +1367,10 @@ pub enum CycleClass {
         dimensions: Vec<String>,
     },
     /// At least one edge has a non-Bare shape (Wildcard, FixedIndex, or
-    /// DynamicIndex), or the cycle mixes scalar and arrayed nodes, or
-    /// the cycle's arrayed nodes don't share the same dimension list.
-    /// The cycle requires element-level enumeration on the slow-path
-    /// subgraph induced by its variables.
+    /// DynamicIndex) or is `ThroughAgg`-routed, or the cycle mixes
+    /// scalar and arrayed nodes, or the cycle's arrayed nodes don't
+    /// share the same dimension list. The cycle requires element-level
+    /// enumeration on the slow-path subgraph induced by its variables.
     CrossElementOrMixed,
 }
 
@@ -1371,11 +1398,21 @@ pub enum CycleClass {
 ///    a single A2A loop. A Wildcard reducer pulls in cross-element
 ///    contributions, so the cycle is structurally cross-element.
 ///    DynamicIndex is conservatively treated like Wildcard.
-/// 2. If every variable has an empty dimension list (all scalar),
+/// 2. If any edge is `ThroughAgg`-routed
+///    (`EdgeShapesResult::agg_routed_edges`), `CrossElementOrMixed` --
+///    even when every site shape is Bare. The element graph routes such
+///    an edge through a synthetic `$⁚ltm⁚agg⁚{n}` node, so the loop must
+///    be built from the element-level circuit that traverses the agg; a
+///    fast-path loop built from the variable-level circuit would compose
+///    the direct `from → to` link, which has no usable link-score
+///    variable (GH #737). The Bare-shaped case is a *scalar feeder* of a
+///    hoisted reducer (`scale` in `SUM(pop[*] * scale)`); arrayed
+///    reducer arguments are `Wildcard` and already caught by rule 1.
+/// 3. If every variable has an empty dimension list (all scalar),
 ///    `PureScalar`.
-/// 3. If every variable has the *same* non-empty dimension list,
+/// 4. If every variable has the *same* non-empty dimension list,
 ///    `PureSameElementA2A` with that dimension list.
-/// 4. Otherwise (mixed scalar / arrayed nodes, or arrayed nodes with
+/// 5. Otherwise (mixed scalar / arrayed nodes, or arrayed nodes with
 ///    differing dimension lists), `CrossElementOrMixed`.
 ///
 /// Empty cycles are degenerate; treat them as `PureScalar` for the
@@ -1389,13 +1426,21 @@ pub(crate) fn classify_cycle(
         return CycleClass::PureScalar;
     }
 
-    // Rule 1: scan all edges in cycle order. If any edge carries a
-    // non-Bare shape, the cycle is cross-element / mixed.
+    // Rules 1 / 2: scan all edges in cycle order. If any edge carries a
+    // non-Bare shape, or is routed through a synthetic aggregate node,
+    // the cycle is cross-element / mixed.
     let n = cycle.len();
     for i in 0..n {
         let from = &cycle[i];
         let to = &cycle[(i + 1) % n];
         let key = (from.clone(), to.clone());
+        // Rule 2: a ThroughAgg-routed edge forces the slow path even when
+        // its shapes are all Bare (a scalar feeder of a hoisted reducer) --
+        // the loop must traverse the `from → $⁚ltm⁚agg⁚{n} → to` element
+        // hops so its score composes the agg-half link scores (GH #737).
+        if edge_shapes.agg_routed_edges.contains(&key) {
+            return CycleClass::CrossElementOrMixed;
+        }
         let shapes = match edge_shapes.edge_shapes.get(&key) {
             Some(s) => s,
             None => continue, // missing edge -> treat as Bare
@@ -1410,7 +1455,7 @@ pub(crate) fn classify_cycle(
         }
     }
 
-    // Rule 2 / 3 / 4: dimension uniformity check.
+    // Rules 3 / 4 / 5: dimension uniformity check.
     let first_dims = dim_lookup(&cycle[0]);
     let any_arrayed = !first_dims.is_empty()
         || cycle
@@ -1421,7 +1466,7 @@ pub(crate) fn classify_cycle(
         return CycleClass::PureScalar;
     }
 
-    // Rule 3: every variable must have *the same* non-empty dimensions.
+    // Rule 4: every variable must have *the same* non-empty dimensions.
     if first_dims.is_empty() {
         return CycleClass::CrossElementOrMixed;
     }
@@ -1851,11 +1896,19 @@ pub fn model_detected_loops(
     // Variable-level canonical rotation of a scored loop, used both to dedup a
     // pin's loops against the enumerated set and to transfer the pin's name
     // onto the surviving enumerated loop it duplicates.
+    //
+    // Synthetic `$⁚ltm⁚agg⁚{n}` nodes are filtered out: a pin whose cycle
+    // routes through a hoisted reducer carries the agg hop in its links
+    // (`scale → $⁚ltm⁚agg⁚0 → grow`), while the enumerated cycles here come
+    // from the *variable-level* graph and never contain agg nodes. Comparing
+    // raw rotations would treat the pin as a distinct loop -- surfacing the
+    // same cycle twice and dropping the name transfer (GH #737).
     let loop_rotation = |l: &crate::ltm::Loop| -> Vec<String> {
         let seq: Vec<String> = l
             .links
             .iter()
             .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
+            .filter(|n| !crate::ltm_agg::is_synthetic_agg_name(n))
             .collect();
         crate::ltm::canonical_rotation(&seq)
     };
@@ -1871,17 +1924,10 @@ pub fn model_detected_loops(
         .collect();
     // Canonical rotations of the enumerated loops, so a pinned loop that
     // duplicates one is not surfaced twice (its name is transferred instead).
-    let enumerated: std::collections::HashSet<Vec<String>> = loops
-        .iter()
-        .map(|l| {
-            let seq: Vec<String> = l
-                .links
-                .iter()
-                .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
-                .collect();
-            crate::ltm::canonical_rotation(&seq)
-        })
-        .collect();
+    // (`loop_rotation` filters synthetic agg nodes -- a no-op for these
+    // variable-level cycles, but it keeps the two key derivations identical.)
+    let enumerated: std::collections::HashSet<Vec<String>> =
+        loops.iter().map(&loop_rotation).collect();
     // The extra pins (those not duplicating an enumerated loop), kept as
     // `ltm::Loop`s alongside their pin name so partition resolution can run
     // over the full final loop list in the SAME order the `DetectedLoop`s
@@ -1912,12 +1958,7 @@ pub fn model_detected_loops(
         // Extract variable names from the loop's links
         let mut vars = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let loop_rotation: Vec<String> = l
-            .links
-            .iter()
-            .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
-            .collect();
-        let loop_key = crate::ltm::canonical_rotation(&loop_rotation);
+        let loop_key = loop_rotation(&l);
         if !l.links.is_empty() {
             let first = l.links[0].from.to_string();
             if seen.insert(first.clone()) {
@@ -1985,14 +2026,19 @@ pub fn model_detected_loops(
 fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop {
     let mut vars = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    // Synthetic `$⁚ltm⁚agg⁚{n}` hops are an LTM scoring implementation
+    // detail; like macro/module internals they are trimmed from the reported
+    // node sequence (a pin expanded through a hoisted reducer carries them
+    // in its links -- GH #737).
+    let is_agg = |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
     if !l.links.is_empty() {
         let first = l.links[0].from.to_string();
-        if seen.insert(first.clone()) {
+        if !is_agg(&first) && seen.insert(first.clone()) {
             vars.push(first);
         }
         for link in &l.links {
             let to = link.to.to_string();
-            if seen.insert(to.clone()) {
+            if !is_agg(&to) && seen.insert(to.clone()) {
                 vars.push(to);
             }
         }
@@ -4120,7 +4166,10 @@ mod classify_cycle_tests {
             let set: BTreeSet<RefShape> = shapes.iter().cloned().collect();
             edge_shapes.insert((from.to_string(), to.to_string()), set);
         }
-        EdgeShapesResult { edge_shapes }
+        EdgeShapesResult {
+            edge_shapes,
+            agg_routed_edges: BTreeSet::new(),
+        }
     }
 
     #[test]
@@ -4131,6 +4180,34 @@ mod classify_cycle_tests {
         assert_eq!(
             classify_cycle(&cycle, &edges, &lookup),
             CycleClass::PureScalar
+        );
+    }
+
+    /// GH #737, rule 1b: an all-scalar, all-Bare cycle whose edge is
+    /// ThroughAgg-routed (a scalar feeder of a hoisted reducer) must NOT
+    /// classify PureScalar -- the loop has to be built from the element
+    /// circuit that traverses the synthetic agg node.
+    #[test]
+    fn agg_routed_bare_edge_forces_slow_path() {
+        let cycle = vec!["total".to_string(), "scale".to_string(), "grow".to_string()];
+        let mut edges = shapes_with(&[
+            ("total", "scale", &[RefShape::Bare]),
+            ("scale", "grow", &[RefShape::Bare]),
+            ("grow", "total", &[RefShape::Bare]),
+        ]);
+        let lookup = dim_lookup(&[], &[]);
+        // Without the routing marker the cycle is PureScalar (sanity check
+        // that the marker, not the shapes, drives the reclassification).
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::PureScalar
+        );
+        edges
+            .agg_routed_edges
+            .insert(("scale".to_string(), "grow".to_string()));
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::CrossElementOrMixed
         );
     }
 

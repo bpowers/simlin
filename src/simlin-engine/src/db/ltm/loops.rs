@@ -380,6 +380,12 @@ pub(crate) fn build_loops_from_tiered(
     // arrayed dimensions (empty for PureScalar). The links / stocks /
     // polarity are derived from the variable-level cycle exactly as
     // the legacy pure-dimension branch did.
+    //
+    // Building straight from the variable-level circuit is sound here
+    // because `classify_cycle` guarantees no fast-path cycle traverses a
+    // `ThroughAgg`-routed edge (GH #737): such a cycle's loop must instead
+    // route `from → $⁚ltm⁚agg⁚{n} → to` (only the agg-half link scores are
+    // scoreable), which only the element-level slow path below produces.
     for fp in &tiered.fast_path {
         if fp.variables.is_empty() {
             continue;
@@ -1534,7 +1540,17 @@ where
 /// - `source[d] → agg`: `SUM`/`MEAN`/`MIN`/`MAX` are monotone non-decreasing
 ///   in each source element (raising any one element raises-or-holds the
 ///   result), so the hop is `Positive`. `STDDEV`/`RANK` are not monotone --
-///   left `Unknown`.
+///   left `Unknown`. A *scalar feeder* hop (`scale → agg` for
+///   `SUM(pop[*] * scale)`, GH #737) rides the same arm: strictly, monotone
+///   non-decreasing holds in the source *elements*, not in an arbitrary
+///   feeder the reducer body composes -- but the feeder's sign is not
+///   derivable from the variable graph either (the agg node isn't in it),
+///   and a feeder entering a monotone reducer's body multiplicatively/
+///   additively against non-negative co-factors (the overwhelmingly common
+///   shape) is positive. A negating body (`SUM(pop[*] * (1 - scale))`)
+///   mislabels this hop Positive; the simulated loop score's sign is
+///   unaffected (it is computed numerically), only the static `r`/`b` id
+///   prefix and reported polarity.
 /// - `agg → consumer`: the polarity of `consumer`'s equation with respect to
 ///   the reducer subexpression, computed by substituting the reducer with the
 ///   agg name and running ordinary static polarity analysis

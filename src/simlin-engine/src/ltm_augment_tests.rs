@@ -3194,3 +3194,62 @@ fn loop_score_variables_prefer_apply_to_all_when_all_links_bare() {
         ),
     }
 }
+
+/// GH #737: the scalar-feeder → agg link-score equation freezes ONLY the
+/// feeder (changed-last attribution): the reducer's array references stay
+/// live exactly as in the agg's own equation (the changed-first form would
+/// need a lagged whole-array read, which does not compile), and the guard
+/// structure matches `link_score_guard_form`.
+#[test]
+fn test_generate_scalar_feeder_to_agg_equation_freezes_only_feeder() {
+    let eq = generate_scalar_feeder_to_agg_equation(
+        "scale",
+        "$\u{205A}ltm\u{205A}agg\u{205A}0",
+        "sum(pop[*] * scale)",
+    )
+    .expect("the agg equation text must parse");
+    // The frozen evaluation wraps the feeder, not the array reference.
+    assert!(
+        eq.contains("sum(pop[*] * PREVIOUS(scale))"),
+        "the frozen partial must wrap only the scalar feeder; got: {eq}"
+    );
+    assert!(
+        !eq.contains("PREVIOUS(pop"),
+        "the array reference must stay live (a lagged whole-array read does not compile); \
+         got: {eq}"
+    );
+    // The numerator is changed-last: agg minus the feeder-frozen evaluation.
+    assert!(
+        eq.contains("\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - (sum(pop[*] * PREVIOUS(scale)))"),
+        "the numerator must subtract the feeder-frozen evaluation from the agg; got: {eq}"
+    );
+    // Standard guard structure: initial-step zero, zero-delta zero, SAFEDIV.
+    assert!(
+        eq.starts_with("if (TIME = INITIAL_TIME) then 0"),
+        "got: {eq}"
+    );
+    assert!(eq.contains("SAFEDIV("), "got: {eq}");
+    assert!(eq.contains("SIGN((scale - PREVIOUS(scale)))"), "got: {eq}");
+}
+
+/// `wrap_matching_in_previous` must not double-lag references that are
+/// already inside a `PREVIOUS(...)`/`INIT(...)` call, and must wrap every
+/// other occurrence of the target (including inside nested calls and
+/// subscript index expressions).
+#[test]
+fn test_wrap_matching_in_previous_skips_already_lagged() {
+    let ast = Expr0::new("sum(arr[*] * scale) + PREVIOUS(scale) + abs(scale)", {
+        crate::lexer::LexerType::Equation
+    })
+    .unwrap()
+    .unwrap();
+    let wrapped = wrap_matching_in_previous(ast, &Ident::<Canonical>::new("scale"));
+    let text = print_eqn(&wrapped);
+    // (The parse/print roundtrip lowercases the pre-existing `PREVIOUS` call
+    // name; the newly-inserted wrappers keep the uppercase spelling. Both
+    // parse identically.)
+    assert_eq!(
+        text, "sum(arr[*] * PREVIOUS(scale)) + previous(scale) + abs(PREVIOUS(scale))",
+        "only un-lagged occurrences of the target are wrapped"
+    );
+}

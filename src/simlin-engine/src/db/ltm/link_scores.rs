@@ -907,6 +907,17 @@ pub(super) fn emit_per_shape_link_scores(
 /// `from`-slice combined for that slot) is the `all_elements` for the
 /// MEAN divisor / nonlinear expansion. The agg's *own* equation is exactly
 /// the reducer, so the "bare" algebraic shortcut applies.
+///
+/// A *scalar* `from` is the GH #737 scalar-feeder case (`scale` in
+/// `SUM(pop[*] * scale)`): there are no read rows, the element graph emits
+/// `scale → agg` (or `scale → agg[<slot>]` per result slot for an arrayed
+/// agg), and the loop builder's element-level path traverses that hop. One
+/// Bare-named link score `$⁚ltm⁚link_score⁚{from}→{agg}` is emitted --
+/// shaped over `result_dims` for an arrayed agg, so a loop visiting one
+/// slot references it as `"{name}"[<slot>]` -- with the changed-last
+/// equation from `generate_scalar_feeder_to_agg_equation` (the changed-first
+/// partial would need a lagged whole-array read, which doesn't compile; see
+/// that function's doc).
 pub(super) fn emit_source_to_agg_link_scores(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
@@ -924,6 +935,41 @@ pub(super) fn emit_source_to_agg_link_scores(
     }
     let from_dims = variable_dimensions(db, *from_sv, project);
     if from_dims.is_empty() {
+        // GH #737: a scalar feeder of the hoisted reducer. The per-read-row
+        // machinery below is meaningless for a scalar source; emit the single
+        // Bare-named score (dimensioned over `result_dims` when the agg is
+        // arrayed) built on the changed-last attribution instead.
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
+            from, agg.name
+        );
+        match crate::ltm_augment::generate_scalar_feeder_to_agg_equation(
+            from,
+            &agg.name,
+            &agg.equation_text,
+        ) {
+            Ok(text) => {
+                let equation = if agg.result_dims.is_empty() {
+                    datamodel::Equation::Scalar(text)
+                } else {
+                    // An arrayed agg's feeder score is per-slot: the agg's own
+                    // equation text is already ApplyToAll-compatible over
+                    // `result_dims` (it is the agg aux's own equation shape),
+                    // and the bare agg/feeder references resolve same-element
+                    // / broadcast respectively in A2A context.
+                    datamodel::Equation::ApplyToAll(agg.result_dims.clone(), text)
+                };
+                vars.push(LtmSyntheticVar {
+                    name,
+                    equation,
+                    dimensions: agg.result_dims.clone(),
+                    // agg-named target -> routed direct by the synthetic-agg
+                    // check in compile_ltm_synthetic_fragment.
+                    compile_directly: false,
+                });
+            }
+            Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+        }
         return;
     }
     // Reconstruct a transient (parsed + lowered) `Variable` from the

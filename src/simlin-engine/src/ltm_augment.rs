@@ -1009,6 +1009,128 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
     Ok((print_eqn(&transformed), live_ref))
 }
 
+/// Wrap every reference to `target` in `PREVIOUS()` -- the *inverse* of
+/// [`wrap_non_matching_in_previous`]: freeze ONLY the named variable, keep
+/// every other reference live (current-step).
+///
+/// Used by [`generate_scalar_feeder_to_agg_equation`] to build the
+/// "feeder frozen" evaluation of a hoisted reducer's equation. References
+/// already inside a `PREVIOUS(...)`/`INIT(...)` call are left untouched
+/// (their contents are already lagged/frozen; double-wrapping would read
+/// two steps back). Subscript index expressions are recursed into so a
+/// `arr[target + 1]` style index reference is frozen too; the outer
+/// subscripted variable itself is wrapped only when it names `target`
+/// (defensive -- the feeder this is used for is scalar and so is always a
+/// bare `Var` reference).
+fn wrap_matching_in_previous(expr: Expr0, target: &Ident<Canonical>) -> Expr0 {
+    match expr {
+        Expr0::Const(..) => expr,
+        Expr0::Var(ref ident, loc) => {
+            if &Ident::<Canonical>::new(ident.as_str()) == target {
+                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+            } else {
+                expr
+            }
+        }
+        Expr0::Subscript(ident, indices, loc) => {
+            let indices: Vec<IndexExpr0> = indices
+                .into_iter()
+                .map(|idx| match idx {
+                    IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_matching_in_previous(e, target)),
+                    other => other,
+                })
+                .collect();
+            let subscript = Expr0::Subscript(ident.clone(), indices, loc);
+            if &Ident::<Canonical>::new(ident.as_str()) == target {
+                Expr0::App(
+                    UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
+                    loc,
+                )
+            } else {
+                subscript
+            }
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            // Contents of PREVIOUS/INIT are already lagged/frozen.
+            if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
+                return Expr0::App(UntypedBuiltinFn(name, args), loc);
+            }
+            let args = args
+                .into_iter()
+                .map(|a| wrap_matching_in_previous(a, target))
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, arg, loc) => {
+            Expr0::Op1(op, Box::new(wrap_matching_in_previous(*arg, target)), loc)
+        }
+        Expr0::Op2(op, l, r, loc) => Expr0::Op2(
+            op,
+            Box::new(wrap_matching_in_previous(*l, target)),
+            Box::new(wrap_matching_in_previous(*r, target)),
+            loc,
+        ),
+        Expr0::If(c, t, f, loc) => Expr0::If(
+            Box::new(wrap_matching_in_previous(*c, target)),
+            Box::new(wrap_matching_in_previous(*t, target)),
+            Box::new(wrap_matching_in_previous(*f, target)),
+            loc,
+        ),
+    }
+}
+
+/// Generate the link-score equation for a *scalar feeder* of a hoisted
+/// reducer: the `feeder → $⁚ltm⁚agg⁚{n}` half of an edge the reference-site
+/// IR routed `ThroughAgg`, where the feeder is a scalar variable referenced
+/// inside the reducer's argument (`scale` in `SUM(pop[*] * scale)`).
+///
+/// The standard guard form ([`link_score_guard_form`]) measures the
+/// "changed-first" partial `Δ_x z = z(x_t, w_{t-1}) - z_{t-1}` by holding
+/// every *other* dependency at `PREVIOUS`. For a scalar feeder of a reducer
+/// that partial is INEXPRESSIBLE as compilable equation text: the reducer's
+/// arrayed argument would have to be frozen as a lagged whole-array read
+/// (`SUM(PREVIOUS(pop[*]) * scale)`), which the engine rejects (the GH
+/// #541-class wildcard-subscripted `PREVIOUS` capture -- the same shape that
+/// keeps the direct `scale→grow` link score uncompilable).
+///
+/// So this half uses the algebraically-dual "changed-last" attribution
+/// instead: `Δ_x z = z_t - z(x_{t-1}, w_t)` -- evaluate the reducer with
+/// ONLY the feeder frozen at `PREVIOUS` (a scalar `LoadPrev`, always
+/// compilable; every array reference stays exactly as in the agg's own
+/// equation, which compiles by construction) and subtract from the agg's
+/// current value. Both conventions are first-order-equal discrete
+/// attributions of `Δz` to `Δx` (LTM scores are inherently path-dependent
+/// approximations); for a SUM/MEAN body the two differ only in which step's
+/// co-factor weights the feeder's change.
+///
+/// The emitted text follows `link_score_guard_form`'s guard structure
+/// (zero at the initial step, zero when `Δtarget` or `Δsource` is zero,
+/// single-numerator `SAFEDIV` form) with the changed-last numerator
+/// `(agg - frozen)` in place of `(partial - PREVIOUS(agg))`.
+///
+/// Returns `Err` when `agg_equation_text` does not parse -- same loud-failure
+/// contract as [`build_partial_equation_shaped`] (GH #311).
+pub(crate) fn generate_scalar_feeder_to_agg_equation(
+    feeder: &str,
+    agg_name: &str,
+    agg_equation_text: &str,
+) -> Result<String, PartialEquationError> {
+    let Ok(Some(ast)) = Expr0::new(agg_equation_text, LexerType::Equation) else {
+        return Err(PartialEquationError::new(agg_equation_text));
+    };
+    let feeder_ident = Ident::<Canonical>::new(feeder);
+    let frozen = print_eqn(&wrap_matching_in_previous(ast, &feeder_ident));
+    let agg_q = quote_ident(agg_name);
+    let feeder_q = quote_ident(feeder);
+    let target_diff = format!("({agg_q} - PREVIOUS({agg_q}))");
+    let source_diff = format!("({feeder_q} - PREVIOUS({feeder_q}))");
+    Ok(format!(
+        "if (TIME = INITIAL_TIME) then 0 \
+         else if ({target_diff} = 0) OR ({source_diff} = 0) then 0 \
+         else SAFEDIV(({agg_q} - ({frozen})), ABS({target_diff}), 0) * SIGN({source_diff})"
+    ))
+}
+
 /// Replace every bare `Var(id)` reference in `equation_text` where `id`
 /// (canonicalized) is in `idents` with `Subscript(id, [element])`,
 /// pinning that variable to `element`.

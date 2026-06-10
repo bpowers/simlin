@@ -536,9 +536,9 @@ fn whole_extent_sum_agg_loop_scores_are_finite_and_sustained() {
     );
 }
 
-/// GH #533, end-to-end: a feedback loop whose only path back to a *scalar*
-/// stock runs through a *scalar* feeder of a hoisted reducer *with a scalar
-/// target*. The fixture is a scalar stock `total` grown by
+/// GH #533 + GH #737, end-to-end: a feedback loop whose only path back to a
+/// *scalar* stock runs through a *scalar* feeder of a hoisted reducer *with a
+/// scalar target*. The fixture is a scalar stock `total` grown by
 /// `grow = 1 + SUM(pop[*] * scale)`, with `scale = 0.001 * total + 0.01`
 /// feeding back from `total`. `SUM(pop[*] * scale)` is a sub-expression, so it
 /// is hoisted into a synthetic `$⁚ltm⁚agg⁚0`.
@@ -548,14 +548,10 @@ fn whole_extent_sum_agg_loop_scores_are_finite_and_sustained() {
 /// before the fix `model_element_causal_edges`'s both-scalar fast path emitted
 /// a direct `scale → grow` element edge instead of `scale → $⁚ltm⁚agg⁚0`. That
 /// element-graph fix is pinned directly by
-/// `element_graph_tests::element_graph_scalar_feeder_*`. This end-to-end test
-/// pins the robustly-observable consequence: with LTM enabled the model still
-/// COMPILES and SIMULATES (no crash, no NaN/Inf) and the loop is enumerated --
-/// the well-formedness the element-graph fix preserves.
+/// `element_graph_tests::element_graph_scalar_feeder_*`.
 ///
-/// Of the two pre-existing gaps this scalar-target scenario originally
-/// exposed (BOTH independent of #533's element-graph fast path), one is now
-/// fixed and one remains:
+/// The two follow-on gaps this scalar-target scenario originally exposed are
+/// both fixed now:
 ///
 /// 1. (FIXED, GH #738) The synthetic agg `$⁚ltm⁚agg⁚0` for
 ///    `SUM(pop[*] * scale)` (arrayed `pop` times scalar `scale`, reduced to a
@@ -567,21 +563,19 @@ fn whole_extent_sum_agg_loop_scores_are_finite_and_sustained() {
 ///    and tracks the inlined reducer's value -- asserted below, and pinned in
 ///    detail by `scalar_target_agg_value_matches_inlined_reducer`.
 ///
-/// 2. (OPEN, GH #737) The loop-score *builder* does not route the pure-scalar
-///    loop through the agg: `build_loops_from_tiered` materializes a
-///    `PureScalar` fast-path cycle straight from the *variable-level* circuit
-///    `total → scale → grow → total` (`var_graph.circuit_to_links`), linking
-///    `scale → grow` directly -- never the agg. The
-///    cross-element-through-aggregate recovery (`recover_cross_agg_loops`) runs
-///    only on the slow (cross-element) path. Compounding it, the *direct*
-///    `scale→grow` link score itself still fails fragment compilation: its
-///    ceteris-paribus partial contains `PREVIOUS(pop[*])`, which
-///    `make_temp_arg` (outside A2A context) captures into an ill-typed
-///    *scalar* helper -- the documented GH #541 limitation extended to
-///    wildcard-subscripted args. So this loop's score stays 0.
-///
-/// Pinning gap (2)'s current routing keeps it observable; closing it is
-/// separate, tracked work (#737).
+/// 2. (FIXED, GH #737) The loop-score *builder* now routes the loop through
+///    the agg: `classify_cycle` sends a cycle that traverses a
+///    `ThroughAgg`-routed edge down the element-level slow path (it is no
+///    longer `PureScalar`), where the post-#533 element graph's
+///    `scale → $⁚ltm⁚agg⁚0 → grow` hops are traversed, so the loop score
+///    composes the two agg-half link scores instead of the direct
+///    `scale → grow` link. That matters because the DIRECT `scale→grow` link
+///    score is still uncompilable (its ceteris-paribus partial contains
+///    `PREVIOUS(pop[*])`, the GH #541-class wildcard-subscripted-arg capture,
+///    tracked separately) and would be silently stubbed to 0, zeroing the
+///    loop score. The agg halves avoid the lagged-wildcard shape entirely:
+///    `scale → agg` freezes only the scalar feeder (`PREVIOUS(scale)`), and
+///    `agg → grow` substitutes the reducer with the agg name.
 #[test]
 fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
     let project = TestProject::new("scalar_feeder_agg_loop")
@@ -648,33 +642,73 @@ fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
         }
     }
 
-    // The pure-scalar loop `total → scale → grow → total` is enumerated and
-    // scored via the direct `scale → grow` link (the variable-level circuit;
-    // gap #2 in the doc comment). Exactly one such loop exists.
-    let u_loops: Vec<&LtmSyntheticVar> = ltm_vars
+    // GH #737 (gap #2, fixed): the scalar feedback loop
+    // `total → scale → $⁚ltm⁚agg⁚0 → grow → total` is enumerated as exactly
+    // one loop whose score composes the two agg-half link scores -- the
+    // equation references the agg name on both sides -- and does NOT
+    // reference the (uncompilable, stubbed-to-0) direct `scale→grow` form.
+    let agg_loops: Vec<&LtmSyntheticVar> = ltm_vars
         .iter()
         .filter(|v| {
-            v.name.starts_with(LOOP_SCORE_PREFIX)
-                && v.equation.source_text().contains("scale\u{2192}grow")
+            v.name.starts_with(LOOP_SCORE_PREFIX) && v.equation.source_text().contains(agg_name)
         })
         .collect();
     assert_eq!(
-        u_loops.len(),
+        agg_loops.len(),
         1,
-        "the scalar feedback loop must be enumerated as exactly one loop scored via the \
-         direct scale→grow link; loop vars: {:?}",
+        "the scalar feedback loop must be enumerated as exactly one loop scored through the \
+         synthetic agg; loop vars: {:?}",
         ltm_vars
             .iter()
             .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
             .map(|v| (v.name.as_str(), v.equation.source_text()))
             .collect::<Vec<_>>()
     );
+    let agg_loop = agg_loops[0];
+    let eq = agg_loop.equation.source_text();
+    assert!(
+        eq.contains(&format!("scale\u{2192}{agg_name}"))
+            && eq.contains(&format!("{agg_name}\u{2192}grow")),
+        "the loop score must compose the two agg-half link scores \
+         (scale→{agg_name} and {agg_name}→grow); got: {eq}"
+    );
+    assert!(
+        !eq.contains("scale\u{2192}grow"),
+        "the loop score must NOT reference the direct scale→grow link score \
+         (uncompilable, silently stubbed to 0); got: {eq}"
+    );
+    // The hop polarities are recoverable (SUM is monotone in the feeder's
+    // direction here, and `grow = 1 + agg` is a positive consumer), so the
+    // loop must classify concretely as reinforcing -- an `r{n}` id, not the
+    // degraded `u{n}` Undetermined fallback.
+    assert!(
+        agg_loop
+            .name
+            .strip_prefix(LOOP_SCORE_PREFIX)
+            .is_some_and(|id| id.starts_with('r')),
+        "the agg-routed loop must classify concretely (reinforcing, r-prefixed id), \
+         not degrade to Undetermined; got: {}",
+        agg_loop.name
+    );
+    // And -- the assertion with teeth -- the loop score must carry a real,
+    // sustained non-zero value at every discoverable step (mirrors
+    // `whole_extent_sum_agg_loop_scores_are_finite_and_sustained`): the agg
+    // halves compile, so the score is no longer silently 0.
+    {
+        let base = offset_of(&results, &agg_loop.name);
+        let s = series_at(&results, base);
+        assert!(
+            s.iter()
+                .skip(STARTUP_STEPS)
+                .all(|v| v.is_finite() && v.abs() > MEANINGFUL_SCORE),
+            "the agg-routed loop score must be sustained non-zero (> {MEANINGFUL_SCORE}) past \
+             the {STARTUP_STEPS}-step startup guard; series: {s:?}"
+        );
+    }
 
     // Every LTM score variable must be finite at every timestep -- no NaN/Inf
     // leaks from the agg wiring or the link scores. This is the
-    // well-formedness guarantee the #533 element-graph fix preserves; the
-    // characterization of which scores stay 0 pending gap #2 (#737) lives in
-    // the doc comment, not as a brittle per-value assertion.
+    // well-formedness guarantee the #533 element-graph fix preserves.
     for v in ltm_vars
         .iter()
         .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX) || v.name.starts_with(LINK_SCORE_PREFIX))
@@ -1676,5 +1710,77 @@ fn unloweable_ltm_link_score_degrades_gracefully_no_panic() {
             .iter()
             .map(|d| (&d.variable, &d.severity))
             .collect::<Vec<_>>()
+    );
+}
+
+/// GH #737, arrayed-agg companion: a *scalar feeder* of an ARRAYED hoisted
+/// reducer (`growth[r1] = 0.01 * pool[r1] + SUM(matrix[r1,*] * scale)` --
+/// `result_dims = [r1]`, so the agg is A2A over `r1`) in a feedback loop.
+/// Such a cycle mixes scalar (`scale`) and arrayed nodes, so it was already
+/// CrossElementOrMixed and traversed `scale → $⁚ltm⁚agg⁚0[<slot>]` element
+/// hops -- but `emit_source_to_agg_link_scores` early-returned for the
+/// scalar feeder, leaving the loop score referencing a never-emitted name
+/// (silently stubbed to 0).
+///
+/// The scalar-feeder emission now produces ONE A2A link score
+/// `$⁚ltm⁚link_score⁚scale→$⁚ltm⁚agg⁚0` dimensioned over `result_dims`
+/// (the changed-last equation text is ApplyToAll-compatible: the agg's own
+/// reducer body iterated over `r1`, with only the scalar feeder frozen at
+/// PREVIOUS), and each per-slot cross-element loop references it
+/// subscripted-after-quote (`"…scale→$⁚ltm⁚agg⁚0"[a]`).
+#[test]
+fn arrayed_agg_scalar_feeder_loop_scores_sustained() {
+    let project = TestProject::new("arrayed_agg_scalar_feeder")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("r1", &["a", "b"])
+        .named_dimension("r2", &["x", "y"])
+        .array_aux("matrix[r1,r2]", "2")
+        .array_stock("pool[r1]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[r1]",
+            "0.01 * pool[r1] + SUM(matrix[r1,*] * scale)",
+            None,
+        )
+        // Closes the loop: pool -> $agg1 -> scale -> $agg0 -> growth -> pool.
+        .scalar_aux("scale", "0.001 * SUM(pool[*]) + 0.01")
+        .build_datamodel();
+
+    let (results, ltm_vars) = run_ltm(&project);
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // The scalar-feeder link score is one A2A var over the agg's result dims.
+    let feeder_score_name =
+        "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let feeder_score = ltm_var(&ltm_vars, feeder_score_name);
+    assert_eq!(
+        feeder_score.dimensions,
+        vec!["r1".to_string()],
+        "the scalar-feeder link score must be dimensioned over the agg's result dims"
+    );
+
+    // Each per-slot cross-element loop references the feeder score at its
+    // slot and is sustained non-zero past the startup guard.
+    let mut slot_loops = 0usize;
+    for v in ltm_vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+    {
+        let eq = v.equation.source_text();
+        if !eq.contains(feeder_score_name) {
+            continue;
+        }
+        slot_loops += 1;
+        let s = series_at(&results, offset_of(&results, &v.name));
+        assert!(
+            s.iter()
+                .skip(STARTUP_STEPS)
+                .all(|val| val.is_finite() && val.abs() > MEANINGFUL_SCORE),
+            "agg-routed loop score {} must be sustained non-zero; series: {s:?}",
+            v.name
+        );
+    }
+    assert_eq!(
+        slot_loops, 2,
+        "one cross-element loop per r1 slot must reference the feeder score"
     );
 }

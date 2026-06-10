@@ -2504,6 +2504,110 @@ fn no_agg_aux_for_whole_rhs_reducer() {
     );
 }
 
+/// GH #737: a pure-scalar feedback cycle that re-enters through a *scalar
+/// feeder* of a hoisted reducer (`grow = 1 + SUM(pop[*] * scale)`, with
+/// `scale` fed back from the scalar stock `total`) must be built routed
+/// through the synthetic agg node -- links `scale → $⁚ltm⁚agg⁚0` and
+/// `$⁚ltm⁚agg⁚0 → grow`, never a direct `scale → grow` link.
+///
+/// Pre-fix, `classify_cycle` saw only Bare shapes on the cycle's edges (the
+/// scalar feeder's reference inside the reducer is Bare) and classified it
+/// `PureScalar`; `build_loops_from_tiered`'s fast path then materialized the
+/// loop straight from the variable-level circuit, linking `scale → grow`
+/// directly -- an edge with no usable link-score variable. The cycle now
+/// classifies `CrossElementOrMixed` (it traverses a `ThroughAgg`-routed
+/// edge), descends to the element-level slow path, and the built `Loop`
+/// traverses the agg.
+///
+/// The loop's polarity must also classify concretely (not degrade to
+/// Undetermined): `recover_agg_hop_polarities` patches the agg hops (SUM is
+/// monotone, `grow = 1 + agg` is a positive consumer) and the rest of the
+/// cycle's signs are statically known, so the loop is reinforcing -- pinned
+/// here via the `r`-prefixed loop_score id `model_ltm_variables` emits.
+#[test]
+fn scalar_feeder_cycle_routes_through_agg_node() {
+    let project = TestProject::new("scalar_feeder_routing")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[Region]", "pop * 0.05", None)
+        .aux("scale", "0.001 * total + 0.01", None)
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * scale)", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+
+    let tiered = model_loop_circuits_tiered(&db, model, sync.project);
+    let var_graph = causal_graph_with_modules(&db, model, sync.project);
+    let source_vars = model.variables(&db);
+    let dm_dims = project_datamodel_dims(&db, sync.project);
+    let (loops, _truncated) = build_loops_from_tiered(
+        tiered,
+        &var_graph,
+        source_vars,
+        &db,
+        sync.project,
+        dm_dims.as_slice(),
+        MAX_CROSS_AGG_LOOPS,
+    );
+
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let scalar_loop = loops
+        .iter()
+        .find(|l| l.links.iter().any(|link| link.from.as_str() == "scale"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a loop containing scale; got: {:?}",
+                loops
+                    .iter()
+                    .map(|l| l.links.iter().map(|k| k.from.as_str()).collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
+            )
+        });
+    let edges: Vec<(&str, &str)> = scalar_loop
+        .links
+        .iter()
+        .map(|l| (l.from.as_str(), l.to.as_str()))
+        .collect();
+    assert!(
+        edges.contains(&("scale", agg_name)) && edges.contains(&(agg_name, "grow")),
+        "the scalar feeder loop must traverse scale → {agg_name} → grow; links: {edges:?}"
+    );
+    assert!(
+        !edges.contains(&("scale", "grow")),
+        "the scalar feeder loop must NOT carry a direct scale → grow link; links: {edges:?}"
+    );
+
+    // Polarity end-to-end: the emitted loop score for the agg-routed loop is
+    // r-prefixed (reinforcing), not the Undetermined `u{n}` fallback.
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let loop_score_prefix = "$\u{205A}ltm\u{205A}loop_score\u{205A}";
+    let agg_loop_score = ltm
+        .vars
+        .iter()
+        .find(|v| {
+            v.name.starts_with(loop_score_prefix) && v.equation.source_text().contains(agg_name)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected an agg-routed loop score; loop vars: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.starts_with(loop_score_prefix))
+                    .map(|v| (&v.name, v.equation.source_text()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        agg_loop_score.name[loop_score_prefix.len()..].starts_with('r'),
+        "the agg-routed loop's polarity must classify concretely (reinforcing); got id {:?}",
+        &agg_loop_score.name[loop_score_prefix.len()..]
+    );
+}
+
 /// The agg aux must be emitted *before* the link-score variables in the
 /// returned `vars` list (the LTM flow fragments are not topologically
 /// sorted, and the `agg → target` link score reads the agg's current-step
