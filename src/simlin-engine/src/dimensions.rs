@@ -654,7 +654,7 @@ impl DimensionsContext {
     ///   resolves mapped references POSITIONALLY and ignores the element
     ///   map (different-cardinality maps don't compile at all -- GH #753;
     ///   the broader positional-vs-element-map execution inconsistency is
-    ///   tracked separately), so a map-following diagonal would DROP the
+    ///   GH #756), so a map-following diagonal would DROP the
     ///   true positionally-read edges. Re-enable element-map diagonals
     ///   here only once the engine honors element maps in execution; the
     ///   graph-vs-simulation parity test
