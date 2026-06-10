@@ -2919,3 +2919,64 @@ fn variable_backed_co_source_link_score_tracks_true_partial() {
         );
     }
 }
+
+/// GH #744 review I1 (end-to-end): `tp = SUM(pop[*] * pop[north])` -- a
+/// fixed-literal self-reference inside the reducer body. The north row's
+/// body partial would drop the other rows' `pop[i] * pop[north]`
+/// cross-terms (they reference the live element, so they do NOT cancel
+/// against PREVIOUS(tp)), emitting a confidently-wrong score (0.5 vs the
+/// true changed-first 0.7497 here, and sign-flippable for mixed-sign
+/// sources). Both rows must consistently use the delta-ratio fallback
+/// (score = SIGN(Δpop[e]) when the guards pass).
+#[test]
+fn fixed_literal_self_reference_rows_fall_back_consistently() {
+    let project = TestProject::new("self_ref_744")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_with_ranges("gain[region]", vec![("north", "0.003"), ("south", "0.005")])
+        .array_flow("pgrow[region]", "pop * gain * 0.0001 * tp", None)
+        .aux("tp", "SUM(pop[*] * pop[north])", None)
+        .build_datamodel();
+    let (results, ltm_vars) = run_ltm(&project);
+    let tp = series_at(&results, offset_of(&results, "tp"));
+
+    for elem in ["north", "south"] {
+        let score_name = format!("{LINK_SCORE_PREFIX}pop[{elem}]\u{2192}tp");
+        let var = ltm_var(&ltm_vars, &score_name);
+        let text = var.equation.source_text();
+        assert!(
+            text.contains("SAFEDIV((tp - PREVIOUS(tp))"),
+            "{score_name} must use the delta-ratio fallback; got: {text}"
+        );
+        assert!(
+            !text.contains("PREVIOUS(tp) + "),
+            "{score_name} must not carry a body/shortcut partial; got: {text}"
+        );
+
+        let score = series_at(&results, offset_of(&results, &score_name));
+        let pop = series_at(&results, offset_of(&results, &format!("pop[{elem}]")));
+        let mut contributing = 0usize;
+        for t in 1..score.len() {
+            let d_tp = tp[t] - tp[t - 1];
+            let d_pop = pop[t] - pop[t - 1];
+            if d_tp == 0.0 || d_pop == 0.0 {
+                assert_eq!(score[t], 0.0, "{score_name} at step {t}: guard must zero");
+                continue;
+            }
+            // Delta-ratio degenerates to SIGN(Δsource); pop grows here.
+            assert!(
+                (score[t] - 1.0).abs() <= 1e-9,
+                "{score_name} at step {t}: delta-ratio fallback must read \
+                 SIGN(Δpop) = 1; got {} (0.5-flavored values are the dropped \
+                 cross-term defect)",
+                score[t]
+            );
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "{score_name}: expected at least 3 scored steps, got {contributing}"
+        );
+    }
+}

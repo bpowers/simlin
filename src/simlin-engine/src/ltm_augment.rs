@@ -3225,10 +3225,16 @@ pub(crate) struct ReducerBodyCtx<'a> {
     /// The live source variable (the row whose partial is being built).
     pub live_source: &'a str,
     /// Declared dimension count for every ARRAYED model variable referenced
-    /// in the body. Pinning a reference to the row requires its axes to
-    /// correspond positionally to the live source's axes -- guaranteed for a
-    /// hoisted agg by `combined_read_slice`'s slice-agreement gate, and
-    /// validated index-by-index here for the variable-backed path.
+    /// in the body. Pinning substitutes a reference's indices POSITIONALLY
+    /// from the row tuple, which is sound because the engine's subscript
+    /// resolution is itself positional: a co-source declared over a
+    /// *differently named* same-size dimension (`SUM(pop[*] + other[*])`
+    /// with `pop[region]`/`other[city]`) is hoisted -- `combined_read_slice`
+    /// compares axis SHAPES, never dimension names -- and the resulting
+    /// cross-dimension subscript (`other[region·north]`) reads the
+    /// slot-aligned element, exactly as the A2A expansion of the reducer
+    /// itself does. `pin_body_index` additionally validates each index
+    /// against the row's axis; an unprovable correspondence bails.
     pub arrayed_dep_dims: &'a HashMap<String, usize>,
     /// Every model-variable ident the body may reference -- the freeze set.
     /// References to idents NOT in this set (TIME, function names resolved
@@ -3250,28 +3256,40 @@ pub(crate) struct ReducerBodyCtx<'a> {
 /// correspond to that axis position -- the caller then bails to the
 /// delta-ratio fallback rather than emitting a mis-pinned equation.
 ///
+/// The returned `bool` is whether the index MOVES with the row -- i.e. the
+/// reference reads a different element for each co-reduced row. A
+/// fixed-literal index reads the same element for every row;
+/// [`pin_body_to_row`] uses this to reject a live-source reference with NO
+/// moving index (review I1 on GH #744: the other rows' bodies reference
+/// that fixed live element, so they do not cancel against
+/// `PREVIOUS(target)` and the single-row partial would silently drop their
+/// contribution).
+///
 /// Substitutable index forms at position `j`:
-/// - `*` / `*:SubDim` -- a reduced axis; the row iterates it. (A `StarRange`
-///   over a proper subdimension over-approximates exactly like
+/// - `*` / `*:SubDim` -- a reduced axis; the row iterates it (moves). (A
+///   `StarRange` over a proper subdimension over-approximates exactly like
 ///   `compute_read_slice`'s conservative `Reduced` treatment.)
 /// - a `Var` naming the axis's own dimension (`row_dim_names[j]`), or a
 ///   dimension that MAPS to it (`has_mapping_to`, the GH #534 gate) -- an
-///   iterated axis.
+///   iterated axis (moves).
 /// - a `Var`/`Const` literal element equal to the row's element at `j` -- a
-///   pinned axis (re-pinned to the qualified form so `PREVIOUS(...)` of the
-///   reference compiles to a direct `LoadPrev`).
+///   pinned axis (fixed; re-pinned to the qualified form so
+///   `PREVIOUS(...)` of the reference compiles to a direct `LoadPrev`).
 fn pin_body_index(
     idx: &IndexExpr0,
     j: usize,
     ctx: &ReducerBodyCtx<'_>,
     row_parts: &[String],
-) -> Option<IndexExpr0> {
+) -> Option<(IndexExpr0, bool)> {
     use crate::common::CanonicalDimensionName;
-    let pinned = || {
-        IndexExpr0::Expr(Expr0::Var(
-            RawIdent::new_from_str(&row_parts[j]),
-            crate::ast::Loc::default(),
-        ))
+    let pinned = |moves: bool| {
+        (
+            IndexExpr0::Expr(Expr0::Var(
+                RawIdent::new_from_str(&row_parts[j]),
+                crate::ast::Loc::default(),
+            )),
+            moves,
+        )
     };
     // The row's bare element name at `j` (the part after the `dim·`
     // qualifier, or the whole part for an indexed dim).
@@ -3280,26 +3298,26 @@ fn pin_body_index(
         .map(|(_, e)| e)
         .unwrap_or(row_parts[j].as_str());
     match idx {
-        IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(..) => Some(pinned()),
+        IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(..) => Some(pinned(true)),
         IndexExpr0::Expr(Expr0::Var(name, _)) => {
             let n = canonicalize(name.as_str());
             if n.as_ref() == ctx.row_dim_names[j].as_str() {
-                return Some(pinned());
+                return Some(pinned(true));
             }
             if let Some(dc) = ctx.dims_ctx {
                 let n_dim = CanonicalDimensionName::from_raw(n.as_ref());
                 let row_dim = CanonicalDimensionName::from_raw(ctx.row_dim_names[j].as_str());
                 if dc.has_mapping_to(&n_dim, &row_dim) {
-                    return Some(pinned());
+                    return Some(pinned(true));
                 }
             }
-            (n.as_ref() == row_element).then(pinned)
+            (n.as_ref() == row_element).then(|| pinned(false))
         }
         IndexExpr0::Expr(Expr0::Const(s, _, _)) => {
             // An indexed-dim ordinal; canonicalize via parse-then-format so
             // `pop[01]` matches the row part `"1"`.
             let n = s.parse::<u32>().ok()?;
-            (n.to_string() == row_parts[j]).then(pinned)
+            (n.to_string() == row_parts[j]).then(|| pinned(false))
         }
         _ => None,
     }
@@ -3310,8 +3328,19 @@ fn pin_body_index(
 /// by the row's (qualified) elements, and a bare arrayed-variable reference
 /// gains the full row subscript. `None` when the body cannot be safely
 /// pinned (an index that doesn't correspond to the row's axes, an arrayed
-/// reference with a different axis count, or a nested array reducer) -- the
-/// caller bails to the delta-ratio fallback.
+/// reference with a different axis count, a nested array reducer, or a
+/// FIXED-literal reference to the live source -- see below) -- the caller
+/// bails to the delta-ratio fallback.
+///
+/// Review I1 on GH #744: a live-source reference whose indices are ALL
+/// fixed literals (`pop[north]` in `SUM(pop[*] * pop[north])`) reads the
+/// same element for every co-reduced row, so the OTHER rows' bodies also
+/// reference the live element and the single-row cancellation invariant
+/// (see [`generate_linear_body_partial`]) does not hold -- the partial
+/// would drop those rows' `Σ_{i≠e} body_i` cross-terms. A live-source
+/// reference with at least one MOVING index (`pop[nyc,*]`, the
+/// pinned-slice shape) instantiates to a DIFFERENT element in each row, so
+/// cancellation holds and it stays pinned.
 fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) -> Option<Expr0> {
     match expr {
         Expr0::Const(..) => Some(expr),
@@ -3346,11 +3375,23 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
                 if n_dims != row_parts.len() || indices.len() != row_parts.len() {
                     return None;
                 }
+                let mut any_moving = false;
                 let pinned: Vec<IndexExpr0> = indices
                     .iter()
                     .enumerate()
-                    .map(|(j, idx)| pin_body_index(idx, j, ctx, row_parts))
+                    .map(|(j, idx)| {
+                        pin_body_index(idx, j, ctx, row_parts).map(|(p, moves)| {
+                            any_moving |= moves;
+                            p
+                        })
+                    })
                     .collect::<Option<Vec<_>>>()?;
+                // A live-source reference that does NOT move with the row
+                // (all indices fixed literals) breaks the other-rows
+                // cancellation invariant -- bail (review I1, GH #744).
+                if !any_moving && canonicalize(ident.as_str()).as_ref() == ctx.live_source {
+                    return None;
+                }
                 Some(Expr0::Subscript(ident, pinned, loc))
             } else {
                 // Not an arrayed model variable (e.g. a graphical-function
@@ -3403,10 +3444,13 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
 
 /// Wrap every model-variable reference of a row-pinned body in
 /// `PREVIOUS()`, except occurrences of `keep_live` (when given). Subscript
-/// indices are left untouched (after pinning they are literal qualified
-/// elements, not causal references), and the contents of `PREVIOUS`/`INIT`
-/// calls are already lagged/frozen so they are not re-wrapped (mirroring
-/// [`wrap_matching_in_previous`]).
+/// indices are never recursed into: on an arrayed MODEL dep's subscript,
+/// pinning has already replaced them with literal qualified elements (not
+/// causal references); on a non-model head (whose expression indices
+/// [`pin_body_to_row`] preserves) any index reference is left live -- the
+/// same model/non-model boundary the pinning walk draws. The contents of
+/// `PREVIOUS`/`INIT` calls are already lagged/frozen so they are not
+/// re-wrapped (mirroring [`wrap_matching_in_previous`]).
 fn freeze_pinned_body(expr: Expr0, freeze: &HashSet<String>, keep_live: Option<&str>) -> Expr0 {
     let should_freeze = |ident: &str| -> bool {
         let c = canonicalize(ident);
@@ -3510,9 +3554,15 @@ fn pinned_body_references_live(expr: &Expr0, live_source: &str) -> bool {
 ///
 /// For source row `e` the true changed-first partial holds every OTHER
 /// input (co-sources, scalar feeders, the other rows of the source) at
-/// `PREVIOUS` and lets `source[e]` move. All fully-frozen rows contribute
-/// exactly their share of `PREVIOUS(target)`, so the partial collapses to
-/// the single-row form
+/// `PREVIOUS` and lets `source[e]` move. Every fully-frozen row then
+/// contributes exactly its share of `PREVIOUS(target)` -- PROVIDED no
+/// other row's body references the live element, which [`pin_body_to_row`]
+/// enforces by rejecting a fixed-literal self-reference (a live-source
+/// reference with no row-moving index, e.g. `pop[north]` in
+/// `SUM(pop[*] * pop[north])`; every other surviving live-source reference
+/// reads exactly the row's own element, so the other rows stay fully
+/// frozen). Under that guarantee the partial collapses to the single-row
+/// form
 ///
 /// ```text
 /// SUM:  PREVIOUS(target) + (body_e_live - body_e_frozen)

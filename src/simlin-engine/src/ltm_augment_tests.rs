@@ -847,7 +847,7 @@ fn test_generate_nested_reducer_uses_delta_ratio() {
         &elements,
         &ReducerKind::Linear,
         "SUM",
-        false, // nested reducer,
+        false, // nested reducer
         None,
     );
     // Should NOT use the algebraic shortcut (PREVIOUS(target) + delta)
@@ -3572,5 +3572,71 @@ fn test_wrap_matching_in_previous_skips_already_lagged() {
     assert_eq!(
         text, "sum(arr[*] * PREVIOUS(scale)) + previous(scale) + abs(PREVIOUS(scale))",
         "only un-lagged occurrences of the target are wrapped"
+    );
+}
+
+/// GH #744 review I1: a FIXED-literal reference to the live source inside
+/// the body (`SUM(pop[*] * pop[nyc])` w.r.t. `pop`, row `nyc`) must NOT be
+/// row-pinned: the other co-reduced rows' bodies (`pop[i] * pop[nyc]`) also
+/// reference the live element, so they do not cancel against
+/// PREVIOUS(target) and the single-row partial drops their contribution
+/// (`Σ_{i≠e} pop_i_prev * Δpop[e]`). The row must fall back to the
+/// delta-ratio form -- consistently with the rows whose literal does not
+/// match (which already fell back).
+#[test]
+fn test_body_aware_fixed_literal_self_reference_falls_back() {
+    let elements = vec!["region·nyc".to_string(), "region·boston".to_string()];
+    let fixture = BodyCtxFixture::new("pop[*] * pop[nyc]", "pop", &[("pop", 1)], &[], &["region"]);
+    let eq = generate_element_to_scalar_equation(
+        "pop",
+        "total",
+        "region·nyc",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(
+        eq.contains("SAFEDIV((total - PREVIOUS(total))"),
+        "the nyc row must use the delta-ratio fallback: {eq}"
+    );
+    assert!(
+        !eq.contains("pop[region·nyc] * pop[region·nyc]"),
+        "the broken pinned self-product must not be emitted: {eq}"
+    );
+}
+
+/// The same shape with a MOVING axis alongside the literal one
+/// (`SUM(matrix[nyc, *])`, the pinned-slice shape) stays on the body
+/// partial: each row's live reference moves with the row, so the other
+/// co-reduced rows never reference the live element and cancellation
+/// holds.
+#[test]
+fn test_body_aware_pinned_slice_self_reference_still_pins() {
+    let elements = vec!["region·nyc,d2·x".to_string(), "region·nyc,d2·y".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "matrix[nyc, *]",
+        "matrix",
+        &[("matrix", 2)],
+        &[],
+        &["region", "d2"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "matrix",
+        "total",
+        "region·nyc,d2·x",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
+    // The bare fast path fires: legacy shortcut, not delta-ratio.
+    assert!(
+        eq.contains(
+            "PREVIOUS(total) + (matrix[region·nyc,d2·x] - PREVIOUS(matrix[region·nyc,d2·x]))"
+        ),
+        "equation: {eq}"
     );
 }
