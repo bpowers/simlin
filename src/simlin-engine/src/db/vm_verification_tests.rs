@@ -740,7 +740,7 @@ fn test_ltm_mapped_dimension_loop_scores_diagonal_and_nonzero() {
 /// fixing the classification itself). Before #758 this was a warned
 /// constant-0 stub plus a cascade of per-loop fragment-failure warnings.
 #[test]
-fn test_ltm_reverse_declared_subscripted_link_score_stays_scalar() {
+fn test_ltm_reverse_declared_subscripted_link_score_is_skipped_loudly() {
     use crate::test_common::TestProject;
     use salsa::Setter;
 

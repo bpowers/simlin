@@ -7438,6 +7438,93 @@ fn test_disjoint_dim_unscoreable_edge_warns_and_emits_no_link_score() {
         .expect("unscoreable-edge model should still compile and simulate");
 }
 
+/// GH #758 round 2 (the #510 unification): a feedback loop through an
+/// unscoreable disjoint-dim edge (an `Ast::Arrayed` target referencing the
+/// disjoint-dim source via a dynamic index) is DROPPED from loop scoring,
+/// covered by the single unscoreable-edge Warning -- instead of emitting
+/// loop scores whose subscripted references to the never-emitted
+/// `source[m]→target` names fail fragment compile (one cascading Warning
+/// per loop, all series zero-stubbed).
+#[test]
+fn test_disjoint_dynamic_index_loop_scores_dropped() {
+    use simlin_engine::test_common::TestProject;
+
+    // Loop: source[j] -> target[a] (the DynamicIndex disjoint edge) ->
+    // $⁚agg⁚0 (SUM(target[*])) -> grow[j] -> source[j].
+    let project = TestProject::new("disjoint_dyn_idx_loop")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D3", &["m", "n"])
+        .array_stock("source[D3]", "100", &["grow"], &[], None)
+        .aux("idx", "1", None)
+        .array_with_ranges_direct(
+            "target",
+            vec!["D1".to_string()],
+            vec![("a", "source[idx] * 0.1"), ("b", "2")],
+            None,
+        )
+        .array_flow("grow[D3]", "SUM(target[*]) * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // No source...→target link score of any shape, and no loop scores --
+    // every enumerated loop traverses the unscoreable edge.
+    assert!(
+        !ltm.vars.iter().any(|v| {
+            v.name
+                .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}source")
+                && v.name.contains("\u{2192}target")
+        }),
+        "the unscoreable disjoint edge must emit no source...→target link score; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+        "loops through the unscoreable disjoint edge must be dropped, not \
+         zero-stubbed; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // Exactly ONE Assembly warning: the unscoreable-edge diagnostic, which
+    // names the edge and announces the loop drop. (Before the unification:
+    // the edge warning PLUS one fragment-failure warning per loop score.)
+    let diags = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.severity == simlin_engine::db::DiagnosticSeverity::Warning
+                && matches!(d.error, simlin_engine::db::DiagnosticError::Assembly(_))
+        })
+        .collect();
+    assert_eq!(
+        assembly.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable edge); got: {assembly:?}"
+    );
+    let simlin_engine::db::DiagnosticError::Assembly(msg) = &assembly[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("source") && msg.contains("target") && msg.contains("not be scored"),
+        "the warning must name the edge and announce the loop drop; got: {msg}"
+    );
+
+    // The model still simulates.
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("unscoreable-edge loop model should still simulate");
+}
+
 /// No regression: the existing full-reduce (`SUM(population[*])` -> scalar)
 /// integration tests still pass with unchanged values. (This test exists
 /// purely to keep the AC4.6 work co-located with an explicit assertion

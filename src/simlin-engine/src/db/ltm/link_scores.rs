@@ -137,9 +137,11 @@ pub(super) fn link_score_dimensions(
     // retargeting its (Bare-named, since Wildcard/DynamicIndex collapse
     // onto the Bare name) score to the target's dims would shape per-slot
     // DIAGONAL partials that the off-diagonal loop links then read by
-    // target-element subscript -- wrong-slot values instead of the
-    // conservative scalar stub (GH #758). A mixed edge (a Bare site AND a
-    // DynamicIndex site on the same `(from, to)`) keeps the arrayed score
+    // target-element subscript -- silent wrong-slot values. Denied the
+    // retarget, such an edge instead takes the GH #758 loud skip in
+    // `emit_per_shape_link_scores` (no link-score variable, loop scores
+    // through the edge dropped, one Warning). A mixed edge (a Bare site AND
+    // a DynamicIndex site on the same `(from, to)`) keeps the arrayed score
     // -- the Bare site needs it -- while its cross-product links still read
     // diagonal slots; that is the pre-existing mixed-shape conservatism
     // family, not changed here. The same-NAME arms below stay
@@ -628,10 +630,13 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
 /// edge that is not statically scoreable (the target's per-element
 /// equations reference the source via a dynamic index, so which target
 /// slots depend on which source elements can't be decided at compile
-/// time). The edge gets *no* link-score variable -- a missing link score
-/// is graceful (loop/path scores referencing it get the zero-contribution
-/// stub-dep fallback) and far less misleading than the scalarized stand-in
-/// the pre-#510 path produced.
+/// time). The edge gets *no* link-score variable, and -- like the GH #758
+/// dim-incompatible class -- the caller records it in `unscoreable_edges`
+/// so loop scores traversing it are dropped (their product could only be
+/// a guaranteed-zero stub). Sub-model *pathway* scores referencing the
+/// missing name still get the fragment compiler's zero-contribution
+/// stub-dep fallback. Both are far less misleading than the scalarized
+/// stand-in the pre-#510 path produced.
 pub(super) fn emit_unscoreable_disjoint_edge_warning(
     db: &dyn Db,
     model: SourceModel,
@@ -643,7 +648,7 @@ pub(super) fn emit_unscoreable_disjoint_edge_warning(
         "LTM link score for edge {from} -> {to} could not be computed: {to} is a \
          per-element-equation arrayed variable whose equations reference {from} via a \
          dynamic index, which is not statically scoreable; this edge will have no \
-         link-score variable"
+         link-score variable and feedback loops through it will not be scored"
     );
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
@@ -780,8 +785,12 @@ pub(crate) fn ltm_partial_equation_warning_message(
 ///  - `Some(vec![])` when the target references `from` via a non-literal
 ///    index (a `DynamicIndex` site -- or, defensively, a `Wildcard`/`Bare`
 ///    site that can't be a literal-element reference into a disjoint-dim
-///    target): a `Warning` is accumulated and no link score is emitted, and
-///    the caller must *not* fall through to `emit_per_shape_link_scores`;
+///    target): a `Warning` is accumulated (once -- the edge is recorded in
+///    `unscoreable_edges`, which both dedups the warning and makes
+///    `model_ltm_variables` drop loop scores traversing the edge, the same
+///    GH #758 treatment the dim-incompatible per-shape class gets) and no
+///    link score is emitted, and the caller must *not* fall through to
+///    `emit_per_shape_link_scores`;
 ///  - `None` when the edge isn't an arrayed -> disjoint-dim-`Ast::Arrayed`
 ///    edge at all -- the caller's existing emission path handles it.
 ///
@@ -797,6 +806,7 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
     to: &str,
     model: SourceModel,
     project: SourceProject,
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> Option<Vec<LtmSyntheticVar>> {
     // Both ends must be arrayed, non-module variables.
     let from_sv = source_vars.get(from)?;
@@ -854,7 +864,13 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
                 }
             }
             RefShape::Bare | RefShape::Wildcard | RefShape::DynamicIndex => {
-                emit_unscoreable_disjoint_edge_warning(db, model, from, to);
+                // Record the edge so loop scores through it are dropped
+                // (GH #758 unification); the insert also dedups the warning
+                // when the pinned-loop pass re-visits the edge (whose
+                // `emitted_edges` set only tracks edges that emitted a var).
+                if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                    emit_unscoreable_disjoint_edge_warning(db, model, from, to);
+                }
                 return Some(vec![]);
             }
         }
@@ -1745,12 +1761,20 @@ pub(super) fn emit_link_scores_for_edge(
     // (`Ast::Arrayed`) target (GH #510): one link score per distinct
     // referenced source element, each `Equation::Arrayed` over `to`'s
     // dims. `Some(vec![])` means the edge is genuinely unscoreable (a
-    // dynamic-index source): a `Warning` was accumulated and no link
-    // score is emitted -- crucially, we *don't* fall through to
-    // `emit_per_shape_link_scores`, which would build a scalarized stand-in.
-    if let Some(disjoint_vars) =
-        try_disjoint_dim_arrayed_link_scores(db, source_vars, from, to, model, project)
-    {
+    // dynamic-index source): a `Warning` was accumulated, the edge was
+    // recorded in `unscoreable_edges` (so loop scores through it are
+    // dropped -- the GH #758 treatment), and no link score is emitted --
+    // crucially, we *don't* fall through to `emit_per_shape_link_scores`,
+    // which would build a scalarized stand-in.
+    if let Some(disjoint_vars) = try_disjoint_dim_arrayed_link_scores(
+        db,
+        source_vars,
+        from,
+        to,
+        model,
+        project,
+        unscoreable_edges,
+    ) {
         vars.extend(disjoint_vars);
         return;
     }

@@ -1643,6 +1643,12 @@ pub fn model_ltm_variables(
                 .filter(|l| !enumerated_rotations.contains(&canonical_variable_rotation(l)))
                 .collect();
 
+            // GH #758: warn at most once per PIN (not per element-level
+            // instance) when its cycle traverses an unscoreable edge -- a
+            // cross-element pin can expand to many `pin{n}⁚{j}` instances,
+            // and one warning per instance is the same cascade the
+            // unscoreable-edge treatment exists to avoid.
+            let mut warned_unscoreable_pin = false;
             for pin_loop in loops_to_emit {
                 // Emit any link scores this loop's cycle needs that aren't
                 // present, with the same per-link agg-hop dispatch the
@@ -1696,23 +1702,27 @@ pub fn model_ltm_variables(
                 // GH #758: a pin whose cycle traverses an unscoreable edge
                 // has no link score to multiply -- its loop score could only
                 // be a guaranteed-zero stub (or a warned fragment failure).
-                // Warn naming the pin (mirroring the invalid-pin treatment)
-                // and skip it. Checked AFTER the link-score emission above
-                // so the gate has classified this cycle's edges even when
-                // no enumerated loop visited them.
+                // Warn naming the pin (mirroring the invalid-pin treatment;
+                // once per pin, not per instance) and skip the instance.
+                // Checked AFTER the link-score emission above so the gate
+                // has classified this cycle's edges even when no enumerated
+                // loop visited them.
                 if traverses_unscoreable(pin_loop, &unscoreable_edges) {
-                    CompilationDiagnostic(Diagnostic {
-                        model: model.name(db).clone(),
-                        variable: None,
-                        error: DiagnosticError::Assembly(format!(
-                            "pinned loop '{}' traverses a causal edge whose link score \
-                             could not be computed (see the unscoreable-edge warning) \
-                             and is not scored",
-                            pin_loop.id
-                        )),
-                        severity: DiagnosticSeverity::Warning,
-                    })
-                    .accumulate(db);
+                    if !warned_unscoreable_pin {
+                        warned_unscoreable_pin = true;
+                        CompilationDiagnostic(Diagnostic {
+                            model: model.name(db).clone(),
+                            variable: None,
+                            error: DiagnosticError::Assembly(format!(
+                                "pinned loop '{}' traverses a causal edge whose link \
+                                 score could not be computed (see the unscoreable-edge \
+                                 warning); its affected instances are not scored",
+                                pin.name
+                            )),
+                            severity: DiagnosticSeverity::Warning,
+                        })
+                        .accumulate(db);
+                    }
                     continue;
                 }
 

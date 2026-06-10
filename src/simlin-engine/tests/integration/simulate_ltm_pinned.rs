@@ -1557,3 +1557,105 @@ fn pinned_loop_through_stockless_passthrough_rejected() {
         "a rejected pin must not emit a loop_score var"
     );
 }
+
+/// GH #758 round 2: a pin whose cycle traverses an UNSCOREABLE edge (here
+/// the GH #510 disjoint-dim dynamic-index class: `target[a]` references
+/// `source[idx]` across disjoint dims) is skipped with ONE Warning naming
+/// the pin -- even though the cross-element pin expands to multiple
+/// element-level instances -- and the unscoreable-edge Warning itself fires
+/// exactly once even though the pin pass re-visits the edge (the pinned
+/// pass's `emitted_edges` dedup only tracks edges that emitted a variable,
+/// so before the `unscoreable_edges` insert-dedup the edge double-warned).
+/// No pin loop_score variable is emitted (it could only be a
+/// guaranteed-zero stub).
+#[test]
+fn pinned_loop_through_unscoreable_edge_skipped_with_single_warnings() {
+    let mut project = TestProject::new("pin_unscoreable")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D3", &["m", "n"])
+        .array_stock("source[D3]", "100", &["grow"], &[], None)
+        .aux("idx", "1", None)
+        .array_with_ranges_direct(
+            "target",
+            vec!["D1".to_string()],
+            vec![("a", "source[idx] * 0.1"), ("b", "2")],
+            None,
+        )
+        .array_flow("grow[D3]", "SUM(target[*]) * 0.01", None)
+        .build_datamodel();
+    assign_uids(&mut project);
+    pin_loop(
+        &mut project,
+        "main",
+        "doomed",
+        &["source", "target", "grow"],
+    );
+
+    // Discovery mode: every causal edge gets link scores in Part 1 (so the
+    // unscoreable edge is classified there), and the pin is the only
+    // possible loop score.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // No pin loop_score var.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("loop_score\u{205A}pin")),
+        "a pin through an unscoreable edge must not emit a loop_score var; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let assembly_msgs: Vec<&str> = diagnostics
+        .iter()
+        .filter_map(|d| match &d.error {
+            simlin_engine::db::DiagnosticError::Assembly(msg) => Some(msg.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    // Exactly ONE unscoreable-edge warning (Part 1 + the pin's re-visit
+    // dedup to a single accumulation)...
+    let edge_warnings: Vec<&&str> = assembly_msgs
+        .iter()
+        .filter(|m| m.contains("source") && m.contains("target") && m.contains("not be scored"))
+        .collect();
+    assert_eq!(
+        edge_warnings.len(),
+        1,
+        "the unscoreable edge must warn exactly once; got: {assembly_msgs:?}"
+    );
+
+    // ...and exactly ONE pin-skip warning naming the pin, despite the
+    // cross-element pin expanding to multiple element-level instances.
+    let pin_warnings: Vec<&&str> = assembly_msgs
+        .iter()
+        .filter(|m| m.contains("doomed"))
+        .collect();
+    assert_eq!(
+        pin_warnings.len(),
+        1,
+        "the doomed pin must warn exactly once across its instances; got: {assembly_msgs:?}"
+    );
+
+    // No other Assembly warnings (in particular, no fragment-failure
+    // cascade from zero-stubbed pin scores).
+    assert_eq!(
+        assembly_msgs.len(),
+        2,
+        "only the edge warning and the pin warning may be accumulated; got: {assembly_msgs:?}"
+    );
+
+    // The model still compiles and simulates.
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main").expect("LTM compile should succeed");
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+}
