@@ -1529,3 +1529,179 @@ fn element_graph_unmapped_disjoint_dims_stay_broadcast() {
     assert_edge(&result, "x[b]", "target[s1]");
     assert_edge(&result, "x[b]", "target[s2]");
 }
+
+/// GH #534: a positionally-MAPPED sliced reducer subexpression
+/// (`SUM(matrix[State,*])` inside an A2A-over-`State` body, `matrix` over
+/// `[Region,D2]`, positional `State→Region` mapping) is hoisted into an
+/// arrayed synthetic agg over `State`, and the element graph routes only the
+/// read rows through it WITH the slot remapped along the mapping: source
+/// rows over `Region` land on the agg slot of the corresponding `State`
+/// element (s1↦r1, s2↦r2), then `agg[s] → growth[s]` diagonally. No
+/// cross-slot row edges, and no direct `matrix → growth` edges (the
+/// reference is fully routed through the agg).
+#[test]
+fn element_graph_mapped_sliced_reducer_routes_through_remapped_agg() {
+    let project = TestProject::new("mapped_sliced_agg")
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+        .array_aux_direct(
+            "growth",
+            vec!["State".into()],
+            "1 + SUM(matrix[State, *])",
+            None,
+        );
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Source rows route to the agg slot of the MAPPED State element.
+    assert_edge(&result, "matrix[r1,x]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r1,y]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r2,x]", &format!("{agg}[s2]"));
+    assert_edge(&result, "matrix[r2,y]", &format!("{agg}[s2]"));
+    // Never the cross slot.
+    assert_no_edge(&result, "matrix[r1,x]", &format!("{agg}[s2]"));
+    assert_no_edge(&result, "matrix[r2,x]", &format!("{agg}[s1]"));
+    // The agg fans into the target diagonally on the shared State axis.
+    assert_edge(&result, &format!("{agg}[s1]"), "growth[s1]");
+    assert_edge(&result, &format!("{agg}[s2]"), "growth[s2]");
+    assert_no_edge(&result, &format!("{agg}[s1]"), "growth[s2]");
+    // The reducer reference is fully routed through the agg: no direct
+    // matrix → growth element edges remain.
+    for r in ["r1", "r2"] {
+        for d2 in ["x", "y"] {
+            for s in ["s1", "s2"] {
+                assert_no_edge(
+                    &result,
+                    &format!("matrix[{r},{d2}]"),
+                    &format!("growth[{s}]"),
+                );
+            }
+        }
+    }
+}
+
+/// GH #534 (conservative gate): a sliced reducer over an EXPLICIT
+/// element-mapped pair stays un-hoisted -- the engine's executed A2A
+/// lowering resolves mapped references positionally, ignoring element maps
+/// (GH #756), so `mapped_element_correspondence` declines and the reference
+/// keeps the conservative full cross-product (a superset of the true reads).
+/// No agg node appears in the element graph.
+#[test]
+fn element_graph_element_mapped_sliced_reducer_stays_cross_product() {
+    let project = TestProject::new("element_mapped_sliced")
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_element_mapping(
+            "State",
+            &["s1", "s2"],
+            "Region",
+            &[("s1", "r2"), ("s2", "r1")],
+        )
+        .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+        .array_aux_direct(
+            "growth",
+            vec!["State".into()],
+            "1 + SUM(matrix[State, *])",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    // Conservative cross-product: every matrix row feeds every growth slot.
+    for r in ["r1", "r2"] {
+        for d2 in ["x", "y"] {
+            for s in ["s1", "s2"] {
+                assert_edge(
+                    &result,
+                    &format!("matrix[{r},{d2}]"),
+                    &format!("growth[{s}]"),
+                );
+            }
+        }
+    }
+    // No agg node was minted for the element-mapped sliced reducer.
+    assert!(
+        !result
+            .edges
+            .keys()
+            .any(|k| k.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}")),
+        "an element-mapped sliced reducer must not route through an agg node; edges: {:?}",
+        result.edges.keys().collect::<Vec<_>>()
+    );
+}
+
+/// GH #534 (classifier-direction consistency): a sliced reducer whose
+/// mapping is declared only in the REVERSE direction (on the source's
+/// `Region` toward `State`) stays un-hoisted, mirroring
+/// `classify_iterated_dim_shape`'s declared-direction gate (GH #757 tracks
+/// the reverse-subscripted direction separately). Conservative cross-product,
+/// no agg node.
+#[test]
+fn element_graph_reverse_declared_mapped_sliced_reducer_stays_cross_product() {
+    let project = TestProject::new("reverse_mapped_sliced")
+        .named_dimension_with_mapping("Region", &["r1", "r2"], "State")
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("State", &["s1", "s2"])
+        .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+        .array_aux_direct(
+            "growth",
+            vec!["State".into()],
+            "1 + SUM(matrix[State, *])",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    for r in ["r1", "r2"] {
+        for d2 in ["x", "y"] {
+            for s in ["s1", "s2"] {
+                assert_edge(
+                    &result,
+                    &format!("matrix[{r},{d2}]"),
+                    &format!("growth[{s}]"),
+                );
+            }
+        }
+    }
+    assert!(
+        !result
+            .edges
+            .keys()
+            .any(|k| k.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}")),
+        "a reverse-declared mapped sliced reducer must not route through an agg node"
+    );
+}
+
+/// GH #534 (scalar co-feeder composition): a mapped sliced reducer with a
+/// scalar co-feeder (`SUM(matrix[State,*] * scale)`) routes the scalar
+/// feeder to EVERY remapped agg slot (a scalar can't pick a slot) while the
+/// arrayed rows keep the mapping's slot diagonal.
+#[test]
+fn element_graph_mapped_sliced_reducer_with_scalar_cofeeder() {
+    let project = TestProject::new("mapped_sliced_cofeeder")
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .scalar_aux("scale", "2")
+        .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+        .array_aux_direct(
+            "growth",
+            vec!["State".into()],
+            "1 + SUM(matrix[State, *] * scale)",
+            None,
+        );
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Arrayed rows: the mapping's slot diagonal.
+    assert_edge(&result, "matrix[r1,x]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r2,y]", &format!("{agg}[s2]"));
+    assert_no_edge(&result, "matrix[r1,x]", &format!("{agg}[s2]"));
+    // Scalar co-feeder: every agg slot.
+    assert_edge(&result, "scale", &format!("{agg}[s1]"));
+    assert_edge(&result, "scale", &format!("{agg}[s2]"));
+}

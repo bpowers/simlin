@@ -1571,15 +1571,15 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 ///   resulting name, so any such slot collapses onto the canonical Bare name
 ///   rather than minting a `⁚wildcard`/`⁚dynamic` variant. Every
 ///   statically-describable inlined reducer -- whole-extent (`SUM(pop[*])`)
-///   or sliced (`SUM(pop[NYC, *])`, `SUM(matrix[D1, *])`) -- is hoisted into
-///   a `$⁚ltm⁚agg⁚{n}` node, so the only `Direct` references with these
+///   or sliced (`SUM(pop[NYC, *])`, `SUM(matrix[D1, *])`, and the
+///   positionally-mapped `SUM(matrix[State, *])` of GH #534) -- is hoisted
+///   into a `$⁚ltm⁚agg⁚{n}` node, so the only `Direct` references with these
 ///   shapes that reach `emit_per_shape_link_scores` are a *whole-RHS*
 ///   variable-backed reducer's argument (`total = SUM(population[*])`), a
 ///   bare dynamic index (`arr[i+1]`), the dynamic-index reducer carve-out
-///   (`SUM(pop[idx, *])`), or a mapped-dimension sliced reducer
-///   (`SUM(matrix[State, *])` over `matrix[Region, D2]` with a `State→Region`
-///   mapping) -- a coarse conservative score is the right semantics for all
-///   of those.
+///   (`SUM(pop[idx, *])`), or a mapped sliced reducer the correspondence
+///   declines (element-mapped -- GH #756 -- or reverse-declared -- GH #757)
+///   -- a coarse conservative score is the right semantics for all of those.
 ///
 /// The Unicode separators `\u{205A}` (TWO DOT PUNCTUATION) and `\u{2192}`
 /// (RIGHTWARDS ARROW) are intentional: they collide with no legal

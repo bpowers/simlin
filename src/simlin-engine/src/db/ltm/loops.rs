@@ -234,43 +234,57 @@ pub(super) struct ReadSliceRow {
 /// holds because `from` is one of `agg`'s `source_vars`) and `from`'s
 /// dimension element lists. A `Pinned` axis is fixed to its single element; an
 /// `Iterated` or `Reduced` axis ranges over every element of that axis. The
-/// agg result slot for a row is its `Iterated` coordinates in order.
+/// agg result slot for a row is its `Iterated` coordinates in order --
+/// remapped to the corresponding TARGET-dim element via
+/// [`crate::ltm_agg::iterated_axis_slot_elements`] when the axis is a
+/// positionally-mapped pair (GH #534; identity in the literal case), so the
+/// emitted `{from}[<row>]→{agg}[<slot>]` names match the element graph's
+/// remapped agg-slot nodes.
 ///
 /// `None` when `read_slice` doesn't have one entry per `from` axis (it always
-/// should for a hoisted agg whose `source_vars` contains `from`): the caller
+/// should for a hoisted agg whose `source_vars` contains `from`), or when a
+/// mapped `Iterated` axis has no usable slot remap (cannot happen for a slice
+/// `compute_read_slice` accepted -- both gate on the same helper over the
+/// same salsa dimension context -- but a stale invariant degrades to the
+/// caller's conservative fallback rather than mis-slotted scores): the caller
 /// then falls back to the conservative "every source element, scalar agg" form.
 pub(super) fn read_slice_rows(
     read_slice: &[crate::ltm_agg::AxisRead],
     from_dim_element_lists: &[Vec<String>],
+    dim_ctx: &crate::dimensions::DimensionsContext,
 ) -> Option<Vec<ReadSliceRow>> {
     use crate::ltm_agg::AxisRead;
     if read_slice.len() != from_dim_element_lists.len() {
         return None;
     }
-    // Per axis: the element list to iterate, plus whether the axis contributes
-    // a coordinate to the result slot.
-    let per_axis: Vec<(Vec<String>, bool)> = read_slice
+    // Per axis: the element list to iterate, plus -- for an `Iterated` axis
+    // -- the slot coordinate per source element (index-aligned).
+    let per_axis: Vec<(Vec<String>, Option<Vec<String>>)> = read_slice
         .iter()
         .zip(from_dim_element_lists)
         .map(|(a, elems)| match a {
-            AxisRead::Pinned(e) => (vec![e.clone()], false),
-            AxisRead::Iterated(_) => (elems.clone(), true),
-            AxisRead::Reduced => (elems.clone(), false),
+            AxisRead::Pinned(e) => Some((vec![e.clone()], None)),
+            AxisRead::Iterated { dim, source_dim } => {
+                let slots =
+                    crate::ltm_agg::iterated_axis_slot_elements(dim, source_dim, elems, dim_ctx)?;
+                Some((elems.clone(), Some(slots)))
+            }
+            AxisRead::Reduced => Some((elems.clone(), None)),
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()?;
     // Cartesian product, tracking each row's full element tuple and its slot
     // coordinates.
     let mut rows: Vec<(Vec<String>, Vec<String>)> = vec![(Vec::new(), Vec::new())];
-    for (elems, contributes_to_slot) in &per_axis {
+    for (elems, slot_elems) in &per_axis {
         let mut next: Vec<(Vec<String>, Vec<String>)> =
             Vec::with_capacity(rows.len() * elems.len());
         for (row, slot) in &rows {
-            for e in elems {
+            for (ei, e) in elems.iter().enumerate() {
                 let mut new_row = row.clone();
                 new_row.push(e.clone());
                 let mut new_slot = slot.clone();
-                if *contributes_to_slot {
-                    new_slot.push(e.clone());
+                if let Some(slots) = slot_elems {
+                    new_slot.push(slots[ei].clone());
                 }
                 next.push((new_row, new_slot));
             }

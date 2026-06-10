@@ -95,15 +95,17 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// drive a per-shape `⁚wildcard` / `⁚dynamic` link-score variant. Every
 /// statically-describable inlined reducer -- whole-extent (`SUM(pop[*])`) or
 /// sliced (`SUM(pop[NYC, *])`, `SUM(matrix[D1, *])`) -- is hoisted into a
-/// `$⁚ltm⁚agg⁚{n}` node and scored by the agg's two halves. A site that is
-/// *not* a hoisted reducer's argument -- a bare dynamic index (`arr[i+1]`, a
-/// range), the dynamic-index reducer carve-out (`SUM(pop[idx, *])`, `idx`
-/// non-literal, reclassified to `DynamicIndex`), a mapped-dimension sliced
-/// reducer (`SUM(matrix[State, *])` over `matrix[Region, D2]` with a
-/// `State→Region` mapping; `enumerate_agg_nodes` declines the remapped axis,
-/// so the `Wildcard` reference stays `Direct`), or a direct `pop[idx]`
-/// alongside a `SUM(pop[*])` -- keeps a conservative edge and a Bare-named
-/// link score.
+/// `$⁚ltm⁚agg⁚{n}` node and scored by the agg's two halves -- including a
+/// positionally-MAPPED sliced reducer (`SUM(matrix[State, *])` over
+/// `matrix[Region, D2]` with a positional `State→Region` mapping, GH #534).
+/// A site that is *not* a hoisted reducer's argument -- a bare dynamic index
+/// (`arr[i+1]`, a range), the dynamic-index reducer carve-out
+/// (`SUM(pop[idx, *])`, `idx` non-literal, reclassified to `DynamicIndex`),
+/// a mapped sliced reducer the correspondence declines (element-mapped --
+/// GH #756 -- or reverse-declared -- GH #757; `enumerate_agg_nodes` declines
+/// those, so the reference stays `Direct` and is reclassified
+/// `DynamicIndex`), or a direct `pop[idx]` alongside a `SUM(pop[*])` --
+/// keeps a conservative edge and a Bare-named link score.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
@@ -610,7 +612,9 @@ fn expand_same_element(
 ///
 /// - A [`AxisRead::Pinned`] axis fixes one element of the source on that axis.
 /// - An [`AxisRead::Iterated`] axis ranges; its element selects the agg result
-///   slot's coordinate for that dimension.
+///   slot's coordinate for that dimension -- remapped to the corresponding
+///   TARGET-dim element via `iterated_axis_slot_elements` when the axis is a
+///   positionally-mapped pair (GH #534; identity in the literal case).
 /// - A [`AxisRead::Reduced`] axis ranges over *every* element (each one feeds
 ///   the same agg result slot). For the *element graph* a representative
 ///   element would suffice for reachability, but emitting one edge per element
@@ -722,65 +726,98 @@ fn emit_agg_routed_edges(
         // source rows: a `Pinned` axis is fixed to one element; an `Iterated`
         // or `Reduced` axis ranges over every element. The position of an
         // `Iterated` axis within the result tuple is tracked so each source
-        // row maps to the matching agg result slot.
+        // row maps to the matching agg result slot; for a positionally-MAPPED
+        // iterated axis (GH #534) the slot coordinate is the source element's
+        // corresponding TARGET-dim element (`slot_elems`, aligned with
+        // `elems`), not the source element itself.
         struct AxisPlan {
             elems: Vec<String>,
+            /// The agg-slot coordinate per source element (index-aligned
+            /// with `elems`); `Some` exactly when this axis is `Iterated`.
+            /// Identity for the literal case, the mapping's positional
+            /// correspondence for a mapped pair.
+            slot_elems: Option<Vec<String>>,
             /// `Some(j)` if this axis is the `j`th `Iterated` axis (its
-            /// element becomes coordinate `j` of the agg result slot);
+            /// slot element becomes coordinate `j` of the agg result slot);
             /// `None` otherwise.
             iterated_pos: Option<usize>,
         }
-        let mut axis_plans: Vec<AxisPlan> = Vec::with_capacity(from_dims.len());
         let mut next_iterated_pos = 0usize;
-        if read_slice_ok {
-            for (a, d) in agg.read_slice.iter().zip(from_dims) {
-                let plan = match a {
-                    AxisRead::Pinned(elem) => AxisPlan {
+        // `None` when a mapped `Iterated` axis has no usable slot remap --
+        // which cannot happen for a slice `compute_read_slice` accepted
+        // (both gate on `iterated_axis_slot_elements` over the same salsa
+        // dimension context), but a stale invariant degrades to the same
+        // conservative fallback as a malformed `read_slice` rather than
+        // emitting mis-slotted edges.
+        let planned: Option<Vec<AxisPlan>> = if read_slice_ok {
+            agg.read_slice
+                .iter()
+                .zip(from_dims)
+                .map(|(a, d)| match a {
+                    AxisRead::Pinned(elem) => Some(AxisPlan {
                         elems: vec![elem.clone()],
+                        slot_elems: None,
                         iterated_pos: None,
-                    },
-                    AxisRead::Iterated(_) => {
+                    }),
+                    AxisRead::Iterated { dim, source_dim } => {
+                        let elems = dimension_element_names(d);
+                        let slots = crate::ltm_agg::iterated_axis_slot_elements(
+                            dim, source_dim, &elems, dim_ctx,
+                        )?;
                         let pos = next_iterated_pos;
                         next_iterated_pos += 1;
-                        AxisPlan {
-                            elems: dimension_element_names(d),
+                        Some(AxisPlan {
+                            elems,
+                            slot_elems: Some(slots),
                             iterated_pos: Some(pos),
-                        }
+                        })
                     }
-                    AxisRead::Reduced => AxisPlan {
+                    AxisRead::Reduced => Some(AxisPlan {
                         elems: dimension_element_names(d),
+                        slot_elems: None,
                         iterated_pos: None,
-                    },
-                };
-                axis_plans.push(plan);
-            }
+                    }),
+                })
+                .collect()
         } else {
+            None
+        };
+        debug_assert!(
+            !read_slice_ok || planned.is_some(),
+            "every Iterated axis accepted by compute_read_slice must have a slot remap"
+        );
+        let n_iterated = if planned.is_some() {
+            next_iterated_pos
+        } else {
+            0
+        };
+        let axis_plans: Vec<AxisPlan> = planned.unwrap_or_else(|| {
             // Conservative fallback: every source element, scalar agg.
-            for d in from_dims {
-                axis_plans.push(AxisPlan {
+            from_dims
+                .iter()
+                .map(|d| AxisPlan {
                     elems: dimension_element_names(d),
+                    slot_elems: None,
                     iterated_pos: None,
-                });
-            }
-        }
+                })
+                .collect()
+        });
 
         // Source → agg edges: cartesian product over the per-axis element
         // lists, routing each row to the agg result slot picked out by its
-        // `Iterated` coordinates. (`next_iterated_pos` is 0 in the
-        // conservative fallback.)
-        let n_iterated = if read_slice_ok { next_iterated_pos } else { 0 };
+        // `Iterated` coordinates (remapped via `slot_elems`).
         let mut rows: Vec<(Vec<String>, Vec<String>)> =
             vec![(Vec::new(), vec![String::new(); n_iterated])];
         for plan in &axis_plans {
             let mut next_rows: Vec<(Vec<String>, Vec<String>)> =
                 Vec::with_capacity(rows.len() * plan.elems.len());
             for (row_elems, slot) in &rows {
-                for elem in &plan.elems {
+                for (ei, elem) in plan.elems.iter().enumerate() {
                     let mut new_row = row_elems.clone();
                     new_row.push(elem.clone());
                     let mut new_slot = slot.clone();
-                    if let Some(j) = plan.iterated_pos {
-                        new_slot[j] = elem.clone();
+                    if let (Some(j), Some(slots)) = (plan.iterated_pos, &plan.slot_elems) {
+                        new_slot[j] = slots[ei].clone();
                     }
                     next_rows.push((new_row, new_slot));
                 }
@@ -829,11 +866,12 @@ fn emit_agg_routed_edges(
             !to_dims.is_empty() && target_element.is_none(),
             "an Iterated-axis agg implies an A2A target"
         );
-        // The agg's result dims come from the target equation's own iterated
-        // dims (`compute_read_slice` declines a mapped iterated axis -- GH
-        // #534), so the name-match path always applies here today; the
-        // `dim_ctx` is threaded for signature uniformity and #534's future
-        // mapped-axis support.
+        // The agg's result dims are the target equation's own iterated dims
+        // (for a MAPPED iterated axis, GH #534, `result_dims` carries the
+        // TARGET dim of the pair -- the slot remap happened on the
+        // source→agg side above), so the name-match path applies; `dim_ctx`
+        // still backs `expand_same_element`'s own mapped-Bare diagonal for
+        // any remaining differently-named axes.
         expand_same_element(
             &agg.name,
             to_name,
