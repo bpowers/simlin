@@ -931,6 +931,57 @@ fn test_variable_backed_partial_reduce_emits_no_fragment_warning() {
     );
 }
 
+/// GH #752 follow-up: a variable-backed partial reduce with a PINNED axis
+/// in its read slice (`inflow[D1] = MEAN(cube[D1,x,*])`) is EXCLUDED from
+/// the read-slice routing -- `try_cross_dimensional_link_scores`' co-reduced
+/// slice ignores Pinned axes, so its per-`(row, slot)` values are wrong for
+/// a pinned slice (the MEAN divisor counts unread rows; tracked separately).
+/// The shape must stay on the LOUD conservative regime: cross-product
+/// element edges whose loop scores reference never-emitted names and surface
+/// fragment-failure Warnings, rather than compiling cleanly against silently
+/// wrong scores. When the co-reduced-slice derivation is fixed, this test
+/// flips to the zero-warning assertion and the gate's Pinned exclusion goes.
+#[test]
+fn test_variable_backed_pinned_mixed_reduce_stays_on_warned_path() {
+    use crate::db::collect_model_diagnostics;
+    use salsa::Setter;
+
+    let project = TestProject::new("vb_pinned_mixed_warned")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .array_flow("inflow[D1]", "MEAN(cube[D1,x,*])", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_model_diagnostics(&db, source_model, source_project);
+
+    let frag_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| is_ltm_fragment_failure(d))
+        .collect();
+    assert!(
+        !frag_failures.is_empty(),
+        "a Pinned-bearing variable-backed partial reduce must stay on the \
+         loud conservative path (fragment-failure Warnings) until the \
+         per-(row, slot) co-reduced-slice derivation handles Pinned axes; \
+         got no fragment warnings: {diags:?}"
+    );
+}
+
 /// Counterpart to the surfacing test: when LTM is disabled,
 /// `collect_model_diagnostics` must not run the LTM fragment-diagnostic
 /// pass -- a model with a failing LTM fragment whose caller never asked

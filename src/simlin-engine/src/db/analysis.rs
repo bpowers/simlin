@@ -815,7 +815,19 @@ fn emit_agg_routed_edges(
             0
         };
         let axis_plans: Vec<AxisPlan> = planned.unwrap_or_else(|| {
-            // Conservative fallback: every source element, scalar agg.
+            // Conservative fallback: every source element, scalar agg. NOTE:
+            // for a VARIABLE-BACKED arrayed agg this fallback is NOT merely
+            // imprecise -- a scalar slot makes `agg_node_name` the BARE
+            // variable name (`inflow`), a node that does not exist in the
+            // element graph (an arrayed variable's nodes are all
+            // subscripted), so the edges dangle and any loop through the
+            // reducer silently disappears from enumeration. Unreachable by
+            // construction today (`variable_backed_partial_reduce_agg` only
+            // admits well-formed all-Iterated/Reduced slices, and the
+            // debug_asserts above pin the remap invariants), but if the gate
+            // is ever widened this fallback must be re-evaluated for the
+            // variable-backed case (e.g. fall back to the cross-product
+            // instead).
             from_dims
                 .iter()
                 .map(|d| AxisPlan {

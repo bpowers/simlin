@@ -74,7 +74,11 @@
 //! never emitted and stubbed to 0). Whole-extent variable-backed reducers
 //! (`total = SUM(pop[*])`, including the broadcast `share[R] = SUM(pop[*])`)
 //! keep the normal reference walker's reduction/broadcast edges, which are
-//! already the true reads.
+//! already the true reads for those shapes; the gate's other exclusions
+//! (partial reduce broadcast over extra target dims / permuted axes --
+//! GH #764 -- and Pinned-bearing mixed slices, see
+//! [`variable_backed_partial_reduce_agg`]) keep the conservative
+//! cross-product, a SUPERSET of the true reads on the loud warned path.
 
 use std::collections::HashMap;
 
@@ -1181,6 +1185,15 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
 ///   per-`(row, slot)` link scores are not emitted for that shape either).
 /// - a permuted-axes whole-RHS reduce: slot coordinates are in
 ///   `Iterated`-axis (source) order, which would mis-subscript `to`.
+/// - a PINNED-bearing mixed slice (`outf[D1] = MEAN(cube[D1,x,*])`):
+///   `try_cross_dimensional_link_scores` derives each slot's co-reduced
+///   slice from the FULL source cartesian product, ignoring `Pinned` axes,
+///   so its per-`(row, slot)` values are wrong for a pinned slice (e.g. the
+///   MEAN divisor counts the unread rows -- tracked separately). Accepting
+///   the slice here would trade the loud conservative regime (cross-product
+///   edges whose loop scores fail fragment compile with `Warning`s) for
+///   silently wrong numbers; the exclusion goes when that derivation
+///   respects the read slice.
 pub(crate) fn variable_backed_partial_reduce_agg<'a>(
     aggs: &'a AggNodesResult,
     from: &str,
@@ -1197,6 +1210,11 @@ pub(crate) fn variable_backed_partial_reduce_agg<'a>(
             && a.read_slice
                 .iter()
                 .any(|ax| matches!(ax, AxisRead::Iterated { .. }))
+            // Every axis Iterated or Reduced: a Pinned-bearing slice is
+            // excluded (see the rustdoc's last bullet).
+            && a.read_slice
+                .iter()
+                .all(|ax| matches!(ax, AxisRead::Iterated { .. } | AxisRead::Reduced))
             && a.result_dims.len() == to_dims.len()
             && a.result_dims
                 .iter()

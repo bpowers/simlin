@@ -626,9 +626,17 @@ fn variable_backed_partial_reduce_loop_scores_finite_and_sustained() {
         .into_iter()
         .filter(|s| s.starts_with(LOOP_SCORE_PREFIX))
         .collect();
-    assert!(
-        !loop_score_names.is_empty(),
-        "the variable-backed partial-reduce feedback model must produce loop scores"
+    // Exactly the four real per-(d1, d2) loops -- one scalar loop per matrix
+    // element (`stock[d1] → matrix[d1,d2] → inflow[d1] → stock[d1]`).
+    // Pre-fix this model had FIVE broken loops (four phantom cross-element
+    // 6-cycles over the off-diagonal cross-product edges plus one
+    // uncompilable A2A loop); a count drift here means phantom loops were
+    // reintroduced (or real ones dropped), independent of whether their
+    // scores happen to compile.
+    assert_eq!(
+        loop_score_names.len(),
+        4,
+        "expected exactly one loop per (d1, d2) matrix element; got: {loop_score_names:?}"
     );
 
     // Every loop score routes through the reducer (every feedback path runs
