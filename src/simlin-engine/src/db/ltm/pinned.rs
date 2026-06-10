@@ -397,6 +397,7 @@ fn expand_pin_on_element_graph(
         var_graph,
         source_vars,
         db,
+        model,
         project,
         dm_dims,
         cross_agg_loop_budget(),

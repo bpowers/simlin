@@ -636,9 +636,12 @@ pub(crate) fn model_ltm_reference_sites(
             // includes `from` -- i.e. `to`'s whole equation is exactly the
             // reducer (`total = SUM(population[*])`, `row_sum[D1] =
             // SUM(matrix[D1,*])`). In that case the `(from, to)` edge *is* the
-            // agg edge: `emit_edges_for_reference` projects the `Wildcard`
-            // syntactic shape correctly (a reduction into the scalar/lower-
-            // rank `to`), so it must keep its `Wildcard` shape.
+            // agg edge and the reference keeps its `Wildcard` shape:
+            // `model_element_causal_edges` routes the partial-reduce case by
+            // its read slice (GH #752, via
+            // `ltm_agg::variable_backed_partial_reduce_agg`) and projects the
+            // whole-extent case as the reduction/broadcast via
+            // `emit_edges_for_reference`.
             let to_is_variable_backed_agg = agg_nodes
                 .by_var
                 .get(to_name_str)

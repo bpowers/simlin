@@ -537,6 +537,134 @@ fn whole_extent_sum_agg_loop_scores_are_finite_and_sustained() {
     );
 }
 
+/// GH #752, end-to-end: a feedback loop through a VARIABLE-BACKED partial
+/// reducer -- `inflow[D1] = SUM(matrix[D1,*])` is the WHOLE RHS, so `inflow`
+/// itself is the aggregate node (`is_synthetic == false`, no `$⁚ltm⁚agg⁚{n}`
+/// minted) -- must compile every loop-score fragment and produce finite,
+/// sustained non-zero scores.
+///
+/// Before the fix the element graph kept the conservative cross-product for
+/// the variable-backed reducer reference (phantom `matrix[a,x] → inflow[b]`
+/// edges), so the loop builder emitted phantom cross-element loops whose
+/// scores referenced `"matrix[a,x]→inflow"[b]` / the bare A2A
+/// `"matrix→inflow"` -- names `try_cross_dimensional_link_scores` never
+/// emits (only the per-`(row, slot)` scalars `matrix[a,x]→inflow[a]` exist).
+/// Every loop score through the reducer failed fragment compile (Assembly
+/// Warnings) and was silently stubbed to a constant 0.
+#[test]
+fn variable_backed_partial_reduce_loop_scores_finite_and_sustained() {
+    let project = TestProject::new("vb_partial_reduce_loop")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux("matrix[D1,D2]", "stock[D1] * 0.1")
+        // Heterogeneous initial stock values so the two D1 rows stay
+        // distinguishable and the per-row reducer link scores are
+        // non-degenerate.
+        .array_with_ranges("stock0[D1]", vec![("a", "10"), ("b", "30")])
+        .array_stock("stock[D1]", "stock0[D1]", &["inflow"], &[], None)
+        // The WHOLE RHS is the partial reduce: `inflow` is the
+        // variable-backed agg (result_dims = [D1]).
+        .array_flow("inflow[D1]", "SUM(matrix[D1,*])", None)
+        .build_datamodel();
+
+    // Zero fragment-failure warnings: every LTM synthetic fragment for this
+    // model must compile. (This was the GH #752 / #547 positive-failure
+    // fixture before the fix.)
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let frag_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(
+                    &d.error,
+                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
+                )
+        })
+        .collect();
+    assert!(
+        frag_failures.is_empty(),
+        "a feedback loop through a variable-backed partial reducer must compile every \
+         LTM fragment; got: {frag_failures:?}"
+    );
+
+    let (results, ltm_vars) = run_ltm(&project);
+    assert!(
+        results.step_count > STARTUP_STEPS,
+        "the fixture must simulate past the {STARTUP_STEPS}-step startup guard, got {} step(s)",
+        results.step_count
+    );
+
+    // No synthetic agg: the variable is the agg.
+    assert!(
+        !ltm_vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}agg\u{205A}")),
+        "a whole-RHS reducer must not mint a synthetic agg; synthetic vars: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // The per-(row, slot) reducer link scores are the only matrix→inflow
+    // names; the loops must reference them.
+    let partial_reduce_names: Vec<String> = ltm_vars
+        .iter()
+        .map(|v| v.name.clone())
+        .filter(|n| {
+            n.starts_with(&format!("{LINK_SCORE_PREFIX}matrix[")) && n.contains("\u{2192}inflow[")
+        })
+        .collect();
+    assert_eq!(
+        partial_reduce_names.len(),
+        4,
+        "expected one per-(row, slot) link score per matrix element; got: {partial_reduce_names:?}"
+    );
+
+    let loop_score_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|s| s.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !loop_score_names.is_empty(),
+        "the variable-backed partial-reduce feedback model must produce loop scores"
+    );
+
+    // Every loop score routes through the reducer (every feedback path runs
+    // matrix → inflow), so every one must reference a per-(row, slot) link
+    // score, be finite everywhere, and be sustained non-zero past the
+    // startup guard.
+    for name in &loop_score_names {
+        let var = ltm_var(&ltm_vars, name);
+        let eq = var.equation.source_text();
+        assert!(
+            partial_reduce_names.iter().any(|n| eq.contains(n.as_str())),
+            "loop score {name} must reference a per-(row, slot) reducer link score; eq: {eq}"
+        );
+        let n_slots = slot_count(var, &project.dimensions);
+        let base = offset_of(&results, name);
+        for slot in 0..n_slots {
+            let s = series_at(&results, base + slot);
+            for (step, &v) in s.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "loop score {name} slot {slot} at step {step} is not finite: {v}"
+                );
+            }
+            let sustained = s
+                .iter()
+                .skip(STARTUP_STEPS)
+                .all(|v| v.abs() > MEANINGFUL_SCORE);
+            assert!(
+                sustained,
+                "loop score {name} slot {slot} must be sustained non-zero past the startup \
+                 guard (the reinforcing loop is active every step); got: {s:?}"
+            );
+        }
+    }
+}
+
 /// GH #533 + GH #737, end-to-end: a feedback loop whose only path back to a
 /// *scalar* stock runs through a *scalar* feeder of a hoisted reducer *with a
 /// scalar target*. The fixture is a scalar stock `total` grown by

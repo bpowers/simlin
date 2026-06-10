@@ -1393,6 +1393,21 @@ pub(crate) fn compile_ltm_synthetic_fragment(
     model: SourceModel,
     project: SourceProject,
 ) -> Option<VarFragmentResult> {
+    // GH #547: a test-scoped forced failure, so the fragment-diagnostics
+    // positive tests exercise the diagnostic pass without depending on a
+    // real fragment-compile bug existing (every such bug eventually gets
+    // fixed, which used to break the positive fixture).
+    #[cfg(test)]
+    {
+        let forced = LTM_FRAGMENT_FAILURE_OVERRIDE.with(|c| {
+            c.borrow()
+                .as_deref()
+                .is_some_and(|pat| ltm_var.name.contains(pat))
+        });
+        if forced {
+            return None;
+        }
+    }
     // Compile this LTM var's already-prepared equation verbatim.
     // Used for everything except the standard scalar Bare `from→to`
     // link score, which goes through the salsa-cached
@@ -1463,6 +1478,51 @@ pub(crate) fn compile_ltm_synthetic_fragment(
     } else {
         // Loop scores and relative loop scores.
         compile_direct()
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only forced-failure pattern for
+    /// [`compile_ltm_synthetic_fragment`], scoped by an active
+    /// [`LtmFragmentFailureGuard`] (GH #547): any LTM synthetic variable
+    /// whose name contains the pattern is treated as a compile failure
+    /// (`None`), so the positive tests for
+    /// [`model_ltm_fragment_diagnostics`] are decoupled from the lifetime
+    /// of any real fragment-compile bug. Mirrors `AGG_LOOP_BUDGET_OVERRIDE`
+    /// in `db/ltm/loops.rs`.
+    static LTM_FRAGMENT_FAILURE_OVERRIDE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// RAII guard (test-only) that forces [`compile_ltm_synthetic_fragment`] to
+/// fail for any synthetic variable whose name contains `pattern`, for the
+/// current thread for the guard's lifetime; the previous override is
+/// restored on drop (so a panicking test does not leak it to the next test
+/// reusing the thread).
+///
+/// Because `model_ltm_fragment_diagnostics` (and `assemble_module`) are
+/// salsa-memoized, the guard must outlive every call in the test whose
+/// failures it forces, and the test must use a fresh `db` (a memoized
+/// result computed under a different override would otherwise be returned
+/// regardless of the guard's state). Same caveat as `AggLoopBudgetGuard`.
+#[cfg(test)]
+pub(crate) struct LtmFragmentFailureGuard {
+    prev: Option<String>,
+}
+
+#[cfg(test)]
+impl LtmFragmentFailureGuard {
+    pub(crate) fn new(pattern: &str) -> Self {
+        let prev = LTM_FRAGMENT_FAILURE_OVERRIDE.with(|c| c.replace(Some(pattern.to_string())));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for LtmFragmentFailureGuard {
+    fn drop(&mut self) {
+        LTM_FRAGMENT_FAILURE_OVERRIDE.with(|c| *c.borrow_mut() = self.prev.take());
     }
 }
 

@@ -793,6 +793,59 @@ fn element_graph_whole_rhs_scalar_reducer_is_its_own_agg_node() {
     assert_no_edge(&result, "pop[boston]", "migration[nyc]");
 }
 
+/// GH #752 (element graph, variable-backed partial reduce): a whole-RHS
+/// partial reducer (`inflow[D1] = SUM(matrix[D1,*])` is the ENTIRE
+/// dt-equation, so `inflow` itself is the variable-backed agg --
+/// `is_synthetic == false`, `result_dims = [D1]`, `read_slice =
+/// [Iterated(d1), Reduced]`) gets read-slice-driven element edges, exactly
+/// like a synthetic agg's source half: each `matrix[d1,d2]` row feeds ONLY
+/// its own slot `inflow[d1]`. Before the fix the variable-backed reference
+/// stayed on the conservative `Wildcard` cross-product, whose phantom
+/// off-diagonal `matrix[a,x] -> inflow[b]` edges produced loop-score
+/// equations referencing link-score names (`"matrix[a,x]→inflow"[b]`, the
+/// bare A2A `"matrix→inflow"`) that `try_cross_dimensional_link_scores`
+/// never emits -- only the per-`(row, slot)` scalars
+/// `matrix[a,x]→inflow[a]` exist -- so every loop score through the
+/// reducer failed fragment compile and was silently stubbed to 0.
+#[test]
+fn element_graph_variable_backed_partial_reduce_routes_read_slice() {
+    let project = TestProject::new("vb_partial_reduce_elem_graph")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux("matrix[D1,D2]", "stock[D1] * 0.1")
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .array_flow("inflow[D1]", "SUM(matrix[D1,*])", None);
+
+    let result = element_edges(&project);
+
+    // No synthetic agg node: the variable IS the agg.
+    assert!(
+        !result
+            .edges
+            .keys()
+            .any(|k| k.contains("\u{205A}agg\u{205A}"))
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t.contains("\u{205A}agg\u{205A}"))),
+        "a variable-backed partial reducer must not produce a synthetic agg node; got: {:?}",
+        result.edges
+    );
+
+    // The read-slice diagonal: each matrix row feeds only its own D1 slot.
+    assert_edge(&result, "matrix[a,x]", "inflow[a]");
+    assert_edge(&result, "matrix[a,y]", "inflow[a]");
+    assert_edge(&result, "matrix[b,x]", "inflow[b]");
+    assert_edge(&result, "matrix[b,y]", "inflow[b]");
+
+    // No phantom off-diagonal cross-product edges: `SUM(matrix[a,*])` never
+    // reads row `b` and vice versa.
+    assert_no_edge(&result, "matrix[a,x]", "inflow[b]");
+    assert_no_edge(&result, "matrix[a,y]", "inflow[b]");
+    assert_no_edge(&result, "matrix[b,x]", "inflow[a]");
+    assert_no_edge(&result, "matrix[b,y]", "inflow[a]");
+}
+
 /// AC4.1 (element graph, sliced reducer): `target[Region] = pop[NYC, Adult] +
 /// SUM(pop[NYC, *])` over `pop[Region, Age]` (Region={NYC, Boston}, Age={Adult,
 /// Child}). The maximal `SUM(pop[NYC, *])` subexpression is hoisted into a

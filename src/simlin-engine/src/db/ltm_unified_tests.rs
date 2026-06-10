@@ -734,33 +734,28 @@ fn test_ltm_disabled_gate_suppresses_auto_flip_warning() {
 // LTM synthetic-fragment compile-failure diagnostics
 // ---------------------------------------------------------------------------
 
-/// Build a model whose LTM augmentation emits a synthetic equation the
-/// fragment compiler genuinely rejects, so the diagnostic pass has a real
-/// failure to surface.
+/// Build a feedback loop through a *variable-backed* partial reducer
+/// (`inflow[D1] = SUM(matrix[D1,*])` is the whole RHS, so `inflow` itself
+/// is the agg) closed through a `D1` stock that broadcasts into the
+/// `D1 x D2` matrix.
 ///
-/// This used to be a `SMTH1`-in-loop model, but that hazard (the
-/// composite-reference link score into a stdlib-macro module) was fixed in
-/// GH #548 (`build_submodel_metadata` now registers the sub-model's LTM
-/// composite var, so the cross-module reference resolves). The fixture is a
-/// *variable-backed* partial reducer (`inflow[D1] = SUM(matrix[D1,*])` is
-/// the whole RHS, so `inflow` itself is the agg) closed into a feedback loop
-/// through a `D1` stock that broadcasts into the `D1 x D2` matrix.
-/// Variable-backed aggs take the conservative cross-product in the element
-/// graph, and the resulting loop-score equations reference link-score names
-/// that don't exist for a partial reduce -- the bare A2A
-/// `"...matrix→inflow"` and the subscripted-per-element
-/// `"...matrix[a,x]→inflow"[b]` forms, where only the per-`(row, slot)`
-/// scalar `matrix[a,x]→inflow[a]` vars are emitted -- so the loop-score
-/// fragments fail to compile and `assemble_module` would silently stub them
-/// to 0. The diagnostic pass must surface that. (This fixture originally
-/// leaned on the GH #528 broadcast over-subscription of a *synthetic*
-/// arrayed agg, which is now fixed; the variable-backed loop-score
-/// name-resolution gap here is a distinct, still-open failure.)
-///
-/// Using a genuinely-unfixed failure (rather than a once-broken-now-fixed
-/// one) keeps these diagnostic-infrastructure tests decoupled from any
-/// single bug's lifetime -- the test-coupling concern of GH #547.
-fn build_model_with_failing_ltm_fragment(name: &str) -> datamodel::Project {
+/// This was the fragment-diagnostics POSITIVE fixture while GH #752 was
+/// open: the element graph kept the conservative cross-product for the
+/// variable-backed reducer reference, and the loop-score equations over
+/// the phantom off-diagonal edges referenced link-score names that were
+/// never emitted (the bare A2A `"...matrix→inflow"` and the
+/// subscripted-per-element `"...matrix[a,x]→inflow"[b]` forms; only the
+/// per-`(row, slot)` scalars `matrix[a,x]→inflow[a]` exist), so they
+/// failed fragment compile. GH #752 retired that cross-product (read-slice
+/// diagonal element edges + per-circuit loops that resolve the
+/// per-`(row, slot)` scores), so this model now compiles every LTM
+/// fragment -- pinned by
+/// `test_variable_backed_partial_reduce_emits_no_fragment_warning`. The
+/// positive fragment-failure tests now use the deterministic
+/// [`crate::db::LtmFragmentFailureGuard`] injection hook instead of a real
+/// bug, resolving the GH #547 test-debt coupling (a positive fixture that
+/// leans on a real bug breaks when that bug is fixed).
+fn build_variable_backed_partial_reduce_project(name: &str) -> datamodel::Project {
     TestProject::new(name)
         .with_sim_time(0.0, 5.0, 1.0)
         .named_dimension("D1", &["a", "b"])
@@ -789,12 +784,19 @@ fn is_ltm_fragment_failure(d: &crate::db::Diagnostic) -> bool {
 /// Without this the failure is silent: the variable keeps a layout slot,
 /// reads a constant 0, and the model still simulates, so the degraded
 /// loop/link score masquerades as a correct result.
+///
+/// The failure is INJECTED via `LtmFragmentFailureGuard` (GH #547) rather
+/// than relying on a real fragment-compile bug, so this test exercises only
+/// the diagnostic pass and survives every such bug being fixed (the prior
+/// fixture leaned on GH #752 and broke when it was).
 #[test]
 fn test_ltm_fragment_compile_failure_surfaces_warning() {
-    use crate::db::collect_model_diagnostics;
+    use crate::db::{LtmFragmentFailureGuard, collect_model_diagnostics};
     use salsa::Setter;
 
-    let project = build_model_with_failing_ltm_fragment("frag_fail_surface");
+    // A plain scalar feedback loop whose fragments all genuinely compile;
+    // the guard then deterministically fails its loop-score fragment.
+    let project = build_chain_scc_project("frag_fail_surface", 5);
     let mut db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
@@ -802,6 +804,7 @@ fn test_ltm_fragment_compile_failure_surfaces_warning() {
     };
     source_project.set_ltm_enabled(&mut db).to(true);
 
+    let _force_failure = LtmFragmentFailureGuard::new("loop_score");
     let diags = collect_model_diagnostics(&db, source_model, source_project);
 
     let frag_failures: Vec<_> = diags
@@ -819,34 +822,34 @@ fn test_ltm_fragment_compile_failure_surfaces_warning() {
         frag_failures.iter().all(|d| {
             d.variable
                 .as_deref()
-                .is_some_and(|v| v.contains("$\u{205A}ltm\u{205A}"))
+                .is_some_and(|v| v.contains("$\u{205A}ltm\u{205A}loop_score"))
         }),
-        "fragment-failure warnings must name the LTM synthetic variable; \
-         got: {frag_failures:?}"
+        "fragment-failure warnings must name the LTM synthetic variable the \
+         guard failed; got: {frag_failures:?}"
     );
 }
 
 /// The compile-failure warning is accumulated by `model_ltm_fragment_diagnostics`
 /// itself. Asserting on the tracked function directly isolates the
 /// emission from the `model_all_diagnostics` wiring exercised by
-/// `test_ltm_fragment_compile_failure_surfaces_warning`.
+/// `test_ltm_fragment_compile_failure_surfaces_warning`. Like that test,
+/// the failure is injected via `LtmFragmentFailureGuard` (GH #547).
 #[test]
 fn test_model_ltm_fragment_diagnostics_emits_warning() {
-    use crate::db::CompilationDiagnostic;
+    use crate::db::{CompilationDiagnostic, LtmFragmentFailureGuard};
     use salsa::Setter;
 
-    let project = build_model_with_failing_ltm_fragment("frag_fail_direct");
+    let project = build_chain_scc_project("frag_fail_direct", 5);
     let mut db = SimlinDb::default();
     let (source_project, model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
     // Mirror the production reachability of this pass (`model_all_diagnostics`
-    // only runs it when `ltm_enabled`); the broadcast-agg failure surfaces
-    // regardless of the flag, but enabling it keeps the test faithful to how
-    // the diagnostic is actually triggered.
+    // only runs it when `ltm_enabled`).
     source_project.set_ltm_enabled(&mut db).to(true);
 
+    let _force_failure = LtmFragmentFailureGuard::new("loop_score");
     model_ltm_fragment_diagnostics(&db, model, source_project);
     let diags = model_ltm_fragment_diagnostics::accumulated::<CompilationDiagnostic>(
         &db,
@@ -859,7 +862,7 @@ fn test_model_ltm_fragment_diagnostics_emits_warning() {
             .iter()
             .any(|CompilationDiagnostic(d)| is_ltm_fragment_failure(d)),
         "model_ltm_fragment_diagnostics must accumulate a compile-failure \
-         Warning for the broadcast arrayed-aggregate loop score; got: {:?}",
+         Warning for the guard-failed loop-score fragment; got: {:?}",
         diags.iter().map(|c| &c.0).collect::<Vec<_>>()
     );
 }
@@ -897,19 +900,53 @@ fn test_clean_ltm_model_emits_no_fragment_warning() {
     );
 }
 
+/// GH #752 regression: the feedback loop through a variable-backed partial
+/// reducer -- the model that WAS the fragment-diagnostics positive fixture
+/// while the bug was open -- must now compile every LTM fragment and emit
+/// ZERO fragment-failure warnings (its loop scores resolve the
+/// per-`(row, slot)` link-score names over the read-slice diagonal edges).
+#[test]
+fn test_variable_backed_partial_reduce_emits_no_fragment_warning() {
+    use crate::db::collect_model_diagnostics;
+    use salsa::Setter;
+
+    let project = build_variable_backed_partial_reduce_project("vb_partial_reduce_clean");
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_model_diagnostics(&db, source_model, source_project);
+
+    let frag_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| is_ltm_fragment_failure(d))
+        .collect();
+    assert!(
+        frag_failures.is_empty(),
+        "every loop score through a variable-backed partial reducer must \
+         compile (GH #752); got: {frag_failures:?}"
+    );
+}
+
 /// Counterpart to the surfacing test: when LTM is disabled,
 /// `collect_model_diagnostics` must not run the LTM fragment-diagnostic
 /// pass -- a model with a failing LTM fragment whose caller never asked
-/// for LTM should not emit the warning. Mirrors
+/// for LTM should not emit the warning. The guard stays active for the
+/// whole collection, so the absence of the warning proves the pass never
+/// ran, not that the fragments happened to compile. Mirrors
 /// `test_ltm_disabled_gate_suppresses_auto_flip_warning`.
 #[test]
 fn test_ltm_disabled_does_not_surface_fragment_failure_warning() {
-    use crate::db::collect_model_diagnostics;
+    use crate::db::{LtmFragmentFailureGuard, collect_model_diagnostics};
 
-    let project = build_model_with_failing_ltm_fragment("frag_fail_disabled");
+    let project = build_chain_scc_project("frag_fail_disabled", 5);
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
+    let _force_failure = LtmFragmentFailureGuard::new("loop_score");
 
     assert!(
         !sync.project.ltm_enabled(&db),
@@ -1493,6 +1530,7 @@ fn build_loops_for_test(project: &TestProject) -> Vec<crate::ltm::Loop> {
         &var_graph,
         source_vars,
         &db,
+        model,
         sync.project,
         dm_dims.as_slice(),
         MAX_CROSS_AGG_LOOPS,
@@ -1775,6 +1813,7 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
             &var_graph,
             source_vars,
             &db,
+            model,
             source_project,
             dm_dims.as_slice(),
             MAX_CROSS_AGG_LOOPS,
@@ -2557,6 +2596,7 @@ fn scalar_feeder_cycle_routes_through_agg_node() {
         &var_graph,
         source_vars,
         &db,
+        model,
         sync.project,
         dm_dims.as_slice(),
         MAX_CROSS_AGG_LOOPS,
@@ -3075,6 +3115,7 @@ fn cross_agg_two_petal_loops_match_pre_fix_content() {
         &var_graph,
         source_vars,
         &db,
+        model,
         sync.project,
         dm_dims.as_slice(),
         MAX_CROSS_AGG_LOOPS,
@@ -3302,6 +3343,7 @@ fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
         &var_graph,
         source_vars,
         &db,
+        model,
         sync.project,
         dm_dims.as_slice(),
         MAX_CROSS_AGG_LOOPS,

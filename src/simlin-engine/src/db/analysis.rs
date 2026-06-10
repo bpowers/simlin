@@ -122,12 +122,16 @@ pub enum RefShape {
     /// (the reducer-style whole-extent access). A reducer reference with
     /// this shape that `enumerate_agg_nodes` hoisted into a `$⁚ltm⁚agg⁚{n}`
     /// node is routed `ThroughAgg` (the shape is then ignored); a *whole-RHS*
-    /// reducer's argument (`total = SUM(population[*])`,
-    /// `row_sum[D1] = SUM(matrix[D1,*])`) keeps this shape on its `Direct`
-    /// site, where it projects to the conservative reduction / cross-product
-    /// into the (variable-backed-agg) target. The not-hoistable dynamic-index
-    /// reducer carve-out (`SUM(pop[idx,*])`) is reclassified by `ltm_ir`
-    /// as `DynamicIndex` rather than kept here (#514), so a `Direct`
+    /// reducer's argument keeps this shape on its `Direct` site, where
+    /// `model_element_causal_edges` routes a PARTIAL reduce
+    /// (`row_sum[D1] = SUM(matrix[D1,*])`) by its read slice (GH #752,
+    /// `ltm_agg::variable_backed_partial_reduce_agg` -- only the diagonal
+    /// `matrix[d1,d2] → row_sum[d1]` rows, matching the per-`(row, slot)`
+    /// link scores) and projects a whole-extent reduce
+    /// (`total = SUM(population[*])`) to the conservative reduction /
+    /// broadcast into the (variable-backed-agg) target. The not-hoistable
+    /// dynamic-index reducer carve-out (`SUM(pop[idx,*])`) is reclassified by
+    /// `ltm_ir` as `DynamicIndex` rather than kept here (#514), so a `Direct`
     /// `Wildcard` site never carries an *un*-hoisted sliced reducer.
     Wildcard,
     /// `Expr2::Subscript(source, indices)` where at least one index is
@@ -187,11 +191,15 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 ///
 /// A `ThroughAgg`-routed reference never reaches here -- those are routed
 /// through a synthetic aggregate node by `emit_agg_routed_edges` (only the
-/// read-slice rows). After #514 the `Direct` not-hoistable-reducer carve-out
-/// (`SUM(pop[idx,*])`) is reclassified by the IR as `DynamicIndex`, so a
-/// `Direct` `Wildcard` site is now only a variable-backed reducer's whole-RHS
-/// argument (`total = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`),
-/// a (rare) non-reducer whole-array reference, or a mapped sliced reducer the
+/// read-slice rows) -- and neither does a variable-backed PARTIAL reducer's
+/// `Wildcard` argument (`row_sum[D1] = SUM(matrix[D1,*])`), which the caller
+/// routes by its read slice through the same helper (GH #752). After #514
+/// the `Direct` not-hoistable-reducer carve-out (`SUM(pop[idx,*])`) is
+/// reclassified by the IR as `DynamicIndex`, so a `Wildcard` site reaching
+/// here is only a variable-backed WHOLE-EXTENT reducer's argument
+/// (`total = SUM(population[*])`, the broadcast `share[R] = SUM(pop[*])`, or
+/// a partial reduce whose result axes don't equal the target's dims), a
+/// (rare) non-reducer whole-array reference, or a mapped sliced reducer the
 /// correspondence declines (element-mapped -- GH #756 -- or reverse-declared
 /// -- GH #757). The conservative cross product is sound for the element
 /// EDGES in all of those (a superset, never fewer); note the declined
@@ -321,11 +329,14 @@ fn emit_edges_for_reference(
             // inside an arrayed per-element expression. `DynamicIndex`
             // here is `arr[i+1]`, a range, or the not-hoistable-reducer
             // carve-out (`SUM(pop[idx,*])`, reclassified from `Wildcard` by
-            // the IR); `Wildcard` here is only a variable-backed reducer's
-            // whole-RHS argument (a reduction into a scalar/lower-rank `to`)
-            // or a rare non-reducer whole-array reference -- a hoisted
-            // *synthetic*-agg reducer reference is routed through the agg
-            // (`emit_agg_routed_edges`) and never lands on this arm.
+            // the IR); `Wildcard` here is only a variable-backed
+            // WHOLE-EXTENT reducer's whole-RHS argument (a full reduction
+            // feeding every target element) or a rare non-reducer
+            // whole-array reference -- a hoisted *synthetic*-agg reducer
+            // reference is routed through the agg (`emit_agg_routed_edges`)
+            // and a variable-backed PARTIAL reducer's argument is routed by
+            // its read slice through the same helper (GH #752), so neither
+            // lands on this arm.
             let from_elements = cartesian_element_names(from_name, from_dims);
             for from_elem in &from_elements {
                 let entry = element_edges.entry(from_elem.clone()).or_default();
@@ -629,6 +640,13 @@ fn expand_same_element(
 /// element -- the pre-Phase-4 behavior. `target_element` (a per-element
 /// `Ast::Arrayed` slot) pins the `agg → to` half to that single target.
 ///
+/// A VARIABLE-BACKED agg (`is_synthetic == false`, GH #752 -- the target's
+/// whole RHS is the reducer, so `agg.name == to_name` and the gate
+/// `ltm_agg::variable_backed_partial_reduce_agg` guarantees `result_dims`
+/// equal `to`'s dims) emits only the source→slot half: the slot names ARE
+/// `to`'s element nodes, and an agg→to half would emit degenerate
+/// `to[e] → to[e]` self-edges.
+///
 /// Defensive: if `read_slice` doesn't have one entry per source axis (it
 /// always should for a hoisted agg whose `source_vars` includes `from`), fall
 /// back to the conservative "every source element → agg" form so a stale
@@ -841,6 +859,19 @@ fn emit_agg_routed_edges(
                 .or_default()
                 .insert(agg_node_name(slot));
         }
+    }
+
+    // A VARIABLE-BACKED agg IS the target (`agg.name == to_name`, GH #752):
+    // the source→slot edges above already land on real `to[<slot>]` element
+    // nodes, and an agg→to half would only emit degenerate `to[e] → to[e]`
+    // self-edges (spurious 1-cycles for Johnson). Only synthetic aggs need
+    // the second half.
+    if !agg.is_synthetic {
+        debug_assert_eq!(
+            agg.name, to_name,
+            "a variable-backed agg routed through emit_agg_routed_edges must be the target itself"
+        );
+        return;
     }
 
     // Agg → to edges. With no `Iterated` axes the agg is scalar and broadcasts
@@ -1805,6 +1836,40 @@ pub fn model_element_causal_edges(
             for site in classified.expect("classified is Some -- checked above") {
                 match &site.routing {
                     crate::db::ltm_ir::SiteRouting::Direct => {
+                        // GH #752: a `Direct` `Wildcard` site whose target is
+                        // a VARIABLE-BACKED partial reducer (`inflow[D1] =
+                        // SUM(matrix[D1,*])` as the whole RHS -- the variable
+                        // IS the agg, so the site is not `ThroughAgg`) gets
+                        // the same read-slice routing a synthetic agg's
+                        // source half gets: `matrix[d1,d2] → inflow[d1]`,
+                        // never the phantom off-diagonal cross-product
+                        // (`SUM(matrix[a,*])` does not read row `b`). The
+                        // per-`(row, slot)` link scores
+                        // `try_cross_dimensional_link_scores` emits carry
+                        // exactly these diagonal edges' names, so loop scores
+                        // over them resolve; the cross-product's phantom
+                        // edges referenced names that were never emitted and
+                        // stubbed every loop score through the reducer to 0.
+                        // `variable_backed_partial_reduce_agg` is `None` for
+                        // the whole-extent / broadcast / permuted-axes
+                        // shapes, which keep the conservative arm below.
+                        if matches!(site.shape, RefShape::Wildcard)
+                            && let Some(vb_agg) = crate::ltm_agg::variable_backed_partial_reduce_agg(
+                                agg_nodes, from_name, to_name, &to_dims,
+                            )
+                        {
+                            emit_agg_routed_edges(
+                                from_name,
+                                to_name,
+                                &from_dims,
+                                &to_dims,
+                                vb_agg,
+                                site.target_element.as_deref(),
+                                dim_ctx,
+                                &mut element_edges,
+                            );
+                            continue;
+                        }
                         emit_edges_for_reference(
                             from_name,
                             to_name,

@@ -6451,15 +6451,14 @@ fn find_partial_reduce_offset(
 /// `SUM(matrix[D1,*])`, so `row_sum` itself is the (variable-backed) aggregate
 /// node -- `result_dims = [D1]`, `read_slice = [Iterated(d1), Reduced]` (the
 /// `D1` axis is iterated over the A2A dimension space, the `D2` axis reduced).
-/// Variable-backed aggs are real variable nodes, so the `(matrix, row_sum)`
-/// element edges go through the normal reference walker (which classifies
-/// `matrix[D1,*]` as `Wildcard` -> the conservative `matrix[d1,d2] ->
-/// row_sum[d1']` cross-product), *not* the synthetic-agg reroute that #514
-/// tightened for *inline* reducer subexpressions. So besides the clean
-/// 4-cycles `matrix[d1,d2] -> row_sum[d1] -> total -> growth[d1,d2] ->
-/// matrix[d1,d2]` there are still spurious cross-element loops; the assertions
-/// only require that a real partial-reduce link score is emitted, carries
-/// non-degenerate values, and is referenced by some loop score.
+/// Variable-backed aggs are real variable nodes (no synthetic `$⁚ltm⁚agg⁚{n}`
+/// is minted), and since GH #752 the element graph routes the
+/// `(matrix, row_sum)` edge by the read slice -- only the diagonal
+/// `matrix[d1,d2] -> row_sum[d1]` rows, never the phantom off-diagonal
+/// cross-product -- so the loops are exactly the clean 4-cycles
+/// `matrix[d1,d2] -> row_sum[d1] -> total -> growth[d1,d2] -> matrix[d1,d2]`.
+/// The assertions require that a real partial-reduce link score is emitted,
+/// carries non-degenerate values, and is referenced by some loop score.
 fn build_partial_reduce_model(name: &str) -> simlin_engine::datamodel::Project {
     use simlin_engine::datamodel::{self, Equation, Variable};
 
@@ -6647,12 +6646,11 @@ fn test_partial_reduce_cross_element_loop() {
     // link scores. The elementary loop that runs through `row_sum` is the
     // per-element 4-cycle `matrix[d1,d2] -> row_sum[d1] -> total ->
     // growth[d1,d2] -> matrix[d1,d2]` (`growth` references the scalar
-    // full-reduce `total`, not `row_sum` directly); the conservative
-    // full-cross-product element graph for the `SUM(matrix[D1,*])`
-    // reference also produces spurious cross-element loops (fixed in
-    // Phase 5), but at least one loop_score equation must reference a
-    // real `matrix[d1,d2]->row_sum[d1]` link score for the partial reduce
-    // to contribute at all -- independent of which cycle it lands in.
+    // full-reduce `total`, not `row_sum` directly); since GH #752 the
+    // read-slice element edges make those 4-cycles the only loops (no
+    // spurious cross-element circuits), and at least one loop_score
+    // equation must reference a real `matrix[d1,d2]->row_sum[d1]` link
+    // score for the partial reduce to contribute at all.
     let loop_score_var_count = results
         .offsets
         .keys()

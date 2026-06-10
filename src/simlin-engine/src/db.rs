@@ -122,6 +122,12 @@ pub(crate) use ltm::{
 // enough to hit the production constant.
 #[cfg(test)]
 pub(crate) use ltm::AggLoopBudgetGuard;
+// Test-only: the forced-fragment-failure override (GH #547), so the
+// fragment-diagnostics positive tests can exercise the diagnostic pass
+// deterministically instead of depending on a real fragment-compile bug
+// existing.
+#[cfg(test)]
+pub(crate) use ltm::LtmFragmentFailureGuard;
 
 mod analysis;
 pub use analysis::RefShape;

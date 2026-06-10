@@ -75,6 +75,8 @@ pub(crate) use pinned::model_pinned_loops;
 // db-root-mounted `ltm_unified_tests` (reached through `db.rs`'s `use ltm::*`
 // glob) -- so they would warn as unused in a non-test lib build.
 #[cfg(test)]
+pub(crate) use compile::LtmFragmentFailureGuard;
+#[cfg(test)]
 pub(crate) use compile::compile_ltm_equation_fragment;
 #[cfg(test)]
 pub(crate) use loops::{AggLoopBudgetGuard, MAX_CROSS_AGG_LOOPS, build_element_level_loops};
@@ -1235,6 +1237,7 @@ pub fn model_ltm_variables(
                 &var_graph,
                 source_vars,
                 db,
+                model,
                 project,
                 dm_dims,
                 cross_agg_budget,

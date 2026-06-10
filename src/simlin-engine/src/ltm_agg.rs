@@ -65,10 +65,16 @@
 //!
 //! Whole-RHS partial reduces (`row_sum[D1] = SUM(matrix[D1,*])`) *are*
 //! recognized -- the variable is the agg, `result_dims` carries its dims, and
-//! `read_slice` records the `Iterated`/`Reduced` axis split -- but the
-//! element-graph reroute leaves the conservative full-cross-product in place
-//! for variable-backed aggs (the edges to/from a real variable node already
-//! exist via the normal reference walker).
+//! `read_slice` records the `Iterated`/`Reduced` axis split. The element
+//! graph routes them by the read slice too (GH #752,
+//! [`variable_backed_partial_reduce_agg`]): each source row feeds only its
+//! own `row_sum[<slot>]` element node -- matching the per-`(row, slot)` link
+//! scores `try_cross_dimensional_link_scores` emits -- never the phantom
+//! off-diagonal cross-product (whose loop scores referenced names that were
+//! never emitted and stubbed to 0). Whole-extent variable-backed reducers
+//! (`total = SUM(pop[*])`, including the broadcast `share[R] = SUM(pop[*])`)
+//! keep the normal reference walker's reduction/broadcast edges, which are
+//! already the true reads.
 
 use std::collections::HashMap;
 
@@ -1148,6 +1154,55 @@ fn result_dims_from_read_slice(
 /// `true` when `name` is a synthetic aggregate-node name (`$⁚ltm⁚agg⁚{n}`).
 pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
     name.starts_with(AGG_NAME_PREFIX)
+}
+
+/// The variable-backed PARTIAL-reduce aggregate node for the causal edge
+/// `from -> to`, if any (GH #752): `to`'s entire dt-equation is a reducer
+/// reading `from` (`to` IS the agg, `is_synthetic == false`) with at least
+/// one [`AxisRead::Iterated`] axis, and the agg's `result_dims` are exactly
+/// `to`'s declared dims, in order -- so each agg result slot names a complete
+/// `to` element and the element graph can route the read-slice rows straight
+/// to `to[<slot>]` (the diagonal `matrix[d1,d2] → row_sum[d1]` family whose
+/// per-`(row, slot)` link scores `try_cross_dimensional_link_scores` emits).
+///
+/// This is the single gate shared by the element-graph reroute
+/// (`model_element_causal_edges`' `Direct`-`Wildcard` dispatch) and the loop
+/// builder (`build_element_level_loops`' per-circuit routing), so the two can
+/// never disagree about which edges carry per-`(row, slot)` scores.
+///
+/// `None` (callers keep the conservative path) for:
+/// - a whole-extent / pinned-only variable-backed reducer
+///   (`total = SUM(pop[*])`, `share[R] = SUM(pop[*])`): no `Iterated` axis;
+///   the reduction / broadcast edges the conservative path emits are already
+///   the true reads.
+/// - a whole-RHS partial reduce broadcast over extra target dims
+///   (`out[D1,D3] = SUM(matrix[D1,*])`): `result_dims` is a strict subset of
+///   `to`'s dims, so a slot does not name a complete `to` element (and the
+///   per-`(row, slot)` link scores are not emitted for that shape either).
+/// - a permuted-axes whole-RHS reduce: slot coordinates are in
+///   `Iterated`-axis (source) order, which would mis-subscript `to`.
+pub(crate) fn variable_backed_partial_reduce_agg<'a>(
+    aggs: &'a AggNodesResult,
+    from: &str,
+    to: &str,
+    to_dims: &[crate::dimensions::Dimension],
+) -> Option<&'a AggNode> {
+    if to_dims.is_empty() {
+        return None;
+    }
+    aggs.aggs_in_var(to).find(|a| {
+        !a.is_synthetic
+            && a.name == to
+            && a.source_vars.iter().any(|s| s == from)
+            && a.read_slice
+                .iter()
+                .any(|ax| matches!(ax, AxisRead::Iterated { .. }))
+            && a.result_dims.len() == to_dims.len()
+            && a.result_dims
+                .iter()
+                .zip(to_dims)
+                .all(|(rd, td)| canonicalize(rd).as_ref() == td.name())
+    })
 }
 
 /// Collect the canonical names of all model variables referenced (directly or
