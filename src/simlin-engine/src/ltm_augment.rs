@@ -1009,6 +1009,140 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
     Ok((print_eqn(&transformed), live_ref))
 }
 
+/// Wrap every reference to `target` in `PREVIOUS()` -- the *inverse* of
+/// [`wrap_non_matching_in_previous`]: freeze ONLY the named variable, keep
+/// every other reference live (current-step).
+///
+/// Used by [`generate_scalar_feeder_to_agg_equation`] to build the
+/// "feeder frozen" evaluation of a hoisted reducer's equation. References
+/// already inside a `PREVIOUS(...)`/`INIT(...)` call are left untouched
+/// (their contents are already lagged/frozen; double-wrapping would read
+/// two steps back). Subscript index expressions are recursed into so a
+/// `arr[target + 1]` style index reference is frozen too; the outer
+/// subscripted variable itself is wrapped only when it names `target`
+/// (defensive -- the feeder this is used for is scalar and so is always a
+/// bare `Var` reference).
+fn wrap_matching_in_previous(expr: Expr0, target: &Ident<Canonical>) -> Expr0 {
+    match expr {
+        Expr0::Const(..) => expr,
+        Expr0::Var(ref ident, loc) => {
+            if &Ident::<Canonical>::new(ident.as_str()) == target {
+                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+            } else {
+                expr
+            }
+        }
+        Expr0::Subscript(ident, indices, loc) => {
+            let indices: Vec<IndexExpr0> = indices
+                .into_iter()
+                .map(|idx| match idx {
+                    IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_matching_in_previous(e, target)),
+                    other => other,
+                })
+                .collect();
+            let subscript = Expr0::Subscript(ident.clone(), indices, loc);
+            if &Ident::<Canonical>::new(ident.as_str()) == target {
+                Expr0::App(
+                    UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
+                    loc,
+                )
+            } else {
+                subscript
+            }
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            // Contents of PREVIOUS/INIT are already lagged/frozen.
+            if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
+                return Expr0::App(UntypedBuiltinFn(name, args), loc);
+            }
+            let args = args
+                .into_iter()
+                .map(|a| wrap_matching_in_previous(a, target))
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, arg, loc) => {
+            Expr0::Op1(op, Box::new(wrap_matching_in_previous(*arg, target)), loc)
+        }
+        Expr0::Op2(op, l, r, loc) => Expr0::Op2(
+            op,
+            Box::new(wrap_matching_in_previous(*l, target)),
+            Box::new(wrap_matching_in_previous(*r, target)),
+            loc,
+        ),
+        Expr0::If(c, t, f, loc) => Expr0::If(
+            Box::new(wrap_matching_in_previous(*c, target)),
+            Box::new(wrap_matching_in_previous(*t, target)),
+            Box::new(wrap_matching_in_previous(*f, target)),
+            loc,
+        ),
+    }
+}
+
+/// Generate the link-score equation for a *scalar feeder* of a hoisted
+/// reducer: the `feeder → $⁚ltm⁚agg⁚{n}` half of an edge the reference-site
+/// IR routed `ThroughAgg`, where the feeder is a scalar variable referenced
+/// inside the reducer's argument (`scale` in `SUM(pop[*] * scale)`).
+///
+/// The standard guard form ([`link_score_guard_form`]) measures the
+/// "changed-first" partial `Δ_x z = z(x_t, w_{t-1}) - z_{t-1}` by holding
+/// every *other* dependency at `PREVIOUS`. For a scalar feeder of a reducer,
+/// rendering that partial as inline equation text does not compile: the
+/// reducer's arrayed argument would be frozen as a lagged whole-array read
+/// (`SUM(PREVIOUS(pop[*]) * scale)`), which the engine rejects (the GH
+/// #541-class wildcard-subscripted `PREVIOUS` capture -- the same shape that
+/// keeps the direct `scale→grow` link score uncompilable). Changed-first
+/// COULD still be expressed at extra cost -- e.g. one synthesized
+/// per-element frozen helper per arrayed reference
+/// (`prevpop[Region] = PREVIOUS(pop[Region])`, then
+/// `SUM(prevpop[*] * scale)`), a helper-aux emission machinery this path
+/// doesn't have today -- so this is a cost/complexity tradeoff, not an
+/// impossibility.
+///
+/// Instead this half uses the algebraically-dual "changed-last" attribution:
+/// `Δ_x z = z_t - z(x_{t-1}, w_t)` -- evaluate the reducer with
+/// ONLY the feeder frozen at `PREVIOUS` (a scalar `LoadPrev`, always
+/// compilable; every array reference stays exactly as in the agg's own
+/// equation, which compiles by construction) and subtract from the agg's
+/// current value. Both conventions are first-order-equal discrete
+/// attributions of `Δz` to `Δx` (LTM scores are inherently path-dependent
+/// approximations); for a SUM/MEAN body the two differ only in which step's
+/// co-factor weights the feeder's change. For a bilinear body
+/// (`SUM(pop[*] * scale)`) the feeder's changed-last half is exactly
+/// complementary to the rows' changed-first halves --
+/// `Σ_e Δ_pop[e] z + Δ_scale z = Δz` holds identically -- so the mixed
+/// convention loses nothing there. The deviation is called out in
+/// `docs/reference/ltm--loops-that-matter.md` alongside the numerator-timing
+/// convention note.
+///
+/// The emitted text follows `link_score_guard_form`'s guard structure
+/// (zero at the initial step, zero when `Δtarget` or `Δsource` is zero,
+/// single-numerator `SAFEDIV` form) with the changed-last numerator
+/// `(agg - frozen)` in place of `(partial - PREVIOUS(agg))`.
+///
+/// Returns `Err` when `agg_equation_text` does not parse -- same loud-failure
+/// contract as [`build_partial_equation_shaped`] (GH #311).
+pub(crate) fn generate_scalar_feeder_to_agg_equation(
+    feeder: &str,
+    agg_name: &str,
+    agg_equation_text: &str,
+) -> Result<String, PartialEquationError> {
+    let Ok(Some(ast)) = Expr0::new(agg_equation_text, LexerType::Equation) else {
+        return Err(PartialEquationError::new(agg_equation_text));
+    };
+    let feeder_ident = Ident::<Canonical>::new(feeder);
+    let frozen = print_eqn(&wrap_matching_in_previous(ast, &feeder_ident));
+    let agg_q = quote_ident(agg_name);
+    let feeder_q = quote_ident(feeder);
+    let target_diff = format!("({agg_q} - PREVIOUS({agg_q}))");
+    let source_diff = format!("({feeder_q} - PREVIOUS({feeder_q}))");
+    Ok(format!(
+        "if (TIME = INITIAL_TIME) then 0 \
+         else if ({target_diff} = 0) OR ({source_diff} = 0) then 0 \
+         else SAFEDIV(({agg_q} - ({frozen})), ABS({target_diff}), 0) * SIGN({source_diff})"
+    ))
+}
+
 /// Replace every bare `Var(id)` reference in `equation_text` where `id`
 /// (canonicalized) is in `idents` with `Subscript(id, [element])`,
 /// pinning that variable to `element`.
@@ -1210,7 +1344,9 @@ fn subscript_idents_in_expr0(
 /// must be element-pinned -- the arrayed deps that share the target's
 /// dimension (the target self-reference is pinned implicitly via the
 /// already-subscripted `to[element]` reference the guard form is built
-/// around).
+/// around). The source itself is never in this set: an arrayed-agg source is
+/// pinned via `source_pin_element` instead, since the full target tuple
+/// over-subscripts it in the broadcast case (GH #528).
 ///
 /// `source_ref_override`: the pre-rendered (quoted, possibly element-pinned)
 /// reference expression to use for the `Δsource` denominator. `None` uses the
@@ -1219,6 +1355,17 @@ fn subscript_idents_in_expr0(
 /// indexes the same agg slot the link-score name and the (subscripted-in-the-
 /// partial) numerator do; a bare agg reference in a scalar equation would not
 /// compile and the link score would stub to zero.
+///
+/// `source_pin_element`: the (qualified) element tuple to pin `from`'s
+/// references to in the partial BODY, or `None` for a true scalar source
+/// (no pinning). The arrayed-agg caller passes the target element's
+/// projection onto the agg's `result_dims` axes -- the same slot the
+/// link-score name and `source_ref_override` carry. Pinning the agg through
+/// `to_deps_to_subscript` instead would use the target's FULL element tuple,
+/// which over-subscripts the agg in the broadcast case (`agg[D1]` feeding
+/// `to[D1,D2]`): the fragment fails to compile and the score is stubbed to a
+/// constant 0 (GH #528). For the diagonal case (`result_dims` == `to`'s
+/// dims) the projection IS the full tuple, so the equation is unchanged.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_scalar_to_element_equation(
     from: &str,
@@ -1228,6 +1375,7 @@ pub(crate) fn generate_scalar_to_element_equation(
     to_deps: &HashSet<Ident<Canonical>>,
     to_deps_to_subscript: &HashSet<Ident<Canonical>>,
     source_ref_override: Option<&str>,
+    source_pin_element: Option<&str>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Result<String, PartialEquationError> {
     let from_canonical = Ident::new(from);
@@ -1249,6 +1397,17 @@ pub(crate) fn generate_scalar_to_element_equation(
         dims_ctx,
     )?;
     let partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element)?;
+    // Pin the source's own references (live numerator occurrence and any
+    // PREVIOUS-wrapped ones alike) to its projected slot -- a separate pass
+    // from the full-tuple `to_deps_to_subscript` pinning above.
+    let partial = match source_pin_element {
+        Some(slot) => {
+            let source_only: HashSet<Ident<Canonical>> =
+                std::iter::once(from_canonical.clone()).collect();
+            subscript_idents_at_element(&partial, &source_only, slot)?
+        }
+        None => partial,
+    };
     let source_ref = source_ref_override.unwrap_or(&from_q);
     Ok(link_score_guard_form(&partial, &to_elem, source_ref))
 }
@@ -1412,15 +1571,18 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 ///   resulting name, so any such slot collapses onto the canonical Bare name
 ///   rather than minting a `⁚wildcard`/`⁚dynamic` variant. Every
 ///   statically-describable inlined reducer -- whole-extent (`SUM(pop[*])`)
-///   or sliced (`SUM(pop[NYC, *])`, `SUM(matrix[D1, *])`) -- is hoisted into
-///   a `$⁚ltm⁚agg⁚{n}` node, so the only `Direct` references with these
+///   or sliced (`SUM(pop[NYC, *])`, `SUM(matrix[D1, *])`, and the
+///   positionally-mapped `SUM(matrix[State, *])` of GH #534) -- is hoisted
+///   into a `$⁚ltm⁚agg⁚{n}` node, so the only `Direct` references with these
 ///   shapes that reach `emit_per_shape_link_scores` are a *whole-RHS*
 ///   variable-backed reducer's argument (`total = SUM(population[*])`), a
 ///   bare dynamic index (`arr[i+1]`), the dynamic-index reducer carve-out
-///   (`SUM(pop[idx, *])`), or a mapped-dimension sliced reducer
-///   (`SUM(matrix[State, *])` over `matrix[Region, D2]` with a `State→Region`
-///   mapping) -- a coarse conservative score is the right semantics for all
-///   of those.
+///   (`SUM(pop[idx, *])`), or a mapped sliced reducer the correspondence
+///   declines (element-mapped -- GH #756 -- or reverse-declared -- GH #757).
+///   A coarse conservative score is the intended semantics for all of those,
+///   but for the declined mapped-reducer cases the emitted scalar score
+///   currently references A2A idents and fails fragment compilation, so the
+///   loop scores through it stub to 0 with Assembly warnings (GH #758).
 ///
 /// The Unicode separators `\u{205A}` (TWO DOT PUNCTUATION) and `\u{2192}`
 /// (RIGHTWARDS ARROW) are intentional: they collide with no legal

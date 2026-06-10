@@ -741,13 +741,21 @@ fn test_ltm_disabled_gate_suppresses_auto_flip_warning() {
 /// This used to be a `SMTH1`-in-loop model, but that hazard (the
 /// composite-reference link score into a stdlib-macro module) was fixed in
 /// GH #548 (`build_submodel_metadata` now registers the sub-model's LTM
-/// composite var, so the cross-module reference resolves). The fixture is
-/// retargeted at the still-open broadcast arrayed-aggregate case (GH #528):
-/// a strict-prefix broadcast reducer `SUM(matrix[D1,*])` over a `D1 x D2`
-/// matrix, closed into a feedback loop through a `D1` stock. The agg is
-/// over-subscribed into the cross-product, so the loop-score fragment fails
-/// to compile and `assemble_module` would silently stub it to 0. The
-/// diagnostic pass must surface that.
+/// composite var, so the cross-module reference resolves). The fixture is a
+/// *variable-backed* partial reducer (`inflow[D1] = SUM(matrix[D1,*])` is
+/// the whole RHS, so `inflow` itself is the agg) closed into a feedback loop
+/// through a `D1` stock that broadcasts into the `D1 x D2` matrix.
+/// Variable-backed aggs take the conservative cross-product in the element
+/// graph, and the resulting loop-score equations reference link-score names
+/// that don't exist for a partial reduce -- the bare A2A
+/// `"...matrix→inflow"` and the subscripted-per-element
+/// `"...matrix[a,x]→inflow"[b]` forms, where only the per-`(row, slot)`
+/// scalar `matrix[a,x]→inflow[a]` vars are emitted -- so the loop-score
+/// fragments fail to compile and `assemble_module` would silently stub them
+/// to 0. The diagnostic pass must surface that. (This fixture originally
+/// leaned on the GH #528 broadcast over-subscription of a *synthetic*
+/// arrayed agg, which is now fixed; the variable-backed loop-score
+/// name-resolution gap here is a distinct, still-open failure.)
 ///
 /// Using a genuinely-unfixed failure (rather than a once-broken-now-fixed
 /// one) keeps these diagnostic-infrastructure tests decoupled from any
@@ -2504,6 +2512,110 @@ fn no_agg_aux_for_whole_rhs_reducer() {
     );
 }
 
+/// GH #737: a pure-scalar feedback cycle that re-enters through a *scalar
+/// feeder* of a hoisted reducer (`grow = 1 + SUM(pop[*] * scale)`, with
+/// `scale` fed back from the scalar stock `total`) must be built routed
+/// through the synthetic agg node -- links `scale → $⁚ltm⁚agg⁚0` and
+/// `$⁚ltm⁚agg⁚0 → grow`, never a direct `scale → grow` link.
+///
+/// Pre-fix, `classify_cycle` saw only Bare shapes on the cycle's edges (the
+/// scalar feeder's reference inside the reducer is Bare) and classified it
+/// `PureScalar`; `build_loops_from_tiered`'s fast path then materialized the
+/// loop straight from the variable-level circuit, linking `scale → grow`
+/// directly -- an edge with no usable link-score variable. The cycle now
+/// classifies `CrossElementOrMixed` (it traverses a `ThroughAgg`-routed
+/// edge), descends to the element-level slow path, and the built `Loop`
+/// traverses the agg.
+///
+/// The loop's polarity must also classify concretely (not degrade to
+/// Undetermined): `recover_agg_hop_polarities` patches the agg hops (SUM is
+/// monotone, `grow = 1 + agg` is a positive consumer) and the rest of the
+/// cycle's signs are statically known, so the loop is reinforcing -- pinned
+/// here via the `r`-prefixed loop_score id `model_ltm_variables` emits.
+#[test]
+fn scalar_feeder_cycle_routes_through_agg_node() {
+    let project = TestProject::new("scalar_feeder_routing")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[Region]", "pop * 0.05", None)
+        .aux("scale", "0.001 * total + 0.01", None)
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * scale)", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+
+    let tiered = model_loop_circuits_tiered(&db, model, sync.project);
+    let var_graph = causal_graph_with_modules(&db, model, sync.project);
+    let source_vars = model.variables(&db);
+    let dm_dims = project_datamodel_dims(&db, sync.project);
+    let (loops, _truncated) = build_loops_from_tiered(
+        tiered,
+        &var_graph,
+        source_vars,
+        &db,
+        sync.project,
+        dm_dims.as_slice(),
+        MAX_CROSS_AGG_LOOPS,
+    );
+
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let scalar_loop = loops
+        .iter()
+        .find(|l| l.links.iter().any(|link| link.from.as_str() == "scale"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a loop containing scale; got: {:?}",
+                loops
+                    .iter()
+                    .map(|l| l.links.iter().map(|k| k.from.as_str()).collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
+            )
+        });
+    let edges: Vec<(&str, &str)> = scalar_loop
+        .links
+        .iter()
+        .map(|l| (l.from.as_str(), l.to.as_str()))
+        .collect();
+    assert!(
+        edges.contains(&("scale", agg_name)) && edges.contains(&(agg_name, "grow")),
+        "the scalar feeder loop must traverse scale → {agg_name} → grow; links: {edges:?}"
+    );
+    assert!(
+        !edges.contains(&("scale", "grow")),
+        "the scalar feeder loop must NOT carry a direct scale → grow link; links: {edges:?}"
+    );
+
+    // Polarity end-to-end: the emitted loop score for the agg-routed loop is
+    // r-prefixed (reinforcing), not the Undetermined `u{n}` fallback.
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let loop_score_prefix = "$\u{205A}ltm\u{205A}loop_score\u{205A}";
+    let agg_loop_score = ltm
+        .vars
+        .iter()
+        .find(|v| {
+            v.name.starts_with(loop_score_prefix) && v.equation.source_text().contains(agg_name)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected an agg-routed loop score; loop vars: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.starts_with(loop_score_prefix))
+                    .map(|v| (&v.name, v.equation.source_text()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        agg_loop_score.name[loop_score_prefix.len()..].starts_with('r'),
+        "the agg-routed loop's polarity must classify concretely (reinforcing); got id {:?}",
+        &agg_loop_score.name[loop_score_prefix.len()..]
+    );
+}
+
 /// The agg aux must be emitted *before* the link-score variables in the
 /// returned `vars` list (the LTM flow fragments are not topologically
 /// sorted, and the `agg → target` link score reads the agg's current-step
@@ -2886,12 +2998,9 @@ fn cross_agg_loop_recovery_truncates_at_budget() {
 
 /// AC5.3 (no regression): a model whose reducer-in-a-loop has 3 disjoint
 /// petals (under the production budget) recovers exactly the 3 pairwise
-/// combinations (`{p0,p1}`, `{p0,p2}`, `{p1,p2}`, one cyclic ordering each)
-/// plus the single ordering of the full 3-petal subset -- 4 recovered loops
-/// -- with `agg_recovery_truncated == false` and no truncation `Warning`.
-/// The two-petal combinations each have exactly one cyclic ordering, which
-/// is the per-subset ordering the pre-#515 `2^k`-bitmask enumeration also
-/// produced.
+/// combinations (`{p0,p1}`, `{p0,p2}`, `{p1,p2}`) plus the full 3-petal
+/// subset -- one canonical loop per disjoint subset, 4 recovered loops --
+/// with `agg_recovery_truncated == false` and no truncation `Warning`.
 #[test]
 fn cross_agg_loop_recovery_three_petals_no_truncation() {
     use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
@@ -2920,8 +3029,7 @@ fn cross_agg_loop_recovery_three_petals_no_truncation() {
     let three_petal = count_loops_through_agg(ltm, 3);
     assert_eq!(
         three_petal, 1,
-        "the full 3-petal subset has exactly one cyclic ordering under the \
-         mirror-skip rule; got {three_petal}"
+        "the full 3-petal subset yields exactly one canonical loop; got {three_petal}"
     );
 
     let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
@@ -3065,18 +3173,19 @@ fn cross_agg_two_petal_loops_match_pre_fix_content() {
     }
 }
 
-/// AC5.2: a 4-petal reducer-in-a-loop fixture recovers every disjoint petal
-/// subset's distinct cyclic orderings within the (production) budget -- the
-/// 6 two-petal pairs (1 ordering each) + the 4 three-petal triples (1
-/// ordering each) + the 3 distinct cyclic orderings of the full 4-petal
-/// subset (`(4-1)!/2 = 3`), all present as distinct directed cycles. The
-/// pre-#515 `2^k`-bitmask enumeration produced one ordering per subset, so
-/// it gave only `1` loop for the full 4-subset instead of 3. (The k=4
-/// fixture, not k=3, is what surfaces the multiple-cyclic-orderings
-/// behavior: a 3-petal subset has `(3-1)!/2 = 1` ordering -- `[0,1,2]` and
-/// `[0,2,1]` are mirrors.)
+/// AC5.2 (GH #676): a 4-petal reducer-in-a-loop fixture recovers exactly ONE
+/// loop per disjoint petal subset -- the 6 two-petal pairs + the 4
+/// three-petal triples + the 1 full 4-petal subset = 11 loops. For a fixed
+/// petal subset every cyclic ordering yields the SAME edge multiset (each
+/// petal contributes its `agg→head`/internal/`tail→agg` edges regardless of
+/// its position in the concatenation), and the loop score is a commutative
+/// product over that multiset -- so additional orderings would be
+/// dominance-indistinguishable duplicates that only waste the
+/// `MAX_CROSS_AGG_LOOPS` budget. (The k=4 fixture, not k=3, is what would
+/// surface multiple orderings if they were emitted: a 3-petal subset has
+/// only one ordering class either way.)
 #[test]
-fn cross_agg_loop_recovery_four_petals_enumerates_cyclic_orderings() {
+fn cross_agg_loop_recovery_four_petals_one_loop_per_subset() {
     let project = share_reducer_loop_fixture(4);
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
@@ -3089,25 +3198,23 @@ fn cross_agg_loop_recovery_four_petals_enumerates_cyclic_orderings() {
     );
 
     // All recovered cross-agg loops (>= 2 distinct `pop[*]→agg` factors):
-    // C(4,2)=6 two-petal + C(4,3)=4 three-petal + 3 four-petal orderings = 13.
+    // C(4,2)=6 two-petal + C(4,3)=4 three-petal + 1 four-petal = 11.
     let recovered = count_loops_through_agg(ltm, 2);
     assert_eq!(
-        recovered, 13,
-        "expected 6 (m=2) + 4 (m=3) + 3 (m=4 cyclic orderings) = 13 recovered cross-agg loops; got {recovered}"
+        recovered, 11,
+        "expected 6 (m=2) + 4 (m=3) + 1 (m=4) = 11 recovered cross-agg loops; got {recovered}"
     );
-    // Loops through the agg >= 3 times: 4 three-petal + 3 four-petal = 7.
-    assert_eq!(count_loops_through_agg(ltm, 3), 7);
-    // Loops through the agg >= 4 times: only the 3 four-petal cyclic orderings.
+    // Loops through the agg >= 3 times: 4 three-petal + 1 four-petal = 5.
+    assert_eq!(count_loops_through_agg(ltm, 3), 5);
+    // Loops through the agg >= 4 times: only the single full-subset loop.
     assert_eq!(
         count_loops_through_agg(ltm, 4),
-        3,
-        "the full 4-petal subset must yield exactly (4-1)!/2 = 3 distinct cyclic orderings"
+        1,
+        "the full 4-petal subset must yield exactly one canonical loop"
     );
 
-    // The 3 four-petal cyclic orderings are distinct loops: their
-    // `loop_score` equations list the same set of link-score factors (the
-    // edge multiset of the petal subset is ordering-invariant) but in
-    // distinct sequences, and they get distinct ids.
+    // The full-subset loop is unique: exactly one `loop_score` equation
+    // references all four `pop[r]→agg` factors.
     let four_petal_loop_scores: Vec<(&str, String)> = ltm
         .vars
         .iter()
@@ -3126,32 +3233,10 @@ fn cross_agg_loop_recovery_four_petals_enumerates_cyclic_orderings() {
         })
         .map(|v| (v.name.as_str(), v.equation.source_text()))
         .collect();
-    assert_eq!(four_petal_loop_scores.len(), 3);
-    let distinct_ids: std::collections::HashSet<&str> =
-        four_petal_loop_scores.iter().map(|(n, _)| *n).collect();
     assert_eq!(
-        distinct_ids.len(),
-        3,
-        "the 3 four-petal orderings need distinct ids"
-    );
-    let distinct_eqs: std::collections::HashSet<&str> = four_petal_loop_scores
-        .iter()
-        .map(|(_, eq)| eq.as_str())
-        .collect();
-    assert_eq!(
-        distinct_eqs.len(),
-        3,
-        "the 3 four-petal cyclic orderings must have distinct edge sequences \
-         (distinct loop_score equation texts); got: {four_petal_loop_scores:?}"
-    );
-    // ... but the same multiset of factors (so they will share a loop_score).
-    let factor_sets: Vec<std::collections::BTreeSet<String>> = four_petal_loop_scores
-        .iter()
-        .map(|(_, eq)| extract_quoted_refs(eq).into_iter().collect())
-        .collect();
-    assert!(
-        factor_sets.windows(2).all(|w| w[0] == w[1]),
-        "the 3 four-petal cyclic orderings must reference the same factor set; got: {factor_sets:?}"
+        four_petal_loop_scores.len(),
+        1,
+        "exactly one loop per disjoint petal subset; got: {four_petal_loop_scores:?}"
     );
 }
 
@@ -3172,8 +3257,9 @@ fn cross_agg_loop_recovery_four_petals_enumerates_cyclic_orderings() {
 /// the subscripted form) -- and a loop through `agg[a]` is never combined
 /// with one through `agg[b]` (different element-graph nodes). The reported
 /// variable-level loops never surface the synthetic agg. (The broadcast-case
-/// loop *score* itself is the known GH #528 limitation -- this test only
-/// pins the structural recovery.)
+/// loop *score* is pinned end-to-end by
+/// `ltm_array_agg::broadcast_agg_loop_scores_are_finite_and_sustained` --
+/// this test only pins the structural recovery.)
 #[test]
 fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
     use crate::common::Ident;
@@ -3288,6 +3374,61 @@ fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
                 .all(|v| !v.contains("\u{205A}agg\u{205A}")),
             "model_detected_loops should not surface synthetic agg nodes; got: {:?}",
             l.variables
+        );
+    }
+}
+
+/// GH #528: in the strict-prefix *broadcast* case -- an arrayed synthetic
+/// agg over `[D1]` (`SUM(matrix[D1,*])` as a sub-expression of an A2A body
+/// over `D1 x D2`) feeding `growth[D1,D2]` -- the per-target-element
+/// `agg → growth` link-score EQUATION must subscript the agg ident by the
+/// target element's projection onto the agg's `result_dims` axes
+/// (`[d1·a]`), not by the full target tuple (`[d1·a, d2·x]` -- an
+/// out-of-shape over-subscript of a 1-D agg, whose fragment fails to
+/// compile and stubs the score to a constant 0). The link-score NAME and
+/// the `Δsource` denominator were already projected; this pins the partial
+/// BODY's pinning too.
+#[test]
+fn broadcast_agg_to_target_equation_projects_agg_subscript() {
+    let project = TestProject::new("broadcast_agg_eqn")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("matrix[D1,D2]", "100", &["mflow"], &[], None)
+        .array_aux("growth[D1,D2]", "SUM(matrix[D1,*]) * 0.01 + 1")
+        .array_flow("mflow[D1,D2]", "growth[D1,D2]", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name =
+            format!("$\u{205A}ltm\u{205A}link_score\u{205A}{agg}[{d1}]\u{2192}growth[{d1},{d2}]");
+        let var = ltm.vars.iter().find(|v| v.name == name).unwrap_or_else(|| {
+            panic!(
+                "expected agg→target link score {name:?}; synthetic vars: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            )
+        });
+        let eq = var.equation.source_text();
+        // The numerator's live agg reference is pinned to the projected
+        // (qualified) slot...
+        let projected = format!("\"{agg}\"[d1\u{B7}{d1}]");
+        assert!(
+            eq.contains(&projected),
+            "{name}: the equation body must pin the agg to the projected slot {projected}; \
+             got: {eq}"
+        );
+        // ...and never to the full (over-subscripting) target tuple.
+        let over_subscript = format!("\"{agg}\"[d1\u{B7}{d1}, d2\u{B7}{d2}]");
+        assert!(
+            !eq.contains(&over_subscript),
+            "{name}: the equation body must NOT over-subscript the 1-D agg with the full \
+             target tuple {over_subscript} (GH #528); got: {eq}"
         );
     }
 }
@@ -3933,4 +4074,133 @@ fn test_ltm_main_rk4_looped_submodel_is_rejected() {
         details.contains("RK4") || details.contains("Runge"),
         "the rejection must name the main-governed method: {details}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// GH #738: scalar-target agg over an array *expression* (`SUM(pop[*] * scale)`)
+// ---------------------------------------------------------------------------
+
+/// Build a GH #738-shaped fixture: a *scalar* flow whose equation embeds a
+/// reducer over an array expression (`grow_eqn`, e.g. `1 + SUM(pop[*] *
+/// scale)`), with the scalar feeder `scale` closing a feedback loop through
+/// the scalar stock `total`. The `1 +` keeps the reducer a sub-expression,
+/// so it is hoisted into a synthetic `$⁚ltm⁚agg⁚{n}` whose own equation is
+/// the reducer text -- the fragment that GH #738's empty-lowering-scope bug
+/// rejected. `pop2` and `matrix` exist so equation variants can exercise
+/// multi-source (`SUM(pop[*] + pop2[*])`) and pinned-slice
+/// (`SUM(matrix[north,*] * scale)`) reducers against the same model.
+fn build_scalar_target_array_expr_reducer_project(
+    name: &str,
+    grow_eqn: &str,
+) -> datamodel::Project {
+    TestProject::new(name)
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .named_dimension("band", &["lo", "hi"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .array_aux("pop2[region]", "pop[region] * 2")
+        .array_aux("matrix[region,band]", "pop[region] * 0.5")
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", grow_eqn, None)
+        .build_datamodel()
+}
+
+/// Collect the LTM fragment-failure warnings for `project`, asserting first
+/// that the expected synthetic agg was actually hoisted (so a test using
+/// this helper can never pass vacuously because no agg node existed).
+fn ltm_fragment_failures_with_agg_present(project: &datamodel::Project) -> Vec<String> {
+    use crate::db::collect_model_diagnostics;
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let ltm = model_ltm_variables(&db, source_model, source_project);
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}agg\u{205A}")),
+        "the inlined reducer must be hoisted into a synthetic agg; \
+         synthetic vars: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+
+    collect_model_diagnostics(&db, source_model, source_project)
+        .iter()
+        .filter(|d| is_ltm_fragment_failure(d))
+        .map(|d| format!("{:?}: {:?}", d.variable, d.error))
+        .collect()
+}
+
+/// Assert GH #738's contract on a scalar-target reducer fixture: the
+/// synthetic `$⁚ltm⁚agg⁚{n}` fragment compiles (no fragment-failure
+/// Warning names an agg variable), and the only failures still present --
+/// if any -- are the known residual: the *direct* `scale→grow` link score,
+/// whose ceteris-paribus partial contains `PREVIOUS(pop[*])` and trips the
+/// documented GH #541 scalar-helper limitation (`make_temp_arg` outside A2A
+/// context captures a wildcard-subscripted arrayed arg into an ill-typed
+/// *scalar* helper). That residual is a separate defect from #738 -- the
+/// loop score consuming that direct link stays 0 pending GH #737's
+/// routing fix anyway. The second assertion TOLERATES the residual rather
+/// than REQUIRING it: any unexpected failure still trips it, but fixing
+/// the #541-class gap later leaves it passing (an empty failure list
+/// satisfies the `all`), so the assertion cannot rot.
+fn assert_agg_fragments_compile(eqn: &str, failures: &[String]) {
+    assert!(
+        failures.iter().all(|f| !f.contains("\u{205A}agg\u{205A}")),
+        "the synthetic agg fragment for the scalar-target {eqn:?} model \
+         must compile; failures: {failures:?}"
+    );
+    assert!(
+        failures.iter().all(|f| f.contains("scale\u{2192}grow")),
+        "the only tolerated residual fragment failure for {eqn:?} is the \
+         direct scale\u{2192}grow link score (the PREVIOUS-of-wildcard \
+         scalar-helper gap); failures: {failures:?}"
+    );
+}
+
+/// GH #738: the synthetic agg hoisted for `SUM(pop[*] * scale)` with a
+/// *scalar* target must compile. Before the fix,
+/// `compile_ltm_equation_fragment` lowered the agg's equation with an empty
+/// `ScopeStage0.models`, so the `pop[*] * scale` Op2 never got its Expr2
+/// `ArrayBounds` and Pass-1 temp decomposition never hoisted it -- codegen
+/// then rejected the inline Op2 under SUM and the agg was silently stubbed
+/// to a constant 0, corrupting every score routed through it.
+#[test]
+fn scalar_target_agg_over_array_expression_fragments_compile() {
+    let eqn = "1 + SUM(pop[*] * scale)";
+    let project =
+        build_scalar_target_array_expr_reducer_project("scalar_target_array_expr_agg", eqn);
+    let failures = ltm_fragment_failures_with_agg_present(&project);
+    assert_agg_fragments_compile(eqn, &failures);
+}
+
+/// GH #738, adjacent shapes: the fix is general to the scalar-target
+/// reducer-over-array-expression class, not just `SUM(arrayed * scalar)`.
+/// Each variant hoists a synthetic agg whose equation embeds an array
+/// expression: a different reducer kind (`MEAN`/`MIN`/`MAX`), a
+/// multi-source reducer (`SUM(a[*] + b[*])`), and a pinned-slice reducer
+/// (`SUM(matrix[north,*] * scale)`).
+#[test]
+fn scalar_target_reducer_variants_fragments_compile() {
+    for (tag, eqn) in [
+        ("mean", "1 + MEAN(pop[*] * scale)"),
+        ("min", "1 + MIN(pop[*] * scale)"),
+        ("max", "1 + MAX(pop[*] * scale)"),
+        ("multi_source", "1 + SUM(pop[*] + pop2[*])"),
+        ("pinned_slice", "1 + SUM(matrix[north,*] * scale)"),
+    ] {
+        let project = build_scalar_target_array_expr_reducer_project(
+            &format!("scalar_target_variant_{tag}"),
+            eqn,
+        );
+        let failures = ltm_fragment_failures_with_agg_present(&project);
+        assert_agg_fragments_compile(eqn, &failures);
+    }
 }

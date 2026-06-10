@@ -34,7 +34,10 @@
 //! - **Variable-backed** (`is_synthetic == false`): the reducer is the
 //!   *entire* dt-equation of a scalar or apply-to-all variable
 //!   (`total_population = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`).
-//!   That variable *is* the aggregate node; no synthetic is minted. Each such
+//!   That variable *is* the aggregate node; no synthetic is minted. One
+//!   exception: a whole-RHS reducer with a MAPPED iterated axis (GH #534)
+//!   mints a synthetic agg instead -- see the carve-out comment in
+//!   [`walk_var_equation`]. Each such
 //!   variable is its own distinct agg node -- variable-backed aggs are never
 //!   deduped and never reused by an inline use of the same reducer text (an
 //!   inline use must get its own *synthetic* node, since the element-graph
@@ -49,10 +52,16 @@
 //! Whole-extent reducers (`SUM(pop[*])`, `SUM(matrix[*,*])`) have an all-
 //! `Reduced` slice; sliced reducers (`SUM(pop[NYC,*])` ⇒ `[Pinned(nyc),
 //! Reduced]`, `SUM(matrix[D1,*])` over an A2A-`D1` body ⇒ `[Iterated(d1),
-//! Reduced]` and an arrayed agg over `D1`) are hoisted too. The one carve-out:
-//! a reducer over a *dynamic index* (`SUM(pop[idx,*])`, `idx` non-literal) is
-//! not statically describable -- `compute_read_slice` returns `None`, the
-//! reducer is not hoisted, and its reference stays on the conservative path.
+//! Reduced]` and an arrayed agg over `D1`) are hoisted too -- including a
+//! positionally-MAPPED iterated axis (`SUM(matrix[State,*])` over a
+//! `matrix[Region,..]` source with a `State→Region` mapping, GH #534), where
+//! the `Iterated` axis carries the (target, source) dim pair and the agg is
+//! arrayed over the TARGET dim. The carve-outs: a reducer over a *dynamic
+//! index* (`SUM(pop[idx,*])`, `idx` non-literal) is not statically
+//! describable, and a mapped iterated axis whose mapping is element-mapped
+//! (GH #756), reverse-declared (GH #757), or non-positional is declined --
+//! `compute_read_slice` returns `None`, the reducer is not hoisted, and its
+//! reference stays on the conservative path.
 //!
 //! Whole-RHS partial reduces (`row_sum[D1] = SUM(matrix[D1,*])`) *are*
 //! recognized -- the variable is the agg, `result_dims` carries its dims, and
@@ -146,21 +155,6 @@ pub(crate) fn reducer_kind<E>(builtin: &BuiltinFn<E>) -> Option<ReducerKind> {
     reducer_kind_from_name(builtin.name(), arity)
 }
 
-/// `true` when a reducer named `name` is monotone *non-decreasing* in each of
-/// its source elements: `SUM`, `MEAN`, `MIN`, `MAX`. Raising any one element
-/// can only raise (or leave unchanged) the result, so a `source[d] → agg` hop
-/// through such a reducer has `Positive` polarity.
-///
-/// Monotonicity is keyed on the reducer *name* rather than carried by
-/// [`ReducerKind`] because `Nonlinear` lumps the monotone single-argument
-/// `MIN`/`MAX` together with the non-monotone `STDDEV`/`RANK` -- but it lives
-/// here next to [`reducer_kind`], so AC1.2's "the array-reducer set and its
-/// `Linear`/`Nonlinear`/`Constant` + `is_monotone` classification are defined
-/// in exactly one place" still holds.
-pub(crate) fn reducer_name_is_monotone(name: &str) -> bool {
-    matches!(name, "sum" | "mean" | "min" | "max")
-}
-
 /// `true` when `builtin` is a recognized array reducer that is *hoisted* into
 /// an aggregate node -- i.e. recognized AND not [`ReducerKind::Constant`].
 ///
@@ -191,7 +185,9 @@ pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
 /// - [`AxisRead::Iterated`] -- the axis is iterated over the enclosing
 ///   variable's apply-to-all dimension space and the agg result varies per
 ///   element of it (`matrix[D1, *]`'s first axis inside an A2A-over-`D1`
-///   body). Carries the canonical dimension name; it appears in
+///   body). Carries the (target, source) canonical dimension pair -- equal
+///   for the literal case, different for a positionally-MAPPED sliced
+///   reducer (GH #534) -- and the target dim appears in
 ///   [`AggNode::result_dims`] (datamodel-cased).
 /// - [`AxisRead::Reduced`] -- the whole axis is reduced away (`SUM(pop[*])`,
 ///   the `*` in `SUM(pop[NYC, *])`). Every element of that axis feeds the
@@ -203,11 +199,85 @@ pub enum AxisRead {
     Pinned(String),
     /// This source axis is iterated over the enclosing variable's
     /// apply-to-all dimension space (`matrix[D1, *]` inside an
-    /// A2A-over-`D1` body). Carries the canonical dimension name.
-    Iterated(String),
+    /// A2A-over-`D1` body, or `matrix[State, *]` over a `matrix[Region, ..]`
+    /// source with a positional `State→Region` mapping -- GH #534).
+    Iterated {
+        /// Canonical name of the TARGET equation's iterated dimension --
+        /// the agg's result axis for this slot coordinate.
+        dim: String,
+        /// Canonical name of the SOURCE's declared dimension on this axis.
+        /// Equals `dim` in the literal case; differs for a positionally
+        /// mapped sliced reducer, where each source row feeds the slot of
+        /// its positionally-corresponding target element (see
+        /// [`iterated_axis_slot_elements`]).
+        source_dim: String,
+    },
     /// The whole axis is reduced away (`SUM(pop[*])`); every element of it
     /// feeds the single agg result slot.
     Reduced,
+}
+
+/// The agg result-slot coordinate (an element of the `Iterated` axis's
+/// TARGET dimension `target_dim`) for each source element of
+/// `source_axis_elems`, index-aligned.
+///
+/// - Literal case (`target_dim == source_dim`): the identity -- slot
+///   coordinate == source element.
+/// - Mapped case (GH #534): the PREIMAGE inversion of
+///   [`crate::dimensions::DimensionsContext::mapped_element_correspondence`]
+///   `(target_dim, source_dim)` -- that helper is indexed by TARGET element
+///   position and yields the source element read for it, so the slot for a
+///   given source element is the target element whose correspondence entry
+///   names it. The helper's positional-only gate (an explicit element map
+///   returns `None` -- GH #756) makes the correspondence a bijection
+///   (index-identity, equal cardinality), so every source element has
+///   exactly one preimage; the inversion is still written generally and
+///   declines (returns `None`) if a source element has zero or multiple
+///   preimages, mirroring `expand_same_element`'s general-shape inversion.
+///
+/// `None` means "no usable slot remap": `compute_read_slice` then declines
+/// to hoist (classification), and the emitters fall back to their
+/// conservative forms (expansion) -- the same function gates both, so the
+/// two can never disagree about which mapped axes are remappable.
+pub(crate) fn iterated_axis_slot_elements(
+    target_dim: &str,
+    source_dim: &str,
+    source_axis_elems: &[String],
+    dim_ctx: &crate::dimensions::DimensionsContext,
+) -> Option<Vec<String>> {
+    use crate::common::CanonicalDimensionName;
+    if target_dim == source_dim {
+        return Some(source_axis_elems.to_vec());
+    }
+    let t = CanonicalDimensionName::from_raw(target_dim);
+    let s = CanonicalDimensionName::from_raw(source_dim);
+    let corr = dim_ctx.mapped_element_correspondence(&t, &s)?;
+    let target_named = match dim_ctx.get(&t)? {
+        crate::dimensions::Dimension::Named(_, named) => named,
+        crate::dimensions::Dimension::Indexed(_, _) => return None,
+    };
+    // `corr` is indexed by target element position (declared order), so it
+    // is parallel to `target_named.elements` by construction.
+    debug_assert_eq!(corr.len(), target_named.elements.len());
+    source_axis_elems
+        .iter()
+        .map(|e| {
+            let mut found: Option<usize> = None;
+            for (p, src_elem) in corr.iter().enumerate() {
+                if src_elem.as_str() == e {
+                    if found.is_some() {
+                        // Non-bijective (a many-to-one correspondence):
+                        // a single source row would feed several slots,
+                        // which the one-slot-per-row machinery can't
+                        // express. Decline.
+                        return None;
+                    }
+                    found = Some(p);
+                }
+            }
+            found.map(|p| target_named.elements[p].as_str().to_string())
+        })
+        .collect()
 }
 
 /// One aggregate node: the stand-in for a maximal reducer subexpression.
@@ -312,6 +382,12 @@ pub fn enumerate_agg_nodes(
 ) -> AggNodesResult {
     let variables = reconstruct_model_variables(db, model, project);
     let dm_dims = project_datamodel_dims(db, project);
+    // Dimension context for the GH #534 mapped-iterated-axis recognition
+    // (`compute_read_slice`'s `has_mapping_to` direction gate +
+    // `iterated_axis_slot_elements`' positional correspondence). Salsa-cached
+    // off the project's dimensions input, so the enumeration is recomputed
+    // when a dimension's mappings change.
+    let dim_ctx = crate::db::project_dimensions_context(db, project);
 
     // Visit variables in canonical-sorted order for deterministic synthetic
     // naming. `reconstruct_model_variables` returns a HashMap, so the order
@@ -339,6 +415,7 @@ pub fn enumerate_agg_nodes(
                     variables: &variables,
                     target_iterated_dims: &[],
                     dm_dims: dm_dims_ref,
+                    dim_ctx,
                 };
                 walk_var_equation(
                     expr,
@@ -358,6 +435,7 @@ pub fn enumerate_agg_nodes(
                     variables: &variables,
                     target_iterated_dims: &target_iterated_dims,
                     dm_dims: dm_dims_ref,
+                    dim_ctx,
                 };
                 walk_var_equation(
                     expr,
@@ -380,6 +458,7 @@ pub fn enumerate_agg_nodes(
                     variables: &variables,
                     target_iterated_dims: &[],
                     dm_dims: dm_dims_ref,
+                    dim_ctx,
                 };
                 let mut elem_keys: Vec<_> = per_elem.keys().collect();
                 elem_keys.sort();
@@ -414,14 +493,17 @@ pub fn enumerate_agg_nodes(
 /// [`walk_subexpr_for_aggs`] for a single target variable: the model's
 /// variable map, the target equation's iterated dimension names (canonical,
 /// in source order; empty for `Ast::Scalar` and per-element `Ast::Arrayed`
-/// slots), and the datamodel dimension list (used to map an `Iterated`
+/// slots), the datamodel dimension list (used to map an `Iterated`
 /// axis's canonical dim name back to datamodel casing for
-/// `AggNode::result_dims`). Bundling these keeps the walkers' signatures
-/// short; the mutable `result`/`next_synthetic_n` stay out of band.
+/// `AggNode::result_dims`), and the project's `DimensionsContext` (the
+/// GH #534 mapped-iterated-axis gate). Bundling these keeps the walkers'
+/// signatures short; the mutable `result`/`next_synthetic_n` stay out of
+/// band.
 struct AggWalkCtx<'a> {
     variables: &'a HashMap<Ident<Canonical>, crate::variable::Variable>,
     target_iterated_dims: &'a [String],
     dm_dims: &'a [crate::datamodel::Dimension],
+    dim_ctx: &'a crate::dimensions::DimensionsContext,
 }
 
 /// Walk the whole-RHS expression of a `Scalar` / `ApplyToAll` variable.
@@ -440,6 +522,23 @@ fn walk_var_equation(
     if let Expr2::App(builtin, _, _) = expr
         && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
         && let Some(read_slice) = combined_read_slice(builtin, ctx)
+        // A whole-RHS reducer with a MAPPED iterated axis (GH #534,
+        // `out[State] = SUM(matrix[State,*])` over a positionally-mapped
+        // pair) is NOT variable-backed: it falls through to
+        // `walk_subexpr_for_aggs`, which mints a *synthetic* agg for the
+        // same reducer text. The variable-backed link-score path
+        // (`try_cross_dimensional_link_scores`'s partial-reduce arm) matches
+        // result axes against source axes BY NAME, so a remapped pair falls
+        // off it onto `emit_per_shape_link_scores`' `Wildcard` partial --
+        // whose PREVIOUS-wrapping mangles the iterated index into the
+        // non-compiling `matrix[PREVIOUS(state),*]` (a silently-stubbed
+        // constant-0 score). Routing through a synthetic agg instead gives
+        // the whole-RHS case the same remapped two-half scoring as an
+        // inline mapped reducer, at the cost of one synthetic aux
+        // duplicating the variable's value.
+        && !read_slice.iter().any(
+            |a| matches!(a, AxisRead::Iterated { dim, source_dim } if dim != source_dim),
+        )
     {
         // Whole-RHS reducer: the variable IS the aggregate node. The agg
         // node's result shape is the *reducer's* result shape (the `Iterated`
@@ -748,17 +847,25 @@ fn reducer_source_vars(
 ///   tracked separately.)
 /// - `IndexExpr2::Expr(Expr2::Var(d, ..))` where `d` (canonical) is one of
 ///   the *target equation's* iterated dimensions AND matches the source's
-///   `i`-th declared dimension *by name* ⇒ [`AxisRead::Iterated`] carrying
-///   `d`. If `d` only matches by a *dimension mapping* (a `State→Region`
-///   style remap, AC3.5 in `classify_iterated_dim_shape`) ⇒ `None`: the
-///   read-slice / link-score / element-graph machinery built on
-///   [`AxisRead::Iterated`] assumes the agg's result axis and the source's
-///   row axis are the *same* dimension (same element count, same offsets),
-///   so it would mis-route a remapped reducer. The non-hoisted reference
-///   then keeps its conservative shape (`classify_iterated_dim_shape`'s
-///   own mapped branch -- a *whole*-equation-iterated subscript, not a
-///   sliced reducer argument -- is a separate code path and is unaffected).
-///   Tightening this to honor mappings is tracked tech debt.
+///   `i`-th declared dimension either *by name* or via a positional
+///   dimension MAPPING declared on `d` toward it (`has_mapping_to(d, src)`
+///   -- the same declared direction `classify_iterated_dim_shape`'s mapped
+///   arm accepts -- with a usable [`iterated_axis_slot_elements`] remap,
+///   which inherits `mapped_element_correspondence`'s positional-only gate)
+///   ⇒ [`AxisRead::Iterated`] carrying the `(d, src)` pair (GH #534). The
+///   three `Iterated`-axis consumers (`emit_agg_routed_edges`,
+///   `read_slice_rows` behind `emit_source_to_agg_link_scores`, and
+///   `emit_agg_to_target_link_scores` via `result_dims`) remap each source
+///   row to the slot of its positionally-corresponding target element
+///   through the same helper. Declined (⇒ `None`, conservative): an
+///   explicit element-mapped pair (execution resolves positionally and
+///   ignores the map -- GH #756), a mapping declared only in the REVERSE
+///   direction (on the source's dimension; GH #757 tracks that direction's
+///   classification separately -- do not widen here), an unmapped
+///   position-mismatched pair, and a non-positional size mismatch.
+///   (`classify_iterated_dim_shape`'s own mapped branch -- a
+///   *whole*-equation-iterated subscript, not a sliced reducer argument --
+///   is a separate code path and is unaffected.)
 /// - `IndexExpr2::Expr(Expr2::Var(elem, ..))` or `Expr2::Const` resolving to
 ///   a literal element / 1-based index of the source's `i`-th dimension ⇒
 ///   [`AxisRead::Pinned`] carrying that element's canonical name.
@@ -771,11 +878,9 @@ fn reducer_source_vars(
 /// model variable ⇒ `None` (it's not a reducer source). A `Subscript` whose
 /// index count doesn't match the source's dimension count ⇒ `None`
 /// (conservative -- a partial subscript is not the case Phase 4 hoists).
-fn compute_read_slice(
-    arg_expr: &Expr2,
-    target_iterated_dims: &[String],
-    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
-) -> Option<Vec<AxisRead>> {
+fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<AxisRead>> {
+    let target_iterated_dims = ctx.target_iterated_dims;
+    let variables = ctx.variables;
     let source_dims = |ident: &Ident<Canonical>| -> Option<&[crate::dimensions::Dimension]> {
         let dims = variables.get(ident).and_then(|v| v.get_dimensions())?;
         if dims.is_empty() { None } else { Some(dims) }
@@ -806,20 +911,52 @@ fn compute_read_slice(
                         // over the target's dimension space (and the agg
                         // result varies per element of it) iff `name` is one
                         // of the target's iterated dims AND it lines up with
-                        // the source's i-th dim by name or by a mapping.
+                        // the source's i-th dim by name or by a positional
+                        // mapping (GH #534).
                         if target_iterated_dims.iter().any(|t| t == name_str) {
                             if name_str == src_dim_name {
-                                AxisRead::Iterated(name_str.to_string())
+                                AxisRead::Iterated {
+                                    dim: name_str.to_string(),
+                                    source_dim: src_dim_name.to_string(),
+                                }
                             } else {
                                 // The iterated dim names a *different* source
-                                // axis (either a position mismatch or a remap
-                                // like `State→Region`). The slice machinery
-                                // built on `Iterated` assumes the agg result
-                                // axis and the source row axis are literally
-                                // the same dimension, so neither case is the
-                                // sliced-reducer pattern -- decline. (The
-                                // remap case is tracked tech debt.)
-                                return None;
+                                // axis: a positional remap (`State→Region`,
+                                // GH #534) is accepted -- carrying the
+                                // (target, source) pair so the emitters remap
+                                // each row to its slot -- when (a) the mapping
+                                // is declared on the iterated dim toward the
+                                // source's dim (the same direction
+                                // `classify_iterated_dim_shape`'s mapped arm
+                                // accepts; the reverse-declared direction is
+                                // GH #757 and stays conservative) and (b) the
+                                // slot remap exists (positional mappings
+                                // only: explicit element maps decline via
+                                // `mapped_element_correspondence`'s GH #756
+                                // gate). Everything else -- a plain position
+                                // mismatch, an element-mapped or
+                                // reverse-declared pair -- declines, keeping
+                                // the reference on the conservative path.
+                                use crate::common::CanonicalDimensionName;
+                                let d_canon = CanonicalDimensionName::from_raw(name_str);
+                                let src_canon = CanonicalDimensionName::from_raw(src_dim_name);
+                                let elems = crate::ltm_augment::dimension_element_names(&dims[i]);
+                                if ctx.dim_ctx.has_mapping_to(&d_canon, &src_canon)
+                                    && iterated_axis_slot_elements(
+                                        name_str,
+                                        src_dim_name,
+                                        &elems,
+                                        ctx.dim_ctx,
+                                    )
+                                    .is_some()
+                                {
+                                    AxisRead::Iterated {
+                                        dim: name_str.to_string(),
+                                        source_dim: src_dim_name.to_string(),
+                                    }
+                                } else {
+                                    return None;
+                                }
                             }
                         } else if let Some(elem) = resolve_literal_axis_index(idx, &dims[i]) {
                             AxisRead::Pinned(elem)
@@ -941,21 +1078,13 @@ fn collect_arrayed_source_slices(
         Expr2::Var(ident, _, _) => {
             if ctx.variables.contains_key(ident) && is_arrayed(ident) {
                 *any_arrayed = true;
-                fold(
-                    compute_read_slice(expr, ctx.target_iterated_dims, ctx.variables),
-                    common,
-                    ok,
-                );
+                fold(compute_read_slice(expr, ctx), common, ok);
             }
         }
         Expr2::Subscript(ident, indices, _, _) => {
             if ctx.variables.contains_key(ident) && is_arrayed(ident) {
                 *any_arrayed = true;
-                fold(
-                    compute_read_slice(expr, ctx.target_iterated_dims, ctx.variables),
-                    common,
-                    ok,
-                );
+                fold(compute_read_slice(expr, ctx), common, ok);
             }
             // Also descend into index expressions (a nested source ref).
             for idx in indices {
@@ -1005,7 +1134,12 @@ fn result_dims_from_read_slice(
     read_slice
         .iter()
         .filter_map(|a| match a {
-            AxisRead::Iterated(d) => Some(canonical_dim_to_datamodel(d, dm_dims)),
+            // The TARGET dim of the pair: the agg variable is arrayed over
+            // the target equation's iterated dimension (`State` for the
+            // GH #534 mapped case), which is what the agg's own A2A
+            // equation, the agg→target projection (GH #528), and the
+            // element-graph slot naming all key on.
+            AxisRead::Iterated { dim, .. } => Some(canonical_dim_to_datamodel(dim, dm_dims)),
             AxisRead::Pinned(_) | AxisRead::Reduced => None,
         })
         .collect()
@@ -1014,34 +1148,6 @@ fn result_dims_from_read_slice(
 /// `true` when `name` is a synthetic aggregate-node name (`$⁚ltm⁚agg⁚{n}`).
 pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
     name.starts_with(AGG_NAME_PREFIX)
-}
-
-/// `true` when an aggregate node's reducer is monotone *non-decreasing* in
-/// each of its source elements (`SUM`, `MEAN`, `MIN`, `MAX`), so a
-/// `source[d] → agg` hop through it has `Positive` polarity. `STDDEV` and
-/// `RANK` are not monotone, so a hop through them stays `Unknown`-polarity.
-///
-/// Keyed on the canonical reducer text (`AggNode::equation_text`, which is
-/// `print_eqn` output -- function names lowercased, no space before `(`). The
-/// leading-name extraction (everything up to the first `(`, trimmed) is
-/// intentionally lenient: it also accepts an optional `(` and surrounding
-/// whitespace (`"sum (x)"`, or even a bare `"sum"`), so it never accidentally
-/// reads past the function name. That widening is harmless because the input is
-/// always `print_eqn` output (no space before `(`) and an aggregate's equation
-/// always *has* a `(`, so in practice only the exact-`name(` shape ever
-/// occurs; documenting the leniency is cheaper than restating the literal
-/// `"sum(" | "mean(" | ...` set the consolidation removed. The monotone set
-/// itself comes from [`reducer_name_is_monotone`] so this stays a thin reader
-/// of the one reducer table. Only the single-argument `MIN`/`MAX` forms are
-/// ever hoisted into an aggregate node, so a leading `min` / `max` here is
-/// always the reducer form.
-pub(crate) fn agg_reducer_is_monotone(equation_text: &str) -> bool {
-    let name = equation_text
-        .split('(')
-        .next()
-        .unwrap_or(equation_text)
-        .trim();
-    reducer_name_is_monotone(name)
 }
 
 /// Collect the canonical names of all model variables referenced (directly or
@@ -1168,7 +1274,13 @@ mod tests {
         assert_eq!(agg.result_dims, vec!["D1".to_string()]);
         assert_eq!(
             agg.read_slice,
-            vec![AxisRead::Iterated("d1".to_string()), AxisRead::Reduced]
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Reduced
+            ]
         );
     }
 
@@ -1685,7 +1797,13 @@ mod tests {
         );
         assert_eq!(
             synthetic[0].read_slice,
-            vec![AxisRead::Iterated("d1".to_string()), AxisRead::Reduced]
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Reduced
+            ]
         );
         assert_eq!(synthetic[0].result_dims, vec!["D1".to_string()]);
         assert_eq!(synthetic[0].source_vars, vec!["matrix".to_string()]);
@@ -1730,7 +1848,10 @@ mod tests {
         assert_eq!(
             synthetic[0].read_slice,
             vec![
-                AxisRead::Iterated("d1".to_string()),
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
                 AxisRead::Pinned("nyc".to_string()),
                 AxisRead::Reduced
             ]
@@ -1802,20 +1923,20 @@ mod tests {
         assert!(result.synthetic_by_key.is_empty());
     }
 
-    /// #514: a sliced reducer whose iterated index only lines up with the
-    /// source's row axis via a *dimension mapping* (`matrix[Region, D2]`,
-    /// `State` over `{s1, s2}` with a `State→Region` mapping, target A2A
-    /// over `State` with `... + SUM(matrix[State, *])`) is NOT hoisted:
-    /// `compute_read_slice` declines the remapped-axis case because the
-    /// `Iterated`-driven slice / link-score / element-graph machinery
-    /// assumes the agg result axis and the source row axis are literally
-    /// the same dimension. The non-hoisted reference keeps its conservative
-    /// shape. (`classify_iterated_dim_shape`'s own mapped branch -- a
+    /// GH #534: a sliced reducer whose iterated index lines up with the
+    /// source's row axis via a *positional dimension mapping*
+    /// (`matrix[Region, D2]`, `State` over `{s1, s2}` with a `State→Region`
+    /// mapping, target A2A over `State` with `... + SUM(matrix[State, *])`)
+    /// IS hoisted: the `Iterated` axis carries the (target, source) dim
+    /// pair, `result_dims` is the TARGET's iterated dim (`State` -- the
+    /// dimension the agg variable is arrayed over), and the emitters remap
+    /// each source row to its positionally-corresponding slot.
+    /// (`classify_iterated_dim_shape`'s own mapped branch -- a
     /// whole-equation-iterated subscript, not a sliced reducer argument --
     /// is a separate path and stays `Bare`; see
     /// `db::ltm_ir_tests::ir_mapped_iterated_dim_subscript_is_bare`.)
     #[test]
-    fn mapped_iterated_dim_sliced_reducer_is_not_hoisted() {
+    fn mapped_iterated_dim_sliced_reducer_is_hoisted_with_pair() {
         let project = TestProject::new("mapped_iterated_slice")
             .named_dimension("Region", &["r1", "r2"])
             .named_dimension("D2", &["x", "y"])
@@ -1829,15 +1950,209 @@ mod tests {
             );
 
         let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "a positionally-mapped sliced reducer must mint one synthetic agg; got: {:?}",
+            result.aggs
+        );
+        assert_eq!(
+            synthetic[0].read_slice,
+            vec![
+                AxisRead::Iterated {
+                    dim: "state".to_string(),
+                    source_dim: "region".to_string()
+                },
+                AxisRead::Reduced
+            ]
+        );
+        assert_eq!(
+            synthetic[0].result_dims,
+            vec!["State".to_string()],
+            "the agg's result axis is the TARGET equation's iterated dim"
+        );
+        assert_eq!(synthetic[0].source_vars, vec!["matrix".to_string()]);
+        assert_eq!(synthetic[0].equation_text, "sum(matrix[state, *])");
+    }
+
+    /// GH #534 (conservative gate, element-mapped): a sliced reducer over an
+    /// EXPLICIT element-mapped pair stays un-hoisted -- the executed A2A
+    /// lowering resolves mapped references positionally and ignores the
+    /// element map (GH #756), so `mapped_element_correspondence` declines
+    /// and the reference keeps its conservative shape.
+    #[test]
+    fn element_mapped_sliced_reducer_is_not_hoisted() {
+        let project = TestProject::new("element_mapped_slice")
+            .named_dimension("Region", &["r1", "r2"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension_with_element_mapping(
+                "State",
+                &["s1", "s2"],
+                "Region",
+                &[("s1", "r2"), ("s2", "r1")],
+            )
+            .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+            .array_aux_direct(
+                "out",
+                vec!["State".into()],
+                "1 + SUM(matrix[State, *])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
         assert!(
             result
                 .aggs
                 .iter()
                 .all(|a| !a.source_vars.contains(&"matrix".to_string())),
-            "a mapped-dimension sliced reducer must not be hoisted; got: {:?}",
+            "an element-mapped sliced reducer must not be hoisted; got: {:?}",
             result.aggs
         );
         assert!(result.synthetic_by_key.is_empty());
+    }
+
+    /// GH #534 (conservative gate, reverse-declared): a sliced reducer whose
+    /// mapping is declared only in the REVERSE direction (on the source's
+    /// `Region` toward `State`) stays un-hoisted, matching the direction
+    /// `classify_iterated_dim_shape`'s mapped arm accepts
+    /// (`has_mapping_to(iterated, source)` only; the reverse-subscripted
+    /// direction is tracked by GH #757 -- not widened here).
+    #[test]
+    fn reverse_declared_mapped_sliced_reducer_is_not_hoisted() {
+        let project = TestProject::new("reverse_mapped_slice")
+            .named_dimension_with_mapping("Region", &["r1", "r2"], "State")
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension("State", &["s1", "s2"])
+            .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+            .array_aux_direct(
+                "out",
+                vec!["State".into()],
+                "1 + SUM(matrix[State, *])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result
+                .aggs
+                .iter()
+                .all(|a| !a.source_vars.contains(&"matrix".to_string())),
+            "a reverse-declared mapped sliced reducer must not be hoisted; got: {:?}",
+            result.aggs
+        );
+        assert!(result.synthetic_by_key.is_empty());
+    }
+
+    /// GH #534: the whole-RHS twin -- `out[State] = SUM(matrix[State,*])`
+    /// over a positionally-mapped pair mints a SYNTHETIC agg, an exception
+    /// to the variable-is-the-agg rule for whole-RHS reducers: the
+    /// variable-backed link-score path (`try_cross_dimensional_link_scores`)
+    /// matches result axes against source axes by name, so a remapped pair
+    /// falls off it onto the `Wildcard` per-shape partial, whose
+    /// PREVIOUS-wrapping mangles the iterated index into a non-compiling
+    /// `matrix[PREVIOUS(state),*]` (silently stubbed to 0). The synthetic
+    /// agg gives the whole-RHS case the same remapped two-half scoring as
+    /// an inline mapped reducer.
+    #[test]
+    fn whole_rhs_mapped_partial_reduce_mints_synthetic_agg() {
+        let project = TestProject::new("whole_rhs_mapped")
+            .named_dimension("Region", &["r1", "r2"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+            .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+            .array_aux_direct("out", vec!["State".into()], "SUM(matrix[State, *])", None);
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| a.is_synthetic),
+            "a whole-RHS MAPPED reducer must mint a synthetic agg (not variable-backed); got: {:?}",
+            result.aggs
+        );
+        let agg = result
+            .aggs_in_var("out")
+            .next()
+            .expect("expected a synthetic agg owned by `out`");
+        assert_eq!(agg.name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
+        assert_eq!(
+            agg.read_slice,
+            vec![
+                AxisRead::Iterated {
+                    dim: "state".to_string(),
+                    source_dim: "region".to_string()
+                },
+                AxisRead::Reduced
+            ]
+        );
+        assert_eq!(agg.result_dims, vec!["State".to_string()]);
+    }
+
+    /// GH #534: `iterated_axis_slot_elements` -- identity for the literal
+    /// case, the positional preimage for a mapped pair, `None` for an
+    /// element-mapped or unmapped pair.
+    #[test]
+    fn iterated_axis_slot_elements_cases() {
+        use crate::datamodel::{Dimension as DmDimension, DimensionMapping};
+        use crate::dimensions::DimensionsContext;
+
+        let named = |name: &str, elems: &[&str], mappings: Vec<DimensionMapping>| {
+            let mut d = DmDimension::named(
+                name.to_string(),
+                elems.iter().map(|e| e.to_string()).collect(),
+            );
+            d.mappings = mappings;
+            d
+        };
+        let positional = DimensionMapping {
+            target: "Region".to_string(),
+            element_map: vec![],
+        };
+        let element_mapped = DimensionMapping {
+            target: "Region".to_string(),
+            element_map: vec![
+                ("s1".to_string(), "r2".to_string()),
+                ("s2".to_string(), "r1".to_string()),
+            ],
+        };
+
+        let region_elems = vec!["r1".to_string(), "r2".to_string()];
+
+        // Literal: identity (no dim_ctx lookups consulted).
+        let ctx = DimensionsContext::from(&[
+            named("Region", &["r1", "r2"], vec![]),
+            named("State", &["s1", "s2"], vec![positional.clone()]),
+        ]);
+        assert_eq!(
+            iterated_axis_slot_elements("region", "region", &region_elems, &ctx),
+            Some(region_elems.clone())
+        );
+
+        // Positional mapping: source row r1 feeds slot s1, r2 feeds s2
+        // (index-identity under the positional correspondence).
+        assert_eq!(
+            iterated_axis_slot_elements("state", "region", &region_elems, &ctx),
+            Some(vec!["s1".to_string(), "s2".to_string()])
+        );
+
+        // Explicit element map: declined (GH #756 positional-only gate).
+        let ctx_elem = DimensionsContext::from(&[
+            named("Region", &["r1", "r2"], vec![]),
+            named("State", &["s1", "s2"], vec![element_mapped]),
+        ]);
+        assert_eq!(
+            iterated_axis_slot_elements("state", "region", &region_elems, &ctx_elem),
+            None
+        );
+
+        // Unmapped pair: declined.
+        let ctx_unmapped = DimensionsContext::from(&[
+            named("Region", &["r1", "r2"], vec![]),
+            named("State", &["s1", "s2"], vec![]),
+        ]);
+        assert_eq!(
+            iterated_axis_slot_elements("state", "region", &region_elems, &ctx_unmapped),
+            None
+        );
     }
 
     /// AC4.4 (the carve-out): a reducer over a *dynamic* index
@@ -1898,21 +2213,9 @@ mod tests {
         assert!(synthetic[0].result_dims.is_empty());
     }
 
-    /// The `BuiltinFn`-form companion to [`reducer_name_is_monotone`]: `true`
-    /// when `builtin` is a recognized array reducer (so a 2-arg `MIN(a, b)` --
-    /// not an array reducer at all -- is never "monotone" here) *and* that
-    /// reducer is monotone non-decreasing. Only the classification test needs
-    /// the builtin-keyed shape; the production monotone consumer
-    /// (`recover_agg_hop_polarities`) has the agg's printed equation text and
-    /// uses [`agg_reducer_is_monotone`], so this lives in the tests rather than
-    /// at module scope.
-    fn reducer_is_monotone<E>(builtin: &BuiltinFn<E>) -> bool {
-        reducer_kind(builtin).is_some() && reducer_name_is_monotone(builtin.name())
-    }
-
     /// AC1.2: the consolidated `reducer_kind` table classifies every array
-    /// reducer the LTM machinery cares about, and `reducer_is_monotone` /
-    /// `reducer_is_hoistable` derive the right subsets. `reducer_kind` is
+    /// reducer the LTM machinery cares about, and `reducer_is_hoistable`
+    /// derives the right hoisted subset. `reducer_kind` is
     /// generic over the contained expression type, so `BuiltinFn::<i32>`
     /// literals suffice -- it only inspects structure and arity.
     #[test]
@@ -1944,32 +2247,6 @@ mod tests {
         assert_eq!(reducer_kind(&rank), Some(ReducerKind::Nonlinear));
         assert_eq!(reducer_kind(&size), Some(ReducerKind::Constant));
         assert_eq!(reducer_kind(&abs), None);
-
-        // Monotone: SUM / 1-arg MEAN / 1-arg MIN / 1-arg MAX. STDDEV, RANK,
-        // SIZE are not (raising one element can move the result either way,
-        // or not at all). 2-arg MIN/MAX are not reducers, so not monotone.
-        assert!(reducer_is_monotone(&sum));
-        assert!(reducer_is_monotone(&mean_1));
-        assert!(reducer_is_monotone(&min_1));
-        assert!(reducer_is_monotone(&max_1));
-        assert!(!reducer_is_monotone(&mean_2));
-        assert!(!reducer_is_monotone(&min_2));
-        assert!(!reducer_is_monotone(&max_2));
-        assert!(!reducer_is_monotone(&stddev));
-        assert!(!reducer_is_monotone(&rank));
-        assert!(!reducer_is_monotone(&size));
-        assert!(!reducer_is_monotone(&abs));
-
-        // The name-keyed predicate agrees with the builtin-keyed one for the
-        // recognized names.
-        assert!(reducer_name_is_monotone("sum"));
-        assert!(reducer_name_is_monotone("mean"));
-        assert!(reducer_name_is_monotone("min"));
-        assert!(reducer_name_is_monotone("max"));
-        assert!(!reducer_name_is_monotone("stddev"));
-        assert!(!reducer_name_is_monotone("rank"));
-        assert!(!reducer_name_is_monotone("size"));
-        assert!(!reducer_name_is_monotone("abs"));
 
         // Hoistable: recognized AND not Constant -- SUM / 1-arg MEAN /
         // 1-arg MIN / 1-arg MAX / STDDEV / RANK. SIZE is recognized but never

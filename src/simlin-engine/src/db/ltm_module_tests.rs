@@ -1575,3 +1575,166 @@ fn test_multi_output_loop_link_uses_per_exit_port_alias() {
         "loop score must reference the per-exit-port alias {alias_name}; got: {loop_eqn}"
     );
 }
+
+/// Assign sequential UIDs to every variable of every model in `project`, so
+/// `loop_metadata` (the pinned-loop primitive) can reference them.
+fn assign_uids_for_pinning(project: &mut datamodel::Project) {
+    for model in &mut project.models {
+        for (i, var) in model.variables.iter_mut().enumerate() {
+            let uid = (i as i32) + 1;
+            match var {
+                datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                datamodel::Variable::Module(m) => m.uid = Some(uid),
+            }
+        }
+    }
+}
+
+/// Pin a loop on `model_name` by variable idents, mirroring the `SetLoopName`
+/// patch path: assign UIDs to the named variables and append the
+/// `LoopMetadata` entry those UIDs resolve from at sync time.
+fn pin_loop_by_names(
+    project: &mut datamodel::Project,
+    model_name: &str,
+    name: &str,
+    variables: &[&str],
+) {
+    let model = project
+        .models
+        .iter_mut()
+        .find(|m| m.name == model_name)
+        .expect("model exists");
+    let uids: Vec<i32> = variables
+        .iter()
+        .map(|v| {
+            model
+                .variables
+                .iter()
+                .find(|var| var.get_ident() == *v)
+                .and_then(crate::patch::variable_uid)
+                .unwrap_or_else(|| panic!("variable {v} has no uid"))
+        })
+        .collect();
+    model.loop_metadata.push(datamodel::LoopMetadata {
+        uids,
+        deleted: false,
+        name: name.to_string(),
+        description: String::new(),
+    });
+}
+
+/// Two-model fixture for the GH #673 pin-through-module tests: `main` has a
+/// 3-node cycle `driver -> {module} -> reader -> driver` whose ONLY state (if
+/// any) lives inside the module's sub-model. `sub_vars` supplies the
+/// passthrough.
+fn pin_through_module_project(sub_vars: Vec<datamodel::Variable>) -> datamodel::Project {
+    datamodel::Project {
+        name: "pin_through_module".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            x_model(
+                "main",
+                vec![
+                    x_aux("driver", "100 + reader * 0.5", None),
+                    x_module("sub", &[("driver", "sub.input")], None),
+                    x_aux("reader", "sub.output", None),
+                ],
+            ),
+            x_model("sub", sub_vars),
+        ],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// GH #673: a pinned loop whose only stock lives INSIDE a module it traverses
+/// (a smooth-like sub-model) must validate -- the old check compared the
+/// cycle's nodes against the PARENT-level stock set only, so the module-borne
+/// state was invisible and the pin was wrongly rejected as "contains no
+/// stock" even though the enumerator finds and scores the same cycle.
+#[test]
+fn test_pinned_loop_through_module_with_internal_stock_validates() {
+    let mut project = pin_through_module_project(vec![
+        x_aux("input", "0", None),
+        x_flow("chg", "(input - output) / 3", None),
+        x_stock("output", "0", &["chg"], &[], None),
+    ]);
+    assign_uids_for_pinning(&mut project);
+    pin_loop_by_names(
+        &mut project,
+        "main",
+        "smooth loop",
+        &["driver", "sub", "reader"],
+    );
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let result = model_pinned_loops(&db, sync.models["main"].source, sync.project);
+
+    assert!(
+        result.invalid.is_empty(),
+        "a pin whose only stock is module-internal must validate; got invalid: {:?}",
+        result.invalid
+    );
+    assert_eq!(result.loops.len(), 1, "the pin must resolve to one loop");
+    let pin = &result.loops[0];
+    assert_eq!(pin.name, "smooth loop");
+    assert_eq!(pin.loops.len(), 1);
+    let l = &pin.loops[0];
+    assert_eq!(l.id, "pin1");
+    // The resolved Loop must carry the module-internal stock (namespaced with
+    // the module instance name), the same enrichment the enumerator applies,
+    // so downstream partition resolution sees the loop's state.
+    assert!(
+        l.stocks.iter().any(|s| s.as_str() == "sub\u{00B7}output"),
+        "the loop must carry the module-internal stock; got stocks: {:?}",
+        l.stocks
+    );
+}
+
+/// GH #673 (the other direction): a pinned cycle through a stockless
+/// PASSTHROUGH module -- no stock anywhere on the cycle, inside or out -- is
+/// a purely-instantaneous circular dependency, not a feedback loop, and must
+/// STILL be rejected with the clear "contains no stock" reason.
+#[test]
+fn test_pinned_loop_through_stockless_passthrough_still_rejected() {
+    let mut project = pin_through_module_project(vec![
+        x_aux("input", "0", None),
+        x_aux("output", "input * 2", None),
+    ]);
+    assign_uids_for_pinning(&mut project);
+    pin_loop_by_names(
+        &mut project,
+        "main",
+        "instantaneous",
+        &["driver", "sub", "reader"],
+    );
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let result = model_pinned_loops(&db, sync.models["main"].source, sync.project);
+
+    assert!(
+        result.loops.is_empty(),
+        "a stockless cycle through a passthrough module must not score; got: {:?}",
+        result.loops.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+    assert_eq!(result.invalid.len(), 1);
+    let (name, reason) = &result.invalid[0];
+    assert_eq!(name, "instantaneous");
+    assert!(
+        reason.contains("contains no stock"),
+        "rejection must carry the clear no-stock reason; got: {reason}"
+    );
+}

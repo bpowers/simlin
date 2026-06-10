@@ -7696,15 +7696,16 @@ fn test_sliced_agg_cross_element_loop_simulates() {
 /// non-degenerate `loop_score`.
 ///
 /// The fixture is the *diagonal* case (`result_dims == growth`'s dims): the
-/// agg over `D1` feeds a target also over exactly `D1`. The original review
-/// fixture put `SUM(matrix[D1,*])` inside an A2A body over `(D1, D2)` (the
-/// strict-prefix *broadcast* case `agg[D1] → growth[D1,D2]`), where the
-/// `agg→target` partial element-pins to the full `(d1,d2)` tuple and thus
-/// over-subscripts the 1-D agg -- a known imprecision tracked as GH #528.
-/// The diagonal case exercises the same arrayed-agg link/loop machinery
-/// without that orthogonal over-subscription bug; `mflow[D1,D2] = growth[D1]`
-/// (the GH #511 iterated-dim subscript) then broadcasts `growth` over `D2`
-/// to close the per-`(D1,D2)` element loops through `matrix`.
+/// agg over `D1` feeds a target also over exactly `D1`. The strict-prefix
+/// *broadcast* case (`SUM(matrix[D1,*])` inside an A2A body over `(D1, D2)`,
+/// `agg[D1] → growth[D1,D2]`) is the GH #528 twin, pinned by
+/// `ltm_array_agg::broadcast_agg_loop_scores_are_finite_and_sustained`: there
+/// the `agg→target` partial pins the agg to the target element's PROJECTION
+/// onto the agg's `result_dims` axes (the full `(d1,d2)` tuple would
+/// over-subscript the 1-D agg). For the diagonal case here the projection IS
+/// the full tuple; `mflow[D1,D2] = growth[D1]` (the GH #511 iterated-dim
+/// subscript) then broadcasts `growth` over `D2` to close the per-`(D1,D2)`
+/// element loops through `matrix`.
 #[test]
 fn test_arrayed_sliced_agg_cross_element_loop_simulates() {
     // `D1={a,b}`, `D2={x,y}`. `matrix[D1,D2]` stock <- `mflow[D1,D2]`;
@@ -8929,19 +8930,19 @@ fn test_inline_reducer_gets_synthetic_agg_despite_var_backed_sibling() {
     vm.run_to_end().expect("should simulate");
 }
 
-/// AC5.2 / AC5.4 (#515, end-to-end): a 4-element-dim `share[r] = pop[r] /
-/// SUM(pop[*])` model with `update[r] = share[r] * pop[r] * c` and
-/// *heterogeneous* stock initials (so loop scores don't degenerate to zero
-/// under symmetry) hoists `SUM(pop[*])` into `$⁚ltm⁚agg⁚0`; each region has
-/// one disjoint petal through it. `recover_cross_agg_loops` reconstructs the
-/// full 4-petal subset's `(4-1)!/2 = 3` distinct cyclic orderings as
-/// distinct loops -- distinct ids, distinct `loop_score` equation texts
-/// (different edge sequences) -- but, because all three traverse the same
-/// edge *multiset*, their simulated `loop_score` time series are equal
-/// (to within floating-point round-off; multiplication is commutative, so
-/// the products coincide up to FP reassociation), and non-degenerate.
+/// AC5.2 / AC5.4 (#515, end-to-end; one-loop-per-subset per GH #676): a
+/// 4-element-dim `share[r] = pop[r] / SUM(pop[*])` model with `update[r] =
+/// share[r] * pop[r] * c` and *heterogeneous* stock initials (so loop
+/// scores don't degenerate to zero under symmetry) hoists `SUM(pop[*])`
+/// into `$⁚ltm⁚agg⁚0`; each region has one disjoint petal through it.
+/// `recover_cross_agg_loops` reconstructs the full 4-petal subset as
+/// exactly ONE canonical loop (every cyclic ordering of a fixed subset
+/// traverses the same edge multiset, so additional orderings would be
+/// score-identical duplicates), and its simulated `loop_score` series is
+/// non-degenerate and equals the product of its 16 link scores at every
+/// step.
 #[test]
-fn test_four_petal_cyclic_orderings_share_loop_score_series() {
+fn test_four_petal_canonical_loop_score_is_link_score_product() {
     use simlin_engine::datamodel::{self, Equation, Variable};
 
     let regions = ["A", "B", "C", "D"];
@@ -9038,9 +9039,8 @@ fn test_four_petal_cyclic_orderings_share_loop_score_series() {
 
     let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
     // The full-4-petal loop_score vars: those whose equation references all
-    // four `pop[r]→agg` factors. There must be exactly 3 (the 3 cyclic
-    // orderings of the full subset), with distinct names and distinct
-    // equation texts.
+    // four `pop[r]→agg` factors. There must be exactly 1 -- one canonical
+    // loop per disjoint petal subset (GH #676).
     let four_petal_loop_vars: Vec<&simlin_engine::db::LtmSyntheticVar> = ltm
         .vars
         .iter()
@@ -9060,27 +9060,12 @@ fn test_four_petal_cyclic_orderings_share_loop_score_series() {
         .collect();
     assert_eq!(
         four_petal_loop_vars.len(),
-        3,
-        "the full 4-petal subset must give exactly (4-1)!/2 = 3 cyclic-ordering loops; \
-         got {:?}",
+        1,
+        "the full 4-petal subset must give exactly one canonical loop; got {:?}",
         four_petal_loop_vars
             .iter()
             .map(|v| v.name.as_str())
             .collect::<Vec<_>>()
-    );
-    let names: std::collections::HashSet<&str> = four_petal_loop_vars
-        .iter()
-        .map(|v| v.name.as_str())
-        .collect();
-    assert_eq!(names.len(), 3, "distinct ids for the 3 cyclic orderings");
-    let eqs: std::collections::HashSet<String> = four_petal_loop_vars
-        .iter()
-        .map(|v| v.equation.source_text())
-        .collect();
-    assert_eq!(
-        eqs.len(),
-        3,
-        "the 3 cyclic orderings must have distinct edge sequences (loop_score equation texts)"
     );
 
     let compiled = compile_project_incremental(&db, sync.project, "main").expect("should compile");
@@ -9088,35 +9073,19 @@ fn test_four_petal_cyclic_orderings_share_loop_score_series() {
     vm.run_to_end().expect("should simulate");
     let results = vm.into_results();
 
-    let offsets: Vec<usize> = four_petal_loop_vars
-        .iter()
-        .map(|v| {
-            *results
-                .offsets
-                .get(&Ident::<Canonical>::new(&v.name))
-                .unwrap_or_else(|| panic!("missing offset for {}", v.name))
-        })
-        .collect();
+    let loop_offset = *results
+        .offsets
+        .get(&Ident::<Canonical>::new(&four_petal_loop_vars[0].name))
+        .unwrap_or_else(|| panic!("missing offset for {}", four_petal_loop_vars[0].name));
 
-    // The three series must be equal step-by-step -- they traverse the same
-    // edge multiset, and the loop score is `∏ link_score(e)`, so the products
-    // coincide up to FP reassociation of the factor order -- and the loop
-    // must be non-degenerate (genuinely computed: non-zero and finite at some
-    // step, not stubbed to a constant zero). It is a product of 16 link
-    // scores (each O(1e-3..1)), so the value is small but not zero.
+    // The loop must be non-degenerate (genuinely computed: non-zero and
+    // finite at some step, not stubbed to a constant zero). It is a product
+    // of 16 link scores (each O(1e-3..1)), so the value is small but not
+    // zero.
     let mut saw_nonzero = false;
     let mut all_finite = true;
     for step in 0..results.step_count {
-        let base = step * results.step_size;
-        let v0 = results.data[base + offsets[0]];
-        for &o in &offsets[1..] {
-            let v = results.data[base + o];
-            let both_nan = v.is_nan() && v0.is_nan();
-            assert!(
-                both_nan || (v - v0).abs() <= 1e-12 * v0.abs().max(1e-300),
-                "step {step}: cyclic-ordering loop scores diverge: {v0} vs {v}"
-            );
-        }
+        let v0 = results.data[step * results.step_size + loop_offset];
         if !v0.is_finite() {
             all_finite = false;
         } else if v0 != 0.0 {
@@ -9169,7 +9138,7 @@ fn test_four_petal_cyclic_orderings_share_loop_score_series() {
                 .iter()
                 .map(|&o| results.data[base + o])
                 .product();
-            let loop_val = results.data[base + offsets[0]];
+            let loop_val = results.data[base + loop_offset];
             let both_nan = loop_val.is_nan() && product.is_nan();
             assert!(
                 both_nan || (loop_val - product).abs() <= 1e-9 * product.abs().max(1e-300),
@@ -10393,6 +10362,207 @@ fn exhaustive_never_active_loop_keeps_structural_polarity() {
     );
 }
 
+/// GH #679 fixture: a single-stock loop whose runtime loop score genuinely
+/// MIXES signs with overwhelming positive dominance, so runtime
+/// reclassification must produce `MostlyReinforcing` (the LTM papers' "Rux")
+/// -- the variant that is structurally unreachable on the exhaustive
+/// pre-simulation surface.
+///
+/// Construction: `f = s * g + d` with a sign-flipping marginal gain `g` and
+/// an exogenous drive `d`.
+///
+/// * Phase 1 (t < 100): `g = 0.02`, `d = 0`. The flow depends on `s` alone,
+///   so the per-step `s -> f` link score is exactly +1 (the ceteris-paribus
+///   partial equals the full change) and the loop score is +1 at each of the
+///   ~400 steps.
+/// * Phase 2 (t >= 100): `g = -0.0001` (the marginal gain flips sign, so the
+///   loop genuinely becomes balancing) while `d = 50*(TIME-100)` ramps. The
+///   per-step change in `f` is dominated by the exogenous `delta d = 12.5`,
+///   so each of the 40 negative loop-score samples has magnitude
+///   `|g * delta s / delta f|` of only ~1e-4..1e-3.
+///
+/// The dominance ratio `|r - |b|| / (r + |b|)` lands at ~0.9999 -- above the
+/// 0.99 Rux gate but strictly below 1.0 (both signs are present). The
+/// `s -> f` link polarity is statically Unknown (the sign of `g` is not
+/// derivable), so the structural label is Undetermined/0.0.
+fn mixed_sign_dominant_loop_project() -> simlin_engine::datamodel::Project {
+    TestProject::new("rux_mixed_sign")
+        .with_sim_time(0.0, 110.0, 0.25)
+        .aux("g", "IF TIME < 100 THEN 0.02 ELSE -0.0001", None)
+        .aux("d", "IF TIME < 100 THEN 0 ELSE 50 * (TIME - 100)", None)
+        .stock("s", "100", &["f"], &[], None)
+        .flow("f", "s * g + d", None)
+        .build_datamodel()
+}
+
+/// GH #679: the exhaustive surface must be able to report the mixed-sign
+/// `MostlyReinforcing` (Rux) classification with its REAL dominance-ratio
+/// confidence -- not just the single-signed R/B flip that
+/// `exhaustive_module_loop_polarity_reclassified_from_runtime` pins.
+/// This is the canonical case from the issue: a loop whose polarity
+/// genuinely changes sign during simulation, where the honest post-sim
+/// answer is Rux with a concrete confidence, not a blanket Undetermined.
+#[test]
+fn exhaustive_mixed_sign_dominant_loop_reclassifies_to_rux() {
+    use simlin_engine::ltm::POLARITY_CONFIDENCE_THRESHOLD;
+
+    let project = mixed_sign_dominant_loop_project();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    assert_eq!(detected.loops.len(), 1, "the fixture has exactly one loop");
+    assert_eq!(
+        detected.loops[0].polarity,
+        DetectedLoopPolarity::Undetermined,
+        "the sign of g is not statically derivable, so the structural label is Undetermined"
+    );
+    assert_eq!(
+        detected.loops[0].polarity_confidence, 0.0,
+        "structural Undetermined carries the binary 0.0 confidence"
+    );
+
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    let mut loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
+
+    assert_eq!(
+        loops[0].polarity,
+        DetectedLoopPolarity::MostlyReinforcing,
+        "a mixed-sign series with >=0.99 positive dominance must classify Rux \
+         (got {:?} at confidence {})",
+        loops[0].polarity,
+        loops[0].polarity_confidence
+    );
+    assert!(
+        loops[0].polarity_confidence >= POLARITY_CONFIDENCE_THRESHOLD
+            && loops[0].polarity_confidence < 1.0,
+        "the Rux confidence is the REAL dominance ratio: at or above the {} gate but \
+         strictly below 1.0 (both signs are present in the series); got {}",
+        POLARITY_CONFIDENCE_THRESHOLD,
+        loops[0].polarity_confidence
+    );
+}
+
+/// GH #679, the sub-threshold side of the Rux gate: a loop whose score
+/// spends comparable magnitude on both signs stays `Undetermined` after
+/// runtime reclassification -- but with a real (non-zero, sub-0.99)
+/// dominance ratio instead of the structural 0.0 sentinel, proving the
+/// reclassifier ran and measured the series rather than leaving the
+/// structural label untouched.
+#[test]
+fn exhaustive_mixed_sign_balanced_loop_stays_undetermined() {
+    use simlin_engine::ltm::POLARITY_CONFIDENCE_THRESHOLD;
+
+    // Two phases of equal length and comparable per-step magnitude (the
+    // score is +1 then -1 per step), so the dominance ratio is far below
+    // the 0.99 gate.
+    let project = TestProject::new("u_mixed_sign")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .aux("g", "IF TIME < 10 THEN 0.02 ELSE -0.02", None)
+        .stock("s", "100", &["f"], &[], None)
+        .flow("f", "s * g", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    assert_eq!(detected.loops.len(), 1, "the fixture has exactly one loop");
+
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    let mut loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
+
+    assert_eq!(
+        loops[0].polarity,
+        DetectedLoopPolarity::Undetermined,
+        "comparable-magnitude mixed signs stay Undetermined below the Rux gate"
+    );
+    assert!(
+        loops[0].polarity_confidence > 0.0
+            && loops[0].polarity_confidence < POLARITY_CONFIDENCE_THRESHOLD,
+        "the runtime U confidence is the real sub-threshold dominance ratio, not the \
+         structural 0.0 sentinel; got {}",
+        loops[0].polarity_confidence
+    );
+}
+
+/// GH #679 parity: discovery mode and the exhaustive runtime-reclassification
+/// path must agree on the Rux fixture -- same `MostlyReinforcing` label and
+/// the same dominance-ratio confidence. Both classify via
+/// `LoopPolarity::from_runtime_scores`; for this single-loop fixture the
+/// discovery strongest-path score series is the same per-step product of
+/// link scores the exhaustive `loop_score` variable computes, so the two
+/// modes must not disagree about the same model.
+#[test]
+fn discovery_rux_classification_matches_exhaustive() {
+    use simlin_engine::ltm::{LoopPolarity, POLARITY_CONFIDENCE_THRESHOLD};
+
+    let project = mixed_sign_dominant_loop_project();
+
+    // Exhaustive: reclassify the detected loop from the simulated series.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("exhaustive simulation should run");
+    let results = vm.into_results();
+    let mut exhaustive_loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut exhaustive_loops, &results, &loop_partitions);
+    assert_eq!(
+        exhaustive_loops[0].polarity,
+        DetectedLoopPolarity::MostlyReinforcing
+    );
+    let exhaustive_confidence = exhaustive_loops[0].polarity_confidence;
+
+    // Discovery: run the strongest-path search over the discovery-mode sim.
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("discovery simulation should run");
+    let discovery_results = vm.into_results();
+    let proj = Project::from(project);
+    let found =
+        ltm_finding::discover_loops(&discovery_results, &proj).expect("discovery should succeed");
+    assert_eq!(found.len(), 1, "discovery finds the single feedback loop");
+
+    assert_eq!(
+        found[0].loop_info.polarity,
+        LoopPolarity::MostlyReinforcing,
+        "discovery must report the same Rux label exhaustive reclassification does"
+    );
+    assert!(
+        found[0].polarity_confidence >= POLARITY_CONFIDENCE_THRESHOLD
+            && found[0].polarity_confidence < 1.0,
+        "discovery Rux confidence must clear the gate and stay below 1.0; got {}",
+        found[0].polarity_confidence
+    );
+    // Both modes classify the same per-step product of the same link-score
+    // series, so the confidences agree to float precision -- a loose 1e-6
+    // tolerance allows for the two paths' different accumulation order.
+    assert!(
+        (found[0].polarity_confidence - exhaustive_confidence).abs() < 1e-6,
+        "discovery confidence {} must match exhaustive confidence {}",
+        found[0].polarity_confidence,
+        exhaustive_confidence
+    );
+}
+
 /// GROUND TRUTH PROBE / acceptance invariant for GH #675: an isolated
 /// feedback loop routed through a module->module link must have raw loop
 /// score exactly +1 at every settled step, regardless of the gain the
@@ -10439,6 +10609,446 @@ fn module_to_module_isolated_loop_raw_score_is_one() {
                  A module->module link scored with the gain dz/dx (not a link score) makes \
                  the loop score scale with the module gain; the isolated-loop invariant breaks."
             );
+        }
+    }
+}
+
+/// GH #534 (end-to-end): a positionally-MAPPED sliced reducer subexpression
+/// `SUM(matrix[State,*])` inside an A2A-over-`State` body (`matrix` over
+/// `[Region,D2]`, positional `State→Region` mapping) is hoisted into an
+/// arrayed synthetic agg over `State` whose source rows are remapped along
+/// the mapping: `matrix[r1,*]` feeds slot `s1`, `matrix[r2,*]` feeds slot
+/// `s2`. The mapped twin of `test_arrayed_sliced_agg_cross_element_loop_simulates`.
+///
+/// Asserts:
+///  - the agg aux is arrayed over `State` and each slot equals the MAPPED
+///    Region row's slice sum at every step (positional resolution -- the
+///    same reads the engine's own A2A lowering performs);
+///  - the per-(read row x remapped slot) source-half link scores exist and
+///    are finite, with NO cross-slot variant;
+///  - the agg→target half exists per State element (the GH #528 projection
+///    composes unchanged: `result_dims` carry the TARGET dim);
+///  - zero LTM fragment-compile-failure warnings (every emitted synthetic
+///    equation compiles);
+///  - the per-element feedback loop through the mapped agg is enumerated and
+///    its loop_score series is finite and sustained non-zero.
+#[test]
+fn test_mapped_sliced_agg_cross_element_loop_simulates() {
+    // Loop (per Region/State pair): matrix[r1,x] → $⁚ltm⁚agg⁚0[s1] →
+    // growth[s1] → mflow[r1,x] → matrix[r1,x]. `mflow`'s bare `growth`
+    // reference resolves through the same positional mapping (GH #527's
+    // mapped-Bare diagonal), closing the loop.
+    let project = TestProject::new("mapped_sliced_agg_sim")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_stock("matrix[Region,D2]", "100", &["mflow"], &[], None)
+        .array_aux("growth[State]", "SUM(matrix[State,*]) * 0.01 + 1")
+        .array_flow("mflow[Region,D2]", "growth", None)
+        .build_datamodel();
+
+    // The agg node is minted with the (target, source) iterated pair:
+    // result dims over State (the TARGET's iterated dim).
+    {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let source_model = sync.models["main"].source_model;
+        let agg_nodes =
+            simlin_engine::ltm_agg::enumerate_agg_nodes(&db, source_model, sync.project);
+        let synthetic: Vec<_> = agg_nodes.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "expected exactly one synthetic agg for the mapped SUM(matrix[State,*]); got: {:?}",
+            agg_nodes
+                .aggs
+                .iter()
+                .map(|a| (&a.name, a.is_synthetic, &a.result_dims))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            synthetic[0].result_dims,
+            vec!["State".to_string()],
+            "the mapped sliced reducer's agg result axis must be the TARGET's iterated dim"
+        );
+    }
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm.vars.iter().find(|v| v.name == agg).unwrap_or_else(|| {
+        panic!(
+            "expected the synthetic agg aux {agg}; synthetic vars: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(
+        agg_var.dimensions,
+        vec!["State".to_string()],
+        "the synthetic agg aux must be arrayed over State"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+
+    // Every emitted LTM synthetic fragment compiles: no fragment-failure
+    // warnings (the silent-stub path would zero the loop score).
+    let diags = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let frag_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.severity == simlin_engine::db::DiagnosticSeverity::Warning
+                && matches!(
+                    &d.error,
+                    simlin_engine::db::DiagnosticError::Assembly(msg)
+                        if msg.contains("failed to compile")
+                )
+        })
+        .collect();
+    assert!(
+        frag_failures.is_empty(),
+        "the mapped sliced-reducer model must compile every LTM fragment; got: {frag_failures:?}"
+    );
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("mapped-sliced-agg model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    let off = |name: &str| -> usize {
+        *results
+            .offsets
+            .get(&Ident::<Canonical>::new(name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing offset {name}; have: {:?}",
+                    results
+                        .offsets
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    let at = |step: usize, o: usize| results.data[step * results.step_size + o];
+
+    // Each agg slot equals the MAPPED Region row's slice sum (s1 ↦ r1,
+    // s2 ↦ r2 -- positional).
+    let agg_base = off(agg);
+    for (state_idx, region) in ["r1", "r2"].into_iter().enumerate() {
+        let agg_slot = agg_base + state_idx;
+        let mx_a = off(&format!("matrix[{region},x]"));
+        let mx_b = off(&format!("matrix[{region},y]"));
+        for step in 0..results.step_count {
+            let expected = at(step, mx_a) + at(step, mx_b);
+            assert!(
+                (at(step, agg_slot) - expected).abs() < 1e-9 * expected.abs().max(1.0),
+                "step {step}: {agg} slot {state_idx} = {}, expected SUM(matrix[{region},*]) = {expected}",
+                at(step, agg_slot)
+            );
+        }
+    }
+
+    // Per-(read row x remapped slot) source-half link scores exist and are
+    // finite; the cross-slot variant must not exist.
+    for (region, state) in [("r1", "s1"), ("r2", "s2")] {
+        for d2 in &["x", "y"] {
+            let o = off(&format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[{region},{d2}]\u{2192}{agg}[{state}]"
+            ));
+            for step in 0..results.step_count {
+                assert!(
+                    at(step, o).is_finite(),
+                    "step {step}: matrix[{region},{d2}]→{agg}[{state}] link score not finite"
+                );
+            }
+        }
+    }
+    for (region, state) in [("r1", "s2"), ("r2", "s1")] {
+        assert!(
+            !results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new(&format!(
+                    "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[{region},x]\u{2192}{agg}[{state}]"
+                ))),
+            "must not emit a matrix[{region},x]→{agg}[{state}] link score (wrong slot under the mapping)"
+        );
+    }
+
+    // The agg→target half exists per State element (diagonal on State).
+    for state in &["s1", "s2"] {
+        let o = off(&format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{agg}[{state}]\u{2192}growth[{state}]"
+        ));
+        for step in 0..results.step_count {
+            assert!(
+                at(step, o).is_finite(),
+                "step {step}: {agg}[{state}]→growth[{state}] link score not finite"
+            );
+        }
+    }
+
+    // A loop through the mapped agg is enumerated and scored: finite and
+    // sustained non-zero (the exponential growth keeps every link active).
+    let cross_agg_loop_score_name = ltm
+        .vars
+        .iter()
+        .find(|v| {
+            v.name.contains("\u{205A}loop_score\u{205A}")
+                && v.equation
+                    .source_text()
+                    .contains(format!("{agg}[s1]\u{2192}growth[s1]").as_str())
+                && v.equation.source_text().contains("matrix[r1,")
+                && v.equation
+                    .source_text()
+                    .contains(format!("\u{2192}{agg}[s1]").as_str())
+        })
+        .map(|v| v.name.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a loop_score var traversing matrix[r1,*]→{agg}[s1]→growth[s1]; loop scores: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+                    .map(|v| (v.name.as_str(), v.equation.source_text()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    let lo = off(&cross_agg_loop_score_name);
+    let mut nonzero_steps = 0usize;
+    for step in 2..results.step_count {
+        let v = at(step, lo);
+        assert!(
+            v.is_finite(),
+            "step {step}: mapped-agg loop score not finite"
+        );
+        if v.abs() > 1e-12 {
+            nonzero_steps += 1;
+        }
+    }
+    assert!(
+        nonzero_steps >= results.step_count.saturating_sub(2) / 2,
+        "the mapped-agg loop score must be sustained non-zero (got {nonzero_steps} non-zero of {} post-warmup steps)",
+        results.step_count - 2
+    );
+}
+
+/// GH #534 (scalar co-feeder composition, end-to-end): the mapped sliced
+/// reducer with a scalar co-feeder (`SUM(matrix[State,*] * scale)`) still
+/// hoists (the scalar arg contributes no read slice), the scalar feeder
+/// gets its Bare-named per-slot link score shaped over `State` (asserted in
+/// discovery mode -- exhaustive mode scores only loop-participating edges,
+/// and `scale` is exogenous here), and the model compiles every LTM
+/// fragment and simulates finite.
+#[test]
+fn test_mapped_sliced_agg_with_scalar_cofeeder_simulates() {
+    let project = TestProject::new("mapped_sliced_cofeeder_sim")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .scalar_aux("scale", "2")
+        .array_stock("matrix[Region,D2]", "100", &["mflow"], &[], None)
+        .array_aux("growth[State]", "SUM(matrix[State,*] * scale) * 0.005 + 1")
+        .array_flow("mflow[Region,D2]", "growth", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm.vars.iter().find(|v| v.name == agg).unwrap_or_else(|| {
+        panic!(
+            "expected the synthetic agg aux {agg} (the scalar co-feeder must not block hoisting); \
+             vars: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(agg_var.dimensions, vec!["State".to_string()]);
+
+    // The scalar feeder's Bare-named link score is shaped over State. The
+    // exogenous `scale` participates in no loop, so exhaustive mode never
+    // emits its edge score -- assert via discovery mode, which scores every
+    // causal edge (the GH #737 scalar-feeder arm composed with the GH #534
+    // remapped agg).
+    {
+        let mut ddb = SimlinDb::default();
+        let dsync = sync_from_datamodel_incremental(&mut ddb, &project, None);
+        set_project_ltm_enabled(&mut ddb, dsync.project, true);
+        set_project_ltm_discovery_mode(&mut ddb, dsync.project, true);
+        let dmodel = dsync.models["main"].source_model;
+        let dltm = model_ltm_variables(&ddb, dmodel, dsync.project);
+        let feeder = dltm
+            .vars
+            .iter()
+            .find(|v| v.name == format!("$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}{agg}"))
+            .expect("expected the scalar-feeder link score scale→agg in discovery mode");
+        assert_eq!(
+            feeder.dimensions,
+            vec!["State".to_string()],
+            "the scalar-feeder score must be shaped over the agg's result dims"
+        );
+    }
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let diags = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let frag_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.severity == simlin_engine::db::DiagnosticSeverity::Warning
+                && matches!(
+                    &d.error,
+                    simlin_engine::db::DiagnosticError::Assembly(msg)
+                        if msg.contains("failed to compile")
+                )
+        })
+        .collect();
+    assert!(
+        frag_failures.is_empty(),
+        "the co-feeder model must compile every LTM fragment; got: {frag_failures:?}"
+    );
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("mapped-sliced-agg co-feeder model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    // The remapped source-half link scores exist and the run stays finite.
+    for (region, state) in [("r1", "s1"), ("r2", "s2")] {
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[{region},x]\u{2192}{agg}[{state}]"
+        );
+        let o = *results
+            .offsets
+            .get(&Ident::<Canonical>::new(&name))
+            .unwrap_or_else(|| panic!("missing remapped source-half link score {name}"));
+        for step in 0..results.step_count {
+            let v = results.data[step * results.step_size + o];
+            assert!(v.is_finite(), "step {step}: {name} not finite");
+        }
+    }
+}
+
+/// GH #534 (whole-RHS twin, end-to-end): `out[State] = SUM(matrix[State,*])`
+/// over a positionally-mapped pair mints a SYNTHETIC agg (an exception to
+/// the variable-is-the-agg rule -- the variable-backed link-score path is
+/// name-based and cannot remap; its `Wildcard` partial generated the
+/// non-compiling `matrix[PREVIOUS(state),*]` and silently stubbed the score
+/// to 0). Asserts: the synthetic agg exists, every LTM fragment compiles,
+/// the remapped source-half link scores exist, and the loops through the
+/// agg are scored finite.
+#[test]
+fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
+    let project = TestProject::new("whole_rhs_mapped_e2e")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_stock("matrix[Region,D2]", "100", &["mflow"], &[], None)
+        .array_aux("out[State]", "SUM(matrix[State,*])")
+        .array_flow("mflow[Region,D2]", "out * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    assert!(
+        ltm.vars.iter().any(|v| v.name == agg),
+        "the whole-RHS mapped reducer must mint a synthetic agg; vars: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let diags = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let frag_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.severity == simlin_engine::db::DiagnosticSeverity::Warning
+                && matches!(
+                    &d.error,
+                    simlin_engine::db::DiagnosticError::Assembly(msg)
+                        if msg.contains("failed to compile")
+                )
+        })
+        .collect();
+    assert!(
+        frag_failures.is_empty(),
+        "the whole-RHS mapped model must compile every LTM fragment (the \
+         variable-backed Wildcard partial used to silently stub); got: {frag_failures:?}"
+    );
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("whole-RHS mapped model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    // Remapped source-half link scores exist and stay finite; the cross-slot
+    // variant must not exist.
+    for (region, state) in [("r1", "s1"), ("r2", "s2")] {
+        for d2 in &["x", "y"] {
+            let name = format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[{region},{d2}]\u{2192}{agg}[{state}]"
+            );
+            let o = *results
+                .offsets
+                .get(&Ident::<Canonical>::new(&name))
+                .unwrap_or_else(|| panic!("missing remapped source-half link score {name}"));
+            for step in 0..results.step_count {
+                let v = results.data[step * results.step_size + o];
+                assert!(v.is_finite(), "step {step}: {name} not finite");
+            }
+        }
+    }
+    assert!(
+        !results
+            .offsets
+            .contains_key(&Ident::<Canonical>::new(&format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[r1,x]\u{2192}{agg}[s2]"
+            ))),
+        "must not emit a cross-slot matrix[r1,x]→{agg}[s2] link score"
+    );
+
+    // Each loop through the agg gets a finite loop score.
+    let loop_scores: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| {
+            v.name.contains("\u{205A}loop_score\u{205A}")
+                && v.equation
+                    .source_text()
+                    .contains(format!("\u{2192}{agg}[").as_str())
+        })
+        .map(|v| v.name.clone())
+        .collect();
+    assert!(
+        !loop_scores.is_empty(),
+        "expected loop scores traversing the synthetic agg; loop scores: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    for name in &loop_scores {
+        let o = *results
+            .offsets
+            .get(&Ident::<Canonical>::new(name))
+            .unwrap_or_else(|| panic!("missing loop score {name}"));
+        for step in 0..results.step_count {
+            let v = results.data[step * results.step_size + o];
+            assert!(v.is_finite(), "step {step}: {name} not finite");
         }
     }
 }

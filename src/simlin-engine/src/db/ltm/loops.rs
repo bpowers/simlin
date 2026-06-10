@@ -234,43 +234,57 @@ pub(super) struct ReadSliceRow {
 /// holds because `from` is one of `agg`'s `source_vars`) and `from`'s
 /// dimension element lists. A `Pinned` axis is fixed to its single element; an
 /// `Iterated` or `Reduced` axis ranges over every element of that axis. The
-/// agg result slot for a row is its `Iterated` coordinates in order.
+/// agg result slot for a row is its `Iterated` coordinates in order --
+/// remapped to the corresponding TARGET-dim element via
+/// [`crate::ltm_agg::iterated_axis_slot_elements`] when the axis is a
+/// positionally-mapped pair (GH #534; identity in the literal case), so the
+/// emitted `{from}[<row>]→{agg}[<slot>]` names match the element graph's
+/// remapped agg-slot nodes.
 ///
 /// `None` when `read_slice` doesn't have one entry per `from` axis (it always
-/// should for a hoisted agg whose `source_vars` contains `from`): the caller
+/// should for a hoisted agg whose `source_vars` contains `from`), or when a
+/// mapped `Iterated` axis has no usable slot remap (cannot happen for a slice
+/// `compute_read_slice` accepted -- both gate on the same helper over the
+/// same salsa dimension context -- but a stale invariant degrades to the
+/// caller's conservative fallback rather than mis-slotted scores): the caller
 /// then falls back to the conservative "every source element, scalar agg" form.
 pub(super) fn read_slice_rows(
     read_slice: &[crate::ltm_agg::AxisRead],
     from_dim_element_lists: &[Vec<String>],
+    dim_ctx: &crate::dimensions::DimensionsContext,
 ) -> Option<Vec<ReadSliceRow>> {
     use crate::ltm_agg::AxisRead;
     if read_slice.len() != from_dim_element_lists.len() {
         return None;
     }
-    // Per axis: the element list to iterate, plus whether the axis contributes
-    // a coordinate to the result slot.
-    let per_axis: Vec<(Vec<String>, bool)> = read_slice
+    // Per axis: the element list to iterate, plus -- for an `Iterated` axis
+    // -- the slot coordinate per source element (index-aligned).
+    let per_axis: Vec<(Vec<String>, Option<Vec<String>>)> = read_slice
         .iter()
         .zip(from_dim_element_lists)
         .map(|(a, elems)| match a {
-            AxisRead::Pinned(e) => (vec![e.clone()], false),
-            AxisRead::Iterated(_) => (elems.clone(), true),
-            AxisRead::Reduced => (elems.clone(), false),
+            AxisRead::Pinned(e) => Some((vec![e.clone()], None)),
+            AxisRead::Iterated { dim, source_dim } => {
+                let slots =
+                    crate::ltm_agg::iterated_axis_slot_elements(dim, source_dim, elems, dim_ctx)?;
+                Some((elems.clone(), Some(slots)))
+            }
+            AxisRead::Reduced => Some((elems.clone(), None)),
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()?;
     // Cartesian product, tracking each row's full element tuple and its slot
     // coordinates.
     let mut rows: Vec<(Vec<String>, Vec<String>)> = vec![(Vec::new(), Vec::new())];
-    for (elems, contributes_to_slot) in &per_axis {
+    for (elems, slot_elems) in &per_axis {
         let mut next: Vec<(Vec<String>, Vec<String>)> =
             Vec::with_capacity(rows.len() * elems.len());
         for (row, slot) in &rows {
-            for e in elems {
+            for (ei, e) in elems.iter().enumerate() {
                 let mut new_row = row.clone();
                 new_row.push(e.clone());
                 let mut new_slot = slot.clone();
-                if *contributes_to_slot {
-                    new_slot.push(e.clone());
+                if let Some(slots) = slot_elems {
+                    new_slot.push(slots[ei].clone());
                 }
                 next.push((new_row, new_slot));
             }
@@ -380,6 +394,12 @@ pub(crate) fn build_loops_from_tiered(
     // arrayed dimensions (empty for PureScalar). The links / stocks /
     // polarity are derived from the variable-level cycle exactly as
     // the legacy pure-dimension branch did.
+    //
+    // Building straight from the variable-level circuit is sound here
+    // because `classify_cycle` guarantees no fast-path cycle traverses a
+    // `ThroughAgg`-routed edge (GH #737): such a cycle's loop must instead
+    // route `from → $⁚ltm⁚agg⁚{n} → to` (only the agg-half link scores are
+    // scoreable), which only the element-level slow path below produces.
     for fp in &tiered.fast_path {
         if fp.variables.is_empty() {
             continue;
@@ -1080,16 +1100,15 @@ pub(crate) fn build_element_level_loops(
 /// all synthetic aggregate nodes), Phase 5 / GH #515.
 ///
 /// With `k` disjoint petals through one agg the recoverable loop count is
-/// `Σ_{m=2}^{k} C(k,m)·orderings(m)` where `orderings(m)` is 1 for m=2 and
-/// `(m-1)!/2` for m≥3 -- it grows super-exponentially, so a budget is
+/// `Σ_{m=2}^{k} C(k,m) = 2^k - k - 1` (one canonical loop per disjoint
+/// petal subset, GH #676) -- still exponential in `k`, so a budget is
 /// mandatory. When recovery hits this budget it stops, sets the truncation
 /// flag, and the caller emits a `Warning`; the deterministic petal priority
 /// (fewest internal nodes first, then a stable joined-name tiebreaker)
 /// makes *which* loops survive truncation reproducible. The prior implicit
 /// ceiling was `2^8 - 8 - 1 = 247` per agg (the old `MAX_AGG_PETALS = 8`
 /// hard drop); 256 keeps roughly that order of magnitude as a model-wide
-/// total. Because the budget is modest, recovery never reaches a subset
-/// large enough for `cyclic_orderings(m)` to blow up in practice.
+/// total.
 pub(crate) const MAX_CROSS_AGG_LOOPS: usize = 256;
 
 /// Soft per-aggregate cap on the petals considered when stitching them into
@@ -1158,72 +1177,6 @@ impl Drop for AggLoopBudgetGuard {
     }
 }
 
-/// Distinct orderings of `[0, 1, ..., n-1]` modulo rotation (index `0`
-/// pinned first to kill rotations) and modulo mirror reversal (the loop
-/// score is a commutative product over the edge multiset, so a directed
-/// cycle and its reverse share a score; the design enumerates only one of
-/// each mirror pair). Count: `1` for `n ∈ {0, 1, 2}`, `(n-1)!/2` for
-/// `n ≥ 3` (`(n-1)!` rotation classes, halved by the mirror involution --
-/// which has no fixed point for `n ≥ 3` since a length-`(n-1)` permutation
-/// of distinct indices is never a palindrome; for `n = 2` reversing the
-/// 2-cycle gives the same sequence, so there is nothing to quotient).
-///
-/// "Mirror" here is the petal-sequence reversed with the first petal still
-/// pinned -- `[0, p1, .., p_{n-1}] ↦ [0, p_{n-1}, .., p1]` -- so the rule
-/// is: enumerate the permutations of `[1, .., n-1]` via Heap's algorithm
-/// (deterministic order, which `assign_loop_ids`' stable sort relies on for
-/// stable distinct loop ids), and keep a permutation `tail` iff it is
-/// lexicographically `<= reverse(tail)` (equivalently: track the emitted
-/// canonicals in a set -- the lex test is the cheaper involution).
-///
-/// Pure: depends only on `n`. Only called from `recover_cross_agg_loops`
-/// with `n` = a disjoint petal-subset size (≥ 2, ≤ `MAX_AGG_PETALS`), and
-/// the loop budget stops recovery long before it reaches a subset large
-/// enough for `(n-1)!/2` to be a concern.
-pub(crate) fn cyclic_orderings(n: usize) -> Vec<Vec<usize>> {
-    if n <= 1 {
-        return vec![(0..n).collect()];
-    }
-    // Generate every permutation of the tail `[1, .., n-1]` via Heap's
-    // algorithm, in its canonical order.
-    let mut tail: Vec<usize> = (1..n).collect();
-    let mut perms: Vec<Vec<usize>> = Vec::new();
-    heaps_permutations(tail.len(), &mut tail, &mut perms);
-
-    let mut orderings: Vec<Vec<usize>> = Vec::with_capacity(perms.len().div_ceil(2));
-    for perm in perms {
-        // Skip a permutation whose mirror (the tail reversed, with 0 still
-        // pinned) sorts strictly before it -- we keep one of each mirror pair.
-        let rev: Vec<usize> = perm.iter().rev().copied().collect();
-        if perm > rev {
-            continue;
-        }
-        let mut ordering = Vec::with_capacity(n);
-        ordering.push(0);
-        ordering.extend(perm);
-        orderings.push(ordering);
-    }
-    orderings
-}
-
-/// Recursive Heap's algorithm: append every permutation of `a[0..k]` (with
-/// `a[k..]` held fixed) to `out`, in Heap's canonical order. Called with
-/// `k == a.len()`.
-fn heaps_permutations(k: usize, a: &mut [usize], out: &mut Vec<Vec<usize>>) {
-    if k <= 1 {
-        out.push(a.to_vec());
-        return;
-    }
-    for i in 0..k {
-        heaps_permutations(k - 1, a, out);
-        if k.is_multiple_of(2) {
-            a.swap(i, k - 1);
-        } else {
-            a.swap(0, k - 1);
-        }
-    }
-}
-
 /// A single agg petal for the mode-agnostic stitching core
 /// [`stitch_cross_agg_petals`]: the node sequence rotated to start at the
 /// aggregate node (`[A, x_1, ..., x_m]`) plus its internal node set.
@@ -1255,13 +1208,25 @@ pub(crate) struct StitchPetal<T> {
 /// priority (fewest internal nodes first, then a stable joined-name
 /// tiebreaker), keep the smallest [`MAX_AGG_PETALS`] (clipping flags the agg as
 /// truncated), then walk pairwise-disjoint petal subsets of size `≥ 2`
-/// smallest-cardinality-first; for each subset emit every distinct
-/// [`cyclic_orderings`] as one stitched sequence `[A, p1_x..., A, p2_x..., ...]`
-/// (the caller turns each sequence into its own loop -- `build_element_…_links`
-/// /`circuit_to_links` reconstitutes the `... → A → p1_x → A → p2_x → ... → A`
-/// cycle). A running count is checked against `budget`; once hit, enumeration
+/// smallest-cardinality-first; for each subset emit ONE canonical stitched
+/// sequence `[A, p1_x..., A, p2_x..., ...]` -- the chosen petals concatenated
+/// in priority order (the caller turns each sequence into its own loop --
+/// `build_element_…_links`/`circuit_to_links` reconstitutes the
+/// `... → A → p1_x → A → p2_x → ... → A` cycle).
+///
+/// One loop per disjoint petal subset (GH #676): for a fixed subset, EVERY
+/// cyclic ordering of the petals produces the same edge multiset -- each
+/// petal contributes the same `agg→head`, internal, and `tail→agg` edges
+/// regardless of its position in the concatenation -- and the loop score is
+/// a commutative product over that multiset, so all orderings share one
+/// `loop_score`. Distinct orderings are distinct directed circuits but are
+/// indistinguishable for dominance analysis; emitting them would only burn
+/// the loop budget on duplicates and truncate genuinely-distinct subsets
+/// earlier.
+///
+/// A running count is checked against `budget`; once hit, enumeration
 /// stops and every not-yet-enumerated agg with `≥ 2` petals is reported as
-/// truncated. The deterministic agg/petal/subset/ordering walk makes the
+/// truncated. The deterministic agg/petal/subset walk makes the
 /// *truncated* output reproducible rather than HashMap-iteration dependent.
 ///
 /// Returns the stitched node sequences (each starting at an agg) and the
@@ -1271,7 +1236,7 @@ pub(crate) struct StitchPetal<T> {
 /// (both modes sort the keys before calling).
 ///
 /// Pure: no db, no I/O. The only shared invariant with the exhaustive path is
-/// the petal priority / subset / ordering walk, which now lives here once.
+/// the petal priority / subset walk, which now lives here once.
 pub(crate) fn stitch_cross_agg_petals<T, K>(
     petals_by_agg: Vec<(K, Vec<StitchPetal<T>>)>,
     budget: usize,
@@ -1338,19 +1303,21 @@ where
             {
                 continue;
             }
-            let m = chosen.len();
-            for ord in cyclic_orderings(m) {
-                let seq: Vec<T> = ord
-                    .iter()
-                    .flat_map(|&j| petals[chosen[j]].nodes.iter().cloned())
-                    .collect();
-                stitched.push(seq);
-                emitted += 1;
-                if emitted >= budget {
-                    truncated.insert(_agg.clone());
-                    budget_clip_idx = Some(agg_idx);
-                    break 'outer;
-                }
+            // One canonical ordering per subset: the chosen petals in
+            // priority order (`chosen` is ascending over the sorted petals).
+            // All cyclic orderings of a fixed subset share the same edge
+            // multiset and hence the same loop score (see the fn doc), so a
+            // single representative suffices.
+            let seq: Vec<T> = chosen
+                .iter()
+                .flat_map(|&i| petals[i].nodes.iter().cloned())
+                .collect();
+            stitched.push(seq);
+            emitted += 1;
+            if emitted >= budget {
+                truncated.insert(_agg.clone());
+                budget_clip_idx = Some(agg_idx);
+                break 'outer;
             }
         }
     }
@@ -1378,7 +1345,8 @@ where
 /// rest of the cycle). Two petals are disjoint when their internal node sets
 /// don't overlap. For a pairwise-disjoint subset of `m ≥ 2` petals of `A`,
 /// the recovered loop's element-level node sequence concatenates the petals'
-/// `nodes` (each of which starts with `A`) in some order:
+/// `nodes` (each of which starts with `A`) in the canonical priority order
+/// (one loop per subset -- see [`stitch_cross_agg_petals`]):
 /// `[A, p1_x..., A, p2_x..., ...]` -- `build_element_subscripted_links`
 /// builds `seq[i] → seq[(i+1) % n]`, so this is exactly the cyclic sequence
 /// `... → A → p1_x... → A → p2_x... → ... → A` (the last internal node wraps
@@ -1521,6 +1489,57 @@ where
     petals_by_agg
 }
 
+/// Polarity of one `source → agg` hop: the *discriminating* analysis of the
+/// agg's own lowered body with respect to the source variable
+/// ([`crate::ltm::CausalGraph::source_to_agg_polarity`], the
+/// positive-by-convention Mul rule), applied uniformly to scalar feeders and
+/// arrayed rows / co-sources (GH #737 review follow-ups I1/I1b):
+///
+/// - `SUM(pop[*])` / `SUM(pop[*] * scale)` w.r.t. `pop` → Positive (the
+///   genuinely-monotone row cases keep their label),
+/// - `SUM(pop[*] * scale)` w.r.t. `scale` → Positive,
+/// - `SUM(pop[*] * (1 - weight[*]))` w.r.t. `weight` → Negative (the I1b
+///   co-source case the old blanket monotone-Positive arm mislabeled --
+///   "monotone in each summand" is not "monotone in every variable the
+///   summand body composes"),
+/// - indeterminate bodies (compound co-factors, STDDEV/RANK, lookups of
+///   unknown direction) → Unknown, never a confident wrong label.
+///
+/// `recover_agg_hop_polarities` is the single consumer; the scored, pinned,
+/// and detected surfaces all run that one recovery pass (the detected
+/// surface splices its ThroughAgg-routed edges into explicit agg hops
+/// first), so the hop polarity -- and hence the polarity-prefixed loop ids
+/// the runtime join is keyed on -- is decided in exactly one place.
+fn source_to_agg_hop_polarity(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    var_graph: &crate::ltm::CausalGraph,
+    from_var_level: &str,
+    agg: &crate::ltm_agg::AggNode,
+) -> crate::ltm::LinkPolarity {
+    use crate::ltm::LinkPolarity;
+
+    // Reconstruct the agg's lowered AST from its equation text (the agg is
+    // not a model variable, so the graph's variable map has no AST for it).
+    // Mirrors `emit_source_to_agg_link_scores`' reconstruction.
+    let agg_eqn = if agg.result_dims.is_empty() {
+        datamodel::Equation::Scalar(agg.equation_text.clone())
+    } else {
+        datamodel::Equation::ApplyToAll(agg.result_dims.clone(), agg.equation_text.clone())
+    };
+    let Some(agg_var) =
+        super::parse::reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project)
+    else {
+        return LinkPolarity::Unknown;
+    };
+    let Some(agg_ast) = agg_var.ast() else {
+        return LinkPolarity::Unknown;
+    };
+    let source = Ident::<Canonical>::new(from_var_level);
+    var_graph.source_to_agg_polarity(&source, agg_ast)
+}
+
 /// Recover the polarity of synthetic-aggregate-node hops in `loops` (GH #516).
 ///
 /// The loop builders derive every link's polarity from the *variable-level*
@@ -1528,13 +1547,12 @@ where
 /// *element* graph -- so `analyze_link_polarity` finds no reference to the
 /// agg's name in either endpoint's equation and a hop into or out of an agg
 /// comes back `Unknown`, forcing every agg-traversing loop to `Undetermined`.
-/// For the common (monotone) reducers the polarity is derivable, so patch it
-/// here:
+/// For the derivable cases, patch it here:
 ///
-/// - `source[d] → agg`: `SUM`/`MEAN`/`MIN`/`MAX` are monotone non-decreasing
-///   in each source element (raising any one element raises-or-holds the
-///   result), so the hop is `Positive`. `STDDEV`/`RANK` are not monotone --
-///   left `Unknown`.
+/// - `source → agg`: [`source_to_agg_hop_polarity`] (the discriminating
+///   `analyze_source_to_agg_polarity` body analysis, applied uniformly to
+///   arrayed rows and scalar feeders alike; indeterminate bodies stay
+///   `Unknown`, never a blanket monotone label).
 /// - `agg → consumer`: the polarity of `consumer`'s equation with respect to
 ///   the reducer subexpression, computed by substituting the reducer with the
 ///   agg name and running ordinary static polarity analysis
@@ -1543,7 +1561,7 @@ where
 /// Any loop whose links change is re-classified via `calculate_polarity`.
 /// If anything was patched, loop IDs are re-assigned (the `r`/`b`/`u` prefix
 /// is polarity-derived).
-pub(super) fn recover_agg_hop_polarities(
+pub(crate) fn recover_agg_hop_polarities(
     loops: &mut [crate::ltm::Loop],
     var_graph: &crate::ltm::CausalGraph,
     db: &dyn Db,
@@ -1573,10 +1591,13 @@ pub(super) fn recover_agg_hop_polarities(
             if link.polarity != LinkPolarity::Unknown {
                 continue;
             }
-            // `source[d] → agg`: the agg is this link's target.
+            // `source → agg`: the agg is this link's target.
             if let Some((_, agg)) = synthetic.iter().find(|(name, _)| name == &link.to) {
-                if crate::ltm_agg::agg_reducer_is_monotone(&agg.equation_text) {
-                    link.polarity = LinkPolarity::Positive;
+                let from_var_level = strip_subscript(link.from.as_str());
+                let p =
+                    source_to_agg_hop_polarity(db, model, project, var_graph, from_var_level, agg);
+                if p != LinkPolarity::Unknown {
+                    link.polarity = p;
                     patched = true;
                 }
                 continue;
@@ -1601,3 +1622,194 @@ pub(super) fn recover_agg_hop_polarities(
         crate::ltm::assign_loop_ids(loops);
     }
 }
+
+/// Expand each variable-level loop's `ThroughAgg`-routed edges into explicit
+/// agg-node hops, one loop variant per routed agg -- the detected-FFI-surface
+/// bijection with the scored loop set (GH #737 round-2 review, C1b).
+///
+/// `model_detected_loops` enumerates loops on the variable-level graph, whose
+/// links never traverse agg nodes: an edge like `scale → grow` (where `grow`
+/// hoists `SUM(pop[*] * scale)`) carries the whole through-agg routing as ONE
+/// link. The scored surface (`model_ltm_variables`) instead enumerates the
+/// element graph, where that edge is `scale → $⁚ltm⁚agg⁚{n} → grow` -- one
+/// loop PER routed agg when the same feeder is read by several hoisted
+/// reducers of the target. The polarity-prefixed loop ids `assign_loop_ids`
+/// derives are the key the runtime join reads `$⁚ltm⁚loop_score⁚{id}` with
+/// (`reclassify_loops_from_results`, pysimlin's `get_relative_loop_score`),
+/// so a count or polarity mismatch between the surfaces makes a detected
+/// loop read ANOTHER loop's series. Composing the hop polarities onto the
+/// single variable-level link (the round-1 fix) was not enough: a multi-agg
+/// edge still left the detected surface one loop short (id collision), and
+/// hop polarities that DISAGREE across the routed aggs collapsed to one
+/// Unknown loop where the scored surface has two definite ones.
+///
+/// So: rebuild each loop as the cartesian product, over its links, of that
+/// link's routing variants -- the direct link itself when the edge has any
+/// `Direct` site (a mixed Direct+ThroughAgg edge genuinely has both
+/// pathways; the element graph emits both, so Johnson finds both loop
+/// variants on the scored side too), plus one `from → agg → to` splice per
+/// distinct routed agg. Spliced hops start `Unknown`; the caller runs the
+/// SAME `recover_agg_hop_polarities` pass the scored surface uses, so the
+/// polarities -- and with both surfaces' links now speaking the same node
+/// language, the `loop_id_sort_key` orderings -- agree by construction.
+///
+/// Bijection boundary, precisely: for a cycle whose variables are all
+/// SCALAR, this expansion is isomorphic to the element-graph circuits the
+/// scored surface enumerates (scalar nodes don't expand per element; every
+/// agg hoisted from a scalar-consumer equation is itself scalar; and the
+/// scored cross-agg petal stitching never fires for scalar cycles -- all of
+/// one agg's petals pass through the agg's single host variable, so no two
+/// petals are disjoint). Cycles involving ARRAYED variables remain
+/// variable-level here while the scored surface enumerates them per element
+/// -- the pre-existing divergent class (`reclassify_loops_from_results`
+/// skips ids with no score series; durable cross-surface identity for them
+/// is the stock set, not the id).
+///
+/// Defensive bound: a loop whose variant product exceeds
+/// [`MAX_DETECTED_AGG_VARIANTS_PER_LOOP`] is kept unexpanded (its ids may
+/// then diverge from the scored surface for that pathological model, which
+/// enumerates under its own `MAX_LTM_CIRCUITS` budget).
+pub(crate) fn expand_loops_through_routed_aggs(
+    loops: Vec<crate::ltm::Loop>,
+    var_graph: &crate::ltm::CausalGraph,
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> Vec<crate::ltm::Loop> {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::{Link, LinkPolarity, Loop};
+
+    let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
+    if !aggs.aggs.iter().any(|a| a.is_synthetic) {
+        return loops;
+    }
+    let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
+
+    /// One way a variable-level link can be realized.
+    enum LinkVariant {
+        /// Keep the original link (a Direct pathway exists, or no routing).
+        Direct,
+        /// Splice through the routed agg at this index in `aggs.aggs`.
+        ViaAgg(usize),
+    }
+
+    let mut expanded: Vec<Loop> = Vec::with_capacity(loops.len());
+    for lp in loops {
+        // Per link, the realization variants in deterministic order
+        // (Direct first, then aggs in first-occurrence site order).
+        let per_link: Vec<Vec<LinkVariant>> = lp
+            .links
+            .iter()
+            .map(|link| {
+                let from_var_level = strip_subscript(link.from.as_str());
+                let to_var_level = strip_subscript(link.to.as_str());
+                let Some(sites) = ir
+                    .sites
+                    .get(&(from_var_level.to_string(), to_var_level.to_string()))
+                else {
+                    return vec![LinkVariant::Direct];
+                };
+                let mut has_direct = sites.is_empty();
+                let mut agg_idxs: Vec<usize> = Vec::new();
+                for s in sites {
+                    match &s.routing {
+                        crate::db::ltm_ir::SiteRouting::ThroughAgg { agg } => {
+                            if !agg_idxs.contains(&agg.0) {
+                                agg_idxs.push(agg.0);
+                            }
+                        }
+                        crate::db::ltm_ir::SiteRouting::Direct => has_direct = true,
+                    }
+                }
+                let mut variants: Vec<LinkVariant> = Vec::with_capacity(1 + agg_idxs.len());
+                if has_direct || agg_idxs.is_empty() {
+                    variants.push(LinkVariant::Direct);
+                }
+                variants.extend(agg_idxs.into_iter().map(LinkVariant::ViaAgg));
+                variants
+            })
+            .collect();
+
+        // A loop none of whose links route through an agg is kept verbatim
+        // (ids/polarities untouched). NOTE: a single pure-ThroughAgg variant
+        // still has a product of 1, so the gate is "any non-Direct variant",
+        // not the product size.
+        let all_direct = per_link
+            .iter()
+            .all(|v| v.len() == 1 && matches!(v[0], LinkVariant::Direct));
+        if all_direct {
+            expanded.push(lp);
+            continue;
+        }
+        let n_variants: usize = per_link.iter().map(|v| v.len()).product();
+        if n_variants > MAX_DETECTED_AGG_VARIANTS_PER_LOOP {
+            expanded.push(lp);
+            continue;
+        }
+
+        // Cartesian product over the per-link variants, in row-major order
+        // (deterministic: per_link orders are deterministic and the product
+        // walk is positional).
+        let mut choices: Vec<usize> = vec![0; per_link.len()];
+        loop {
+            let mut links: Vec<Link> = Vec::with_capacity(lp.links.len());
+            for (i, link) in lp.links.iter().enumerate() {
+                match per_link[i][choices[i]] {
+                    LinkVariant::Direct => links.push(link.clone()),
+                    LinkVariant::ViaAgg(idx) => {
+                        let agg_ident = Ident::<Canonical>::new(aggs.aggs[idx].name.as_str());
+                        // Spliced hops start Unknown; the caller's
+                        // `recover_agg_hop_polarities` pass patches them
+                        // exactly as it does for the scored surface's loops.
+                        links.push(Link {
+                            from: link.from.clone(),
+                            to: agg_ident.clone(),
+                            polarity: LinkPolarity::Unknown,
+                        });
+                        links.push(Link {
+                            from: agg_ident,
+                            to: link.to.clone(),
+                            polarity: LinkPolarity::Unknown,
+                        });
+                    }
+                }
+            }
+            let polarity = var_graph.calculate_polarity(&links);
+            expanded.push(Loop {
+                id: String::new(),
+                links,
+                stocks: lp.stocks.clone(),
+                polarity,
+                dimensions: lp.dimensions.clone(),
+                slot_links: vec![],
+            });
+
+            // Advance the mixed-radix counter.
+            let mut pos = 0;
+            loop {
+                if pos == per_link.len() {
+                    break;
+                }
+                choices[pos] += 1;
+                if choices[pos] < per_link[pos].len() {
+                    break;
+                }
+                choices[pos] = 0;
+                pos += 1;
+            }
+            if pos == per_link.len() {
+                break;
+            }
+        }
+    }
+
+    expanded
+}
+
+/// Defensive cap on the per-loop routing-variant product in
+/// [`expand_loops_through_routed_aggs`]: a loop with `k` ThroughAgg-routed
+/// links of `a_i` aggs each expands into `Π (a_i + direct_i)` variants. Real
+/// models have a handful of reducers per equation and short cycles, so this
+/// is far above anything reachable; a loop over the cap stays unexpanded
+/// rather than blowing up the FFI loop list.
+const MAX_DETECTED_AGG_VARIANTS_PER_LOOP: usize = 64;

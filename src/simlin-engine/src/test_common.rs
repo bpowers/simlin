@@ -168,6 +168,32 @@ impl TestProject {
         self
     }
 
+    /// Add a named dimension with an explicit element-level mapping to a
+    /// target dimension. Unlike `named_dimension_with_mapping` (positional,
+    /// requires equal cardinality), an element map can be many-to-one
+    /// (e.g. `State{s1,s2,s3} -> Region{a,b}` with s1->a, s2->a, s3->b).
+    pub fn named_dimension_with_element_mapping(
+        mut self,
+        name: &str,
+        elements: &[&str],
+        target: &str,
+        element_map: &[(&str, &str)],
+    ) -> Self {
+        let mut dim = Dimension::named(
+            name.to_string(),
+            elements.iter().map(|s| s.to_string()).collect(),
+        );
+        dim.mappings = vec![datamodel::DimensionMapping {
+            target: target.to_string(),
+            element_map: element_map
+                .iter()
+                .map(|(s, t)| (s.to_string(), t.to_string()))
+                .collect(),
+        }];
+        self.dimensions.push(dim);
+        self
+    }
+
     /// Add an auxiliary variable
     pub fn aux(mut self, name: &str, equation: &str, units: Option<&str>) -> Self {
         self.variables.push(Variable::Aux(datamodel::Aux {

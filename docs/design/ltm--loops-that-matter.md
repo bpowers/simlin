@@ -1019,10 +1019,8 @@ IR reclassifies from `Wildcard` to `DynamicIndex` so a `Direct` site that
 *could* have been a hoisted reducer never falls through to the conservative
 cross-product. So a `Direct` `Wildcard` site is now only a *whole-RHS*
 variable-backed reducer's argument (`total = SUM(population[*])`,
-`row_sum[D1] = SUM(matrix[D1, *])`) or a mapped-dimension sliced reducer
-(`SUM(matrix[State, *])` over `matrix[Region, D2]` with a `State→Region`
-mapping -- `enumerate_agg_nodes` declines the remapped axis, tracked tech
-debt), and the conservative cross-product is the right semantics for both.
+`row_sum[D1] = SUM(matrix[D1, *])`), and the conservative cross-product is
+the right semantics for it.
 
 **Iterated-dimension subscripts** (#511). An explicit subscript whose
 indices are *exactly* the target equation's iterated (apply-to-all)
@@ -1046,10 +1044,20 @@ it as `ThroughAgg`, and `model_element_causal_edges` routes only the rows the
 reducer's `read_slice` reads through the synthetic agg node:
 `source[<read slice>] → $⁚ltm⁚agg⁚{n}[<iterated>]` then `$⁚ltm⁚agg⁚{n}[<iterated>] → target[e]`,
 so the per-reducer cost is O(N + M) edges (a whole-extent reduce degenerates
-to "every source element → scalar agg → every target element"). The only
-reducers *not* hoisted are the dynamic-index carve-out (`SUM(pop[idx, *])`,
-`idx` non-literal -- not statically describable, reclassified `DynamicIndex`)
-and the mapped-dimension sliced reducer (above); a bare non-literal index
+to "every source element → scalar agg → every target element"). A
+positionally-MAPPED sliced reducer (`SUM(matrix[State, *])` over
+`matrix[Region, D2]` with a positional `State→Region` mapping, GH #534) is
+hoisted too: the `Iterated` axis carries the (target, source) dimension
+pair, the agg is arrayed over the TARGET dim (`State`), and each source row
+is remapped to the slot of its positionally-corresponding target element
+(`iterated_axis_slot_elements` -- the preimage of
+`mapped_element_correspondence`, so the element-map/positional gate is
+inherited). The only reducers *not* hoisted are the dynamic-index carve-out
+(`SUM(pop[idx, *])`, `idx` non-literal -- not statically describable,
+reclassified `DynamicIndex`) and the mapped sliced reducers the
+correspondence declines -- an explicit element-mapped pair (execution
+resolves positionally, GH #756) or a reverse-declared mapping (GH #757) --
+which keep the conservative cross-product; a bare non-literal index
 (`arr[i+1]`) is a dynamic reference, not a reducer, so it stays conservative.
 Variable-backed aggs (`total_population = SUM(population[*])`) are already
 real nodes -- their edges come from the normal arrayed→scalar /
@@ -1128,30 +1136,40 @@ order; empty for a whole-extent or pinned-slice reduce, since the result is a
 scalar). `compute_read_slice` decides hoistability per axis:
 
 - `*` / `*:Dim` ⇒ `Reduced` (the whole axis is reduced away);
-- an iterated-dimension index that names the source's `i`-th dim by name ⇒
-  `Iterated(d)` (the agg's result varies per element of `d`);
+- an iterated-dimension index that names the source's `i`-th dim by name, or
+  a positionally-MAPPED iterated dim (`State` over a `Region` source axis
+  with a positional `State→Region` mapping, GH #534) ⇒
+  `Iterated{dim, source_dim}` (the agg's result varies per element of the
+  TARGET dim `dim`; `dim == source_dim` for the literal case);
 - a literal element name / 1-based integer ⇒ `Pinned(elem)`;
-- anything else (`@N`, `Range`, a non-literal `Expr`, an iterated dim that
-  only lines up via a *mapping*) ⇒ `None` -- the reducer is not statically
-  describable, so it is not hoisted.
+- anything else (`@N`, `Range`, a non-literal `Expr`, an iterated dim whose
+  mapping is element-mapped, reverse-declared, or non-positional) ⇒ `None`
+  -- the reducer is not statically describable, so it is not hoisted.
 
 So `SUM(pop[*])` ⇒ all-`Reduced`, `result_dims = []` (a scalar agg);
 `SUM(pop[NYC, *])` over `pop[Region, Age]` ⇒ `[Pinned(nyc), Reduced]`,
 `result_dims = []`; `SUM(matrix[D1, *])` inside an A2A body over `D1` ⇒
-`[Iterated(d1), Reduced]`, `result_dims = [D1]` (an *arrayed* agg, one slot
-per `D1` element); `SUM(matrix3d[D1, NYC, *])` over an A2A-`D1` body ⇒
-`[Iterated(d1), Pinned(nyc), Reduced]`. The carve-outs (tracked tech debt;
+`[Iterated(d1,d1), Reduced]`, `result_dims = [D1]` (an *arrayed* agg, one
+slot per `D1` element); `SUM(matrix3d[D1, NYC, *])` over an A2A-`D1` body ⇒
+`[Iterated(d1,d1), Pinned(nyc), Reduced]`; `SUM(matrix[State, *])` over
+`matrix[Region, D2]` inside an A2A body over `State` (positional
+`State→Region` mapping) ⇒ `[Iterated{state, region}, Reduced]`,
+`result_dims = [State]` -- the agg is arrayed over the TARGET's iterated
+dim, and the emitters remap each source row to the slot of its
+positionally-corresponding target element (`iterated_axis_slot_elements`,
+the preimage inversion of `mapped_element_correspondence`, so the
+positional-only gate is inherited). The carve-outs (tracked tech debt;
 the conservative cross-product / coarse link score stays in place) are: a
 reducer over a *dynamic index* (`SUM(pop[idx, *])`, `idx` non-literal -- the
-IR reclassifies its reference to `DynamicIndex`); a sliced reducer whose
-iterated index only matches the source row axis via a *dimension mapping*
-(`SUM(matrix[State, *])` over `matrix[Region, D2]` with a `State→Region`
-mapping -- `compute_read_slice` returns `None` because the `Iterated`-driven
-machinery assumes the agg result axis and the source row axis are literally
-the same dimension); and a multi-source reducer whose arrayed args read
-incompatible slices (`combined_read_slice` returns `None` on disagreement -- a
-multi-source reducer whose args *agree*, `SUM(a[*] + b[*])` over the same dim,
-mints one agg carrying the combined slice and both source variables).
+IR reclassifies its reference to `DynamicIndex`); a mapped sliced reducer
+the correspondence declines -- an explicit element-mapped pair (execution
+resolves positionally and ignores the map, GH #756) or a mapping declared
+only in the reverse direction (on the source's dimension; GH #757 tracks
+that direction's classification); and a multi-source reducer whose arrayed
+args read incompatible slices (`combined_read_slice` returns `None` on
+disagreement -- a multi-source reducer whose args *agree*, `SUM(a[*] +
+b[*])` over the same dim, mints one agg carrying the combined slice and
+both source variables).
 
 Two kinds of agg:
 
@@ -1173,16 +1191,17 @@ Two kinds of agg:
     arrayed `target` this is one scalar `$⁚ltm⁚link_score⁚{agg}→{to}[{e}]` per
     target element; for a scalar `target`, a single `$⁚ltm⁚link_score⁚{agg}→{to}`.
     When the agg is itself arrayed, the agg side carries an `[<slot>]`
-    subscript *and* the `Δsource` denominator of that link-score equation
-    projects the same `[<slot>]` subscript (the bare multi-slot agg name
-    doesn't compile as a scalar denominator). This is exact for the diagonal
-    case (`result_dims` equal `target`'s iterated dims); the strict-prefix
+    subscript -- the target element's *projection* onto the agg's
+    `result_dims` axes -- on the link-score name, on the `Δsource`
+    denominator (the bare multi-slot agg name doesn't compile as a scalar
+    denominator), *and* on the agg's pinned references in the equation body
+    (GH #528). For the diagonal case (`result_dims` equal `target`'s iterated
+    dims) the projection is the full target tuple; for the strict-prefix
     *broadcast* case (`SUM(matrix[D1, *])` inside an A2A body over `D1 × D2`,
-    so the agg is over `D1` but the target is over `D1 × D2`) over-subscribes
-    the agg into the cross-product -- the degradation is fail-LOUD: the
-    over-subscripted fragment does not compile, so
-    `model_ltm_fragment_diagnostics` emits a per-variable `Warning` and the
-    loop score degrades to 0 (GH #528).
+    so the agg is over `D1` but the target is over `D1 × D2`) it drops the
+    broadcast axes -- pinning by the full tuple instead would over-subscribe
+    the 1-D agg, fail fragment compilation, and stub the score (and every
+    loop through the agg) to 0.
 
   A loop running through the inlined reducer therefore traverses
   `… → from[<row>] → $⁚ltm⁚agg⁚{n}[<slot>] → to[e] → …`, and the loop-score
@@ -1204,7 +1223,17 @@ Two kinds of agg:
   no synthetic is minted, and its edges to/from come from the normal
   arrayed→scalar / scalar→arrayed reference walker -- the element-graph reroute
   leaves the conservative cross-product in place for the variable-backed
-  reducer's edge, since the edges to a real variable node already exist.
+  reducer's edge, since the edges to a real variable node already exist. One
+  exception (GH #534): a whole-RHS reducer with a MAPPED iterated axis
+  (`out[State] = SUM(matrix[State, *])` over a positionally-mapped pair)
+  mints a *synthetic* agg instead -- the variable-backed link-score path
+  (`try_cross_dimensional_link_scores`' partial-reduce arm) matches result
+  axes against source axes by name, so a remapped pair falls off it onto the
+  per-shape `Wildcard` partial, whose PREVIOUS-wrapping mangles the iterated
+  index into the non-compiling `matrix[PREVIOUS(state), *]` (a
+  silently-stubbed constant-0 score). Routing through a synthetic agg gives
+  the whole-RHS case the same remapped two-half scoring as an inline mapped
+  reducer.
 
 **Loop reporting trims agg nodes.** `$⁚ltm⁚agg⁚{n}` nodes don't appear in the
 user-facing loop list -- like the internal stocks of `DELAY3`/`SMOOTH` in the
@@ -1351,12 +1380,15 @@ arrayed agg `[<slot>]`-subscripted) agg node more than once, so neither Johnson
 (exhaustive) nor the strongest-path DFS (discovery) emits it directly -- both
 enumerate only elementary circuits. The recovery is shared: the combinatorial
 core `stitch_cross_agg_petals` reconstructs the loop from the agg-touching
-elementary "petals" (`agg → … → agg`), stitching pairwise-disjoint petal
-subsets of size ≥ 2 in every distinct *cyclic ordering*: `cyclic_orderings(m)`
-pins index 0 to kill rotations and skips mirror reversals (`1` for m = 2,
-`(m-1)!/2` for m ≥ 3, via a hand-rolled Heap's algorithm), so each disjoint
-subset of `m` petals yields `(m-1)!/2` distinct directed cycles that share a
-`loop_score` (same edge multiset ⇒ same commutative product). It is bounded
+elementary "petals" (`agg → … → agg`), stitching each pairwise-disjoint petal
+subset of size ≥ 2 into ONE canonical loop -- the chosen petals concatenated
+in priority order (GH #676). One loop per subset is exact for dominance
+analysis: every cyclic ordering of a fixed subset traverses the same edge
+multiset (each petal contributes the same `agg→head`/internal/`tail→agg`
+edges regardless of its position in the concatenation), and the loop score is
+a commutative product over that multiset, so all orderings share one
+`loop_score`; emitting more orderings would only burn the loop budget on
+dominance-indistinguishable duplicates. It is bounded
 by a deterministic petal priority (fewest internal nodes first, then a stable
 joined-name tiebreaker -- makes truncation reproducible), a soft per-agg petal
 cap (`MAX_AGG_PETALS = 8`, bounding the `2^k` subset enumeration), and a
@@ -1409,9 +1441,10 @@ When `ltm_discovery_mode = true`, element-level discovery proceeds as:
    after the per-step sweep, `discover_loops_with_graph` treats each discovered
    single-agg path as a *petal* and feeds them to the SHARED combinatorial core
    `stitch_cross_agg_petals` (`src/db/ltm/loops.rs`) -- the same petal priority,
-   pairwise-disjoint-internal-node rule, `MAX_AGG_PETALS` / `cyclic_orderings`
-   enumeration, and `cross_agg_loop_budget()` that `recover_cross_agg_loops`
-   uses, so discovery recovers exactly the loops exhaustive does. The stitched
+   pairwise-disjoint-internal-node rule, `MAX_AGG_PETALS` cap,
+   one-canonical-loop-per-subset emission, and `cross_agg_loop_budget()` that
+   `recover_cross_agg_loops` uses, so discovery recovers exactly the loops
+   exhaustive does. The stitched
    element-level node sequences are appended to `all_paths` (deduped by
    canonical rotation against the elementary ones) and flow through the
    identical FoundLoop construction / score-product / trim / rank pipeline; a
@@ -1566,12 +1599,6 @@ cases remain deliberate carve-outs:
   polarity (#502); over more than one dimension it stays `Unknown`. The
   monotonicity check itself compares the y-delta `dy`, not the slope `dy/dx`,
   so a non-uniform x-spacing can still misclassify (GH #536).
-- **An arrayed synthetic agg's link score over-subscripts in the broadcast
-  case.** When the agg is over `D1` but the target is over `D1 × D2` (a
-  strict-prefix broadcast, `SUM(matrix[D1, *])` inside an A2A body over
-  `D1 × D2`), the `agg → target` link score over-subscribes the agg into the
-  cross-product and the loop score degrades to 0 (GH #528). The diagonal case
-  (agg dims equal the target's iterated dims) is exact.
 - **Smaller magnitude/over-conservatism nits.** A transposed non-live array
   dependency's magnitude estimate in an A2A link-score partial can be
   imprecise (GH #526); `expand_same_element` takes the full cross-product

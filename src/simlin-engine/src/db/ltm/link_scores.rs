@@ -37,6 +37,12 @@ use super::parse::{
 /// `try_cross_dimensional_link_scores` which generates N separate
 /// scalar variables).
 ///
+/// `model` is consulted (via `model_edge_shapes`) only by the
+/// mapped-dimension compatibility arm, which requires the edge to have a
+/// `Bare`-classified reference site -- the exact condition under which the
+/// element graph expands the edge as the mapped DIAGONAL rather than the
+/// conservative cross-product (see the GH #527 comment in the body).
+///
 /// The returned names use the original datamodel casing (e.g.,
 /// "Region" not "region") because `parse_ltm_equation` feeds them
 /// into `Equation::ApplyToAll`, which `get_dimensions` resolves by
@@ -46,6 +52,7 @@ pub(super) fn link_score_dimensions(
     source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
+    model: SourceModel,
     project: SourceProject,
     dm_dims: &[crate::datamodel::Dimension],
 ) -> Vec<String> {
@@ -103,16 +110,61 @@ pub(super) fn link_score_dimensions(
     // - Same-dimension A2A: from_dims == to_dims
     // - Partial-collapse: to_dims ⊆ from_dims (e.g., [D1,D2]→[D1])
     // - Broadcast: from_dims ⊆ to_dims (e.g., [D1]→[D1,D2])
+    // - Mapped dimensions (GH #527): a differently-named pair related by
+    //   a declared dimension mapping counts as corresponding, the same
+    //   element correspondence the element graph's diagonal projection
+    //   uses. Without this the mapped Bare A2A edge got a SCALAR link
+    //   score whose equation referenced arrayed variables in scalar
+    //   context (a compile failure, silently stubbed to 0) while the
+    //   loop-score equations subscript the Bare name per slot -- the
+    //   arrayed form both compiles (the equation's references resolve
+    //   through the same mapping the model's own equations use) and
+    //   resolves those per-slot references.
     //
     // In all these cases, the link score inherits the target's
     // dimensions so per-element values are computed via A2A expansion.
+    let dim_ctx = project_dimensions_context(db, project);
+    // PR #761 review (r3389029131): the mapped arm is additionally gated on
+    // the edge having a `Bare`-classified reference site -- the exact
+    // condition under which `expand_same_element` emits the mapped DIAGONAL
+    // element edges, so "score arrayed over the target's dims" ⟺ "element
+    // edges are the diagonal". `mapped_element_correspondence` deliberately
+    // accepts BOTH declaration directions (the bare-reference case needs
+    // the source-declared one), but `classify_iterated_dim_shape` accepts a
+    // SUBSCRIPTED mapped reference only in the forward direction: a
+    // reverse-declared subscripted reference classifies `DynamicIndex` (GH
+    // #757) and the element graph emits the conservative CROSS-PRODUCT, so
+    // retargeting its (Bare-named, since Wildcard/DynamicIndex collapse
+    // onto the Bare name) score to the target's dims would shape per-slot
+    // DIAGONAL partials that the off-diagonal loop links then read by
+    // target-element subscript -- wrong-slot values instead of the
+    // conservative scalar stub (GH #758). A mixed edge (a Bare site AND a
+    // DynamicIndex site on the same `(from, to)`) keeps the arrayed score
+    // -- the Bare site needs it -- while its cross-product links still read
+    // diagonal slots; that is the pre-existing mixed-shape conservatism
+    // family, not changed here. The same-NAME arms below stay
+    // shape-independent. Absent-edge lookups (a `(from, to)` not in the
+    // causal graph, which the emitters never produce) fail the gate, which
+    // errs toward the conservative scalar.
+    let edge_has_bare_site = crate::db::model_edge_shapes(db, model, project)
+        .edge_shapes
+        .get(&(from.to_string(), to.to_string()))
+        .is_some_and(|shapes| shapes.contains(&RefShape::Bare));
+    let dims_correspond =
+        |td: &crate::dimensions::Dimension, fd: &crate::dimensions::Dimension| -> bool {
+            td.name() == fd.name()
+                || (edge_has_bare_site
+                    && dim_ctx
+                        .mapped_element_correspondence(td.canonical_name(), fd.canonical_name())
+                        .is_some())
+        };
     let dims_compatible = from_dims == *to_dims
         || to_dims
             .iter()
-            .all(|td| from_dims.iter().any(|fd| fd.name() == td.name()))
+            .all(|td| from_dims.iter().any(|fd| dims_correspond(td, fd)))
         || from_dims
             .iter()
-            .all(|fd| to_dims.iter().any(|td| td.name() == fd.name()));
+            .all(|fd| to_dims.iter().any(|td| dims_correspond(td, fd)));
 
     if dims_compatible {
         // Map canonical dimension names back to their original
@@ -487,7 +539,9 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 elem_deps,
                 deps_to_sub,
                 // A true scalar source: the bare `quote_ident(from)`
-                // denominator is correct.
+                // denominator is correct, and there is no source subscript
+                // to pin in the partial body.
+                None,
                 None,
                 Some(project_dimensions_context(db, project)),
             ) {
@@ -849,7 +903,7 @@ pub(super) fn emit_per_shape_link_scores(
         emitted_names.insert(crate::ltm_augment::link_score_var_name(from, to, shape))
     });
 
-    let target_dims = link_score_dimensions(db, source_vars, from, to, project, dm_dims);
+    let target_dims = link_score_dimensions(db, source_vars, from, to, model, project, dm_dims);
 
     for shape in shapes {
         let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
@@ -907,6 +961,17 @@ pub(super) fn emit_per_shape_link_scores(
 /// `from`-slice combined for that slot) is the `all_elements` for the
 /// MEAN divisor / nonlinear expansion. The agg's *own* equation is exactly
 /// the reducer, so the "bare" algebraic shortcut applies.
+///
+/// A *scalar* `from` is the GH #737 scalar-feeder case (`scale` in
+/// `SUM(pop[*] * scale)`): there are no read rows, the element graph emits
+/// `scale → agg` (or `scale → agg[<slot>]` per result slot for an arrayed
+/// agg), and the loop builder's element-level path traverses that hop. One
+/// Bare-named link score `$⁚ltm⁚link_score⁚{from}→{agg}` is emitted --
+/// shaped over `result_dims` for an arrayed agg, so a loop visiting one
+/// slot references it as `"{name}"[<slot>]` -- with the changed-last
+/// equation from `generate_scalar_feeder_to_agg_equation` (the changed-first
+/// partial would need a lagged whole-array read, which doesn't compile; see
+/// that function's doc).
 pub(super) fn emit_source_to_agg_link_scores(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
@@ -924,6 +989,41 @@ pub(super) fn emit_source_to_agg_link_scores(
     }
     let from_dims = variable_dimensions(db, *from_sv, project);
     if from_dims.is_empty() {
+        // GH #737: a scalar feeder of the hoisted reducer. The per-read-row
+        // machinery below is meaningless for a scalar source; emit the single
+        // Bare-named score (dimensioned over `result_dims` when the agg is
+        // arrayed) built on the changed-last attribution instead.
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
+            from, agg.name
+        );
+        match crate::ltm_augment::generate_scalar_feeder_to_agg_equation(
+            from,
+            &agg.name,
+            &agg.equation_text,
+        ) {
+            Ok(text) => {
+                let equation = if agg.result_dims.is_empty() {
+                    datamodel::Equation::Scalar(text)
+                } else {
+                    // An arrayed agg's feeder score is per-slot: the agg's own
+                    // equation text is already ApplyToAll-compatible over
+                    // `result_dims` (it is the agg aux's own equation shape),
+                    // and the bare agg/feeder references resolve same-element
+                    // / broadcast respectively in A2A context.
+                    datamodel::Equation::ApplyToAll(agg.result_dims.clone(), text)
+                };
+                vars.push(LtmSyntheticVar {
+                    name,
+                    equation,
+                    dimensions: agg.result_dims.clone(),
+                    // agg-named target -> routed direct by the synthetic-agg
+                    // check in compile_ltm_synthetic_fragment.
+                    compile_directly: false,
+                });
+            }
+            Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+        }
         return;
     }
     // Reconstruct a transient (parsed + lowered) `Variable` from the
@@ -955,21 +1055,26 @@ pub(super) fn emit_source_to_agg_link_scores(
         .iter()
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
-    // The read rows: only the slice the reducer reads. If `read_slice`
+    // The read rows: only the slice the reducer reads, each row paired with
+    // its (possibly mapping-remapped, GH #534) agg slot. If `read_slice`
     // doesn't line up with `from`'s axes (shouldn't happen for a hoisted
     // agg whose `source_vars` contains `from`), fall back to all elements
     // / scalar agg.
-    let rows: Vec<ReadSliceRow> = read_slice_rows(&agg.read_slice, &dim_element_lists)
-        .unwrap_or_else(|| {
-            let all = cartesian_subscripts(&dim_element_lists);
-            all.iter()
-                .map(|r| ReadSliceRow {
-                    row: r.clone(),
-                    slot: String::new(),
-                    coreduced: all.clone(),
-                })
-                .collect()
-        });
+    let rows: Vec<ReadSliceRow> = read_slice_rows(
+        &agg.read_slice,
+        &dim_element_lists,
+        project_dimensions_context(db, project),
+    )
+    .unwrap_or_else(|| {
+        let all = cartesian_subscripts(&dim_element_lists);
+        all.iter()
+            .map(|r| ReadSliceRow {
+                row: r.clone(),
+                slot: String::new(),
+                coreduced: all.clone(),
+            })
+            .collect()
+    });
     for ReadSliceRow {
         row,
         slot,
@@ -1092,7 +1197,7 @@ pub(super) fn emit_agg_to_target_link_scores(
     for other_agg in reducer_subst.values() {
         all_deps.insert(Ident::<Canonical>::new(other_agg));
     }
-    let mut deps_to_subscript: HashSet<Ident<Canonical>> = all_deps
+    let deps_to_subscript: HashSet<Ident<Canonical>> = all_deps
         .iter()
         .filter(|d| {
             source_vars
@@ -1110,16 +1215,17 @@ pub(super) fn emit_agg_to_target_link_scores(
         .cloned()
         .collect();
     // An arrayed agg (`result_dims` non-empty) is element-pinned in the
-    // per-target-element equation just like an arrayed dep that shares
-    // `to`'s dims: `$⁚ltm⁚agg⁚0` → `$⁚ltm⁚agg⁚0[<element>]`. This is
-    // exact when `result_dims` equals `to`'s dimensions (the diagonal
-    // `agg[d1] → to[d1]` case -- a partial-reduce sub-expression in an
-    // A2A target over exactly that dim, e.g. `x[D1] = ... + SUM(matrix[D1,*])`);
-    // for the rarer broadcast case (`agg[D1]` into `to[D1,D2]`) the
-    // element tuple over-subscripts the agg, which is a known imprecision.
-    if agg_is_arrayed {
-        deps_to_subscript.insert(agg_canonical.clone());
-    }
+    // per-target-element equation too: `$⁚ltm⁚agg⁚0` → `$⁚ltm⁚agg⁚0[<slot>]`.
+    // But NOT via `deps_to_subscript`: that set pins to `to`'s FULL element
+    // tuple, which is the agg's correct subscript only in the diagonal case
+    // (`result_dims` == `to`'s dims) and over-subscripts the agg in the
+    // broadcast case (`agg[D1]` feeding `to[D1,D2]` -- the fragment then
+    // fails to compile and the score is stubbed to a constant 0, zeroing
+    // every loop through the agg; GH #528). Instead the agg is pinned to the
+    // target element's PROJECTION onto `result_dims`'s axes -- the same slot
+    // the link-score name and the `Δsource` denominator carry -- via
+    // `generate_scalar_to_element_equation`'s `source_pin_element`, computed
+    // by `agg_pin_for_target` below.
 
     // Positions of the agg's `result_dims` within `to`'s dimensions, so a
     // target element tuple can be projected onto the agg-slot subscript
@@ -1168,6 +1274,24 @@ pub(super) fn emit_agg_to_target_link_scores(
             None => agg_q.clone(),
             Some(slot) => format!("{agg_q}[{slot}]"),
         }
+    };
+    // The QUALIFIED (`d1·a`) projection of a target element onto the agg's
+    // `result_dims` axes -- the subscript the agg ident is pinned to in the
+    // per-target-element equation BODY (`generate_scalar_to_element_equation`'s
+    // `source_pin_element`). Qualified like the other pinned deps so
+    // `PREVIOUS(agg[...])` references compile to direct LoadPrevs. `None`
+    // when the agg is scalar (referenced bare; nothing to pin).
+    let agg_pin_for_target = |element: &str| -> Option<String> {
+        if !agg_is_arrayed {
+            return None;
+        }
+        let qualified = crate::ltm_augment::qualify_element_csv(element, &to_dims);
+        let parts: Vec<&str> = qualified.split(',').collect();
+        let slot: Vec<&str> = result_dim_positions
+            .iter()
+            .filter_map(|&p| parts.get(p).copied())
+            .collect();
+        (!slot.is_empty()).then(|| slot.join(","))
     };
 
     // Helper: substitute the reducers in a slot expr's canonical text, to
@@ -1244,11 +1368,12 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .collect();
             for element in &cartesian_subscripts(&dim_element_lists) {
                 // The partial is built around the *bare* agg name (which is
-                // what `substituted` holds); `deps_to_subscript` then
-                // element-pins it to `agg[<element>]` when the agg is
-                // arrayed, matching `agg_name_for_target` (exact when
-                // `result_dims == to`'s dims). The `Δsource` denominator
-                // is element-pinned the same way via the explicit override.
+                // what `substituted` holds); `agg_pin_for_target` then pins
+                // it to the projected `agg[<slot>]` when the agg is arrayed,
+                // matching `agg_name_for_target` (the full element tuple
+                // would over-subscript the agg in the broadcast case; GH
+                // #528). The `Δsource` denominator carries the same slot
+                // via the explicit override.
                 let name = format!(
                     "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
                     agg_name_for_target(element),
@@ -1264,6 +1389,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                     &all_deps,
                     &deps_to_subscript,
                     Some(&agg_source_ref_for_target(element)),
+                    agg_pin_for_target(element).as_deref(),
                     Some(project_dimensions_context(db, project)),
                 ) {
                     Ok(equation) => vars.push(LtmSyntheticVar {
@@ -1321,6 +1447,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             &slot_deps,
                             &deps_to_subscript,
                             Some(&agg_source_ref_for_target(element)),
+                            agg_pin_for_target(element).as_deref(),
                             Some(project_dimensions_context(db, project)),
                         )
                     }),

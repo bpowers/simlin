@@ -95,15 +95,17 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// drive a per-shape `⁚wildcard` / `⁚dynamic` link-score variant. Every
 /// statically-describable inlined reducer -- whole-extent (`SUM(pop[*])`) or
 /// sliced (`SUM(pop[NYC, *])`, `SUM(matrix[D1, *])`) -- is hoisted into a
-/// `$⁚ltm⁚agg⁚{n}` node and scored by the agg's two halves. A site that is
-/// *not* a hoisted reducer's argument -- a bare dynamic index (`arr[i+1]`, a
-/// range), the dynamic-index reducer carve-out (`SUM(pop[idx, *])`, `idx`
-/// non-literal, reclassified to `DynamicIndex`), a mapped-dimension sliced
-/// reducer (`SUM(matrix[State, *])` over `matrix[Region, D2]` with a
-/// `State→Region` mapping; `enumerate_agg_nodes` declines the remapped axis,
-/// so the `Wildcard` reference stays `Direct`), or a direct `pop[idx]`
-/// alongside a `SUM(pop[*])` -- keeps a conservative edge and a Bare-named
-/// link score.
+/// `$⁚ltm⁚agg⁚{n}` node and scored by the agg's two halves -- including a
+/// positionally-MAPPED sliced reducer (`SUM(matrix[State, *])` over
+/// `matrix[Region, D2]` with a positional `State→Region` mapping, GH #534).
+/// A site that is *not* a hoisted reducer's argument -- a bare dynamic index
+/// (`arr[i+1]`, a range), the dynamic-index reducer carve-out
+/// (`SUM(pop[idx, *])`, `idx` non-literal, reclassified to `DynamicIndex`),
+/// a mapped sliced reducer the correspondence declines (element-mapped --
+/// GH #756 -- or reverse-declared -- GH #757; `enumerate_agg_nodes` declines
+/// those, so the reference stays `Direct` and is reclassified
+/// `DynamicIndex`), or a direct `pop[idx]` alongside a `SUM(pop[*])` --
+/// keeps a conservative edge and a Bare-named link score.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
@@ -171,6 +173,7 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// | non-empty   | []         | Bare                          | `from[d] -> to` for each cartesian d          |
 /// | non-empty   | non-empty (same dims)  | Bare              | `from[d] -> to[d]` per shared element         |
 /// | non-empty   | non-empty (partial collapse) | Bare        | `from[d1,d2] -> to[d1]` (delegates to `expand_same_element`)|
+/// | non-empty   | non-empty (mapped dims, GH #527) | Bare    | the mapping's diagonal `from[mapped(d)] -> to[d]` per target element when a usable (positional) correspondence exists, else broadcast (via `expand_same_element` + `dim_ctx`) |
 /// | non-empty   | any        | Wildcard / DynamicIndex       | full cross product (NxM)                      |
 /// | non-empty   | []         | FixedIndex(elems)             | `from[elems] -> to` (one edge)                |
 /// | non-empty   | non-empty  | FixedIndex(elems)             | `from[elems] -> to[d]` for each cartesian d   |
@@ -187,9 +190,13 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// read-slice rows). After #514 the `Direct` not-hoistable-reducer carve-out
 /// (`SUM(pop[idx,*])`) is reclassified by the IR as `DynamicIndex`, so a
 /// `Direct` `Wildcard` site is now only a variable-backed reducer's whole-RHS
-/// argument (`total = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`)
-/// or a (rare) non-reducer whole-array reference; the conservative cross
-/// product is the right semantics for all of those.
+/// argument (`total = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`),
+/// a (rare) non-reducer whole-array reference, or a mapped sliced reducer the
+/// correspondence declines (element-mapped -- GH #756 -- or reverse-declared
+/// -- GH #757). The conservative cross product is sound for the element
+/// EDGES in all of those (a superset, never fewer); note the declined
+/// mapped-reducer cases' link SCORES are separately broken (GH #758).
+#[allow(clippy::too_many_arguments)]
 fn emit_edges_for_reference(
     from_name: &str,
     to_name: &str,
@@ -197,6 +204,7 @@ fn emit_edges_for_reference(
     to_dims: &[crate::dimensions::Dimension],
     shape: &RefShape,
     target_element: Option<&str>,
+    dim_ctx: &crate::dimensions::DimensionsContext,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
     let from_is_scalar = from_dims.is_empty();
@@ -260,7 +268,14 @@ fn emit_edges_for_reference(
                 // full diagonal into a scratch map and then keep only
                 // edges whose target appears in `target_nodes`.
                 let mut scratch: HashMap<String, BTreeSet<String>> = HashMap::new();
-                expand_same_element(from_name, to_name, from_dims, to_dims, &mut scratch);
+                expand_same_element(
+                    from_name,
+                    to_name,
+                    from_dims,
+                    to_dims,
+                    dim_ctx,
+                    &mut scratch,
+                );
                 let target_set: BTreeSet<String> = target_nodes.iter().cloned().collect();
                 for (from_node, tos) in scratch {
                     let filtered: BTreeSet<String> =
@@ -273,7 +288,14 @@ fn emit_edges_for_reference(
                     }
                 }
             } else {
-                expand_same_element(from_name, to_name, from_dims, to_dims, element_edges);
+                expand_same_element(
+                    from_name,
+                    to_name,
+                    from_dims,
+                    to_dims,
+                    dim_ctx,
+                    element_edges,
+                );
             }
         }
         RefShape::FixedIndex(elems) => {
@@ -358,18 +380,35 @@ fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]
 
 /// Expand same-element edges with possible partial dimension collapse.
 ///
-/// For each source element tuple, constructs the target element tuple by
-/// matching shared dimension names. Dimensions in the source that are not
-/// present in the target are collapsed (their elements are iterated but
-/// do not appear in the target subscript).
+/// For each source element tuple, constructs the target element tuple(s) by
+/// matching shared dimension names -- or, when names differ, a declared
+/// dimension MAPPING between a target dimension and a source dimension
+/// (GH #527; the correspondence comes from
+/// [`crate::dimensions::DimensionsContext::mapped_element_correspondence`]
+/// and is the diagonal WHEN a usable correspondence exists -- today,
+/// positional mappings only -- else the conservative broadcast, a superset
+/// of the simulation's true reads; see that helper's rustdoc for the
+/// positional-only gate). Dimensions in the source that correspond to
+/// no target dimension are collapsed (their elements are iterated but do
+/// not appear in the target subscript); target dimensions that correspond
+/// to no source dimension broadcast over all their elements.
 ///
-/// Example: from[D1,D2] -> to[D1] with SameElement produces
-/// from[d1,d2] -> to[d1] for all (d1,d2).
+/// Examples:
+/// - `from[D1,D2] -> to[D1]`: `from[d1,d2] -> to[d1]` for all `(d1,d2)`
+///   (partial collapse).
+/// - `from[Region] -> to[State]` with a positional `State→Region` mapping:
+///   the mapping's diagonal -- `from[mapped(s)] -> to[s]` for each State
+///   element `s`.
+/// - `from[Region] -> to[State]` with NO mapping -- or one declared via an
+///   explicit element map (declined by the positional-only gate): the
+///   conservative broadcast (every source element feeds every target
+///   element).
 fn expand_same_element(
     from_name: &str,
     to_name: &str,
     from_dims: &[crate::dimensions::Dimension],
     to_dims: &[crate::dimensions::Dimension],
+    dim_ctx: &crate::dimensions::DimensionsContext,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
     // Build a map of target dimension name -> position for matching
@@ -380,12 +419,74 @@ fn expand_same_element(
         .collect();
 
     // For each source dimension, record which target dimension position
-    // it corresponds to (if any). Dimensions in the source not found in
-    // the target are "collapsed" (iterated but not projected).
-    let from_to_target_pos: Vec<Option<usize>> = from_dims
+    // it corresponds to (if any) -- by name first, then by a declared
+    // dimension mapping. Source dimensions with no correspondence are
+    // "collapsed" (iterated but not projected).
+    #[derive(Clone)]
+    enum Correspondence {
+        /// Same-named target dimension at this position: target element =
+        /// same index as the source element.
+        SameName(usize),
+        /// Mapped target dimension at this position. The Vec is indexed by
+        /// TARGET element index and holds the corresponding SOURCE element
+        /// index (the diagonal direction `mapped_element_correspondence`
+        /// defines); the expansion below inverts it per source element.
+        /// Today the helper only returns positional (bijective)
+        /// correspondences, but the inversion below is written for the
+        /// general (many-to-one) shape so re-enabling element-map
+        /// diagonals (see the helper's positional-only gate) needs no
+        /// emitter change.
+        Mapped(usize, Vec<usize>),
+        /// No corresponding target dimension: collapse.
+        Collapsed,
+    }
+
+    // Name matches first (every source dim gets a chance before mapped
+    // matching claims a position), so adding a mapping to a model can
+    // never change which dimensions pair up by name.
+    let mut correspondence: Vec<Correspondence> = from_dims
         .iter()
-        .map(|d| to_dim_positions.get(d.name()).copied())
+        .map(|d| match to_dim_positions.get(d.name()) {
+            Some(&pos) => Correspondence::SameName(pos),
+            None => Correspondence::Collapsed,
+        })
         .collect();
+    let mut claimed: Vec<bool> = vec![false; to_dims.len()];
+    for c in &correspondence {
+        if let Correspondence::SameName(pos) = c {
+            claimed[*pos] = true;
+        }
+    }
+    for (i, c) in correspondence.iter_mut().enumerate() {
+        if !matches!(c, Correspondence::Collapsed) {
+            continue;
+        }
+        let from_canon = from_dims[i].canonical_name();
+        for (pos, to_dim) in to_dims.iter().enumerate() {
+            if claimed[pos] {
+                continue;
+            }
+            let Some(elems) =
+                dim_ctx.mapped_element_correspondence(to_dim.canonical_name(), from_canon)
+            else {
+                continue;
+            };
+            // Resolve the per-target-element source names to source element
+            // indices. `mapped_element_correspondence` only returns elements
+            // of the source dimension, so the lookup can't fail for a
+            // well-formed context; bail to Collapsed (broadcast) if it does.
+            let Some(idxs) = elems
+                .iter()
+                .map(|e| from_dims[i].get_offset(e))
+                .collect::<Option<Vec<usize>>>()
+            else {
+                continue;
+            };
+            *c = Correspondence::Mapped(pos, idxs);
+            claimed[pos] = true;
+            break;
+        }
+    }
 
     // Build element name lists for each dimension
     let from_dim_elements: Vec<Vec<String>> =
@@ -420,77 +521,88 @@ fn expand_same_element(
             format_multi_element_name(from_name, &from_elems)
         };
 
-        // Build target element name by projecting shared dimensions
-        let mut to_elems: Vec<&str> = vec![""; to_dim_count];
-        let mut all_mapped = true;
-        for (src_dim_idx, target_pos) in from_to_target_pos.iter().enumerate() {
-            if let Some(pos) = target_pos {
-                let src_elem_idx = from_indices[src_dim_idx];
-                // Use the element name from the target dimension at the
-                // corresponding position. If the source element index is
-                // out of range for the target dimension (dimension size
-                // mismatch), fall back to the source element name.
-                to_elems[*pos] = if src_elem_idx < to_dim_elements[*pos].len() {
-                    &to_dim_elements[*pos][src_elem_idx]
+        // Per target position, the candidate element names this source
+        // tuple connects to: a singleton for a SameName position, the
+        // (possibly empty) preimage of the source element for a Mapped
+        // position, and every element for an unclaimed (broadcast)
+        // position. The target node set is the cartesian product.
+        let mut to_elem_options: Vec<Vec<&str>> = to_dim_elements
+            .iter()
+            .enumerate()
+            .map(|(pos, elems)| {
+                if claimed[pos] {
+                    Vec::new() // filled from the correspondence below
                 } else {
-                    from_dim_elements[src_dim_idx][src_elem_idx].as_str()
-                };
-            }
-        }
-
-        // Check if all target dimensions got filled from shared source dims
-        for elem in to_elems.iter().take(to_dim_count) {
-            if elem.is_empty() {
-                all_mapped = false;
-                break;
-            }
-        }
-
-        if all_mapped {
-            let to_node = if to_elems.len() == 1 {
-                format_element_name(to_name, to_elems[0])
-            } else {
-                format_multi_element_name(to_name, &to_elems)
-            };
-            element_edges.entry(from_node).or_default().insert(to_node);
-        } else {
-            // If some target dimensions are not covered by the source,
-            // we need to iterate over those target dimensions too (broadcast).
-            // Collect the unfilled target dimension indices and their elements.
-            let unfilled: Vec<(usize, &Vec<String>)> = (0..to_dim_count)
-                .filter(|&pos| to_elems[pos].is_empty())
-                .map(|pos| (pos, &to_dim_elements[pos]))
-                .collect();
-
-            // Cartesian product of unfilled target dimensions
-            let mut unfilled_tuples: Vec<Vec<(usize, usize)>> = vec![vec![]];
-            for &(pos, elements) in &unfilled {
-                let mut new_tuples = Vec::with_capacity(unfilled_tuples.len() * elements.len());
-                for existing in &unfilled_tuples {
-                    for elem_idx in 0..elements.len() {
-                        let mut extended = existing.clone();
-                        extended.push((pos, elem_idx));
-                        new_tuples.push(extended);
+                    elems.iter().map(String::as_str).collect()
+                }
+            })
+            .collect();
+        for (src_dim_idx, c) in correspondence.iter().enumerate() {
+            let src_elem_idx = from_indices[src_dim_idx];
+            match c {
+                Correspondence::SameName(pos) => {
+                    // Use the element name from the target dimension at the
+                    // corresponding position. If the source element index is
+                    // out of range for the target dimension (dimension size
+                    // mismatch), fall back to the source element name.
+                    let name = if src_elem_idx < to_dim_elements[*pos].len() {
+                        to_dim_elements[*pos][src_elem_idx].as_str()
+                    } else {
+                        from_dim_elements[src_dim_idx][src_elem_idx].as_str()
+                    };
+                    to_elem_options[*pos].push(name);
+                }
+                Correspondence::Mapped(pos, target_to_source) => {
+                    // Preimage: every target element whose mapped source
+                    // element is this source element. With today's
+                    // positional-only correspondences this is always a
+                    // singleton, but the general form (empty for a source
+                    // element nothing maps to; several elements for a
+                    // many-to-one element map) is kept for the element-map
+                    // re-enable gate.
+                    for (target_idx, &src_idx) in target_to_source.iter().enumerate() {
+                        if src_idx == src_elem_idx {
+                            to_elem_options[*pos].push(to_dim_elements[*pos][target_idx].as_str());
+                        }
                     }
                 }
-                unfilled_tuples = new_tuples;
+                Correspondence::Collapsed => {}
             }
+        }
 
-            for fill in &unfilled_tuples {
-                let mut filled = to_elems.clone();
-                for &(pos, elem_idx) in fill {
-                    filled[pos] = &to_dim_elements[pos][elem_idx];
+        // Cartesian product over the per-position options. An empty
+        // option list at any position (an unmapped source element on a
+        // Mapped axis) yields no target tuples, i.e. no edges for this
+        // source tuple.
+        let mut to_tuples: Vec<Vec<&str>> = vec![vec![]];
+        for options in to_elem_options.iter().take(to_dim_count) {
+            let mut next = Vec::with_capacity(to_tuples.len() * options.len());
+            for existing in &to_tuples {
+                for &opt in options {
+                    let mut extended = existing.clone();
+                    extended.push(opt);
+                    next.push(extended);
                 }
-                let to_node = if filled.len() == 1 {
-                    format_element_name(to_name, filled[0])
-                } else {
-                    format_multi_element_name(to_name, &filled)
-                };
-                element_edges
-                    .entry(from_node.clone())
-                    .or_default()
-                    .insert(to_node);
             }
+            to_tuples = next;
+        }
+        if to_tuples.is_empty() {
+            // An empty option list at some position emptied the product:
+            // this source element feeds no target element. Don't create an
+            // empty adjacency entry for it.
+            continue;
+        }
+
+        let entry = element_edges.entry(from_node).or_default();
+        for to_elems in &to_tuples {
+            let to_node = if to_dim_count == 0 {
+                to_name.to_string()
+            } else if to_elems.len() == 1 {
+                format_element_name(to_name, to_elems[0])
+            } else {
+                format_multi_element_name(to_name, to_elems)
+            };
+            entry.insert(to_node);
         }
     }
 }
@@ -503,7 +615,9 @@ fn expand_same_element(
 ///
 /// - A [`AxisRead::Pinned`] axis fixes one element of the source on that axis.
 /// - An [`AxisRead::Iterated`] axis ranges; its element selects the agg result
-///   slot's coordinate for that dimension.
+///   slot's coordinate for that dimension -- remapped to the corresponding
+///   TARGET-dim element via `iterated_axis_slot_elements` when the axis is a
+///   positionally-mapped pair (GH #534; identity in the literal case).
 /// - A [`AxisRead::Reduced`] axis ranges over *every* element (each one feeds
 ///   the same agg result slot). For the *element graph* a representative
 ///   element would suffice for reachability, but emitting one edge per element
@@ -519,6 +633,7 @@ fn expand_same_element(
 /// always should for a hoisted agg whose `source_vars` includes `from`), fall
 /// back to the conservative "every source element → agg" form so a stale
 /// invariant can't drop edges.
+#[allow(clippy::too_many_arguments)]
 fn emit_agg_routed_edges(
     from_name: &str,
     to_name: &str,
@@ -526,6 +641,7 @@ fn emit_agg_routed_edges(
     to_dims: &[crate::dimensions::Dimension],
     agg: &crate::ltm_agg::AggNode,
     target_element: Option<&str>,
+    dim_ctx: &crate::dimensions::DimensionsContext,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
     use crate::ltm_agg::AxisRead;
@@ -538,8 +654,10 @@ fn emit_agg_routed_edges(
     // dimensions), and -- when the reducer reads its arrayed source by the
     // matching iterated subscript -- a subset of the arrayed source's dims too,
     // so we can recover the `Dimension` from `from_dims` (preferred -- it's the
-    // source row axis) or from `to_dims` (the only place to look when `from` is
-    // a *scalar* feeder of the agg). `read_slice_ok` keys the source-row layout
+    // source row axis) or from `to_dims` (needed when `from` is a *scalar*
+    // feeder of the agg, and for a mapped sliced reducer -- GH #534 -- whose
+    // result dim is the target's iterated dim, absent from the source's
+    // declared dims). `read_slice_ok` keys the source-row layout
     // machinery below off the well-formed slice; it is independent of where the
     // `Iterated` `Dimension`s come from.
     let read_slice_ok = !from_dims.is_empty() && agg.read_slice.len() == from_dims.len();
@@ -613,65 +731,98 @@ fn emit_agg_routed_edges(
         // source rows: a `Pinned` axis is fixed to one element; an `Iterated`
         // or `Reduced` axis ranges over every element. The position of an
         // `Iterated` axis within the result tuple is tracked so each source
-        // row maps to the matching agg result slot.
+        // row maps to the matching agg result slot; for a positionally-MAPPED
+        // iterated axis (GH #534) the slot coordinate is the source element's
+        // corresponding TARGET-dim element (`slot_elems`, aligned with
+        // `elems`), not the source element itself.
         struct AxisPlan {
             elems: Vec<String>,
+            /// The agg-slot coordinate per source element (index-aligned
+            /// with `elems`); `Some` exactly when this axis is `Iterated`.
+            /// Identity for the literal case, the mapping's positional
+            /// correspondence for a mapped pair.
+            slot_elems: Option<Vec<String>>,
             /// `Some(j)` if this axis is the `j`th `Iterated` axis (its
-            /// element becomes coordinate `j` of the agg result slot);
+            /// slot element becomes coordinate `j` of the agg result slot);
             /// `None` otherwise.
             iterated_pos: Option<usize>,
         }
-        let mut axis_plans: Vec<AxisPlan> = Vec::with_capacity(from_dims.len());
         let mut next_iterated_pos = 0usize;
-        if read_slice_ok {
-            for (a, d) in agg.read_slice.iter().zip(from_dims) {
-                let plan = match a {
-                    AxisRead::Pinned(elem) => AxisPlan {
+        // `None` when a mapped `Iterated` axis has no usable slot remap --
+        // which cannot happen for a slice `compute_read_slice` accepted
+        // (both gate on `iterated_axis_slot_elements` over the same salsa
+        // dimension context), but a stale invariant degrades to the same
+        // conservative fallback as a malformed `read_slice` rather than
+        // emitting mis-slotted edges.
+        let planned: Option<Vec<AxisPlan>> = if read_slice_ok {
+            agg.read_slice
+                .iter()
+                .zip(from_dims)
+                .map(|(a, d)| match a {
+                    AxisRead::Pinned(elem) => Some(AxisPlan {
                         elems: vec![elem.clone()],
+                        slot_elems: None,
                         iterated_pos: None,
-                    },
-                    AxisRead::Iterated(_) => {
+                    }),
+                    AxisRead::Iterated { dim, source_dim } => {
+                        let elems = dimension_element_names(d);
+                        let slots = crate::ltm_agg::iterated_axis_slot_elements(
+                            dim, source_dim, &elems, dim_ctx,
+                        )?;
                         let pos = next_iterated_pos;
                         next_iterated_pos += 1;
-                        AxisPlan {
-                            elems: dimension_element_names(d),
+                        Some(AxisPlan {
+                            elems,
+                            slot_elems: Some(slots),
                             iterated_pos: Some(pos),
-                        }
+                        })
                     }
-                    AxisRead::Reduced => AxisPlan {
+                    AxisRead::Reduced => Some(AxisPlan {
                         elems: dimension_element_names(d),
+                        slot_elems: None,
                         iterated_pos: None,
-                    },
-                };
-                axis_plans.push(plan);
-            }
+                    }),
+                })
+                .collect()
         } else {
+            None
+        };
+        debug_assert!(
+            !read_slice_ok || planned.is_some(),
+            "every Iterated axis accepted by compute_read_slice must have a slot remap"
+        );
+        let n_iterated = if planned.is_some() {
+            next_iterated_pos
+        } else {
+            0
+        };
+        let axis_plans: Vec<AxisPlan> = planned.unwrap_or_else(|| {
             // Conservative fallback: every source element, scalar agg.
-            for d in from_dims {
-                axis_plans.push(AxisPlan {
+            from_dims
+                .iter()
+                .map(|d| AxisPlan {
                     elems: dimension_element_names(d),
+                    slot_elems: None,
                     iterated_pos: None,
-                });
-            }
-        }
+                })
+                .collect()
+        });
 
         // Source → agg edges: cartesian product over the per-axis element
         // lists, routing each row to the agg result slot picked out by its
-        // `Iterated` coordinates. (`next_iterated_pos` is 0 in the
-        // conservative fallback.)
-        let n_iterated = if read_slice_ok { next_iterated_pos } else { 0 };
+        // `Iterated` coordinates (remapped via `slot_elems`).
         let mut rows: Vec<(Vec<String>, Vec<String>)> =
             vec![(Vec::new(), vec![String::new(); n_iterated])];
         for plan in &axis_plans {
             let mut next_rows: Vec<(Vec<String>, Vec<String>)> =
                 Vec::with_capacity(rows.len() * plan.elems.len());
             for (row_elems, slot) in &rows {
-                for elem in &plan.elems {
+                for (ei, elem) in plan.elems.iter().enumerate() {
                     let mut new_row = row_elems.clone();
                     new_row.push(elem.clone());
                     let mut new_slot = slot.clone();
-                    if let Some(j) = plan.iterated_pos {
-                        new_slot[j] = elem.clone();
+                    if let (Some(j), Some(slots)) = (plan.iterated_pos, &plan.slot_elems) {
+                        new_slot[j] = slots[ei].clone();
                     }
                     next_rows.push((new_row, new_slot));
                 }
@@ -720,7 +871,20 @@ fn emit_agg_routed_edges(
             !to_dims.is_empty() && target_element.is_none(),
             "an Iterated-axis agg implies an A2A target"
         );
-        expand_same_element(&agg.name, to_name, &iterated_dims, to_dims, element_edges);
+        // The agg's result dims are the target equation's own iterated dims
+        // (for a MAPPED iterated axis, GH #534, `result_dims` carries the
+        // TARGET dim of the pair -- the slot remap happened on the
+        // source→agg side above), so the name-match path applies; `dim_ctx`
+        // still backs `expand_same_element`'s own mapped-Bare diagonal for
+        // any remaining differently-named axes.
+        expand_same_element(
+            &agg.name,
+            to_name,
+            &iterated_dims,
+            to_dims,
+            dim_ctx,
+            element_edges,
+        );
     }
 }
 
@@ -1224,6 +1388,18 @@ pub struct EdgeShapesResult {
     /// AST. Keys mirror the `(from, to)` pairs from
     /// `model_causal_edges`.
     pub edge_shapes: HashMap<(String, String), BTreeSet<RefShape>>,
+    /// The variable-level edges with at least one `ThroughAgg`-routed
+    /// reference site: the element graph routes (part of) this edge
+    /// through a synthetic `$⁚ltm⁚agg⁚{n}` node instead of emitting a
+    /// direct `from → to` element edge. A cycle traversing such an edge
+    /// can never be scored from the variable-level circuit alone (the
+    /// direct link has no usable link-score variable -- GH #737), so
+    /// `classify_cycle` must send it to the element-level slow path
+    /// regardless of the edge's `RefShape`s. The distinction matters
+    /// exactly when the routed site's shape is `Bare` (a scalar feeder
+    /// of a hoisted reducer); an arrayed reducer argument is `Wildcard`
+    /// and already classifies as cross-element on shape alone.
+    pub agg_routed_edges: BTreeSet<(String, String)>,
 }
 
 /// Tag every variable-level edge with the set of `RefShape`s observed
@@ -1270,6 +1446,7 @@ pub fn model_edge_shapes(
     }
 
     let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
+    let mut agg_routed_edges: BTreeSet<(String, String)> = BTreeSet::new();
     for (from_name, to_set) in &variable_edges.edges {
         for to_name in to_set {
             // Module edges and structural flow->stock edges short-circuit
@@ -1298,19 +1475,32 @@ pub fn model_edge_shapes(
             // couldn't be reconstructed) has no IR entry -> default to
             // {Bare} so the cycle classifier sees a same-element shape
             // rather than an empty set (which would be ambiguous).
-            let mut set: BTreeSet<RefShape> = ir
-                .sites
-                .get(&(from_name.clone(), to_name.clone()))
+            let sites = ir.sites.get(&(from_name.clone(), to_name.clone()));
+            let mut set: BTreeSet<RefShape> = sites
                 .map(|sites| sites.iter().map(|s| s.shape.clone()).collect())
                 .unwrap_or_default();
             if set.is_empty() {
                 set.insert(RefShape::Bare);
             }
             edge_shapes.insert((from_name.clone(), to_name.clone()), set);
+            // Record edges with a ThroughAgg-routed site: the element graph
+            // routes them through a synthetic agg node, so the cycle
+            // classifier must keep cycles traversing them off the fast path
+            // even when every site's shape is Bare (GH #737).
+            if sites.is_some_and(|sites| {
+                sites
+                    .iter()
+                    .any(|s| matches!(s.routing, crate::db::ltm_ir::SiteRouting::ThroughAgg { .. }))
+            }) {
+                agg_routed_edges.insert((from_name.clone(), to_name.clone()));
+            }
         }
     }
 
-    EdgeShapesResult { edge_shapes }
+    EdgeShapesResult {
+        edge_shapes,
+        agg_routed_edges,
+    }
 }
 
 /// Classification of a variable-level cycle for tiered loop enumeration.
@@ -1322,16 +1512,17 @@ pub fn model_edge_shapes(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CycleClass {
     /// Every variable in the cycle is scalar and every traversed edge
-    /// has a `Bare` reference. The cycle exists exactly once at scalar
-    /// granularity; emit one scalar `Loop` and skip the element-level
-    /// enumerator.
+    /// has a `Bare` reference with no `ThroughAgg` routing. The cycle
+    /// exists exactly once at scalar granularity; emit one scalar
+    /// `Loop` and skip the element-level enumerator.
     PureScalar,
     /// Every variable in the cycle is arrayed over the same dimension
-    /// list and every traversed edge has only `Bare` references. The
-    /// cycle exists at every element of the shared dimensions; emit one
-    /// A2A `Loop` whose `dimensions` field carries those dimensions'
-    /// canonical names (lex-ordered as they appear on the participating
-    /// variables) and skip the element-level enumerator.
+    /// list and every traversed edge has only `Bare` references (none
+    /// `ThroughAgg`-routed). The cycle exists at every element of the
+    /// shared dimensions; emit one A2A `Loop` whose `dimensions` field
+    /// carries those dimensions' canonical names (lex-ordered as they
+    /// appear on the participating variables) and skip the
+    /// element-level enumerator.
     PureSameElementA2A {
         /// Canonical (lower-case) dimension names, in source order from
         /// the participating variables' dimension list. The list is
@@ -1340,10 +1531,10 @@ pub enum CycleClass {
         dimensions: Vec<String>,
     },
     /// At least one edge has a non-Bare shape (Wildcard, FixedIndex, or
-    /// DynamicIndex), or the cycle mixes scalar and arrayed nodes, or
-    /// the cycle's arrayed nodes don't share the same dimension list.
-    /// The cycle requires element-level enumeration on the slow-path
-    /// subgraph induced by its variables.
+    /// DynamicIndex) or is `ThroughAgg`-routed, or the cycle mixes
+    /// scalar and arrayed nodes, or the cycle's arrayed nodes don't
+    /// share the same dimension list. The cycle requires element-level
+    /// enumeration on the slow-path subgraph induced by its variables.
     CrossElementOrMixed,
 }
 
@@ -1371,11 +1562,21 @@ pub enum CycleClass {
 ///    a single A2A loop. A Wildcard reducer pulls in cross-element
 ///    contributions, so the cycle is structurally cross-element.
 ///    DynamicIndex is conservatively treated like Wildcard.
-/// 2. If every variable has an empty dimension list (all scalar),
+/// 2. If any edge is `ThroughAgg`-routed
+///    (`EdgeShapesResult::agg_routed_edges`), `CrossElementOrMixed` --
+///    even when every site shape is Bare. The element graph routes such
+///    an edge through a synthetic `$⁚ltm⁚agg⁚{n}` node, so the loop must
+///    be built from the element-level circuit that traverses the agg; a
+///    fast-path loop built from the variable-level circuit would compose
+///    the direct `from → to` link, which has no usable link-score
+///    variable (GH #737). The Bare-shaped case is a *scalar feeder* of a
+///    hoisted reducer (`scale` in `SUM(pop[*] * scale)`); arrayed
+///    reducer arguments are `Wildcard` and already caught by rule 1.
+/// 3. If every variable has an empty dimension list (all scalar),
 ///    `PureScalar`.
-/// 3. If every variable has the *same* non-empty dimension list,
+/// 4. If every variable has the *same* non-empty dimension list,
 ///    `PureSameElementA2A` with that dimension list.
-/// 4. Otherwise (mixed scalar / arrayed nodes, or arrayed nodes with
+/// 5. Otherwise (mixed scalar / arrayed nodes, or arrayed nodes with
 ///    differing dimension lists), `CrossElementOrMixed`.
 ///
 /// Empty cycles are degenerate; treat them as `PureScalar` for the
@@ -1389,13 +1590,21 @@ pub(crate) fn classify_cycle(
         return CycleClass::PureScalar;
     }
 
-    // Rule 1: scan all edges in cycle order. If any edge carries a
-    // non-Bare shape, the cycle is cross-element / mixed.
+    // Rules 1 / 2: scan all edges in cycle order. If any edge carries a
+    // non-Bare shape, or is routed through a synthetic aggregate node,
+    // the cycle is cross-element / mixed.
     let n = cycle.len();
     for i in 0..n {
         let from = &cycle[i];
         let to = &cycle[(i + 1) % n];
         let key = (from.clone(), to.clone());
+        // Rule 2: a ThroughAgg-routed edge forces the slow path even when
+        // its shapes are all Bare (a scalar feeder of a hoisted reducer) --
+        // the loop must traverse the `from → $⁚ltm⁚agg⁚{n} → to` element
+        // hops so its score composes the agg-half link scores (GH #737).
+        if edge_shapes.agg_routed_edges.contains(&key) {
+            return CycleClass::CrossElementOrMixed;
+        }
         let shapes = match edge_shapes.edge_shapes.get(&key) {
             Some(s) => s,
             None => continue, // missing edge -> treat as Bare
@@ -1410,7 +1619,7 @@ pub(crate) fn classify_cycle(
         }
     }
 
-    // Rule 2 / 3 / 4: dimension uniformity check.
+    // Rules 3 / 4 / 5: dimension uniformity check.
     let first_dims = dim_lookup(&cycle[0]);
     let any_arrayed = !first_dims.is_empty()
         || cycle
@@ -1421,7 +1630,7 @@ pub(crate) fn classify_cycle(
         return CycleClass::PureScalar;
     }
 
-    // Rule 3: every variable must have *the same* non-empty dimensions.
+    // Rule 4: every variable must have *the same* non-empty dimensions.
     if first_dims.is_empty() {
         return CycleClass::CrossElementOrMixed;
     }
@@ -1480,6 +1689,11 @@ pub fn model_element_causal_edges(
     // full cross-product there.
     let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
+    // The dimension-mapping element correspondence for the mapped-`Bare`
+    // diagonal projection (GH #527) -- the same context the IR's
+    // `classify_iterated_dim_shape` consults, so classification and
+    // expansion can't disagree.
+    let dim_ctx = project_dimensions_context(db, project);
 
     // Cache dimension lookups to avoid repeated calls for the same variable
     let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
@@ -1582,6 +1796,7 @@ pub fn model_element_causal_edges(
                     &to_dims,
                     &RefShape::Bare,
                     None,
+                    dim_ctx,
                     &mut element_edges,
                 );
                 continue;
@@ -1597,6 +1812,7 @@ pub fn model_element_causal_edges(
                             &to_dims,
                             &site.shape,
                             site.target_element.as_deref(),
+                            dim_ctx,
                             &mut element_edges,
                         );
                     }
@@ -1621,6 +1837,7 @@ pub fn model_element_causal_edges(
                             &to_dims,
                             agg_node,
                             site.target_element.as_deref(),
+                            dim_ctx,
                             &mut element_edges,
                         );
                     }
@@ -1848,9 +2065,41 @@ pub fn model_detected_loops(
             partitions: parts,
         };
     };
+    // GH #737 (review C1/C1b): make this surface's loop set agree with the
+    // scored surface's for agg-routed cycles. The polarity-prefixed loop ids
+    // reported here are the key the runtime join
+    // (`reclassify_loops_from_results`, pysimlin's
+    // `get_relative_loop_score`) reads `$⁚ltm⁚loop_score⁚{id}` with, so a
+    // loop-count or polarity divergence makes a detected loop read ANOTHER
+    // loop's series. Two steps, sharing the scored surface's machinery:
+    //
+    // 1. splice each ThroughAgg-routed edge into explicit
+    //    `from → $⁚ltm⁚agg⁚{n} → to` hops, ONE LOOP PER ROUTED AGG (a
+    //    feeder read by two hoisted reducers is two scored loops);
+    // 2. run the SAME `recover_agg_hop_polarities` pass the scored/pinned
+    //    surfaces run, so the spliced hops get identical polarities.
+    //
+    // With the links now speaking the same node language on both surfaces,
+    // `assign_loop_ids`' content sort orders them identically wherever the
+    // loop sets biject (every all-scalar cycle; arrayed cycles remain the
+    // pre-existing variable-level-vs-element-level divergent class).
+    let had_loops = !loops.is_empty();
+    let mut loops =
+        crate::db::ltm::expand_loops_through_routed_aggs(loops, &graph, db, model, project);
+    if had_loops {
+        crate::ltm::assign_loop_ids(&mut loops);
+        crate::db::ltm::recover_agg_hop_polarities(&mut loops, &graph, db, model, project);
+    }
     // Variable-level canonical rotation of a scored loop, used both to dedup a
     // pin's loops against the enumerated set and to transfer the pin's name
     // onto the surviving enumerated loop it duplicates.
+    //
+    // Both sides keep their synthetic `$⁚ltm⁚agg⁚{n}` nodes in the rotation
+    // (GH #737 / C1b): the enumerated loops are agg-spliced above and a
+    // pin's element-graph expansion carries the agg hops too, so raw
+    // rotations match exactly -- and a multi-agg cycle's per-agg pin variants
+    // dedup against (and transfer the pin's name onto) their OWN enumerated
+    // counterparts rather than collapsing onto one.
     let loop_rotation = |l: &crate::ltm::Loop| -> Vec<String> {
         let seq: Vec<String> = l
             .links
@@ -1871,17 +2120,8 @@ pub fn model_detected_loops(
         .collect();
     // Canonical rotations of the enumerated loops, so a pinned loop that
     // duplicates one is not surfaced twice (its name is transferred instead).
-    let enumerated: std::collections::HashSet<Vec<String>> = loops
-        .iter()
-        .map(|l| {
-            let seq: Vec<String> = l
-                .links
-                .iter()
-                .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
-                .collect();
-            crate::ltm::canonical_rotation(&seq)
-        })
-        .collect();
+    let enumerated: std::collections::HashSet<Vec<String>> =
+        loops.iter().map(&loop_rotation).collect();
     // The extra pins (those not duplicating an enumerated loop), kept as
     // `ltm::Loop`s alongside their pin name so partition resolution can run
     // over the full final loop list in the SAME order the `DetectedLoop`s
@@ -1909,23 +2149,24 @@ pub fn model_detected_loops(
         resolve_loop_partitions(&final_loops, &partitions, dims.as_slice());
 
     let enumerated_loops = loops.into_iter().map(|l| {
-        // Extract variable names from the loop's links
+        // Extract variable names from the loop's links. Spliced
+        // `$⁚ltm⁚agg⁚{n}` hops are an LTM scoring implementation detail and
+        // are trimmed from the user-facing list (mirroring
+        // `detected_loop_from_loop`); they stay in the links so the id sort
+        // key and the pin-dedup rotation see them.
+        let is_agg =
+            |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
         let mut vars = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let loop_rotation: Vec<String> = l
-            .links
-            .iter()
-            .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
-            .collect();
-        let loop_key = crate::ltm::canonical_rotation(&loop_rotation);
+        let loop_key = loop_rotation(&l);
         if !l.links.is_empty() {
             let first = l.links[0].from.to_string();
-            if seen.insert(first.clone()) {
+            if !is_agg(&first) && seen.insert(first.clone()) {
                 vars.push(first);
             }
             for link in &l.links {
                 let to = link.to.to_string();
-                if seen.insert(to.clone()) {
+                if !is_agg(&to) && seen.insert(to.clone()) {
                     vars.push(to);
                 }
             }
@@ -1985,14 +2226,19 @@ pub fn model_detected_loops(
 fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop {
     let mut vars = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    // Synthetic `$⁚ltm⁚agg⁚{n}` hops are an LTM scoring implementation
+    // detail; like macro/module internals they are trimmed from the reported
+    // node sequence (a pin expanded through a hoisted reducer carries them
+    // in its links -- GH #737).
+    let is_agg = |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
     if !l.links.is_empty() {
         let first = l.links[0].from.to_string();
-        if seen.insert(first.clone()) {
+        if !is_agg(&first) && seen.insert(first.clone()) {
             vars.push(first);
         }
         for link in &l.links {
             let to = link.to.to_string();
-            if seen.insert(to.clone()) {
+            if !is_agg(&to) && seen.insert(to.clone()) {
                 vars.push(to);
             }
         }
@@ -2902,12 +3148,27 @@ mod emit_edges_for_reference_tests {
         )
     }
 
+    /// An empty `DimensionsContext` for tests that don't exercise the
+    /// mapped-dimension correspondence.
+    fn empty_dim_ctx() -> crate::dimensions::DimensionsContext {
+        crate::dimensions::DimensionsContext::from(&[])
+    }
+
     /// Scalar source -> scalar target with `Bare` shape: a single
     /// from -> to edge, no expansion.
     #[test]
     fn scalar_to_scalar_bare_passthrough() {
         let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
-        emit_edges_for_reference("a", "b", &[], &[], &RefShape::Bare, None, &mut edges);
+        emit_edges_for_reference(
+            "a",
+            "b",
+            &[],
+            &[],
+            &RefShape::Bare,
+            None,
+            &empty_dim_ctx(),
+            &mut edges,
+        );
 
         let from = edges.get("a").expect("expected 'a' as a source key");
         assert_eq!(from.len(), 1);
@@ -2930,6 +3191,7 @@ mod emit_edges_for_reference_tests {
             dims,
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             None,
+            &empty_dim_ctx(),
             &mut edges,
         );
 
@@ -2955,7 +3217,16 @@ mod emit_edges_for_reference_tests {
         let dims = std::slice::from_ref(&region);
         let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
 
-        emit_edges_for_reference("pop", "rel", dims, dims, &RefShape::Bare, None, &mut edges);
+        emit_edges_for_reference(
+            "pop",
+            "rel",
+            dims,
+            dims,
+            &RefShape::Bare,
+            None,
+            &empty_dim_ctx(),
+            &mut edges,
+        );
 
         let nyc = edges.get("pop[nyc]").expect("from key 'pop[nyc]'");
         assert_eq!(nyc.len(), 1, "diagonal: one outgoing edge");
@@ -2983,6 +3254,7 @@ mod emit_edges_for_reference_tests {
             dims,
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             Some("boston"),
+            &empty_dim_ctx(),
             &mut edges,
         );
 
@@ -3010,6 +3282,7 @@ mod emit_edges_for_reference_tests {
             dims,
             &RefShape::Bare,
             Some("boston"),
+            &empty_dim_ctx(),
             &mut edges,
         );
 
@@ -3039,6 +3312,91 @@ mod emit_edges_for_reference_tests {
                 "pop[nyc] -> rel[nyc] must be excluded when target_element = boston"
             );
         }
+    }
+
+    /// GH #527: a `Bare` edge between dimensions related by a POSITIONAL
+    /// mapping projects the diagonal; a pair related only by an EXPLICIT
+    /// element map keeps the conservative broadcast (the executed A2A
+    /// lowering resolves positionally, ignoring the element map -- see
+    /// `mapped_element_correspondence`'s positional-only gate / GH #753).
+    /// Exercised directly (no salsa pipeline) so both arms of the
+    /// correspondence decision are pinned at the emitter level.
+    #[test]
+    fn bare_mapped_dims_positional_diagonal_element_map_broadcast() {
+        // Positional mapping: diagonal.
+        let mut state = crate::datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["s1".to_string(), "s2".to_string()],
+        );
+        state.set_maps_to("Region".to_string());
+        let region = crate::datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        let dim_ctx = crate::dimensions::DimensionsContext::from(&[state.clone(), region.clone()]);
+        let from_dims = vec![crate::dimensions::Dimension::from(&region)];
+        let to_dims = vec![crate::dimensions::Dimension::from(&state)];
+
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+        emit_edges_for_reference(
+            "x",
+            "target",
+            &from_dims,
+            &to_dims,
+            &RefShape::Bare,
+            None,
+            &dim_ctx,
+            &mut edges,
+        );
+        assert_eq!(
+            edges.get("x[a]"),
+            Some(&BTreeSet::from(["target[s1]".to_string()])),
+            "positional mapping: x[a] feeds only its positional twin"
+        );
+        assert_eq!(
+            edges.get("x[b]"),
+            Some(&BTreeSet::from(["target[s2]".to_string()])),
+            "positional mapping: x[b] feeds only its positional twin"
+        );
+
+        // Explicit element map (permuted s1↦b, s2↦a): broadcast.
+        let mut state_em = crate::datamodel::Dimension::named(
+            "State".to_string(),
+            vec!["s1".to_string(), "s2".to_string()],
+        );
+        state_em.mappings = vec![crate::datamodel::DimensionMapping {
+            target: "Region".to_string(),
+            element_map: vec![
+                ("s1".to_string(), "b".to_string()),
+                ("s2".to_string(), "a".to_string()),
+            ],
+        }];
+        let dim_ctx_em =
+            crate::dimensions::DimensionsContext::from(&[state_em.clone(), region.clone()]);
+        let to_dims_em = vec![crate::dimensions::Dimension::from(&state_em)];
+
+        let mut edges_em: HashMap<String, BTreeSet<String>> = HashMap::new();
+        emit_edges_for_reference(
+            "x",
+            "target",
+            &from_dims,
+            &to_dims_em,
+            &RefShape::Bare,
+            None,
+            &dim_ctx_em,
+            &mut edges_em,
+        );
+        let broadcast = BTreeSet::from(["target[s1]".to_string(), "target[s2]".to_string()]);
+        assert_eq!(
+            edges_em.get("x[a]"),
+            Some(&broadcast),
+            "element map: x[a] keeps the conservative broadcast"
+        );
+        assert_eq!(
+            edges_em.get("x[b]"),
+            Some(&broadcast),
+            "element map: x[b] keeps the conservative broadcast"
+        );
     }
 }
 
@@ -4120,7 +4478,10 @@ mod classify_cycle_tests {
             let set: BTreeSet<RefShape> = shapes.iter().cloned().collect();
             edge_shapes.insert((from.to_string(), to.to_string()), set);
         }
-        EdgeShapesResult { edge_shapes }
+        EdgeShapesResult {
+            edge_shapes,
+            agg_routed_edges: BTreeSet::new(),
+        }
     }
 
     #[test]
@@ -4131,6 +4492,34 @@ mod classify_cycle_tests {
         assert_eq!(
             classify_cycle(&cycle, &edges, &lookup),
             CycleClass::PureScalar
+        );
+    }
+
+    /// GH #737, rule 1b: an all-scalar, all-Bare cycle whose edge is
+    /// ThroughAgg-routed (a scalar feeder of a hoisted reducer) must NOT
+    /// classify PureScalar -- the loop has to be built from the element
+    /// circuit that traverses the synthetic agg node.
+    #[test]
+    fn agg_routed_bare_edge_forces_slow_path() {
+        let cycle = vec!["total".to_string(), "scale".to_string(), "grow".to_string()];
+        let mut edges = shapes_with(&[
+            ("total", "scale", &[RefShape::Bare]),
+            ("scale", "grow", &[RefShape::Bare]),
+            ("grow", "total", &[RefShape::Bare]),
+        ]);
+        let lookup = dim_lookup(&[], &[]);
+        // Without the routing marker the cycle is PureScalar (sanity check
+        // that the marker, not the shapes, drives the reclassification).
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::PureScalar
+        );
+        edges
+            .agg_routed_edges
+            .insert(("scale".to_string(), "grow".to_string()));
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::CrossElementOrMixed
         );
     }
 

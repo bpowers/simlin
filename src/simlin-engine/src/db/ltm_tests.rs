@@ -545,66 +545,6 @@ fn test_scalarize_ltm_equation_arrayed_collapse() {
     );
 }
 
-/// `cyclic_orderings(n)` enumerates the distinct orderings of `[0, .., n-1]`
-/// modulo rotation (index 0 pinned first) and modulo mirror reversal
-/// (reverse-the-tail) -- `1` ordering for n ∈ {0, 1, 2}, `(n-1)!/2` for
-/// n ≥ 3. The exact vectors (and their order, which Heap's-algorithm
-/// determinism fixes -- and which `assign_loop_ids`' stable sort relies on
-/// for stable, distinct ids) are pinned here.
-#[test]
-fn cyclic_orderings_enumerates_distinct_rotation_and_mirror_classes() {
-    use super::cyclic_orderings;
-
-    // Degenerate / trivial cases.
-    assert_eq!(cyclic_orderings(0), vec![Vec::<usize>::new()]);
-    assert_eq!(cyclic_orderings(1), vec![vec![0]]);
-    // n=2: `0! = 1` ordering; reversing a 2-cycle gives the same sequence,
-    // so no mirror to quotient.
-    assert_eq!(cyclic_orderings(2), vec![vec![0, 1]]);
-    // n=3: `(3-1)!/2 = 1`. `[0,1,2]` and `[0,2,1]` are mirrors (reverse the
-    // tail `[1,2]` -> `[2,1]`); the lexicographically smaller tail wins.
-    assert_eq!(cyclic_orderings(3), vec![vec![0, 1, 2]]);
-    // n=4: `(4-1)!/2 = 3`. Heap's order over the tail `[1,2,3]` is
-    // `[1,2,3], [2,1,3], [3,1,2], [1,3,2], [2,3,1], [3,2,1]`; keep a tail
-    // iff it is lexicographically <= its reverse -> `[1,2,3]`, `[2,1,3]`,
-    // `[1,3,2]`.
-    assert_eq!(
-        cyclic_orderings(4),
-        vec![vec![0, 1, 2, 3], vec![0, 2, 1, 3], vec![0, 1, 3, 2]]
-    );
-
-    // Structural checks for a few more `n`: count == (n-1)!/2 for n >= 3,
-    // index 0 always first, every ordering is a permutation of 0..n, and no
-    // two are mirror images of each other.
-    fn factorial(k: usize) -> usize {
-        (1..=k).product::<usize>().max(1)
-    }
-    for n in 3..=6 {
-        let orderings = cyclic_orderings(n);
-        assert_eq!(
-            orderings.len(),
-            factorial(n - 1) / 2,
-            "cyclic_orderings({n}) should have (n-1)!/2 entries"
-        );
-        let mut seen: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
-        for ord in &orderings {
-            assert_eq!(ord[0], 0, "index 0 must be pinned first");
-            let mut sorted = ord.clone();
-            sorted.sort();
-            assert_eq!(sorted, (0..n).collect::<Vec<_>>(), "must be a permutation");
-            // Mirror = pin 0, reverse the tail.
-            let mirror: Vec<usize> = std::iter::once(0)
-                .chain(ord[1..].iter().rev().copied())
-                .collect();
-            assert!(
-                !seen.contains(&mirror),
-                "cyclic_orderings({n}) emitted both {ord:?} and its mirror {mirror:?}"
-            );
-            assert!(seen.insert(ord.clone()), "duplicate ordering {ord:?}");
-        }
-    }
-}
-
 /// Build a `StitchPetal<&str>` from `[agg, x1, ..., xm]`.
 fn petal<'a>(nodes: &[&'a str]) -> super::StitchPetal<&'a str> {
     super::StitchPetal {
@@ -615,9 +555,10 @@ fn petal<'a>(nodes: &[&'a str]) -> super::StitchPetal<&'a str> {
 
 /// The mode-agnostic petal stitcher (`stitch_cross_agg_petals`, GH #515/#696)
 /// enumerates exactly the disjoint-petal cross-agg loops: for one agg with
-/// `k` pairwise-disjoint petals it emits `Σ_{m=2}^{k} C(k,m)·orderings(m)`
-/// stitched sequences -- the single petals themselves are NOT in the output
-/// (they are already elementary loops the enumerator emits directly).
+/// `k` pairwise-disjoint petals it emits `Σ_{m=2}^{k} C(k,m)` stitched
+/// sequences -- ONE canonical ordering per subset (GH #676) -- and the
+/// single petals themselves are NOT in the output (they are already
+/// elementary loops the enumerator emits directly).
 #[test]
 fn stitch_cross_agg_petals_enumerates_disjoint_subsets() {
     // One agg "a" with three disjoint petals (each through its own internals).
@@ -631,7 +572,7 @@ fn stitch_cross_agg_petals_enumerates_disjoint_subsets() {
     )];
     let (stitched, truncated) = super::stitch_cross_agg_petals(petals, 1024);
     assert!(truncated.is_empty(), "well under budget");
-    // 3 disjoint pairs (each 1 ordering) + 1 triple ((3-1)!/2 = 1 ordering) = 4.
+    // 3 disjoint pairs + 1 triple = 4, one loop per subset.
     assert_eq!(stitched.len(), 4, "got {stitched:?}");
     // Each stitched sequence starts at the agg and contains it once per petal.
     for seq in &stitched {
@@ -648,6 +589,78 @@ fn stitch_cross_agg_petals_enumerates_disjoint_subsets() {
     );
     // Three pairs (length 4).
     assert_eq!(stitched.iter().filter(|s| s.len() == 4).count(), 3);
+}
+
+/// GH #676: exactly ONE canonical loop per disjoint petal subset. For a
+/// fixed subset every cyclic ordering of the petals yields the same edge
+/// multiset (each petal contributes its `agg→head` / internal / `tail→agg`
+/// edges regardless of position), hence the same commutative loop-score
+/// product -- so one representative suffices, and it is the priority-order
+/// (fewest internal nodes first, then node-sequence tiebreak) concatenation
+/// of the chosen petals, independent of the caller's petal order. With
+/// `k = 4` disjoint petals the output is `Σ_{m=2}^{4} C(4,m) = 11`
+/// sequences, each a distinct petal subset, and repeated calls are
+/// byte-identical (the deterministic walk `assign_loop_ids` relies on).
+#[test]
+fn stitch_cross_agg_petals_one_canonical_ordering_per_subset() {
+    use std::collections::BTreeSet;
+    use std::collections::HashSet;
+
+    // Deliberately NOT in priority order: priority sorts p1, p2 (1 internal
+    // node each, name tiebreak) before q (2) before r (3).
+    let build = || {
+        vec![(
+            "a",
+            vec![
+                petal(&["a", "r", "r2", "r3"]),
+                petal(&["a", "q", "q2"]),
+                petal(&["a", "p2"]),
+                petal(&["a", "p1"]),
+            ],
+        )]
+    };
+    let (stitched, truncated) = super::stitch_cross_agg_petals(build(), 1024);
+    assert!(truncated.is_empty(), "well under budget");
+    assert_eq!(
+        stitched.len(),
+        11,
+        "k=4 disjoint petals -> Σ_(m=2..4) C(4,m) = 11 subsets, one loop each; got {stitched:?}"
+    );
+
+    // Each stitched sequence is a distinct petal SUBSET (keyed by its petal
+    // head set -- the nodes following each "a").
+    let petal_heads = |seq: &[&str]| -> BTreeSet<String> {
+        seq.iter()
+            .zip(seq.iter().skip(1))
+            .filter(|(n, _)| **n == "a")
+            .map(|(_, head)| head.to_string())
+            .collect()
+    };
+    let subsets: HashSet<BTreeSet<String>> = stitched.iter().map(|s| petal_heads(s)).collect();
+    assert_eq!(
+        subsets.len(),
+        11,
+        "every stitched sequence is a distinct subset"
+    );
+
+    // The emitted sequence per subset is the priority-order concatenation of
+    // its petals: e.g. the {p2, q} pair is [a, p2, a, q, q2] (p2 first --
+    // fewer internal nodes -- despite q preceding p2 in the input), and the
+    // full subset is the four petals in full priority order.
+    assert!(
+        stitched.contains(&vec!["a", "p2", "a", "q", "q2"]),
+        "the {{p2, q}} pair must be stitched in priority order; got {stitched:?}"
+    );
+    assert!(
+        stitched.contains(&vec![
+            "a", "p1", "a", "p2", "a", "q", "q2", "a", "r", "r2", "r3"
+        ]),
+        "the full 4-petal subset must be the priority-order concatenation; got {stitched:?}"
+    );
+
+    // Determinism: repeated calls produce byte-identical output.
+    let (stitched2, _) = super::stitch_cross_agg_petals(build(), 1024);
+    assert_eq!(stitched, stitched2, "stitching must be deterministic");
 }
 
 /// Petals that overlap on an internal node are never stitched together (they

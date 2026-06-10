@@ -1297,16 +1297,17 @@ fn element_graph_iterated_dim_subscript_same_element_projection() {
     assert_no_edge(&result, "row_sum[b]", "growth[a,old]");
 }
 
-/// AC3.5: a mapped-dimension iterated subscript (`x` over `Region`,
+/// AC3.5 / GH #527: a mapped-dimension iterated subscript (`x` over `Region`,
 /// `target` over `State`, a `State→Region` mapping, `target[State] =
 /// x[State] * c`) classifies `x[State]` as `Bare` (see
-/// `ltm_ir_tests::ir_mapped_iterated_dim_subscript_is_bare`), so the
-/// element graph is *identical* to the one a bare `x` reference (`target[State]
-/// = x * c`) produces -- no new dimension-mapping behavior. `expand_same_element`
-/// matches dimension *names*, so a disjoint-named pair like `Region`/`State`
-/// is the broadcast case (every source element feeds every target element)
-/// for both the subscripted and the bare form; the assertion below pins
-/// "subscripted iterated == bare", not the projection shape.
+/// `ltm_ir_tests::ir_mapped_iterated_dim_subscript_is_bare`), and
+/// `expand_same_element` projects it along the mapping's element
+/// correspondence: with the positional `State→Region` mapping (s1↦a, s2↦b)
+/// the element graph is the DIAGONAL `x[a]→target[s1]`, `x[b]→target[s2]` --
+/// NOT the `Region × State` cross-product the pre-#527 name-only matching
+/// broadcast to. The bare form (`target[State] = x * c`) resolves through
+/// the same compiler mapping correspondence, so it must produce the
+/// identical diagonal.
 #[test]
 fn element_graph_mapped_iterated_dim_matches_bare_baseline() {
     let subscripted = TestProject::new("mapped_iterated_subscripted")
@@ -1328,4 +1329,379 @@ fn element_graph_mapped_iterated_dim_matches_bare_baseline() {
         "a mapped-dimension iterated subscript `x[State]` must produce the \
          same element edges as a bare `x` reference into the same target"
     );
+
+    // The positional mapping's diagonal, and nothing else.
+    assert_edge(&sub_result, "x[a]", "target[s1]");
+    assert_edge(&sub_result, "x[b]", "target[s2]");
+    assert_no_edge(&sub_result, "x[a]", "target[s2]");
+    assert_no_edge(&sub_result, "x[b]", "target[s1]");
+}
+
+/// GH #527: the mapping declared in the REVERSE direction -- on the
+/// *source's* dimension (`Region→State`) rather than the target equation's
+/// iterated dimension. A bare `x` reference still classifies `Bare` (no
+/// subscript to inspect), and the compiler resolves it through
+/// `translate_via_mapping`'s forward branch, so the expansion projects the
+/// same diagonal.
+#[test]
+fn element_graph_mapped_reverse_declared_bare_is_diagonal() {
+    let project = TestProject::new("mapped_reverse_bare")
+        .named_dimension_with_mapping("Region", &["a", "b"], "State")
+        .named_dimension("State", &["s1", "s2"])
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x * 0.5", None);
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "x[a]", "target[s1]");
+    assert_edge(&result, "x[b]", "target[s2]");
+    assert_no_edge(&result, "x[a]", "target[s2]");
+    assert_no_edge(&result, "x[b]", "target[s1]");
+}
+
+/// GH #527 (classifier consistency): a SUBSCRIPTED iterated-dim reference
+/// whose mapping is declared only in the reverse direction (`Region→State`,
+/// i.e. on the source's dimension) is NOT accepted by
+/// `classify_iterated_dim_shape`'s mapped arm (which checks
+/// `has_mapping_to(index_dim, source_dim)` only), so it classifies
+/// `DynamicIndex` and keeps the conservative cross-product. This pins the
+/// classification ⟺ expansion agreement: the diagonal is only emitted for
+/// shapes the classifier calls `Bare`.
+#[test]
+fn element_graph_mapped_reverse_declared_subscripted_stays_cross_product() {
+    let project = TestProject::new("mapped_reverse_subscripted")
+        .named_dimension_with_mapping("Region", &["a", "b"], "State")
+        .named_dimension("State", &["s1", "s2"])
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x[State] * 0.5", None);
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "x[a]", "target[s1]");
+    assert_edge(&result, "x[a]", "target[s2]");
+    assert_edge(&result, "x[b]", "target[s1]");
+    assert_edge(&result, "x[b]", "target[s2]");
+}
+
+/// GH #527: an EXPLICIT element-level mapping (here the different-
+/// cardinality many-to-one `State{s1,s2,s3}→Region{a,b}`: s1↦a, s2↦a,
+/// s3↦b) keeps the conservative BROADCAST, not a map-following diagonal:
+/// the engine's executed A2A lowering resolves mapped references
+/// positionally, ignoring the element map (this 3→2 model doesn't compile
+/// at all -- GH #753 -- so the graph-level pin is all we can have here;
+/// the same positional-execution inconsistency is why
+/// `mapped_element_correspondence` declines element maps wholesale, see
+/// its rustdoc gate). The broadcast is a superset of whatever the engine
+/// would read, so no true edge can be missing.
+#[test]
+fn element_graph_mapped_element_map_stays_broadcast() {
+    let project = TestProject::new("mapped_element_map_3_to_2")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension_with_element_mapping(
+            "State",
+            &["s1", "s2", "s3"],
+            "Region",
+            &[("s1", "a"), ("s2", "a"), ("s3", "b")],
+        )
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x[State] * 0.5", None);
+
+    let result = element_edges(&project);
+
+    for region in ["a", "b"] {
+        for state in ["s1", "s2", "s3"] {
+            assert_edge(
+                &result,
+                &format!("x[{region}]"),
+                &format!("target[{state}]"),
+            );
+        }
+    }
+}
+
+/// GH #527: the mapped diagonal composes with the target-only-dimension
+/// broadcast. `target[State,Age] = x[State] * c` (`x` over `Region`,
+/// `State→Region` positional mapping): the State axis projects along the
+/// mapping while the Age axis broadcasts -- `x[a]` feeds `target[s1,*]`
+/// only, never `target[s2,*]`.
+#[test]
+fn element_graph_mapped_diagonal_with_broadcast_dim() {
+    let project = TestProject::new("mapped_diag_broadcast")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .named_dimension("Age", &["young", "old"])
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct(
+            "target",
+            vec!["State".into(), "Age".into()],
+            "x[State] * 0.5",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "x[a]", "target[s1,young]");
+    assert_edge(&result, "x[a]", "target[s1,old]");
+    assert_edge(&result, "x[b]", "target[s2,young]");
+    assert_edge(&result, "x[b]", "target[s2,old]");
+    assert_no_edge(&result, "x[a]", "target[s2,young]");
+    assert_no_edge(&result, "x[a]", "target[s2,old]");
+    assert_no_edge(&result, "x[b]", "target[s1,young]");
+    assert_no_edge(&result, "x[b]", "target[s1,old]");
+}
+
+/// Graph-vs-SIMULATION parity for an ASYMMETRIC explicit element map.
+///
+/// `Region{a,b}`, `State{s1,s2}` with the PERMUTED element map s1↦b, s2↦a,
+/// distinct per-element source values (`x[a]=10`, `x[b]=20`), and
+/// `target[State] = x[State] * 1`. The element graph's edges must be a
+/// SUPERSET of the edges the simulation's actual reads imply (derived here
+/// from which `x` element's value each `target` element equals) -- the LTM
+/// contract is "more edges than necessary, never fewer".
+///
+/// Today the engine's executed A2A lowering resolves mapped references
+/// POSITIONALLY, ignoring the explicit element map (target[s1] = x[a], the
+/// map notwithstanding; see GH #753 for the related different-cardinality
+/// compile failure), so a map-following diagonal would DROP the true
+/// positionally-read edges -- which is why `mapped_element_correspondence`
+/// declines explicit element maps (conservative broadcast). The test
+/// derives the implied edges from the run itself, so it keeps passing if
+/// the engine later honors element maps in execution and the element-map
+/// diagonal is re-enabled.
+#[test]
+fn element_graph_mapped_element_map_edges_superset_of_simulation_reads() {
+    let project = TestProject::new("mapped_element_map_parity")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension_with_element_mapping(
+            "State",
+            &["s1", "s2"],
+            "Region",
+            &[("s1", "b"), ("s2", "a")],
+        )
+        .array_with_ranges_direct(
+            "x",
+            vec!["Region".into()],
+            vec![("a", "10"), ("b", "20")],
+            None,
+        )
+        .array_aux_direct("target", vec!["State".into()], "x[State] * 1", None);
+
+    let sim = project.run_vm_incremental();
+    let graph = element_edges(&project);
+
+    let region_elems = ["a", "b"];
+    for state_elem in ["s1", "s2"] {
+        let target_key = format!("target[{state_elem}]");
+        let target_val = sim
+            .get(&target_key)
+            .unwrap_or_else(|| panic!("{target_key} missing from sim results"))[0];
+        // The source element the simulation ACTUALLY read for this target
+        // element (source values are distinct, so the match is unique).
+        let read_from: Vec<&str> = region_elems
+            .iter()
+            .copied()
+            .filter(|r| (sim[&format!("x[{r}]")][0] - target_val).abs() < 1e-9)
+            .collect();
+        assert_eq!(
+            read_from.len(),
+            1,
+            "exactly one x element should match {target_key}={target_val}"
+        );
+        assert_edge(&graph, &format!("x[{}]", read_from[0]), &target_key);
+    }
+}
+
+/// GH #527: two dimensions with the same shape but NO declared mapping must
+/// keep the conservative broadcast -- the mapped diagonal only applies when
+/// the model declares the correspondence.
+#[test]
+fn element_graph_unmapped_disjoint_dims_stay_broadcast() {
+    let project = TestProject::new("unmapped_disjoint_broadcast")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("State", &["s1", "s2"])
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x * 0.5", None);
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "x[a]", "target[s1]");
+    assert_edge(&result, "x[a]", "target[s2]");
+    assert_edge(&result, "x[b]", "target[s1]");
+    assert_edge(&result, "x[b]", "target[s2]");
+}
+
+/// GH #534: a positionally-MAPPED sliced reducer subexpression
+/// (`SUM(matrix[State,*])` inside an A2A-over-`State` body, `matrix` over
+/// `[Region,D2]`, positional `State→Region` mapping) is hoisted into an
+/// arrayed synthetic agg over `State`, and the element graph routes only the
+/// read rows through it WITH the slot remapped along the mapping: source
+/// rows over `Region` land on the agg slot of the corresponding `State`
+/// element (s1↦r1, s2↦r2), then `agg[s] → growth[s]` diagonally. No
+/// cross-slot row edges, and no direct `matrix → growth` edges (the
+/// reference is fully routed through the agg).
+#[test]
+fn element_graph_mapped_sliced_reducer_routes_through_remapped_agg() {
+    let project = TestProject::new("mapped_sliced_agg")
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+        .array_aux_direct(
+            "growth",
+            vec!["State".into()],
+            "1 + SUM(matrix[State, *])",
+            None,
+        );
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Source rows route to the agg slot of the MAPPED State element.
+    assert_edge(&result, "matrix[r1,x]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r1,y]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r2,x]", &format!("{agg}[s2]"));
+    assert_edge(&result, "matrix[r2,y]", &format!("{agg}[s2]"));
+    // Never the cross slot.
+    assert_no_edge(&result, "matrix[r1,x]", &format!("{agg}[s2]"));
+    assert_no_edge(&result, "matrix[r2,x]", &format!("{agg}[s1]"));
+    // The agg fans into the target diagonally on the shared State axis.
+    assert_edge(&result, &format!("{agg}[s1]"), "growth[s1]");
+    assert_edge(&result, &format!("{agg}[s2]"), "growth[s2]");
+    assert_no_edge(&result, &format!("{agg}[s1]"), "growth[s2]");
+    // The reducer reference is fully routed through the agg: no direct
+    // matrix → growth element edges remain.
+    for r in ["r1", "r2"] {
+        for d2 in ["x", "y"] {
+            for s in ["s1", "s2"] {
+                assert_no_edge(
+                    &result,
+                    &format!("matrix[{r},{d2}]"),
+                    &format!("growth[{s}]"),
+                );
+            }
+        }
+    }
+}
+
+/// GH #534 (conservative gate): a sliced reducer over an EXPLICIT
+/// element-mapped pair stays un-hoisted -- the engine's executed A2A
+/// lowering resolves mapped references positionally, ignoring element maps
+/// (GH #756), so `mapped_element_correspondence` declines and the reference
+/// keeps the conservative full cross-product (a superset of the true reads).
+/// No agg node appears in the element graph.
+#[test]
+fn element_graph_element_mapped_sliced_reducer_stays_cross_product() {
+    let project = TestProject::new("element_mapped_sliced")
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_element_mapping(
+            "State",
+            &["s1", "s2"],
+            "Region",
+            &[("s1", "r2"), ("s2", "r1")],
+        )
+        .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+        .array_aux_direct(
+            "growth",
+            vec!["State".into()],
+            "1 + SUM(matrix[State, *])",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    // Conservative cross-product: every matrix row feeds every growth slot.
+    for r in ["r1", "r2"] {
+        for d2 in ["x", "y"] {
+            for s in ["s1", "s2"] {
+                assert_edge(
+                    &result,
+                    &format!("matrix[{r},{d2}]"),
+                    &format!("growth[{s}]"),
+                );
+            }
+        }
+    }
+    // No agg node was minted for the element-mapped sliced reducer.
+    assert!(
+        !result
+            .edges
+            .keys()
+            .any(|k| k.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}")),
+        "an element-mapped sliced reducer must not route through an agg node; edges: {:?}",
+        result.edges.keys().collect::<Vec<_>>()
+    );
+}
+
+/// GH #534 (classifier-direction consistency): a sliced reducer whose
+/// mapping is declared only in the REVERSE direction (on the source's
+/// `Region` toward `State`) stays un-hoisted, mirroring
+/// `classify_iterated_dim_shape`'s declared-direction gate (GH #757 tracks
+/// the reverse-subscripted direction separately). Conservative cross-product,
+/// no agg node.
+#[test]
+fn element_graph_reverse_declared_mapped_sliced_reducer_stays_cross_product() {
+    let project = TestProject::new("reverse_mapped_sliced")
+        .named_dimension_with_mapping("Region", &["r1", "r2"], "State")
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("State", &["s1", "s2"])
+        .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+        .array_aux_direct(
+            "growth",
+            vec!["State".into()],
+            "1 + SUM(matrix[State, *])",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    for r in ["r1", "r2"] {
+        for d2 in ["x", "y"] {
+            for s in ["s1", "s2"] {
+                assert_edge(
+                    &result,
+                    &format!("matrix[{r},{d2}]"),
+                    &format!("growth[{s}]"),
+                );
+            }
+        }
+    }
+    assert!(
+        !result
+            .edges
+            .keys()
+            .any(|k| k.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}")),
+        "a reverse-declared mapped sliced reducer must not route through an agg node"
+    );
+}
+
+/// GH #534 (scalar co-feeder composition): a mapped sliced reducer with a
+/// scalar co-feeder (`SUM(matrix[State,*] * scale)`) routes the scalar
+/// feeder to EVERY remapped agg slot (a scalar can't pick a slot) while the
+/// arrayed rows keep the mapping's slot diagonal.
+#[test]
+fn element_graph_mapped_sliced_reducer_with_scalar_cofeeder() {
+    let project = TestProject::new("mapped_sliced_cofeeder")
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .scalar_aux("scale", "2")
+        .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+        .array_aux_direct(
+            "growth",
+            vec!["State".into()],
+            "1 + SUM(matrix[State, *] * scale)",
+            None,
+        );
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Arrayed rows: the mapping's slot diagonal.
+    assert_edge(&result, "matrix[r1,x]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r2,y]", &format!("{agg}[s2]"));
+    assert_no_edge(&result, "matrix[r1,x]", &format!("{agg}[s2]"));
+    // Scalar co-feeder: every agg slot.
+    assert_edge(&result, "scale", &format!("{agg}[s1]"));
+    assert_edge(&result, "scale", &format!("{agg}[s2]"));
 }

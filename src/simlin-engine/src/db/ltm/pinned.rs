@@ -21,12 +21,15 @@ use std::collections::{HashMap, HashSet};
 use crate::common::{Canonical, Ident};
 use crate::db::{
     CycleClass, Db, LoopCircuitsResult, SourceModel, SourceProject, SourceVariable,
-    causal_graph_with_modules, classify_cycle, model_causal_edges, model_edge_shapes,
-    model_element_causal_edges, project_datamodel_dims, variable_dimensions,
+    causal_graph_with_modules, classify_cycle, model_edge_shapes, model_element_causal_edges,
+    project_datamodel_dims, variable_dimensions,
 };
 use crate::ltm::{Loop, strip_subscript};
 
-use super::loops::{build_a2a_loop_stocks, build_element_level_loops, cross_agg_loop_budget};
+use super::loops::{
+    build_a2a_loop_stocks, build_element_level_loops, cross_agg_loop_budget,
+    recover_agg_hop_polarities,
+};
 
 /// A pinned loop the LTM pipeline must always score, paired with the user's
 /// chosen name so a caller can map the synthetic `pin{n}` id back to a label.
@@ -70,8 +73,13 @@ pub struct PinnedLoopsResult {
 ///
 /// For each non-deleted pin (already projected to canonical variable names at
 /// sync time), this recovers the loop's cyclic order from the causal graph,
-/// confirms the named set forms a closed cycle containing at least one stock,
-/// and assigns a stable `pin{n}` id (n = declaration index, so ids never
+/// confirms the named set forms a closed cycle containing at least one stock
+/// -- where stocks INSIDE a module instance the cycle traverses count (GH
+/// #673), via the same `enrich_with_module_stocks` enrichment the enumerator
+/// applies, so a loop whose only state lives in a SMOOTH/DELAY instance or
+/// stock-carrying user sub-model validates while a purely-instantaneous cycle
+/// (including one through a stockless passthrough module) is still rejected
+/// -- and assigns a stable `pin{n}` id (n = declaration index, so ids never
 /// collide with the enumerator's `r{n}`/`b{n}`/`u{n}` namespace). Pins that
 /// fail any check land in `invalid` rather than producing a garbage score.
 ///
@@ -79,7 +87,11 @@ pub struct PinnedLoopsResult {
 /// exhaustive enumerator classifies cycles ([`classify_cycle`], GH #653):
 ///
 /// - **PureScalar** -> a scalar `Loop` (the pre-#653 behavior, correct for
-///   scalar models).
+///   scalar models). A cycle traversing a `ThroughAgg`-routed edge (a
+///   scalar feeder of a hoisted reducer) never classifies `PureScalar`
+///   (GH #737): it lands in the CrossElementOrMixed arm below, whose
+///   element-graph expansion routes it through the synthetic
+///   `$⁚ltm⁚agg⁚{n}` node -- the only routing with compilable link scores.
 /// - **PureSameElementA2A** -> the `Loop` carries the cycle's shared
 ///   `dimensions` and element-level stocks, so its loop score is emitted as
 ///   an arrayed (per-element) variable and its cycle partition resolves per
@@ -108,8 +120,6 @@ pub(crate) fn model_pinned_loops(
         return PinnedLoopsResult::default();
     }
 
-    // A stock-free model has no feedback loops at all; every pin is invalid.
-    let edges = model_causal_edges(db, model, project);
     let graph = causal_graph_with_modules(db, model, project);
     // Classification inputs: per-edge access shapes and per-variable
     // dimensions, the same data the tiered enumerator classifies cycles with.
@@ -151,9 +161,27 @@ pub(crate) fn model_pinned_loops(
         };
 
         // A standard feedback loop includes at least one stock (LTM ref 2.1).
-        // A purely-instantaneous cycle would be a compile-time circular
-        // dependency, not a feedback loop, so reject it with a clear message.
-        let has_stock = cycle.iter().any(|n| edges.stocks.contains(n.as_str()));
+        // A stockless cycle is usually a compile-time circular dependency,
+        // not a feedback loop, so reject it with a clear message. (The one
+        // exception is a stockless cycle broken by PREVIOUS: it compiles and
+        // the enumerator currently scores it, so this rejection makes the two
+        // surfaces disagree there -- tracked as GH #749.)
+        //
+        // "Stock" here counts state INSIDE any module instance the cycle
+        // traverses (GH #673): a SMOOTH/DELAY instance or user sub-model whose
+        // internal stock is the loop's only state is a genuine feedback loop.
+        // The loop-detection surface (`find_loops_with_limit`, behind
+        // `detect_loops` / `model_detected_loops`) attaches module-internal
+        // stocks via the same `enrich_with_module_stocks` enrichment instead
+        // of filtering, as does the PureScalar pin arm's
+        // `build_loop_from_cycle` below -- so validation and the loops both
+        // surfaces construct can never disagree about module-internal state.
+        // A cycle through a stockless *passthrough* module enriches to
+        // nothing and is still rejected -- it is instantaneous end to end.
+        let parent_stocks = graph.find_stocks_in_loop(&cycle);
+        let has_stock = !graph
+            .enrich_with_module_stocks(&cycle, parent_stocks)
+            .is_empty();
         if !has_stock {
             result.invalid.push((
                 spec.name.clone(),
@@ -193,6 +221,16 @@ pub(crate) fn model_pinned_loops(
                     dm_dims,
                 ) {
                     Ok(mut loops) => {
+                        // A pin expanded through a hoisted reducer carries
+                        // synthetic-agg hops, which come back Unknown-polarity
+                        // from the variable-level graph (GH #516, same as the
+                        // enumerator's slow path); patch the derivable cases so
+                        // the pin's reported polarity isn't degraded to
+                        // Undetermined. Must run BEFORE `assign_pin_ids`: the
+                        // patcher re-runs the (content-sorting) enumerator id
+                        // assignment when it changes anything, and the
+                        // pin-derived ids overwrite those positionally.
+                        recover_agg_hop_polarities(&mut loops, &graph, db, model, project);
                         assign_pin_ids(&mut loops, &id);
                         loops
                     }
@@ -216,11 +254,14 @@ pub(crate) fn model_pinned_loops(
 }
 
 /// Assign pin-derived ids to a pin's expanded loops: the plain `pin{n}` when
-/// the expansion produced exactly one loop, `pin{n}⁚{j}` (1-based, in the
-/// deterministic order [`build_element_level_loops`] produced) when it
-/// produced several. The `⁚` separator is the reserved synthetic-name
-/// separator, so multi-instance ids can never collide with user content or
-/// the enumerator's id namespace.
+/// the expansion produced exactly one loop, `pin{n}⁚{j}` (1-based) when it
+/// produced several. The `j` ordering is deterministic: the
+/// [`build_element_level_loops`] emission order, content-re-sorted by
+/// `recover_agg_hop_polarities`' internal `assign_loop_ids` when any agg-hop
+/// polarity was patched (the caller runs the patch before this function) --
+/// both orders are pure functions of loop content. The `⁚` separator is
+/// the reserved synthetic-name separator, so multi-instance ids can never
+/// collide with user content or the enumerator's id namespace.
 fn assign_pin_ids(loops: &mut [Loop], pin_id: &str) {
     if loops.len() == 1 {
         loops[0].id = pin_id.to_string();

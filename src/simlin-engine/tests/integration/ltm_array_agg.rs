@@ -64,8 +64,9 @@
 
 use simlin_engine::datamodel::{self, Dimension};
 use simlin_engine::db::{
-    DiagnosticError, DiagnosticSeverity, LtmSyntheticVar, SimlinDb, collect_all_diagnostics,
-    compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
+    DetectedLoopPolarity, DiagnosticError, DiagnosticSeverity, LtmSyntheticVar, SimlinDb,
+    collect_all_diagnostics, compile_project_incremental, model_detected_loops,
+    model_ltm_variables, reclassify_loops_from_results, set_project_ltm_enabled,
     sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
@@ -536,9 +537,9 @@ fn whole_extent_sum_agg_loop_scores_are_finite_and_sustained() {
     );
 }
 
-/// GH #533, end-to-end: a feedback loop whose only path back to a *scalar*
-/// stock runs through a *scalar* feeder of a hoisted reducer *with a scalar
-/// target*. The fixture is a scalar stock `total` grown by
+/// GH #533 + GH #737, end-to-end: a feedback loop whose only path back to a
+/// *scalar* stock runs through a *scalar* feeder of a hoisted reducer *with a
+/// scalar target*. The fixture is a scalar stock `total` grown by
 /// `grow = 1 + SUM(pop[*] * scale)`, with `scale = 0.001 * total + 0.01`
 /// feeding back from `total`. `SUM(pop[*] * scale)` is a sub-expression, so it
 /// is hoisted into a synthetic `$⁚ltm⁚agg⁚0`.
@@ -548,33 +549,34 @@ fn whole_extent_sum_agg_loop_scores_are_finite_and_sustained() {
 /// before the fix `model_element_causal_edges`'s both-scalar fast path emitted
 /// a direct `scale → grow` element edge instead of `scale → $⁚ltm⁚agg⁚0`. That
 /// element-graph fix is pinned directly by
-/// `element_graph_tests::element_graph_scalar_feeder_*`. This end-to-end test
-/// pins the robustly-observable consequence: with LTM enabled the model still
-/// COMPILES and SIMULATES (no crash, no NaN/Inf) and the loop is enumerated --
-/// the well-formedness the element-graph fix preserves.
+/// `element_graph_tests::element_graph_scalar_feeder_*`.
 ///
-/// CHARACTERIZATION of two pre-existing gaps this scalar-target scenario
-/// exposes (BOTH independent of #533's element-graph fast path -- both behave
-/// identically with and without it, since the element edge the fix adds is
-/// never consumed downstream here):
+/// The two follow-on gaps this scalar-target scenario originally exposed are
+/// both fixed now:
 ///
-/// 1. The synthetic agg `$⁚ltm⁚agg⁚0` for `SUM(pop[*] * scale)` (arrayed `pop`
-///    times scalar `scale`, reduced to a scalar target) currently FAILS to
-///    compile and is stubbed to a constant `0` with an `Assembly` Warning.
-///    This is an agg-augmentation gap (the emitted agg equation is rejected by
-///    the compiler), distinct from the element-graph edge.
+/// 1. (FIXED, GH #738) The synthetic agg `$⁚ltm⁚agg⁚0` for
+///    `SUM(pop[*] * scale)` (arrayed `pop` times scalar `scale`, reduced to a
+///    scalar target) used to FAIL fragment compilation and was stubbed to a
+///    constant `0` with an `Assembly` Warning: `compile_ltm_equation_fragment`
+///    lowered the equation with an empty `ScopeStage0.models`, so the
+///    `pop[*] * scale` Op2 never got its Expr2 `ArrayBounds` and Pass-1 temp
+///    decomposition never hoisted it out of the reducer. The agg now compiles
+///    and tracks the inlined reducer's value -- asserted below, and pinned in
+///    detail by `scalar_target_agg_value_matches_inlined_reducer`.
 ///
-/// 2. Even were the agg computed, the loop-score *builder* would not route the
-///    pure-scalar loop through it: `build_loops_from_tiered` materializes a
-///    `PureScalar` fast-path cycle straight from the *variable-level* circuit
-///    `total → scale → grow → total` (`var_graph.circuit_to_links`), linking
-///    `scale → grow` directly -- never the agg. The
-///    cross-element-through-aggregate recovery (`recover_cross_agg_loops`) runs
-///    only on the slow (cross-element) path.
-///
-/// So the loop score is `0` here -- not because of #533, but because of (1)
-/// and (2). Pinning the current behavior keeps both gaps observable; closing
-/// them is separate, tracked work.
+/// 2. (FIXED, GH #737) The loop-score *builder* now routes the loop through
+///    the agg: `classify_cycle` sends a cycle that traverses a
+///    `ThroughAgg`-routed edge down the element-level slow path (it is no
+///    longer `PureScalar`), where the post-#533 element graph's
+///    `scale → $⁚ltm⁚agg⁚0 → grow` hops are traversed, so the loop score
+///    composes the two agg-half link scores instead of the direct
+///    `scale → grow` link. That matters because the DIRECT `scale→grow` link
+///    score is still uncompilable (its ceteris-paribus partial contains
+///    `PREVIOUS(pop[*])`, the GH #541-class wildcard-subscripted-arg capture,
+///    tracked separately) and would be silently stubbed to 0, zeroing the
+///    loop score. The agg halves avoid the lagged-wildcard shape entirely:
+///    `scale → agg` freezes only the scalar feeder (`PREVIOUS(scale)`), and
+///    `agg → grow` substitutes the reducer with the agg name.
 #[test]
 fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
     let project = TestProject::new("scalar_feeder_agg_loop")
@@ -618,33 +620,96 @@ fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
         ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
 
-    // The pure-scalar loop `total → scale → grow → total` is enumerated and
-    // scored via the direct `scale → grow` link (the variable-level circuit;
-    // gap #2 in the doc comment). Exactly one such loop exists.
-    let u_loops: Vec<&LtmSyntheticVar> = ltm_vars
+    // GH #738 (gap #1, fixed): the agg's own fragment compiles, so its series
+    // tracks the inlined reducer -- `SUM(pop[*] * scale)` -- instead of the
+    // constant 0 the silently-stubbed fragment used to read. `pop` starts at
+    // 100/300 and `scale` is strictly positive, so the value is non-zero from
+    // step 0.
+    {
+        let agg_series = series_at(&results, offset_of(&results, agg_name));
+        let pop_n = series_at(&results, offset_of(&results, "pop[north]"));
+        let pop_s = series_at(&results, offset_of(&results, "pop[south]"));
+        let scale = series_at(&results, offset_of(&results, "scale"));
+        for (step, &agg) in agg_series.iter().enumerate() {
+            let expected = (pop_n[step] + pop_s[step]) * scale[step];
+            assert!(
+                expected.abs() > 0.0,
+                "fixture defect: SUM(pop[*] * scale) must be non-zero at step {step}"
+            );
+            assert!(
+                (agg - expected).abs() <= 1e-9 * expected.abs(),
+                "step {step}: {agg_name} = {agg}, expected SUM(pop[*] * scale) = {expected}"
+            );
+        }
+    }
+
+    // GH #737 (gap #2, fixed): the scalar feedback loop
+    // `total → scale → $⁚ltm⁚agg⁚0 → grow → total` is enumerated as exactly
+    // one loop whose score composes the two agg-half link scores -- the
+    // equation references the agg name on both sides -- and does NOT
+    // reference the (uncompilable, stubbed-to-0) direct `scale→grow` form.
+    let agg_loops: Vec<&LtmSyntheticVar> = ltm_vars
         .iter()
         .filter(|v| {
-            v.name.starts_with(LOOP_SCORE_PREFIX)
-                && v.equation.source_text().contains("scale\u{2192}grow")
+            v.name.starts_with(LOOP_SCORE_PREFIX) && v.equation.source_text().contains(agg_name)
         })
         .collect();
     assert_eq!(
-        u_loops.len(),
+        agg_loops.len(),
         1,
-        "the scalar feedback loop must be enumerated as exactly one loop scored via the \
-         direct scale→grow link; loop vars: {:?}",
+        "the scalar feedback loop must be enumerated as exactly one loop scored through the \
+         synthetic agg; loop vars: {:?}",
         ltm_vars
             .iter()
             .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
             .map(|v| (v.name.as_str(), v.equation.source_text()))
             .collect::<Vec<_>>()
     );
+    let agg_loop = agg_loops[0];
+    let eq = agg_loop.equation.source_text();
+    assert!(
+        eq.contains(&format!("scale\u{2192}{agg_name}"))
+            && eq.contains(&format!("{agg_name}\u{2192}grow")),
+        "the loop score must compose the two agg-half link scores \
+         (scale→{agg_name} and {agg_name}→grow); got: {eq}"
+    );
+    assert!(
+        !eq.contains("scale\u{2192}grow"),
+        "the loop score must NOT reference the direct scale→grow link score \
+         (uncompilable, silently stubbed to 0); got: {eq}"
+    );
+    // The hop polarities are recoverable (SUM is monotone in the feeder's
+    // direction here, and `grow = 1 + agg` is a positive consumer), so the
+    // loop must classify concretely as reinforcing -- an `r{n}` id, not the
+    // degraded `u{n}` Undetermined fallback.
+    assert!(
+        agg_loop
+            .name
+            .strip_prefix(LOOP_SCORE_PREFIX)
+            .is_some_and(|id| id.starts_with('r')),
+        "the agg-routed loop must classify concretely (reinforcing, r-prefixed id), \
+         not degrade to Undetermined; got: {}",
+        agg_loop.name
+    );
+    // And -- the assertion with teeth -- the loop score must carry a real,
+    // sustained non-zero value at every discoverable step (mirrors
+    // `whole_extent_sum_agg_loop_scores_are_finite_and_sustained`): the agg
+    // halves compile, so the score is no longer silently 0.
+    {
+        let base = offset_of(&results, &agg_loop.name);
+        let s = series_at(&results, base);
+        assert!(
+            s.iter()
+                .skip(STARTUP_STEPS)
+                .all(|v| v.is_finite() && v.abs() > MEANINGFUL_SCORE),
+            "the agg-routed loop score must be sustained non-zero (> {MEANINGFUL_SCORE}) past \
+             the {STARTUP_STEPS}-step startup guard; series: {s:?}"
+        );
+    }
 
     // Every LTM score variable must be finite at every timestep -- no NaN/Inf
-    // leaks from the agg wiring or the stubbed link scores. This is the
-    // well-formedness guarantee the #533 element-graph fix preserves; the
-    // characterization of *which* scores are currently 0 (gaps #1/#2) lives in
-    // the doc comment, not as a brittle per-value assertion.
+    // leaks from the agg wiring or the link scores. This is the
+    // well-formedness guarantee the #533 element-graph fix preserves.
     for v in ltm_vars
         .iter()
         .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX) || v.name.starts_with(LINK_SCORE_PREFIX))
@@ -660,6 +725,148 @@ fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
                 );
             }
         }
+    }
+}
+
+/// GH #738, focused regression: the synthetic agg hoisted for an inlined
+/// reducer over an array *expression* with a *scalar* target --
+/// `grow = 1 + SUM(pop[*] * scale)` -- compiles and its runtime series
+/// equals the inlined reducer's value at every step (non-zero, since `pop`
+/// starts at 100/300 and `scale` is strictly positive).
+///
+/// Root cause of the prior failure: `compile_ltm_equation_fragment` lowered
+/// the agg's equation with an empty `ScopeStage0.models`, so `pop`'s
+/// dimensions could not be resolved during Expr2 lowering, the
+/// `pop[*] * scale` Op2 carried no `ArrayBounds`, and Pass-1 temp
+/// decomposition (which gates on those bounds) never hoisted the array
+/// expression out of the reducer -- codegen then rejected the fragment and
+/// the agg silently read a constant 0. The fix threads the equation's
+/// dependencies into the lowering scope, mirroring `lower_var_fragment`.
+#[test]
+fn scalar_target_agg_value_matches_inlined_reducer() {
+    let project = TestProject::new("scalar_target_agg_value")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        // Heterogeneous initial stock values so SUM(pop[*] * scale) is
+        // exercised non-trivially.
+        .array_with_ranges("pop0[region]", vec![("north", "100"), ("south", "300")])
+        .array_stock("pop[region]", "pop0[region]", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * scale)", None)
+        .build_datamodel();
+
+    let (results, ltm_vars) = run_ltm(&project);
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg = ltm_var(&ltm_vars, agg_name);
+    assert!(
+        agg.dimensions.is_empty(),
+        "the whole-extent reducer's agg must be scalar; got dims {:?}",
+        agg.dimensions
+    );
+
+    let agg_series = series_at(&results, offset_of(&results, agg_name));
+    let pop_n = series_at(&results, offset_of(&results, "pop[north]"));
+    let pop_s = series_at(&results, offset_of(&results, "pop[south]"));
+    let scale = series_at(&results, offset_of(&results, "scale"));
+    assert!(results.step_count > STARTUP_STEPS);
+    for (step, &agg_val) in agg_series.iter().enumerate() {
+        let expected = (pop_n[step] + pop_s[step]) * scale[step];
+        assert!(
+            expected.abs() > 0.0,
+            "fixture defect: SUM(pop[*] * scale) must be non-zero at step {step}"
+        );
+        assert!(
+            (agg_val - expected).abs() <= 1e-9 * expected.abs(),
+            "step {step}: {agg_name} = {agg_val}, expected SUM(pop[*] * scale) = {expected}"
+        );
+    }
+}
+
+/// GH #738 round 2: the syntactic gate that decides whether an LTM
+/// fragment's lowering needs the dependency-aware scope must cover EVERY
+/// Pass-1 temp-decomposition site, not just the agg-hoistable reducer set.
+/// `SIZE` is the demonstrated divergence: it is never hoisted into a
+/// `$⁚ltm⁚agg⁚{n}` (its link score is constant 0), but Pass-1 decomposes
+/// its argument exactly like `SUM`'s, so a fragment whose equation embeds
+/// `SIZE(<array expression>)` still needs Expr2 bounds.
+///
+/// The reachable shape: `grow = scale * SIZE(pop[*] * 2)`. The
+/// ceteris-paribus partial for `scale→grow` wraps the non-live reducer
+/// subtree atomically as `PREVIOUS(SIZE(pop[*] * 2), 0)`; LTM parsing
+/// captures the argument into a scalar helper aux whose equation is
+/// exactly `size(pop[*] * 2)` (well-typed -- SIZE of an array is a
+/// scalar -- so the GH #541 scalar-helper limitation does NOT mask it).
+/// With the gate keyed on the wrong (agg-hoistable) builtin set, the
+/// helper skipped the scoped re-lower, lost its bounds, failed codegen,
+/// and was stubbed to constant 0 -- doubly silently, since failed
+/// implicit-HELPER fragments get no `model_ltm_fragment_diagnostics`
+/// Warning (that pass covers only `model_ltm_variables().vars`; the
+/// assemble-time drop of helper fragments is tracked separately).
+///
+/// Pins the runtime values: the helper series is the element count (2.0)
+/// at every step, and the `scale→grow` link score is 0 at step 0 (the
+/// TIME = INITIAL_TIME guard) and exactly 1 thereafter (`scale` is the
+/// only driver of `grow` and is strictly increasing).
+#[test]
+fn size_reducer_previous_helper_compiles_and_is_correct() {
+    let project = TestProject::new("size_helper")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "scale * SIZE(pop[*] * 2)", None)
+        .build_datamodel();
+
+    let (results, _ltm_vars) = run_ltm(&project);
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // The PREVIOUS-capture helper for the scale→grow partial holds
+    // `size(pop[*] * 2)` == the region element count.
+    let helper_offsets: Vec<(String, usize)> = results
+        .offsets
+        .iter()
+        .filter(|(k, _)| k.as_str().contains("scale\u{2192}grow") && k.as_str().contains("arg0"))
+        .map(|(k, &o)| (k.as_str().to_string(), o))
+        .collect();
+    assert!(
+        !helper_offsets.is_empty(),
+        "expected a PREVIOUS-capture helper for the scale→grow partial; offsets: {:?}",
+        results
+            .offsets
+            .keys()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+    );
+    for (name, off) in &helper_offsets {
+        for (step, &v) in series_at(&results, *off).iter().enumerate() {
+            assert!(
+                (v - 2.0).abs() < 1e-12,
+                "step {step}: helper {name} = {v}, expected SIZE(pop[*] * 2) = 2.0 \
+                 (a 0 here means the helper fragment was silently stubbed)"
+            );
+        }
+    }
+
+    // grow = scale * 2 exactly, so the scale→grow ceteris-paribus link
+    // score is 1 at every step past the initial-time guard.
+    let ls = series_at(
+        &results,
+        offset_of(
+            &results,
+            "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}grow",
+        ),
+    );
+    assert_eq!(ls[0], 0.0, "step 0 is pinned to 0 by the TIME guard");
+    for (step, &v) in ls.iter().enumerate().skip(1) {
+        assert!(
+            (v - 1.0).abs() < 1e-9,
+            "step {step}: scale\u{2192}grow link score = {v}, expected exactly 1 \
+             (scale is grow's only driver)"
+        );
     }
 }
 
@@ -1505,4 +1712,658 @@ fn unloweable_ltm_link_score_degrades_gracefully_no_panic() {
             .map(|d| (&d.variable, &d.severity))
             .collect::<Vec<_>>()
     );
+}
+
+/// GH #737, arrayed-agg companion: a *scalar feeder* of an ARRAYED hoisted
+/// reducer (`growth[r1] = 0.01 * pool[r1] + SUM(matrix[r1,*] * scale)` --
+/// `result_dims = [r1]`, so the agg is A2A over `r1`) in a feedback loop.
+/// Such a cycle mixes scalar (`scale`) and arrayed nodes, so it was already
+/// CrossElementOrMixed and traversed `scale → $⁚ltm⁚agg⁚0[<slot>]` element
+/// hops -- but `emit_source_to_agg_link_scores` early-returned for the
+/// scalar feeder, leaving the loop score referencing a never-emitted name
+/// (silently stubbed to 0).
+///
+/// The scalar-feeder emission now produces ONE A2A link score
+/// `$⁚ltm⁚link_score⁚scale→$⁚ltm⁚agg⁚0` dimensioned over `result_dims`
+/// (the changed-last equation text is ApplyToAll-compatible: the agg's own
+/// reducer body iterated over `r1`, with only the scalar feeder frozen at
+/// PREVIOUS), and each per-slot cross-element loop references it
+/// subscripted-after-quote (`"…scale→$⁚ltm⁚agg⁚0"[a]`).
+#[test]
+fn arrayed_agg_scalar_feeder_loop_scores_sustained() {
+    let project = TestProject::new("arrayed_agg_scalar_feeder")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("r1", &["a", "b"])
+        .named_dimension("r2", &["x", "y"])
+        .array_aux("matrix[r1,r2]", "2")
+        .array_stock("pool[r1]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[r1]",
+            "0.01 * pool[r1] + SUM(matrix[r1,*] * scale)",
+            None,
+        )
+        // Closes the loop: pool -> $agg1 -> scale -> $agg0 -> growth -> pool.
+        .scalar_aux("scale", "0.001 * SUM(pool[*]) + 0.01")
+        .build_datamodel();
+
+    let (results, ltm_vars) = run_ltm(&project);
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // The scalar-feeder link score is one A2A var over the agg's result dims.
+    let feeder_score_name =
+        "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let feeder_score = ltm_var(&ltm_vars, feeder_score_name);
+    assert_eq!(
+        feeder_score.dimensions,
+        vec!["r1".to_string()],
+        "the scalar-feeder link score must be dimensioned over the agg's result dims"
+    );
+
+    // Each per-slot cross-element loop references the feeder score at its
+    // slot and is sustained non-zero past the startup guard.
+    let mut slot_loops = 0usize;
+    for v in ltm_vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+    {
+        let eq = v.equation.source_text();
+        if !eq.contains(feeder_score_name) {
+            continue;
+        }
+        slot_loops += 1;
+        let s = series_at(&results, offset_of(&results, &v.name));
+        assert!(
+            s.iter()
+                .skip(STARTUP_STEPS)
+                .all(|val| val.is_finite() && val.abs() > MEANINGFUL_SCORE),
+            "agg-routed loop score {} must be sustained non-zero; series: {s:?}",
+            v.name
+        );
+    }
+    assert_eq!(
+        slot_loops, 2,
+        "one cross-element loop per r1 slot must reference the feeder score"
+    );
+}
+
+/// GH #737 follow-up (review C1): the structural FFI loop surface
+/// (`model_detected_loops`) and the scored surface (`model_ltm_variables`)
+/// must assign IDENTICAL ids (and matching structural polarities) to the
+/// scalar-feeder reducer loops, because the runtime join is keyed purely on
+/// the id: `reclassify_loops_from_results` (and its production caller
+/// `simlin_analyze_get_loops_runtime`, plus pysimlin's
+/// `get_relative_loop_score(loop.id)`) reads `$⁚ltm⁚loop_score⁚{id}` for
+/// each detected loop.
+///
+/// Pre-fix the two surfaces diverged AND collided on these fixtures: the
+/// scored surface routed the feeder loop through the agg and recovered its
+/// polarity (r/b prefix), while the detected surface still derived polarity
+/// from the variable-level `scale→grow` link (Unknown → `u1`) -- so scored
+/// = {r1: feeder, r2: pop} vs detected = {u1: feeder, r1: pop}, and the
+/// runtime join classified the pop-growth loop from the FEEDER loop's
+/// series. On the negating-body variant that reported the pop-growth loop
+/// as confidently Balancing -- a wrong polarity with confidence 1.0 on a
+/// production FFI surface.
+///
+/// Covers both the headline fixture (`SUM(pop[*] * scale)`, feeder loop
+/// reinforcing) and the negating-body variant (`SUM(pop[*] * (1 - scale))`,
+/// feeder loop balancing -- exercising the discriminating feeder-hop
+/// polarity analysis, review I1).
+#[test]
+fn scalar_feeder_loop_cross_surface_ids_and_polarity_agree() {
+    struct Case {
+        grow_eqn: &'static str,
+        feeder_structural: DetectedLoopPolarity,
+        feeder_runtime: [DetectedLoopPolarity; 2],
+    }
+    let cases = [
+        Case {
+            grow_eqn: "1 + SUM(pop[*] * scale)",
+            feeder_structural: DetectedLoopPolarity::Reinforcing,
+            feeder_runtime: [
+                DetectedLoopPolarity::Reinforcing,
+                DetectedLoopPolarity::MostlyReinforcing,
+            ],
+        },
+        Case {
+            grow_eqn: "1 + SUM(pop[*] * (1 - scale))",
+            feeder_structural: DetectedLoopPolarity::Balancing,
+            feeder_runtime: [
+                DetectedLoopPolarity::Balancing,
+                DetectedLoopPolarity::MostlyBalancing,
+            ],
+        },
+    ];
+
+    for case in &cases {
+        let project = TestProject::new("cross_surface_feeder")
+            .with_sim_time(0.0, 6.0, 1.0)
+            .named_dimension("region", &["north", "south"])
+            .array_with_ranges("pop0[region]", vec![("north", "100"), ("south", "300")])
+            .array_stock("pop[region]", "pop0[region]", &["pgrow"], &[], None)
+            .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+            .scalar_aux("scale", "0.001 * total + 0.01")
+            .stock("total", "100", &["grow"], &[], None)
+            .flow("grow", case.grow_eqn, None)
+            .build_datamodel();
+
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("LTM-enabled compilation should succeed");
+        let source_model = sync.models["main"].source_model;
+        let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+        // The scored surface's loop-score ids.
+        let scored_ids: std::collections::BTreeSet<String> = ltm
+            .vars
+            .iter()
+            .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+            .map(|id| id.to_string())
+            .collect();
+
+        // The structural FFI surface's loops.
+        let detected = model_detected_loops(&db, source_model, sync.project).clone();
+        let detected_ids: std::collections::BTreeSet<String> =
+            detected.loops.iter().map(|l| l.id.clone()).collect();
+        assert_eq!(
+            detected_ids, scored_ids,
+            "[{}] the detected-loop ids must equal the scored loop-score ids (the runtime \
+             join and get_relative_loop_score are keyed purely on the id)",
+            case.grow_eqn
+        );
+
+        let feeder = detected
+            .loops
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "scale"))
+            .expect("the feeder loop must be detected");
+        let pop_loop = detected
+            .loops
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "pgrow"))
+            .expect("the pop-growth loop must be detected");
+        assert_eq!(
+            feeder.polarity, case.feeder_structural,
+            "[{}] the feeder loop's structural polarity must match the scored surface",
+            case.grow_eqn
+        );
+        assert_eq!(
+            pop_loop.polarity,
+            DetectedLoopPolarity::Reinforcing,
+            "[{}] the pop-growth loop is reinforcing on both surfaces",
+            case.grow_eqn
+        );
+
+        // The runtime join: reclassify each detected loop from its own
+        // loop_score series. Pre-fix the id collision made the pop-growth
+        // loop read the feeder loop's series here (confidently wrong).
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+        let mut runtime_loops = detected.loops.clone();
+        reclassify_loops_from_results(&mut runtime_loops, &results, &ltm.loop_partitions);
+        let pop_runtime = runtime_loops
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "pgrow"))
+            .unwrap();
+        assert!(
+            matches!(
+                pop_runtime.polarity,
+                DetectedLoopPolarity::Reinforcing | DetectedLoopPolarity::MostlyReinforcing
+            ),
+            "[{}] the pop-growth loop's RUNTIME polarity must stay reinforcing (a wrong \
+             classification here means the id join read another loop's series); got {:?}",
+            case.grow_eqn,
+            pop_runtime.polarity
+        );
+        let feeder_runtime = runtime_loops
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "scale"))
+            .unwrap();
+        assert!(
+            case.feeder_runtime.contains(&feeder_runtime.polarity),
+            "[{}] the feeder loop's runtime polarity must match its series sign; got {:?}",
+            case.grow_eqn,
+            feeder_runtime.polarity
+        );
+    }
+}
+
+/// GH #737 round-2 review, probe A (C1b): MULTI-AGG edges must keep the two
+/// surfaces bijective. `grow = 1 + SUM(pop[*] * scale) + SUM(q[*] * scale)`
+/// hoists TWO synthetic aggs, both reading `scale`, so the scored surface
+/// has TWO feeder loops (one per agg) -- the detected surface must expand
+/// the ThroughAgg-routed `scale → grow` edge into one loop per routed agg,
+/// or the id sets diverge and every id after the divergence joins the wrong
+/// loop's series (the round-1 failure mode again: detected r2 = pop loop
+/// read scored r2 = feeder-via-agg1's series).
+#[test]
+fn multi_agg_feeder_edge_cross_surface_ids_agree() {
+    let project = TestProject::new("multi_agg_feeder")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .array_stock("q[region]", "200", &["qgrow"], &[], None)
+        .array_flow("qgrow[region]", "q[region] * 0.04", None)
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * scale) + SUM(q[*] * scale)", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    let scored_ids: std::collections::BTreeSet<String> = ltm
+        .vars
+        .iter()
+        .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+        .map(|id| id.to_string())
+        .collect();
+    let detected = model_detected_loops(&db, source_model, sync.project).clone();
+    let detected_ids: std::collections::BTreeSet<String> =
+        detected.loops.iter().map(|l| l.id.clone()).collect();
+    assert_eq!(
+        detected_ids, scored_ids,
+        "multi-agg edge: detected ids must equal the scored loop-score ids"
+    );
+
+    // The feeder cycle must surface once PER ROUTED AGG (the bijection), and
+    // the user-facing variable lists must not leak the agg nodes.
+    let feeder_loops: Vec<_> = detected
+        .loops
+        .iter()
+        .filter(|l| l.variables.iter().any(|v| v == "scale"))
+        .collect();
+    assert_eq!(
+        feeder_loops.len(),
+        2,
+        "the feeder cycle routes through two hoisted reducers, so it must surface as two \
+         detected loops; got: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
+    );
+    for l in &detected.loops {
+        assert!(
+            !l.variables
+                .iter()
+                .any(|v| v.contains("\u{205A}agg\u{205A}")),
+            "DetectedLoop.variables must not leak synthetic agg nodes; {:?}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    // The runtime join: every detected loop reads its OWN series. All four
+    // loops here are reinforcing with sustained-positive scores, so the
+    // joint assertion with teeth is the id-set equality above plus every
+    // runtime classification staying in the reinforcing family.
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    let mut runtime_loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut runtime_loops, &results, &ltm.loop_partitions);
+    for l in &runtime_loops {
+        assert!(
+            matches!(
+                l.polarity,
+                DetectedLoopPolarity::Reinforcing | DetectedLoopPolarity::MostlyReinforcing
+            ),
+            "loop {} ({:?}) must classify reinforcing from its own series; got {:?}",
+            l.id,
+            l.variables,
+            l.polarity
+        );
+    }
+}
+
+/// GH #737 round-2 review, probe B (C1b): a feeder edge through two aggs of
+/// OPPOSING signs, plus an unrelated genuinely-Undetermined loop. Pre-fix
+/// the detected surface collapsed the feeder cycle into one Unknown loop
+/// (u1) while the scored surface had it as two definite loops (r/b) plus
+/// the unrelated loop as u1 -- so after simulation the feeder cycle was
+/// confidently classified FROM THE UNRELATED LOOP'S SERIES. With the
+/// per-agg expansion the surfaces are bijective: the feeder surfaces as one
+/// reinforcing and one balancing loop on BOTH sides, and the only
+/// u-prefixed loop is the genuinely-undetermined one.
+#[test]
+fn opposing_multi_agg_feeder_does_not_misjoin_undetermined_loop() {
+    let project = TestProject::new("opposing_multi_agg")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .array_stock("q[region]", "200", &["qgrow"], &[], None)
+        .array_flow("qgrow[region]", "q[region] * 0.04", None)
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow(
+            "grow",
+            "1 + SUM(pop[*] * scale) + SUM(q[*] * (1 - scale))",
+            None,
+        )
+        // An unrelated, genuinely structurally-Undetermined loop: the
+        // SIN(TIME) factor defeats static polarity analysis.
+        .stock("u_s", "100", &["u_f"], &[], None)
+        .flow("u_f", "u_s * 0.01 * SIN(TIME)", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    let scored_ids: std::collections::BTreeSet<String> = ltm
+        .vars
+        .iter()
+        .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+        .map(|id| id.to_string())
+        .collect();
+    let detected = model_detected_loops(&db, source_model, sync.project).clone();
+    let detected_ids: std::collections::BTreeSet<String> =
+        detected.loops.iter().map(|l| l.id.clone()).collect();
+    assert_eq!(
+        detected_ids, scored_ids,
+        "opposing multi-agg: detected ids must equal the scored loop-score ids"
+    );
+
+    // Exactly one u-prefixed loop, and it is the unrelated SIN loop -- the
+    // feeder cycle must NOT degrade to Undetermined (its two agg variants
+    // have definite, opposing polarities).
+    let u_loops: Vec<_> = detected
+        .loops
+        .iter()
+        .filter(|l| l.id.starts_with('u'))
+        .collect();
+    assert_eq!(
+        u_loops.len(),
+        1,
+        "exactly one genuinely-Undetermined loop; got: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        u_loops[0].variables.iter().any(|v| v == "u_s"),
+        "the u-prefixed loop must be the unrelated SIN loop, not the feeder cycle; got {:?}",
+        u_loops[0].variables
+    );
+    let feeder_polarities: std::collections::BTreeSet<&str> = detected
+        .loops
+        .iter()
+        .filter(|l| l.variables.iter().any(|v| v == "scale"))
+        .map(|l| match l.polarity {
+            DetectedLoopPolarity::Reinforcing => "R",
+            DetectedLoopPolarity::Balancing => "B",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        feeder_polarities,
+        ["R", "B"].into_iter().collect(),
+        "the feeder cycle surfaces as one reinforcing (via SUM(pop[*]*scale)) and one \
+         balancing (via SUM(q[*]*(1-scale))) loop"
+    );
+
+    // Runtime join: the two feeder loops classify from their OWN series with
+    // their structural signs (pre-fix the feeder read the SIN loop's series
+    // and came back confidently wrong).
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    let mut runtime_loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut runtime_loops, &results, &ltm.loop_partitions);
+    for l in &runtime_loops {
+        if !l.variables.iter().any(|v| v == "scale") {
+            continue;
+        }
+        let structural = detected
+            .loops
+            .iter()
+            .find(|d| d.id == l.id)
+            .map(|d| d.polarity)
+            .unwrap();
+        match structural {
+            DetectedLoopPolarity::Reinforcing => assert!(
+                matches!(
+                    l.polarity,
+                    DetectedLoopPolarity::Reinforcing | DetectedLoopPolarity::MostlyReinforcing
+                ),
+                "feeder loop {} runtime polarity must match its reinforcing series; got {:?}",
+                l.id,
+                l.polarity
+            ),
+            DetectedLoopPolarity::Balancing => assert!(
+                matches!(
+                    l.polarity,
+                    DetectedLoopPolarity::Balancing | DetectedLoopPolarity::MostlyBalancing
+                ),
+                "feeder loop {} runtime polarity must match its balancing series; got {:?}",
+                l.id,
+                l.polarity
+            ),
+            other => panic!(
+                "feeder loop {} has unexpected structural polarity {other:?}",
+                l.id
+            ),
+        }
+    }
+}
+
+/// GH #737 round-2 review, I1b: an ARRAYED CO-SOURCE feeder of a hoisted
+/// reducer must not get the blanket monotone-Positive hop label.
+/// `grow = 1 + SUM(pop[*] * (1 - weight[*]))` with
+/// `weight[region] = 0.001 * total + 0.01` fed back from the stock `total`:
+/// ∂agg/∂weight[e] = -pop[e] < 0, so the total → weight → grow → total loop
+/// is genuinely BALANCING. The discriminating source-hop analysis must label
+/// it Balancing on both surfaces (pre-fix: the detected surface reported
+/// Reinforcing at confidence 1.0; at the base commit it was Undetermined --
+/// strictly worse after the round-1 change).
+#[test]
+fn arrayed_co_source_feeder_loop_is_balancing() {
+    let project = TestProject::new("co_source_feeder")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .array_aux("weight[region]", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * (1 - weight[*]))", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let source_model = sync.models["main"].source_model;
+
+    // Detected surface: the weight loop must be Balancing -- and above all
+    // NOT a confident Reinforcing (the runtime weight→agg series for this
+    // fixture is wrong-signed pending a separately-tracked fix, so a wrong
+    // static label here could "agree" with wrong runtime data).
+    let detected = model_detected_loops(&db, source_model, sync.project).clone();
+    let weight_loop = detected
+        .loops
+        .iter()
+        .find(|l| l.variables.iter().any(|v| v == "weight"))
+        .expect("the weight loop must be detected");
+    assert_eq!(
+        weight_loop.polarity,
+        DetectedLoopPolarity::Balancing,
+        "∂agg/∂weight[e] = -pop[e] < 0: the weight loop is balancing; a Reinforcing label \
+         here is the I1b confidently-wrong-label regression"
+    );
+
+    // Scored surface: the per-element weight loops' ids must carry the b
+    // prefix (same discriminating hop analysis, shared helper).
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let weight_loop_ids: Vec<&str> = ltm
+        .vars
+        .iter()
+        .filter(|v| {
+            v.name.starts_with(LOOP_SCORE_PREFIX)
+                && v.equation.source_text().contains(agg_name)
+                && v.equation.source_text().contains("weight")
+        })
+        .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !weight_loop_ids.is_empty(),
+        "scored weight loops must exist; loop vars: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| (&v.name, v.equation.source_text()))
+            .collect::<Vec<_>>()
+    );
+    for id in &weight_loop_ids {
+        assert!(
+            id.starts_with('b'),
+            "scored weight loop id must be b-prefixed (balancing); got {id:?}"
+        );
+    }
+}
+
+/// GH #528 end-to-end: the strict-prefix *broadcast* arrayed-agg case --
+/// `SUM(matrix[D1,*])` as a sub-expression of an A2A body over `D1 x D2`
+/// mints an arrayed synthetic agg over `[D1]` that broadcasts into
+/// `growth[D1,D2]` -- is genuinely scored. The per-target-element
+/// `agg[d1] → growth[d1,d2]` link-score equation must pin the agg ident to
+/// the PROJECTED slot `[d1]`, not the full `(d1,d2)` target tuple: the full
+/// tuple over-subscripts the 1-D agg, so pre-fix the fragment failed to
+/// compile, was stubbed to a constant 0 (with an Assembly Warning), and
+/// every loop score through the agg was identically 0.
+///
+/// Post-fix this pins: no LTM fragment-compile warnings; the agg→growth
+/// link score is exactly 1 past the initial step (the agg is growth's only
+/// driver); and every loop score -- all of which route through the agg in
+/// this model -- is finite everywhere and sustained non-zero past the
+/// startup guard (mirroring
+/// `whole_extent_sum_agg_loop_scores_are_finite_and_sustained`).
+#[test]
+fn broadcast_agg_loop_scores_are_finite_and_sustained() {
+    let project = TestProject::new("broadcast_agg")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("matrix[D1,D2]", "100", &["mflow"], &[], None)
+        // Broadcast: the A2A body iterates D1 x D2 but the sliced reducer
+        // iterates only D1 -> arrayed agg over [D1], broadcast over D2.
+        .array_aux("growth[D1,D2]", "SUM(matrix[D1,*]) * 0.01 + 1")
+        // Same-element diagonal, closing the per-(d1,d2) loops through the
+        // agg (and the cross-D2 petal combinations within each D1 row).
+        .array_flow("mflow[D1,D2]", "growth[D1,D2]", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // No LTM synthetic fragment may fail to compile: the pre-fix failure
+    // mode was each over-subscripted agg→growth fragment stubbing to a
+    // constant 0 with an Assembly "failed to compile" Warning.
+    let fragment_failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
+        .into_iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(&d.error,
+                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile"))
+        })
+        .map(|d| d.variable.unwrap_or_default())
+        .collect();
+    assert!(
+        fragment_failures.is_empty(),
+        "no LTM synthetic fragment may fail to compile (GH #528: the broadcast agg→target \
+         link score over-subscripted the agg); failing fragments: {fragment_failures:?}"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(
+        results.step_count > STARTUP_STEPS,
+        "the fixture must simulate past the {STARTUP_STEPS}-step startup guard, got {} step(s)",
+        results.step_count
+    );
+
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The agg→growth link score is exactly 1 past step 0: `growth =
+    // agg * 0.01 + 1` and the agg is growth's only driver. A constant 0
+    // here is the GH #528 stubbed-fragment degradation.
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name = format!("{LINK_SCORE_PREFIX}{agg_name}[{d1}]\u{2192}growth[{d1},{d2}]");
+        let s = series_at(&results, offset_of(&results, &name));
+        assert_eq!(s[0], 0.0, "{name}: step 0 is pinned to 0 by the TIME guard");
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() <= 1e-9,
+                "{name} at step {step}: got {v}, expected exactly 1 (the agg is growth's \
+                 only driver; 0 means the fragment was silently stubbed -- GH #528)"
+            );
+        }
+    }
+
+    // Every feedback loop in this model routes through the synthetic agg
+    // (`growth` reads `matrix` only via the reducer). Each loop score must
+    // be finite at every step and sustained non-zero past the startup guard.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !loop_names.is_empty(),
+        "the broadcast-agg feedback model must produce at least one loop score"
+    );
+    for name in &loop_names {
+        let var = ltm_var(&ltm_vars, name);
+        assert!(
+            var.equation.source_text().contains(agg_name),
+            "every loop in this model routes through the synthetic agg; {name} does not: {}",
+            var.equation.source_text()
+        );
+        let n_slots = slot_count(var, &project.dimensions);
+        let base = offset_of(&results, name);
+        for slot in 0..n_slots {
+            let s = series_at(&results, base + slot);
+            for (step, &v) in s.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "loop score {name} slot {slot} at step {step} is not finite: {v}"
+                );
+            }
+            assert!(
+                s.iter()
+                    .skip(STARTUP_STEPS)
+                    .all(|v| v.abs() > MEANINGFUL_SCORE),
+                "loop score {name} slot {slot} must be sustained non-zero (> \
+                 {MEANINGFUL_SCORE}) past step {STARTUP_STEPS}; an all-zero agg-routed loop \
+                 score is the GH #528 degradation. series: {s:?}"
+            );
+        }
+    }
 }

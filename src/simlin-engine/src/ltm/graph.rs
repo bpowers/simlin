@@ -520,9 +520,12 @@ impl CausalGraph {
     /// internal pathway from the relevant input port to the output, and collect
     /// all stocks along that pathway.
     ///
-    /// `pub(super)` (not private) so the `ltm::tests` sibling module can drive
-    /// the GH #649 truncation-fallback path directly.
-    pub(super) fn enrich_with_module_stocks(
+    /// `pub(crate)` (not private) so the `ltm::tests` sibling module can drive
+    /// the GH #649 truncation-fallback path directly, and so the pinned-loop
+    /// validation (`db::ltm::pinned::model_pinned_loops`) can apply the SAME
+    /// stock semantics the enumerator does when checking that a pinned cycle
+    /// passes through state (GH #673).
+    pub(crate) fn enrich_with_module_stocks(
         &self,
         circuit: &[Ident<Canonical>],
         mut stocks: Vec<Ident<Canonical>>,
@@ -1263,6 +1266,22 @@ impl CausalGraph {
         analyze_agg_consumer_polarity(ast, reducer_subexpr_text, agg_name, &self.variables)
     }
 
+    /// Polarity of a `feeder → $⁚ltm⁚agg` hop: the discriminating analysis of
+    /// the agg's (lowered) body with respect to a *scalar feeder* referenced
+    /// inside the reducer (GH #737 review follow-up). `agg_ast` is the agg's
+    /// own lowered equation (the caller reconstructs it from
+    /// `AggNode::equation_text`, since the agg has no node in this
+    /// variable-level graph). See
+    /// [`super::polarity::analyze_source_to_agg_polarity`] for the
+    /// positive-by-convention Mul rule and the Unknown fallback.
+    pub(crate) fn source_to_agg_polarity(
+        &self,
+        feeder: &Ident<Canonical>,
+        agg_ast: &crate::ast::Ast<crate::ast::Expr2>,
+    ) -> LinkPolarity {
+        super::polarity::analyze_source_to_agg_polarity(agg_ast, feeder, &self.variables)
+    }
+
     /// Compute per-link polarity for all edges in the causal graph.
     ///
     /// Requires `variables` to be populated for accurate results;
@@ -1382,6 +1401,18 @@ fn all_module_stocks(
 ///   distinguishes per-element cross-element loops on arrayed models), so it
 ///   fully orders any tied group, making `assign_loop_ids` a pure function of
 ///   loop content rather than enumeration order.
+///
+/// Synthetic `$⁚ltm⁚agg⁚{n}` nodes are INCLUDED in the key like any other
+/// node (GH #737 / review C1b). Both id-bearing surfaces now carry the agg
+/// hops explicitly in their links -- the scored loops are built from the
+/// element graph and `model_detected_loops` splices its ThroughAgg-routed
+/// edges through the same agg nodes
+/// (`db::ltm::expand_loops_through_routed_aggs`) -- so the keys match
+/// EXACTLY across surfaces, two loops differing only in WHICH agg they route
+/// through stay totally ordered (`agg⁚0` vs `agg⁚1`), and the cross-surface
+/// numbering never leans on a tied-key stable-sort fallback. (A round-1 fix
+/// stripped agg names here to reconcile the then-agg-free detected surface;
+/// that left multi-agg sibling loops key-tied and is reverted.)
 fn loop_id_sort_key(loop_item: &Loop) -> (String, Vec<String>) {
     let mut vars: Vec<String> = loop_item
         .links

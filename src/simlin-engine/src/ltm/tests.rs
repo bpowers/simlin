@@ -7,7 +7,8 @@ use super::indexed::IndexedGraph;
 use super::partitions::CyclePartitions;
 use super::polarity::{
     analyze_expr_polarity_with_context, analyze_graphical_function_polarity, analyze_link_polarity,
-    expr_references_var, flip_polarity, is_negative_constant, is_positive_constant,
+    analyze_source_to_agg_polarity, expr_references_var, flip_polarity, is_negative_constant,
+    is_positive_constant,
 };
 use super::types::{
     Link, LinkPolarity, Loop, LoopPolarity, POLARITY_CONFIDENCE_THRESHOLD, TruncatedByBudget,
@@ -5894,4 +5895,94 @@ proptest! {
         // API boundary (rotation, SCC ordering, empty-SCC handling).
         assert_johnson_matches_tiernan(&cg);
     }
+}
+
+/// GH #737 follow-up (review I1): the *discriminating* feeder-hop polarity
+/// analysis for `scalar feeder -> $⁚ltm⁚agg⁚{n}` hops. Unlike the blanket
+/// monotone-Positive labeling (sound only for the reduced source's own
+/// elements), this analyzes d(reducer body)/d(feeder) with the
+/// positive-by-convention Mul rule (the existing Div-arm convention,
+/// extended to a Mul whose feeder-independent co-factor is a bare named
+/// quantity): `pop[*] * scale` -> Positive, `pop[*] * (1 - scale)` ->
+/// Negative, and an indeterminate body falls back to Unknown -- NOT
+/// Positive.
+#[test]
+fn test_source_to_agg_polarity_discriminates_body_sign() {
+    use crate::ast::{Ast, Expr2, IndexExpr2};
+    let loc = crate::ast::Loc::default();
+    let scale: Ident<Canonical> = Ident::new("scale");
+    let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), v, loc);
+    let op2 =
+        |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
+    let pop_wild = || {
+        Expr2::Subscript(
+            Ident::new("pop"),
+            vec![IndexExpr2::Wildcard(loc)],
+            None,
+            loc,
+        )
+    };
+    let sum = |arg: Expr2| Expr2::App(crate::builtins::BuiltinFn::Sum(Box::new(arg)), None, loc);
+    let empty_vars = HashMap::new();
+
+    // SUM(pop[*] * scale): the co-factor is a bare arrayed reference,
+    // positive by the SD labeling convention -> Positive.
+    let headline = Ast::Scalar(sum(op2(BinaryOp::Mul, pop_wild(), var("scale"))));
+    assert_eq!(
+        analyze_source_to_agg_polarity(&headline, &scale, &empty_vars),
+        LinkPolarity::Positive,
+        "SUM(pop[*] * scale) w.r.t. scale must be Positive under the convention Mul rule"
+    );
+
+    // SUM(pop[*] * (1 - scale)): the feeder enters through a negation ->
+    // Negative (the review's demonstrated counterexample to the blanket
+    // monotone-Positive label).
+    let negating = Ast::Scalar(sum(op2(
+        BinaryOp::Mul,
+        pop_wild(),
+        op2(BinaryOp::Sub, cnst(1.0), var("scale")),
+    )));
+    assert_eq!(
+        analyze_source_to_agg_polarity(&negating, &scale, &empty_vars),
+        LinkPolarity::Negative,
+        "SUM(pop[*] * (1 - scale)) w.r.t. scale must be Negative"
+    );
+
+    // SUM((k - pop[*]) * scale): the co-factor is a COMPOUND expression --
+    // its value sign is derived, not a convention -- so the hop polarity is
+    // indeterminate and must fall back to Unknown (never a confident wrong
+    // label).
+    let compound = Ast::Scalar(sum(op2(
+        BinaryOp::Mul,
+        op2(BinaryOp::Sub, var("k"), pop_wild()),
+        var("scale"),
+    )));
+    assert_eq!(
+        analyze_source_to_agg_polarity(&compound, &scale, &empty_vars),
+        LinkPolarity::Unknown,
+        "a compound co-factor defeats the value convention -> Unknown"
+    );
+
+    // STDDEV(pop[*] * scale): a non-monotone reducer stays Unknown even
+    // with a convention-positive body.
+    let stddev = Ast::Scalar(Expr2::App(
+        crate::builtins::BuiltinFn::Stddev(Box::new(op2(BinaryOp::Mul, pop_wild(), var("scale")))),
+        None,
+        loc,
+    ));
+    assert_eq!(
+        analyze_source_to_agg_polarity(&stddev, &scale, &empty_vars),
+        LinkPolarity::Unknown,
+        "a non-monotone reducer (STDDEV) stays Unknown"
+    );
+
+    // The plain analyzer (no convention Mul rule) must be unchanged: the
+    // headline body is Unknown there -- the convention applies ONLY to the
+    // feeder-hop analysis, never to general link polarity.
+    assert_eq!(
+        analyze_link_polarity(&headline, &scale, &empty_vars),
+        LinkPolarity::Unknown,
+        "the general analyzer must NOT adopt the convention Mul rule"
+    );
 }

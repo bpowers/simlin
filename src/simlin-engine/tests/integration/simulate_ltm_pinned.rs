@@ -13,9 +13,9 @@
 
 use simlin_engine::datamodel;
 use simlin_engine::db::{
-    LtmMode, LtmSyntheticVar, SimlinDb, collect_all_diagnostics, compile_project_incremental,
-    model_detected_loops, model_ltm_mode, model_ltm_variables, set_project_ltm_discovery_mode,
-    set_project_ltm_enabled, sync_from_datamodel_incremental,
+    DetectedLoopPolarity, LtmMode, LtmSyntheticVar, SimlinDb, collect_all_diagnostics,
+    compile_project_incremental, model_detected_loops, model_ltm_mode, model_ltm_variables,
+    set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{Vm, canonicalize};
@@ -986,6 +986,208 @@ fn user_forced_discovery_on_small_model_surfaces_pin() {
     );
 }
 
+/// GH #737, pinned twin of
+/// `ltm_array_agg::scalar_feeder_scalar_target_loop_compiles_and_is_well_formed`:
+/// a pinned pure-scalar loop whose path re-enters through a *scalar feeder* of
+/// a hoisted reducer (`grow = 1 + SUM(pop[*] * scale)`, `scale` fed back from
+/// the scalar stock `total`) must route through the synthetic
+/// `$⁚ltm⁚agg⁚0` node, exactly like the enumerated loop.
+///
+/// Pre-fix, `model_pinned_loops`' `CycleClass::PureScalar` arm built the pin's
+/// `Loop` straight from the variable-level cycle, so the pin's score composed
+/// the direct `scale→grow` link -- which has no compilable link-score fragment
+/// (the GH #541-class `PREVIOUS(pop[*])` capture) and silently read 0. With
+/// `classify_cycle` treating ThroughAgg-traversing cycles as
+/// CrossElementOrMixed, the pin expands on the element graph and its score
+/// composes the two (compilable) agg-half link scores instead.
+///
+/// Discovery mode is forced so the pin path is exercised end-to-end (in
+/// exhaustive mode the pin dedups onto the enumerated loop, which the
+/// non-pinned twin already covers).
+#[test]
+fn pinned_scalar_feeder_agg_loop_scored_in_discovery_mode() {
+    let mut project = TestProject::new("pinned_scalar_feeder_agg")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_with_ranges("pop0[region]", vec![("north", "100"), ("south", "300")])
+        .array_stock("pop[region]", "pop0[region]", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * scale)", None)
+        .build_datamodel();
+    assign_uids(&mut project);
+    pin_loop(
+        &mut project,
+        "main",
+        "reducer loop",
+        &["total", "scale", "grow"],
+    );
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // The pin must resolve (not land in `invalid`) and its loop score must
+    // route through the agg halves, never the direct scale→grow link.
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let pin_score = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1")
+        .unwrap_or_else(|| {
+            panic!(
+                "the pinned loop must emit a pin1 loop_score; vars: {:?}",
+                ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+            )
+        });
+    let eq = pin_score.equation.source_text();
+    assert!(
+        eq.contains(&format!("scale\u{2192}{agg_name}"))
+            && eq.contains(&format!("{agg_name}\u{2192}grow")),
+        "the pinned loop score must compose the agg-half link scores; got: {eq}"
+    );
+    assert!(
+        !eq.contains("scale\u{2192}grow"),
+        "the pinned loop score must NOT reference the direct (uncompilable) scale→grow link \
+         score; got: {eq}"
+    );
+
+    // And the simulated pin score is sustained non-zero past the two-step
+    // startup guard -- the agg halves compile, so the score is no longer
+    // silently 0.
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    let off = *results
+        .offsets
+        .get(pin_score.name.as_str())
+        .expect("pin1 loop_score must have a results slot");
+    const STARTUP_STEPS: usize = 2;
+    let series: Vec<f64> = results.iter().map(|row| row[off]).collect();
+    assert!(
+        series.len() > STARTUP_STEPS,
+        "fixture must simulate past the startup guard"
+    );
+    assert!(
+        series
+            .iter()
+            .skip(STARTUP_STEPS)
+            .all(|v| v.is_finite() && v.abs() > 1e-6),
+        "the pinned agg-routed loop score must be sustained non-zero past the startup guard; \
+         series: {series:?}"
+    );
+
+    // FFI surface (discovery): the pin is reported once, named, and its
+    // variable list does NOT leak the synthetic agg node (aggs are an LTM
+    // implementation detail, trimmed from reported loops like macro
+    // internals).
+    let detected = model_detected_loops(&db, source_model, sync.project).clone();
+    assert_eq!(
+        detected.loops.len(),
+        1,
+        "discovery mode must surface only the pin; got: {:?}",
+        detected.loops.iter().map(|l| &l.id).collect::<Vec<_>>()
+    );
+    assert_eq!(detected.loops[0].name.as_deref(), Some("reducer loop"));
+    assert!(
+        !detected.loops[0]
+            .variables
+            .iter()
+            .any(|v| v.contains("\u{205A}agg\u{205A}")),
+        "the reported pin must not leak the synthetic agg node; variables: {:?}",
+        detected.loops[0].variables
+    );
+    // The agg hops' polarities are recoverable (SUM is monotone, `grow =
+    // 1 + agg` is a positive consumer), so the pin's structural polarity
+    // must classify concretely instead of degrading to Undetermined.
+    assert_eq!(
+        detected.loops[0].polarity,
+        DetectedLoopPolarity::Reinforcing,
+        "the pinned agg-routed loop's polarity must be recovered, not Undetermined"
+    );
+}
+
+/// GH #737, exhaustive-mode companion of
+/// `pinned_scalar_feeder_agg_loop_scored_in_discovery_mode`: a pin whose
+/// cycle routes through a hoisted reducer's synthetic agg must still DEDUP
+/// onto the enumerated loop (one loop score, the pin's name transferred onto
+/// the surviving enumerated `DetectedLoop`).
+///
+/// The dedup keys must be agg-insensitive: the scored loop's links traverse
+/// `scale → $⁚ltm⁚agg⁚0 → grow` while `model_detected_loops`' enumerated
+/// (variable-level) cycle is `total → scale → grow`; comparing raw link
+/// rotations would treat them as different loops, double-surfacing the pin
+/// and dropping the name transfer.
+#[test]
+fn pinned_scalar_feeder_agg_loop_dedups_in_exhaustive_mode() {
+    let mut project = TestProject::new("pinned_scalar_feeder_agg_ex")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_with_ranges("pop0[region]", vec![("north", "100"), ("south", "300")])
+        .array_stock("pop[region]", "pop0[region]", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * scale)", None)
+        .build_datamodel();
+    assign_uids(&mut project);
+    pin_loop(
+        &mut project,
+        "main",
+        "reducer loop",
+        &["total", "scale", "grow"],
+    );
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+
+    // The synthetic-var surface: exactly one loop score for the scalar
+    // feedback cycle (the enumerated agg-routed loop), no extra pin1.
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("loop_score\u{205A}pin")),
+        "a pin duplicating the enumerated agg-routed loop must dedup onto it; vars: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.contains("loop_score"))
+            .map(|v| &v.name)
+            .collect::<Vec<_>>()
+    );
+
+    // The FFI surface: one loop for the cycle, carrying the pin's name.
+    let detected = model_detected_loops(&db, source_model, sync.project).clone();
+    let scalar_cycle_loops: Vec<_> = detected
+        .loops
+        .iter()
+        .filter(|l| l.variables.iter().any(|v| v == "scale"))
+        .collect();
+    assert_eq!(
+        scalar_cycle_loops.len(),
+        1,
+        "the pinned cycle must surface exactly once (deduped); got: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        scalar_cycle_loops[0].name.as_deref(),
+        Some("reducer loop"),
+        "the surviving enumerated loop must inherit the pin's name"
+    );
+}
+
 /// GH #653 / pin-dims.AC8.1: pin one of C-LEARN's climate feedback loops --
 /// "Feedback cooling", the planet's blackbody-radiation balancing loop -- and
 /// assert it is genuinely scored on the real model.
@@ -1161,5 +1363,197 @@ fn pinned_loop_carries_cycle_partition_in_discovery_mode() {
     assert!(
         !stocks.contains("stock_0"),
         "the pinned loop's partition must not contain the disjoint ring stocks"
+    );
+}
+
+/// Two-model fixture for the GH #673 pin-through-module tests: `main` has the
+/// 3-node cycle `driver -> sub (module) -> reader -> driver` whose only state
+/// (if any) lives inside the `sub` sub-model, supplied by `sub_vars` so each
+/// test picks a stock-carrying smooth or a stockless passthrough body. The
+/// disjoint `bystander` stock keeps the parent model stock-bearing so
+/// `model_ltm_variables` runs at all (its stock-free early return looks only
+/// at parent-level stocks).
+fn module_pin_project(sub_vars: Vec<datamodel::Variable>) -> datamodel::Project {
+    let mut p = TestProject::new("module_pin")
+        .with_sim_time(0.0, 12.0, 0.25)
+        .aux("driver", "100 + reader * 0.5", None)
+        .aux("reader", "sub.output", None)
+        .stock("bystander", "10", &["bg"], &[], None)
+        .flow("bg", "1", None)
+        .build_datamodel();
+    p.models[0]
+        .variables
+        .push(datamodel::Variable::Module(datamodel::Module {
+            ident: "sub".to_string(),
+            model_name: "sub".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![datamodel::ModuleReference {
+                src: "driver".to_string(),
+                dst: "sub.input".to_string(),
+            }],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    p.models.push(datamodel::Model {
+        name: "sub".to_string(),
+        sim_specs: None,
+        variables: sub_vars,
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+    assign_uids(&mut p);
+    p
+}
+
+fn sub_aux(ident: &str, eqn: &str) -> datamodel::Variable {
+    datamodel::Variable::Aux(datamodel::Aux {
+        ident: ident.to_string(),
+        equation: datamodel::Equation::Scalar(eqn.to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    })
+}
+
+/// A smooth-like sub-model body: `output` (a stock) chases `input` with a
+/// 3-time-unit adjustment, so the sub-model carries the loop's only state.
+fn smooth_sub_vars() -> Vec<datamodel::Variable> {
+    vec![
+        sub_aux("input", "0"),
+        datamodel::Variable::Flow(datamodel::Flow {
+            ident: "chg".to_string(),
+            equation: datamodel::Equation::Scalar("(input - output) / 3".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }),
+        datamodel::Variable::Stock(datamodel::Stock {
+            ident: "output".to_string(),
+            equation: datamodel::Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["chg".to_string()],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }),
+    ]
+}
+
+/// GH #673: a pinned loop whose ONLY stock lives inside a module it traverses
+/// (a smooth-like sub-model) must validate and be scored. The old `has_stock`
+/// validation compared the pin's cycle against the PARENT-level stock set
+/// only, so the module-borne state was invisible and the pin was rejected as
+/// "contains no stock" -- even though the enumerator finds and scores the
+/// same cycle (it enriches module-internal stocks instead of filtering).
+/// Discovery mode makes the defect observable end-to-end: the pin is the only
+/// way to score the loop there.
+#[test]
+fn pinned_loop_through_module_internal_stock_scored() {
+    let mut project = module_pin_project(smooth_sub_vars());
+    pin_loop(
+        &mut project,
+        "main",
+        "module smooth loop",
+        &["driver", "sub", "reader"],
+    );
+
+    let (results, loop_partitions, _ltm_vars) = run_ltm_discovery(&project);
+
+    let pin_loop_var = "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1";
+    assert!(
+        results.offsets.contains_key(pin_loop_var),
+        "a pin whose only stock is module-internal must emit its loop_score; \
+         loop-score offsets: {:?}",
+        results
+            .offsets
+            .keys()
+            .filter(|k| k.as_str().contains("loop_score"))
+            .collect::<Vec<_>>()
+    );
+
+    // The simulated score must be finite at every saved step and non-zero
+    // once behavior begins (the smooth chases the rising driver, so the loop
+    // genuinely transfers signal).
+    let off = results.offsets[pin_loop_var];
+    let mut saw_nonzero = false;
+    for step in 0..results.step_count {
+        let v = results.data[step * results.step_size + off];
+        assert!(
+            v.is_finite(),
+            "pinned loop_score must be finite at every step; step {step} = {v}"
+        );
+        if v != 0.0 {
+            saw_nonzero = true;
+        }
+    }
+    assert!(
+        saw_nonzero,
+        "pinned loop_score should be non-zero at some step once behavior begins"
+    );
+
+    // The pin registers a partition entry; its only stock is module-internal,
+    // which the parent-level partition map deliberately does not key (see
+    // `CyclePartitions::partition_for_loop`), so the single slot resolves to
+    // `None` rather than being dropped.
+    assert_eq!(
+        loop_partitions.get("pin1"),
+        Some(&vec![None]),
+        "module-internal-stock pin registers a single unresolved partition slot"
+    );
+}
+
+/// GH #673 (the rejection direction): a pinned cycle through a stockless
+/// PASSTHROUGH module -- no stock anywhere on the cycle, inside the module or
+/// out -- is a purely-instantaneous circular dependency, not a feedback loop.
+/// It must STILL be rejected with the clear "contains no stock" diagnostic
+/// and emit no (silent-zero) pin loop_score.
+#[test]
+fn pinned_loop_through_stockless_passthrough_rejected() {
+    let mut project =
+        module_pin_project(vec![sub_aux("input", "0"), sub_aux("output", "input * 2")]);
+    pin_loop(
+        &mut project,
+        "main",
+        "instantaneous",
+        &["driver", "sub", "reader"],
+    );
+
+    // The passthrough cycle is an algebraic circular dependency, so the model
+    // does not compile; pin validation happens at the causal-graph level and
+    // must surface its own clear diagnostic alongside the compile error.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+
+    let has_no_stock_warning = diagnostics.iter().any(|d| {
+        let msg = format!("{:?}", d.error);
+        msg.contains("instantaneous") && msg.contains("contains no stock")
+    });
+    assert!(
+        has_no_stock_warning,
+        "a stockless passthrough pin must surface the no-stock diagnostic; got: {:?}",
+        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("loop_score\u{205A}pin")),
+        "a rejected pin must not emit a loop_score var"
     );
 }

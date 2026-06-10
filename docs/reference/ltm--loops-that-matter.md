@@ -266,6 +266,26 @@ After computing one timestep dt, for each non-stock variable `target`:
 This roughly doubles the number of equation evaluations vs. normal simulation (one
 re-evaluation per input per variable).
 
+> **Simlin implementation note: changed-last attribution for scalar reducer feeders.**
+> The partial above is the "changed-first" convention: the isolated input `x` is read at
+> its *current* value while every other input is frozen at its *previous* value. Simlin
+> uses changed-first everywhere except one case: the link score for a **scalar feeder of
+> a hoisted array reducer** (`scale` in `SUM(pop[*] * scale)`, scored as the
+> `scale -> $...agg...` half of the routed edge). There the changed-first partial would
+> have to freeze the reducer's arrayed argument as an inline lagged whole-array read
+> (`SUM(PREVIOUS(pop[*]) * scale)`), which Simlin's equation compiler rejects; expressing
+> it would require synthesizing a per-element frozen helper per arrayed reference (a cost
+> and complexity tradeoff, not an impossibility). Instead Simlin emits the algebraically
+> dual **"changed-last"** attribution for that one hop:
+> `Delta_x(z) = z(x_current, w_current) - z(x_previous, w_current)` -- only the scalar
+> feeder is frozen, every array reference stays live. Both conventions are
+> first-order-equal discrete attributions of `Delta(z)` to `Delta(x)`; for a bilinear
+> body such as
+> `SUM(pop[*] * scale)` the feeder's changed-last half is exactly complementary to the
+> array rows' changed-first halves (the per-input deltas sum identically to `Delta(z)`),
+> so the loop-score product loses nothing. The two renderings differ only in which
+> step's co-factor weights the feeder's change.
+
 ### 3.2 Flow-to-Stock Link Score
 
 For a stock S with inflow i and outflow o, the link scores from the flows to the stock
