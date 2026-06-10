@@ -825,7 +825,17 @@ pub fn model_ltm_implicit_var_info(
                     })
                     .unwrap_or(1)
             } else {
-                1
+                // A non-module helper is usually a scalar aux (1 slot), but
+                // an ARRAYED capture helper -- the GH #541 arrayed
+                // `PREVIOUS`/`INIT` capture, extended to array-valued builtin
+                // subtrees like `rank(pop, 1)` by GH #742 -- occupies
+                // product(dim lengths) slots. Laid out at size 1 it would
+                // overlap its successors' slots and consumers would read it
+                // as scalar.
+                ltm_implicit_helper_size(
+                    crate::db::project_dimensions_context(db, project),
+                    implicit_dm_var,
+                )
             };
 
             result.insert(
@@ -844,6 +854,29 @@ pub fn model_ltm_implicit_var_info(
     }
 
     result
+}
+
+/// Slot count of a non-module LTM implicit helper: 1 for a scalar helper
+/// aux, product(dim lengths) for an arrayed (`Equation::ApplyToAll` /
+/// `Equation::Arrayed`) capture helper. An unknown dimension name degrades
+/// to 1 per axis (defensive -- the helper's own fragment compile rejects it
+/// loudly).
+fn ltm_implicit_helper_size(
+    dim_ctx: &crate::dimensions::DimensionsContext,
+    var: &datamodel::Variable,
+) -> usize {
+    match var.get_equation() {
+        Some(datamodel::Equation::ApplyToAll(dim_names, _))
+        | Some(datamodel::Equation::Arrayed(dim_names, _, _, _)) => dim_names
+            .iter()
+            .map(|n| {
+                let canonical = crate::common::CanonicalDimensionName::from_raw(n);
+                dim_ctx.get(&canonical).map(|d| d.len()).unwrap_or(1)
+            })
+            .product::<usize>()
+            .max(1),
+        _ => 1,
+    }
 }
 
 /// The module-typed projection of [`model_ltm_implicit_var_info`]: each

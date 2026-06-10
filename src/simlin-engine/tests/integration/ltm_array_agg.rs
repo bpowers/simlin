@@ -3979,3 +3979,155 @@ fn module_only_root_with_pinned_index_sub_scores_cleanly() {
         "root loop score must carry signal once behavior begins; got {series:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GH #742: PREVIOUS-captured array-valued non-reducing builtins (RANK)
+// ---------------------------------------------------------------------------
+
+/// GH #742, engine leg: `PREVIOUS(RANK(pop, 1))` in an apply-to-all equation
+/// must compile and read the per-element rank of the *lagged* array.
+///
+/// `RANK(arr, dir)` is array-valued (the rank of each element -- Vensim's
+/// VECTOR RANK), but `builtins_visitor::arg_has_bare_var_ref` treated every
+/// `reducer_kind_from_name` builtin as scalar-collapsing and refused to
+/// descend, so the PREVIOUS capture landed in a per-element SCALAR helper
+/// whose equation `rank(pop, 1)` is ill-typed (array-valued in scalar
+/// context) and the model failed to compile. Treating RANK as
+/// array-valued routes the capture through the GH #541 ARRAYED helper
+/// (`Equation::ApplyToAll` over the active dims, referenced at the active
+/// element), which compiles exactly like the model's own A2A equation.
+#[test]
+fn previous_of_rank_compiles_per_element() {
+    let project = TestProject::new("prev_rank")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("Region", &["north", "south"])
+        .array_with_ranges("seed[Region]", vec![("north", "100"), ("south", "200")])
+        .array_stock("pop[Region]", "seed[Region]", &["inflow"], &[], None)
+        .array_flow("inflow[Region]", "pop[Region] * 0.01", None)
+        .array_aux("prev_rank[Region]", "PREVIOUS(RANK(pop, 1))")
+        .build_datamodel();
+
+    let results = run_plain_sim(&project);
+    let north = series_at(&results, offset_of(&results, "prev_rank[north]"));
+    let south = series_at(&results, offset_of(&results, "prev_rank[south]"));
+    // PREVIOUS(x) defaults to 0 at the initial step; pop[north] < pop[south]
+    // throughout, so the lagged ascending ranks are a constant [1, 2].
+    assert_eq!(north[0], 0.0, "PREVIOUS defaults to 0 at t=0");
+    assert_eq!(south[0], 0.0, "PREVIOUS defaults to 0 at t=0");
+    assert!(
+        north.iter().skip(1).all(|&v| v == 1.0),
+        "prev_rank[north] must read the lagged rank 1; got {north:?}"
+    );
+    assert!(
+        south.iter().skip(1).all(|&v| v == 2.0),
+        "prev_rank[south] must read the lagged rank 2; got {south:?}"
+    );
+}
+
+/// GH #742, LTM leg: a link-score partial that freezes an array-valued
+/// non-reducing builtin subtree (`PREVIOUS(rank(pop, 1))` inside the
+/// `scale -> grow` partial of `grow[Region] = scale[Region] * RANK(pop, 1)`)
+/// must compile through the arrayed capture helper and score its true value.
+///
+/// With distinct, order-preserving populations the ranks are constant, so
+/// `grow` is linear in `scale` with a frozen coefficient and the
+/// changed-first partial reproduces delta-grow exactly: the score is +1 per
+/// element from the first post-initial step (pre-fix it read a constant
+/// -100-class value off the 0-stubbed scalar helpers).
+///
+/// The one remaining degradation in this fixture is OUT of #742's scope:
+/// `enumerate_agg_nodes` hoists the whole-extent `RANK(pop, 1)` into a
+/// scalar `$⁚ltm⁚agg⁚0` whose own (array-valued) equation cannot compile --
+/// the "RANK as the scored reducer itself" path (docs/tech-debt.md entry
+/// 27's family). That failure is loud (one synthetic-variable Warning,
+/// pinned here) and zeroes only the agg-routed loop scores.
+#[test]
+fn rank_frozen_subtree_link_score_scores_correctly() {
+    let project = TestProject::new("gh742_rank")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["north", "south"])
+        .array_with_ranges("seed[Region]", vec![("north", "100"), ("south", "200")])
+        .array_aux("scale[Region]", "pop[Region] * 0.01")
+        .array_aux("grow[Region]", "scale[Region] * RANK(pop, 1)")
+        .array_flow("inflow[Region]", "grow[Region]", None)
+        .array_stock("pop[Region]", "seed[Region]", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The capture helpers compile: the ONLY degradation left is the
+    // out-of-scope RANK-hoisted scalar agg (see the doc comment).
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "only the RANK-hoisted agg may warn; got: {warnings:?}"
+    );
+    assert_eq!(
+        warnings[0].variable.as_deref(),
+        Some("$\u{205A}ltm\u{205A}agg\u{205A}0"),
+        "the remaining warning must be the RANK-hoisted synthetic agg; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // The frozen-RANK capture helper is ONE arrayed (deduped) helper whose
+    // slots read the current-step per-element ranks -- constant [1, 2].
+    let helper =
+        "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}grow\u{205A}0\u{205A}arg0";
+    let helper_base = offset_of(&results, helper);
+    let helper_north = series_at(&results, helper_base);
+    let helper_south = series_at(&results, helper_base + 1);
+    assert!(
+        helper_north.iter().all(|&v| v == 1.0),
+        "the arrayed capture helper's north slot must hold rank 1; got {helper_north:?}"
+    );
+    assert!(
+        helper_south.iter().all(|&v| v == 2.0),
+        "the arrayed capture helper's south slot must hold rank 2; got {helper_south:?}"
+    );
+
+    // `grow` is linear in `scale` with the (constant) rank as coefficient,
+    // so the scale -> grow link score is exactly +1 per element.
+    let score_name = format!("{LINK_SCORE_PREFIX}scale\u{2192}grow");
+    let score = ltm_var(&ltm.vars, &score_name);
+    let base = offset_of(&results, &score.name);
+    for slot in 0..slot_count(score, &project.dimensions) {
+        let series = series_at(&results, base + slot);
+        assert_eq!(series[0], 0.0, "initial-step guard pins slot {slot} to 0");
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "scale->grow slot {slot} step {step} must score +1; got {series:?}"
+            );
+        }
+    }
+
+    // The direct (non-agg-routed) per-element loop -- the A2A loop over
+    // Region (pop -> scale -> grow -> inflow -> pop) -- scores +1 once the
+    // flow-to-stock startup guard clears.
+    let loop_var = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .find(|v| v.dimensions == vec!["Region".to_string()])
+        .expect("the per-element pop/scale/grow/inflow loop must be scored");
+    let base = offset_of(&results, &loop_var.name);
+    for slot in 0..slot_count(loop_var, &project.dimensions) {
+        let series = series_at(&results, base + slot);
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
+            assert!(
+                (v - 1.0).abs() < 1e-6,
+                "loop score slot {slot} step {step} must be +1; got {series:?}"
+            );
+        }
+    }
+}

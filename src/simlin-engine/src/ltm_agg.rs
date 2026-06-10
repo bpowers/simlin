@@ -148,6 +148,25 @@ pub(crate) fn reducer_kind_from_name(name: &str, arity: usize) -> Option<Reducer
     }
 }
 
+/// `true` when `name`/`arity` (lowercase, like [`reducer_kind_from_name`])
+/// names an array builtin whose RESULT is a scalar -- the genuinely reducing
+/// set (`SUM`, 1-arg `MEAN`/`MIN`/`MAX`, `STDDEV`, `SIZE`).
+///
+/// `RANK` is recognized as a reducer by [`reducer_kind_from_name`] (the agg
+/// machinery enumerates and scores it like one), but `RANK(arr, dir)` is
+/// ARRAY-valued -- the rank of each element, Vensim's VECTOR RANK -- so any
+/// consumer deciding "does this subtree collapse to a scalar" must exclude
+/// it (GH #742): treating a frozen `PREVIOUS(RANK(arr, dir))` subtree as
+/// scalar routes the capture into a per-element *scalar* helper whose
+/// equation is ill-typed (array-valued in scalar context), the helper
+/// fragment fails, and the consuming score silently corrupts. The two
+/// consumers are `builtins_visitor::arg_has_bare_var_ref` (the GH #541
+/// arrayed-capture gate) and `ltm_augment::expr_is_array_slice_valued` (the
+/// GH #743 unfreezable-`PREVIOUS` detector).
+pub(crate) fn reducer_collapses_to_scalar(name: &str, arity: usize) -> bool {
+    reducer_kind_from_name(name, arity).is_some() && name != "rank"
+}
+
 /// [`reducer_kind_from_name`] applied to a `BuiltinFn`.
 ///
 /// Generic over the contained expression type because it only inspects the

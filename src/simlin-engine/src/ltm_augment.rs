@@ -1117,8 +1117,17 @@ fn expr_is_array_slice_valued(expr: &Expr0) -> bool {
             .iter()
             .any(|idx| matches!(idx, IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(_, _))),
         Expr0::App(UntypedBuiltinFn(name, args), _) => {
-            // A reducer's result is scalar regardless of slices inside it.
-            if is_array_reducer_name(name, args.len()) {
+            // A scalar-collapsing reducer's result is scalar regardless of
+            // slices inside it. RANK is in the reducer table but is
+            // ARRAY-valued (GH #742), so it is transparent here: a slice in
+            // its argument stays uncollapsed (`PREVIOUS(rank(matrix[d1,*],1))`
+            // is unfreezable -- the slice-bearing capture lands in a scalar
+            // helper, where `rank(...)` is ill-typed), while a bare-name
+            // argument (`PREVIOUS(rank(pop, 1))`) stays freezable because
+            // `make_temp_arg` captures it into an ARRAYED helper (the GH #541
+            // path, extended to array-valued builtins by the same GH #742
+            // predicate in `arg_has_bare_var_ref`).
+            if crate::ltm_agg::reducer_collapses_to_scalar(&name.to_ascii_lowercase(), args.len()) {
                 false
             } else {
                 args.iter().any(expr_is_array_slice_valued)

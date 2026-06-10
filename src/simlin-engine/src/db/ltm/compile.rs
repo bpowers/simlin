@@ -1064,6 +1064,76 @@ pub(crate) fn compile_ltm_equation_fragment(
                 ));
             }
         }
+        // Dep is an LTM parse-time helper aux -- from this equation's own
+        // parse or another LTM equation's (cross-equation refs resolve
+        // through the cached registry). Scalar helpers worked through the
+        // generic fallback below, but an ARRAYED capture helper (the GH #541
+        // arrayed `PREVIOUS`/`INIT` capture, extended to array-valued builtin
+        // subtrees like `rank(pop, 1)` by GH #742) needs a dimension-aware
+        // stub: registered as a size-1 scalar, the consuming equation's
+        // `helper[dim·elem]` subscript is a dimension error and the fragment
+        // fails to compile.
+        else if let Some(helper_dm) = parsed
+            .implicit_vars
+            .iter()
+            .find(|v| {
+                !matches!(v, datamodel::Variable::Module(_))
+                    && canonicalize(v.get_ident()) == effective
+            })
+            .or_else(|| {
+                ltm_implicit_info
+                    .get(effective)
+                    .filter(|meta| !meta.is_module)
+                    .map(|meta| &meta.variable)
+            })
+        {
+            let (dep_size, dep_ast) = match helper_dm.get_equation() {
+                Some(
+                    datamodel::Equation::ApplyToAll(dim_names, _)
+                    | datamodel::Equation::Arrayed(dim_names, _, _, _),
+                ) => {
+                    let canonical_dims: Vec<crate::dimensions::Dimension> = dim_names
+                        .iter()
+                        .filter_map(|name| {
+                            let canonical = crate::common::CanonicalDimensionName::from_raw(name);
+                            dim_context.get(&canonical).cloned()
+                        })
+                        .collect();
+                    let size: usize = canonical_dims.iter().map(|d| d.len()).product();
+                    let ast = if canonical_dims.is_empty() {
+                        None
+                    } else {
+                        Some(crate::ast::Ast::ApplyToAll(
+                            canonical_dims,
+                            crate::ast::Expr2::Const(
+                                "0".to_string(),
+                                0.0,
+                                crate::ast::Loc::default(),
+                            ),
+                        ))
+                    };
+                    (size.max(1), ast)
+                }
+                _ => (1, None),
+            };
+            dep_variables.push((
+                dep_ident.clone(),
+                crate::variable::Variable::Var {
+                    ident: dep_ident,
+                    ast: dep_ast,
+                    init_ast: None,
+                    eqn: None,
+                    units: None,
+                    tables: vec![],
+                    non_negative: false,
+                    is_flow: false,
+                    is_table_only: false,
+                    errors: vec![],
+                    unit_errors: vec![],
+                },
+                dep_size,
+            ));
+        }
         // Dep could also be another LTM var (e.g., loop score refs link
         // scores; composite refs paths).  These cases need dimension-
         // aware stubs: an A2A loop_score that references an A2A

@@ -4025,6 +4025,42 @@ fn shaped_guard_form_keeps_changed_first_when_freezable() {
     );
 }
 
+/// GH #742 x GH #743: a frozen RANK subtree whose argument carries an
+/// uncollapsed array slice (`PREVIOUS(rank(matrix[d1, *], 1))`) is
+/// unfreezable -- RANK is array-valued, so it does NOT collapse the slice
+/// the way SUM does, and the slice-bearing capture would land in an
+/// ill-typed scalar helper. The chooser must detect that (RANK is
+/// transparent to `expr_is_array_slice_valued`) and fall back to the
+/// changed-last attribution, where the RANK subtree stays verbatim
+/// (compiling exactly like the target's own equation) and only the live
+/// feeder is frozen.
+#[test]
+fn shaped_guard_form_rank_slice_arg_falls_back_to_changed_last() {
+    let deps = deps_set(&["matrix", "frac"]);
+    let live = Ident::<Canonical>::new("frac");
+    let text = shaped_guard_form_text(
+        "frac * RANK(matrix[d1, *], 1)",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &[],
+        &[],
+        None,
+        None,
+        "growth",
+    )
+    .unwrap();
+    assert!(
+        text.contains("(growth - (PREVIOUS(frac) * rank(matrix[d1, *], 1)))"),
+        "the chooser must emit the changed-last numerator with the RANK subtree \
+         verbatim; got: {text}"
+    );
+    assert!(
+        !text.to_lowercase().contains("previous(rank"),
+        "the slice-bearing RANK subtree must not be frozen (unfreezable, GH #742); got: {text}"
+    );
+}
+
 /// When BOTH conventions are unfreezable (the live occurrence is itself a
 /// wildcard slice, so changed-last would freeze `PREVIOUS(arr[*])`), the
 /// chooser fails loudly: the caller skips the score and warns, instead of
