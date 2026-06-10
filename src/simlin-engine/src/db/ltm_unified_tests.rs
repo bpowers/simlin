@@ -3934,3 +3934,129 @@ fn test_ltm_main_rk4_looped_submodel_is_rejected() {
         "the rejection must name the main-governed method: {details}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GH #738: scalar-target agg over an array *expression* (`SUM(pop[*] * scale)`)
+// ---------------------------------------------------------------------------
+
+/// Build a GH #738-shaped fixture: a *scalar* flow whose equation embeds a
+/// reducer over an array expression (`grow_eqn`, e.g. `1 + SUM(pop[*] *
+/// scale)`), with the scalar feeder `scale` closing a feedback loop through
+/// the scalar stock `total`. The `1 +` keeps the reducer a sub-expression,
+/// so it is hoisted into a synthetic `$⁚ltm⁚agg⁚{n}` whose own equation is
+/// the reducer text -- the fragment that GH #738's empty-lowering-scope bug
+/// rejected. `pop2` and `matrix` exist so equation variants can exercise
+/// multi-source (`SUM(pop[*] + pop2[*])`) and pinned-slice
+/// (`SUM(matrix[north,*] * scale)`) reducers against the same model.
+fn build_scalar_target_array_expr_reducer_project(
+    name: &str,
+    grow_eqn: &str,
+) -> datamodel::Project {
+    TestProject::new(name)
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .named_dimension("band", &["lo", "hi"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .array_aux("pop2[region]", "pop[region] * 2")
+        .array_aux("matrix[region,band]", "pop[region] * 0.5")
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", grow_eqn, None)
+        .build_datamodel()
+}
+
+/// Collect the LTM fragment-failure warnings for `project`, asserting first
+/// that the expected synthetic agg was actually hoisted (so a test using
+/// this helper can never pass vacuously because no agg node existed).
+fn ltm_fragment_failures_with_agg_present(project: &datamodel::Project) -> Vec<String> {
+    use crate::db::collect_model_diagnostics;
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let ltm = model_ltm_variables(&db, source_model, source_project);
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}agg\u{205A}")),
+        "the inlined reducer must be hoisted into a synthetic agg; \
+         synthetic vars: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+
+    collect_model_diagnostics(&db, source_model, source_project)
+        .iter()
+        .filter(|d| is_ltm_fragment_failure(d))
+        .map(|d| format!("{:?}: {:?}", d.variable, d.error))
+        .collect()
+}
+
+/// Assert GH #738's contract on a scalar-target reducer fixture: the
+/// synthetic `$⁚ltm⁚agg⁚{n}` fragment compiles (no fragment-failure
+/// Warning names an agg variable), and the only failures still present --
+/// if any -- are the known residual: the *direct* `scale→grow` link score,
+/// whose ceteris-paribus partial contains `PREVIOUS(pop[*])` and trips the
+/// documented GH #541 scalar-helper limitation (`make_temp_arg` outside A2A
+/// context captures a wildcard-subscripted arrayed arg into an ill-typed
+/// *scalar* helper). That residual is a separate defect from #738 -- the
+/// loop score consuming that direct link stays 0 pending GH #737's
+/// routing fix anyway -- and pinning it here keeps it observable.
+fn assert_agg_fragments_compile(eqn: &str, failures: &[String]) {
+    assert!(
+        failures.iter().all(|f| !f.contains("\u{205A}agg\u{205A}")),
+        "the synthetic agg fragment for the scalar-target {eqn:?} model \
+         must compile; failures: {failures:?}"
+    );
+    assert!(
+        failures.iter().all(|f| f.contains("scale\u{2192}grow")),
+        "the only tolerated residual fragment failure for {eqn:?} is the \
+         direct scale\u{2192}grow link score (the PREVIOUS-of-wildcard \
+         scalar-helper gap); failures: {failures:?}"
+    );
+}
+
+/// GH #738: the synthetic agg hoisted for `SUM(pop[*] * scale)` with a
+/// *scalar* target must compile. Before the fix,
+/// `compile_ltm_equation_fragment` lowered the agg's equation with an empty
+/// `ScopeStage0.models`, so the `pop[*] * scale` Op2 never got its Expr2
+/// `ArrayBounds` and Pass-1 temp decomposition never hoisted it -- codegen
+/// then rejected the inline Op2 under SUM and the agg was silently stubbed
+/// to a constant 0, corrupting every score routed through it.
+#[test]
+fn scalar_target_agg_over_array_expression_fragments_compile() {
+    let eqn = "1 + SUM(pop[*] * scale)";
+    let project =
+        build_scalar_target_array_expr_reducer_project("scalar_target_array_expr_agg", eqn);
+    let failures = ltm_fragment_failures_with_agg_present(&project);
+    assert_agg_fragments_compile(eqn, &failures);
+}
+
+/// GH #738, adjacent shapes: the fix is general to the scalar-target
+/// reducer-over-array-expression class, not just `SUM(arrayed * scalar)`.
+/// Each variant hoists a synthetic agg whose equation embeds an array
+/// expression: a different reducer kind (`MEAN`/`MIN`/`MAX`), a
+/// multi-source reducer (`SUM(a[*] + b[*])`), and a pinned-slice reducer
+/// (`SUM(matrix[north,*] * scale)`).
+#[test]
+fn scalar_target_reducer_variants_fragments_compile() {
+    for (tag, eqn) in [
+        ("mean", "1 + MEAN(pop[*] * scale)"),
+        ("min", "1 + MIN(pop[*] * scale)"),
+        ("max", "1 + MAX(pop[*] * scale)"),
+        ("multi_source", "1 + SUM(pop[*] + pop2[*])"),
+        ("pinned_slice", "1 + SUM(matrix[north,*] * scale)"),
+    ] {
+        let project = build_scalar_target_array_expr_reducer_project(
+            &format!("scalar_target_variant_{tag}"),
+            eqn,
+        );
+        let failures = ltm_fragment_failures_with_agg_present(&project);
+        assert_agg_fragments_compile(eqn, &failures);
+    }
+}

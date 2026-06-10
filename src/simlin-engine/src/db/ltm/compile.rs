@@ -203,6 +203,148 @@ pub fn link_score_equation_text_shaped<'db>(
     })
 }
 
+/// Lower a parsed LTM Stage0 variable with a lowering scope that can
+/// resolve the dimensions of its model-variable dependencies (GH #738).
+///
+/// Expr1 -> Expr2 lowering computes each subexpression's `ArrayBounds` via
+/// `ArrayContext::get_dimensions`, which reads `ScopeStage0.models`. Pass-1
+/// temp decomposition (`Pass1Context::needs_decomposition`) gates on those
+/// bounds: a reducer over an array *expression* (`SUM(pop[*] * scale)`) is
+/// hoisted into an `AssignTemp` only when the Op2 carries them. With an
+/// empty scope the bounds are never computed, the array expression stays
+/// inline under the reducer, and codegen rejects the fragment ("Cannot push
+/// view for expression type ..."), silently stubbing the LTM variable to a
+/// constant 0. Mirrors `lower_var_fragment`'s minimal-`ModelStage0`
+/// construction for ordinary per-variable fragments.
+///
+/// Strategy: lower once with an empty scope (cheap, and byte-identical to
+/// the populated-scope lowering when no dependency is arrayed -- the scope
+/// only feeds `get_dimensions`, which returns `None` for scalars either
+/// way); only when an arrayed dependency is present, re-lower with a scope
+/// carrying the parsed Stage0 variables of self plus the deps. The
+/// dependency identifier set is scope-independent (the scope affects only
+/// bounds metadata), so the preliminary lowering sees the same deps the
+/// final one does.
+///
+/// An arrayed dependency can be a model source variable OR an arrayed
+/// implicit helper aux synthesized while parsing an LTM equation (the GH
+/// #541 `PREVIOUS(<bare arrayed name>)` capture, which a ceteris-paribus
+/// link score references inside its reducer). `equation_implicits` carries
+/// the implicits from the caller's own parse; cross-equation helper refs
+/// resolve through the cached `model_ltm_implicit_var_info` registry.
+fn lower_ltm_variable(
+    db: &dyn Db,
+    parsed_variable: &crate::model::VariableStage0,
+    equation_implicits: &[datamodel::Variable],
+    model: SourceModel,
+    project: SourceProject,
+) -> crate::variable::Variable {
+    let dim_context = project_dimensions_context(db, project);
+    let empty_models = HashMap::new();
+    let empty_scope = crate::model::ScopeStage0 {
+        models: &empty_models,
+        dimensions: dim_context,
+        model_name: "",
+    };
+    let prelim = crate::model::lower_variable(&empty_scope, parsed_variable);
+
+    // Dependencies of the LTM equation (data-flow deps plus referenced
+    // lookup tables -- an arrayed graphical function's per-element apply
+    // also needs its dimensions resolved). `·`-dotted module-output refs
+    // are not flat variables and keep resolving to scalar (None) exactly
+    // as before.
+    let mut dep_names: BTreeSet<String> = BTreeSet::new();
+    for ast in [prelim.ast(), prelim.init_ast()].into_iter().flatten() {
+        let classification = crate::variable::classify_dependencies(ast, &[], None);
+        for dep in classification
+            .all
+            .iter()
+            .map(|d| d.as_str())
+            .chain(classification.referenced_tables.iter().map(|s| s.as_str()))
+        {
+            let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
+            if !effective.contains('\u{00B7}') {
+                dep_names.insert(effective.to_string());
+            }
+        }
+    }
+
+    let source_vars = model.variables(db);
+    let ltm_implicit_info = model_ltm_implicit_var_info(db, model, project);
+    // Resolve a dep that is an LTM-parse-time implicit helper aux to its
+    // datamodel form (modules are scalar nodes in equations; only helper
+    // auxes can be arrayed).
+    let find_implicit_dm = |name: &str| -> Option<&datamodel::Variable> {
+        equation_implicits
+            .iter()
+            .find(|v| canonicalize(v.get_ident()) == name)
+            .or_else(|| {
+                ltm_implicit_info
+                    .get(name)
+                    .filter(|meta| !meta.is_module)
+                    .map(|meta| &meta.variable)
+            })
+    };
+    let dm_var_is_arrayed = |v: &datamodel::Variable| {
+        matches!(
+            v.get_equation(),
+            Some(datamodel::Equation::ApplyToAll(..) | datamodel::Equation::Arrayed(..))
+        )
+    };
+
+    let any_arrayed_dep = dep_names.iter().any(|name| {
+        source_vars
+            .get(name.as_str())
+            .is_some_and(|sv| !variable_dimensions(db, *sv, project).is_empty())
+            || find_implicit_dm(name).is_some_and(dm_var_is_arrayed)
+    });
+    if !any_arrayed_dep {
+        return prelim;
+    }
+
+    let model_name_str = model.name(db);
+    let module_ctx = model_module_ident_context(db, model, project, vec![]);
+    let dims = project_datamodel_dims(db, project);
+    let units_ctx = project_units_context(db, project);
+    let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> = HashMap::new();
+    stage0_vars.insert(Ident::new(parsed_variable.ident()), parsed_variable.clone());
+    for dep_name in &dep_names {
+        if let Some(dep_sv) = source_vars.get(dep_name.as_str()) {
+            let dep_parsed =
+                parse_source_variable_with_module_context(db, *dep_sv, project, module_ctx);
+            stage0_vars.insert(Ident::new(dep_name), dep_parsed.variable.clone());
+        } else if let Some(implicit_dm) = find_implicit_dm(dep_name) {
+            // Nested implicits of an implicit are registered (and compiled)
+            // in their own right; here only the dep's own dimensions matter.
+            let mut nested = Vec::new();
+            let dep_parsed =
+                crate::variable::parse_var(dims, implicit_dm, &mut nested, units_ctx, |mi| {
+                    Ok(Some(mi.clone()))
+                });
+            stage0_vars.insert(Ident::new(dep_name), dep_parsed);
+        }
+    }
+
+    let mini_model = crate::model::ModelStage0 {
+        ident: Ident::new(model_name_str),
+        display_name: model_name_str.to_string(),
+        variables: stage0_vars,
+        errors: None,
+        implicit: false,
+        // Single-variable fragment lowering only; not a macro template.
+        is_macro: false,
+        macro_params: vec![],
+    };
+    let mut models: HashMap<Ident<Canonical>, &crate::model::ModelStage0> = HashMap::new();
+    models.insert(Ident::new(model_name_str), &mini_model);
+    let scope = crate::model::ScopeStage0 {
+        models: &models,
+        dimensions: dim_context,
+        model_name: model_name_str,
+    };
+    crate::model::lower_variable(&scope, parsed_variable)
+}
+
 /// Compile an arbitrary LTM `Equation` to symbolic bytecodes.
 ///
 /// Shared implementation used by `compile_ltm_var_fragment` (link scores)
@@ -259,13 +401,10 @@ pub(crate) fn compile_ltm_equation_fragment(
     // Lower the variable. Scalar LTM vars produce a plain Var;
     // A2A LTM vars produce a Var with dimension views that the
     // compiler's expand_a2a_with_hoisting handles automatically.
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: dim_context,
-        model_name: "",
-    };
-    let lowered = crate::model::lower_variable(&scope, &parsed.variable);
+    // `lower_ltm_variable` threads the dependencies (model variables and
+    // arrayed parse-time helpers) into the lowering scope so array bounds
+    // resolve (GH #738).
+    let lowered = lower_ltm_variable(db, &parsed.variable, &parsed.implicit_vars, model, project);
 
     let model_name_ident = Ident::new(model.name(db));
     let var_name_canonical = canonicalize(var_name).into_owned();
@@ -1267,13 +1406,11 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
             return None;
         }
     } else {
-        let models = HashMap::new();
-        let scope = crate::model::ScopeStage0 {
-            models: &models,
-            dimensions: dim_context,
-            model_name: "",
-        };
-        crate::model::lower_variable(&scope, &parsed_implicit)
+        // Same dependency-aware lowering scope as
+        // `compile_ltm_equation_fragment` (GH #738): a synthesized helper aux
+        // whose equation embeds a reducer over an array expression needs its
+        // deps' dimensions resolvable for Pass-1 temp decomposition.
+        lower_ltm_variable(db, &parsed_implicit, &dummy_implicits, model, project)
     };
 
     let model_name_ident = Ident::new(model.name(db));

@@ -553,28 +553,35 @@ fn whole_extent_sum_agg_loop_scores_are_finite_and_sustained() {
 /// COMPILES and SIMULATES (no crash, no NaN/Inf) and the loop is enumerated --
 /// the well-formedness the element-graph fix preserves.
 ///
-/// CHARACTERIZATION of two pre-existing gaps this scalar-target scenario
-/// exposes (BOTH independent of #533's element-graph fast path -- both behave
-/// identically with and without it, since the element edge the fix adds is
-/// never consumed downstream here):
+/// Of the two pre-existing gaps this scalar-target scenario originally
+/// exposed (BOTH independent of #533's element-graph fast path), one is now
+/// fixed and one remains:
 ///
-/// 1. The synthetic agg `$⁚ltm⁚agg⁚0` for `SUM(pop[*] * scale)` (arrayed `pop`
-///    times scalar `scale`, reduced to a scalar target) currently FAILS to
-///    compile and is stubbed to a constant `0` with an `Assembly` Warning.
-///    This is an agg-augmentation gap (the emitted agg equation is rejected by
-///    the compiler), distinct from the element-graph edge.
+/// 1. (FIXED, GH #738) The synthetic agg `$⁚ltm⁚agg⁚0` for
+///    `SUM(pop[*] * scale)` (arrayed `pop` times scalar `scale`, reduced to a
+///    scalar target) used to FAIL fragment compilation and was stubbed to a
+///    constant `0` with an `Assembly` Warning: `compile_ltm_equation_fragment`
+///    lowered the equation with an empty `ScopeStage0.models`, so the
+///    `pop[*] * scale` Op2 never got its Expr2 `ArrayBounds` and Pass-1 temp
+///    decomposition never hoisted it out of the reducer. The agg now compiles
+///    and tracks the inlined reducer's value -- asserted below, and pinned in
+///    detail by `scalar_target_agg_value_matches_inlined_reducer`.
 ///
-/// 2. Even were the agg computed, the loop-score *builder* would not route the
-///    pure-scalar loop through it: `build_loops_from_tiered` materializes a
+/// 2. (OPEN, GH #737) The loop-score *builder* does not route the pure-scalar
+///    loop through the agg: `build_loops_from_tiered` materializes a
 ///    `PureScalar` fast-path cycle straight from the *variable-level* circuit
 ///    `total → scale → grow → total` (`var_graph.circuit_to_links`), linking
 ///    `scale → grow` directly -- never the agg. The
 ///    cross-element-through-aggregate recovery (`recover_cross_agg_loops`) runs
-///    only on the slow (cross-element) path.
+///    only on the slow (cross-element) path. Compounding it, the *direct*
+///    `scale→grow` link score itself still fails fragment compilation: its
+///    ceteris-paribus partial contains `PREVIOUS(pop[*])`, which
+///    `make_temp_arg` (outside A2A context) captures into an ill-typed
+///    *scalar* helper -- the documented GH #541 limitation extended to
+///    wildcard-subscripted args. So this loop's score stays 0.
 ///
-/// So the loop score is `0` here -- not because of #533, but because of (1)
-/// and (2). Pinning the current behavior keeps both gaps observable; closing
-/// them is separate, tracked work.
+/// Pinning gap (2)'s current routing keeps it observable; closing it is
+/// separate, tracked work (#737).
 #[test]
 fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
     let project = TestProject::new("scalar_feeder_agg_loop")
@@ -618,6 +625,29 @@ fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
         ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
 
+    // GH #738 (gap #1, fixed): the agg's own fragment compiles, so its series
+    // tracks the inlined reducer -- `SUM(pop[*] * scale)` -- instead of the
+    // constant 0 the silently-stubbed fragment used to read. `pop` starts at
+    // 100/300 and `scale` is strictly positive, so the value is non-zero from
+    // step 0.
+    {
+        let agg_series = series_at(&results, offset_of(&results, agg_name));
+        let pop_n = series_at(&results, offset_of(&results, "pop[north]"));
+        let pop_s = series_at(&results, offset_of(&results, "pop[south]"));
+        let scale = series_at(&results, offset_of(&results, "scale"));
+        for (step, &agg) in agg_series.iter().enumerate() {
+            let expected = (pop_n[step] + pop_s[step]) * scale[step];
+            assert!(
+                expected.abs() > 0.0,
+                "fixture defect: SUM(pop[*] * scale) must be non-zero at step {step}"
+            );
+            assert!(
+                (agg - expected).abs() <= 1e-9 * expected.abs(),
+                "step {step}: {agg_name} = {agg}, expected SUM(pop[*] * scale) = {expected}"
+            );
+        }
+    }
+
     // The pure-scalar loop `total → scale → grow → total` is enumerated and
     // scored via the direct `scale → grow` link (the variable-level circuit;
     // gap #2 in the doc comment). Exactly one such loop exists.
@@ -641,9 +671,9 @@ fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
     );
 
     // Every LTM score variable must be finite at every timestep -- no NaN/Inf
-    // leaks from the agg wiring or the stubbed link scores. This is the
+    // leaks from the agg wiring or the link scores. This is the
     // well-formedness guarantee the #533 element-graph fix preserves; the
-    // characterization of *which* scores are currently 0 (gaps #1/#2) lives in
+    // characterization of which scores stay 0 pending gap #2 (#737) lives in
     // the doc comment, not as a brittle per-value assertion.
     for v in ltm_vars
         .iter()
@@ -660,6 +690,62 @@ fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
                 );
             }
         }
+    }
+}
+
+/// GH #738, focused regression: the synthetic agg hoisted for an inlined
+/// reducer over an array *expression* with a *scalar* target --
+/// `grow = 1 + SUM(pop[*] * scale)` -- compiles and its runtime series
+/// equals the inlined reducer's value at every step (non-zero, since `pop`
+/// starts at 100/300 and `scale` is strictly positive).
+///
+/// Root cause of the prior failure: `compile_ltm_equation_fragment` lowered
+/// the agg's equation with an empty `ScopeStage0.models`, so `pop`'s
+/// dimensions could not be resolved during Expr2 lowering, the
+/// `pop[*] * scale` Op2 carried no `ArrayBounds`, and Pass-1 temp
+/// decomposition (which gates on those bounds) never hoisted the array
+/// expression out of the reducer -- codegen then rejected the fragment and
+/// the agg silently read a constant 0. The fix threads the equation's
+/// dependencies into the lowering scope, mirroring `lower_var_fragment`.
+#[test]
+fn scalar_target_agg_value_matches_inlined_reducer() {
+    let project = TestProject::new("scalar_target_agg_value")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        // Heterogeneous initial stock values so SUM(pop[*] * scale) is
+        // exercised non-trivially.
+        .array_with_ranges("pop0[region]", vec![("north", "100"), ("south", "300")])
+        .array_stock("pop[region]", "pop0[region]", &["pgrow"], &[], None)
+        .array_flow("pgrow[region]", "pop[region] * 0.05", None)
+        .scalar_aux("scale", "0.001 * total + 0.01")
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", "1 + SUM(pop[*] * scale)", None)
+        .build_datamodel();
+
+    let (results, ltm_vars) = run_ltm(&project);
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg = ltm_var(&ltm_vars, agg_name);
+    assert!(
+        agg.dimensions.is_empty(),
+        "the whole-extent reducer's agg must be scalar; got dims {:?}",
+        agg.dimensions
+    );
+
+    let agg_series = series_at(&results, offset_of(&results, agg_name));
+    let pop_n = series_at(&results, offset_of(&results, "pop[north]"));
+    let pop_s = series_at(&results, offset_of(&results, "pop[south]"));
+    let scale = series_at(&results, offset_of(&results, "scale"));
+    assert!(results.step_count > STARTUP_STEPS);
+    for (step, &agg_val) in agg_series.iter().enumerate() {
+        let expected = (pop_n[step] + pop_s[step]) * scale[step];
+        assert!(
+            expected.abs() > 0.0,
+            "fixture defect: SUM(pop[*] * scale) must be non-zero at step {step}"
+        );
+        assert!(
+            (agg_val - expected).abs() <= 1e-9 * expected.abs(),
+            "step {step}: {agg_name} = {agg_val}, expected SUM(pop[*] * scale) = {expected}"
+        );
     }
 }
 
