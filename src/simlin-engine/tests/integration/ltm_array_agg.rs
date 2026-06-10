@@ -4131,3 +4131,117 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
         }
     }
 }
+
+/// GH #525, the exact filed repro: `row_sum[Region] = pop[Region, young] +
+/// pop[Region, old]` -- TWO partially-iterated references (one iterated
+/// index, one literal element, multi-dim source) in one A2A equation, with
+/// `growth[Region, Age] = row_sum[Region] * 0.0001 * pop[Region, Age]`
+/// closing the feedback loop.
+///
+/// As filed, this was a hard "PREVIOUS requires a variable reference after
+/// helper rewriting" compile failure; on the fragment-isolated pipeline it
+/// degraded to a warned 0-stub, and the GH #759 fix makes it genuinely
+/// score: both `pop[region, <elem>]` references classify `DynamicIndex` and
+/// stay live in the conservative partial, the `PREVIOUS(SUM(pop[region,
+/// young]))` guard term compiles through a per-element capture helper, and
+/// -- because `pop` is `row_sum`'s only dependency -- the score is exactly
+/// `+1` per element.
+///
+/// Residual #525 conservatism, deliberately NOT pinned here: the
+/// `DynamicIndex` classification expands to cross-product element edges
+/// (`pop[a,*] -> row_sum[b]`), so the enumerator also reports cross-element
+/// "loops" that don't exist causally. Extending
+/// `classify_iterated_dim_shape` to the iterated+literal mix (a per-element
+/// family pinned on the literal axes) would remove them; tracked on GH #525.
+#[test]
+fn gh525_two_reference_partially_iterated_row_sum_scores() {
+    let project = TestProject::new("gh525_repro")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_aux("row_sum[Region]", "pop[Region, young] + pop[Region, old]")
+        .array_flow(
+            "growth[Region, Age]",
+            "row_sum[Region] * 0.0001 * pop[Region, Age]",
+            None,
+        )
+        .array_stock("pop[Region, Age]", "100", &["growth"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the GH #525 repro must compile with LTM enabled");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment (capture helpers included) must compile; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Both pop references stay live and pop is row_sum's only dependency,
+    // so the conservative partial reproduces delta-row_sum exactly: +1 per
+    // Region element from the first post-initial step.
+    let link_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}row_sum";
+    let base = offset_of(&results, link_name);
+    for slot in 0..2 {
+        let series = series_at(&results, base + slot);
+        assert_eq!(series[0], 0.0, "initial-step guard pins slot {slot} to 0");
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "pop->row_sum slot {slot} step {step} must score +1; got {series:?}"
+            );
+        }
+    }
+
+    // Every loop score is finite, and the same-element A2A loop through
+    // row_sum (dimensioned over the full Region x Age space) carries real
+    // non-zero values once the startup guard clears.
+    let mut saw_row_sum_loop = false;
+    for lv in ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+    {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "loop score {} slot {slot} must stay finite; got {series:?}",
+                lv.name
+            );
+        }
+        if lv.dimensions == vec!["Region".to_string(), "Age".to_string()] {
+            let eqn_text = match &lv.equation {
+                datamodel::Equation::ApplyToAll(_, t) => t.clone(),
+                other => format!("{other:?}"),
+            };
+            if eqn_text.contains("row_sum") {
+                saw_row_sum_loop = true;
+                for slot in 0..slot_count(lv, &project.dimensions) {
+                    let series = series_at(&results, base + slot);
+                    assert!(
+                        series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
+                        "the same-element loop through row_sum must carry real values \
+                         ({}, slot {slot}); got {series:?}",
+                        lv.name
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        saw_row_sum_loop,
+        "an A2A loop through row_sum must be enumerated; vars: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+}

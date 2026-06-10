@@ -201,7 +201,13 @@ fn classify_subscript_shape(
 ///   1. it has exactly one index per source dimension (a *partially*
 ///      iterated subscript -- some indices iterated, some literal/wildcard
 ///      -- is out of scope for Phase 3 and stays with its
-///      `classify_subscript_shape` result; Phase 4 handles sliced reducers),
+///      `classify_subscript_shape` result; Phase 4 handles sliced reducers.
+///      The partially-iterated NON-reducer reference (`pop[Region, young]`
+///      inside an A2A-over-`Region` equation, GH #525) therefore classifies
+///      `DynamicIndex`: since the GH #759 fix its conservative partial
+///      compiles and scores, but the element graph still expands it to the
+///      cross-product -- the per-element family pinned on the literal axes
+///      that would tighten it is tracked on GH #525),
 ///   2. every index `d_i` is a bare `Var` naming a dimension that is one of
 ///      the target equation's iterated dimensions (`target_iterated_dims`),
 ///      *and*
