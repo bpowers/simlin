@@ -1648,8 +1648,11 @@ cases remain deliberate carve-outs:
      from t-1 to t, so `PREVIOUS(flow)` aligns the numerator and denominator to
      the same causal interval. This produces results shifted by one DT compared
      to reference SD software (Stella/iThink). The integration test
-     (`tests/simulate_ltm.rs`) compensates by shifting reference timestamps
-     forward by DT when loading golden data.
+     (`tests/integration/simulate_ltm.rs`) compensates by shifting reference
+     timestamps forward by DT when loading golden data. This convention is also
+     documented for end users in the reference doc's Section 3.2 (the "numerator
+     timing convention" note under
+     [Flow-to-Stock Link Score](../reference/ltm--loops-that-matter.md)).
    - *`time_step` factor*: the denominator (second-order stock change) is
      `dt * (netflow(t-dt) - netflow(t-2dt))` in Euler, carrying one `dt` that the
      raw flow delta in the numerator lacks; without the factor every

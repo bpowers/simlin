@@ -333,6 +333,42 @@ instantaneous link score. Implementors can either: (a) use this formula directly
 disaggregated flows, or (b) automatically aggregate all flows into net flows and use link
 score 1 for all net-flow-to-stock links. Both produce identical results.
 
+> **Simlin implementation note: numerator timing convention.** The discrete numerator
+> `Delta(i)` has two valid renderings, and Simlin's choice produces output shifted by one
+> DT relative to reference SD software (Stella/iThink) for the same model:
+>
+> - `i(t) - i(t-dt)` -- the change in the *current* flow rate (the Stella convention).
+> - `i(t-dt) - i(t-2dt)` -- the change in the flow over the interval that *drove* the
+>   measured stock change (the Simlin convention).
+>
+> Simlin uses the second form. The rationale is causal-interval alignment: under Euler
+> integration the flow value at `t-dt` is what drove the stock change measured at `t`
+> (`S(t) - S(t-dt) = dt * i(t-dt)`), so taking the change in *that* flow puts the numerator
+> and the second-order stock-change denominator on the same causal interval. Concretely,
+> Simlin generates the numerator as `time_step * (PREVIOUS(i) - PREVIOUS(PREVIOUS(i)))`,
+> i.e. `i(t-dt) - i(t-2dt)` (the `time_step` factor is the separate dimensional
+> correction discussed in the design doc, not part of the timing choice).
+>
+> Both renderings are mathematically valid and have identical continuous-time limits: as
+> `dt -> 0` both converge to `di/dt` in the Section 3.3 form (Eq. 6), which is
+> timing-convention-agnostic. The discrete divergence is purely a one-DT phase shift of an
+> otherwise numerically-identical series.
+>
+> **User-visible consequence.** A user comparing Simlin LTM output against Stella output
+> for the same model and inputs will see numerically identical link/loop scores shifted by
+> one DT. This is not a bug in either tool. To reconcile the two when comparing across
+> tools, shift one set of timestamps by `+/-DT`: Simlin's value at time `t` corresponds to
+> Stella's value at time `t-DT`. (Simlin's own LTM integration tests apply exactly this
+> compensation when validating against reference golden data -- they shift the reference
+> timestamps forward by DT before comparing.)
+>
+> This convention is documented per flow-to-stock link. A separate, distinct issue
+> concerns window consistency *within* a loop's chain of links; that is tracked
+> independently and is not the same as this numerator timing choice. See divergence #6,
+> "Flow-to-stock numerator timing and `time_step` scaling," in
+> [the design doc](../design/ltm--loops-that-matter.md) for the implementation details and
+> the empirical verification.
+
 ### 3.3 Continuous-Time Form
 
 Letting dt approach 0, the instantaneous link score becomes:
