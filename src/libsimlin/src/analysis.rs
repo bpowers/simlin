@@ -1359,7 +1359,7 @@ fn slot_partition_at(pv: &[Option<usize>], k: usize) -> Option<usize> {
 fn ensure_denom_for_element(
     cache: &mut HashMap<(Option<usize>, usize), Vec<f64>>,
     results: &engine::Results,
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     element_index_map: &HashMap<String, engine::ltm_post::LoopElementIndex>,
     partition_key: Option<usize>,
     element_k: usize,
@@ -1427,7 +1427,7 @@ fn ensure_denom_for_element(
 /// reads.
 pub(crate) fn rel_loop_score_series(
     results: &engine::Results,
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     loop_element_index: &HashMap<String, engine::ltm_post::LoopElementIndex>,
     cache: &mut HashMap<(Option<usize>, usize), Vec<f64>>,
     loop_id: &str,
@@ -1598,7 +1598,9 @@ pub(crate) use engine::db::LtmEnabledGuard;
 /// loop id and walk the partition denominator cache.  The fields' types match
 /// `SimState::loop_partitions` and `SimState::loop_element_index`.
 pub(crate) type LtmSnapshots = (
-    HashMap<String, Vec<Option<usize>>>,
+    // `IndexMap` to preserve the engine's loop emission order through to the
+    // rel-loop-score denominator summation (GH #468).
+    engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     HashMap<String, engine::ltm_post::LoopElementIndex>,
 );
 
@@ -1663,7 +1665,7 @@ pub(crate) struct ResolvedLoopQuery<'a> {
 /// the error surface as well as the analytic dispatch.
 pub(crate) fn resolve_loop_query<'a>(
     raw_loop_id: &'a str,
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     loop_element_index: &HashMap<String, engine::ltm_post::LoopElementIndex>,
 ) -> Result<ResolvedLoopQuery<'a>, SimlinError> {
     let parsed = match parse_subscripted_loop_id(raw_loop_id) {

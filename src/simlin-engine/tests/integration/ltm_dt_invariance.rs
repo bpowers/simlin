@@ -47,6 +47,7 @@ use simlin_engine::db::{
     SimlinDb, compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
     sync_from_datamodel_incremental,
 };
+use simlin_engine::indexmap::IndexMap;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{Results, Vm, ltm_post};
 
@@ -61,7 +62,7 @@ const LOOP_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}loop_score\u{205A}";
 /// relative-score computation consumes.
 fn run_ltm(
     project: &simlin_engine::datamodel::Project,
-) -> (Results, HashMap<String, Vec<Option<usize>>>) {
+) -> (Results, IndexMap<String, Vec<Option<usize>>>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);

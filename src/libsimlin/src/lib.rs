@@ -386,7 +386,7 @@ pub(crate) struct SimState {
     /// own consumers.  When populated alongside `loop_element_index`, the two
     /// agree on slot count for every loop (see the `debug_assert!` in
     /// `simlin_sim_new`).
-    pub(crate) loop_partitions: HashMap<String, Vec<Option<usize>>>,
+    pub(crate) loop_partitions: engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     /// Snapshot of per-loop dimension metadata taken at
     /// `simlin_sim_new` time.  Used by the FFI subscript resolver to
     /// turn a user-supplied loop ID like `r1[Boston]` into a slot

@@ -16,6 +16,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use indexmap::IndexMap;
+
 use crate::common::{Canonical, Ident};
 use crate::results::Results;
 
@@ -72,7 +74,7 @@ pub(crate) fn loop_score_ident(loop_id: &str) -> Ident<Canonical> {
 /// element-space size for an A2A loop.  Mirrors
 /// `ltm_post::build_loop_element_index`'s `n_slots`, since both are derived
 /// from the same `LtmSyntheticVar` metadata in `model_ltm_variables`.
-fn loop_n_slots(loop_partitions: &HashMap<String, Vec<Option<usize>>>, id: &str) -> usize {
+fn loop_n_slots(loop_partitions: &IndexMap<String, Vec<Option<usize>>>, id: &str) -> usize {
     loop_partitions.get(id).map(|v| v.len()).unwrap_or(1).max(1)
 }
 
@@ -88,7 +90,7 @@ fn loop_n_slots(loop_partitions: &HashMap<String, Vec<Option<usize>>>, id: &str)
 /// at this slot for the purpose of *that loop's own* series", though it
 /// still buckets into the `None` cohort.
 fn slot_partition(
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
     id: &str,
     k: usize,
 ) -> Option<usize> {
@@ -166,13 +168,22 @@ fn slot_partition(
 /// against each other normally.
 pub fn compute_rel_loop_scores(
     results: &Results,
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
 ) -> HashMap<String, Vec<f64>> {
-    // Stable iteration order keeps partition grouping deterministic even
-    // though the result map is itself unordered; callers that diff
-    // timeseries across runs benefit from the predictable emit order.
-    let mut loop_ids: Vec<&String> = loop_partitions.keys().collect();
-    loop_ids.sort();
+    // Iterate in `loop_partitions`' *emission* order (its `IndexMap` insertion
+    // order), NOT a re-sort.  The partition-sum denominator below accumulates
+    // `|loop_score|` over the loops in a partition in exactly this order, and
+    // IEEE-754 addition is non-associative, so the order is bit-significant.
+    // Emission order is the content-derived order `assign_loop_ids` produced
+    // (see `ltm::graph::loop_id_sort_key`), which the pre-#461 compile-time
+    // emitter also accumulated in -- so iterating it here restores bit-for-bit
+    // parity with that removed emitter (GH #468).  A bare lex sort would order
+    // the same partition as `b1, b10, b2, ...`, perturbing the sum at the ULP.
+    // Emission order is itself deterministic across salsa cache invalidations
+    // and across processes (`assign_loop_ids` is a pure function of loop
+    // content, not of `HashMap` enumeration), so this is just as deterministic
+    // as the old lex sort while also being bit-parity-correct.
+    let loop_ids: Vec<&String> = loop_partitions.keys().collect();
 
     let offsets: Vec<Option<usize>> = loop_ids
         .iter()
@@ -259,14 +270,20 @@ pub fn compute_rel_loop_scores(
 /// all match [`compute_rel_loop_scores`] (via [`denom_summand`]): a `NaN`
 /// at one `(loop, slot)` does not poison the rest of its `(partition,
 /// slot)` bucket (GH #542), while an `Inf` at one slot stays in that
-/// bucket's denominator.  `BTreeMap` on the bucket grid keeps the float
-/// summation order deterministic across runs.
+/// bucket's denominator.  Within each bucket the members are pushed in
+/// `loop_partitions`' emission order, so the per-bucket `Σ|loop_score|`
+/// accumulates in that order (bit-parity with the pre-#461 emitter, GH #468);
+/// the `BTreeMap` over the bucket *grid* keeps the order the buckets
+/// themselves are visited deterministic across runs.
 pub fn compute_rel_loop_scores_per_element(
     results: &Results,
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
 ) -> HashMap<String, Vec<f64>> {
-    let mut loop_ids: Vec<&String> = loop_partitions.keys().collect();
-    loop_ids.sort();
+    // Emission order, not a re-sort: the per-bucket denominator (built over the
+    // `members` grid below) sums `|loop_score|` in this order, and IEEE-754
+    // addition is non-associative.  See `compute_rel_loop_scores` for the full
+    // bit-parity rationale (GH #468).
+    let loop_ids: Vec<&String> = loop_partitions.keys().collect();
 
     let offsets: Vec<Option<usize>> = loop_ids
         .iter()
@@ -1104,7 +1121,7 @@ mod tests {
     /// Build a per-loop, single-slot `loop_partitions` mapping from
     /// `(loop_id, partition)` pairs -- the common scalar/cross-element case
     /// where every loop has exactly one slot.
-    fn mapping(pairs: &[(&str, Option<usize>)]) -> HashMap<String, Vec<Option<usize>>> {
+    fn mapping(pairs: &[(&str, Option<usize>)]) -> IndexMap<String, Vec<Option<usize>>> {
         pairs
             .iter()
             .map(|(id, p)| ((*id).to_string(), vec![*p]))
@@ -1115,7 +1132,7 @@ mod tests {
     /// pairs -- for tests that need genuinely multi-slot A2A loops.
     fn mapping_per_slot(
         pairs: &[(&str, Vec<Option<usize>>)],
-    ) -> HashMap<String, Vec<Option<usize>>> {
+    ) -> IndexMap<String, Vec<Option<usize>>> {
         pairs
             .iter()
             .map(|(id, slots)| ((*id).to_string(), slots.clone()))
@@ -1136,7 +1153,7 @@ mod tests {
     /// matching the production semantics.
     fn reference_rel_loop_scores(
         loop_ids: &[String],
-        loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+        loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
         series: &[Vec<f64>],
     ) -> Vec<Vec<f64>> {
         let step_count = series.first().map(|s| s.len()).unwrap_or(0);
@@ -2836,7 +2853,7 @@ mod tests {
             let loop_ids: Vec<String> = (0..num_loops).map(|i| format!("L{i}")).collect();
             // Scalar-loop shape: one slot per loop (the slot-0 convenience
             // view ignores anything beyond slot 0 anyway).
-            let loop_partitions: HashMap<String, Vec<Option<usize>>> = loop_ids
+            let loop_partitions: IndexMap<String, Vec<Option<usize>>> = loop_ids
                 .iter()
                 .enumerate()
                 .map(|(i, id)| (id.clone(), vec![Some(raw_partitions[i] % num_partitions)]))
@@ -2954,7 +2971,7 @@ mod tests {
                 &n_slots,
                 &series,
             );
-            let loop_partitions: HashMap<String, Vec<Option<usize>>> = loop_ids
+            let loop_partitions: IndexMap<String, Vec<Option<usize>>> = loop_ids
                 .iter()
                 .zip(slots.iter())
                 .map(|(id, v)| (id.clone(), v.clone()))

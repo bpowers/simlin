@@ -952,7 +952,7 @@ pub fn model_ltm_variables(
         // and no module interface to expose. Report the exhaustive default.
         return LtmVariablesResult {
             vars: vec![],
-            loop_partitions: HashMap::new(),
+            loop_partitions: indexmap::IndexMap::new(),
             agg_recovery_truncated: false,
             pathways_truncated: false,
             mode: LtmMode::Exhaustive,
@@ -1206,7 +1206,7 @@ pub fn model_ltm_variables(
                 // was never flipped on this branch, so report exhaustive.
                 return LtmVariablesResult {
                     vars: vec![],
-                    loop_partitions: HashMap::new(),
+                    loop_partitions: indexmap::IndexMap::new(),
                     agg_recovery_truncated: false,
                     pathways_truncated: false,
                     mode: LtmMode::Exhaustive,
@@ -1266,7 +1266,14 @@ pub fn model_ltm_variables(
         None
     };
 
-    let mut loop_partitions: HashMap<String, Vec<Option<usize>>> = HashMap::new();
+    // An `IndexMap` so the iteration order is the loops' emission order:
+    // enumerated loops are inserted below in `detected_loops` order (the
+    // content-sorted order `assign_loop_ids` produced), then pinned loops in
+    // pin order. The post-sim rel-loop-score denominator sums `|loop_score|`
+    // in this order, so emission order keeps that IEEE-754 sum bit-for-bit
+    // identical to the pre-#461 compile-time emitter (GH #468).
+    let mut loop_partitions: indexmap::IndexMap<String, Vec<Option<usize>>> =
+        indexmap::IndexMap::new();
 
     // Part 1: Link scores.
     // Sub-models and discovery mode need scores for ALL edges (pathways

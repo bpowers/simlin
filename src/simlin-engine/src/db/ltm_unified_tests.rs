@@ -2042,6 +2042,74 @@ fn a2a_loop_partitions_have_one_entry_per_element() {
     );
 }
 
+/// GH #468: `loop_partitions` must iterate in *emission* order -- the
+/// content-derived order `assign_loop_ids` produces and
+/// `model_ltm_variables` inserts the per-loop partition vectors in --
+/// not lexicographic loop-id order and not `HashMap` hash-randomized
+/// order.
+///
+/// Emission order is what the post-sim `compute_rel_loop_scores*`
+/// denominator summation walks; pinning it restores bit-for-bit parity
+/// with the pre-#461 compile-time emitter (IEEE-754 addition is
+/// non-associative, so `r1+r2+...+r10` differs at the ULP from the
+/// lex-sorted `r1+r10+r2+...`).  The fixture puts 12 loops in one
+/// partition so the two orders genuinely differ (`r1, r10, r11, r12,
+/// r2, ...` lex vs `r1, r2, ..., r12` emission).
+#[test]
+fn loop_partitions_iterate_in_emission_order() {
+    // One stock with 12 parallel feedback paths through 12 distinct
+    // auxes.  Every loop `s -> a{i} -> netflow -> s` shares the single
+    // SCC partition, and all are reinforcing, so they take sequential
+    // `r1..r12` ids in `assign_loop_ids`' content-sorted order.
+    let mut p = TestProject::new("emission_order_loops");
+    let mut inflow_terms: Vec<String> = Vec::new();
+    for i in 1..=12 {
+        p = p.scalar_aux(&format!("a{i}"), "s * 0.001");
+        inflow_terms.push(format!("a{i}"));
+    }
+    let p = p.stock("s", "100", &["netflow"], &[], None).flow(
+        "netflow",
+        &inflow_terms.join(" + "),
+        None,
+    );
+
+    let datamodel = p.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    // The independent oracle: the emission order is `assign_loop_ids`'
+    // content-sorted order, which `model_detected_loops` reproduces
+    // (it runs the same enumeration + id assignment, with no pins here).
+    let detected = model_detected_loops(&db, model, sync.project);
+    let emission_order: Vec<String> = detected.loops.iter().map(|l| l.id.clone()).collect();
+    assert_eq!(
+        emission_order.len(),
+        12,
+        "fixture must enumerate 12 loops; got {emission_order:?}"
+    );
+
+    let iter_order: Vec<String> = ltm.loop_partitions.keys().cloned().collect();
+    assert_eq!(
+        iter_order, emission_order,
+        "loop_partitions must iterate in emission order (the order \
+         `assign_loop_ids` / `model_detected_loops` produce), so the \
+         post-sim rel-score denominator sums in emission order"
+    );
+
+    // Guard against a future refactor that "fixes" determinism by
+    // lex-sorting: with 12 same-prefix ids the emission order is *not*
+    // the lexicographic order, so this distinguishes the two.
+    let mut lex_order = iter_order.clone();
+    lex_order.sort();
+    assert_ne!(
+        iter_order, lex_order,
+        "fixture is supposed to make emission order differ from lex order; \
+         if these are equal the test no longer guards the bit-parity property"
+    );
+}
+
 /// Regression test: every link-score reference inside a loop_score
 /// equation must resolve to a synthetic variable that was actually
 /// emitted. For `share[r] = SUM(pop[*])` the only reference of `pop` in

@@ -4477,7 +4477,7 @@ fn try_detect_ltm_loops_incremental(
             .collect();
         (ltm_vars.loop_partitions.clone(), n_slots)
     } else {
-        (HashMap::new(), HashMap::new())
+        (indexmap::IndexMap::new(), HashMap::new())
     };
 
     source_project.set_ltm_enabled(db).to(false);

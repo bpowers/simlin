@@ -2091,7 +2091,7 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 pub fn reclassify_loops_from_results(
     loops: &mut [DetectedLoop],
     results: &crate::Results,
-    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_partitions: &indexmap::IndexMap<String, Vec<Option<usize>>>,
 ) {
     for loop_item in loops.iter_mut() {
         let Some(&base_off) = results

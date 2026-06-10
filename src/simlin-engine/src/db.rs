@@ -355,6 +355,20 @@ pub enum LtmMode {
 /// (e.g. a pure module-internal loop).  Populated only in exhaustive LTM
 /// mode; discovery mode leaves it empty.
 ///
+/// It is an `IndexMap` (not a `HashMap`) so iteration order is the loops'
+/// **emission order** -- the content-derived order `assign_loop_ids` produces
+/// and `model_ltm_variables` inserts in (enumerated loops first, then pinned).
+/// The post-sim rel-loop-score denominator (`ltm_post::compute_rel_loop_scores*`)
+/// sums `|loop_score|` in this order, so preserving emission order keeps that
+/// IEEE-754 (non-associative) sum bit-for-bit identical to the pre-#461
+/// compile-time emitter, which accumulated in the same `detected_loops` order
+/// (GH #468). Emission order is itself deterministic across salsa cache
+/// invalidations and across processes because `assign_loop_ids` is a pure
+/// function of loop content (it sorts on the canonical edge-sequence rotation,
+/// not on `HashMap` enumeration order -- see `ltm::graph::loop_id_sort_key`),
+/// so the IndexMap order never flaps even though `IndexMap`'s own `PartialEq`
+/// (used for salsa cache equality) is order-insensitive.
+///
 /// `agg_recovery_truncated` is `true` when reconstruction of the
 /// cross-element-through-aggregate loops (`recover_cross_agg_loops`, GH
 /// #515) hit its loop-count budget (`ltm::MAX_CROSS_AGG_LOOPS`) or its
@@ -377,7 +391,7 @@ pub enum LtmMode {
 #[derive(Clone, PartialEq, salsa::Update)]
 pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
-    pub loop_partitions: HashMap<String, Vec<Option<usize>>>,
+    pub loop_partitions: indexmap::IndexMap<String, Vec<Option<usize>>>,
     pub agg_recovery_truncated: bool,
     pub pathways_truncated: bool,
     pub mode: LtmMode,
