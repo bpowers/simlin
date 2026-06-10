@@ -1939,8 +1939,8 @@ fn opposing_arrayed_multi_agg_loops_keep_agg_identity() {
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
-    // agg⚚0 = SUM(matrix[r1,*] * scale) (left-to-right minting order),
-    // agg⚚1 = SUM(matrix2[r1,*] * (1 - scale)); both arrayed over r1.
+    // agg⁚0 = SUM(matrix[r1,*] * scale) (left-to-right minting order),
+    // agg⁚1 = SUM(matrix2[r1,*] * (1 - scale)); both arrayed over r1.
     let cases = [
         (
             "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0",
