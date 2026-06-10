@@ -131,7 +131,7 @@ fn is_live_source_iterated_dim_subscript(
 /// similarly over-collapses to the `D1`-element rather than the mapped
 /// `D2`-element. Such models are already not statically scoreable in
 /// pre-#511 LTM; the precise non-natural-position handling is a known
-/// limitation tracked separately. (NOT the GH #762 reducer-body work,
+/// limitation tracked as GH #526. (NOT the GH #762 reducer-body work,
 /// which covers the source→agg per-row partials in
 /// [`generate_nonlinear_body_partial`]; this is the other-dep
 /// iterated-subscript collapse in target-equation partials.)
@@ -3652,6 +3652,15 @@ fn generate_linear_body_partial(
 /// reads, so they always compile. MIN/MAX nest binary calls and STDDEV
 /// keeps the GH #483 unrolled population-variance form (divisor `N`,
 /// inlined mean) over the body terms.
+///
+/// Anchor caveat (GH #763): "frozen" freezes MODEL references only, so a
+/// body referencing TIME, a time builtin (PULSE/STEP/RAMP), or a nested
+/// `PREVIOUS(x)` keeps that factor live in every term, and then
+/// `R(all-frozen terms) != PREVIOUS(agg)` -- the anchor subtraction
+/// attributes the time-drift to every row, including rows whose true
+/// partial is 0 (destroying the frozen-argmin-scores-0 property of
+/// MIN/MAX). For pure-model-ref bodies the anchor identity holds exactly
+/// because per-variable `PREVIOUS` sampling commutes with arithmetic.
 ///
 /// When the pinned body is the bare source reference the legacy
 /// [`generate_nonlinear_partial`] is returned byte-identically; RANK is
