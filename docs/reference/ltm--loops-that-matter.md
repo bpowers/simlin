@@ -350,7 +350,8 @@ score 1 for all net-flow-to-stock links. Both produce identical results.
 > correction discussed in the design doc, not part of the timing choice).
 >
 > Both renderings are mathematically valid and have identical continuous-time limits: as
-> `dt -> 0` both converge to `di/dt` in the Section 3.3 form (Eq. 6), which is
+> `dt -> 0` both converge to the Section 3.3 continuous ratio `|di/dt / d^2S/dt^2|`
+> (Eq. 6 of Schoenberg, Hayward, and Eberlein 2023), which is
 > timing-convention-agnostic. The discrete divergence is purely a one-DT phase shift of an
 > otherwise numerically-identical series.
 >

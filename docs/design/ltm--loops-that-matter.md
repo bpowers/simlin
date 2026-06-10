@@ -582,7 +582,7 @@ port's sign -- empirically inverting the loop's polarity (+1.0 in exhaustive vs
 -1.0 in discovery on a `pos = input*0.02` / `neg = -input` repro). The
 cross-mode regression guard is
 `discovery_multi_output_loop_polarity_matches_exhaustive` in
-`tests/simulate_ltm.rs`.
+`tests/integration/simulate_ltm.rs`.
 
 **Deterministic output-port ordering (GH #680)**: `find_model_output_ports`
 sorts its result. The merge-order of the `HashSet` it previously returned was
@@ -1718,7 +1718,7 @@ cases remain deliberate carve-outs:
 - **`db/tests.rs`** (LTM subset): Salsa LTM caching, discovery vs exhaustive
   variable counts, incremental invalidation, layout slot allocation with LTM
 
-### Integration Tests (`tests/simulate_ltm.rs`)
+### Integration Tests (`tests/integration/simulate_ltm.rs`)
 
 All integration tests use `compile_project_incremental` + VM:
 
