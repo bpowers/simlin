@@ -1173,16 +1173,17 @@ Two kinds of agg:
     arrayed `target` this is one scalar `$⁚ltm⁚link_score⁚{agg}→{to}[{e}]` per
     target element; for a scalar `target`, a single `$⁚ltm⁚link_score⁚{agg}→{to}`.
     When the agg is itself arrayed, the agg side carries an `[<slot>]`
-    subscript *and* the `Δsource` denominator of that link-score equation
-    projects the same `[<slot>]` subscript (the bare multi-slot agg name
-    doesn't compile as a scalar denominator). This is exact for the diagonal
-    case (`result_dims` equal `target`'s iterated dims); the strict-prefix
+    subscript -- the target element's *projection* onto the agg's
+    `result_dims` axes -- on the link-score name, on the `Δsource`
+    denominator (the bare multi-slot agg name doesn't compile as a scalar
+    denominator), *and* on the agg's pinned references in the equation body
+    (GH #528). For the diagonal case (`result_dims` equal `target`'s iterated
+    dims) the projection is the full target tuple; for the strict-prefix
     *broadcast* case (`SUM(matrix[D1, *])` inside an A2A body over `D1 × D2`,
-    so the agg is over `D1` but the target is over `D1 × D2`) over-subscribes
-    the agg into the cross-product -- the degradation is fail-LOUD: the
-    over-subscripted fragment does not compile, so
-    `model_ltm_fragment_diagnostics` emits a per-variable `Warning` and the
-    loop score degrades to 0 (GH #528).
+    so the agg is over `D1` but the target is over `D1 × D2`) it drops the
+    broadcast axes -- pinning by the full tuple instead would over-subscribe
+    the 1-D agg, fail fragment compilation, and stub the score (and every
+    loop through the agg) to 0.
 
   A loop running through the inlined reducer therefore traverses
   `… → from[<row>] → $⁚ltm⁚agg⁚{n}[<slot>] → to[e] → …`, and the loop-score
@@ -1570,12 +1571,6 @@ cases remain deliberate carve-outs:
   polarity (#502); over more than one dimension it stays `Unknown`. The
   monotonicity check itself compares the y-delta `dy`, not the slope `dy/dx`,
   so a non-uniform x-spacing can still misclassify (GH #536).
-- **An arrayed synthetic agg's link score over-subscripts in the broadcast
-  case.** When the agg is over `D1` but the target is over `D1 × D2` (a
-  strict-prefix broadcast, `SUM(matrix[D1, *])` inside an A2A body over
-  `D1 × D2`), the `agg → target` link score over-subscribes the agg into the
-  cross-product and the loop score degrades to 0 (GH #528). The diagonal case
-  (agg dims equal the target's iterated dims) is exact.
 - **Smaller magnitude/over-conservatism nits.** A transposed non-live array
   dependency's magnitude estimate in an A2A link-score partial can be
   imprecise (GH #526); `expand_same_element` takes the full cross-product

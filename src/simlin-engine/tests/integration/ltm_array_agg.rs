@@ -2240,3 +2240,130 @@ fn arrayed_co_source_feeder_loop_is_balancing() {
         );
     }
 }
+
+/// GH #528 end-to-end: the strict-prefix *broadcast* arrayed-agg case --
+/// `SUM(matrix[D1,*])` as a sub-expression of an A2A body over `D1 x D2`
+/// mints an arrayed synthetic agg over `[D1]` that broadcasts into
+/// `growth[D1,D2]` -- is genuinely scored. The per-target-element
+/// `agg[d1] → growth[d1,d2]` link-score equation must pin the agg ident to
+/// the PROJECTED slot `[d1]`, not the full `(d1,d2)` target tuple: the full
+/// tuple over-subscripts the 1-D agg, so pre-fix the fragment failed to
+/// compile, was stubbed to a constant 0 (with an Assembly Warning), and
+/// every loop score through the agg was identically 0.
+///
+/// Post-fix this pins: no LTM fragment-compile warnings; the agg→growth
+/// link score is exactly 1 past the initial step (the agg is growth's only
+/// driver); and every loop score -- all of which route through the agg in
+/// this model -- is finite everywhere and sustained non-zero past the
+/// startup guard (mirroring
+/// `whole_extent_sum_agg_loop_scores_are_finite_and_sustained`).
+#[test]
+fn broadcast_agg_loop_scores_are_finite_and_sustained() {
+    let project = TestProject::new("broadcast_agg")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("matrix[D1,D2]", "100", &["mflow"], &[], None)
+        // Broadcast: the A2A body iterates D1 x D2 but the sliced reducer
+        // iterates only D1 -> arrayed agg over [D1], broadcast over D2.
+        .array_aux("growth[D1,D2]", "SUM(matrix[D1,*]) * 0.01 + 1")
+        // Same-element diagonal, closing the per-(d1,d2) loops through the
+        // agg (and the cross-D2 petal combinations within each D1 row).
+        .array_flow("mflow[D1,D2]", "growth[D1,D2]", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // No LTM synthetic fragment may fail to compile: the pre-fix failure
+    // mode was each over-subscripted agg→growth fragment stubbing to a
+    // constant 0 with an Assembly "failed to compile" Warning.
+    let fragment_failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
+        .into_iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(&d.error,
+                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile"))
+        })
+        .map(|d| d.variable.unwrap_or_default())
+        .collect();
+    assert!(
+        fragment_failures.is_empty(),
+        "no LTM synthetic fragment may fail to compile (GH #528: the broadcast agg→target \
+         link score over-subscripted the agg); failing fragments: {fragment_failures:?}"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(
+        results.step_count > STARTUP_STEPS,
+        "the fixture must simulate past the {STARTUP_STEPS}-step startup guard, got {} step(s)",
+        results.step_count
+    );
+
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The agg→growth link score is exactly 1 past step 0: `growth =
+    // agg * 0.01 + 1` and the agg is growth's only driver. A constant 0
+    // here is the GH #528 stubbed-fragment degradation.
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name = format!("{LINK_SCORE_PREFIX}{agg_name}[{d1}]\u{2192}growth[{d1},{d2}]");
+        let s = series_at(&results, offset_of(&results, &name));
+        assert_eq!(s[0], 0.0, "{name}: step 0 is pinned to 0 by the TIME guard");
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() <= 1e-9,
+                "{name} at step {step}: got {v}, expected exactly 1 (the agg is growth's \
+                 only driver; 0 means the fragment was silently stubbed -- GH #528)"
+            );
+        }
+    }
+
+    // Every feedback loop in this model routes through the synthetic agg
+    // (`growth` reads `matrix` only via the reducer). Each loop score must
+    // be finite at every step and sustained non-zero past the startup guard.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !loop_names.is_empty(),
+        "the broadcast-agg feedback model must produce at least one loop score"
+    );
+    for name in &loop_names {
+        let var = ltm_var(&ltm_vars, name);
+        assert!(
+            var.equation.source_text().contains(agg_name),
+            "every loop in this model routes through the synthetic agg; {name} does not: {}",
+            var.equation.source_text()
+        );
+        let n_slots = slot_count(var, &project.dimensions);
+        let base = offset_of(&results, name);
+        for slot in 0..n_slots {
+            let s = series_at(&results, base + slot);
+            for (step, &v) in s.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "loop score {name} slot {slot} at step {step} is not finite: {v}"
+                );
+            }
+            assert!(
+                s.iter()
+                    .skip(STARTUP_STEPS)
+                    .all(|v| v.abs() > MEANINGFUL_SCORE),
+                "loop score {name} slot {slot} must be sustained non-zero (> \
+                 {MEANINGFUL_SCORE}) past step {STARTUP_STEPS}; an all-zero agg-routed loop \
+                 score is the GH #528 degradation. series: {s:?}"
+            );
+        }
+    }
+}

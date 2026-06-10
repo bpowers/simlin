@@ -7696,15 +7696,16 @@ fn test_sliced_agg_cross_element_loop_simulates() {
 /// non-degenerate `loop_score`.
 ///
 /// The fixture is the *diagonal* case (`result_dims == growth`'s dims): the
-/// agg over `D1` feeds a target also over exactly `D1`. The original review
-/// fixture put `SUM(matrix[D1,*])` inside an A2A body over `(D1, D2)` (the
-/// strict-prefix *broadcast* case `agg[D1] → growth[D1,D2]`), where the
-/// `agg→target` partial element-pins to the full `(d1,d2)` tuple and thus
-/// over-subscripts the 1-D agg -- a known imprecision tracked as GH #528.
-/// The diagonal case exercises the same arrayed-agg link/loop machinery
-/// without that orthogonal over-subscription bug; `mflow[D1,D2] = growth[D1]`
-/// (the GH #511 iterated-dim subscript) then broadcasts `growth` over `D2`
-/// to close the per-`(D1,D2)` element loops through `matrix`.
+/// agg over `D1` feeds a target also over exactly `D1`. The strict-prefix
+/// *broadcast* case (`SUM(matrix[D1,*])` inside an A2A body over `(D1, D2)`,
+/// `agg[D1] → growth[D1,D2]`) is the GH #528 twin, pinned by
+/// `ltm_array_agg::broadcast_agg_loop_scores_are_finite_and_sustained`: there
+/// the `agg→target` partial pins the agg to the target element's PROJECTION
+/// onto the agg's `result_dims` axes (the full `(d1,d2)` tuple would
+/// over-subscript the 1-D agg). For the diagonal case here the projection IS
+/// the full tuple; `mflow[D1,D2] = growth[D1]` (the GH #511 iterated-dim
+/// subscript) then broadcasts `growth` over `D2` to close the per-`(D1,D2)`
+/// element loops through `matrix`.
 #[test]
 fn test_arrayed_sliced_agg_cross_element_loop_simulates() {
     // `D1={a,b}`, `D2={x,y}`. `matrix[D1,D2]` stock <- `mflow[D1,D2]`;

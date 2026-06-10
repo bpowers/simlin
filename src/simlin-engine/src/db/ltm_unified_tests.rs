@@ -741,13 +741,21 @@ fn test_ltm_disabled_gate_suppresses_auto_flip_warning() {
 /// This used to be a `SMTH1`-in-loop model, but that hazard (the
 /// composite-reference link score into a stdlib-macro module) was fixed in
 /// GH #548 (`build_submodel_metadata` now registers the sub-model's LTM
-/// composite var, so the cross-module reference resolves). The fixture is
-/// retargeted at the still-open broadcast arrayed-aggregate case (GH #528):
-/// a strict-prefix broadcast reducer `SUM(matrix[D1,*])` over a `D1 x D2`
-/// matrix, closed into a feedback loop through a `D1` stock. The agg is
-/// over-subscribed into the cross-product, so the loop-score fragment fails
-/// to compile and `assemble_module` would silently stub it to 0. The
-/// diagnostic pass must surface that.
+/// composite var, so the cross-module reference resolves). The fixture is a
+/// *variable-backed* partial reducer (`inflow[D1] = SUM(matrix[D1,*])` is
+/// the whole RHS, so `inflow` itself is the agg) closed into a feedback loop
+/// through a `D1` stock that broadcasts into the `D1 x D2` matrix.
+/// Variable-backed aggs take the conservative cross-product in the element
+/// graph, and the resulting loop-score equations reference link-score names
+/// that don't exist for a partial reduce -- the bare A2A
+/// `"...matrix→inflow"` and the subscripted-per-element
+/// `"...matrix[a,x]→inflow"[b]` forms, where only the per-`(row, slot)`
+/// scalar `matrix[a,x]→inflow[a]` vars are emitted -- so the loop-score
+/// fragments fail to compile and `assemble_module` would silently stub them
+/// to 0. The diagnostic pass must surface that. (This fixture originally
+/// leaned on the GH #528 broadcast over-subscription of a *synthetic*
+/// arrayed agg, which is now fixed; the variable-backed loop-score
+/// name-resolution gap here is a distinct, still-open failure.)
 ///
 /// Using a genuinely-unfixed failure (rather than a once-broken-now-fixed
 /// one) keeps these diagnostic-infrastructure tests decoupled from any
@@ -3249,8 +3257,9 @@ fn cross_agg_loop_recovery_four_petals_one_loop_per_subset() {
 /// the subscripted form) -- and a loop through `agg[a]` is never combined
 /// with one through `agg[b]` (different element-graph nodes). The reported
 /// variable-level loops never surface the synthetic agg. (The broadcast-case
-/// loop *score* itself is the known GH #528 limitation -- this test only
-/// pins the structural recovery.)
+/// loop *score* is pinned end-to-end by
+/// `ltm_array_agg::broadcast_agg_loop_scores_are_finite_and_sustained` --
+/// this test only pins the structural recovery.)
 #[test]
 fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
     use crate::common::Ident;
@@ -3365,6 +3374,61 @@ fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
                 .all(|v| !v.contains("\u{205A}agg\u{205A}")),
             "model_detected_loops should not surface synthetic agg nodes; got: {:?}",
             l.variables
+        );
+    }
+}
+
+/// GH #528: in the strict-prefix *broadcast* case -- an arrayed synthetic
+/// agg over `[D1]` (`SUM(matrix[D1,*])` as a sub-expression of an A2A body
+/// over `D1 x D2`) feeding `growth[D1,D2]` -- the per-target-element
+/// `agg → growth` link-score EQUATION must subscript the agg ident by the
+/// target element's projection onto the agg's `result_dims` axes
+/// (`[d1·a]`), not by the full target tuple (`[d1·a, d2·x]` -- an
+/// out-of-shape over-subscript of a 1-D agg, whose fragment fails to
+/// compile and stubs the score to a constant 0). The link-score NAME and
+/// the `Δsource` denominator were already projected; this pins the partial
+/// BODY's pinning too.
+#[test]
+fn broadcast_agg_to_target_equation_projects_agg_subscript() {
+    let project = TestProject::new("broadcast_agg_eqn")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("matrix[D1,D2]", "100", &["mflow"], &[], None)
+        .array_aux("growth[D1,D2]", "SUM(matrix[D1,*]) * 0.01 + 1")
+        .array_flow("mflow[D1,D2]", "growth[D1,D2]", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name =
+            format!("$\u{205A}ltm\u{205A}link_score\u{205A}{agg}[{d1}]\u{2192}growth[{d1},{d2}]");
+        let var = ltm.vars.iter().find(|v| v.name == name).unwrap_or_else(|| {
+            panic!(
+                "expected agg→target link score {name:?}; synthetic vars: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            )
+        });
+        let eq = var.equation.source_text();
+        // The numerator's live agg reference is pinned to the projected
+        // (qualified) slot...
+        let projected = format!("\"{agg}\"[d1\u{B7}{d1}]");
+        assert!(
+            eq.contains(&projected),
+            "{name}: the equation body must pin the agg to the projected slot {projected}; \
+             got: {eq}"
+        );
+        // ...and never to the full (over-subscripting) target tuple.
+        let over_subscript = format!("\"{agg}\"[d1\u{B7}{d1}, d2\u{B7}{d2}]");
+        assert!(
+            !eq.contains(&over_subscript),
+            "{name}: the equation body must NOT over-subscript the 1-D agg with the full \
+             target tuple {over_subscript} (GH #528); got: {eq}"
         );
     }
 }

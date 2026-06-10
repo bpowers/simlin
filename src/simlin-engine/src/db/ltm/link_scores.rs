@@ -487,7 +487,9 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 elem_deps,
                 deps_to_sub,
                 // A true scalar source: the bare `quote_ident(from)`
-                // denominator is correct.
+                // denominator is correct, and there is no source subscript
+                // to pin in the partial body.
+                None,
                 None,
                 Some(project_dimensions_context(db, project)),
             ) {
@@ -1138,7 +1140,7 @@ pub(super) fn emit_agg_to_target_link_scores(
     for other_agg in reducer_subst.values() {
         all_deps.insert(Ident::<Canonical>::new(other_agg));
     }
-    let mut deps_to_subscript: HashSet<Ident<Canonical>> = all_deps
+    let deps_to_subscript: HashSet<Ident<Canonical>> = all_deps
         .iter()
         .filter(|d| {
             source_vars
@@ -1156,16 +1158,17 @@ pub(super) fn emit_agg_to_target_link_scores(
         .cloned()
         .collect();
     // An arrayed agg (`result_dims` non-empty) is element-pinned in the
-    // per-target-element equation just like an arrayed dep that shares
-    // `to`'s dims: `$⁚ltm⁚agg⁚0` → `$⁚ltm⁚agg⁚0[<element>]`. This is
-    // exact when `result_dims` equals `to`'s dimensions (the diagonal
-    // `agg[d1] → to[d1]` case -- a partial-reduce sub-expression in an
-    // A2A target over exactly that dim, e.g. `x[D1] = ... + SUM(matrix[D1,*])`);
-    // for the rarer broadcast case (`agg[D1]` into `to[D1,D2]`) the
-    // element tuple over-subscripts the agg, which is a known imprecision.
-    if agg_is_arrayed {
-        deps_to_subscript.insert(agg_canonical.clone());
-    }
+    // per-target-element equation too: `$⁚ltm⁚agg⁚0` → `$⁚ltm⁚agg⁚0[<slot>]`.
+    // But NOT via `deps_to_subscript`: that set pins to `to`'s FULL element
+    // tuple, which is the agg's correct subscript only in the diagonal case
+    // (`result_dims` == `to`'s dims) and over-subscripts the agg in the
+    // broadcast case (`agg[D1]` feeding `to[D1,D2]` -- the fragment then
+    // fails to compile and the score is stubbed to a constant 0, zeroing
+    // every loop through the agg; GH #528). Instead the agg is pinned to the
+    // target element's PROJECTION onto `result_dims`'s axes -- the same slot
+    // the link-score name and the `Δsource` denominator carry -- via
+    // `generate_scalar_to_element_equation`'s `source_pin_element`, computed
+    // by `agg_pin_for_target` below.
 
     // Positions of the agg's `result_dims` within `to`'s dimensions, so a
     // target element tuple can be projected onto the agg-slot subscript
@@ -1214,6 +1217,24 @@ pub(super) fn emit_agg_to_target_link_scores(
             None => agg_q.clone(),
             Some(slot) => format!("{agg_q}[{slot}]"),
         }
+    };
+    // The QUALIFIED (`d1·a`) projection of a target element onto the agg's
+    // `result_dims` axes -- the subscript the agg ident is pinned to in the
+    // per-target-element equation BODY (`generate_scalar_to_element_equation`'s
+    // `source_pin_element`). Qualified like the other pinned deps so
+    // `PREVIOUS(agg[...])` references compile to direct LoadPrevs. `None`
+    // when the agg is scalar (referenced bare; nothing to pin).
+    let agg_pin_for_target = |element: &str| -> Option<String> {
+        if !agg_is_arrayed {
+            return None;
+        }
+        let qualified = crate::ltm_augment::qualify_element_csv(element, &to_dims);
+        let parts: Vec<&str> = qualified.split(',').collect();
+        let slot: Vec<&str> = result_dim_positions
+            .iter()
+            .filter_map(|&p| parts.get(p).copied())
+            .collect();
+        (!slot.is_empty()).then(|| slot.join(","))
     };
 
     // Helper: substitute the reducers in a slot expr's canonical text, to
@@ -1290,11 +1311,12 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .collect();
             for element in &cartesian_subscripts(&dim_element_lists) {
                 // The partial is built around the *bare* agg name (which is
-                // what `substituted` holds); `deps_to_subscript` then
-                // element-pins it to `agg[<element>]` when the agg is
-                // arrayed, matching `agg_name_for_target` (exact when
-                // `result_dims == to`'s dims). The `Δsource` denominator
-                // is element-pinned the same way via the explicit override.
+                // what `substituted` holds); `agg_pin_for_target` then pins
+                // it to the projected `agg[<slot>]` when the agg is arrayed,
+                // matching `agg_name_for_target` (the full element tuple
+                // would over-subscript the agg in the broadcast case; GH
+                // #528). The `Δsource` denominator carries the same slot
+                // via the explicit override.
                 let name = format!(
                     "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
                     agg_name_for_target(element),
@@ -1310,6 +1332,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                     &all_deps,
                     &deps_to_subscript,
                     Some(&agg_source_ref_for_target(element)),
+                    agg_pin_for_target(element).as_deref(),
                     Some(project_dimensions_context(db, project)),
                 ) {
                     Ok(equation) => vars.push(LtmSyntheticVar {
@@ -1367,6 +1390,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             &slot_deps,
                             &deps_to_subscript,
                             Some(&agg_source_ref_for_target(element)),
+                            agg_pin_for_target(element).as_deref(),
                             Some(project_dimensions_context(db, project)),
                         )
                     }),
