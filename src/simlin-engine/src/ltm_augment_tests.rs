@@ -3640,3 +3640,193 @@ fn test_body_aware_pinned_slice_self_reference_still_pins() {
         "equation: {eq}"
     );
 }
+
+// -- GH #762: body-aware nonlinear (MIN/MAX/STDDEV) partial tests --
+
+/// A bare-source body must keep the legacy nonlinear emission
+/// byte-identically (MIN and STDDEV; same `None`-context comparison the
+/// linear arm pins).
+#[test]
+fn test_body_aware_nonlinear_bare_matches_legacy() {
+    let elements = vec!["region·nyc".to_string(), "region·boston".to_string()];
+    let fixture = BodyCtxFixture::new("pop[*]", "pop", &[("pop", 1)], &[], &["region"]);
+    for name in ["MIN", "MAX", "STDDEV"] {
+        let with_body = generate_element_to_scalar_equation(
+            "pop",
+            "agg",
+            "region·nyc",
+            &elements,
+            &ReducerKind::Nonlinear,
+            name,
+            true,
+            Some(&fixture.ctx()),
+        );
+        let legacy = generate_element_to_scalar_equation(
+            "pop",
+            "agg",
+            "region·nyc",
+            &elements,
+            &ReducerKind::Nonlinear,
+            name,
+            true,
+            None,
+        );
+        assert_eq!(with_body, legacy, "{name}: bare body must keep legacy form");
+    }
+}
+
+/// A coefficient body (`pop[*] * scale` w.r.t. `pop`) must build each
+/// MIN term from the row-pinned body: the scored row's term live (with
+/// the feeder frozen), every other row's term fully frozen.
+#[test]
+fn test_body_aware_min_coefficient_terms() {
+    let elements = vec!["region·nyc".to_string(), "region·boston".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "pop[*] * scale",
+        "pop",
+        &[("pop", 1)],
+        &["scale"],
+        &["region"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "pop",
+        "agg",
+        "region·nyc",
+        &elements,
+        &ReducerKind::Nonlinear,
+        "MIN",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(
+        eq.contains(
+            "MIN((pop[region·nyc] * PREVIOUS(scale)), \
+             (PREVIOUS(pop[region·boston]) * PREVIOUS(scale)))"
+        ),
+        "equation: {eq}"
+    );
+    // The raw bare-element form (the GH #762 garbage) must be gone.
+    assert!(
+        !eq.contains("MIN(pop[region·nyc], PREVIOUS(pop[region·boston]))"),
+        "equation: {eq}"
+    );
+}
+
+/// MAX shares the nested-binary builder; spot-check the term shape.
+#[test]
+fn test_body_aware_max_coefficient_terms() {
+    let elements = vec!["region·nyc".to_string(), "region·boston".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "pop[*] * scale",
+        "pop",
+        &[("pop", 1)],
+        &["scale"],
+        &["region"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "pop",
+        "agg",
+        "region·boston",
+        &elements,
+        &ReducerKind::Nonlinear,
+        "MAX",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(
+        eq.contains(
+            "MAX((PREVIOUS(pop[region·nyc]) * PREVIOUS(scale)), \
+             (pop[region·boston] * PREVIOUS(scale)))"
+        ),
+        "equation: {eq}"
+    );
+}
+
+/// STDDEV builds the unrolled population-variance form (divisor N,
+/// inlined mean -- the GH #483 shape) over the row-pinned body terms.
+#[test]
+fn test_body_aware_stddev_coefficient_terms() {
+    let elements = vec!["region·nyc".to_string(), "region·boston".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "pop[*] * scale",
+        "pop",
+        &[("pop", 1)],
+        &["scale"],
+        &["region"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "pop",
+        "agg",
+        "region·nyc",
+        &elements,
+        &ReducerKind::Nonlinear,
+        "STDDEV",
+        true,
+        Some(&fixture.ctx()),
+    );
+    let live = "(pop[region·nyc] * PREVIOUS(scale))";
+    let frozen = "(PREVIOUS(pop[region·boston]) * PREVIOUS(scale))";
+    assert!(eq.contains("sqrt("), "equation: {eq}");
+    assert!(
+        eq.contains(&format!("(({live} + {frozen}) / 2)")),
+        "the inlined mean must use the body terms: {eq}"
+    );
+    assert!(eq.contains(" / 2)"), "divisor must stay N (GH #483): {eq}");
+}
+
+/// An un-pinnable nonlinear body (axis-count mismatch) must degrade to
+/// the delta-ratio fallback, the same contract as the linear arm.
+#[test]
+fn test_body_aware_nonlinear_unpinnable_falls_back() {
+    let elements = vec!["d1·a,d2·x".to_string(), "d1·a,d2·y".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "matrix[d1, *] * frac[d1]",
+        "matrix",
+        &[("matrix", 2), ("frac", 1)],
+        &[],
+        &["d1", "d2"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "matrix",
+        "agg",
+        "d1·a,d2·x",
+        &elements,
+        &ReducerKind::Nonlinear,
+        "MIN",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(
+        eq.contains("SAFEDIV((agg - PREVIOUS(agg))"),
+        "equation: {eq}"
+    );
+    assert!(!eq.contains("frac"), "equation: {eq}");
+}
+
+/// RANK keeps its documented delta-ratio stand-in regardless of the body
+/// (companion to `test_generate_rank_keeps_delta_ratio`).
+#[test]
+fn test_body_aware_rank_keeps_delta_ratio() {
+    let elements = vec!["region·nyc".to_string(), "region·boston".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "pop[*] * scale",
+        "pop",
+        &[("pop", 1)],
+        &["scale"],
+        &["region"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "pop",
+        "agg",
+        "region·nyc",
+        &elements,
+        &ReducerKind::Nonlinear,
+        "RANK",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(
+        eq.contains("SAFEDIV((agg - PREVIOUS(agg))"),
+        "equation: {eq}"
+    );
+}

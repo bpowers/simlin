@@ -131,7 +131,10 @@ fn is_live_source_iterated_dim_subscript(
 /// similarly over-collapses to the `D1`-element rather than the mapped
 /// `D2`-element. Such models are already not statically scoreable in
 /// pre-#511 LTM; the precise non-natural-position handling is a known
-/// limitation tracked as GH #762.
+/// limitation tracked separately. (NOT the GH #762 reducer-body work,
+/// which covers the source→agg per-row partials in
+/// [`generate_nonlinear_body_partial`]; this is the other-dep
+/// iterated-subscript collapse in target-equation partials.)
 fn is_other_dep_iterated_dim_subscript(
     indices: &[IndexExpr0],
     ctx: Option<&IteratedDimCtx<'_>>,
@@ -3626,6 +3629,136 @@ fn generate_linear_body_partial(
     }
 }
 
+/// The body-aware changed-first per-row partial for a nonlinear reducer
+/// (MIN/MAX/STDDEV) -- GH #762, the nonlinear sibling of
+/// [`generate_linear_body_partial`].
+///
+/// For `agg = R(body(r) for r in coreduced)` with `R ∈ {MIN, MAX, STDDEV}`
+/// the changed-first partial for source row `e` evaluates `R` over one
+/// term per co-reduced row:
+///
+/// ```text
+/// term_e      = body pinned to row e, source live, other model refs frozen
+/// term_r, r≠e = body pinned to row r, ALL model refs frozen
+/// partial     = R(term_e, term_r, ...)
+/// ```
+///
+/// and the link-score guard form's numerator is `partial -
+/// PREVIOUS(agg)`. Unlike SUM/MEAN there is no single-row collapse -- the
+/// frozen rows' terms do not cancel inside MIN/MAX/STDDEV, so every
+/// co-reduced row's frozen body is spelled out (exactly the structure the
+/// bare-body builder already used, with `body(r)` in place of the bare
+/// element). The terms contain only scalar / fixed-element `PREVIOUS`
+/// reads, so they always compile. MIN/MAX nest binary calls and STDDEV
+/// keeps the GH #483 unrolled population-variance form (divisor `N`,
+/// inlined mean) over the body terms.
+///
+/// When the pinned body is the bare source reference the legacy
+/// [`generate_nonlinear_partial`] is returned byte-identically; RANK is
+/// body-independent (the documented delta-ratio stand-in) and delegates
+/// to the legacy builder unconditionally. `None` means some co-reduced
+/// row's body cannot be safely pinned (see [`pin_body_to_row`], including
+/// the fixed-literal self-reference bail); the caller falls back to the
+/// delta-ratio form.
+fn generate_nonlinear_body_partial(
+    ctx: &ReducerBodyCtx<'_>,
+    source_q: &str,
+    target_ref: &str,
+    current_element: &str,
+    all_elements: &[String],
+    reducer_name: &str,
+) -> Option<String> {
+    let upper = reducer_name.to_uppercase();
+    if upper == "RANK" {
+        // RANK is an order statistic; its delta-ratio stand-in does not
+        // read the body at all (see generate_nonlinear_partial's doc).
+        return Some(generate_nonlinear_partial(
+            source_q,
+            target_ref,
+            current_element,
+            all_elements,
+            reducer_name,
+        ));
+    }
+    let Ok(Some(ast)) = Expr0::new(ctx.body_text, LexerType::Equation) else {
+        return None;
+    };
+    let row_parts_of =
+        |elem: &str| -> Vec<String> { elem.split(',').map(|p| p.trim().to_string()).collect() };
+    let current_parts = row_parts_of(current_element);
+    if current_parts.len() != ctx.row_dim_names.len() {
+        return None;
+    }
+    let pinned_current = pin_body_to_row(ast.clone(), ctx, &current_parts)?;
+    if pinned_body_is_bare_source(&pinned_current, ctx.live_source, &current_parts) {
+        // The legacy per-element expansion is exact for a bare body; keep
+        // its emission byte-identical to the pre-body-aware form.
+        return Some(generate_nonlinear_partial(
+            source_q,
+            target_ref,
+            current_element,
+            all_elements,
+            reducer_name,
+        ));
+    }
+    if !pinned_body_references_live(&pinned_current, ctx.live_source) {
+        return None;
+    }
+    // One term per co-reduced row: live at the scored row, fully frozen
+    // elsewhere. Terms are parenthesized -- they are compound expressions
+    // landing inside call arguments and `+`/`-`/`^` contexts.
+    let mut terms = Vec::with_capacity(all_elements.len());
+    for elem in all_elements {
+        let term = if elem == current_element {
+            freeze_pinned_body(
+                pinned_current.clone(),
+                ctx.model_deps,
+                Some(ctx.live_source),
+            )
+        } else {
+            let parts = row_parts_of(elem);
+            if parts.len() != ctx.row_dim_names.len() {
+                return None;
+            }
+            let pinned = pin_body_to_row(ast.clone(), ctx, &parts)?;
+            freeze_pinned_body(pinned, ctx.model_deps, None)
+        };
+        terms.push(format!("({})", print_eqn(&term)));
+    }
+    match upper.as_str() {
+        "MIN" | "MAX" => {
+            // Nest binary calls right-to-left, mirroring the bare builder:
+            // MIN(a, MIN(b, c)) for [a, b, c].
+            if terms.len() == 1 {
+                return Some(terms[0].clone());
+            }
+            let mut result = terms[terms.len() - 1].clone();
+            for term in terms[..terms.len() - 1].iter().rev() {
+                result = format!("{upper}({term}, {result})");
+            }
+            Some(result)
+        }
+        "STDDEV" => {
+            // The GH #483 unrolled population-variance partial (divisor N,
+            // matching vm.rs::Opcode::ArrayStddev; mean string-inlined)
+            // over the body terms.
+            let n = terms.len();
+            if n <= 1 {
+                // The variance of a single term is identically 0 (mirrors
+                // the bare builder's single-element special case).
+                return Some("0".to_string());
+            }
+            let mean = format!("(({}) / {n})", terms.join(" + "));
+            let squared_devs: Vec<String> = terms
+                .iter()
+                .map(|t| format!("(({t} - {mean})^2)"))
+                .collect();
+            Some(format!("sqrt(({}) / {n})", squared_devs.join(" + ")))
+        }
+        _ => None,
+    }
+}
+
 /// Generate a per-element link score equation for an arrayed-to-scalar edge.
 ///
 /// For element `current_element` of source variable `source_var_name`,
@@ -3789,13 +3922,31 @@ fn build_element_reducer_link_score(
                 reducer_name,
             ),
         },
-        ReducerKind::Nonlinear => generate_nonlinear_partial(
-            source_q,
-            target_ref,
-            current_element,
-            all_elements,
-            reducer_name,
-        ),
+        // GH #762 (the nonlinear sibling of the GH #744 Linear arm): with
+        // a body context, build each MIN/MAX/STDDEV term from the
+        // row-pinned BODY (byte-identical legacy emission for a bare
+        // body; RANK delegates unconditionally). An un-pinnable body
+        // degrades to the same delta-ratio fallback. Without a context
+        // (test-only callers) the bare-element expansion is used as
+        // before.
+        ReducerKind::Nonlinear => match body {
+            Some(ctx) => generate_nonlinear_body_partial(
+                ctx,
+                source_q,
+                target_ref,
+                current_element,
+                all_elements,
+                reducer_name,
+            )
+            .unwrap_or_else(|| target_ref.to_string()),
+            None => generate_nonlinear_partial(
+                source_q,
+                target_ref,
+                current_element,
+                all_elements,
+                reducer_name,
+            ),
+        },
     };
 
     // Standard link score formula wrapping the partial equation, in the
@@ -3845,14 +3996,15 @@ fn generate_linear_partial(
     }
 }
 
-/// Generate the partial evaluation for a nonlinear reducer.
+/// Generate the partial evaluation for a nonlinear reducer whose body is
+/// the BARE source reference (or for RANK, whose stand-in ignores the
+/// body).
 ///
-/// KNOWN LIMITATION: like the pre-GH-#744 linear shortcut, this enumerates
-/// the BARE source elements, so a non-bare body (`MIN(pop[*] * scale)`)
-/// produces a partial in the wrong units (raw `pop` vs the scaled agg) and
-/// a garbage score. The body-aware treatment that fixed the Linear arm
-/// ([`generate_linear_body_partial`]'s pin/freeze machinery) would extend
-/// here by building each term from the row-pinned body; tracked as GH #762.
+/// Like [`generate_linear_partial`], this enumerates the bare source
+/// elements, which is exact only for a bare body (`MIN(pop[*])`).
+/// Production callers route through [`generate_nonlinear_body_partial`]
+/// (GH #762), which builds each term from the row-pinned BODY and
+/// collapses to this builder byte-identically for the bare case.
 ///
 /// - **MIN/MAX**: nests 2-argument calls to enumerate every element with
 ///   selective `PREVIOUS` wrapping (`MIN(s[d], MIN(PREVIOUS(s[e]), ...))`).

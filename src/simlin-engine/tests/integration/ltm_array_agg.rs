@@ -2980,3 +2980,172 @@ fn fixed_literal_self_reference_rows_fall_back_consistently() {
         );
     }
 }
+
+// ── GH #762: nonlinear (MIN/MAX/STDDEV) per-row partials must honor the
+// reducer body ───────────────────────────────────────────────────────────
+//
+// The sibling of GH #744: `generate_nonlinear_partial` substituted the
+// BARE source elements into the MIN/MAX nested-binary and STDDEV
+// unrolled-variance shapes, ignoring arithmetic inside the reducer
+// argument -- `MIN(pop[*] * scale)` compared raw `pop` terms against a
+// scaled aggregate, producing garbage scores. Each per-row term is now
+// the row-pinned BODY (live at the scored row, fully frozen elsewhere).
+
+/// Shared GH #762 fixture: a nonlinear reducer over `pop[*] * scale` with
+/// the rows on a loop through the agg and `scale` fed back from `total`.
+fn nonlinear_body_fixture(grow_eqn: &str) -> datamodel::Project {
+    TestProject::new("nonlinear_762")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["pgrow"], &[], None)
+        .array_with_ranges("gain[region]", vec![("north", "0.04"), ("south", "0.07")])
+        .array_flow("pgrow[region]", "pop * gain * 0.001 * grow", None)
+        .aux("scale", "0.001 * total + 0.01", None)
+        .stock("total", "100", &["grow"], &[], None)
+        .flow("grow", grow_eqn, None)
+        .build_datamodel()
+}
+
+/// Per-step expected-vs-actual assertion for the GH #762 value tests: the
+/// numerator terms are O(10), so float noise is absolute (~1e-12); use a
+/// relative tolerance with an absolute floor of 1.0 so an expected score
+/// of exactly 0 (a frozen-argmin row) still admits arithmetic noise.
+fn assert_score_close(actual: f64, expected: f64, what: &str) {
+    let tol = 1e-9 * expected.abs().max(1.0);
+    assert!(
+        (actual - expected).abs() <= tol,
+        "{what}: got {actual}, expected {expected} (tol {tol})"
+    );
+}
+
+/// GH #762 (MIN): the per-row changed-first partial for
+/// `grow = 1 + MIN(pop[*] * scale)` w.r.t. `pop[e]` is
+/// `MIN(pop[e] * PREVIOUS(scale), PREVIOUS(pop[o]) * PREVIOUS(scale))`
+/// anchored against `PREVIOUS(agg)` -- the scored row's body term live,
+/// every other row's body term fully frozen. Pre-fix the terms were the
+/// bare `pop` elements (raw units vs the scaled agg): scores ~73 where
+/// the truth is ~0.003 (north) and exactly 0 (south, the frozen-argmin
+/// row whose change never moves the MIN).
+#[test]
+fn min_body_coefficient_row_scores_track_true_partial() {
+    let project = nonlinear_body_fixture("1 + MIN(pop[*] * scale)");
+    let (results, _) = run_ltm(&project);
+    let agg = series_at(
+        &results,
+        offset_of(&results, "$\u{205A}ltm\u{205A}agg\u{205A}0"),
+    );
+    let scale = series_at(&results, offset_of(&results, "scale"));
+    let pop_n = series_at(&results, offset_of(&results, "pop[north]"));
+    let pop_s = series_at(&results, offset_of(&results, "pop[south]"));
+
+    for (elem, pop_live, pop_other) in [("north", &pop_n, &pop_s), ("south", &pop_s, &pop_n)] {
+        let score_name =
+            format!("{LINK_SCORE_PREFIX}pop[{elem}]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0");
+        let score = series_at(&results, offset_of(&results, &score_name));
+        let mut contributing = 0usize;
+        for t in 1..score.len() {
+            let d_agg = agg[t] - agg[t - 1];
+            let d_pop = pop_live[t] - pop_live[t - 1];
+            if d_agg == 0.0 || d_pop == 0.0 {
+                assert_eq!(score[t], 0.0, "{score_name} at step {t}: guard must zero");
+                continue;
+            }
+            let term_live = pop_live[t] * scale[t - 1];
+            let term_other = pop_other[t - 1] * scale[t - 1];
+            let partial = term_live.min(term_other);
+            let expected = (partial - agg[t - 1]) / d_agg.abs() * d_pop.signum();
+            assert_score_close(score[t], expected, &format!("{score_name} at step {t}"));
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "{score_name}: expected at least 3 scored steps, got {contributing}"
+        );
+    }
+}
+
+/// GH #762 (STDDEV): the per-row changed-first partial for
+/// `grow = 1 + STDDEV(pop[*] * scale)` uses the same row-pinned body
+/// terms inside the unrolled population-variance form (divisor N,
+/// inlined mean -- the GH #483 shape). Expected values mirror the emitted
+/// sqrt-variance arithmetic so float agreement is tight.
+#[test]
+fn stddev_body_coefficient_row_scores_track_true_partial() {
+    let project = nonlinear_body_fixture("1 + STDDEV(pop[*] * scale)");
+    let (results, _) = run_ltm(&project);
+    let agg = series_at(
+        &results,
+        offset_of(&results, "$\u{205A}ltm\u{205A}agg\u{205A}0"),
+    );
+    let scale = series_at(&results, offset_of(&results, "scale"));
+    let pop_n = series_at(&results, offset_of(&results, "pop[north]"));
+    let pop_s = series_at(&results, offset_of(&results, "pop[south]"));
+
+    for (elem, pop_live, pop_other) in [("north", &pop_n, &pop_s), ("south", &pop_s, &pop_n)] {
+        let score_name =
+            format!("{LINK_SCORE_PREFIX}pop[{elem}]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0");
+        let score = series_at(&results, offset_of(&results, &score_name));
+        let mut contributing = 0usize;
+        for t in 1..score.len() {
+            let d_agg = agg[t] - agg[t - 1];
+            let d_pop = pop_live[t] - pop_live[t - 1];
+            if d_agg == 0.0 || d_pop == 0.0 {
+                assert_eq!(score[t], 0.0, "{score_name} at step {t}: guard must zero");
+                continue;
+            }
+            let term_live = pop_live[t] * scale[t - 1];
+            let term_other = pop_other[t - 1] * scale[t - 1];
+            let mean = (term_live + term_other) / 2.0;
+            let partial = (((term_live - mean).powi(2) + (term_other - mean).powi(2)) / 2.0).sqrt();
+            let expected = (partial - agg[t - 1]) / d_agg.abs() * d_pop.signum();
+            assert_score_close(score[t], expected, &format!("{score_name} at step {t}"));
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "{score_name}: expected at least 3 scored steps, got {contributing}"
+        );
+    }
+}
+
+/// GH #762 (bare bodies unchanged): `MIN(pop[*])` / `STDDEV(pop[*])` keep
+/// the legacy analytic partials byte-for-byte, pinned against the
+/// pre-fix emission recorded at `ec72e190` before the change.
+#[test]
+fn nonlinear_bare_body_equations_unchanged() {
+    let (_, ltm_vars) = run_ltm(&nonlinear_body_fixture("1 + MIN(pop[*])"));
+    let min_score = ltm_var(
+        &ltm_vars,
+        &format!("{LINK_SCORE_PREFIX}pop[north]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0"),
+    );
+    assert_eq!(
+        min_score.equation.source_text(),
+        "if (TIME = INITIAL_TIME) then 0 else if ((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
+         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")) = 0) OR ((pop[region\u{B7}north] - \
+         PREVIOUS(pop[region\u{B7}north])) = 0) then 0 else \
+         SAFEDIV((MIN(pop[region\u{B7}north], PREVIOUS(pop[region\u{B7}south])) - \
+         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")), \
+         ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"))), 0) * \
+         SIGN((pop[region\u{B7}north] - PREVIOUS(pop[region\u{B7}north])))",
+        "the bare-body MIN partial must stay byte-identical"
+    );
+
+    let (_, ltm_vars) = run_ltm(&nonlinear_body_fixture("1 + STDDEV(pop[*])"));
+    let stddev_score = ltm_var(
+        &ltm_vars,
+        &format!("{LINK_SCORE_PREFIX}pop[north]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0"),
+    );
+    assert_eq!(
+        stddev_score.equation.source_text(),
+        "if (TIME = INITIAL_TIME) then 0 else if ((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
+         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")) = 0) OR ((pop[region\u{B7}north] - \
+         PREVIOUS(pop[region\u{B7}north])) = 0) then 0 else \
+         SAFEDIV((sqrt((((pop[region\u{B7}north] - ((pop[region\u{B7}north] + \
+         PREVIOUS(pop[region\u{B7}south])) / 2))^2) + ((PREVIOUS(pop[region\u{B7}south]) - \
+         ((pop[region\u{B7}north] + PREVIOUS(pop[region\u{B7}south])) / 2))^2)) / 2) - \
+         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")), \
+         ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"))), 0) * \
+         SIGN((pop[region\u{B7}north] - PREVIOUS(pop[region\u{B7}north])))",
+        "the bare-body STDDEV partial must stay byte-identical"
+    );
+}
