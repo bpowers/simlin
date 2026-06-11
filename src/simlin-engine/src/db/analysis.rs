@@ -126,16 +126,17 @@ pub enum RefShape {
     /// this shape that `enumerate_agg_nodes` hoisted into a `$⁚ltm⁚agg⁚{n}`
     /// node is routed `ThroughAgg` (the shape is then ignored); a *whole-RHS*
     /// reducer's argument keeps this shape on its `Direct` site, where
-    /// `model_element_causal_edges` routes a PARTIAL reduce
-    /// (`row_sum[D1] = SUM(matrix[D1,*])`) by its read slice (GH #752,
-    /// `ltm_agg::variable_backed_partial_reduce_agg` -- only the diagonal
-    /// `matrix[d1,d2] → row_sum[d1]` rows, matching the per-`(row, slot)`
-    /// link scores) and projects a whole-extent reduce
-    /// (`total = SUM(population[*])`) to the conservative reduction /
-    /// broadcast into the (variable-backed-agg) target. The not-hoistable
-    /// dynamic-index reducer carve-out (`SUM(pop[idx,*])`) is reclassified by
-    /// `ltm_ir` as `DynamicIndex` rather than kept here (#514), so a `Direct`
-    /// `Wildcard` site never carries an *un*-hoisted sliced reducer.
+    /// `model_element_causal_edges` routes any non-trivial statically-
+    /// describable reduce (`row_sum[D1] = SUM(matrix[D1,*])`,
+    /// `outf[D1] = MEAN(cube[D1,x,*])`, `total = SUM(pop[nyc,*])`) by its
+    /// read slice (GH #752 / GH #765, `ltm_agg::variable_backed_reduce_agg`
+    /// -- only the READ rows, matching the per-read-row link scores) and
+    /// projects a whole-extent reduce (`total = SUM(population[*])`) to the
+    /// conservative reduction / broadcast into the (variable-backed-agg)
+    /// target. The not-hoistable dynamic-index reducer carve-out
+    /// (`SUM(pop[idx,*])`) is reclassified by `ltm_ir` as `DynamicIndex`
+    /// rather than kept here (#514), so a `Direct` `Wildcard` site never
+    /// carries an *un*-hoisted sliced reducer.
     Wildcard,
     /// `Expr2::Subscript(source, indices)` where at least one index is
     /// a non-literal expression (`@N`, `Range`, an arbitrary `Expr`, or a
@@ -656,10 +657,11 @@ fn expand_same_element(
 ///
 /// A VARIABLE-BACKED agg (`is_synthetic == false`, GH #752 -- the target's
 /// whole RHS is the reducer, so `agg.name == to_name` and the gate
-/// `ltm_agg::variable_backed_partial_reduce_agg` guarantees `result_dims`
-/// equal `to`'s dims) emits only the source→slot half: the slot names ARE
-/// `to`'s element nodes, and an agg→to half would emit degenerate
-/// `to[e] → to[e]` self-edges.
+/// `ltm_agg::variable_backed_reduce_agg` guarantees `result_dims` equal
+/// `to`'s dims, or -- for a scalar-result slice -- that `to` is SCALAR, so
+/// the bare agg name IS `to`'s element node) emits only the source→slot
+/// half: the slot names ARE `to`'s element nodes, and an agg→to half would
+/// emit degenerate `to[e] → to[e]` self-edges.
 ///
 /// Defensive: if `from`'s read slice doesn't have one entry per source axis
 /// (it always should for a hoisted agg whose `sources` include `from` --
@@ -834,18 +836,20 @@ fn emit_agg_routed_edges(
         };
         let axis_plans: Vec<AxisPlan> = planned.unwrap_or_else(|| {
             // Conservative fallback: every source element, scalar agg. NOTE:
-            // for a VARIABLE-BACKED arrayed agg this fallback is NOT merely
-            // imprecise -- a scalar slot makes `agg_node_name` the BARE
-            // variable name (`inflow`), a node that does not exist in the
-            // element graph (an arrayed variable's nodes are all
+            // for a VARIABLE-BACKED *arrayed* agg this fallback is NOT
+            // merely imprecise -- a scalar slot makes `agg_node_name` the
+            // BARE variable name (`inflow`), a node that does not exist in
+            // the element graph (an arrayed variable's nodes are all
             // subscripted), so the edges dangle and any loop through the
-            // reducer silently disappears from enumeration. Unreachable by
-            // construction today (`variable_backed_partial_reduce_agg` only
-            // admits well-formed all-Iterated/Reduced slices, and the
-            // debug_asserts above pin the remap invariants), but if the gate
-            // is ever widened this fallback must be re-evaluated for the
-            // variable-backed case (e.g. fall back to the cross-product
-            // instead).
+            // reducer silently disappears from enumeration. (For a SCALAR
+            // variable-backed owner -- the section-6 scalar-result
+            // admission -- the bare name IS the element node, so the
+            // fallback is safe there.) Unreachable by construction today
+            // (`variable_backed_reduce_agg` only admits well-formed slices
+            // whose Iterated remaps exist, and the debug_asserts above pin
+            // the remap invariants), but if the gate is ever widened this
+            // fallback must be re-evaluated for the arrayed variable-backed
+            // case (e.g. fall back to the cross-product instead).
             from_dims
                 .iter()
                 .map(|d| AxisPlan {
@@ -1866,25 +1870,41 @@ pub fn model_element_causal_edges(
             for site in classified.expect("classified is Some -- checked above") {
                 match &site.routing {
                     crate::db::ltm_ir::SiteRouting::Direct => {
-                        // GH #752: a `Direct` `Wildcard` site whose target is
-                        // a VARIABLE-BACKED partial reducer (`inflow[D1] =
-                        // SUM(matrix[D1,*])` as the whole RHS -- the variable
-                        // IS the agg, so the site is not `ThroughAgg`) gets
-                        // the same read-slice routing a synthetic agg's
-                        // source half gets: `matrix[d1,d2] → inflow[d1]`,
-                        // never the phantom off-diagonal cross-product
-                        // (`SUM(matrix[a,*])` does not read row `b`). The
-                        // per-`(row, slot)` link scores
-                        // `try_cross_dimensional_link_scores` emits carry
-                        // exactly these diagonal edges' names, so loop scores
-                        // over them resolve; the cross-product's phantom
-                        // edges referenced names that were never emitted and
-                        // stubbed every loop score through the reducer to 0.
-                        // `variable_backed_partial_reduce_agg` is `None` for
-                        // the whole-extent / broadcast / permuted-axes
-                        // shapes, which keep the conservative arm below.
-                        if matches!(site.shape, RefShape::Wildcard)
-                            && let Some(vb_agg) = crate::ltm_agg::variable_backed_partial_reduce_agg(
+                        // GH #752 / GH #765: a `Direct` site whose target is
+                        // a VARIABLE-BACKED reducer (`inflow[D1] =
+                        // SUM(matrix[D1,*])`, `outf[D1] = MEAN(cube[D1,x,*])`,
+                        // `total = SUM(pop[nyc,*])` as the whole RHS -- the
+                        // variable IS the agg, so the site is not
+                        // `ThroughAgg`) gets the same read-slice routing a
+                        // synthetic agg's source half gets: only the rows
+                        // the slice READS, never the phantom off-diagonal /
+                        // unread-row cross-product (`SUM(matrix[a,*])` does
+                        // not read row `b`; `MEAN(cube[D1,x,*])` does not
+                        // read the `y` slab). The per-read-row link scores
+                        // `try_cross_dimensional_link_scores` derives from
+                        // the SAME `read_slice_rows` carry exactly these
+                        // edges' names, so loop scores over them resolve.
+                        // `variable_backed_reduce_agg` is `None` for the
+                        // whole-extent / broadcast / permuted-axes shapes,
+                        // which keep the conservative arm below.
+                        //
+                        // Shape condition: a hoistable whole-RHS reducer
+                        // arg classifies `Wildcard` (any `*` index, or
+                        // all-`StarRange` per AC1.4) or `DynamicIndex` (the
+                        // coarse classifier shape of a mixed
+                        // iterated+StarRange subscript like
+                        // `SUM(matrix[D1,*:Sub])` -- the documented partial-
+                        // StarRange classifier residual). Both route here;
+                        // the gate (which requires a statically-describable
+                        // hoisted slice) is the real decider, and a TRUE
+                        // dynamic index (`SUM(matrix[idx,*])`) is never
+                        // hoisted, so the gate is `None` for it. Pre-T3 no
+                        // `DynamicIndex` site could pass the gate (an
+                        // all-Iterated/Reduced{None} slice always has a bare
+                        // `*`), so admitting the shape here is exactly the
+                        // T3 widening, not a behavior change for old shapes.
+                        if matches!(site.shape, RefShape::Wildcard | RefShape::DynamicIndex)
+                            && let Some(vb_agg) = crate::ltm_agg::variable_backed_reduce_agg(
                                 agg_nodes, from_name, to_name, &to_dims,
                             )
                         {

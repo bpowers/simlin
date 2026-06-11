@@ -576,38 +576,44 @@ fn test_get_errors_no_ltm_diagnostics_when_ltm_never_requested() {
 /// accumulator, so `simlin_project_get_errors` surfaces it after an
 /// LTM-enabled sim was created.
 ///
-/// The fixture is the Pinned-bearing variable-backed mixed reduce
-/// (`outf[D1] = MEAN(cube[D1,x,*])` in a feedback loop, the GH #765
-/// family): `variable_backed_partial_reduce_agg` excludes Pinned-bearing
-/// slices onto the loud conservative cross-product, whose off-diagonal
-/// circuits' loop scores reference per-`(row, slot)` link-score names that
-/// are never emitted, so those fragments genuinely fail to compile today
-/// (a real, non-injected failure). The previous fixtures here were the
-/// GH #759 pinned-index repro (retired when #759's fix made its helpers
-/// compile) and the GH #742 RANK-hoisted agg (retired when the GH #771
-/// de-hoist stopped minting the ill-shaped agg); the assertion matches the
-/// shared "failed to compile" wording rather than one diagnostic sub-class,
-/// so the test keeps covering the FFI harvest channel as individual shapes
-/// get fixed -- this shape's fix is T3 of the shape-expressiveness design,
+/// The fixture is the GH #743 co-source closure (`growth[D1] =
+/// SUM(matrix[D1,*] * frac[D1])` with the feedback loop closed through the
+/// wildcard-read co-source `matrix`): the slice-disagreeing multi-source
+/// reducer is not hoisted, so the cross-element circuits' loop scores
+/// reference per-`(row, slot)` link-score names the emitters never produce
+/// for this un-hoisted shape, and those fragments genuinely fail to compile
+/// today (a real, non-injected failure; pinned engine-side by
+/// `un_hoisted_iterated_dim_feeder_co_source_closure_stays_loud`). The
+/// previous fixtures here were the GH #759 pinned-index repro (retired when
+/// #759's fix made its helpers compile), the GH #742 RANK-hoisted agg
+/// (retired when the GH #771 de-hoist stopped minting the ill-shaped agg),
+/// and the GH #765 Pinned-bearing variable-backed mixed reduce (retired
+/// when T3 of the shape-expressiveness design made its read-slice scores
+/// compile cleanly); the assertion matches the shared "failed to compile"
+/// wording rather than one diagnostic sub-class, so the test keeps covering
+/// the FFI harvest channel as individual shapes get fixed -- this shape's
+/// fix is T5 of the same design (feeder sub-slice acceptance, GH #767),
 /// which must rotate the fixture again (the engine-side guard-injected
 /// `test_model_ltm_fragment_diagnostics_covers_implicit_helpers` covers the
-/// implicit-helper diagnostic leg independently of any real-shape lifetime).
+/// implicit-helper diagnostic leg independently of any real-shape lifetime;
+/// the `LtmFragmentFailureGuard` injection hook is engine-`pub(crate)`, so
+/// if no organic failure shape remains after T5 this test needs the guard
+/// re-exported for FFI tests).
 #[test]
 fn test_get_errors_surfaces_ltm_fragment_failure_after_ltm_sim() {
     let datamodel = TestProject::new("get_errors_fragment_fail")
         .with_sim_time(0.0, 8.0, 1.0)
-        .named_dimension("D1", &["a", "b"])
-        .named_dimension("D2", &["x", "y"])
-        .named_dimension("D3", &["p", "q"])
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
         .array_aux_direct(
-            "cube",
-            vec!["D1".into(), "D2".into(), "D3".into()],
-            "stock[D1] * 0.1",
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1] * 0.05",
             None,
         )
-        .array_aux_direct("outf", vec!["D1".into()], "MEAN(cube[D1, x, *])", None)
-        .array_flow("inflow[D1]", "outf[D1]", None)
-        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .array_aux("frac[D1]", "0.5")
+        .array_flow("growth[D1]", "SUM(matrix[D1, *] * frac[D1])", None)
         .build_datamodel();
     let proj = open_project_from_datamodel(&datamodel);
 

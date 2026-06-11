@@ -1189,18 +1189,17 @@ fn test_variable_backed_partial_reduce_emits_no_fragment_warning() {
     );
 }
 
-/// GH #752 follow-up: a variable-backed partial reduce with a PINNED axis
-/// in its read slice (`inflow[D1] = MEAN(cube[D1,x,*])`) is EXCLUDED from
-/// the read-slice routing -- `try_cross_dimensional_link_scores`' co-reduced
-/// slice ignores Pinned axes, so its per-`(row, slot)` values are wrong for
-/// a pinned slice (the MEAN divisor counts unread rows; GH #765).
-/// The shape must stay on the LOUD conservative regime: cross-product
-/// element edges whose loop scores reference never-emitted names and surface
-/// fragment-failure Warnings, rather than compiling cleanly against silently
-/// wrong scores. When the co-reduced-slice derivation is fixed, this test
-/// flips to the zero-warning assertion and the gate's Pinned exclusion goes.
+/// GH #765 (shape-expressiveness T3): a variable-backed partial reduce with
+/// a PINNED axis in its read slice (`inflow[D1] = MEAN(cube[D1,x,*])`) takes
+/// the read-slice routing -- `try_cross_dimensional_link_scores` derives the
+/// co-reduced slices from `read_slice_rows` (Pinned axes fixed by
+/// construction), so the element edges, the per-`(row, slot)` scores, and
+/// the loop-builder routing all cover the identical read rows and EVERY LTM
+/// fragment compiles. Pre-T3 this shape rode the loud conservative regime
+/// (cross-product edges whose loop scores referenced never-emitted names and
+/// surfaced fragment-failure Warnings).
 #[test]
-fn test_variable_backed_pinned_mixed_reduce_stays_on_warned_path() {
+fn test_variable_backed_pinned_mixed_reduce_compiles_cleanly() {
     use crate::db::collect_model_diagnostics;
     use salsa::Setter;
 
@@ -1232,11 +1231,10 @@ fn test_variable_backed_pinned_mixed_reduce_stays_on_warned_path() {
         .filter(|d| is_ltm_fragment_failure(d))
         .collect();
     assert!(
-        !frag_failures.is_empty(),
-        "a Pinned-bearing variable-backed partial reduce must stay on the \
-         loud conservative path (fragment-failure Warnings) until the \
-         per-(row, slot) co-reduced-slice derivation handles Pinned axes; \
-         got no fragment warnings: {diags:?}"
+        frag_failures.is_empty(),
+        "every LTM fragment of a Pinned-bearing variable-backed partial \
+         reduce must compile (GH #765: the read-slice derivation fixes both \
+         the edges and the scores together); got: {frag_failures:?}"
     );
 }
 

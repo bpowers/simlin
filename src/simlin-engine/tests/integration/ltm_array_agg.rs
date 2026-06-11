@@ -4760,3 +4760,561 @@ fn iterated_subset_reducer_loop_scores_end_to_end() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// GH #765 / shape-expressiveness T3: variable-backed reduce slices score by
+// their read slice (Pinned axes fixed, subset axes enumerated, unread rows
+// silent), and the one inexpressible residual degrades loudly.
+// ---------------------------------------------------------------------------
+
+/// GH #765 (the headline fixture): a variable-backed Pinned-mixed partial
+/// reduce in a feedback loop -- `outf[D1] = MEAN(cube[D1,x,*])` over
+/// `cube[D1,D2,D3]`, closed through a `D1` stock. The per-result-row read
+/// slice is `{cube[d1,x,p], cube[d1,x,q]}` -- 2 cells -- so:
+///
+/// - the MEAN divisor is 2, not the full-cartesian 4: with both read rows
+///   changing by identical deltas each row's link score reads exactly 0.5
+///   (the pre-fix full-cartesian co-reduced slice read 0.25 -- the silent
+///   wrong-divisor value this fixture's 0.5 assertion guards, which is also
+///   the design's atomicity guard: deleting the gate's Pinned exclusion
+///   without the `read_slice_rows` derivation swap re-fires it);
+/// - the unread `cube[*,y,*]` rows get NO link score (pre-fix they got
+///   delta-ratio garbage of constant +1) and no enumerated loop traverses
+///   them (pre-fix: 16 warned 0-stub loop scores through the cross-product
+///   edges, plus one silently-wrong 0.25 loop);
+/// - zero assembly warnings: every emitted fragment compiles, the loud
+///   conservative regime this shape used to ride is gone.
+#[test]
+fn pinned_mixed_reduce_divisor_and_scores() {
+    let project = TestProject::new("gh765_pinned_mixed")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_aux_direct("outf", vec!["D1".into()], "MEAN(cube[D1, x, *])", None)
+        .array_flow("inflow[D1]", "outf[D1]", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the Pinned-mixed variable-backed reduce must compile with zero \
+         warnings; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    // Read rows only: the x slab of each D1 row gets a per-(row, slot)
+    // score; the y slab gets nothing.
+    for d1 in ["a", "b"] {
+        for d3 in ["p", "q"] {
+            let name = format!("{LINK_SCORE_PREFIX}cube[{d1},x,{d3}]\u{2192}outf[{d1}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected read-row link score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+            let phantom = format!("{LINK_SCORE_PREFIX}cube[{d1},y,{d3}]\u{2192}outf[{d1}]");
+            assert!(
+                ltm.vars.iter().all(|v| v.name != phantom),
+                "the unread y row must get NO link score; got {phantom:?}"
+            );
+        }
+    }
+
+    // No enumerated loop traverses an unread y row.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the read-row loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v.contains(",y,")),
+            "no loop may run through an unread y row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // MEAN over the 2-cell read slice with equal per-step deltas: each read
+    // row's changed-first partial is exactly (Δrow/2)/Δoutf = 0.5. The
+    // pre-fix full-cartesian divisor read 0.25.
+    for d1 in ["a", "b"] {
+        for d3 in ["p", "q"] {
+            let name = format!("{LINK_SCORE_PREFIX}cube[{d1},x,{d3}]\u{2192}outf[{d1}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            assert_eq!(series[0], 0.0, "initial-step guard pins {name} to 0");
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step} must score 0.5 (read-slice divisor 2, \
+                     not the full-cartesian 4 => 0.25); got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Each per-circuit loop score is the product 1 * 0.5 * 1 * 1 = 0.5 once
+    // the flow-to-stock startup guard clears.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the read-row loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "loop score {} slot {slot} step {step} must read 0.5; got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// GH #766 x T3: a VARIABLE-BACKED subset partial reduce in a feedback loop
+/// -- `out[D1] = MEAN(matrix[D1,*:SubD2])` as the whole RHS (the inline
+/// sibling is covered by `iterated_subset_reducer_loop_scores_end_to_end`;
+/// this shape was excluded from the variable-backed gate until T3). The
+/// per-slot read slice is the 2-element subset, so each subset row scores
+/// (Δrow/2)/Δout = 0.5, the unread `z` rows get no score and no loop, and
+/// the model compiles with zero warnings.
+#[test]
+fn variable_backed_subset_reduce_divisor_and_scores() {
+    let project = TestProject::new("gh766_vb_subset")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y", "z"])
+        .named_dimension("SubD2", &["x", "y"])
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_aux_direct("out", vec!["D1".into()], "MEAN(matrix[D1, *:SubD2])", None)
+        .array_flow("inflow[D1]", "out[D1]", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the subset variable-backed reduce must compile with zero warnings; \
+         got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}out[{d1}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected subset-row link score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+        let phantom = format!("{LINK_SCORE_PREFIX}matrix[{d1},z]\u{2192}out[{d1}]");
+        assert!(
+            ltm.vars.iter().all(|v| v.name != phantom),
+            "the unread z row must get NO link score; got {phantom:?}"
+        );
+    }
+
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the subset loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v.contains(",z]")),
+            "no loop may run through an unread z row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}out[{d1}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step} must score 0.5 (subset divisor); got {series:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Shape-expressiveness section 6 (scalar owner, Pinned slice):
+/// `total = SUM(pop[nyc,*])` in a feedback loop. The gate admits the
+/// scalar-result slice for a SCALAR owner -- the slot is the bare `total`
+/// node -- so element edges and link scores both cover exactly the read
+/// rows (`pop[nyc,*]`), and they match:
+///
+/// - `pop[nyc,p]→total` / `pop[nyc,q]→total` exist and read 0.5 (equal
+///   deltas, Δtotal twice each row's delta);
+/// - the unread `pop[boston,*]` rows get NO score (pre-T3 the
+///   full-cartesian derivation emitted nonzero garbage for them) and no
+///   loop runs through boston at all -- crucially no warned-phantom
+///   circuit through unread rows;
+/// - zero assembly warnings.
+#[test]
+fn scalar_owner_pinned_slice_reduce_scores_read_rows_only() {
+    let project = TestProject::new("t3_scalar_owner_pinned")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .scalar_aux("total", "SUM(pop[nyc, *])")
+        .array_flow("inflow[Region]", "total * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the scalar-owner pinned slice must compile with zero warnings; \
+         got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    for d2 in ["p", "q"] {
+        let name = format!("{LINK_SCORE_PREFIX}pop[nyc,{d2}]\u{2192}total");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected read-row link score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+        let phantom = format!("{LINK_SCORE_PREFIX}pop[boston,{d2}]\u{2192}total");
+        assert!(
+            ltm.vars.iter().all(|v| v.name != phantom),
+            "the unread boston row must get NO link score; got {phantom:?}"
+        );
+    }
+
+    // No loop traverses boston at all: the only edges into `total` come from
+    // the nyc rows, so boston's stock cannot close a circuit.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the read-row loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v.contains("boston")),
+            "no loop may run through the unread boston rows; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    for d2 in ["p", "q"] {
+        let name = format!("{LINK_SCORE_PREFIX}pop[nyc,{d2}]\u{2192}total");
+        let series = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-9,
+                "{name} at step {step} must score 0.5; got {series:?}"
+            );
+        }
+    }
+
+    // Per-circuit loop scores: 1 * 0.5 * 1 * 1 = 0.5 post-startup.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the read-row loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "loop score {} slot {slot} step {step} must read 0.5; got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// Shape-expressiveness section 6 (scalar owner, subset slice):
+/// `total = SUM(arr[*:Core])` in a feedback loop, `Core = {a, b}` a proper
+/// subdimension of `Region = {a, b, c}`. The scalar-result subset slice is
+/// admitted for the scalar owner, so only the subset rows get element edges
+/// and link scores (each 0.5 with equal subset deltas), `arr[c]` gets
+/// neither a score nor a loop, and the model compiles with zero warnings.
+#[test]
+fn scalar_owner_subset_slice_reduce_scores_read_rows_only() {
+    let project = TestProject::new("t3_scalar_owner_subset")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_with_ranges("factor[Region]", vec![("a", "1"), ("b", "1"), ("c", "5")])
+        .scalar_aux("total", "SUM(arr[*:Core])")
+        .array_flow("inflow[Region]", "total * 0.001 * factor[Region]", None)
+        .array_stock("arr[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the scalar-owner subset slice must compile with zero warnings; \
+         got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    for row in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}total");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected subset-row link score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    let phantom = format!("{LINK_SCORE_PREFIX}arr[c]\u{2192}total");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != phantom),
+        "the unread arr[c] row must get NO link score; got {phantom:?}"
+    );
+
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the subset loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v == "arr[c]"),
+            "no loop may run through the unread arr[c] row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    for row in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}total");
+        let series = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-9,
+                "{name} at step {step} must score 0.5 (subset divisor); got {series:?}"
+            );
+        }
+    }
+}
+
+/// Shape-expressiveness section 6 (the DECLINED residual): an ARRAYED-owner
+/// Pinned/subset broadcast slice -- `share[Region] = SUM(pop[nyc,*])`, a
+/// scalar-result slice broadcast over the owner's dims -- degrades to the
+/// GH #758 loud skip: exactly one Warning naming the `pop -> share` edge,
+/// NO `pop→share` link-score variable of any shape, and NO loop scores
+/// (every feedback loop here traverses the declined edge).
+///
+/// Pre-T3 this shape was SILENTLY WRONG (the unfiled GH #765 sibling),
+/// emitting full-cartesian per-(row, slot) garbage: `pop[boston,*]→
+/// share[boston]` scores read a constant delta-ratio +1.0 even though
+/// `share[boston] = SUM(pop[nyc,*])` does not read `pop[boston,*]` at all,
+/// the true `pop[nyc,*]→share[boston]` dependency had no score, and the
+/// `pop[nyc,*]→share[nyc]` partials (0.5) fed loop scores alongside 5
+/// warned 0-stub loops. (The full broadcast fan-out is T6's PerElement rule
+/// applied to variable-backed owners -- a tracked follow-up, not T3.)
+#[test]
+fn arrayed_owner_broadcast_pinned_slice_reduce_skips_loudly() {
+    let project = TestProject::new("t3_broadcast_decline")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("share", vec!["Region".into()], "SUM(pop[nyc, *])", None)
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // Exactly one Warning, naming the declined edge.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the declined broadcast slice must surface exactly one Warning; got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        panic!("expected an Assembly warning; got: {:?}", warnings[0]);
+    };
+    assert!(
+        msg.contains("pop") && msg.contains("share"),
+        "the Warning must name the declined edge; got: {msg}"
+    );
+
+    // No pop→share link-score variable of any shape, and no loop scores at
+    // all (every loop traverses the declined edge).
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let garbage: Vec<&str> = ltm
+        .vars
+        .iter()
+        .filter(|v| {
+            v.name.starts_with(LINK_SCORE_PREFIX)
+                && v.name.contains("pop")
+                && v.name.contains("share")
+        })
+        .map(|v| v.name.as_str())
+        .collect();
+    assert!(
+        garbage.is_empty(),
+        "the declined edge must emit NO link-score variable (pre-T3 it \
+         emitted full-cartesian garbage); got: {garbage:?}"
+    );
+    let loop_scores: Vec<&str> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .map(|v| v.name.as_str())
+        .collect();
+    assert!(
+        loop_scores.is_empty(),
+        "every loop traverses the declined edge, so no loop score may be \
+         emitted; got: {loop_scores:?}"
+    );
+
+    // The model itself still simulates fine -- the decline is an LTM
+    // analysis degradation, not a model error.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+}
+
+/// T3 golden pin (the design's "explicit golden assertion"): the ALIGNED
+/// variable-backed partial reduce (`inflow[D1] = SUM(matrix[D1,*])` in a
+/// loop) keeps byte-identical per-(row, slot) link-score emissions across
+/// the `read_slice_rows` derivation swap -- for an all-Iterated/full-extent
+/// slice the read rows ARE the cartesian rows, in the same row-major order
+/// with the same co-reduced grouping, so nothing about the emitted names or
+/// equation text may change.
+#[test]
+fn aligned_partial_reduce_emissions_stay_byte_identical() {
+    let project = TestProject::new("t3_aligned_golden")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_flow("inflow[D1]", "SUM(matrix[D1, *])", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    // All four read rows, in row-major order, each a scalar var.
+    let expected_names = [
+        format!("{LINK_SCORE_PREFIX}matrix[a,x]\u{2192}inflow[a]"),
+        format!("{LINK_SCORE_PREFIX}matrix[a,y]\u{2192}inflow[a]"),
+        format!("{LINK_SCORE_PREFIX}matrix[b,x]\u{2192}inflow[b]"),
+        format!("{LINK_SCORE_PREFIX}matrix[b,y]\u{2192}inflow[b]"),
+    ];
+    let emitted: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LINK_SCORE_PREFIX) && v.name.contains("matrix["))
+        .collect();
+    assert_eq!(
+        emitted.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+        expected_names
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>(),
+        "aligned per-(row, slot) names (and their order) must not change"
+    );
+
+    // The exact equation text of the first row's score, captured at the T3
+    // parent commit. Byte-identity here is the regression guard for the
+    // derivation swap on already-correct shapes.
+    let golden = "if (TIME = INITIAL_TIME) then 0 else if ((inflow[d1\u{B7}a] - \
+                  PREVIOUS(inflow[d1\u{B7}a])) = 0) OR ((matrix[d1\u{B7}a,d2\u{B7}x] - \
+                  PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x])) = 0) then 0 else \
+                  SAFEDIV((PREVIOUS(inflow[d1\u{B7}a]) + (matrix[d1\u{B7}a,d2\u{B7}x] - \
+                  PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x])) - PREVIOUS(inflow[d1\u{B7}a])), \
+                  ABS((inflow[d1\u{B7}a] - PREVIOUS(inflow[d1\u{B7}a]))), 0) * \
+                  SIGN((matrix[d1\u{B7}a,d2\u{B7}x] - PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x])))";
+    match &emitted[0].equation {
+        datamodel::Equation::Scalar(text) => assert_eq!(
+            text, golden,
+            "the aligned per-(row, slot) equation text must stay byte-identical"
+        ),
+        other => panic!("aligned per-(row, slot) score must be scalar; got {other:?}"),
+    }
+}

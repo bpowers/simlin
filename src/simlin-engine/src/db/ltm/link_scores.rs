@@ -215,17 +215,48 @@ pub(super) fn link_score_dimensions(
 ///     -- `parse_link_offsets` keeps element-level-on-both-sides names
 ///     as a single passthrough edge, so no parser change is needed.
 ///
+/// **Row derivation (GH #765 / shape-expressiveness T3, invariant I4)**:
+/// when `to` IS a variable-backed aggregate node reading `from` and the
+/// shared [`crate::ltm_agg::variable_backed_reduce_agg`] gate admits it,
+/// the rows / slots / co-reduced sets come from `read_slice_rows` over
+/// `from`'s read slice -- `Pinned` axes fixed to their literal element,
+/// subset-`Reduced` axes enumerated over the subset only -- so the divisor
+/// is the true read count and unread rows get NO score, matching the
+/// element edges `emit_agg_routed_edges` derives from the same slice. For
+/// an all-`Iterated`/full-extent slice the read rows ARE the cartesian
+/// rows (byte-identical to the pre-T3 derivation). The full `from_dims`
+/// cartesian product below remains only for edges with NO accepted
+/// variable-backed agg: the not-hoisted conservative family (dynamic-index
+/// reducers, declined mappings, GH #743 slice disagreements) and the
+/// GH #764 broadcast/permuted result shapes, all byte-identical to pre-T3.
+///
+/// The one newly-LOUD decline: an ARRAYED-owner scalar-result Pinned/subset
+/// slice (`share[Region] = SUM(pop[nyc,*])` -- a variable-backed agg with
+/// no `Iterated` axis broadcast over `to`'s dims). Pre-T3 the cartesian
+/// derivation emitted full-cartesian per-`(row, slot)` garbage for it
+/// (delta-ratio +/-1 scores for rows the reducer never reads -- the
+/// unfiled GH #765 sibling); the per-`(row, slot)` machinery cannot
+/// express the broadcast, so the edge now takes the GH #758 treatment: one
+/// Warning ([`emit_unscoreable_broadcast_reduce_edge_warning`]), no
+/// link-score variable, the edge recorded in `unscoreable_edges` (loop
+/// scores through it dropped), and `Some(vec![])` returned so the caller
+/// does NOT fall through to `emit_per_shape_link_scores`.
+///
 /// Returns `None` for scalar-to-scalar, same-dimension A2A, broadcast
 /// (`from_dims ⊆ to_dims`), mismatched dimensions, module-involved
 /// edges, and any edge where the reducer cannot be classified. Returns
-/// `Some(vec![])` for SIZE edges (constant reducer, no scores).
+/// `Some(vec![])` for SIZE edges (constant reducer, no scores) and the
+/// loud decline above.
+#[allow(clippy::too_many_arguments)] // threads salsa keys + emission context
 pub(super) fn try_cross_dimensional_link_scores(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
+    agg_nodes: &crate::ltm_agg::AggNodesResult,
     from: &str,
     to: &str,
     model: SourceModel,
     project: SourceProject,
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> Option<Vec<LtmSyntheticVar>> {
     // Only applies when the source is arrayed.
     let from_sv = source_vars.get(from)?;
@@ -301,6 +332,115 @@ pub(super) fn try_cross_dimensional_link_scores(
         .iter()
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
+
+    // The T3 read-slice derivation (see the rustdoc). The raw finder runs
+    // first so the gate's decline reasons can be told apart: an accepted agg
+    // takes the `read_slice_rows` path; an agg the gate declines because its
+    // slice is non-trivial but scalar-result on an ARRAYED owner is the loud
+    // skip; every other decline (trivial slice, GH #764 broadcast/permuted)
+    // falls through to the pre-T3 cartesian derivation byte-identically.
+    if let Some(vb_agg) = agg_nodes
+        .aggs_in_var(to)
+        .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))
+    {
+        if crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from, to, to_dims).is_some() {
+            let rows = read_slice_rows(
+                vb_agg.source_read_slice(from),
+                &dim_element_lists,
+                project_dimensions_context(db, project),
+            );
+            // `rows` is `Some` for every slice the gate admits (both gate
+            // on the same per-axis data over the same salsa dimension
+            // context); a `None` here would mean a stale arity/remap
+            // invariant, and falls through to the conservative cartesian
+            // derivation below rather than emitting mis-slotted scores --
+            // mirroring `emit_source_to_agg_link_scores`' fallback.
+            if let Some(rows) = rows {
+                let mut cross_vars = Vec::with_capacity(rows.len());
+                for ReadSliceRow {
+                    row,
+                    slot,
+                    coreduced,
+                } in &rows
+                {
+                    // Equation text uses qualified `dim·element` references
+                    // (direct LoadPrev, no helper auxes); names keep the
+                    // bare element form (the user-facing / discovery-parsed
+                    // identity) -- both exactly as the cartesian branches
+                    // below.
+                    let qualified_row = crate::ltm_augment::qualify_element_csv(row, from_dims);
+                    let qualified_coreduced: Vec<String> = coreduced
+                        .iter()
+                        .map(|e| crate::ltm_augment::qualify_element_csv(e, from_dims))
+                        .collect();
+                    let (var_name, equation) = if slot.is_empty() {
+                        // Scalar result slot: the scalar-owner admission
+                        // (`total = SUM(pop[nyc,*])`) -- the bare `to` name
+                        // IS the slot.
+                        (
+                            format!(
+                                "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
+                                from, row, to
+                            ),
+                            crate::ltm_augment::generate_element_to_scalar_equation(
+                                from,
+                                to,
+                                &qualified_row,
+                                &qualified_coreduced,
+                                &classified.kind,
+                                classified.name,
+                                classified.is_bare,
+                                Some(&body_ctx),
+                            ),
+                        )
+                    } else {
+                        // Aligned partial reduce: the slot names a complete
+                        // `to` element (gate invariant), in `to`-dim order.
+                        (
+                            format!(
+                                "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}[{}]",
+                                from, row, to, slot
+                            ),
+                            crate::ltm_augment::generate_element_to_reduced_equation(
+                                from,
+                                to,
+                                &qualified_row,
+                                &crate::ltm_augment::qualify_element_csv(slot, to_dims),
+                                &qualified_coreduced,
+                                &classified.kind,
+                                classified.name,
+                                classified.is_bare,
+                                Some(&body_ctx),
+                            ),
+                        )
+                    };
+                    cross_vars.push(LtmSyntheticVar {
+                        name: var_name,
+                        equation: datamodel::Equation::Scalar(equation),
+                        dimensions: vec![], // scalar -- one variable per read row
+                        // bracketed name -> routed direct by `assemble_module`.
+                        compile_directly: false,
+                    });
+                }
+                return Some(cross_vars);
+            }
+        } else if !to_dims.is_empty()
+            && vb_agg.result_dims.is_empty()
+            && vb_agg
+                .canonical_read_slice()
+                .iter()
+                .any(|ax| !matches!(ax, crate::ltm_agg::AxisRead::Reduced { subset: None }))
+        {
+            // The declined ARRAYED-owner scalar-result Pinned/subset slice:
+            // loud skip (see the rustdoc). The insert dedups the warning
+            // when the pinned-loop pass re-visits the edge.
+            if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                emit_unscoreable_broadcast_reduce_edge_warning(db, model, from, to);
+            }
+            return Some(vec![]);
+        }
+    }
+
     let source_elements = cartesian_subscripts(&dim_element_lists);
 
     if result_axis_names.is_empty() {
@@ -686,6 +826,40 @@ pub(super) fn emit_unscoreable_conservative_edge_warning(
          unmapped dimension pair), so the conservative score has no compilable shape; \
          this edge will have no link-score variable and feedback loops through it will \
          not be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
+/// Accumulate the GH #758-style `Warning` for a declined ARRAYED-owner
+/// variable-backed reduce whose slice is Pinned/subset-bearing with NO
+/// `Iterated` axis (`share[Region] = SUM(pop[nyc,*])` -- the
+/// shape-expressiveness section-6 residual). The reducer's value is a
+/// single scalar broadcast over the owner's dims, which the
+/// per-`(row, slot)` score family cannot name (a slot must name a complete
+/// `to` element), and the pre-T3 cartesian derivation emitted silently
+/// wrong full-cartesian scores for it. Like the other unscoreable classes,
+/// the edge gets *no* link-score variable and the caller records it in
+/// `unscoreable_edges` so loop scores traversing it are dropped -- one
+/// clear diagnostic instead of plausible-looking garbage.
+pub(super) fn emit_unscoreable_broadcast_reduce_edge_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    from: &str,
+    to: &str,
+) {
+    use salsa::Accumulator;
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: {to}'s whole \
+         equation is a reducer that pins or subsets {from}'s axes while producing a \
+         single scalar value broadcast over {to}'s dimensions, which the per-element \
+         score machinery cannot express; this edge will have no link-score variable \
+         and feedback loops through it will not be scored"
     );
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
@@ -1742,11 +1916,24 @@ pub(super) fn emit_link_scores_for_edge(
         );
         return;
     }
-    // Cross-dimensional (arrayed-to-scalar) edges -- includes the
-    // *variable-backed* reducer aggs like `total = SUM(pop[*])`.
-    if let Some(cross_vars) =
-        try_cross_dimensional_link_scores(db, source_vars, from, to, model, project)
-    {
+    // Cross-dimensional (arrayed-to-scalar / partial-reduce) edges --
+    // includes the *variable-backed* reducer aggs like `total = SUM(pop[*])`
+    // and the read-slice-derived shapes (GH #765). `Some(vec![])` can mean
+    // the GH #758-style loud decline of the arrayed-owner scalar-result
+    // slice: a Warning was accumulated and the edge recorded in
+    // `unscoreable_edges`, and we must NOT fall through to
+    // `emit_per_shape_link_scores` (which would build a wrong-shaped
+    // stand-in).
+    if let Some(cross_vars) = try_cross_dimensional_link_scores(
+        db,
+        source_vars,
+        agg_nodes,
+        from,
+        to,
+        model,
+        project,
+        unscoreable_edges,
+    ) {
         vars.extend(cross_vars);
         return;
     }

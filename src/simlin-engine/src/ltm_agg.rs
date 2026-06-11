@@ -72,22 +72,28 @@
 //! -- "a scalar value per result slot" -- has no value to hold for it; see
 //! [`reducer_is_hoistable`].
 //!
-//! Whole-RHS partial reduces (`row_sum[D1] = SUM(matrix[D1,*])`) *are*
-//! recognized -- the variable is the agg, `result_dims` carries its dims, and
-//! its source's read slice records the `Iterated`/`Reduced` axis split. The element
-//! graph routes them by the read slice too (GH #752,
-//! [`variable_backed_partial_reduce_agg`]): each source row feeds only its
-//! own `row_sum[<slot>]` element node -- matching the per-`(row, slot)` link
-//! scores `try_cross_dimensional_link_scores` emits -- never the phantom
-//! off-diagonal cross-product (whose loop scores referenced names that were
-//! never emitted and stubbed to 0). Whole-extent variable-backed reducers
-//! (`total = SUM(pop[*])`, including the broadcast `share[R] = SUM(pop[*])`)
-//! keep the normal reference walker's reduction/broadcast edges, which are
-//! already the true reads for those shapes; the gate's other exclusions
-//! (partial reduce broadcast over extra target dims / permuted axes --
-//! GH #764 -- and Pinned-bearing or subset-bearing mixed slices, see
-//! [`variable_backed_partial_reduce_agg`]) keep the conservative
-//! cross-product, a SUPERSET of the true reads on the loud warned path.
+//! Whole-RHS reduces with a non-trivial slice *are* recognized -- the
+//! variable is the agg, `result_dims` carries the `Iterated` axes' dims, and
+//! its source's read slice records the per-axis split. The element graph
+//! routes them by the read slice too (GH #752, generalized by GH #765 / T3
+//! of the shape-expressiveness design, [`variable_backed_reduce_agg`]): for
+//! an aligned partial reduce (`row_sum[D1] = SUM(matrix[D1,*])`,
+//! Pinned/subset axes included) each source READ row feeds only its own
+//! `row_sum[<slot>]` element node, and for a scalar-result slice on a
+//! SCALAR owner (`total = SUM(pop[nyc,*])`, `total = SUM(arr[*:Sub])`) the
+//! read rows feed the bare `total` node -- in both cases matching the
+//! per-read-row link scores `try_cross_dimensional_link_scores` derives
+//! from the SAME `read_slice_rows` (invariant I4), never the phantom
+//! cross-product or an inflated full-extent divisor. Whole-extent
+//! variable-backed reducers (`total = SUM(pop[*])`, including the broadcast
+//! `share[R] = SUM(pop[*])`) keep the normal reference walker's
+//! reduction/broadcast edges, which are already the true reads for those
+//! shapes; the gate's remaining declines -- partial reduce broadcast over
+//! extra target dims / permuted axes (GH #764) and the ARRAYED-owner
+//! scalar-result Pinned/subset slice (`share[R] = SUM(pop[nyc,*])`, the
+//! GH #758 loud skip) -- keep the conservative cross-product, a SUPERSET of
+//! the true reads, with the latter's scores loudly skipped rather than
+//! silently wrong (see [`variable_backed_reduce_agg`]).
 
 use std::collections::HashMap;
 
@@ -445,7 +451,7 @@ impl AggNode {
     /// this is the first non-empty source slice (or empty for a -- by
     /// construction impossible -- agg with no arrayed source). Consumers
     /// whose decision is about the *reducer's* shape rather than one
-    /// source's rows (the [`variable_backed_partial_reduce_agg`] gate) key
+    /// source's rows (the [`variable_backed_reduce_agg`] gate) key
     /// on it.
     ///
     /// T5 MUST redefine this: "first non-empty" is only correct while
@@ -1360,80 +1366,105 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
     name.starts_with(AGG_NAME_PREFIX)
 }
 
-/// The variable-backed PARTIAL-reduce aggregate node for the causal edge
-/// `from -> to`, if any (GH #752): `to`'s entire dt-equation is a reducer
-/// reading `from` (`to` IS the agg, `is_synthetic == false`) with at least
-/// one [`AxisRead::Iterated`] axis, and the agg's `result_dims` are exactly
-/// `to`'s declared dims, in order -- so each agg result slot names a complete
-/// `to` element and the element graph can route the read-slice rows straight
-/// to `to[<slot>]` (the diagonal `matrix[d1,d2] → row_sum[d1]` family whose
-/// per-`(row, slot)` link scores `try_cross_dimensional_link_scores` emits).
+/// The variable-backed REDUCE aggregate node for the causal edge
+/// `from -> to`, if any (GH #752, generalized by T3 of the
+/// shape-expressiveness design / GH #765): `to`'s entire dt-equation is a
+/// reducer reading `from` (`to` IS the agg, `is_synthetic == false`) whose
+/// slice is statically describable and *non-trivial* -- at least one
+/// `Pinned`, subset-`Reduced`, or `Iterated` axis -- and whose result shape
+/// the per-`(row, slot)` machinery can express:
+///
+/// - **Aligned partial reduce** (`row_sum[D1] = SUM(matrix[D1,*])`,
+///   `outf[D1] = MEAN(cube[D1,x,*])`, `out[D1] = SUM(matrix[D1,*:Sub])`):
+///   at least one `Iterated` axis and `result_dims` exactly `to`'s declared
+///   dims, in order -- each agg result slot names a complete `to` element,
+///   so the element graph routes the read-slice rows straight to
+///   `to[<slot>]` (the diagonal family whose per-`(row, slot)` link scores
+///   `try_cross_dimensional_link_scores` emits from the SAME
+///   `read_slice_rows` derivation, invariant I4). Pinned/subset axes are
+///   admitted: the score derivation fixes `Pinned` axes and enumerates
+///   subsets by construction, so the divisor is the true read count and
+///   unread rows get neither edges nor scores. (The T1-era Pinned/subset
+///   exclusions were deleted atomically with that derivation swap --
+///   deleting them first would have re-fired the 0.25-vs-0.5
+///   silent-wrong-divisor hazard the old rustdoc documented.)
+/// - **Scalar-result slice on a SCALAR owner** (`total = SUM(pop[nyc,*])`,
+///   `total = SUM(arr[*:Sub])`; `to_dims.is_empty()`): no `Iterated` axis;
+///   the slot is the bare `to` node, so `emit_agg_routed_edges` emits
+///   exactly the read rows into `to`, matching the per-read-row scores.
 ///
 /// This is the single gate shared by the element-graph reroute
-/// (`model_element_causal_edges`' `Direct`-`Wildcard` dispatch) and the loop
-/// builder (`build_element_level_loops`' per-circuit routing), so the two can
-/// never disagree about which edges carry per-`(row, slot)` scores.
+/// (`model_element_causal_edges`' `Direct` `Wildcard`/`DynamicIndex`
+/// dispatch), the loop builder (`build_element_level_loops`' per-circuit
+/// routing), and `try_cross_dimensional_link_scores`' row derivation, so
+/// the three can never disagree about which edges carry per-`(row, slot)`
+/// scores.
 ///
-/// `None` (callers keep the conservative path) for:
-/// - a whole-extent / pinned-only variable-backed reducer
-///   (`total = SUM(pop[*])`, `share[R] = SUM(pop[*])`): no `Iterated` axis;
-///   the reduction / broadcast edges the conservative path emits are already
-///   the true reads.
-/// - a whole-RHS partial reduce broadcast over extra target dims
-///   (`out[D1,D3] = SUM(matrix[D1,*])`): `result_dims` is a strict subset of
-///   `to`'s dims, so a slot does not name a complete `to` element (and the
-///   per-`(row, slot)` link scores are not emitted for that shape either).
+/// `None` (callers keep their conservative paths) for:
+/// - a PURE full-extent slice (all `Reduced{subset: None}`:
+///   `total = SUM(pop[*])`, `share[R] = SUM(pop[*,*])`): the reference
+///   walker's reduction/broadcast edges already ARE the read rows, so
+///   routing it through the gate would change nothing -- skipped to keep
+///   the surface byte-identical (inert).
+/// - an ARRAYED-owner scalar-result Pinned/subset slice
+///   (`share[Region] = SUM(pop[nyc,*])`): no `Iterated` axis but `to` is
+///   arrayed -- the reducer's scalar value broadcasts over `to`'s dims,
+///   which per-`(row, slot)` names cannot express (a slot does not name a
+///   complete `to` element). DECLINED here AND loudly skipped by
+///   `try_cross_dimensional_link_scores` (the GH #758 treatment: one
+///   Warning, no link-score variable, loop scores through the edge
+///   dropped). The full broadcast fan-out is the design's section 3
+///   `PerElement` rule applied to variable-backed owners -- T6 machinery,
+///   tracked as a follow-up.
+/// - a whole-RHS partial reduce BROADCAST over extra target dims
+///   (`out[D1,D3] = SUM(matrix[D1,*])`): `result_dims` a strict subset of
+///   `to`'s dims, so a slot does not name a complete `to` element (GH #764,
+///   T4 mints synthetic aggs for these).
 /// - a permuted-axes whole-RHS reduce: slot coordinates are in
-///   `Iterated`-axis (source) order, which would mis-subscript `to`.
-/// - a PINNED-bearing mixed slice (`outf[D1] = MEAN(cube[D1,x,*])`):
-///   `try_cross_dimensional_link_scores` derives each slot's co-reduced
-///   slice from the FULL source cartesian product, ignoring `Pinned` axes,
-///   so its per-`(row, slot)` values are wrong for a pinned slice (e.g. the
-///   MEAN divisor counts the unread rows -- GH #765). Accepting
-///   the slice here would trade the loud conservative regime (cross-product
-///   edges whose loop scores fail fragment compile with `Warning`s) for
-///   silently wrong numbers; the exclusion goes when that derivation
-///   respects the read slice.
-/// - a subset-bearing `Reduced` slice (`out[D1] = MEAN(matrix[D1,*:Sub])`,
-///   GH #766): the same hazard as the Pinned exclusion -- the
-///   `try_cross_dimensional_link_scores` derivation enumerates the full
-///   cartesian, so a subset slice's MEAN divisor would count the unread
-///   rows. Excluded onto the same loud conservative regime until that
-///   derivation consumes the read slice (T3 of the shape-expressiveness
-///   design, where this gate generalizes and both exclusions go together).
-pub(crate) fn variable_backed_partial_reduce_agg<'a>(
+///   `Iterated`-axis (source) order, which would mis-subscript `to`
+///   (GH #764 likewise).
+pub(crate) fn variable_backed_reduce_agg<'a>(
     aggs: &'a AggNodesResult,
     from: &str,
     to: &str,
     to_dims: &[crate::dimensions::Dimension],
 ) -> Option<&'a AggNode> {
-    if to_dims.is_empty() {
-        return None;
-    }
     aggs.aggs_in_var(to).find(|a| {
-        !a.is_synthetic
-            && a.name == to
-            && a.reads_var(from)
-            // The axis checks key on the CANONICAL slice (the shared arrayed
-            // slice, invariant I1) rather than `from`'s own slice: the gate
-            // decides the *reducer's* shape, and `from` may be a scalar
-            // feeder of the reduce (`out[D1] = SUM(matrix[D1,*] * scale)`)
-            // whose own (empty) slice says nothing about the axis split.
-            && a.canonical_read_slice()
-                .iter()
-                .any(|ax| matches!(ax, AxisRead::Iterated { .. }))
-            // Every axis Iterated or full-extent Reduced: a Pinned-bearing
-            // or subset-bearing slice is excluded (see the rustdoc's last
-            // two bullets -- both go when try_cross_dimensional_link_scores
-            // derives its rows from the read slice, T3).
-            && a.canonical_read_slice()
-                .iter()
-                .all(|ax| matches!(ax, AxisRead::Iterated { .. } | AxisRead::Reduced { subset: None }))
-            && a.result_dims.len() == to_dims.len()
-            && a.result_dims
-                .iter()
-                .zip(to_dims)
-                .all(|(rd, td)| canonicalize(rd).as_ref() == td.name())
+        if a.is_synthetic || a.name != to || !a.reads_var(from) {
+            return false;
+        }
+        // The axis checks key on the CANONICAL slice (the shared arrayed
+        // slice, invariant I1) rather than `from`'s own slice: the gate
+        // decides the *reducer's* shape, and `from` may be a scalar
+        // feeder of the reduce (`out[D1] = SUM(matrix[D1,*] * scale)`)
+        // whose own (empty) slice says nothing about the axis split.
+        let slice = a.canonical_read_slice();
+        // Non-trivial: a pure full-extent slice (all `Reduced{subset:
+        // None}`, which also covers the impossible empty slice) is the
+        // inert skip in the rustdoc.
+        if !slice
+            .iter()
+            .any(|ax| !matches!(ax, AxisRead::Reduced { subset: None }))
+        {
+            return false;
+        }
+        if slice
+            .iter()
+            .any(|ax| matches!(ax, AxisRead::Iterated { .. }))
+        {
+            // Aligned partial reduce: each slot names a complete `to`
+            // element. Broadcast/permuted result dims stay declined (#764).
+            a.result_dims.len() == to_dims.len()
+                && a.result_dims
+                    .iter()
+                    .zip(to_dims)
+                    .all(|(rd, td)| canonicalize(rd).as_ref() == td.name())
+        } else {
+            // Scalar-result Pinned/subset slice: admitted only for a SCALAR
+            // owner; the arrayed-owner broadcast slice is the declined
+            // residual (GH #758 loud skip; see the rustdoc).
+            to_dims.is_empty()
+        }
     })
 }
 
@@ -2734,17 +2765,35 @@ mod tests {
         assert_eq!(synthetic[0].result_dims, vec!["D1".to_string()]);
     }
 
-    /// GH #766 / T3 boundary: a VARIABLE-BACKED partial reduce whose slice
-    /// carries a SUBSET (`out[D1] = SUM(matrix[D1,*:SubD2])` as the whole
-    /// RHS) is excluded from `variable_backed_partial_reduce_agg` exactly
-    /// like the Pinned-bearing slice: `try_cross_dimensional_link_scores`
-    /// still derives co-reduced rows from the full cartesian, so admitting
-    /// the subset slice would pair subset edges with full-extent divisors
-    /// (silently wrong numbers). The exclusion goes in T3 with the
-    /// derivation swap.
+    /// Test helper: resolve the named dimensions of a synced project into
+    /// `Dimension` objects (for the gate's `to_dims` argument).
+    fn resolve_dims(
+        db: &SimlinDb,
+        project: crate::db::SourceProject,
+        names: &[&str],
+    ) -> Vec<crate::dimensions::Dimension> {
+        let dim_ctx = crate::db::project_dimensions_context(db, project);
+        names
+            .iter()
+            .map(|n| {
+                dim_ctx
+                    .get(&crate::common::CanonicalDimensionName::from_raw(n))
+                    .unwrap_or_else(|| panic!("dimension {n} resolves"))
+                    .clone()
+            })
+            .collect()
+    }
+
+    /// GH #766 x T3: a VARIABLE-BACKED partial reduce whose slice carries a
+    /// SUBSET (`out[D1] = SUM(matrix[D1,*:SubD2])` as the whole RHS) is
+    /// ACCEPTED by the reduce gate: `try_cross_dimensional_link_scores`
+    /// derives co-reduced rows from the same `read_slice_rows`, so the
+    /// subset edges pair with subset divisors. (Pre-T3 the slice was
+    /// excluded onto the loud conservative regime because the score
+    /// derivation enumerated the full cartesian.)
     #[test]
-    fn variable_backed_subset_slice_is_excluded_from_partial_reduce_gate() {
-        let project = TestProject::new("vb_subset_excluded")
+    fn variable_backed_subset_slice_is_accepted_by_reduce_gate() {
+        let project = TestProject::new("vb_subset_accepted")
             .named_dimension("D1", &["a", "b"])
             .named_dimension("D2", &["x", "y", "z"])
             .named_dimension("SubD2", &["x", "y"])
@@ -2766,17 +2815,140 @@ mod tests {
             AxisRead::Reduced { subset: Some(s) } if s == &["x".to_string(), "y".to_string()]
         ));
 
-        // ...but the #752 gate declines it (the loud conservative regime).
-        let dim_ctx = crate::db::project_dimensions_context(&db, sync.project);
-        let to_dims = vec![
-            dim_ctx
-                .get(&crate::common::CanonicalDimensionName::from_raw("d1"))
-                .expect("D1 resolves")
-                .clone(),
-        ];
+        // ...and the gate admits it (T3 of the shape-expressiveness design).
+        let to_dims = resolve_dims(&db, sync.project, &["d1"]);
+        let accepted = variable_backed_reduce_agg(result, "matrix", "out", &to_dims)
+            .expect("the subset-bearing aligned slice must be admitted by the reduce gate");
+        assert_eq!(accepted.name, "out");
+    }
+
+    /// GH #765 x T3: a VARIABLE-BACKED Pinned-mixed aligned slice
+    /// (`outf[D1] = MEAN(cube[D1,x,*])`) is ACCEPTED by the reduce gate --
+    /// the T1-era Pinned exclusion is deleted atomically with the
+    /// `read_slice_rows` derivation swap.
+    #[test]
+    fn reduce_gate_accepts_pinned_mixed_aligned_slice() {
+        let project = TestProject::new("gate_pinned_mixed")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension("D3", &["p", "q"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "D2".into(), "D3".into()],
+                "1",
+                None,
+            )
+            .array_aux_direct("outf", vec!["D1".into()], "MEAN(cube[D1, x, *])", None);
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
+        let to_dims = resolve_dims(&db, sync.project, &["d1"]);
+        let accepted = variable_backed_reduce_agg(result, "cube", "outf", &to_dims)
+            .expect("the Pinned-mixed aligned slice must be admitted by the reduce gate");
+        assert_eq!(accepted.name, "outf");
+    }
+
+    /// Section 6 (scalar owner): a scalar-result Pinned slice
+    /// (`total = SUM(pop[nyc,*])`, `to_dims` empty) is admitted -- the slot
+    /// is the bare `total` node, so `emit_agg_routed_edges` emits exactly
+    /// the read rows into `to`, matching the per-read-row scores.
+    #[test]
+    fn reduce_gate_accepts_scalar_owner_pinned_slice() {
+        let project = TestProject::new("gate_scalar_owner_pinned")
+            .named_dimension("Region", &["nyc", "boston"])
+            .named_dimension("D2", &["p", "q"])
+            .array_aux_direct("pop", vec!["Region".into(), "D2".into()], "1", None)
+            .scalar_aux("total", "SUM(pop[nyc, *])");
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
+        let accepted = variable_backed_reduce_agg(result, "pop", "total", &[])
+            .expect("the scalar-owner Pinned slice must be admitted by the reduce gate");
+        assert_eq!(accepted.name, "total");
+    }
+
+    /// Section 6 (inert skip): a PURE full-extent scalar reduce
+    /// (`total = SUM(pop[*])`) stays OUT of the gate -- the reference
+    /// walker's reduction edges are already the true reads, so routing it
+    /// through the gate would change nothing and is skipped to keep the
+    /// diff inert (byte-identity).
+    #[test]
+    fn reduce_gate_declines_pure_full_extent_slice() {
+        let project = TestProject::new("gate_full_extent")
+            .named_dimension("Region", &["nyc", "boston"])
+            .array_aux("pop[Region]", "1")
+            .scalar_aux("total", "SUM(pop[*])");
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
         assert!(
-            variable_backed_partial_reduce_agg(result, "matrix", "out", &to_dims).is_none(),
-            "subset-bearing variable-backed slices must stay on the conservative path until T3"
+            variable_backed_reduce_agg(result, "pop", "total", &[]).is_none(),
+            "a pure full-extent slice keeps the reference walker's edges (inert skip)"
+        );
+    }
+
+    /// Section 6 (the DECLINED residual): an ARRAYED-owner scalar-result
+    /// Pinned slice (`share[Region] = SUM(pop[nyc,*])` -- no `Iterated`
+    /// axis, arrayed `to`) is DECLINED: the per-`(row, slot)` machinery
+    /// cannot express a scalar reduce broadcast over the owner's dims.
+    /// `try_cross_dimensional_link_scores` routes the edge to the GH #758
+    /// loud skip.
+    #[test]
+    fn reduce_gate_declines_arrayed_owner_scalar_result_slice() {
+        let project = TestProject::new("gate_broadcast_pinned")
+            .named_dimension("Region", &["nyc", "boston"])
+            .named_dimension("D2", &["p", "q"])
+            .array_aux_direct("pop", vec!["Region".into(), "D2".into()], "1", None)
+            .array_aux_direct("share", vec!["Region".into()], "SUM(pop[nyc, *])", None);
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
+        let to_dims = resolve_dims(&db, sync.project, &["region"]);
+        assert!(
+            variable_backed_reduce_agg(result, "pop", "share", &to_dims).is_none(),
+            "the arrayed-owner scalar-result slice must stay declined (GH #758 loud skip)"
+        );
+    }
+
+    /// GH #764 boundary (unchanged by T3): a partial reduce BROADCAST over
+    /// extra target dims (`out[D1,D3] = SUM(matrix[D1,*])` -- `result_dims`
+    /// a strict subset of `to`'s dims) stays declined; a slot does not name
+    /// a complete `to` element. T4 routes these to synthetic aggs.
+    #[test]
+    fn reduce_gate_declines_broadcast_result_dims() {
+        let project = TestProject::new("gate_broadcast_result")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension("D3", &["p", "q"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct(
+                "out",
+                vec!["D1".into(), "D3".into()],
+                "SUM(matrix[D1, *])",
+                None,
+            );
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
+        let to_dims = resolve_dims(&db, sync.project, &["d1", "d3"]);
+        assert!(
+            variable_backed_reduce_agg(result, "matrix", "out", &to_dims).is_none(),
+            "broadcast result_dims must stay declined (GH #764, T4's scope)"
         );
     }
 

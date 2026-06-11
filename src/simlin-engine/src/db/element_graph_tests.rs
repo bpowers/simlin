@@ -851,9 +851,8 @@ fn element_graph_variable_backed_partial_reduce_routes_read_slice() {
 /// (`out[D1,D2] = SUM(cube[D1,D2,*])` over `cube[D1,D2,D3]`,
 /// `read_slice = [Iterated(d1), Iterated(d2), Reduced]`, `result_dims =
 /// [D1, D2]` equal to `out`'s dims in order): each cube row feeds only its
-/// own `(d1, d2)` slot. Pins that the Pinned-bearing exclusion in
-/// `variable_backed_partial_reduce_agg` does not over-exclude the
-/// all-`Iterated`/`Reduced` shapes.
+/// own `(d1, d2)` slot. Pins that `variable_backed_reduce_agg` keeps
+/// admitting the all-`Iterated`/`Reduced` shapes byte-identically.
 #[test]
 fn element_graph_variable_backed_two_axis_partial_reduce_routes_read_slice() {
     let project = TestProject::new("vb_two_axis_partial_reduce")
@@ -886,18 +885,17 @@ fn element_graph_variable_backed_two_axis_partial_reduce_routes_read_slice() {
     assert_no_edge(&result, "cube[b,y,p]", "out[a,x]");
 }
 
-/// GH #752 follow-up: a variable-backed partial reduce whose read slice
-/// carries a PINNED axis (`outf[D1] = MEAN(cube[D1,x,*])` -- `read_slice =
-/// [Iterated(d1), Pinned(x), Reduced]`) must NOT take the read-slice path:
-/// `try_cross_dimensional_link_scores` derives each slot's co-reduced slice
-/// from the FULL source cartesian product, ignoring Pinned axes, so its
-/// per-`(row, slot)` values are wrong for a pinned slice (the MEAN divisor
-/// counts unread rows; tracked separately). Until that derivation is fixed,
-/// `variable_backed_partial_reduce_agg` excludes Pinned-bearing slices so
-/// this shape stays on the LOUD conservative cross-product + fragment-warning
-/// regime instead of producing silently wrong numbers.
+/// GH #765 (shape-expressiveness T3): a variable-backed partial reduce whose
+/// read slice carries a PINNED axis (`outf[D1] = MEAN(cube[D1,x,*])` --
+/// `read_slice = [Iterated(d1), Pinned(x), Reduced]`) takes the read-slice
+/// routing: only the pinned `x` slab of each `D1` row feeds that row's slot.
+/// `try_cross_dimensional_link_scores` now derives its per-`(row, slot)`
+/// co-reduced slices from the same `read_slice_rows` (invariant I4), so the
+/// edges and the emitted scores cover the identical read rows -- the T1-era
+/// Pinned exclusion (which kept this shape on the loud conservative
+/// cross-product while the score derivation ignored Pinned axes) is gone.
 #[test]
-fn element_graph_variable_backed_pinned_mixed_reduce_stays_cross_product() {
+fn element_graph_variable_backed_pinned_mixed_reduce_routes_read_slice() {
     let project = TestProject::new("vb_pinned_mixed_reduce")
         .named_dimension("D1", &["a", "b"])
         .named_dimension("D2", &["x", "y"])
@@ -913,15 +911,90 @@ fn element_graph_variable_backed_pinned_mixed_reduce_stays_cross_product() {
 
     let result = element_edges(&project);
 
-    // The conservative cross-product: every cube element feeds every inflow
-    // slot -- including the off-diagonal and the unread (y-pinned-out) rows.
-    // This is a deliberate SUPERSET (loud regime: the loop scores over the
-    // phantom edges fail fragment compile with Warnings) rather than
-    // silently wrong per-(row, slot) scores.
+    // The read-slice diagonal: only the pinned x slab of each D1 row.
     assert_edge(&result, "cube[a,x,p]", "inflow[a]");
-    assert_edge(&result, "cube[a,x,p]", "inflow[b]");
-    assert_edge(&result, "cube[a,y,q]", "inflow[a]");
-    assert_edge(&result, "cube[b,x,p]", "inflow[a]");
+    assert_edge(&result, "cube[a,x,q]", "inflow[a]");
+    assert_edge(&result, "cube[b,x,p]", "inflow[b]");
+    assert_edge(&result, "cube[b,x,q]", "inflow[b]");
+
+    // No unread-row edges (the y slab is pinned out) and no off-diagonal
+    // cross-product edges.
+    assert_no_edge(&result, "cube[a,y,p]", "inflow[a]");
+    assert_no_edge(&result, "cube[a,y,q]", "inflow[a]");
+    assert_no_edge(&result, "cube[b,y,p]", "inflow[b]");
+    assert_no_edge(&result, "cube[a,x,p]", "inflow[b]");
+    assert_no_edge(&result, "cube[b,x,p]", "inflow[a]");
+}
+
+/// Shape-expressiveness section 6 (scalar owner): a variable-backed
+/// scalar-result Pinned slice (`total = SUM(pop[nyc,*])`) routes its element
+/// edges by the read slice -- only the `pop[nyc,*]` rows feed the bare
+/// `total` node (the slot of a scalar owner IS the owner). Pre-T3 the gate's
+/// `to_dims.is_empty()` early-return kept the conservative full-extent
+/// edges, whose unread-row scores were silent garbage.
+#[test]
+fn element_graph_variable_backed_scalar_owner_pinned_slice_routes_read_rows() {
+    let project = TestProject::new("vb_scalar_owner_pinned")
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .scalar_aux("total", "SUM(pop[nyc, *])")
+        .array_flow("inflow[Region]", "total * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None);
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "pop[nyc,p]", "total");
+    assert_edge(&result, "pop[nyc,q]", "total");
+    assert_no_edge(&result, "pop[boston,p]", "total");
+    assert_no_edge(&result, "pop[boston,q]", "total");
+}
+
+/// Shape-expressiveness section 6 (scalar owner, subset slice):
+/// `total = SUM(arr[*:Core])` over `arr[Region]` with `Core` a proper
+/// subdimension -- only the subset rows feed `total`.
+#[test]
+fn element_graph_variable_backed_scalar_owner_subset_slice_routes_read_rows() {
+    let project = TestProject::new("vb_scalar_owner_subset")
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_aux("arr[Region]", "10")
+        .scalar_aux("total", "SUM(arr[*:Core])");
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "arr[a]", "total");
+    assert_edge(&result, "arr[b]", "total");
+    assert_no_edge(&result, "arr[c]", "total");
+}
+
+/// Shape-expressiveness section 6 (the DECLINED residual): an ARRAYED-owner
+/// scalar-result Pinned slice (`share[Region] = SUM(pop[nyc,*])` -- no
+/// `Iterated` axis, arrayed `to`) stays on the conservative cross-product:
+/// the per-`(row, slot)` machinery cannot express a scalar reduce broadcast
+/// over the owner's dims, so the gate declines it and
+/// `try_cross_dimensional_link_scores` routes the edge to the GH #758 loud
+/// skip (no link scores, dropped loop scores, one Warning). The
+/// cross-product edges are a deliberate SUPERSET of the true reads.
+#[test]
+fn element_graph_variable_backed_broadcast_pinned_slice_stays_cross_product() {
+    let project = TestProject::new("vb_broadcast_pinned")
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct("pop", vec!["Region".into(), "D2".into()], "10", None)
+        .array_aux_direct("share", vec!["Region".into()], "SUM(pop[nyc, *])", None);
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "pop[nyc,p]", "share[nyc]");
+    assert_edge(&result, "pop[nyc,p]", "share[boston]");
+    assert_edge(&result, "pop[boston,q]", "share[nyc]");
+    assert_edge(&result, "pop[boston,q]", "share[boston]");
 }
 
 /// AC4.1 (element graph, sliced reducer): `target[Region] = pop[NYC, Adult] +

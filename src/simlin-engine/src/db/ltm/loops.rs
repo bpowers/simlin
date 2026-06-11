@@ -699,12 +699,14 @@ pub(crate) fn build_element_level_loops(
             .iter()
             .any(|n| crate::ltm_agg::is_synthetic_agg_name(strip_subscript(n)));
 
-        // GH #752: a circuit traversing a VARIABLE-BACKED partial-reduce hop
-        // (`matrix[d1,d2] → inflow[d1]` where `inflow[D1] = SUM(matrix[D1,*])`
-        // is the whole RHS -- the variable IS the agg, so there is no
-        // synthetic agg node in the circuit) must likewise never collapse
-        // into a single A2A loop: the only emitted link scores for that hop
-        // are the per-`(row, slot)` scalars `matrix[d1,d2]→inflow[d1]` from
+        // GH #752 / GH #765: a circuit traversing a VARIABLE-BACKED reduce
+        // hop (`matrix[d1,d2] → inflow[d1]` where `inflow[D1] =
+        // SUM(matrix[D1,*])` -- Pinned/subset axes included since T3 of the
+        // shape-expressiveness design -- is the whole RHS; the variable IS
+        // the agg, so there is no synthetic agg node in the circuit) must
+        // likewise never collapse into a single A2A loop: the only emitted
+        // link scores for that hop are the per-`(row, slot)` scalars
+        // `matrix[d1,d2]→inflow[d1]` from
         // `try_cross_dimensional_link_scores` -- there is no dimensioned
         // `matrix→inflow` variable an A2A loop-score equation could
         // reference (and per-slot `slot_links` are ambiguous anyway: |D2|
@@ -713,13 +715,17 @@ pub(crate) fn build_element_level_loops(
         // `build_element_subscripted_links` keeps BOTH subscripts and
         // `loop_link_score_ref`'s per-element-in-name case resolves the
         // per-`(row, slot)` name. Gated on the SAME
-        // `variable_backed_partial_reduce_agg` decision the element graph's
-        // read-slice reroute uses, so a group is rerouted here exactly when
-        // its element edges (and the per-`(row, slot)` scores) are the
-        // diagonal family. Only computed for all-subscripted groups: a
-        // mixed circuit (a scalar node present) already handles the
-        // partial-reduce hop via `is_partial_reduce_edge` in the mixed
-        // branch's link builder.
+        // `variable_backed_reduce_agg` decision the element graph's
+        // read-slice reroute and the score derivation use, so a group is
+        // rerouted here exactly when its element edges (and the
+        // per-`(row, slot)` scores) are the read-row family. Only the
+        // arrayed-owner (Iterated-armed) acceptance is reachable here -- a
+        // scalar-owner reduce hop has an unsubscripted `to` node, so its
+        // circuits take the mixed branch (whose link builder keeps the
+        // bracketed `from` for the full-reduce name). Only computed for
+        // all-subscripted groups: a mixed circuit (a scalar node present)
+        // already handles the reduce hop via `is_partial_reduce_edge` in
+        // the mixed branch's link builder.
         let representative_has_partial_reduce_hop = all_subscripted && {
             let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
             (0..representative.len()).any(|i| {
@@ -732,7 +738,7 @@ pub(crate) fn build_element_level_loops(
                     return false;
                 }
                 let to_dims = variable_dimensions(db, *to_sv, project);
-                crate::ltm_agg::variable_backed_partial_reduce_agg(aggs, from_var, to_var, to_dims)
+                crate::ltm_agg::variable_backed_reduce_agg(aggs, from_var, to_var, to_dims)
                     .is_some()
             })
         };
