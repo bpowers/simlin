@@ -47,9 +47,10 @@ use crate::db::{Db, RefShape, SourceModel, SourceProject, reconstruct_model_vari
 /// according to the shape's normal broadcast/diagonal rules).
 ///
 /// `in_reducer` is true iff the reference site occurs syntactically inside
-/// an array-reducing builtin call (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/`RANK`
-/// -- the `crate::ltm_agg::reducer_is_hoistable` set; `SIZE` and the 2-arg
-/// `MIN`/`MAX` are *not* hoisted reducers). It is the precise signal for
+/// an array-reducing builtin call (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`
+/// -- the `crate::ltm_agg::reducer_is_hoistable` set; `SIZE`, the
+/// array-valued `RANK` (GH #771), and the 2-arg `MIN`/`MAX` are *not*
+/// hoisted reducers). It is the precise signal for
 /// "should this reference be rerouted through a hoisted aggregate node",
 /// which the access `shape` alone cannot answer: a target with *both*
 /// `SUM(pop[*])` and a direct `pop[idx]` produces a `DynamicIndex` site for
@@ -156,8 +157,12 @@ fn resolve_literal_index(
 /// 4. Any other index pattern (a *partial* `StarRange` mixed with literal
 ///    indices, a `DimPosition`, a `Range`, an unrecognized literal) ⇒
 ///    `DynamicIndex`. (A partial-`StarRange` slice like `SUM(matrix[D1,
-///    *:Dim])` stays conservatively `DynamicIndex` -- the slice-reduce is
-///    not hoisted yet; tracked as tech debt.)
+///    *:Dim])` keeps the coarse `DynamicIndex` shape HERE, but the reducer
+///    *is* hoisted -- `compute_read_slice` carries the per-axis truth,
+///    including a proper-subdimension subset since GH #766 -- and a
+///    `ThroughAgg`-routed site's shape is ignored, so the coarse classifier
+///    shape is routing-irrelevant: a documented residual, not a behavior
+///    gap.)
 fn classify_subscript_shape(
     indices: &[crate::ast::IndexExpr2],
     source_dims: &[crate::dimensions::Dimension],
@@ -192,96 +197,87 @@ fn classify_subscript_shape(
     RefShape::FixedIndex(resolved)
 }
 
-/// Recognize an *iterated-dimension* subscript -- one whose indices are
-/// exactly the target equation's iterated dimensions, in the position
-/// matching the source's declared dimension order -- and classify it as
-/// [`RefShape::Bare`] (a same-element-on-shared-dims reference, GH #511).
+/// Recognize a *statically-describable per-axis* subscript -- one whose
+/// every index is either an iterated-dimension name lined up with the
+/// source's axis at that position or a literal element of that axis -- and
+/// classify it:
 ///
-/// The precise rule: the subscript `source[d_0, d_1, ...]` is `Bare` iff
-///   1. it has exactly one index per source dimension (a *partially*
-///      iterated subscript -- some indices iterated, some literal/wildcard
-///      -- is out of scope for Phase 3 and stays with its
-///      `classify_subscript_shape` result; Phase 4 handles sliced reducers.
-///      The partially-iterated NON-reducer reference (`pop[Region, young]`
-///      inside an A2A-over-`Region` equation, GH #525) therefore classifies
-///      `DynamicIndex`: since the GH #759 fix its conservative partial
-///      compiles and scores, but the element graph still expands it to the
-///      cross-product -- the per-element family pinned on the literal axes
-///      that would tighten it is tracked on GH #525),
-///   2. every index `d_i` is a bare `Var` naming a dimension that is one of
-///      the target equation's iterated dimensions (`target_iterated_dims`),
-///      *and*
-///   3. for each `i`, `d_i` is either the same dimension name as the
-///      source's `i`-th declared dimension `D_i`, or a dimension that *maps
-///      to* `D_i` (the AC3.5 mapped-dimension case -- `State[i]` over a
-///      source declared with `Region[i]` where `State` maps to `Region`).
+/// - **all axes `Iterated`** ⇒ [`RefShape::Bare`] (the
+///   same-element-on-shared-dims reference, GH #511: `row_sum[Region]`
+///   inside `growth[Region,Age]` reads the same `Region` element, which
+///   `emit_edges_for_reference`'s `Bare` arm projects via
+///   `expand_same_element`);
+/// - **mixed `Iterated` + `Pinned`** ⇒ [`RefShape::PerElement`] (GH #525,
+///   T6 of the shape-expressiveness design: `pop[Region, young]` inside an
+///   A2A-over-`Region` equation reads the same `Region` element pinned at
+///   `Age = young` -- the element graph emits the diagonal-with-pinned-axes
+///   edges and emission produces per-(row, full-target-element) scalar
+///   scores, killing the former `DynamicIndex` cross-product's phantom
+///   loops at enumeration time);
+/// - **all axes `Pinned`** ⇒ `None`, falling through to
+///   [`classify_subscript_shape`]'s `FixedIndex` (the canonicalization rule
+///   that keeps every existing `FixedIndex` name untouched).
 ///
-/// That is exactly "the reference iterates over the target's dimension
-/// space and reads the same element of the source" -- the thing
-/// `emit_edges_for_reference`'s `Bare`-arrayed arm then projects via
-/// `expand_same_element` (`row_sum[d1] -> growth[d1,*]`). A
-/// position-mismatched subscript like `row_sum[D2]` inside `growth[D1,D2]`
-/// where `row_sum` is over `D1` is a *genuine* cross-element reference --
-/// `D2` doesn't match `row_sum`'s declared `D1` -- so it returns `None` and
-/// keeps its `DynamicIndex` classification (out of scope here).
+/// The per-axis decision is [`crate::ltm_agg::classify_axis_access`] -- the
+/// SAME classifier `compute_read_slice` applies to reducer arguments, so
+/// the reducer path and the direct-reference path can never disagree about
+/// an axis. The one direct-reference divergence is a post-filter: an
+/// [`AxisRead::Reduced`] result (a `*` / StarRange index) returns `None`
+/// here -- a non-reducer reference never collapses an axis -- so wildcard
+/// shapes keep their `classify_subscript_shape` classification.
 ///
-/// Returns `None` when the subscript is not this shape; the caller then
-/// falls back to [`classify_subscript_shape`].
+/// A mapped iterated index (`State[i]` over a source declared with
+/// `Region[i]`) is accepted when `classify_axis_access`'s
+/// `iterated_axis_slot_elements` / `mapped_element_correspondence` gate
+/// yields a usable positional remap -- in EITHER declaration direction
+/// (GH #757; explicit element maps decline per the GH #756 positional-only
+/// gate, keeping the conservative shape). A position-mismatched subscript
+/// like `row_sum[D2]` inside `growth[D1,D2]` where `row_sum` is over `D1`
+/// is a *genuine* cross-element reference -- no axis classifies -- so it
+/// returns `None` and keeps its `DynamicIndex` classification.
+///
+/// Returns `None` when the subscript is not statically describable per
+/// axis; the caller then falls back to [`classify_subscript_shape`].
 fn classify_iterated_dim_shape(
     indices: &[crate::ast::IndexExpr2],
     source_dims: &[crate::dimensions::Dimension],
     target_iterated_dims: &[String],
     dim_ctx: &crate::dimensions::DimensionsContext,
 ) -> Option<RefShape> {
-    use crate::ast::{Expr2, IndexExpr2};
-    use crate::common::CanonicalDimensionName;
+    use crate::ltm_agg::{AxisRead, classify_axis_access};
 
     // Need one index per source dimension; an empty subscript is never a
-    // `Subscript` node, and a longer/shorter one is not the all-iterated
-    // case (a partial slice or a dimensionally-mismatched reference).
+    // `Subscript` node, and a longer/shorter one is not statically
+    // describable per axis (a partial slice or a dimensionally-mismatched
+    // reference).
     if indices.is_empty() || indices.len() != source_dims.len() {
         return None;
     }
-    for (i, idx) in indices.iter().enumerate() {
-        // Each index must be a bare `Var` -- a dimension name. (After
-        // dimension resolution, an iterated dimension name in a subscript
-        // stays an `Expr2::Var`; element names also parse that way, but the
-        // `target_iterated_dims` membership check below rejects them.)
-        let d = match idx {
-            IndexExpr2::Expr(Expr2::Var(ident, _, _)) => ident.as_str(),
-            _ => return None,
-        };
-        if !target_iterated_dims.iter().any(|t| t == d) {
-            return None;
-        }
-        let src_dim_name = source_dims[i].name();
-        if d == src_dim_name {
-            continue;
-        }
-        // AC3.5: a mapped dimension is treated the same way -- don't
-        // special-case it, just don't exclude it. The element-graph side
-        // (`expand_same_element`) projects the resulting `Bare` edge along
-        // the mapping's element correspondence
-        // (`DimensionsContext::mapped_element_correspondence`, GH #527):
-        // the diagonal WHEN a usable correspondence exists (today,
-        // positional mappings only -- explicit element maps are declined
-        // because the executed lowering resolves positionally; see the
-        // helper's gate), else the conservative broadcast -- a superset of
-        // the simulation's reads either way, so accepting the mapped case
-        // here never under-approximates downstream. Note the direction:
-        // only a mapping declared on the index dimension `d` toward the
-        // source's dimension is accepted (`has_mapping_to(d, src)`); a
-        // reverse-declared mapping keeps the conservative `DynamicIndex`
-        // classification (the expansion's correspondence is consulted only
-        // for `Bare` shapes, so the two stay consistent).
-        let d_canon = CanonicalDimensionName::from_raw(d);
-        let src_canon = CanonicalDimensionName::from_raw(src_dim_name);
-        if dim_ctx.has_mapping_to(&d_canon, &src_canon) {
-            continue;
-        }
+    let axes: Vec<AxisRead> = indices
+        .iter()
+        .zip(source_dims)
+        .map(|(idx, axis_dim)| classify_axis_access(idx, axis_dim, target_iterated_dims, dim_ctx))
+        .collect::<Option<_>>()?;
+    // Post-filter: a direct (non-reducer) reference never collapses an
+    // axis, so any `Reduced` axis (a `*` / StarRange index) falls back to
+    // the coarse classifier (`Wildcard` for all-full-extent subscripts,
+    // `DynamicIndex` for partial-StarRange mixes -- both unchanged).
+    if axes.iter().any(|a| matches!(a, AxisRead::Reduced { .. })) {
         return None;
     }
-    Some(RefShape::Bare)
+    let n_iterated = axes
+        .iter()
+        .filter(|a| matches!(a, AxisRead::Iterated { .. }))
+        .count();
+    if n_iterated == 0 {
+        // All-`Pinned` canonicalizes to `FixedIndex` via the caller's
+        // `classify_subscript_shape` fallback (identical resolution rules).
+        return None;
+    }
+    if n_iterated == axes.len() {
+        return Some(RefShape::Bare);
+    }
+    Some(RefShape::PerElement { axes })
 }
 
 // ── Single-pass all-sources walk ───────────────────────────────────────────
@@ -552,7 +548,7 @@ pub(crate) struct LtmReferenceSitesResult {
 /// so the `sites` values are in a stable order. The synthetic agg an
 /// `in_reducer` reference routes through is found via the same `by_var`
 /// indexing `enumerate_agg_nodes` exposes (a synthetic agg of `to` whose
-/// `source_vars` contains `from`), and the routing decision is the
+/// `sources` include `from`), and the routing decision is the
 /// byte-identical `route_through_agg = !routed_aggs.is_empty() && in_reducer`
 /// the old element-graph / link-score walkers each restated.
 #[salsa::tracked(returns(ref))]
@@ -630,23 +626,20 @@ pub(crate) fn model_ltm_reference_sites(
             let routed_aggs: Vec<usize> = synthetic_aggs_in_to
                 .iter()
                 .copied()
-                .filter(|&i| {
-                    agg_nodes.aggs[i]
-                        .source_vars
-                        .iter()
-                        .any(|s| s == &from_name)
-                })
+                .filter(|&i| agg_nodes.aggs[i].reads_var(&from_name))
                 .collect();
 
             // Whether `to` is a *variable-backed* aggregate node whose source
             // includes `from` -- i.e. `to`'s whole equation is exactly the
             // reducer (`total = SUM(population[*])`, `row_sum[D1] =
             // SUM(matrix[D1,*])`). In that case the `(from, to)` edge *is* the
-            // agg edge and the reference keeps its `Wildcard` shape:
-            // `model_element_causal_edges` routes the partial-reduce case by
-            // its read slice (GH #752, via
-            // `ltm_agg::variable_backed_partial_reduce_agg`) and projects the
-            // whole-extent case as the reduction/broadcast via
+            // agg edge and the reference keeps its coarse syntactic shape
+            // (`Wildcard`, or `DynamicIndex` for the partial-StarRange
+            // residual like `SUM(matrix[D1,*:Sub])`):
+            // `model_element_causal_edges` routes any non-trivial
+            // statically-describable slice by its read slice (GH #752 /
+            // GH #765, via `ltm_agg::variable_backed_reduce_agg`) and
+            // projects the whole-extent case as the reduction/broadcast via
             // `emit_edges_for_reference`.
             let to_is_variable_backed_agg = agg_nodes
                 .by_var
@@ -654,9 +647,7 @@ pub(crate) fn model_ltm_reference_sites(
                 .map(|idxs| {
                     idxs.iter().any(|&i| {
                         let a = &agg_nodes.aggs[i];
-                        !a.is_synthetic
-                            && a.name == to_name_str
-                            && a.source_vars.iter().any(|s| s == &from_name)
+                        !a.is_synthetic && a.name == to_name_str && a.reads_var(&from_name)
                     })
                 })
                 .unwrap_or(false);
@@ -682,13 +673,26 @@ pub(crate) fn model_ltm_reference_sites(
                     // isn't itself a variable-backed agg) is the not-hoistable
                     // reducer carve-out -- a reducer over a dynamic index
                     // (`SUM(pop[idx,*])`) whose read slice isn't statically
-                    // describable. Reclassify it as `DynamicIndex` so the
-                    // `Wildcard` *variant* only ever means "a hoisted reducer's
-                    // (ignored) syntactic shape" or "a whole-RHS variable-
-                    // backed reducer's argument" and never reaches
-                    // `emit_edges_for_reference`'s conservative cross-product
-                    // arm via a `Direct` site (#514 AC4.5: the conservative
-                    // cross-product is `DynamicIndex`-only there).
+                    // describable. Reclassify it as `DynamicIndex` so a
+                    // `Direct` `Wildcard` site only ever means "a hoisted
+                    // reducer's (ignored) syntactic shape", "a whole-RHS
+                    // variable-backed reducer's argument", a NON-hoisting
+                    // builtin's wildcard arg -- `SIZE(pop[*])` and the
+                    // de-hoisted array-valued `RANK(pop[*], 1)` (GH #771):
+                    // neither is `reducer_is_hoistable`, so `in_reducer` is
+                    // never set for their args and this reclassification
+                    // deliberately does NOT fire; the site keeps `Wildcard`
+                    // and takes `emit_edges_for_reference`'s conservative
+                    // cross-product arm, the same coarse-but-sound treatment
+                    // a Direct `DynamicIndex` gets -- or a (rare) bare
+                    // non-reducer whole-array reference (`arr[*]` outside
+                    // any builtin), which likewise keeps `Wildcard` and the
+                    // cross-product. The original #514 AC4.5 invariant
+                    // -- the conservative cross-product is `DynamicIndex`-only
+                    // from `Direct` sites -- therefore narrowed in T1 of the
+                    // shape-expressiveness design: it still holds for every
+                    // HOISTABLE reducer's argument, which is what keeps a
+                    // hoist-eligible `Wildcard` from leaking past its agg.
                     let shape = if raw.in_reducer
                         && matches!(raw.shape, RefShape::Wildcard)
                         && !to_is_variable_backed_agg

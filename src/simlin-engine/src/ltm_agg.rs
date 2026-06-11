@@ -35,9 +35,11 @@
 //!   *entire* dt-equation of a scalar or apply-to-all variable
 //!   (`total_population = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`).
 //!   That variable *is* the aggregate node; no synthetic is minted. One
-//!   exception: a whole-RHS reducer with a MAPPED iterated axis (GH #534)
-//!   mints a synthetic agg instead -- see the carve-out comment in
-//!   [`walk_var_equation`]. Each such
+//!   exception: a whole-RHS reducer whose shape the variable-backed
+//!   machinery cannot express -- a MAPPED iterated axis (GH #534) or
+//!   NON-ALIGNED result dims (broadcast/permuted, GH #764) -- mints a
+//!   synthetic agg instead; see
+//!   [`variable_backed_shape_is_expressible`]. Each such
 //!   variable is its own distinct agg node -- variable-backed aggs are never
 //!   deduped and never reused by an inline use of the same reducer text (an
 //!   inline use must get its own *synthetic* node, since the element-graph
@@ -46,9 +48,11 @@
 //!   on the conservative direct-scoring path, with the outcome depending on
 //!   whether the whole-RHS reducer happened to be declared first).
 //!
-//! Each agg carries a [`AggNode::read_slice`] -- one [`AxisRead`] per source
-//! axis -- recording *which rows* the reducer reads, so the element-graph
-//! reroute and the per-element reducer link scores route only those rows.
+//! Each agg carries a [`AggNode::sources`] -- one [`AggSource`] per source
+//! variable, each with its own read slice (one [`AxisRead`] per that
+//! source's axes) -- recording *which rows* the reducer reads, so the
+//! element-graph reroute and the per-element reducer link scores route only
+//! those rows.
 //! Whole-extent reducers (`SUM(pop[*])`, `SUM(matrix[*,*])`) have an all-
 //! `Reduced` slice; sliced reducers (`SUM(pop[NYC,*])` ⇒ `[Pinned(nyc),
 //! Reduced]`, `SUM(matrix[D1,*])` over an A2A-`D1` body ⇒ `[Iterated(d1),
@@ -56,29 +60,58 @@
 //! positionally-MAPPED iterated axis (`SUM(matrix[State,*])` over a
 //! `matrix[Region,..]` source with a `State→Region` mapping, GH #534), where
 //! the `Iterated` axis carries the (target, source) dim pair and the agg is
-//! arrayed over the TARGET dim. The carve-outs: a reducer over a *dynamic
-//! index* (`SUM(pop[idx,*])`, `idx` non-literal) is not statically
-//! describable, and a mapped iterated axis whose mapping is element-mapped
-//! (GH #756), reverse-declared (GH #757), or non-positional is declined --
-//! `compute_read_slice` returns `None`, the reducer is not hoisted, and its
-//! reference stays on the conservative path.
+//! arrayed over the TARGET dim, and a StarRange over a PROPER subdimension
+//! (`SUM(arr[*:Sub])`, GH #766), where the `Reduced` axis carries the
+//! subdimension's element subset. A MULTI-SOURCE reducer is accepted per
+//! invariant I1 of the shape-expressiveness design ([`accept_source_slices`],
+//! GH #767 / T5): all CO-SOURCES (`Reduced`-bearing slices) must carry the
+//! identical canonical slice, and an ITERATED-DIM PROJECTION FEEDER --
+//! a source whose slice is all-`Iterated` over exactly the canonical
+//! slice's iterated target dims, in order, unmapped (`frac[D1]` in
+//! `SUM(matrix[D1,*] * frac[D1])`) -- is accepted with ITS OWN slice (it
+//! is per-result-slot constant, the arrayed generalization of the GH #737
+//! scalar feeder). The carve-outs: a reducer over a *dynamic index*
+//! (`SUM(pop[idx,*])`, `idx` non-literal) is not statically describable, a
+//! mapped iterated axis whose mapping is element-mapped (GH #756) or
+//! non-positional is declined (a positional mapping is accepted in EITHER
+//! declaration direction since GH #757), a StarRange
+//! naming a NON-subdimension (a mid-edit inconsistency that must not
+//! silently widen to the full extent) is declined -- `compute_read_slice`
+//! returns `None`, the reducer is not hoisted, and its reference stays on
+//! the conservative path -- and so are co-sources with differing slices,
+//! one variable read with two different slices (I3b), and a no-`Reduced`
+//! source outside the projection rule (a Pinned-bearing, dim-subset,
+//! permuted, or mapped mix; see [`accept_source_slices`]). `RANK` is
+//! recognized as a reducer but never hoisted (GH #771): it is ARRAY-valued,
+//! so an agg node -- "a scalar value per result slot" -- has no value to
+//! hold for it; see [`reducer_is_hoistable`].
 //!
-//! Whole-RHS partial reduces (`row_sum[D1] = SUM(matrix[D1,*])`) *are*
-//! recognized -- the variable is the agg, `result_dims` carries its dims, and
-//! `read_slice` records the `Iterated`/`Reduced` axis split. The element
-//! graph routes them by the read slice too (GH #752,
-//! [`variable_backed_partial_reduce_agg`]): each source row feeds only its
-//! own `row_sum[<slot>]` element node -- matching the per-`(row, slot)` link
-//! scores `try_cross_dimensional_link_scores` emits -- never the phantom
-//! off-diagonal cross-product (whose loop scores referenced names that were
-//! never emitted and stubbed to 0). Whole-extent variable-backed reducers
-//! (`total = SUM(pop[*])`, including the broadcast `share[R] = SUM(pop[*])`)
-//! keep the normal reference walker's reduction/broadcast edges, which are
-//! already the true reads for those shapes; the gate's other exclusions
-//! (partial reduce broadcast over extra target dims / permuted axes --
-//! GH #764 -- and Pinned-bearing mixed slices, see
-//! [`variable_backed_partial_reduce_agg`]) keep the conservative
-//! cross-product, a SUPERSET of the true reads on the loud warned path.
+//! Whole-RHS reduces with a non-trivial slice *are* recognized -- the
+//! variable is the agg, `result_dims` carries the `Iterated` axes' dims, and
+//! its source's read slice records the per-axis split. The element graph
+//! routes them by the read slice too (GH #752, generalized by GH #765 / T3
+//! of the shape-expressiveness design, [`variable_backed_reduce_agg`]): for
+//! an aligned partial reduce (`row_sum[D1] = SUM(matrix[D1,*])`,
+//! Pinned/subset axes included) each source READ row feeds only its own
+//! `row_sum[<slot>]` element node, and for a scalar-result slice on a
+//! SCALAR owner (`total = SUM(pop[nyc,*])`, `total = SUM(arr[*:Sub])`) the
+//! read rows feed the bare `total` node -- in both cases matching the
+//! per-read-row link scores `try_cross_dimensional_link_scores` derives
+//! from the SAME `read_slice_rows` (invariant I4), never the phantom
+//! cross-product or an inflated full-extent divisor. Whole-extent
+//! variable-backed reducers (`total = SUM(pop[*])`, including the broadcast
+//! `share[R] = SUM(pop[*])`) keep the normal reference walker's
+//! reduction/broadcast edges, which are already the true reads for those
+//! shapes. A whole-RHS partial reduce whose result dims are NON-ALIGNED
+//! with the owner's dims -- broadcast over extra target dims or permuted
+//! axes (GH #764 / T4 of the shape-expressiveness design) -- mints a
+//! SYNTHETIC agg instead, like the mapped GH #534 case (see
+//! [`variable_backed_shape_is_expressible`], the one minting condition).
+//! The gate's remaining decline -- the ARRAYED-owner scalar-result
+//! Pinned/subset slice (`share[R] = SUM(pop[nyc,*])`, no `Iterated` axis,
+//! GH #777) -- keeps the conservative cross-product, a SUPERSET of the
+//! true reads, with its scores loudly skipped (the GH #758 treatment)
+//! rather than silently wrong (see [`variable_backed_reduce_agg`]).
 
 use std::collections::HashMap;
 
@@ -158,17 +191,29 @@ pub(crate) fn reducer_kind_from_name(name: &str, arity: usize) -> Option<Reducer
 /// lowercases function-call identifiers, and LTM-generated uppercase
 /// reducer text is re-parsed before any of these predicates see it).
 ///
-/// `RANK` is recognized as a reducer by [`reducer_kind_from_name`] (the agg
-/// machinery enumerates and scores it like one), but `RANK(arr, dir)` is
-/// ARRAY-valued -- the rank of each element, Vensim's VECTOR RANK -- so any
-/// consumer deciding "does this subtree collapse to a scalar" must exclude
-/// it (GH #742): treating a frozen `PREVIOUS(RANK(arr, dir))` subtree as
-/// scalar routes the capture into a per-element *scalar* helper whose
-/// equation is ill-typed (array-valued in scalar context), the helper
-/// fragment fails, and the consuming score silently corrupts. The two
-/// consumers are `builtins_visitor::arg_has_bare_var_ref` (the GH #541
-/// arrayed-capture gate) and `ltm_augment::expr_is_array_slice_valued` (the
-/// GH #743 unfreezable-`PREVIOUS` detector).
+/// `RANK` is recognized as a reducer by [`reducer_kind_from_name`], but
+/// `RANK(arr, dir)` is ARRAY-valued -- the rank of each element, Vensim's
+/// VECTOR RANK -- so any consumer deciding "does this subtree collapse to a
+/// scalar" must exclude it (GH #742): treating a frozen
+/// `PREVIOUS(RANK(arr, dir))` subtree as scalar routes the capture into a
+/// per-element *scalar* helper whose equation is ill-typed (array-valued in
+/// scalar context), the helper fragment fails, and the consuming score
+/// silently corrupts. The three consumers are
+/// `builtins_visitor::arg_has_bare_var_ref` (the GH #541 arrayed-capture
+/// gate), `ltm_augment::expr_is_array_slice_valued` (the GH #743
+/// unfreezable-`PREVIOUS` detector), and [`reducer_is_hoistable`] (the agg
+/// hoisting gate, GH #771): an agg node *is* "a scalar value per result
+/// slot", and RANK has no such value to name.
+///
+/// Residual of the GH #771 de-hoist: a `RANK(pop, dir)` reference
+/// classifies by its syntactic shape (a bare `pop` is `Bare` -> diagonal
+/// edges), so loops through the rank ORDERING -- element r's rank changing
+/// because element s moved past it -- are not enumerated. This replaces the
+/// strictly-worse pre-#771 state (cross-element loops enumerated through an
+/// ill-shaped scalar agg whose every score was warned-zero); the
+/// alternative -- reclassifying value-shaped reducer args as `DynamicIndex`
+/// -- would recreate the GH #525 phantom pathology (cross-product edges
+/// reading diagonal scores) and was rejected.
 pub(crate) fn reducer_collapses_to_scalar(name: &str, arity: usize) -> bool {
     reducer_kind_from_name(name, arity).is_some() && name != "rank"
 }
@@ -180,31 +225,43 @@ pub(crate) fn reducer_collapses_to_scalar(name: &str, arity: usize) -> bool {
 /// `BuiltinFn<Expr2>` (the element-graph walker, `classify_reducer`) and any
 /// future `BuiltinFn<Expr0>` caller share one implementation.
 pub(crate) fn reducer_kind<E>(builtin: &BuiltinFn<E>) -> Option<ReducerKind> {
-    // Only `MEAN`/`MIN`/`MAX` are arity-sensitive; for everything else
-    // `reducer_kind_from_name` ignores the arity argument.
-    let arity = match builtin {
+    reducer_kind_from_name(builtin.name(), builtin_reducer_arity(builtin))
+}
+
+/// The arity [`reducer_kind_from_name`] / [`reducer_collapses_to_scalar`]
+/// key on. Only `MEAN`/`MIN`/`MAX` are arity-sensitive; for everything else
+/// the deciders ignore the arity argument.
+fn builtin_reducer_arity<E>(builtin: &BuiltinFn<E>) -> usize {
+    match builtin {
         BuiltinFn::Mean(args) => args.len(),
         BuiltinFn::Min(_, opt) | BuiltinFn::Max(_, opt) => 1 + opt.is_some() as usize,
         _ => 1,
-    };
-    reducer_kind_from_name(builtin.name(), arity)
+    }
 }
 
 /// `true` when `builtin` is a recognized array reducer that is *hoisted* into
-/// an aggregate node -- i.e. recognized AND not [`ReducerKind::Constant`].
+/// an aggregate node -- i.e. recognized AND not [`ReducerKind::Constant`] AND
+/// scalar-valued ([`reducer_collapses_to_scalar`], invariant I5 of the
+/// shape-expressiveness design).
 ///
 /// `SIZE` is recognized as a reducer but never hoisted (its link score is
 /// always 0), and it never sets the element-graph walker's `in_reducer`
-/// marker. This is the predicate the reference-site IR's AST walk
-/// (`db::ltm_ir::walk_all_in_expr`) uses to flip `child_in_reducer`, and that
-/// [`reducer_source_vars`] uses to gate which subexpressions become aggregate
-/// nodes, so the agg enumerator, the element graph, and the link-score
-/// generator all agree on the hoisted set.
+/// marker. `RANK` is recognized but never hoisted either (GH #771): it is
+/// ARRAY-valued, so a scalar agg node for it has an ill-typed equation that
+/// cannot compile -- an agg node exists to give a scalar reduction a name,
+/// and RANK has no scalar reduction to name. Its references stay `Direct`
+/// (a bare arg classifies `Bare` -> diagonal edges, scored by the GH #742
+/// arrayed-capture machinery). This is the predicate the reference-site
+/// IR's AST walk (`db::ltm_ir::walk_all_in_expr`) uses to flip
+/// `child_in_reducer`, and that [`reducer_source_vars`] uses to gate which
+/// subexpressions become aggregate nodes, so the agg enumerator, the
+/// element graph, and the link-score generator all agree on the hoisted set.
 pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
+    let arity = builtin_reducer_arity(builtin);
     matches!(
-        reducer_kind(builtin),
+        reducer_kind_from_name(builtin.name(), arity),
         Some(ReducerKind::Linear | ReducerKind::Nonlinear)
-    )
+    ) && reducer_collapses_to_scalar(builtin.name(), arity)
 }
 
 /// How one *source axis* of a hoisted reducer is consumed.
@@ -224,10 +281,17 @@ pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
 ///   for the literal case, different for a positionally-MAPPED sliced
 ///   reducer (GH #534) -- and the target dim appears in
 ///   [`AggNode::result_dims`] (datamodel-cased).
-/// - [`AxisRead::Reduced`] -- the whole axis is reduced away (`SUM(pop[*])`,
-///   the `*` in `SUM(pop[NYC, *])`). Every element of that axis feeds the
-///   single agg result slot.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+/// - [`AxisRead::Reduced`] -- the axis is reduced away (`SUM(pop[*])`, the
+///   `*` in `SUM(pop[NYC, *])`, `SUM(arr[*:Sub])`). With `subset: None`
+///   every element of that axis feeds the agg result slot; with
+///   `subset: Some(elems)` (a StarRange over a PROPER subdimension,
+///   GH #766) only the subdimension's elements do.
+///
+/// `PartialOrd`/`Ord`/`Hash` ride along because `RefShape::PerElement`
+/// (GH #525, T6 of the shape-expressiveness design) embeds an
+/// `AxisRead` vector and `RefShape` lives in `BTreeSet`s /
+/// `HashSet`-keyed dedup maps downstream.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum AxisRead {
     /// A single literal element of this source axis is read (`pop[NYC, *]`).
     /// Carries the canonical element name.
@@ -247,9 +311,18 @@ pub enum AxisRead {
         /// [`iterated_axis_slot_elements`]).
         source_dim: String,
     },
-    /// The whole axis is reduced away (`SUM(pop[*])`); every element of it
-    /// feeds the single agg result slot.
-    Reduced,
+    /// The axis is reduced away by the reducer. `subset: None` = the full
+    /// extent (`SUM(pop[*])`, `SUM(arr[*:D])` where `D` is the axis's own
+    /// dimension): every element of the axis feeds the agg result slot.
+    /// `subset: Some(elems)` = a StarRange over a PROPER subdimension of
+    /// the axis's dimension (`SUM(arr[*:Sub])`, GH #766): only the
+    /// subdimension's elements (canonical names, in subdimension-declared
+    /// order, resolved at enumeration time via
+    /// [`crate::dimensions::SubdimensionRelation`]) feed the slot.
+    /// Invariant I3: a `Some` subset is non-empty and a proper subset of
+    /// the axis's elements -- a subdimension covering the whole axis
+    /// normalizes to `None` so the full-extent representation is unique.
+    Reduced { subset: Option<Vec<String>> },
 }
 
 /// The agg result-slot coordinate (an element of the `Iterated` axis's
@@ -315,6 +388,31 @@ pub(crate) fn iterated_axis_slot_elements(
         .collect()
 }
 
+/// One source variable of an aggregate node, carrying its OWN read slice
+/// (the per-source representation of the shape-expressiveness design, T2 --
+/// GH #767's data-model half).
+///
+/// `read_slice` has one [`AxisRead`] per THIS source's declared axes
+/// (invariant I2), so a SCALAR source -- a feeder like `scale` in
+/// `SUM(pop[*] * scale)`, GH #737 -- carries an empty slice. Under the I1
+/// acceptance ([`accept_source_slices`], T5 of the design / GH #767) every
+/// arrayed CO-SOURCE carries the identical *canonical* slice, while an
+/// ITERATED-DIM PROJECTION FEEDER (`frac` in
+/// `SUM(matrix[D1,*] * frac[D1])`) carries its own all-`Iterated`
+/// projection slice -- see [`AggNode::source_is_projection_feeder`].
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct AggSource {
+    /// Canonical model-variable name.
+    pub var: String,
+    /// One entry per this source's axes (in the source's declared dimension
+    /// order): which rows of it the reducer actually reads. Empty for a
+    /// scalar source. Drives the element-graph reroute
+    /// (`source[<pinned>,<iterated>,<reduced→rep>] → agg[<iterated>]`) and
+    /// the per-element reducer link scores (only the read rows get a link
+    /// score). All-`Reduced` means a whole-extent reduce; see [`AxisRead`].
+    pub read_slice: Vec<AxisRead>,
+}
+
 /// One aggregate node: the stand-in for a maximal reducer subexpression.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct AggNode {
@@ -328,28 +426,104 @@ pub struct AggNode {
     /// normalizes whitespace, so textually-distinct-but-AST-identical
     /// subexpressions collapse to one node.
     pub equation_text: String,
-    /// Canonical names of the model variables the reducer reads (sorted,
-    /// deduplicated). For `SUM(a[*] + b[*])` this is `["a", "b"]`.
-    pub source_vars: Vec<String>,
     /// The aggregate's result-axis dimension names, in datamodel casing
     /// (e.g. `["D1"]` for `row_sum[D1] = SUM(matrix[D1,*])` or for a
     /// synthetic agg minted from `x[D1] = ... + SUM(matrix[D1,*])`). Empty
     /// for a scalar reducer (`SUM(pop[*])`, `SUM(pop[NYC,*])`). These are
-    /// the [`AxisRead::Iterated`] axes' dims, in order.
+    /// the canonical slice's [`AxisRead::Iterated`] axes' dims, in order.
     pub result_dims: Vec<String>,
-    /// One entry per source axis (in the source's declared dimension order):
-    /// which rows of the arrayed source the reducer actually reads. Drives
-    /// the element-graph reroute (`source[<pinned>,<iterated>,<reduced→rep>]
-    /// → agg[<iterated>]`) and the per-element reducer link scores (only the
-    /// read rows get a link score). For a multi-source reducer
-    /// (`SUM(a[*] + b[*])`) every source ref shares this slice (the
-    /// enumerator declines to hoist if they disagree). All-`Reduced` means a
-    /// whole-extent reduce; see [`AxisRead`].
-    pub read_slice: Vec<AxisRead>,
+    /// The model variables the reducer reads, each with its own read slice
+    /// (see [`AggSource`]). SORTED by canonical variable name and
+    /// deduplicated (invariant I3b: one entry per variable -- `sources` is
+    /// keyed by name downstream, so the enumerator declines a hoist whose
+    /// references would give one variable two different slices), making
+    /// salsa cache equality and emission order deterministic regardless of
+    /// AST occurrence order. For `SUM(a[*] + b[*])` this is
+    /// `[a, b]`, each carrying the shared `[Reduced]` slice.
+    pub sources: Vec<AggSource>,
     /// `true` when a `$⁚ltm⁚agg⁚{n}` auxiliary must be minted to hold this
     /// value; `false` when the owning variable already *is* the aggregate
     /// node (its entire dt-equation is exactly this reducer).
     pub is_synthetic: bool,
+}
+
+impl AggNode {
+    /// `true` when `var` (canonical) is one of this agg's source variables
+    /// (arrayed co-source or scalar feeder alike) -- the name-keyed
+    /// membership test the reference-site IR's routing filter and the
+    /// GH #752 gate share.
+    pub fn reads_var(&self, var: &str) -> bool {
+        self.sources.iter().any(|s| s.var == var)
+    }
+
+    /// The read slice of source `var`, or the EMPTY slice when `var` is not
+    /// a source of this agg. A scalar source's slice is empty too -- for
+    /// the row-enumeration consumers (`emit_agg_routed_edges`,
+    /// `read_slice_rows`) both mean the same thing: no per-row machinery
+    /// applies, degrade to the caller's conservative fallback / scalar arm.
+    pub fn source_read_slice(&self, var: &str) -> &[AxisRead] {
+        self.sources
+            .iter()
+            .find(|s| s.var == var)
+            .map(|s| s.read_slice.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The *canonical* slice (invariant I1 of the shape-expressiveness
+    /// design): the shared slice of the agg's CO-SOURCES -- the first
+    /// source slice carrying a [`AxisRead::Reduced`] axis (all co-sources
+    /// carry identical slices by the I1 acceptance, so "first" is
+    /// order-independent). Consumers whose decision is about the
+    /// *reducer's* shape rather than one source's rows (the
+    /// [`variable_backed_reduce_agg`] gate) key on it.
+    ///
+    /// The "first slice with a Reduced axis" definition is the T5 contract
+    /// fix: under projection-feeder acceptance (GH #767) an arrayed source
+    /// may carry an all-`Iterated` feeder slice, and "first non-empty"
+    /// would let an alphabetically-first feeder (e.g. `frac` in
+    /// `SUM(matrix[D1,*] * frac[D1])`) satisfy the gate's axis checks for
+    /// the wrong shape. The fallback to the first non-empty slice covers
+    /// the degenerate no-co-source agg (every arrayed source all-`Iterated`,
+    /// e.g. a scalar-valued `SUM(frac[D1])` arg) -- accepted under the
+    /// identical-slices rule exactly as before T5, so the gate keeps
+    /// reading the shared slice for it. Empty for a -- by construction
+    /// impossible -- agg with no arrayed source (scalar feeders carry
+    /// empty slices).
+    pub fn canonical_read_slice(&self) -> &[AxisRead] {
+        let slices = || self.sources.iter().map(|s| s.read_slice.as_slice());
+        slices()
+            .find(|rs| rs.iter().any(|ax| matches!(ax, AxisRead::Reduced { .. })))
+            .or_else(|| slices().find(|rs| !rs.is_empty()))
+            .unwrap_or(&[])
+    }
+
+    /// `true` when `var` is an accepted ITERATED-DIM PROJECTION FEEDER of
+    /// this agg (the I1 feeder clause, GH #767 / T5 of the
+    /// shape-expressiveness design): its own slice is non-empty and
+    /// all-`Iterated` (a projection of the canonical slice onto the shared
+    /// iterated axes -- per-result-slot constant), while the canonical
+    /// slice carries a `Reduced` axis (a genuine reduction exists for the
+    /// feeder to feed; the canonical slice may also carry `Pinned` axes --
+    /// the Iterated-only requirement is on the feeder's slice, not the
+    /// canonical one). The acceptance in `combined_read_slice` guarantees
+    /// an accepted feeder's Iterated target dims equal the canonical
+    /// slice's, in order, and are unmapped -- so a feeder's
+    /// `read_slice_rows` rows are 1:1 with the agg's result slots.
+    ///
+    /// The canonical-`Reduced` requirement keeps the degenerate
+    /// no-co-source agg (`SUM(frac[D1])`, all sources all-`Iterated`) OFF
+    /// the feeder emitters: it rides the pre-T5 paths byte-identically.
+    pub fn source_is_projection_feeder(&self, var: &str) -> bool {
+        let slice = self.source_read_slice(var);
+        !slice.is_empty()
+            && slice
+                .iter()
+                .all(|ax| matches!(ax, AxisRead::Iterated { .. }))
+            && self
+                .canonical_read_slice()
+                .iter()
+                .any(|ax| matches!(ax, AxisRead::Reduced { .. }))
+    }
 }
 
 /// The result of enumerating every aggregate node in a model.
@@ -556,24 +730,21 @@ fn walk_var_equation(
 ) {
     if let Expr2::App(builtin, _, _) = expr
         && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
-        && let Some(read_slice) = combined_read_slice(builtin, ctx)
-        // A whole-RHS reducer with a MAPPED iterated axis (GH #534,
-        // `out[State] = SUM(matrix[State,*])` over a positionally-mapped
-        // pair) is NOT variable-backed: it falls through to
-        // `walk_subexpr_for_aggs`, which mints a *synthetic* agg for the
-        // same reducer text. The variable-backed link-score path
-        // (`try_cross_dimensional_link_scores`'s partial-reduce arm) matches
-        // result axes against source axes BY NAME, so a remapped pair falls
-        // off it onto `emit_per_shape_link_scores`' `Wildcard` partial --
-        // whose PREVIOUS-wrapping mangles the iterated index into the
-        // non-compiling `matrix[PREVIOUS(state),*]` (a silently-stubbed
-        // constant-0 score). Routing through a synthetic agg instead gives
-        // the whole-RHS case the same remapped two-half scoring as an
-        // inline mapped reducer, at the cost of one synthetic aux
-        // duplicating the variable's value.
-        && !read_slice.iter().any(
-            |a| matches!(a, AxisRead::Iterated { dim, source_dim } if dim != source_dim),
-        )
+        && let Some(slices) = combined_read_slice(builtin, ctx)
+        // A whole-RHS reducer whose slice/result shape the variable-backed
+        // machinery cannot express is NOT variable-backed: it falls through
+        // to `walk_subexpr_for_aggs`, which mints a *synthetic* agg for the
+        // same reducer text (at the cost of one synthetic aux duplicating
+        // the variable's value) and rides the well-tested two-half scoring
+        // + the GH #528 agg-to-target projection. See
+        // [`variable_backed_shape_is_expressible`] for the one minting
+        // condition (the GH #534 mapped carve-out, generalized to the
+        // GH #764 broadcast/permuted result shapes by T4 of the
+        // shape-expressiveness design). The expressibility check keys on
+        // the CANONICAL (co-source) slice -- a projection feeder's
+        // all-`Iterated` slice (GH #767) says nothing about the reducer's
+        // result shape.
+        && variable_backed_shape_is_expressible(&slices.canonical, ctx.target_iterated_dims)
     {
         // Whole-RHS reducer: the variable IS the aggregate node. The agg
         // node's result shape is the *reducer's* result shape (the `Iterated`
@@ -583,7 +754,8 @@ fn walk_var_equation(
         // value); a partial reduce keyed by the active A2A dimension
         // (`rowsum[D1] = SUM(matrix[D1, *])`) keeps `[D1]` as its result dims.
         let key = crate::patch::expr2_to_string(expr);
-        let result_dims = result_dims_from_read_slice(&read_slice, ctx.dm_dims);
+        let result_dims = result_dims_from_read_slice(&slices.canonical, ctx.dm_dims);
+        let sources = agg_sources(source_vars, &slices, ctx);
         register_agg(
             result,
             next_synthetic_n,
@@ -592,9 +764,8 @@ fn walk_var_equation(
             AggKind::VariableBacked {
                 var_name: var_name.to_string(),
                 result_dims,
-                read_slice,
             },
-            source_vars,
+            sources,
         );
         return;
     }
@@ -606,6 +777,90 @@ fn walk_var_equation(
         next_synthetic_n,
         /* in_reducer = */ false,
     );
+}
+
+/// The ONE minting condition for whole-RHS reducers (shape-expressiveness
+/// design, T4): `true` when the variable-backed machinery -- the
+/// [`variable_backed_reduce_agg`] gate, `try_cross_dimensional_link_scores`'
+/// per-`(row, slot)` derivation, and `emit_agg_routed_edges`' source→slot
+/// routing, all of which key slots by NAME against the owning variable's
+/// element nodes -- can express this slice with the variable itself as the
+/// aggregate node. `false` routes the reducer through
+/// `walk_subexpr_for_aggs`, which mints a *synthetic* agg arrayed over the
+/// slice's `Iterated` target dims instead.
+///
+/// Not expressible (⇒ synthetic):
+/// - **Mapped iterated axis** (GH #534, `out[State] = SUM(matrix[State,*])`
+///   over a positionally-mapped `State→Region` pair): the variable-backed
+///   link-score path matches result axes against source axes BY NAME, so a
+///   remapped pair falls off it onto `emit_per_shape_link_scores`'
+///   `Wildcard` partial -- whose PREVIOUS-wrapping mangles the iterated
+///   index into the non-compiling `matrix[PREVIOUS(state),*]` (a
+///   silently-stubbed constant-0 score). The mapped clause is NOT subsumed
+///   by the alignment clause below: in the CANONICAL GH #534 shape
+///   (`out[State] = SUM(matrix[State,*])`, the owner's only dim is
+///   `State`) the result dims ARE aligned -- the `Iterated` axis carries
+///   the TARGET dim -- so the alignment comparison alone would wrongly
+///   call it expressible; there the remap, not the shape, is what the
+///   name-keyed path cannot express. But mapped does NOT imply aligned:
+///   the two conditions co-occur (`out[State,D3] = SUM(matrix[State,*])`
+///   is mapped AND broadcast). The mapped check simply fires first, and
+///   the synthetic machinery handles the intersection cleanly -- the
+///   source half remaps rows to slots and the GH #528 projection
+///   broadcasts the agg over the extra owner dims (pinned end-to-end by
+///   `whole_rhs_mapped_broadcast_intersection_scores_cleanly`). Do not
+///   reorder or merge the clauses on an assumed mapped ⇒ aligned.
+/// - **Non-aligned result dims** (GH #764): the `Iterated` axes' target
+///   dims, in slice order, differ from the owner's declared dims -- a
+///   BROADCAST (`out[D1,D3] = SUM(matrix[D1,*])`, strict subset) or a
+///   PERMUTATION (`out[D2,D1] = SUM(cube[D1,D2,*])`, different order). A
+///   per-`(row, slot)` slot must name a complete `to` element in declared
+///   order, which neither shape's slots do; the synthetic agg's slots are
+///   keyed by `result_dims` order and the GH #528 projection
+///   (`emit_agg_to_target_link_scores`' per-ident pins /
+///   `expand_same_element`'s name-matched projection) handles the
+///   broadcast fan-out and the reordering.
+///
+/// Expressible (⇒ the variable IS the agg, byte-identical to pre-T4):
+/// - an ALIGNED partial reduce (`Iterated` dims == the owner's dims, in
+///   order -- Pinned/subset axes included);
+/// - any slice with NO `Iterated` axis: the full-extent reduce
+///   (`total = SUM(pop[*])`, `share[R] = SUM(pop[*])` -- the inert
+///   reference-walker family), the scalar-owner Pinned/subset slice
+///   (`total = SUM(pop[nyc,*])`, admitted by the gate), and the
+///   ARRAYED-owner Pinned/subset slice (`share[R] = SUM(pop[nyc,*])`,
+///   GH #777 -- deliberately kept on the gate's loud-skip decline, NOT
+///   widened into here: it has no `Iterated` axis, so its broadcast needs
+///   the design's section-3 `PerElement` rule, T6 machinery).
+///
+/// `target_iterated_dims` are the owner's A2A dims (canonical, declared
+/// order; empty for a scalar owner). An `Iterated` axis's `dim` is always
+/// one of them by construction (`classify_axis_access` only mints
+/// `Iterated` for a target iterated dim), so "non-aligned" here can only
+/// mean strict subset, permutation, or a duplicated dim (a square source
+/// read as `SUM(sq[D1,D1,*])` -- routed synthetic, matching what the
+/// inline form of the same text already does).
+fn variable_backed_shape_is_expressible(
+    read_slice: &[AxisRead],
+    target_iterated_dims: &[String],
+) -> bool {
+    let mut iterated_dims: Vec<&str> = Vec::new();
+    for axis in read_slice {
+        if let AxisRead::Iterated { dim, source_dim } = axis {
+            if dim != source_dim {
+                return false; // mapped pair (GH #534)
+            }
+            iterated_dims.push(dim.as_str());
+        }
+    }
+    // Scalar-result slices (no Iterated axis) are always expressible-or-
+    // gate-declined as the variable itself; an Iterated-armed slice must
+    // align exactly with the owner's declared dims (GH #764).
+    iterated_dims.is_empty()
+        || iterated_dims
+            .iter()
+            .copied()
+            .eq(target_iterated_dims.iter().map(String::as_str))
 }
 
 /// Recursively walk an expression looking for *maximal* reducer
@@ -666,7 +921,9 @@ fn walk_subexpr_for_aggs(
             // A maximal reducer subexpression is hoisted into a synthetic agg
             // iff every one of its arrayed source references reads a
             // *statically describable* slice -- `compute_read_slice` is `Some`
-            // for each (and they all agree). That covers the whole-extent case
+            // for each -- and the slices pass the I1 acceptance
+            // (`accept_source_slices`: identical co-source slices plus
+            // projection feeders, GH #767). That covers the whole-extent case
             // (`SUM(pop[*])` ⇒ all-`Reduced`), the slice cases
             // (`SUM(pop[NYC,*])` ⇒ `[Pinned(nyc), Reduced]`,
             // `SUM(matrix[D1,*])` over an A2A-`D1` body ⇒
@@ -677,20 +934,18 @@ fn walk_subexpr_for_aggs(
             // as a variable-backed agg via `walk_var_equation`, not here.
             if !in_reducer
                 && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
-                && let Some(read_slice) = combined_read_slice(builtin, ctx)
+                && let Some(slices) = combined_read_slice(builtin, ctx)
             {
                 let key = crate::patch::expr2_to_string(expr);
-                let result_dims = result_dims_from_read_slice(&read_slice, ctx.dm_dims);
+                let result_dims = result_dims_from_read_slice(&slices.canonical, ctx.dm_dims);
+                let sources = agg_sources(source_vars, &slices, ctx);
                 register_agg(
                     result,
                     next_synthetic_n,
                     &key,
                     owner_var,
-                    AggKind::Synthetic {
-                        result_dims,
-                        read_slice,
-                    },
-                    source_vars,
+                    AggKind::Synthetic { result_dims },
+                    sources,
                 );
                 // Descend with `in_reducer = true` so nested reducers are
                 // not separately minted, but index expressions etc. are
@@ -734,16 +989,61 @@ fn walk_subexpr_for_aggs(
 /// What sort of aggregate node a reducer subexpression maps to.
 enum AggKind {
     /// A `$⁚ltm⁚agg⁚{n}` auxiliary must be minted.
-    Synthetic {
-        result_dims: Vec<String>,
-        read_slice: Vec<AxisRead>,
-    },
+    Synthetic { result_dims: Vec<String> },
     /// The owning variable already is the aggregate node.
     VariableBacked {
         var_name: String,
         result_dims: Vec<String>,
-        read_slice: Vec<AxisRead>,
     },
+}
+
+/// Build the per-source [`AggSource`] list for a hoisted reducer: one entry
+/// per distinct source variable, SORTED by canonical name (invariant I3b --
+/// deterministic salsa cache equality and emission order regardless of AST
+/// occurrence order). Each ARRAYED source carries its OWN accepted slice
+/// from [`CombinedReadSlices::per_var`] -- the canonical co-source slice
+/// for a co-source, the all-`Iterated` projection slice for a feeder
+/// (GH #767); each SCALAR source (a feeder, GH #737) carries an empty
+/// slice (it has no axes -- invariant I2).
+fn agg_sources(
+    source_vars: Vec<String>,
+    slices: &CombinedReadSlices,
+    ctx: &AggWalkCtx<'_>,
+) -> Vec<AggSource> {
+    // `reducer_source_vars` already sorts + dedups; re-establishing the
+    // invariant locally keeps it independent of the caller.
+    let mut names = source_vars;
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|var| {
+            let arrayed = ctx
+                .variables
+                .get(&Ident::<Canonical>::new(&var))
+                .and_then(|v| v.get_dimensions())
+                .map(|d| !d.is_empty())
+                .unwrap_or(false);
+            let read_slice = if arrayed {
+                // Every arrayed source has a per-var entry by construction
+                // (`reducer_source_vars` and `collect_arrayed_source_slices`
+                // walk the same references); the canonical fallback is
+                // defensive only.
+                debug_assert!(
+                    slices.per_var.contains_key(&var),
+                    "arrayed reducer source {var:?} has no accepted slice"
+                );
+                slices
+                    .per_var
+                    .get(&var)
+                    .cloned()
+                    .unwrap_or_else(|| slices.canonical.clone())
+            } else {
+                Vec::new()
+            };
+            AggSource { var, read_slice }
+        })
+        .collect()
 }
 
 /// Register an aggregate node for `key` (canonical reducer text) and record
@@ -765,16 +1065,10 @@ fn register_agg(
     key: &str,
     owner_var: &str,
     kind: AggKind,
-    source_vars: Vec<String>,
+    sources: Vec<AggSource>,
 ) {
-    let mut sorted_sources = source_vars;
-    sorted_sources.sort();
-    sorted_sources.dedup();
     let idx = match kind {
-        AggKind::Synthetic {
-            result_dims,
-            read_slice,
-        } => {
+        AggKind::Synthetic { result_dims } => {
             if let Some(&existing) = result.synthetic_by_key.get(key) {
                 existing
             } else {
@@ -783,9 +1077,8 @@ fn register_agg(
                 result.aggs.push(AggNode {
                     name,
                     equation_text: key.to_string(),
-                    source_vars: sorted_sources,
                     result_dims,
-                    read_slice,
+                    sources,
                     is_synthetic: true,
                 });
                 let idx = result.aggs.len() - 1;
@@ -796,16 +1089,14 @@ fn register_agg(
         AggKind::VariableBacked {
             var_name,
             result_dims,
-            read_slice,
         } => {
             // Each whole-RHS-reducer variable is its own aggregate node;
             // never deduped, and not entered in `synthetic_by_key`.
             result.aggs.push(AggNode {
                 name: var_name,
                 equation_text: key.to_string(),
-                source_vars: sorted_sources,
                 result_dims,
-                read_slice,
+                sources,
                 is_synthetic: false,
             });
             result.aggs.len() - 1
@@ -872,49 +1163,17 @@ fn reducer_source_vars(
 /// a non-literal index (`pop[idx, *]`, a `Range`, a `@N` position), so the
 /// enclosing reducer is not hoisted (the dynamic-index carve-out).
 ///
-/// Per source axis `i`:
-/// - `IndexExpr2::Wildcard(_)` ⇒ [`AxisRead::Reduced`].
-/// - `IndexExpr2::StarRange(_, _)` ⇒ [`AxisRead::Reduced`]. (Conservative
-///   even when the named subdimension is a *proper* subset of the axis's own
-///   dimension -- matching `classify_subscript_shape`'s AC1.4 treatment of an
-///   all-`StarRange` subscript as `Wildcard`. The element-graph reroute then
-///   over-approximates the unread rows, exactly as before; tightening this is
-///   tracked as GH #766.)
-/// - `IndexExpr2::Expr(Expr2::Var(d, ..))` where `d` (canonical) is one of
-///   the *target equation's* iterated dimensions AND matches the source's
-///   `i`-th declared dimension either *by name* or via a positional
-///   dimension MAPPING declared on `d` toward it (`has_mapping_to(d, src)`
-///   -- the same declared direction `classify_iterated_dim_shape`'s mapped
-///   arm accepts -- with a usable [`iterated_axis_slot_elements`] remap,
-///   which inherits `mapped_element_correspondence`'s positional-only gate)
-///   ⇒ [`AxisRead::Iterated`] carrying the `(d, src)` pair (GH #534). The
-///   three `Iterated`-axis consumers (`emit_agg_routed_edges`,
-///   `read_slice_rows` behind `emit_source_to_agg_link_scores`, and
-///   `emit_agg_to_target_link_scores` via `result_dims`) remap each source
-///   row to the slot of its positionally-corresponding target element
-///   through the same helper. Declined (⇒ `None`, conservative): an
-///   explicit element-mapped pair (execution resolves positionally and
-///   ignores the map -- GH #756), a mapping declared only in the REVERSE
-///   direction (on the source's dimension; GH #757 tracks that direction's
-///   classification separately -- do not widen here), an unmapped
-///   position-mismatched pair, and a non-positional size mismatch.
-///   (`classify_iterated_dim_shape`'s own mapped branch -- a
-///   *whole*-equation-iterated subscript, not a sliced reducer argument --
-///   is a separate code path and is unaffected.)
-/// - `IndexExpr2::Expr(Expr2::Var(elem, ..))` or `Expr2::Const` resolving to
-///   a literal element / 1-based index of the source's `i`-th dimension ⇒
-///   [`AxisRead::Pinned`] carrying that element's canonical name.
-/// - anything else (`DimPosition`, `Range`, a non-literal `Expr`, a
-///   `Var`/`Const` that resolves to neither an iterated dim nor a literal
-///   element) ⇒ `None`.
+/// Per source axis `i`, the access is decided by [`classify_axis_access`]
+/// (one shared per-axis classifier; see its rustdoc for the per-index
+/// rules).
 ///
 /// A bare `Expr2::Var(source, ..)` arg (no subscript) on an arrayed source ⇒
-/// all-`Reduced` (`[Reduced; source.dims.len()]`). A reference to a *scalar*
-/// model variable ⇒ `None` (it's not a reducer source). A `Subscript` whose
-/// index count doesn't match the source's dimension count ⇒ `None`
-/// (conservative -- a partial subscript is not the case Phase 4 hoists).
+/// all-`Reduced` (`[Reduced{subset: None}; source.dims.len()]`). A reference
+/// to a *scalar* model variable ⇒ `None` (it's not a reducer source). A
+/// `Subscript` whose index count doesn't match the source's dimension count
+/// ⇒ `None` (conservative -- a partial subscript is not the case Phase 4
+/// hoists).
 fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<AxisRead>> {
-    let target_iterated_dims = ctx.target_iterated_dims;
     let variables = ctx.variables;
     let source_dims = |ident: &Ident<Canonical>| -> Option<&[crate::dimensions::Dimension]> {
         let dims = variables.get(ident).and_then(|v| v.get_dimensions())?;
@@ -925,7 +1184,7 @@ fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<Axis
         Expr2::Var(ident, _, _) => {
             // A bare arrayed-variable arg reads the whole array.
             let dims = source_dims(ident)?;
-            Some(vec![AxisRead::Reduced; dims.len()])
+            Some(vec![AxisRead::Reduced { subset: None }; dims.len()])
         }
         Expr2::Subscript(ident, indices, _, _) => {
             let dims = source_dims(ident)?;
@@ -934,84 +1193,154 @@ fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<Axis
             if indices.len() != dims.len() {
                 return None;
             }
-            let mut slice: Vec<AxisRead> = Vec::with_capacity(indices.len());
-            for (i, idx) in indices.iter().enumerate() {
-                let axis = match idx {
-                    IndexExpr2::Wildcard(_) | IndexExpr2::StarRange(_, _) => AxisRead::Reduced,
-                    IndexExpr2::Range(_, _, _) | IndexExpr2::DimPosition(_, _) => return None,
-                    IndexExpr2::Expr(Expr2::Var(name, _, _)) => {
-                        let name_str = name.as_str();
-                        let src_dim_name = dims[i].name();
-                        // An iterated-dimension index: the axis is iterated
-                        // over the target's dimension space (and the agg
-                        // result varies per element of it) iff `name` is one
-                        // of the target's iterated dims AND it lines up with
-                        // the source's i-th dim by name or by a positional
-                        // mapping (GH #534).
-                        if target_iterated_dims.iter().any(|t| t == name_str) {
-                            if name_str == src_dim_name {
-                                AxisRead::Iterated {
-                                    dim: name_str.to_string(),
-                                    source_dim: src_dim_name.to_string(),
-                                }
-                            } else {
-                                // The iterated dim names a *different* source
-                                // axis: a positional remap (`State→Region`,
-                                // GH #534) is accepted -- carrying the
-                                // (target, source) pair so the emitters remap
-                                // each row to its slot -- when (a) the mapping
-                                // is declared on the iterated dim toward the
-                                // source's dim (the same direction
-                                // `classify_iterated_dim_shape`'s mapped arm
-                                // accepts; the reverse-declared direction is
-                                // GH #757 and stays conservative) and (b) the
-                                // slot remap exists (positional mappings
-                                // only: explicit element maps decline via
-                                // `mapped_element_correspondence`'s GH #756
-                                // gate). Everything else -- a plain position
-                                // mismatch, an element-mapped or
-                                // reverse-declared pair -- declines, keeping
-                                // the reference on the conservative path.
-                                use crate::common::CanonicalDimensionName;
-                                let d_canon = CanonicalDimensionName::from_raw(name_str);
-                                let src_canon = CanonicalDimensionName::from_raw(src_dim_name);
-                                let elems = crate::ltm_augment::dimension_element_names(&dims[i]);
-                                if ctx.dim_ctx.has_mapping_to(&d_canon, &src_canon)
-                                    && iterated_axis_slot_elements(
-                                        name_str,
-                                        src_dim_name,
-                                        &elems,
-                                        ctx.dim_ctx,
-                                    )
-                                    .is_some()
-                                {
-                                    AxisRead::Iterated {
-                                        dim: name_str.to_string(),
-                                        source_dim: src_dim_name.to_string(),
-                                    }
-                                } else {
-                                    return None;
-                                }
-                            }
-                        } else if let Some(elem) = resolve_literal_axis_index(idx, &dims[i]) {
-                            AxisRead::Pinned(elem)
-                        } else {
-                            return None;
-                        }
-                    }
-                    IndexExpr2::Expr(Expr2::Const(..)) => {
-                        match resolve_literal_axis_index(idx, &dims[i]) {
-                            Some(elem) => AxisRead::Pinned(elem),
-                            None => return None,
-                        }
-                    }
-                    IndexExpr2::Expr(_) => return None,
-                };
-                slice.push(axis);
-            }
-            Some(slice)
+            indices
+                .iter()
+                .zip(dims)
+                .map(|(idx, axis_dim)| {
+                    classify_axis_access(idx, axis_dim, ctx.target_iterated_dims, ctx.dim_ctx)
+                })
+                .collect()
         }
         _ => None,
+    }
+}
+
+/// Classify ONE subscript index against one source axis -- the single
+/// per-axis access classifier (shape-expressiveness design, T1/T6). Shared
+/// by [`compute_read_slice`] (reducer args) AND the direct-reference
+/// classifier (`db::ltm_ir::classify_iterated_dim_shape`, which rejects
+/// `Reduced` results -- a non-reducer reference never collapses an axis),
+/// so the reducer path and the reference path can never disagree about an
+/// axis.
+///
+/// Returns `None` for anything not statically describable (a dynamic
+/// expression, a `@N` position, a `Range`, a declined mapping, a StarRange
+/// naming a non-subdimension) -- the enclosing reducer is then not hoisted
+/// and its reference stays on the conservative path. Per index:
+///
+/// - `IndexExpr2::Wildcard(_)` ⇒ `Reduced{subset: None}` (full extent).
+/// - `IndexExpr2::StarRange(D, _)` (GH #766): `D` the axis's own dimension
+///   ⇒ `Reduced{subset: None}` (full extent, byte-identical to `*`); `D` a
+///   PROPER subdimension of the axis's dimension ⇒ `Reduced{subset:
+///   Some(elems)}`, the subdimension's elements resolved via
+///   [`crate::dimensions::DimensionsContext::get_subdimension_relation`]
+///   (a subdimension that covers the whole axis normalizes back to
+///   `subset: None`, invariant I3); `D` neither ⇒ **decline** -- such a
+///   subscript is at best a mid-edit inconsistency and must not silently
+///   widen to the full extent.
+/// - `IndexExpr2::Expr(Expr2::Var(d, ..))` where `d` (canonical) is one of
+///   the *target equation's* iterated dimensions AND matches the source's
+///   axis dimension either *by name* or via a usable
+///   [`iterated_axis_slot_elements`] remap -- which consults
+///   `mapped_element_correspondence` and therefore accepts a positional
+///   dimension MAPPING declared in EITHER direction (GH #757 widened the
+///   former `has_mapping_to(d, src)` forward-declared-only gate; the
+///   correspondence helper already handled both declaration directions and
+///   carries the GH #756 positional-only gate)
+///   ⇒ [`AxisRead::Iterated`] carrying the `(d, src)` pair (GH #534). The
+///   three `Iterated`-axis consumers (`emit_agg_routed_edges`,
+///   `read_slice_rows` behind `emit_source_to_agg_link_scores`, and
+///   `emit_agg_to_target_link_scores` via `result_dims`) remap each source
+///   row to the slot of its positionally-corresponding target element
+///   through the same helper. Declined (⇒ `None`, conservative): an
+///   explicit element-mapped pair (execution resolves positionally and
+///   ignores the map -- GH #756), an unmapped position-mismatched pair,
+///   and a non-positional size mismatch.
+///   (`classify_iterated_dim_shape` consumes this classifier directly
+///   since T6, so the direct-reference path and the reducer path accept
+///   the identical mapped set by construction.)
+/// - `IndexExpr2::Expr(Expr2::Var(elem, ..))` or `Expr2::Const` resolving to
+///   a literal element / 1-based index of the axis's dimension ⇒
+///   [`AxisRead::Pinned`] carrying that element's canonical name.
+/// - anything else (`DimPosition`, `Range`, a non-literal `Expr`, a
+///   `Var`/`Const` that resolves to neither an iterated dim nor a literal
+///   element) ⇒ `None`.
+pub(crate) fn classify_axis_access(
+    idx: &IndexExpr2,
+    axis_dim: &crate::dimensions::Dimension,
+    target_iterated_dims: &[String],
+    dim_ctx: &crate::dimensions::DimensionsContext,
+) -> Option<AxisRead> {
+    match idx {
+        IndexExpr2::Wildcard(_) => Some(AxisRead::Reduced { subset: None }),
+        IndexExpr2::StarRange(named, _) => {
+            let axis_canon = axis_dim.canonical_name();
+            if named == axis_canon {
+                // `*:D` over the axis's own dimension: the full extent.
+                return Some(AxisRead::Reduced { subset: None });
+            }
+            let rel = dim_ctx.get_subdimension_relation(named, axis_canon)?;
+            let elems = crate::ltm_augment::dimension_element_names(axis_dim);
+            if rel.parent_offsets.is_empty() || rel.parent_offsets.len() >= elems.len() {
+                // Empty subdimensions don't exist in well-formed models
+                // (decline defensively); a same-cardinality "sub" is the
+                // same element SET as the axis (containment + equal size),
+                // so it normalizes to the full extent -- keeping the
+                // full-extent representation unique (invariant I3).
+                return if rel.parent_offsets.len() == elems.len() {
+                    Some(AxisRead::Reduced { subset: None })
+                } else {
+                    None
+                };
+            }
+            let subset: Vec<String> = rel
+                .parent_offsets
+                .iter()
+                .map(|&o| elems.get(o).cloned())
+                .collect::<Option<_>>()?;
+            Some(AxisRead::Reduced {
+                subset: Some(subset),
+            })
+        }
+        IndexExpr2::Range(_, _, _) | IndexExpr2::DimPosition(_, _) => None,
+        IndexExpr2::Expr(Expr2::Var(name, _, _)) => {
+            let name_str = name.as_str();
+            let src_dim_name = axis_dim.name();
+            // An iterated-dimension index: the axis is iterated over the
+            // target's dimension space (and the agg result varies per
+            // element of it) iff `name` is one of the target's iterated
+            // dims AND it lines up with the source's axis dim by name or by
+            // a positional mapping (GH #534).
+            if target_iterated_dims.iter().any(|t| t == name_str) {
+                if name_str == src_dim_name {
+                    Some(AxisRead::Iterated {
+                        dim: name_str.to_string(),
+                        source_dim: src_dim_name.to_string(),
+                    })
+                } else {
+                    // The iterated dim names a *different* source axis: a
+                    // positional remap (`State→Region`, GH #534) is accepted
+                    // -- carrying the (target, source) pair so the emitters
+                    // remap each row to its slot -- when the slot remap
+                    // exists. `iterated_axis_slot_elements` consults
+                    // `mapped_element_correspondence`, which accepts BOTH
+                    // declaration directions (GH #757 -- the former
+                    // `has_mapping_to(d, src)` forward-only pre-gate was
+                    // dropped) and declines explicit element maps (execution
+                    // resolves positionally and ignores the map, the GH #756
+                    // gate). Everything else -- a plain position mismatch,
+                    // an element-mapped pair -- declines, keeping the
+                    // reference on the conservative path.
+                    let elems = crate::ltm_augment::dimension_element_names(axis_dim);
+                    if iterated_axis_slot_elements(name_str, src_dim_name, &elems, dim_ctx)
+                        .is_some()
+                    {
+                        Some(AxisRead::Iterated {
+                            dim: name_str.to_string(),
+                            source_dim: src_dim_name.to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                resolve_literal_axis_index(idx, axis_dim).map(AxisRead::Pinned)
+            }
+        }
+        IndexExpr2::Expr(Expr2::Const(..)) => {
+            resolve_literal_axis_index(idx, axis_dim).map(AxisRead::Pinned)
+        }
+        IndexExpr2::Expr(_) => None,
     }
 }
 
@@ -1054,38 +1383,154 @@ fn resolve_literal_axis_index(
     }
 }
 
-/// Compute the *combined* read slice of a reducer `builtin`'s arrayed source
-/// references: walk its argument expressions, collect every reference to an
-/// arrayed model variable, [`compute_read_slice`] each, and return the common
-/// slice if (a) at least one such reference exists, (b) `compute_read_slice`
-/// is `Some` for every one, and (c) they all agree. `None` otherwise -- the
-/// reducer is not hoisted (the dynamic-index carve-out, or a multi-source
-/// reducer whose references read incompatible slices).
-fn combined_read_slice(builtin: &BuiltinFn<Expr2>, ctx: &AggWalkCtx<'_>) -> Option<Vec<AxisRead>> {
-    let mut common: Option<Vec<AxisRead>> = None;
-    let mut any_arrayed = false;
+/// The accepted per-source read slices of a hoisted reducer (invariant I1
+/// of the shape-expressiveness design): the CANONICAL slice -- the shared
+/// co-source slice, or (for a degenerate agg with no `Reduced`-bearing
+/// source) the shared all-source slice -- plus each arrayed source
+/// variable's own slice. Built by [`combined_read_slice`]; the walkers
+/// derive the agg's result shape from `canonical` and its [`AggSource`]s
+/// from `per_var`.
+struct CombinedReadSlices {
+    canonical: Vec<AxisRead>,
+    per_var: HashMap<String, Vec<AxisRead>>,
+}
+
+/// Compute the per-source read slices of a reducer `builtin`'s arrayed
+/// source references: walk its argument expressions, collect every
+/// reference to an arrayed model variable, [`compute_read_slice`] each,
+/// and apply the I1 acceptance ([`accept_source_slices`]). `None` -- the
+/// reducer is not hoisted -- when no arrayed reference exists, when any
+/// reference is not statically describable (the dynamic-index carve-out),
+/// or when the references' slices fall outside the acceptance rule.
+fn combined_read_slice(
+    builtin: &BuiltinFn<Expr2>,
+    ctx: &AggWalkCtx<'_>,
+) -> Option<CombinedReadSlices> {
+    let mut refs: Vec<(String, Vec<AxisRead>)> = Vec::new();
     let mut ok = true;
     builtin.for_each_expr_ref(|arg| {
         if ok {
-            collect_arrayed_source_slices(arg, ctx, &mut common, &mut any_arrayed, &mut ok);
+            collect_arrayed_source_slices(arg, ctx, &mut refs, &mut ok);
         }
     });
-    if !ok || !any_arrayed {
+    if !ok || refs.is_empty() {
         return None;
     }
-    common
+    accept_source_slices(refs)
+}
+
+/// The I1 acceptance rule over a reducer's arrayed-reference slices (T5 of
+/// the shape-expressiveness design, GH #767). Sources split into
+/// *co-sources* (>= 1 [`AxisRead::Reduced`] axis) and *feeders* (none):
+///
+/// - **I3b (one slice per var)**: a variable referenced with two different
+///   slices declines (downstream consumers key `sources` by name).
+/// - **Co-sources** must all carry the IDENTICAL slice -- the *canonical
+///   slice* (same `Pinned` elements, same `Iterated` pairs in axis order,
+///   same `Reduced` subsets; two co-sources with different subsets would
+///   disagree on the co-reduced rows per slot).
+/// - **Feeders** are accepted iff the slice consists ONLY of UNMAPPED
+///   `Iterated` axes whose target dims equal the canonical slice's
+///   `Iterated` target dims, in order -- the projection of the canonical
+///   slice onto its iterated axes, so [`crate::db`]'s `read_slice_rows`
+///   derives 1:1 feeder rows-to-slots and the per-row changed-last feeder
+///   equation can pin the slot element into the reducer text. The
+///   Iterated-only requirement is on the FEEDER's slice; a Pinned-bearing
+///   CANONICAL slice (`SUM(cube[D1, c1, *] * frac[D1])`) is in scope. The ordered
+///   EQUALITY (not the design's looser "drawn from the set" subset
+///   wording) is deliberate: a proper-subset feeder's rows would each
+///   feed every slot they project from -- a broadcast the per-`(row,
+///   slot)` machinery cannot name -- and a permuted feeder's
+///   `read_slice_rows` slots (derived in the source's axis order) would
+///   mis-name the `result_dims`-ordered agg slots. Both decline
+///   (conservative + loud, today's behavior). A MAPPED `Iterated` axis
+///   (GH #534) anywhere in the combination declines too: the feeder
+///   equation pins the TARGET-dim slot element into the reducer text,
+///   which is not the source row a mapped reference reads.
+/// - **No co-source at all** (every arrayed source all-`Iterated`, e.g. a
+///   scalar-valued `SUM(frac[D1])` argument): the pre-T5 identical-slices
+///   rule applies byte-identically, with the shared slice as the
+///   canonical one.
+fn accept_source_slices(refs: Vec<(String, Vec<AxisRead>)>) -> Option<CombinedReadSlices> {
+    use std::collections::hash_map::Entry;
+    // I3b: one slice per variable.
+    let mut per_var: HashMap<String, Vec<AxisRead>> = HashMap::new();
+    for (var, slice) in refs {
+        match per_var.entry(var) {
+            Entry::Occupied(e) => {
+                if *e.get() != slice {
+                    return None;
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(slice);
+            }
+        }
+    }
+    let has_reduced = |s: &[AxisRead]| s.iter().any(|ax| matches!(ax, AxisRead::Reduced { .. }));
+    // All co-sources must agree on one canonical slice. (Order-independent:
+    // pairwise equality is what is checked.)
+    let mut canonical: Option<&[AxisRead]> = None;
+    for slice in per_var.values().filter(|s| has_reduced(s)) {
+        match canonical {
+            None => canonical = Some(slice),
+            Some(c) if c == slice.as_slice() => {}
+            Some(_) => return None,
+        }
+    }
+    let Some(canonical) = canonical else {
+        // No co-source: keep the pre-T5 identical-slices rule.
+        let mut slices = per_var.values();
+        let first = slices.next().expect("refs is non-empty").clone();
+        if slices.any(|s| *s != first) {
+            return None;
+        }
+        return Some(CombinedReadSlices {
+            canonical: first,
+            per_var,
+        });
+    };
+    let canonical = canonical.to_vec();
+    // The feeder clause (see the rustdoc).
+    fn unmapped_iterated_dims(s: &[AxisRead]) -> Option<Vec<&str>> {
+        s.iter()
+            .filter_map(|ax| match ax {
+                AxisRead::Iterated { dim, source_dim } => {
+                    Some((dim == source_dim).then_some(dim.as_str()))
+                }
+                AxisRead::Pinned(_) | AxisRead::Reduced { .. } => None,
+            })
+            .collect()
+    }
+    let feeders: Vec<&Vec<AxisRead>> = per_var.values().filter(|s| !has_reduced(s)).collect();
+    if !feeders.is_empty() {
+        // `None` here means a mapped Iterated axis is present.
+        let canonical_dims = unmapped_iterated_dims(&canonical)?;
+        for feeder in feeders {
+            if feeder.len() != canonical_dims.len()
+                || feeder
+                    .iter()
+                    .any(|ax| !matches!(ax, AxisRead::Iterated { .. }))
+                || unmapped_iterated_dims(feeder).as_deref() != Some(&canonical_dims)
+            {
+                return None;
+            }
+        }
+    }
+    Some(CombinedReadSlices { canonical, per_var })
 }
 
 /// Recursive helper for [`combined_read_slice`]: descend `expr` (and any
-/// nested subscript index expressions), folding each arrayed-source-variable
-/// reference's [`compute_read_slice`] into `common` (and clearing `ok` on a
-/// `None` or a disagreement). Scalar-variable references are ignored (a scalar
-/// argument to a reducer is not a reducer source).
+/// nested subscript index expressions), pushing each arrayed-source-variable
+/// reference's `(var, compute_read_slice)` pair into `refs` (and clearing
+/// `ok` on a not-statically-describable `None`). Acceptance over the
+/// collected pairs is [`accept_source_slices`]'s job. Scalar-variable
+/// references are ignored (a scalar argument to a reducer is not a per-row
+/// reducer source; it joins `sources` later with an empty slice).
 fn collect_arrayed_source_slices(
     expr: &Expr2,
     ctx: &AggWalkCtx<'_>,
-    common: &mut Option<Vec<AxisRead>>,
-    any_arrayed: &mut bool,
+    refs: &mut Vec<(String, Vec<AxisRead>)>,
     ok: &mut bool,
 ) {
     if !*ok {
@@ -1098,38 +1543,35 @@ fn collect_arrayed_source_slices(
             .map(|d| !d.is_empty())
             .unwrap_or(false)
     };
-    let fold = |slice: Option<Vec<AxisRead>>, common: &mut Option<Vec<AxisRead>>, ok: &mut bool| {
+    fn push(
+        ident: &Ident<Canonical>,
+        slice: Option<Vec<AxisRead>>,
+        refs: &mut Vec<(String, Vec<AxisRead>)>,
+        ok: &mut bool,
+    ) {
         match slice {
             None => *ok = false,
-            Some(s) => match common {
-                None => *common = Some(s),
-                Some(existing) if *existing == s => {}
-                Some(_) => *ok = false,
-            },
+            Some(s) => refs.push((ident.as_str().to_string(), s)),
         }
-    };
+    }
     match expr {
         Expr2::Const(..) => {}
         Expr2::Var(ident, _, _) => {
             if ctx.variables.contains_key(ident) && is_arrayed(ident) {
-                *any_arrayed = true;
-                fold(compute_read_slice(expr, ctx), common, ok);
+                push(ident, compute_read_slice(expr, ctx), refs, ok);
             }
         }
         Expr2::Subscript(ident, indices, _, _) => {
             if ctx.variables.contains_key(ident) && is_arrayed(ident) {
-                *any_arrayed = true;
-                fold(compute_read_slice(expr, ctx), common, ok);
+                push(ident, compute_read_slice(expr, ctx), refs, ok);
             }
             // Also descend into index expressions (a nested source ref).
             for idx in indices {
                 match idx {
-                    IndexExpr2::Expr(e) => {
-                        collect_arrayed_source_slices(e, ctx, common, any_arrayed, ok)
-                    }
+                    IndexExpr2::Expr(e) => collect_arrayed_source_slices(e, ctx, refs, ok),
                     IndexExpr2::Range(l, r, _) => {
-                        collect_arrayed_source_slices(l, ctx, common, any_arrayed, ok);
-                        collect_arrayed_source_slices(r, ctx, common, any_arrayed, ok);
+                        collect_arrayed_source_slices(l, ctx, refs, ok);
+                        collect_arrayed_source_slices(r, ctx, refs, ok);
                     }
                     IndexExpr2::Wildcard(_)
                     | IndexExpr2::StarRange(_, _)
@@ -1138,21 +1580,17 @@ fn collect_arrayed_source_slices(
             }
         }
         Expr2::App(builtin, _, _) => {
-            builtin.for_each_expr_ref(|sub| {
-                collect_arrayed_source_slices(sub, ctx, common, any_arrayed, ok)
-            });
+            builtin.for_each_expr_ref(|sub| collect_arrayed_source_slices(sub, ctx, refs, ok));
         }
-        Expr2::Op1(_, operand, _, _) => {
-            collect_arrayed_source_slices(operand, ctx, common, any_arrayed, ok)
-        }
+        Expr2::Op1(_, operand, _, _) => collect_arrayed_source_slices(operand, ctx, refs, ok),
         Expr2::Op2(_, left, right, _, _) => {
-            collect_arrayed_source_slices(left, ctx, common, any_arrayed, ok);
-            collect_arrayed_source_slices(right, ctx, common, any_arrayed, ok);
+            collect_arrayed_source_slices(left, ctx, refs, ok);
+            collect_arrayed_source_slices(right, ctx, refs, ok);
         }
         Expr2::If(cond, then_e, else_e, _, _) => {
-            collect_arrayed_source_slices(cond, ctx, common, any_arrayed, ok);
-            collect_arrayed_source_slices(then_e, ctx, common, any_arrayed, ok);
-            collect_arrayed_source_slices(else_e, ctx, common, any_arrayed, ok);
+            collect_arrayed_source_slices(cond, ctx, refs, ok);
+            collect_arrayed_source_slices(then_e, ctx, refs, ok);
+            collect_arrayed_source_slices(else_e, ctx, refs, ok);
         }
     }
 }
@@ -1175,7 +1613,7 @@ fn result_dims_from_read_slice(
             // equation, the agg→target projection (GH #528), and the
             // element-graph slot naming all key on.
             AxisRead::Iterated { dim, .. } => Some(canonical_dim_to_datamodel(dim, dm_dims)),
-            AxisRead::Pinned(_) | AxisRead::Reduced => None,
+            AxisRead::Pinned(_) | AxisRead::Reduced { .. } => None,
         })
         .collect()
 }
@@ -1185,66 +1623,118 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
     name.starts_with(AGG_NAME_PREFIX)
 }
 
-/// The variable-backed PARTIAL-reduce aggregate node for the causal edge
-/// `from -> to`, if any (GH #752): `to`'s entire dt-equation is a reducer
-/// reading `from` (`to` IS the agg, `is_synthetic == false`) with at least
-/// one [`AxisRead::Iterated`] axis, and the agg's `result_dims` are exactly
-/// `to`'s declared dims, in order -- so each agg result slot names a complete
-/// `to` element and the element graph can route the read-slice rows straight
-/// to `to[<slot>]` (the diagonal `matrix[d1,d2] → row_sum[d1]` family whose
-/// per-`(row, slot)` link scores `try_cross_dimensional_link_scores` emits).
+/// The variable-backed REDUCE aggregate node for the causal edge
+/// `from -> to`, if any (GH #752, generalized by T3 of the
+/// shape-expressiveness design / GH #765): `to`'s entire dt-equation is a
+/// reducer reading `from` (`to` IS the agg, `is_synthetic == false`) whose
+/// slice is statically describable and *non-trivial* -- at least one
+/// `Pinned`, subset-`Reduced`, or `Iterated` axis -- and whose result shape
+/// the per-`(row, slot)` machinery can express:
+///
+/// - **Aligned partial reduce** (`row_sum[D1] = SUM(matrix[D1,*])`,
+///   `outf[D1] = MEAN(cube[D1,x,*])`, `out[D1] = SUM(matrix[D1,*:Sub])`):
+///   at least one `Iterated` axis and `result_dims` exactly `to`'s declared
+///   dims, in order -- each agg result slot names a complete `to` element,
+///   so the element graph routes the read-slice rows straight to
+///   `to[<slot>]` (the diagonal family whose per-`(row, slot)` link scores
+///   `try_cross_dimensional_link_scores` emits from the SAME
+///   `read_slice_rows` derivation, invariant I4). Pinned/subset axes are
+///   admitted: the score derivation fixes `Pinned` axes and enumerates
+///   subsets by construction, so the divisor is the true read count and
+///   unread rows get neither edges nor scores. (The T1-era Pinned/subset
+///   exclusions were deleted atomically with that derivation swap --
+///   deleting them first would have re-fired the 0.25-vs-0.5
+///   silent-wrong-divisor hazard the old rustdoc documented.)
+/// - **Scalar-result slice on a SCALAR owner** (`total = SUM(pop[nyc,*])`,
+///   `total = SUM(arr[*:Sub])`; `to_dims.is_empty()`): no `Iterated` axis;
+///   the slot is the bare `to` node, so `emit_agg_routed_edges` emits
+///   exactly the read rows into `to`, matching the per-read-row scores.
+///
+/// Because the axis checks key on the CANONICAL (co-source) slice, the
+/// gate also admits a FEEDER edge of an aligned partial reduce (GH #767 /
+/// T5: `frac → growth` for `growth[D1] = SUM(matrix[D1,*] * frac[D1])`,
+/// where `from`'s own slice is the all-`Iterated` projection) -- the
+/// consumers route THAT edge by `from`'s own slice
+/// ([`AggNode::source_is_projection_feeder`] is the discriminator), so the
+/// feeder's element edges, per-circuit loop routing, and per-`(row, slot)`
+/// changed-last scores cover the same 1:1 rows.
 ///
 /// This is the single gate shared by the element-graph reroute
-/// (`model_element_causal_edges`' `Direct`-`Wildcard` dispatch) and the loop
-/// builder (`build_element_level_loops`' per-circuit routing), so the two can
-/// never disagree about which edges carry per-`(row, slot)` scores.
+/// (`model_element_causal_edges`' `Direct` `Wildcard`/`DynamicIndex`
+/// dispatch), the loop builder (`build_element_level_loops`' per-circuit
+/// routing), and `try_cross_dimensional_link_scores`' row derivation, so
+/// the three can never disagree about which edges carry per-`(row, slot)`
+/// scores.
 ///
-/// `None` (callers keep the conservative path) for:
-/// - a whole-extent / pinned-only variable-backed reducer
-///   (`total = SUM(pop[*])`, `share[R] = SUM(pop[*])`): no `Iterated` axis;
-///   the reduction / broadcast edges the conservative path emits are already
-///   the true reads.
-/// - a whole-RHS partial reduce broadcast over extra target dims
-///   (`out[D1,D3] = SUM(matrix[D1,*])`): `result_dims` is a strict subset of
-///   `to`'s dims, so a slot does not name a complete `to` element (and the
-///   per-`(row, slot)` link scores are not emitted for that shape either).
-/// - a permuted-axes whole-RHS reduce: slot coordinates are in
-///   `Iterated`-axis (source) order, which would mis-subscript `to`.
-/// - a PINNED-bearing mixed slice (`outf[D1] = MEAN(cube[D1,x,*])`):
-///   `try_cross_dimensional_link_scores` derives each slot's co-reduced
-///   slice from the FULL source cartesian product, ignoring `Pinned` axes,
-///   so its per-`(row, slot)` values are wrong for a pinned slice (e.g. the
-///   MEAN divisor counts the unread rows -- GH #765). Accepting
-///   the slice here would trade the loud conservative regime (cross-product
-///   edges whose loop scores fail fragment compile with `Warning`s) for
-///   silently wrong numbers; the exclusion goes when that derivation
-///   respects the read slice.
-pub(crate) fn variable_backed_partial_reduce_agg<'a>(
+/// `None` (callers keep their conservative paths) for:
+/// - a PURE full-extent slice (all `Reduced{subset: None}`:
+///   `total = SUM(pop[*])`, `share[R] = SUM(pop[*,*])`): the reference
+///   walker's reduction/broadcast edges already ARE the read rows, so
+///   routing it through the gate would change nothing -- skipped to keep
+///   the surface byte-identical (inert).
+/// - an ARRAYED-owner scalar-result Pinned/subset slice
+///   (`share[Region] = SUM(pop[nyc,*])`): no `Iterated` axis but `to` is
+///   arrayed -- the reducer's scalar value broadcasts over `to`'s dims,
+///   which per-`(row, slot)` names cannot express (a slot does not name a
+///   complete `to` element). DECLINED here AND loudly skipped by
+///   `try_cross_dimensional_link_scores` (the GH #758 treatment: one
+///   Warning, no link-score variable, loop scores through the edge
+///   dropped). The full broadcast fan-out is the design's section 3
+///   `PerElement` rule applied to variable-backed owners -- T6 machinery,
+///   tracked as GH #777.
+///
+/// The Iterated-arm alignment check below (`result_dims` == `to`'s dims,
+/// in order) is defense-in-depth since T4: a whole-RHS reduce with
+/// NON-ALIGNED result dims (broadcast `out[D1,D3] = SUM(matrix[D1,*])` /
+/// permuted axes, GH #764) never registers a variable-backed agg anymore
+/// -- [`variable_backed_shape_is_expressible`] routes it to a synthetic
+/// agg at minting -- so every Iterated-armed variable-backed agg reaching
+/// this gate is aligned by construction.
+pub(crate) fn variable_backed_reduce_agg<'a>(
     aggs: &'a AggNodesResult,
     from: &str,
     to: &str,
     to_dims: &[crate::dimensions::Dimension],
 ) -> Option<&'a AggNode> {
-    if to_dims.is_empty() {
-        return None;
-    }
     aggs.aggs_in_var(to).find(|a| {
-        !a.is_synthetic
-            && a.name == to
-            && a.source_vars.iter().any(|s| s == from)
-            && a.read_slice
-                .iter()
-                .any(|ax| matches!(ax, AxisRead::Iterated { .. }))
-            // Every axis Iterated or Reduced: a Pinned-bearing slice is
-            // excluded (see the rustdoc's last bullet).
-            && a.read_slice
-                .iter()
-                .all(|ax| matches!(ax, AxisRead::Iterated { .. } | AxisRead::Reduced))
-            && a.result_dims.len() == to_dims.len()
-            && a.result_dims
-                .iter()
-                .zip(to_dims)
-                .all(|(rd, td)| canonicalize(rd).as_ref() == td.name())
+        if a.is_synthetic || a.name != to || !a.reads_var(from) {
+            return false;
+        }
+        // The axis checks key on the CANONICAL (co-source) slice,
+        // invariant I1, rather than `from`'s own slice: the gate decides
+        // the *reducer's* shape, and `from` may be a scalar feeder
+        // (`out[D1] = SUM(matrix[D1,*] * scale)`, empty slice) or an
+        // iterated-dim projection feeder (GH #767, all-`Iterated` slice)
+        // whose own slice says nothing about the reduction's axis split.
+        let slice = a.canonical_read_slice();
+        // Non-trivial: a pure full-extent slice (all `Reduced{subset:
+        // None}`, which also covers the impossible empty slice) is the
+        // inert skip in the rustdoc.
+        if !slice
+            .iter()
+            .any(|ax| !matches!(ax, AxisRead::Reduced { subset: None }))
+        {
+            return false;
+        }
+        if slice
+            .iter()
+            .any(|ax| matches!(ax, AxisRead::Iterated { .. }))
+        {
+            // Aligned partial reduce: each slot names a complete `to`
+            // element. Non-aligned (broadcast/permuted, GH #764) result
+            // dims cannot occur here since T4 -- they mint synthetic aggs
+            // at enumeration -- so this check is pure defense.
+            a.result_dims.len() == to_dims.len()
+                && a.result_dims
+                    .iter()
+                    .zip(to_dims)
+                    .all(|(rd, td)| canonicalize(rd).as_ref() == td.name())
+        } else {
+            // Scalar-result Pinned/subset slice: admitted only for a SCALAR
+            // owner; the arrayed-owner broadcast slice is the declined
+            // residual (GH #758 loud skip; see the rustdoc).
+            to_dims.is_empty()
+        }
     })
 }
 
@@ -1300,6 +1790,12 @@ mod tests {
     use crate::db::{SimlinDb, sync_from_datamodel};
     use crate::test_common::TestProject;
 
+    /// Test helper: the source-variable names of an agg (sorted + deduped
+    /// by the [`AggNode::sources`] construction invariant).
+    fn source_names(a: &AggNode) -> Vec<&str> {
+        a.sources.iter().map(|s| s.var.as_str()).collect()
+    }
+
     /// Build a `TestProject`, sync into salsa, and return the enumerated
     /// aggregate nodes for the "main" model.
     fn agg_nodes(project: &TestProject) -> AggNodesResult {
@@ -1337,7 +1833,7 @@ mod tests {
             .find(|a| a.name == "total_population")
             .expect("expected a variable-backed agg owned by `total_population`");
         assert!(!agg.is_synthetic);
-        assert_eq!(agg.source_vars, vec!["population".to_string()]);
+        assert_eq!(source_names(agg), vec!["population"]);
         assert!(agg.result_dims.is_empty());
         // `agg_for_key` resolves only synthetic aggs, so it must not find this one.
         assert!(result.agg_for_key("sum(population[*])").is_none());
@@ -1368,16 +1864,16 @@ mod tests {
             .expect("expected an agg owned by `agg`");
         assert_eq!(agg.name, "agg");
         assert!(!agg.is_synthetic);
-        assert_eq!(agg.source_vars, vec!["matrix".to_string()]);
+        assert_eq!(source_names(agg), vec!["matrix"]);
         assert_eq!(agg.result_dims, vec!["D1".to_string()]);
         assert_eq!(
-            agg.read_slice,
+            agg.canonical_read_slice(),
             vec![
                 AxisRead::Iterated {
                     dim: "d1".to_string(),
                     source_dim: "d1".to_string()
                 },
-                AxisRead::Reduced
+                AxisRead::Reduced { subset: None }
             ]
         );
     }
@@ -1408,7 +1904,7 @@ mod tests {
             .expect("expected an agg owned by `share`");
         assert_eq!(agg.name, "share");
         assert!(!agg.is_synthetic);
-        assert_eq!(agg.source_vars, vec!["pop".to_string()]);
+        assert_eq!(source_names(agg), vec!["pop"]);
         assert!(
             agg.result_dims.is_empty(),
             "a full reduce broadcast to an arrayed variable has scalar result dims, got: {:?}",
@@ -1436,7 +1932,7 @@ mod tests {
         );
         assert_eq!(synthetic[0].name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
         assert_eq!(synthetic[0].equation_text, "sum(pop[*])");
-        assert_eq!(synthetic[0].source_vars, vec!["pop".to_string()]);
+        assert_eq!(source_names(synthetic[0]), vec!["pop"]);
         assert!(synthetic[0].result_dims.is_empty());
         assert!(
             result
@@ -1490,7 +1986,7 @@ mod tests {
             .expect("expected a synthetic agg owned by `share`");
         assert_eq!(share_agg.name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
         assert_eq!(share_agg.equation_text, "sum(pop[*])");
-        assert_eq!(share_agg.source_vars, vec!["pop".to_string()]);
+        assert_eq!(source_names(share_agg), vec!["pop"]);
         // `agg_for_key` resolves the reducer text to the *synthetic* agg.
         assert_eq!(
             result.agg_for_key("sum(pop[*])").map(|a| a.name.as_str()),
@@ -1630,10 +2126,10 @@ mod tests {
         // First-encounter (left-to-right DFS) order: SUM(a[*]) then SUM(b[*]).
         assert_eq!(synthetic[0].name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
         assert_eq!(synthetic[0].equation_text, "sum(a[*])");
-        assert_eq!(synthetic[0].source_vars, vec!["a".to_string()]);
+        assert_eq!(source_names(synthetic[0]), vec!["a"]);
         assert_eq!(synthetic[1].name, "$\u{205A}ltm\u{205A}agg\u{205A}1");
         assert_eq!(synthetic[1].equation_text, "sum(b[*])");
-        assert_eq!(synthetic[1].source_vars, vec!["b".to_string()]);
+        assert_eq!(source_names(synthetic[1]), vec!["b"]);
     }
 
     /// AC4.4 (dedup): the same reducer subexpression appearing in two
@@ -1850,10 +2346,13 @@ mod tests {
         // `expr2_to_string` puts a space after the comma in a multi-index
         // subscript -- assert the canonical text it actually produces.
         assert_eq!(synthetic[0].equation_text, "sum(pop[nyc, *])");
-        assert_eq!(synthetic[0].source_vars, vec!["pop".to_string()]);
+        assert_eq!(source_names(synthetic[0]), vec!["pop"]);
         assert_eq!(
-            synthetic[0].read_slice,
-            vec![AxisRead::Pinned("nyc".to_string()), AxisRead::Reduced]
+            synthetic[0].canonical_read_slice(),
+            vec![
+                AxisRead::Pinned("nyc".to_string()),
+                AxisRead::Reduced { subset: None }
+            ]
         );
         assert!(
             synthetic[0].result_dims.is_empty(),
@@ -1894,17 +2393,17 @@ mod tests {
             result.aggs
         );
         assert_eq!(
-            synthetic[0].read_slice,
+            synthetic[0].canonical_read_slice(),
             vec![
                 AxisRead::Iterated {
                     dim: "d1".to_string(),
                     source_dim: "d1".to_string()
                 },
-                AxisRead::Reduced
+                AxisRead::Reduced { subset: None }
             ]
         );
         assert_eq!(synthetic[0].result_dims, vec!["D1".to_string()]);
-        assert_eq!(synthetic[0].source_vars, vec!["matrix".to_string()]);
+        assert_eq!(source_names(synthetic[0]), vec!["matrix"]);
         // `expr2_to_string` canonicalizes the iterated dim name lowercase.
         assert_eq!(synthetic[0].equation_text, "sum(matrix[d1, *])");
     }
@@ -1944,18 +2443,18 @@ mod tests {
             result.aggs
         );
         assert_eq!(
-            synthetic[0].read_slice,
+            synthetic[0].canonical_read_slice(),
             vec![
                 AxisRead::Iterated {
                     dim: "d1".to_string(),
                     source_dim: "d1".to_string()
                 },
                 AxisRead::Pinned("nyc".to_string()),
-                AxisRead::Reduced
+                AxisRead::Reduced { subset: None }
             ]
         );
         assert_eq!(synthetic[0].result_dims, vec!["D1".to_string()]);
-        assert_eq!(synthetic[0].source_vars, vec!["matrix3d".to_string()]);
+        assert_eq!(source_names(synthetic[0]), vec!["matrix3d"]);
         assert_eq!(synthetic[0].equation_text, "sum(matrix3d[d1, nyc, *])");
     }
 
@@ -1981,12 +2480,26 @@ mod tests {
             "a multi-source reducer with agreeing slices must mint one synthetic agg; got: {:?}",
             result.aggs
         );
-        assert_eq!(synthetic[0].read_slice, vec![AxisRead::Reduced]);
+        assert_eq!(
+            synthetic[0].canonical_read_slice(),
+            vec![AxisRead::Reduced { subset: None }]
+        );
         assert!(synthetic[0].result_dims.is_empty());
-        // `source_vars` lists every arrayed model variable in the argument.
-        let mut srcs = synthetic[0].source_vars.clone();
-        srcs.sort();
-        assert_eq!(srcs, vec!["a".to_string(), "b".to_string()]);
+        // `sources` lists every arrayed model variable in the argument
+        // (sorted by name), each carrying the IDENTICAL canonical slice --
+        // invariant I1's identical-co-source form (T2 of the
+        // shape-expressiveness design: acceptance is identical-only, so
+        // per-source slices cannot yet differ).
+        assert_eq!(source_names(synthetic[0]), vec!["a", "b"]);
+        for s in &synthetic[0].sources {
+            assert_eq!(
+                s.read_slice,
+                vec![AxisRead::Reduced { subset: None }],
+                "every arrayed co-source must carry the canonical slice; got {:?} for {}",
+                s.read_slice,
+                s.var
+            );
+        }
     }
 
     /// #514 (negative guard): a multi-source reducer whose arrayed args read
@@ -2012,8 +2525,7 @@ mod tests {
             result
                 .aggs
                 .iter()
-                .all(|ag| !ag.source_vars.contains(&"a".to_string())
-                    && !ag.source_vars.contains(&"b".to_string())),
+                .all(|ag| !ag.reads_var("a") && !ag.reads_var("b")),
             "a multi-source reducer whose args read incompatible slices must not be hoisted; \
              got: {:?}",
             result.aggs
@@ -2056,13 +2568,13 @@ mod tests {
             result.aggs
         );
         assert_eq!(
-            synthetic[0].read_slice,
+            synthetic[0].canonical_read_slice(),
             vec![
                 AxisRead::Iterated {
                     dim: "state".to_string(),
                     source_dim: "region".to_string()
                 },
-                AxisRead::Reduced
+                AxisRead::Reduced { subset: None }
             ]
         );
         assert_eq!(
@@ -2070,7 +2582,7 @@ mod tests {
             vec!["State".to_string()],
             "the agg's result axis is the TARGET equation's iterated dim"
         );
-        assert_eq!(synthetic[0].source_vars, vec!["matrix".to_string()]);
+        assert_eq!(source_names(synthetic[0]), vec!["matrix"]);
         assert_eq!(synthetic[0].equation_text, "sum(matrix[state, *])");
     }
 
@@ -2100,24 +2612,24 @@ mod tests {
 
         let result = agg_nodes(&project);
         assert!(
-            result
-                .aggs
-                .iter()
-                .all(|a| !a.source_vars.contains(&"matrix".to_string())),
+            result.aggs.iter().all(|a| !a.reads_var("matrix")),
             "an element-mapped sliced reducer must not be hoisted; got: {:?}",
             result.aggs
         );
         assert!(result.synthetic_by_key.is_empty());
     }
 
-    /// GH #534 (conservative gate, reverse-declared): a sliced reducer whose
-    /// mapping is declared only in the REVERSE direction (on the source's
-    /// `Region` toward `State`) stays un-hoisted, matching the direction
-    /// `classify_iterated_dim_shape`'s mapped arm accepts
-    /// (`has_mapping_to(iterated, source)` only; the reverse-subscripted
-    /// direction is tracked by GH #757 -- not widened here).
+    /// GH #757 (flipped from the GH #534-era conservative pin): a sliced
+    /// reducer whose POSITIONAL mapping is declared only in the REVERSE
+    /// direction (on the source's `Region` toward `State`) is now hoisted --
+    /// `classify_axis_access`'s mapped arm gates on
+    /// `iterated_axis_slot_elements` / `mapped_element_correspondence`,
+    /// which accepts both declaration directions (the compiler's
+    /// `translate_via_mapping` resolves both, so declining one direction
+    /// was pure over-conservatism). The slice and `result_dims` are
+    /// identical to the forward-declared twin.
     #[test]
-    fn reverse_declared_mapped_sliced_reducer_is_not_hoisted() {
+    fn reverse_declared_mapped_sliced_reducer_is_hoisted() {
         let project = TestProject::new("reverse_mapped_slice")
             .named_dimension_with_mapping("Region", &["r1", "r2"], "State")
             .named_dimension("D2", &["x", "y"])
@@ -2131,15 +2643,24 @@ mod tests {
             );
 
         let result = agg_nodes(&project);
-        assert!(
-            result
-                .aggs
-                .iter()
-                .all(|a| !a.source_vars.contains(&"matrix".to_string())),
-            "a reverse-declared mapped sliced reducer must not be hoisted; got: {:?}",
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "the reverse-declared positionally-mapped sliced reducer must be hoisted; got: {:?}",
             result.aggs
         );
-        assert!(result.synthetic_by_key.is_empty());
+        assert_eq!(
+            synthetic[0].canonical_read_slice(),
+            vec![
+                AxisRead::Iterated {
+                    dim: "state".to_string(),
+                    source_dim: "region".to_string()
+                },
+                AxisRead::Reduced { subset: None }
+            ]
+        );
+        assert_eq!(synthetic[0].result_dims, vec!["State".to_string()]);
     }
 
     /// GH #534: the whole-RHS twin -- `out[State] = SUM(matrix[State,*])`
@@ -2173,16 +2694,172 @@ mod tests {
             .expect("expected a synthetic agg owned by `out`");
         assert_eq!(agg.name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
         assert_eq!(
-            agg.read_slice,
+            agg.canonical_read_slice(),
             vec![
                 AxisRead::Iterated {
                     dim: "state".to_string(),
                     source_dim: "region".to_string()
                 },
-                AxisRead::Reduced
+                AxisRead::Reduced { subset: None }
             ]
         );
         assert_eq!(agg.result_dims, vec!["State".to_string()]);
+    }
+
+    /// GH #764 (T4): the whole-RHS BROADCAST twin -- `out[D1,D3] =
+    /// SUM(matrix[D1,*])`, `result_dims` (`[D1]`) a strict subset of the
+    /// owner's dims (`[D1,D3]`) -- mints a SYNTHETIC agg, generalizing the
+    /// GH #534 carve-out: the variable-backed per-`(row, slot)` machinery
+    /// requires each slot to name a complete `to` element, which a
+    /// broadcast slot does not. The synthetic agg is arrayed over
+    /// `result_dims` and rides the two-half emitters + the GH #528
+    /// agg-to-target projection.
+    #[test]
+    fn whole_rhs_broadcast_partial_reduce_mints_synthetic_agg() {
+        let project = TestProject::new("whole_rhs_broadcast_764")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension("D3", &["p", "q"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct(
+                "out",
+                vec!["D1".into(), "D3".into()],
+                "SUM(matrix[D1, *])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| a.is_synthetic),
+            "a whole-RHS BROADCAST reducer must mint a synthetic agg (not variable-backed); \
+             got: {:?}",
+            result.aggs
+        );
+        let agg = result
+            .aggs_in_var("out")
+            .next()
+            .expect("expected a synthetic agg owned by `out`");
+        assert_eq!(agg.name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
+        assert_eq!(
+            agg.canonical_read_slice(),
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Reduced { subset: None }
+            ]
+        );
+        assert_eq!(agg.result_dims, vec!["D1".to_string()]);
+        assert_eq!(source_names(agg), vec!["matrix"]);
+    }
+
+    /// GH #764 (T4): the whole-RHS PERMUTED twin -- `out[D2,D1] =
+    /// SUM(cube[D1,D2,*])`, `result_dims` (`[D1,D2]`, slice order) in a
+    /// different order than the owner's dims (`[D2,D1]`) -- mints a
+    /// SYNTHETIC agg too: variable-backed slot coordinates are in
+    /// `Iterated`-axis order, which would mis-subscript `to`. Slots of the
+    /// synthetic agg are keyed by `result_dims` order, and the GH #528
+    /// projection reorders per target element.
+    #[test]
+    fn whole_rhs_permuted_partial_reduce_mints_synthetic_agg() {
+        let project = TestProject::new("whole_rhs_permuted_764")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension("D3", &["p", "q"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "D2".into(), "D3".into()],
+                "1",
+                None,
+            )
+            .array_aux_direct(
+                "out",
+                vec!["D2".into(), "D1".into()],
+                "SUM(cube[D1, D2, *])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| a.is_synthetic),
+            "a whole-RHS PERMUTED reducer must mint a synthetic agg (not variable-backed); \
+             got: {:?}",
+            result.aggs
+        );
+        let agg = result
+            .aggs_in_var("out")
+            .next()
+            .expect("expected a synthetic agg owned by `out`");
+        assert_eq!(
+            agg.result_dims,
+            vec!["D1".to_string(), "D2".to_string()],
+            "result_dims stay in Iterated-axis (slice) order, not the owner's declared order"
+        );
+        assert_eq!(
+            agg.canonical_read_slice(),
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Iterated {
+                    dim: "d2".to_string(),
+                    source_dim: "d2".to_string()
+                },
+                AxisRead::Reduced { subset: None }
+            ]
+        );
+    }
+
+    /// GH #764 ∩ GH #765 (T4): a non-aligned whole-RHS reduce that ALSO
+    /// carries a `Pinned` axis (`out[D1,D2] = SUM(cube[D1,nyc,*])` over
+    /// `cube[D1,Region,D2]`) mints a synthetic agg whose slice keeps the
+    /// `Pinned` axis -- so the synthetic-half emitters (which are
+    /// Pinned-correct via `read_slice_rows`) score only the read rows.
+    /// Pre-T4 this shape rode the OLD full-cartesian link-score
+    /// derivation, scoring unread (`boston`) rows.
+    #[test]
+    fn whole_rhs_broadcast_pinned_mix_mints_synthetic_agg() {
+        let project = TestProject::new("whole_rhs_broadcast_pinned_764")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("Region", &["nyc", "boston"])
+            .named_dimension("D2", &["x", "y"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "Region".into(), "D2".into()],
+                "1",
+                None,
+            )
+            .array_aux_direct(
+                "out",
+                vec!["D1".into(), "D2".into()],
+                "SUM(cube[D1, nyc, *])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| a.is_synthetic),
+            "a Pinned-bearing non-aligned whole-RHS reducer must mint a synthetic agg; got: {:?}",
+            result.aggs
+        );
+        let agg = result
+            .aggs_in_var("out")
+            .next()
+            .expect("expected a synthetic agg owned by `out`");
+        assert_eq!(agg.result_dims, vec!["D1".to_string()]);
+        assert_eq!(
+            agg.canonical_read_slice(),
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Pinned("nyc".to_string()),
+                AxisRead::Reduced { subset: None }
+            ]
+        );
     }
 
     /// GH #534: `iterated_axis_slot_elements` -- identity for the literal
@@ -2269,10 +2946,7 @@ mod tests {
 
         let result = agg_nodes(&project);
         assert!(
-            result
-                .aggs
-                .iter()
-                .all(|a| !a.source_vars.contains(&"pop".to_string())),
+            result.aggs.iter().all(|a| !a.reads_var("pop")),
             "a dynamic-index reducer must not be hoisted; got: {:?}",
             result.aggs
         );
@@ -2303,10 +2977,13 @@ mod tests {
             "an all-wildcard reducer subexpression must mint one synthetic agg; got: {:?}",
             result.aggs
         );
-        assert_eq!(synthetic[0].source_vars, vec!["matrix".to_string()]);
+        assert_eq!(source_names(synthetic[0]), vec!["matrix"]);
         assert_eq!(
-            synthetic[0].read_slice,
-            vec![AxisRead::Reduced, AxisRead::Reduced]
+            synthetic[0].canonical_read_slice(),
+            vec![
+                AxisRead::Reduced { subset: None },
+                AxisRead::Reduced { subset: None }
+            ]
         );
         assert!(synthetic[0].result_dims.is_empty());
     }
@@ -2346,16 +3023,18 @@ mod tests {
         assert_eq!(reducer_kind(&size), Some(ReducerKind::Constant));
         assert_eq!(reducer_kind(&abs), None);
 
-        // Hoistable: recognized AND not Constant -- SUM / 1-arg MEAN /
-        // 1-arg MIN / 1-arg MAX / STDDEV / RANK. SIZE is recognized but never
-        // hoisted (its link score is always 0); 2-arg MIN/MAX are not
-        // recognized at all.
+        // Hoistable: recognized AND not Constant AND scalar-valued (I5) --
+        // SUM / 1-arg MEAN / 1-arg MIN / 1-arg MAX / STDDEV. SIZE is
+        // recognized but never hoisted (its link score is always 0); RANK is
+        // recognized but never hoisted (array-valued -- a scalar agg node
+        // for it cannot compile, GH #771); 2-arg MIN/MAX are not recognized
+        // at all.
         assert!(reducer_is_hoistable(&sum));
         assert!(reducer_is_hoistable(&mean_1));
         assert!(reducer_is_hoistable(&min_1));
         assert!(reducer_is_hoistable(&max_1));
         assert!(reducer_is_hoistable(&stddev));
-        assert!(reducer_is_hoistable(&rank));
+        assert!(!reducer_is_hoistable(&rank));
         assert!(!reducer_is_hoistable(&size));
         assert!(!reducer_is_hoistable(&mean_2));
         assert!(!reducer_is_hoistable(&min_2));
@@ -2386,5 +3065,865 @@ mod tests {
             Some(ReducerKind::Constant)
         );
         assert_eq!(reducer_kind_from_name("abs", 1), None);
+    }
+
+    /// GH #771: a RANK subexpression is NOT hoisted -- RANK is array-valued
+    /// (Vensim VECTOR RANK), so a scalar agg node for it has an ill-typed
+    /// equation. `reducer_is_hoistable` requires
+    /// `reducer_collapses_to_scalar` (invariant I5), keeping the `pop`
+    /// reference on the Direct path (`Bare` -> diagonal edges, scored by
+    /// the GH #742 arrayed-capture machinery).
+    #[test]
+    fn rank_subexpression_is_not_hoisted() {
+        let project = TestProject::new("rank_not_hoisted")
+            .named_dimension("Region", &["north", "south"])
+            .array_aux("pop[Region]", "100")
+            .array_aux("scale[Region]", "pop[Region] * 0.01")
+            .array_aux("grow[Region]", "scale[Region] * RANK(pop, 1)");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.is_empty(),
+            "RANK must not mint an aggregate node; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// GH #771 (whole-RHS form): `r[Region] = RANK(pop, 1)` is not a
+    /// variable-backed aggregate node either -- the de-hoist applies to
+    /// both agg kinds (the gate is `reducer_source_vars`'
+    /// `reducer_is_hoistable`, shared by both walks).
+    #[test]
+    fn rank_whole_rhs_is_not_variable_backed() {
+        let project = TestProject::new("rank_whole_rhs")
+            .named_dimension("Region", &["north", "south"])
+            .array_aux("pop[Region]", "100")
+            .array_aux("r[Region]", "RANK(pop, 1)");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.is_empty(),
+            "whole-RHS RANK must not become a variable-backed agg; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// GH #766: a StarRange naming a dimension that is NEITHER the axis's
+    /// own dimension NOR a proper subdimension of it (at best a mid-edit
+    /// inconsistency) DECLINES the hoist -- it must not silently widen to
+    /// the full extent. The reducer stays on the conservative path.
+    #[test]
+    fn star_range_non_subdimension_declines_hoist() {
+        let project = TestProject::new("star_range_decline")
+            .named_dimension("Region", &["a", "b", "c"])
+            .named_dimension("Other", &["p", "q"])
+            .array_aux("arr[Region]", "10")
+            .scalar_aux("x", "1 + MEAN(arr[*:Other])");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.is_empty(),
+            "a non-subdimension StarRange must decline the hoist; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// GH #766: a StarRange over the axis's OWN dimension (`SUM(arr[*:Region])`
+    /// where `arr` is declared over `Region`) is the full extent --
+    /// `Reduced{subset: None}`, byte-identical to a plain `*`.
+    #[test]
+    fn star_range_own_dimension_is_full_extent() {
+        let project = TestProject::new("star_range_own_dim")
+            .named_dimension("Region", &["a", "b", "c"])
+            .array_aux("arr[Region]", "10")
+            .scalar_aux("x", "1 + SUM(arr[*:Region])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            synthetic[0].canonical_read_slice(),
+            vec![AxisRead::Reduced { subset: None }]
+        );
+    }
+
+    /// GH #766: a StarRange over a PROPER subdimension carries the
+    /// subdimension's elements as the `Reduced` subset (canonical names, in
+    /// subdimension-declared order, resolved via `SubdimensionRelation`).
+    #[test]
+    fn star_range_proper_subdimension_carries_subset() {
+        let project = TestProject::new("star_range_subset")
+            .named_dimension("Region", &["a", "b", "c"])
+            .named_dimension("Core", &["a", "b"])
+            .array_aux("arr[Region]", "10")
+            .scalar_aux("x", "1 + MEAN(arr[*:Core])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            synthetic[0].canonical_read_slice(),
+            vec![AxisRead::Reduced {
+                subset: Some(vec!["a".to_string(), "b".to_string()])
+            }]
+        );
+        assert!(synthetic[0].result_dims.is_empty());
+    }
+
+    /// GH #766 (composition): a subset StarRange composes with an iterated
+    /// axis -- `out[D1] = 1 + SUM(matrix[D1, *:SubD2])` hoists a synthetic
+    /// agg whose slice is `[Iterated(d1), Reduced{subset}]` and whose
+    /// `result_dims` carry `D1`.
+    #[test]
+    fn star_range_subset_composes_with_iterated_axis() {
+        let project = TestProject::new("star_range_iterated_subset")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y", "z"])
+            .named_dimension("SubD2", &["x", "y"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct(
+                "out",
+                vec!["D1".into()],
+                "1 + SUM(matrix[D1, *:SubD2])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            synthetic[0].canonical_read_slice(),
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Reduced {
+                    subset: Some(vec!["x".to_string(), "y".to_string()])
+                }
+            ]
+        );
+        assert_eq!(synthetic[0].result_dims, vec!["D1".to_string()]);
+    }
+
+    /// Test helper: resolve the named dimensions of a synced project into
+    /// `Dimension` objects (for the gate's `to_dims` argument).
+    fn resolve_dims(
+        db: &SimlinDb,
+        project: crate::db::SourceProject,
+        names: &[&str],
+    ) -> Vec<crate::dimensions::Dimension> {
+        let dim_ctx = crate::db::project_dimensions_context(db, project);
+        names
+            .iter()
+            .map(|n| {
+                dim_ctx
+                    .get(&crate::common::CanonicalDimensionName::from_raw(n))
+                    .unwrap_or_else(|| panic!("dimension {n} resolves"))
+                    .clone()
+            })
+            .collect()
+    }
+
+    /// GH #766 x T3: a VARIABLE-BACKED partial reduce whose slice carries a
+    /// SUBSET (`out[D1] = SUM(matrix[D1,*:SubD2])` as the whole RHS) is
+    /// ACCEPTED by the reduce gate: `try_cross_dimensional_link_scores`
+    /// derives co-reduced rows from the same `read_slice_rows`, so the
+    /// subset edges pair with subset divisors. (Pre-T3 the slice was
+    /// excluded onto the loud conservative regime because the score
+    /// derivation enumerated the full cartesian.)
+    #[test]
+    fn variable_backed_subset_slice_is_accepted_by_reduce_gate() {
+        let project = TestProject::new("vb_subset_accepted")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y", "z"])
+            .named_dimension("SubD2", &["x", "y"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct("out", vec!["D1".into()], "SUM(matrix[D1, *:SubD2])", None);
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
+        // The variable-backed agg exists and carries the subset...
+        let agg = result
+            .aggs_in_var("out")
+            .find(|a| a.name == "out")
+            .expect("expected a variable-backed agg owned by `out`");
+        assert!(matches!(
+            &agg.canonical_read_slice()[1],
+            AxisRead::Reduced { subset: Some(s) } if s == &["x".to_string(), "y".to_string()]
+        ));
+
+        // ...and the gate admits it (T3 of the shape-expressiveness design).
+        let to_dims = resolve_dims(&db, sync.project, &["d1"]);
+        let accepted = variable_backed_reduce_agg(result, "matrix", "out", &to_dims)
+            .expect("the subset-bearing aligned slice must be admitted by the reduce gate");
+        assert_eq!(accepted.name, "out");
+    }
+
+    /// GH #765 x T3: a VARIABLE-BACKED Pinned-mixed aligned slice
+    /// (`outf[D1] = MEAN(cube[D1,x,*])`) is ACCEPTED by the reduce gate --
+    /// the T1-era Pinned exclusion is deleted atomically with the
+    /// `read_slice_rows` derivation swap.
+    #[test]
+    fn reduce_gate_accepts_pinned_mixed_aligned_slice() {
+        let project = TestProject::new("gate_pinned_mixed")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension("D3", &["p", "q"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "D2".into(), "D3".into()],
+                "1",
+                None,
+            )
+            .array_aux_direct("outf", vec!["D1".into()], "MEAN(cube[D1, x, *])", None);
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
+        let to_dims = resolve_dims(&db, sync.project, &["d1"]);
+        let accepted = variable_backed_reduce_agg(result, "cube", "outf", &to_dims)
+            .expect("the Pinned-mixed aligned slice must be admitted by the reduce gate");
+        assert_eq!(accepted.name, "outf");
+    }
+
+    /// Section 6 (scalar owner): a scalar-result Pinned slice
+    /// (`total = SUM(pop[nyc,*])`, `to_dims` empty) is admitted -- the slot
+    /// is the bare `total` node, so `emit_agg_routed_edges` emits exactly
+    /// the read rows into `to`, matching the per-read-row scores.
+    #[test]
+    fn reduce_gate_accepts_scalar_owner_pinned_slice() {
+        let project = TestProject::new("gate_scalar_owner_pinned")
+            .named_dimension("Region", &["nyc", "boston"])
+            .named_dimension("D2", &["p", "q"])
+            .array_aux_direct("pop", vec!["Region".into(), "D2".into()], "1", None)
+            .scalar_aux("total", "SUM(pop[nyc, *])");
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
+        let accepted = variable_backed_reduce_agg(result, "pop", "total", &[])
+            .expect("the scalar-owner Pinned slice must be admitted by the reduce gate");
+        assert_eq!(accepted.name, "total");
+    }
+
+    /// Section 6 (inert skip): a PURE full-extent scalar reduce
+    /// (`total = SUM(pop[*])`) stays OUT of the gate -- the reference
+    /// walker's reduction edges are already the true reads, so routing it
+    /// through the gate would change nothing and is skipped to keep the
+    /// diff inert (byte-identity).
+    #[test]
+    fn reduce_gate_declines_pure_full_extent_slice() {
+        let project = TestProject::new("gate_full_extent")
+            .named_dimension("Region", &["nyc", "boston"])
+            .array_aux("pop[Region]", "1")
+            .scalar_aux("total", "SUM(pop[*])");
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
+        assert!(
+            variable_backed_reduce_agg(result, "pop", "total", &[]).is_none(),
+            "a pure full-extent slice keeps the reference walker's edges (inert skip)"
+        );
+    }
+
+    /// Section 6 (the DECLINED residual): an ARRAYED-owner scalar-result
+    /// Pinned slice (`share[Region] = SUM(pop[nyc,*])` -- no `Iterated`
+    /// axis, arrayed `to`) is DECLINED: the per-`(row, slot)` machinery
+    /// cannot express a scalar reduce broadcast over the owner's dims.
+    /// `try_cross_dimensional_link_scores` routes the edge to the GH #758
+    /// loud skip.
+    #[test]
+    fn reduce_gate_declines_arrayed_owner_scalar_result_slice() {
+        let project = TestProject::new("gate_broadcast_pinned")
+            .named_dimension("Region", &["nyc", "boston"])
+            .named_dimension("D2", &["p", "q"])
+            .array_aux_direct("pop", vec!["Region".into(), "D2".into()], "1", None)
+            .array_aux_direct("share", vec!["Region".into()], "SUM(pop[nyc, *])", None);
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
+        let to_dims = resolve_dims(&db, sync.project, &["region"]);
+        assert!(
+            variable_backed_reduce_agg(result, "pop", "share", &to_dims).is_none(),
+            "the arrayed-owner scalar-result slice must stay declined (GH #758 loud skip)"
+        );
+    }
+
+    /// GH #764 boundary (T4): a partial reduce BROADCAST over extra target
+    /// dims (`out[D1,D3] = SUM(matrix[D1,*])` -- `result_dims` a strict
+    /// subset of `to`'s dims) never reaches the variable-backed gate at all
+    /// anymore: T4's minting condition routes it to a SYNTHETIC agg, so
+    /// `variable_backed_reduce_agg` finds no variable-backed candidate (its
+    /// Iterated-arm alignment check stays as defense).
+    #[test]
+    fn reduce_gate_declines_broadcast_result_dims() {
+        let project = TestProject::new("gate_broadcast_result")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension("D3", &["p", "q"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct(
+                "out",
+                vec!["D1".into(), "D3".into()],
+                "SUM(matrix[D1, *])",
+                None,
+            );
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
+        let to_dims = resolve_dims(&db, sync.project, &["d1", "d3"]);
+        assert!(
+            variable_backed_reduce_agg(result, "matrix", "out", &to_dims).is_none(),
+            "a broadcast whole-RHS reduce must have no variable-backed agg (GH #764)"
+        );
+        assert!(
+            result.aggs.iter().all(|a| a.is_synthetic),
+            "T4 mints a synthetic agg for the broadcast shape; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// GH #766 / invariant I3 (uniqueness of the full-extent form): a
+    /// StarRange naming a SAME-CARDINALITY "subdimension" -- including a
+    /// permuted alias of the axis's element set (`Alias = [c, a, b]` over
+    /// `Region = [a, b, c]`: containment + equal size means the same element
+    /// SET) -- normalizes to `Reduced{subset: None}`, never a `Some` subset
+    /// covering the whole axis. Reduction order is irrelevant (the reduced
+    /// rows are a set), and keeping the full-extent representation unique
+    /// means downstream byte-identity does not depend on which spelling the
+    /// modeler used.
+    #[test]
+    fn star_range_same_cardinality_alias_normalizes_to_full_extent() {
+        let project = TestProject::new("star_range_alias")
+            .named_dimension("Region", &["a", "b", "c"])
+            .named_dimension("Alias", &["c", "a", "b"])
+            .array_aux("arr[Region]", "10")
+            .scalar_aux("x", "1 + SUM(arr[*:Alias])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            synthetic[0].canonical_read_slice(),
+            vec![AxisRead::Reduced { subset: None }],
+            "a whole-axis alias must normalize to the unique full-extent form"
+        );
+    }
+
+    /// GH #766 (indexed dimensions): a StarRange over an INDEXED
+    /// subdimension (`SubIndex(3)` with declared `parent = Index(5)`, which
+    /// maps to the parent's first 3 elements) resolves the subset through
+    /// the same `SubdimensionRelation` path as named dimensions -- the
+    /// subset elements are the canonical indexed names `"1".."3"`, matching
+    /// `dimension_element_names`'s output.
+    #[test]
+    fn star_range_indexed_subdimension_carries_subset() {
+        let project = TestProject::new("star_range_indexed_subdim")
+            .indexed_dimension("Index", 5)
+            .indexed_subdimension("SubIndex", 3, "Index")
+            .array_aux("arr[Index]", "10")
+            .scalar_aux("x", "1 + MEAN(arr[*:SubIndex])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            synthetic[0].canonical_read_slice(),
+            vec![AxisRead::Reduced {
+                subset: Some(vec!["1".to_string(), "2".to_string(), "3".to_string()])
+            }]
+        );
+    }
+
+    // --- T2 (shape-expressiveness design): per-source `AggNode` invariant
+    // pins -- the per-source REPRESENTATION invariants (I2, I3b, sorted
+    // ordering) and the declines `accept_source_slices` enforces. I1's
+    // *feeder clause* pins (deferred from T2 to avoid the GH #739 vacuity
+    // trap) landed with T5's RED fixtures, in the section above.
+
+    /// T2 / I3b ordering: `sources` is sorted by canonical variable name
+    /// regardless of AST occurrence order -- `SUM(b[*] + a[*])` (with `b`
+    /// first in the argument) still yields `[a, b]`, so salsa cache
+    /// equality and downstream emission order never depend on how the
+    /// modeler spelled the argument.
+    #[test]
+    fn multi_source_sources_are_sorted_by_var_name() {
+        let project = TestProject::new("sorted_sources")
+            .named_dimension("D", &["p", "q"])
+            .array_aux_direct("a", vec!["D".into()], "1", None)
+            .array_aux_direct("b", vec!["D".into()], "2", None)
+            .scalar_aux("total", "1 + SUM(b[*] + a[*])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            source_names(synthetic[0]),
+            vec!["a", "b"],
+            "sources must be sorted by canonical name, not AST occurrence order"
+        );
+    }
+
+    /// T2 / I3b dedup: the same variable referenced twice with the SAME
+    /// slice (`SUM(a[*] + a[*])`) collapses to ONE `AggSource` -- the
+    /// by-name downstream consumers (`aggs_in_var` routing, the
+    /// half-emitters) key `sources` on the variable name, so a duplicate
+    /// entry would make them ambiguous.
+    #[test]
+    fn duplicate_var_same_slice_collapses_to_one_source() {
+        let project = TestProject::new("dup_var_same_slice")
+            .named_dimension("D", &["p", "q"])
+            .array_aux_direct("a", vec!["D".into()], "1", None)
+            .scalar_aux("total", "1 + SUM(a[*] + a[*])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            source_names(synthetic[0]),
+            vec!["a"],
+            "a variable read twice with the same slice is one AggSource"
+        );
+        assert_eq!(
+            synthetic[0].sources[0].read_slice,
+            vec![AxisRead::Reduced { subset: None }]
+        );
+    }
+
+    /// T2 / I3b decline: the same variable referenced with two DIFFERENT
+    /// slices (`SUM(a[*] + a[p])` -- `[Reduced]` vs `[Pinned(p)]`) declines
+    /// the hoist -- since T5, `accept_source_slices`' per-variable
+    /// one-slice check (the I3b clause); the pin keeps I3b from regressing
+    /// under the widened per-source acceptance.
+    #[test]
+    fn duplicate_var_with_conflicting_slices_declines_hoist() {
+        let project = TestProject::new("dup_var_conflicting")
+            .named_dimension("D", &["p", "q"])
+            .array_aux_direct("a", vec!["D".into()], "1", None)
+            .scalar_aux("total", "1 + SUM(a[*] + a[p])");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|ag| !ag.reads_var("a")),
+            "one variable with two different slices must decline the hoist; got: {:?}",
+            result.aggs
+        );
+        assert!(result.synthetic_by_key.is_empty());
+    }
+
+    /// T2 / I1 decline (GREEN characterization): two co-sources with
+    /// DIFFERING `Reduced` subsets (`SUM(a[*:Sub1] + b[*:Sub2])`) decline
+    /// the hoist -- their co-reduced rows per slot would disagree, so no
+    /// canonical slice exists. Enforced by `accept_source_slices`'
+    /// co-source-identity clause (subset is part of `AxisRead` equality).
+    #[test]
+    fn differing_reduced_subsets_decline_hoist() {
+        let project = TestProject::new("differing_subsets")
+            .named_dimension("Region", &["a", "b", "c"])
+            .named_dimension("Sub1", &["a", "b"])
+            .named_dimension("Sub2", &["b", "c"])
+            .array_aux("p[Region]", "1")
+            .array_aux("q[Region]", "2")
+            .scalar_aux("total", "1 + SUM(p[*:Sub1] + q[*:Sub2])");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result
+                .aggs
+                .iter()
+                .all(|ag| !ag.reads_var("p") && !ag.reads_var("q")),
+            "co-sources with differing Reduced subsets must decline the hoist; got: {:?}",
+            result.aggs
+        );
+        assert!(result.synthetic_by_key.is_empty());
+    }
+
+    /// T2 / I1 positive twin: two co-sources with the SAME `Reduced` subset
+    /// (`SUM(p[*:Sub] + q[*:Sub])`) hoist one agg whose every source
+    /// carries the identical subset-bearing canonical slice.
+    #[test]
+    fn agreeing_reduced_subsets_hoist_with_shared_subset() {
+        let project = TestProject::new("agreeing_subsets")
+            .named_dimension("Region", &["a", "b", "c"])
+            .named_dimension("Sub", &["a", "b"])
+            .array_aux("p[Region]", "1")
+            .array_aux("q[Region]", "2")
+            .scalar_aux("total", "1 + SUM(p[*:Sub] + q[*:Sub])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(source_names(synthetic[0]), vec!["p", "q"]);
+        let expected = vec![AxisRead::Reduced {
+            subset: Some(vec!["a".to_string(), "b".to_string()]),
+        }];
+        for s in &synthetic[0].sources {
+            assert_eq!(s.read_slice, expected, "source {} slice", s.var);
+        }
+    }
+
+    /// T2 / I2 + the scalar-feeder representation: a scalar feeder of a
+    /// hoisted reducer (`scale` in `SUM(pop[*] * scale)`, GH #737) IS a
+    /// source -- the routing filter and the element graph's scalar-feeder
+    /// arm key on membership -- and carries an EMPTY read slice (one
+    /// `AxisRead` per axis, and a scalar has none), while the arrayed
+    /// co-source's slice has one entry per its declared axis.
+    #[test]
+    fn scalar_feeder_source_carries_empty_slice() {
+        let project = TestProject::new("scalar_feeder")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("pop[Region]", "100")
+            .scalar_aux("scale", "0.5")
+            .scalar_aux("total", "1 + SUM(pop[*] * scale)");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(source_names(synthetic[0]), vec!["pop", "scale"]);
+        // I2: one AxisRead per the source's OWN declared axes.
+        assert_eq!(
+            synthetic[0].source_read_slice("pop"),
+            vec![AxisRead::Reduced { subset: None }],
+            "the arrayed co-source's slice has one entry per its axis"
+        );
+        assert!(
+            synthetic[0].source_read_slice("scale").is_empty(),
+            "a scalar feeder has no axes, so its slice is empty"
+        );
+        // The canonical slice skips the feeder's empty slice.
+        assert_eq!(
+            synthetic[0].canonical_read_slice(),
+            vec![AxisRead::Reduced { subset: None }]
+        );
+        // And the defensive non-source lookup is the empty slice too.
+        assert!(synthetic[0].source_read_slice("absent").is_empty());
+        assert!(synthetic[0].reads_var("scale"));
+        assert!(!synthetic[0].reads_var("absent"));
+    }
+
+    // -- T5 / GH #767: the I1 FEEDER clause -------------------------------
+    //
+    // These pins were deliberately deferred from T2 (pinning them before the
+    // acceptance widened would have been vacuous -- the GH #739 trap). They
+    // land with T5's RED fixtures: an iterated-dim projection feeder is
+    // accepted as an `AggSource` with ITS OWN slice, the canonical slice is
+    // the co-source (Reduced-bearing) slice regardless of source sort order,
+    // and everything outside the projection rule still declines.
+
+    /// T5 / I1 feeder clause (GH #767): the iterated-dim-feeder reducer
+    /// `1 + SUM(matrix[D1,*] * frac[D1])` (inline => synthetic) IS hoisted:
+    /// `matrix` is the co-source carrying the canonical
+    /// `[Iterated, Reduced]` slice, `frac` is a projection feeder carrying
+    /// its OWN `[Iterated]` slice. `frac` sorts BEFORE `matrix`, so this
+    /// also pins the `canonical_read_slice` contract fix: the canonical
+    /// slice is the first slice WITH a `Reduced` axis, never an
+    /// alphabetically-first feeder slice.
+    #[test]
+    fn iterated_dim_feeder_projection_hoists_with_per_source_slices() {
+        let project = TestProject::new("feeder_projection")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .array_aux("frac[D1]", "0.5")
+            .array_aux("growth[D1]", "1 + SUM(matrix[D1, *] * frac[D1])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "the projection-feeder reducer must be hoisted (GH #767); got: {:?}",
+            result.aggs
+        );
+        let agg = synthetic[0];
+        assert_eq!(source_names(agg), vec!["frac", "matrix"]);
+        assert_eq!(
+            agg.source_read_slice("frac"),
+            vec![AxisRead::Iterated {
+                dim: "d1".to_string(),
+                source_dim: "d1".to_string()
+            }],
+            "the feeder carries its OWN projection slice"
+        );
+        assert_eq!(
+            agg.source_read_slice("matrix"),
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Reduced { subset: None }
+            ],
+            "the co-source carries the canonical slice"
+        );
+        // The contract fix: even though `frac` sorts first, the canonical
+        // slice is the Reduced-bearing co-source slice.
+        assert_eq!(agg.canonical_read_slice(), agg.source_read_slice("matrix"));
+        assert_eq!(agg.result_dims, vec!["D1".to_string()]);
+    }
+
+    /// T5 / I1: the WHOLE-RHS form of the feeder shape
+    /// (`growth[D1] = SUM(matrix[D1,*] * frac[D1])`, the GH #743/#767
+    /// fixture) is VARIABLE-BACKED -- the canonical (co-source) slice is
+    /// aligned with the owner's dims, so the variable IS the agg and no
+    /// synthetic is minted.
+    #[test]
+    fn iterated_dim_feeder_whole_rhs_is_variable_backed() {
+        let project = TestProject::new("feeder_whole_rhs")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .array_aux("frac[D1]", "0.5")
+            .array_aux("growth[D1]", "SUM(matrix[D1, *] * frac[D1])");
+
+        let result = agg_nodes(&project);
+        assert!(result.synthetic_by_key.is_empty(), "got: {:?}", result.aggs);
+        let vb: Vec<&AggNode> = result.aggs.iter().filter(|a| !a.is_synthetic).collect();
+        assert_eq!(vb.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(vb[0].name, "growth");
+        assert_eq!(source_names(vb[0]), vec!["frac", "matrix"]);
+        assert_eq!(vb[0].result_dims, vec!["D1".to_string()]);
+        assert!(vb[0].source_is_projection_feeder("frac"));
+        assert!(!vb[0].source_is_projection_feeder("matrix"));
+    }
+
+    /// T5 / I1: a feeder combined with a SCALAR feeder still hoists --
+    /// `SUM(matrix[D1,*] * frac[D1] * scale)` has three sources, the scalar
+    /// one with an empty slice (it is NOT a projection feeder: the
+    /// changed-last machinery for scalar feeders is `generate_scalar_feeder_
+    /// to_agg_equation`, not the per-row form).
+    #[test]
+    fn projection_feeder_and_scalar_feeder_combo_hoists() {
+        let project = TestProject::new("feeder_combo")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .array_aux("frac[D1]", "0.5")
+            .scalar_aux("scale", "2")
+            .array_aux("growth[D1]", "1 + SUM(matrix[D1, *] * frac[D1] * scale)");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        let agg = synthetic[0];
+        assert_eq!(source_names(agg), vec!["frac", "matrix", "scale"]);
+        assert!(agg.source_read_slice("scale").is_empty());
+        assert!(agg.source_is_projection_feeder("frac"));
+        assert!(!agg.source_is_projection_feeder("scale"));
+    }
+
+    /// T5 / I1 (review MINOR-5): a PINNED-bearing CANONICAL slice is within
+    /// the feeder clause's scope -- the clause keys only on the canonical
+    /// slice's Iterated target dims, so `SUM(cube[D1, c1, *] * frac[D1])`
+    /// hoists with canonical `[Iterated, Pinned(c1), Reduced]` and the
+    /// feeder's own `[Iterated]` projection. (It is the FEEDER's slice that
+    /// must be Iterated-only, not the canonical one.)
+    #[test]
+    fn pinned_bearing_canonical_with_feeder_hoists() {
+        let project = TestProject::new("pinned_canonical_feeder")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .named_dimension("D3", &["k1", "k2"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "D2".into(), "D3".into()],
+                "5",
+                None,
+            )
+            .array_aux("frac[D1]", "0.5")
+            .array_aux("growth[D1]", "1 + SUM(cube[D1, c1, *] * frac[D1])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        let agg = synthetic[0];
+        assert_eq!(
+            agg.source_read_slice("cube"),
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Pinned("c1".to_string()),
+                AxisRead::Reduced { subset: None }
+            ]
+        );
+        assert!(agg.source_is_projection_feeder("frac"));
+        assert_eq!(agg.result_dims, vec!["D1".to_string()]);
+    }
+
+    /// T5 / I1 decline: a no-`Reduced` source with a PINNED axis is NOT a
+    /// projection feeder (the design's clause: a feeder slice consists ONLY
+    /// of `Iterated` axes) -- the hoist declines.
+    #[test]
+    fn feeder_with_pinned_axis_declines_hoist() {
+        let project = TestProject::new("feeder_pinned")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .array_aux_direct("w", vec!["D1".into(), "D2".into()], "0.5", None)
+            .array_aux("growth[D1]", "1 + SUM(matrix[D1, *] * w[D1, c1])");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| !a.reads_var("matrix")),
+            "a Pinned-axis no-Reduced source must decline the hoist; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// T5 / I1 decline: a feeder whose Iterated dims are a PROPER SUBSET of
+    /// the canonical slice's Iterated dims declines -- its rows are not 1:1
+    /// with the agg result slots (one feeder row would feed every slot it
+    /// projects from, a broadcast the per-`(row, slot)` machinery cannot
+    /// name). Documented residual: the design's I1 wording ("drawn from the
+    /// canonical Iterated target-dim set") is implemented as ordered
+    /// EQUALITY for exactly this reason.
+    #[test]
+    fn feeder_with_subset_iterated_dims_declines_hoist() {
+        let project = TestProject::new("feeder_subset")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .named_dimension("D3", &["x", "y"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "D2".into(), "D3".into()],
+                "5",
+                None,
+            )
+            .array_aux("w[D1]", "0.5")
+            .array_aux_direct(
+                "growth",
+                vec!["D1".into(), "D2".into()],
+                "1 + SUM(cube[D1, D2, *] * w[D1])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| !a.reads_var("cube")),
+            "a proper-subset feeder must decline the hoist; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// T5 / I1 decline: a feeder whose Iterated dims are a PERMUTATION of
+    /// the canonical order declines -- `read_slice_rows` derives slot
+    /// coordinates in the source's axis order, so a permuted feeder's slots
+    /// would mis-name the agg's `result_dims`-ordered slots.
+    #[test]
+    fn feeder_with_permuted_iterated_dims_declines_hoist() {
+        let project = TestProject::new("feeder_permuted")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .named_dimension("D3", &["x", "y"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "D2".into(), "D3".into()],
+                "5",
+                None,
+            )
+            .array_aux_direct("w", vec!["D2".into(), "D1".into()], "0.5", None)
+            .array_aux_direct(
+                "growth",
+                vec!["D1".into(), "D2".into()],
+                "1 + SUM(cube[D1, D2, *] * w[D2, D1])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| !a.reads_var("cube")),
+            "a permuted feeder must decline the hoist; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// T5 / I1 decline: a MAPPED Iterated axis (GH #534) anywhere in the
+    /// combination declines the feeder clause -- pinning the slot element
+    /// into the equation text reads the TARGET-dim element, which is not
+    /// the source row a mapped reference reads, so the changed-last feeder
+    /// equation would mis-pin. The mapped sliced reducer WITHOUT a feeder
+    /// stays hoisted (the GH #534 path is unchanged).
+    #[test]
+    fn mapped_iterated_axis_with_feeder_declines_hoist() {
+        let project = TestProject::new("feeder_mapped")
+            .named_dimension("Region", &["r1", "r2"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+            .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+            .array_aux_direct("frac", vec!["State".into()], "0.5", None)
+            .array_aux_direct(
+                "out",
+                vec!["State".into()],
+                "1 + SUM(matrix[State, *] * frac[State])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| !a.reads_var("matrix")),
+            "a mapped iterated axis with a feeder must decline the hoist; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// T5 / I3b decline: the same variable appearing as both a co-source
+    /// and a feeder-shaped reference (`SUM(matrix[D1,*] * matrix[D1,c1])`)
+    /// declines -- one variable, two different slices.
+    #[test]
+    fn duplicate_var_as_co_source_and_feeder_declines_hoist() {
+        let project = TestProject::new("dup_co_source_feeder")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .array_aux("growth[D1]", "1 + SUM(matrix[D1, *] * matrix[D1, c1])");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| !a.reads_var("matrix")),
+            "one variable with co-source AND feeder slices must decline; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// T5 / I1 decline: two CO-SOURCES (both Reduced-bearing) with
+    /// differing slices still decline, exactly as before the feeder clause
+    /// -- the clause widens acceptance only for no-`Reduced` projections.
+    #[test]
+    fn co_sources_with_differing_slices_still_decline() {
+        let project = TestProject::new("co_source_differ")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("a", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct("b", vec!["D2".into(), "D1".into()], "2", None)
+            .array_aux("growth[D1]", "1 + SUM(a[D1, *] + b[*, D1])");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result
+                .aggs
+                .iter()
+                .all(|ag| !ag.reads_var("a") && !ag.reads_var("b")),
+            "co-sources with differing slices must still decline; got: {:?}",
+            result.aggs
+        );
     }
 }

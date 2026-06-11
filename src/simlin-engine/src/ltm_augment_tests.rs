@@ -919,6 +919,7 @@ struct BodyCtxFixture {
     arrayed_dep_dims: std::collections::HashMap<String, usize>,
     model_deps: HashSet<String>,
     row_dim_names: Vec<String>,
+    live_read_slice: Option<Vec<crate::ltm_agg::AxisRead>>,
 }
 
 impl BodyCtxFixture {
@@ -942,7 +943,16 @@ impl BodyCtxFixture {
             arrayed_dep_dims,
             model_deps,
             row_dim_names: row_dims.iter().map(|s| s.to_string()).collect(),
+            live_read_slice: None,
         }
+    }
+
+    /// Attach the live source's accepted read slice (the hoisted-agg
+    /// callers' configuration), enabling the Iterated-axis-position
+    /// resolution of mismatched-arity dep indices.
+    fn with_live_slice(mut self, slice: Vec<crate::ltm_agg::AxisRead>) -> Self {
+        self.live_read_slice = Some(slice);
+        self
     }
 
     fn ctx(&self) -> ReducerBodyCtx<'_> {
@@ -953,6 +963,7 @@ impl BodyCtxFixture {
             model_deps: &self.model_deps,
             row_dim_names: &self.row_dim_names,
             dims_ctx: None,
+            live_read_slice: self.live_read_slice.as_deref(),
         }
     }
 }
@@ -1086,11 +1097,14 @@ fn test_body_aware_mean_divides_by_n() {
     assert!(eq.contains(" / 3"), "equation: {eq}");
 }
 
-/// An un-pinnable body (an arrayed reference whose axis count doesn't match
-/// the row -- the GH #743 iterated-dim-feeder shape) must degrade to the
-/// delta-ratio fallback, not a mis-pinned equation.
+/// GH #767 (T5 flip of the old un-pinnable bail): a mismatched-axis-count
+/// dep indexed SOLELY by the row's dimension names (the iterated-dim
+/// projection feeder `frac[d1]` inside the 2-D co-source row partial) is
+/// pinned BY NAME to the row's element and FROZEN -- the changed-first
+/// partial holds `PREVIOUS(frac[d1·a])` at the scored row instead of
+/// bailing to the delta-ratio form (which scored a wrong-magnitude ±1).
 #[test]
-fn test_body_aware_unpinnable_falls_back_to_delta_ratio() {
+fn test_body_aware_projection_feeder_dep_pins_by_dim_name() {
     let elements = vec!["d1·a,d2·x".to_string(), "d1·a,d2·y".to_string()];
     let fixture = BodyCtxFixture::new(
         "matrix[d1, *] * frac[d1]",
@@ -1109,13 +1123,121 @@ fn test_body_aware_unpinnable_falls_back_to_delta_ratio() {
         true,
         Some(&fixture.ctx()),
     );
+    let live = "matrix[d1·a, d2·x] * PREVIOUS(frac[d1·a])";
+    let frozen = "PREVIOUS(matrix[d1·a, d2·x]) * PREVIOUS(frac[d1·a])";
+    assert!(
+        eq.contains(&format!("PREVIOUS(growth) + (({live}) - ({frozen}))")),
+        "the changed-first partial must pin the feeder by dim name and freeze it: {eq}"
+    );
+}
+
+/// GH #767 review (the repeated-dim hazard): with the live source's slice
+/// available, a mismatched-arity feeder dep's index resolves to the
+/// slice's ITERATED axis position -- for `matrix[D1,D1]` read as
+/// `SUM(matrix[*, D1] * frac[D1])` (slice `[Reduced, Iterated]`, row
+/// `(r1, r2)` feeding slot `r2`) the feeder pins to `frac[d1·r2]`, never
+/// the same-named Reduced axis's `r1` element a first-match name lookup
+/// would pick (a silently wrong frozen co-factor).
+#[test]
+fn test_body_aware_repeated_dim_feeder_pins_at_iterated_axis() {
+    use crate::ltm_agg::AxisRead;
+    let elements = vec!["d1·r1,d1·r2".to_string(), "d1·r2,d1·r2".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "matrix[*, d1] * frac[d1]",
+        "matrix",
+        &[("matrix", 2), ("frac", 1)],
+        &[],
+        &["d1", "d1"],
+    )
+    .with_live_slice(vec![
+        AxisRead::Reduced { subset: None },
+        AxisRead::Iterated {
+            dim: "d1".to_string(),
+            source_dim: "d1".to_string(),
+        },
+    ]);
+    let eq = generate_element_to_scalar_equation(
+        "matrix",
+        "growth",
+        "d1·r1,d1·r2",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(
+        eq.contains("PREVIOUS(frac[d1·r2])"),
+        "the feeder must pin at the Iterated axis's row element: {eq}"
+    );
+    assert!(
+        !eq.contains("frac[d1·r1]"),
+        "the feeder must not pin at the same-named Reduced axis's element: {eq}"
+    );
+}
+
+/// GH #767 review: WITHOUT a live slice, an AMBIGUOUS dim name (repeated
+/// among the row's axes) bails to the delta-ratio fallback rather than
+/// first-matching -- the pre-GH #767 behavior for every mismatched dep.
+#[test]
+fn test_body_aware_ambiguous_dim_name_without_slice_falls_back() {
+    let elements = vec!["d1·r1,d1·r2".to_string(), "d1·r2,d1·r2".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "matrix[*, d1] * frac[d1]",
+        "matrix",
+        &[("matrix", 2), ("frac", 1)],
+        &[],
+        &["d1", "d1"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "matrix",
+        "growth",
+        "d1·r1,d1·r2",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(
+        eq.contains("SAFEDIV((growth - PREVIOUS(growth))"),
+        "an ambiguous dim name must bail to the delta-ratio form: {eq}"
+    );
+    assert!(!eq.contains("frac["), "equation: {eq}");
+}
+
+/// A genuinely un-pinnable mismatched-axis-count dep -- one whose index is
+/// NOT a row dimension name (`q[d9]`, `d9` outside the row's axes) -- still
+/// degrades to the delta-ratio fallback, not a mis-pinned equation. (The
+/// GH #767 by-name pin applies only when every index resolves to a row
+/// axis.)
+#[test]
+fn test_body_aware_unpinnable_falls_back_to_delta_ratio() {
+    let elements = vec!["d1·a,d2·x".to_string(), "d1·a,d2·y".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "matrix[d1, *] * q[d9]",
+        "matrix",
+        &[("matrix", 2), ("q", 1)],
+        &[],
+        &["d1", "d2"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "matrix",
+        "growth",
+        "d1·a,d2·x",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
     // Delta-ratio form: the partial IS the target, so the numerator is
-    // (growth - PREVIOUS(growth)) and frac/matrix bodies never appear.
+    // (growth - PREVIOUS(growth)) and q/matrix bodies never appear.
     assert!(
         eq.contains("SAFEDIV((growth - PREVIOUS(growth))"),
         "equation: {eq}"
     );
-    assert!(!eq.contains("frac"), "equation: {eq}");
+    assert!(!eq.contains("q["), "equation: {eq}");
 }
 
 /// A nested array reducer inside the body (`pop[*] * MIN(q[*])`) cannot be
@@ -1498,6 +1620,7 @@ fn test_partial_equation_iterated_dim_source_normalized_to_bare() {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
         dim_ctx: None,
+        dep_dims: None,
     };
 
     // `row_sum` is the live source (Bare): `row_sum[D1]` -> bare
@@ -2733,6 +2856,7 @@ fn generate_link_score_equation_for_link_empty_target_is_err() {
         &to_var,
         &all_vars,
         None,
+        None,
     );
     assert!(
         result.is_err(),
@@ -2764,6 +2888,7 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
         &[],
         &to_var,
         &all_vars,
+        None,
         None,
     )
     .expect("a normal scalar target must produce a valid link-score equation");
@@ -2815,6 +2940,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_nyc() {
         &source_dim_elements,
         &[],
         &to_var,
+        None,
         None,
     )
     .unwrap();
@@ -2893,6 +3019,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_boston() {
         &[],
         &to_var,
         None,
+        None,
     )
     .unwrap();
 
@@ -2957,6 +3084,7 @@ fn test_arrayed_link_score_stock_to_flow_per_element_partials() {
         &[],
         &births,
         None,
+        None,
     )
     .unwrap();
 
@@ -3007,6 +3135,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         &[],
         &scalar_to,
         None,
+        None,
     )
     .unwrap();
     assert!(
@@ -3051,6 +3180,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         &[],
         &[],
         &a2a_to,
+        None,
         None,
     )
     .unwrap();
@@ -3652,6 +3782,51 @@ fn test_generate_scalar_feeder_to_agg_equation_freezes_only_feeder() {
     assert!(eq.contains("SIGN((scale - PREVIOUS(scale)))"), "got: {eq}");
 }
 
+/// GH #767 (T5): the iterated-dim projection-feeder per-`(row, slot)`
+/// equation pins the reducer text's iterated-dim indices to the slot
+/// (every reference, co-source and feeder alike), freezes ONLY the
+/// feeder's slot-pinned reference (changed-last -- the co-source's
+/// wildcard slice stays verbatim, exactly like the scalar feeder), and
+/// carries the slot subscript on the agg/target and feeder guard
+/// references.
+#[test]
+fn test_generate_iterated_feeder_to_agg_equation_pins_slot_and_freezes_feeder() {
+    let eq = generate_iterated_feeder_to_agg_equation(
+        "frac",
+        "growth",
+        "sum(matrix[d1, *] * frac[d1])",
+        &["d1".to_string()],
+        &["d1\u{B7}r1".to_string()],
+    )
+    .expect("the agg equation text must parse");
+    assert_eq!(
+        eq,
+        "if (TIME = INITIAL_TIME) then 0 else if ((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1])) = 0) OR ((frac[d1\u{B7}r1] - \
+         PREVIOUS(frac[d1\u{B7}r1])) = 0) then 0 else \
+         SAFEDIV((growth[d1\u{B7}r1] - (sum(matrix[d1\u{B7}r1, *] * \
+         PREVIOUS(frac[d1\u{B7}r1])))), ABS((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1]))), 0) * SIGN((frac[d1\u{B7}r1] - \
+         PREVIOUS(frac[d1\u{B7}r1])))"
+    );
+}
+
+/// GH #767 (T5): a feeder absent from the reducer text (no occurrence to
+/// freeze) is the unfreezable loud-failure contract -- the score would be
+/// a silent constant 0 otherwise.
+#[test]
+fn test_generate_iterated_feeder_to_agg_equation_unfreezable_without_occurrence() {
+    let err = generate_iterated_feeder_to_agg_equation(
+        "absent",
+        "growth",
+        "sum(matrix[d1, *] * frac[d1])",
+        &["d1".to_string()],
+        &["d1\u{B7}r1".to_string()],
+    )
+    .expect_err("a feeder with no occurrence must be unfreezable");
+    assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
+}
+
 /// `wrap_matching_in_previous` must not double-lag references that are
 /// already inside a `PREVIOUS(...)`/`INIT(...)` call, and must wrap every
 /// other occurrence of the target (including inside nested calls and
@@ -3873,10 +4048,12 @@ fn test_body_aware_stddev_coefficient_terms() {
     assert!(eq.contains(" / 2)"), "divisor must stay N (GH #483): {eq}");
 }
 
-/// An un-pinnable nonlinear body (axis-count mismatch) must degrade to
-/// the delta-ratio fallback, the same contract as the linear arm.
+/// GH #767 (T5 flip, nonlinear sibling): the projection-feeder dep pins by
+/// dim name in the nonlinear per-term expansion too -- each MIN term is the
+/// row-pinned body with `PREVIOUS(frac[d1·…])` frozen, live at the scored
+/// row only.
 #[test]
-fn test_body_aware_nonlinear_unpinnable_falls_back() {
+fn test_body_aware_nonlinear_projection_feeder_dep_pins_by_dim_name() {
     let elements = vec!["d1·a,d2·x".to_string(), "d1·a,d2·y".to_string()];
     let fixture = BodyCtxFixture::new(
         "matrix[d1, *] * frac[d1]",
@@ -3895,11 +4072,42 @@ fn test_body_aware_nonlinear_unpinnable_falls_back() {
         true,
         Some(&fixture.ctx()),
     );
+    let live = "(matrix[d1·a, d2·x] * PREVIOUS(frac[d1·a]))";
+    let frozen = "(PREVIOUS(matrix[d1·a, d2·y]) * PREVIOUS(frac[d1·a]))";
+    assert!(
+        eq.contains(&format!("MIN({live}, {frozen})")),
+        "the nonlinear terms must pin the feeder by dim name: {eq}"
+    );
+}
+
+/// A genuinely un-pinnable nonlinear body (a mismatched-axis dep indexed
+/// outside the row's axes) must degrade to the delta-ratio fallback, the
+/// same contract as the linear arm.
+#[test]
+fn test_body_aware_nonlinear_unpinnable_falls_back() {
+    let elements = vec!["d1·a,d2·x".to_string(), "d1·a,d2·y".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "matrix[d1, *] * q[d9]",
+        "matrix",
+        &[("matrix", 2), ("q", 1)],
+        &[],
+        &["d1", "d2"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "matrix",
+        "agg",
+        "d1·a,d2·x",
+        &elements,
+        &ReducerKind::Nonlinear,
+        "MIN",
+        true,
+        Some(&fixture.ctx()),
+    );
     assert!(
         eq.contains("SAFEDIV((agg - PREVIOUS(agg))"),
         "equation: {eq}"
     );
-    assert!(!eq.contains("frac"), "equation: {eq}");
+    assert!(!eq.contains("q["), "equation: {eq}");
 }
 
 /// RANK keeps its documented delta-ratio stand-in regardless of the body
@@ -3956,6 +4164,7 @@ fn shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source() {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated,
         dim_ctx: None,
+        dep_dims: None,
     };
     let text = shaped_guard_form_text(
         "SUM(matrix[D1, *] * frac[D1])",
@@ -4108,4 +4317,120 @@ fn shaped_guard_form_errs_when_no_live_occurrence_to_freeze() {
     )
     .unwrap_err();
     assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
+}
+
+/// GH #526: a TRANSPOSED non-live array dep (`arr[D2,D1]` for `arr`
+/// declared `[D1,D2]` -- a genuine positional transposition in the
+/// executed simulation) with its declared dims THREADED must not be
+/// collapsed to a bare `PREVIOUS(arr)` (which freezes the WRONG element,
+/// a silent magnitude error). The changed-first-only builder fails with
+/// the loud `UnfreezablePartial`; `shaped_guard_form_text` callers fall
+/// back to the changed-last convention instead (pinned end-to-end by
+/// `ltm_array_agg::gh526_transposed_dep_partial_takes_changed_last`).
+#[test]
+fn gh526_transposed_other_dep_with_threaded_dims_is_unfreezable() {
+    let equation = "pop[d1, d2] * 0.1 + arr[d2, d1] * 0.001";
+    let deps = deps_set(&["pop", "arr"]);
+    let live = Ident::<Canonical>::new("pop");
+    let target_iterated_dims = vec!["d1".to_string(), "d2".to_string()];
+    let source_dim_names = vec!["d1".to_string(), "d2".to_string()];
+    let dep_dims: HashMap<String, Vec<Dimension>> = std::iter::once((
+        "arr".to_string(),
+        vec![
+            make_named_dimension("d1", &["a", "b"]),
+            make_named_dimension("d2", &["x", "y"]),
+        ],
+    ))
+    .collect();
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dim_ctx: None,
+        dep_dims: Some(&dep_dims),
+    };
+    let result = build_partial_equation_shaped(
+        equation,
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &[],
+        Some(&iter_ctx),
+        None,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PartialEquationError {
+                kind: PartialEquationErrorKind::UnfreezablePartial,
+                ..
+            })
+        ),
+        "a known-transposed other-dep must doom the changed-first partial loudly; got: {result:?}"
+    );
+}
+
+/// GH #526 control: the NATURAL-position dep (`arr[D1,D2]` matching its
+/// declared order) keeps the historical collapse to `PREVIOUS(arr)` even
+/// with dims threaded -- the bare freeze reads the same element, so the
+/// collapse is exact. And with dims UN-threadable (the dep absent from the
+/// map), the transposed spelling keeps the permissive legacy collapse, as
+/// the design's GH #526 fallback clause requires.
+#[test]
+fn gh526_natural_and_unthreadable_other_deps_keep_collapse() {
+    let deps = deps_set(&["pop", "arr"]);
+    let live = Ident::<Canonical>::new("pop");
+    let target_iterated_dims = vec!["d1".to_string(), "d2".to_string()];
+    let source_dim_names = vec!["d1".to_string(), "d2".to_string()];
+    let dep_dims: HashMap<String, Vec<Dimension>> = std::iter::once((
+        "arr".to_string(),
+        vec![
+            make_named_dimension("d1", &["a", "b"]),
+            make_named_dimension("d2", &["x", "y"]),
+        ],
+    ))
+    .collect();
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dim_ctx: None,
+        dep_dims: Some(&dep_dims),
+    };
+    let partial = build_partial_equation_shaped(
+        "pop[d1, d2] * 0.1 + arr[d1, d2] * 0.001",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &[],
+        Some(&iter_ctx),
+        None,
+    )
+    .unwrap();
+    assert!(
+        partial.contains("PREVIOUS(arr)") && !partial.contains("PREVIOUS(arr["),
+        "the natural-position dep keeps the exact bare-PREVIOUS collapse; got: {partial}"
+    );
+
+    // Un-threadable dims (dep absent from the map): permissive legacy
+    // collapse even for the transposed spelling.
+    let empty_dep_dims: HashMap<String, Vec<Dimension>> = HashMap::new();
+    let iter_ctx_unthreaded = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dim_ctx: None,
+        dep_dims: Some(&empty_dep_dims),
+    };
+    let partial = build_partial_equation_shaped(
+        "pop[d1, d2] * 0.1 + arr[d2, d1] * 0.001",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &[],
+        Some(&iter_ctx_unthreaded),
+        None,
+    )
+    .unwrap();
+    assert!(
+        partial.contains("PREVIOUS(arr)") && !partial.contains("PREVIOUS(arr["),
+        "un-threadable dep dims keep the permissive legacy collapse; got: {partial}"
+    );
 }

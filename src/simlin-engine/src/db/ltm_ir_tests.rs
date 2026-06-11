@@ -628,6 +628,122 @@ mod model_ltm_reference_sites_tests {
         });
     }
 
+    /// GH #757 (T6 flip): a mapped iterated-dim subscript whose POSITIONAL
+    /// mapping is declared only in the REVERSE direction (on the source's
+    /// `Region` toward `State`) now classifies `Bare` too -- the mapped arm
+    /// gates on `mapped_element_correspondence` (both declaration
+    /// directions, via `classify_axis_access`'s
+    /// `iterated_axis_slot_elements`), matching the compiler's
+    /// `translate_via_mapping`.
+    #[test]
+    fn ir_reverse_declared_mapped_iterated_dim_subscript_is_bare() {
+        let project = TestProject::new("reverse_mapped_iterated_dim_ir")
+            .named_dimension_with_mapping("Region", &["a", "b"], "State")
+            .named_dimension("State", &["s1", "s2"])
+            .array_aux_direct("x", vec!["Region".into()], "100", None)
+            .array_aux_direct("target", vec!["State".into()], "x[State] * 0.5", None);
+
+        with_ir(&project, |_db, ir, _aggs| {
+            let sites = sites_for(ir, "x", "target");
+            assert_eq!(sites.len(), 1, "sites: {sites:?}");
+            assert_eq!(
+                sites[0].shape,
+                RefShape::Bare,
+                "a reverse-declared positionally-mapped iterated subscript is \
+                 a same-element reference -- Bare (GH #757)"
+            );
+            assert_eq!(sites[0].routing, SiteRouting::Direct);
+        });
+    }
+
+    /// GH #525 (T6): a MIXED iterated+literal subscript (`pop[Region, young]`
+    /// inside an A2A-over-`Region` equation) classifies
+    /// `RefShape::PerElement` with one `AxisRead` per source axis --
+    /// `Iterated` for the position-matched dimension index, `Pinned` for the
+    /// literal element -- in declared-axis order.
+    #[test]
+    fn ir_mixed_iterated_literal_subscript_is_per_element() {
+        use crate::ltm_agg::AxisRead;
+        let project = TestProject::new("per_element_ir")
+            .named_dimension("Region", &["a", "b"])
+            .named_dimension("Age", &["young", "old"])
+            .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "100", None)
+            .array_aux_direct(
+                "row_sum",
+                vec!["Region".into()],
+                "pop[Region, young] + pop[Region, old]",
+                None,
+            );
+
+        with_ir(&project, |_db, ir, _aggs| {
+            let sites = sites_for(ir, "pop", "row_sum");
+            assert_eq!(sites.len(), 2, "sites: {sites:?}");
+            assert_eq!(
+                sites[0].shape,
+                RefShape::PerElement {
+                    axes: vec![
+                        AxisRead::Iterated {
+                            dim: "region".to_string(),
+                            source_dim: "region".to_string(),
+                        },
+                        AxisRead::Pinned("young".to_string()),
+                    ],
+                },
+            );
+            assert_eq!(
+                sites[1].shape,
+                RefShape::PerElement {
+                    axes: vec![
+                        AxisRead::Iterated {
+                            dim: "region".to_string(),
+                            source_dim: "region".to_string(),
+                        },
+                        AxisRead::Pinned("old".to_string()),
+                    ],
+                },
+            );
+            assert_eq!(sites[0].routing, SiteRouting::Direct);
+            assert_eq!(sites[1].routing, SiteRouting::Direct);
+        });
+    }
+
+    /// The `PerElement` canonicalization boundary: an all-`Pinned` subscript
+    /// stays `FixedIndex` (so every existing per-element link-score NAME is
+    /// untouched), and a direct wildcard-bearing mix stays on its coarse
+    /// classification (a non-reducer reference never collapses an axis).
+    #[test]
+    fn ir_per_element_canonicalization_boundaries() {
+        let project = TestProject::new("per_element_bounds_ir")
+            .named_dimension("Region", &["a", "b"])
+            .named_dimension("Age", &["young", "old"])
+            .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "100", None)
+            .array_aux_direct(
+                "out",
+                vec!["Region".into()],
+                "pop[a, young] + SIZE(pop[Region, *])",
+                None,
+            );
+
+        with_ir(&project, |_db, ir, _aggs| {
+            let sites = sites_for(ir, "pop", "out");
+            assert_eq!(sites.len(), 2, "sites: {sites:?}");
+            assert_eq!(
+                sites[0].shape,
+                RefShape::FixedIndex(vec!["a".to_string(), "young".to_string()]),
+                "all-Pinned canonicalizes to FixedIndex"
+            );
+            assert_eq!(
+                sites[1].shape,
+                RefShape::Wildcard,
+                "an iterated+wildcard mix keeps its coarse classification -- \
+                 the Reduced post-filter rejects it from the per-axis family \
+                 and `classify_subscript_shape`'s any-wildcard rule says \
+                 Wildcard (SIZE never sets in_reducer, so the #514 \
+                 reclassification doesn't fire either)"
+            );
+        });
+    }
+
     /// A *position-mismatched* iterated subscript is NOT Bare: `row_sum` over
     /// `D1`, `growth` over `D1 x D2`, `growth[D1,D2] = row_sum[D2] * c`. Index
     /// `D2` doesn't match `row_sum`'s declared dimension `D1` (and `D2`
@@ -709,9 +825,7 @@ mod model_ltm_reference_sites_tests {
 
         with_ir(&project, |_db, ir, aggs| {
             assert!(
-                aggs.aggs
-                    .iter()
-                    .all(|a| !a.source_vars.contains(&"pop".to_string())),
+                aggs.aggs.iter().all(|a| !a.reads_var("pop")),
                 "the dynamic-index reducer must not be hoisted; got: {:?}",
                 aggs.aggs
             );

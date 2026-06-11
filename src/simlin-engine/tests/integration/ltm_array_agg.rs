@@ -66,8 +66,8 @@ use simlin_engine::datamodel::{self, Dimension};
 use simlin_engine::db::{
     DetectedLoopPolarity, DiagnosticError, DiagnosticSeverity, LtmSyntheticVar, SimlinDb,
     collect_all_diagnostics, compile_project_incremental, model_detected_loops,
-    model_ltm_variables, reclassify_loops_from_results, set_project_ltm_enabled,
-    sync_from_datamodel_incremental,
+    model_element_causal_edges, model_ltm_variables, reclassify_loops_from_results,
+    set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
 use simlin_engine::test_common::TestProject;
@@ -1743,31 +1743,24 @@ fn arrayed_per_element_init_keeps_per_slot_identity() {
     );
 }
 
-/// The GH #525 partially-iterated-subscript shape now compiles AND scores
-/// (resolved by the GH #759 dimension-name-index fix).
+/// The GH #525 partially-iterated-subscript shape compiles AND scores --
+/// since T6 of the shape-expressiveness design via the `PerElement`
+/// classification (the iterated+literal mix `pop[region,young]` no longer
+/// lands in `DynamicIndex`).
 ///
 /// The model: an arrayed stock `pop[region,age]`, a row-reducer
 /// `row_sum[region] = pop[region,young] * 2` (a partially iterated
 /// subscript -- `young` is fixed, `region` is iterated), and a flow
 /// `growth[region,age] = row_sum[region] * 0.0001 * pop[region,age]` that
-/// closes a feedback loop. The `pop[region,young]` reference still
-/// classifies `DynamicIndex` (the classifier's all-iterated rule doesn't
-/// cover the iterated+literal mix), but the conservative partial it
-/// produces is now compilable: before the #759 fix the iterated dim name
-/// `region` was PREVIOUS-wrapped inside the subscript
-/// (`pop[PREVIOUS(region), young]` / `PREVIOUS(SUM(pop[PREVIOUS(region),
-/// young]))`), the fragment and its capture helpers failed, and the score
-/// was stubbed to 0 with a Warning (a hard `NotSimulatable` on the
-/// pre-fragment-isolation path the original #525 filing hit). Now the
-/// index stays verbatim, the `PREVIOUS(SUM(pop[region, young]))` guard
-/// term compiles through a per-element capture helper, and the score
-/// carries its true value.
+/// closes a feedback loop. The reference's link scores are the
+/// per-(row, full-target-element) scalars
+/// `$⁚ltm⁚link_score⁚pop[{r},young]→row_sum[{r}]` -- one per target
+/// element, with the row projected from it -- replacing the merged
+/// Bare-named conservative score of the pre-T6 `DynamicIndex` family.
 ///
-/// `row_sum` depends on nothing but `pop`, so the conservative
-/// all-references-live partial reproduces Δrow_sum exactly: the score is
-/// `+1` from the first post-initial step. The residual #525 conservatism
-/// -- the `DynamicIndex` cross-product element edges enumerating
-/// cross-element loops that don't exist causally -- is tracked on GH #525.
+/// `pop[region,young]` is the slot's only moving input, so the
+/// per-element partial reproduces Δrow_sum exactly: each scalar scores
+/// `+1` from the first post-initial step.
 #[test]
 fn partially_iterated_subscript_link_score_compiles_and_scores() {
     let project = TestProject::new("ltm525_scored")
@@ -1808,20 +1801,37 @@ fn partially_iterated_subscript_link_score_compiles_and_scores() {
         .expect("VM simulation should run to completion");
     let results = vm.into_results();
 
-    // `pop` is row_sum's only dependency, so the conservative partial is
-    // exact: +1 per element from the first post-initial step.
-    let link_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}row_sum";
-    let base = offset_of(&results, link_name);
-    for slot in 0..2 {
-        let series = series_at(&results, base + slot);
-        assert_eq!(series[0], 0.0, "initial-step guard pins slot {slot} to 0");
+    // The merged Bare-named conservative score is retired; the
+    // per-(row, full-target-element) scalars carry the edge instead.
+    let score_names = ltm_score_var_names(&results);
+    assert!(
+        !score_names
+            .iter()
+            .any(|n| n == "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}row_sum"),
+        "the merged Bare pop\u{2192}row_sum score must not exist post-T6; got: {score_names:?}"
+    );
+    // `pop[region,young]` is the slot's only moving input, so each
+    // per-element scalar is exact: +1 from the first post-initial step.
+    for r in ["a", "b"] {
+        let link_name = format!("{LINK_SCORE_PREFIX}pop[{r},young]\u{2192}row_sum[{r}]");
+        let series = series_at(&results, offset_of(&results, &link_name));
+        assert_eq!(series[0], 0.0, "initial-step guard pins {link_name} to 0");
         for (step, &v) in series.iter().enumerate().skip(1) {
             assert!(
                 (v - 1.0).abs() < 1e-9,
-                "pop->row_sum slot {slot} step {step} must score +1; got {series:?}"
+                "{link_name} step {step} must score +1; got {series:?}"
             );
         }
     }
+    // The unread `old` rows get no score at all (the pre-T6 cross-product
+    // family would have attributed them through the merged Bare name).
+    assert!(
+        !score_names
+            .iter()
+            .any(|n| n.contains("pop[a,old]\u{2192}row_sum")
+                || n.contains("pop[b,old]\u{2192}row_sum")),
+        "unread rows must have no pop\u{2192}row_sum scores; got: {score_names:?}"
+    );
 
     // The sibling link score still carries real values (nothing regressed).
     let sibling = "$\u{205A}ltm\u{205A}link_score\u{205A}row_sum\u{2192}growth";
@@ -3288,16 +3298,17 @@ fn nonlinear_bare_body_equations_unchanged() {
 }
 
 // ---------------------------------------------------------------------------
-// GH #743: un-hoisted multi-source iterated-dim-feeder reducer
+// GH #743 / GH #767: the iterated-dim-feeder reducer (now hoisted, T5)
 // ---------------------------------------------------------------------------
 
-/// The GH #743 fixture: an apply-to-all equation over `D1` whose RHS embeds
+/// The GH #743/#767 fixture: an apply-to-all equation over `D1` whose RHS is
 /// a multi-source reducer whose per-row feeder is arrayed over the ITERATED
-/// dimension -- `growth[D1] = SUM(matrix[D1,*] * frac[D1])`.
-/// `combined_read_slice` declines to hoist it (the multi-source
-/// slice-disagreement carve-out: `matrix[D1,*]` reads `[Iterated, Reduced]`
-/// while `frac[D1]` reads `[Iterated]`), so the references stay on the
-/// conservative path. The feedback loop closes through `frac`:
+/// dimension -- `growth[D1] = SUM(matrix[D1,*] * frac[D1])`. Since T5 of the
+/// shape-expressiveness design the I1 feeder clause ACCEPTS this combination
+/// (`matrix` the co-source with the canonical `[Iterated, Reduced]` slice,
+/// `frac` a projection feeder with its own `[Iterated]` slice); the whole-RHS
+/// form is VARIABLE-BACKED (growth IS the agg, no synthetic minted). The
+/// feedback loop closes through `frac`:
 /// `pop[r] -> frac[r] -> growth[r] -> pop[r]`, trivially reinforcing.
 fn gh743_feeder_closure_fixture() -> datamodel::Project {
     TestProject::new("gh743_feeder")
@@ -3311,27 +3322,29 @@ fn gh743_feeder_closure_fixture() -> datamodel::Project {
         .build_datamodel()
 }
 
-/// GH #743 (the silent-garbage half): the feeder-closure loop must be
-/// CORRECTLY scored on the conservative (un-hoisted) path.
+/// GH #767 (T5, the feeder half): the feeder edge of the hoisted shape gets
+/// per-`(row, slot)` changed-last scores (`frac[r1]→growth[r1]`, 1:1 rows --
+/// the feeder's own `[Iterated]` slice through `read_slice_rows`), replacing
+/// the GH #743 Bare changed-last conservative score for THIS shape (the
+/// changed-last chooser machinery itself stays, serving the still-declined
+/// non-projection shapes -- see
+/// `non_projection_feeder_co_source_closure_stays_loud`).
 ///
-/// Before the fix, the Bare `frac→growth` link score's changed-first
-/// ceteris-paribus partial froze the wildcard-sliced co-source as
-/// `PREVIOUS(matrix[PREVIOUS(d1), *])`. `PREVIOUS` of an array slice has no
-/// codegen path: as a *user* equation it is a hard compile error, but as an
-/// LTM implicit helper (`$⁚$⁚ltm⁚link_score⁚frac→growth⁚0⁚arg0`) it failed
-/// fragment-compile SILENTLY -- keeping a layout slot with no bytecode, so
-/// it read a constant 0. The partial then evaluated to
-/// `sum(0 * frac) = 0` and the score degenerated to
-/// `-PREVIOUS(growth)/|Δgrowth| = -1/g` (g = the per-step growth rate):
-/// constant `-20` on this fixture, the issue's `-250` at 0.4%/step --
-/// plausible-looking garbage with NO diagnostic.
+/// Hand-derived per-slot equation (changed-last: only the feeder frozen,
+/// the co-source slice verbatim -- the changed-FIRST partial would freeze
+/// the wildcard slice as an uncompilable lagged whole-array read):
 ///
-/// After the fix the partial uses the changed-last attribution (only the
-/// feeder frozen: `sum(matrix[d1, *] * PREVIOUS(frac))`, which compiles),
-/// and the trivially-reinforcing isolated loop scores exactly +1 per
-/// element -- the LTM isolated-loop invariant.
+/// ```text
+/// numerator = growth[r1] - sum(matrix[r1,*] * PREVIOUS(frac[r1]))
+///           = Σ_c matrix[r1,c] * Δfrac[r1]
+/// ```
+///
+/// With `matrix` constant the numerator equals `Δgrowth[r1]` exactly, so the
+/// score is +1 from step 1, and each per-circuit loop (the feeder hop routes
+/// circuits to the per-circuit scalar path -- its only scores are the
+/// per-row scalars) is +1 past startup: the isolated-loop invariant.
 #[test]
-fn un_hoisted_iterated_dim_feeder_loop_scores_correct() {
+fn iterated_dim_feeder_closure_scores_via_hoist() {
     let project = gh743_feeder_closure_fixture();
 
     let mut db = SimlinDb::default();
@@ -3343,21 +3356,16 @@ fn un_hoisted_iterated_dim_feeder_loop_scores_correct() {
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("LTM-enabled compilation should succeed");
 
-    // The reducer must STAY un-hoisted (no synthetic agg node): this test
-    // pins the conservative-path fix, not a hoisting change. (GH #743's
-    // direction-1 follow-up -- extending the hoist to feeder-sub-slice
-    // combinations -- would relax this.)
+    // The whole-RHS form is VARIABLE-BACKED: no synthetic agg node.
     assert!(
         ltm_vars
             .iter()
             .all(|v| !v.name.contains("$\u{205A}ltm\u{205A}agg\u{205A}")),
-        "the slice-disagreeing multi-source reducer must not be hoisted; got: {:?}",
+        "the whole-RHS feeder reducer is variable-backed, not synthetic; got: {:?}",
         ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
 
-    // The conservative path must be CORRECT here, so there must be no
-    // degradation warnings (a warned skip would mean the loud floor fired
-    // where the changed-last form should have produced a real score).
+    // Everything compiles cleanly: zero assembly warnings.
     let diags = collect_all_diagnostics(&db, sync.project);
     let assembly: Vec<_> = diags
         .iter()
@@ -3368,80 +3376,105 @@ fn un_hoisted_iterated_dim_feeder_loop_scores_correct() {
         "the feeder-closure fixture must compile every LTM fragment cleanly; got: {assembly:?}"
     );
 
+    // The Bare A2A frac→growth score is RETIRED for this shape, replaced by
+    // the per-(row, slot) scalars.
+    let bare = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
+    assert!(
+        !ltm_vars.iter().any(|v| v.name == bare),
+        "the Bare conservative feeder score must be replaced by per-row scores"
+    );
+
+    // The per-row feeder equation, hand-derived (changed-last, slot-pinned).
+    let feeder_r1 = format!("{LINK_SCORE_PREFIX}frac[r1]\u{2192}growth[r1]");
+    let var = ltm_var(&ltm_vars, &feeder_r1);
+    assert_eq!(
+        var.equation.source_text(),
+        "if (TIME = INITIAL_TIME) then 0 else if ((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1])) = 0) OR ((frac[d1\u{B7}r1] - \
+         PREVIOUS(frac[d1\u{B7}r1])) = 0) then 0 else \
+         SAFEDIV((growth[d1\u{B7}r1] - (sum(matrix[d1\u{B7}r1, *] * \
+         PREVIOUS(frac[d1\u{B7}r1])))), ABS((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1]))), 0) * SIGN((frac[d1\u{B7}r1] - \
+         PREVIOUS(frac[d1\u{B7}r1])))",
+        "the per-row feeder changed-last equation must match the hand-derived form"
+    );
+
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end()
         .expect("VM simulation should run to completion");
     let results = vm.into_results();
 
-    // Exactly one loop: pop -> frac -> growth -> pop, A2A over D1.
+    const TOL: f64 = 1e-9;
+
+    // Per-row feeder scores: +1 at every step past the first (matrix is
+    // constant, so the changed-last numerator IS Δgrowth).
+    for row in ["r1", "r2"] {
+        let name = format!("{LINK_SCORE_PREFIX}frac[{row}]\u{2192}growth[{row}]");
+        let series = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() <= TOL,
+                "{name} at step {step}: got {v}, expected +1. A constant negative \
+                 value here (-1/growth-rate) is the GH #743 silent-garbage \
+                 signature."
+            );
+        }
+    }
+
+    // The feeder hop routes circuits to the per-circuit scalar path: one
+    // scalar loop per D1 element, each +1 past startup.
     let loop_names: Vec<String> = ltm_score_var_names(&results)
         .into_iter()
         .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
         .collect();
     assert_eq!(
         loop_names.len(),
-        1,
-        "expected exactly one loop score; got {loop_names:?}"
+        2,
+        "expected one scalar loop per D1 element; got {loop_names:?}"
     );
-    let loop_var = ltm_var(&ltm_vars, &loop_names[0]);
-    assert_eq!(
-        loop_var.dimensions,
-        vec!["D1".to_string()],
-        "the feeder-closure loop must be A2A over D1"
-    );
-
-    const TOL: f64 = 1e-9;
-
-    // The Bare frac→growth link score: +1 at every step past the first
-    // (the changed-last numerator `growth - sum(matrix[d1,*]*PREVIOUS(frac))`
-    // equals Δgrowth exactly while matrix is constant).
-    let frac_growth = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
-    let var = ltm_var(&ltm_vars, &frac_growth);
-    let n_slots = slot_count(var, &project.dimensions);
-    let base = offset_of(&results, &frac_growth);
-    for slot in 0..n_slots {
-        let series = series_at(&results, base + slot);
-        for (step, &v) in series.iter().enumerate().skip(1) {
-            assert!(
-                (v - 1.0).abs() <= TOL,
-                "{frac_growth} slot {slot} at step {step}: got {v}, expected +1. \
-                 A constant negative value here (-1/growth-rate) is the GH #743 \
-                 silent-garbage signature: the partial silently lost the frozen \
-                 co-source term."
-            );
-        }
-    }
-
-    // The loop score: +1 per element at every step past startup (the
-    // trivially-reinforcing isolated-loop invariant).
-    let base = offset_of(&results, &loop_names[0]);
-    for slot in 0..2 {
-        let series = series_at(&results, base + slot);
+    for name in &loop_names {
+        let var = ltm_var(&ltm_vars, name);
+        assert!(
+            var.dimensions.is_empty(),
+            "feeder-closure loops are per-circuit scalars; {name} got dims {:?}",
+            var.dimensions
+        );
+        let series = series_at(&results, offset_of(&results, name));
         for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
             assert!(
                 (v - 1.0).abs() <= TOL,
-                "{} slot {slot} at step {step}: got {v}, expected +1 (isolated \
-                 reinforcing loop). The pre-fix garbage read -20 at every step.",
-                loop_names[0]
+                "{name} at step {step}: got {v}, expected +1 (isolated reinforcing \
+                 loop)."
             );
         }
     }
 }
 
-/// GH #743 (the loud-floor half, characterization): closing the loop through
-/// the wildcard-read co-source (`matrix`) instead of the feeder keeps the
-/// LOUD degraded behavior -- cross-element loop scores that fail fragment
-/// compile (their equations reference per-(row,slot) link-score names the
-/// emitters never produce for this un-hoisted shape), each surfacing an
-/// Assembly `Warning` and reading a constant 0.
+/// GH #767 (T5, the co-source half -- THE FLIP of
+/// `un_hoisted_iterated_dim_feeder_co_source_closure_stays_loud`): closing
+/// the loop through the wildcard-read co-source (`matrix`) is now genuinely
+/// scoreable. Pre-T5 the hoist declined, the element graph emitted the
+/// conservative cross-product, and every cross-row loop score failed
+/// fragment compile (warned zero-stubs -- the loud floor GH #767's body
+/// names). Post-T5 the gate admits both edges, the element edges shrink to
+/// the read rows (no cross-row circuits exist to warn about), and each
+/// per-circuit loop composes real per-`(row, slot)` scores.
 ///
-/// This is the warned sibling of the #758/#764 zero-stub class, NOT silent
-/// garbage; making these loops genuinely scoreable requires hoisting the
-/// feeder-sub-slice combination (GH #743's direction-1 follow-up). This test
-/// pins that the degradation stays visible: if the warnings disappear, the
-/// scores must be real (a silent zero here would be a regression).
+/// Hand-derived: `matrix = pop[D1]*0.05`, `frac = 0.5` constant. Per slot
+/// `r`, `growth[r] = Σ_c matrix[r,c]*0.5 = 0.05·pop[r]·Σ_c 0.5·... `; the
+/// changed-first per-row partial holds the feeder frozen AT THE ROW
+/// (`PREVIOUS(frac[d1·r])` -- the GH #744 body machinery extended to the
+/// mismatched-arity feeder dep), so
+///
+/// ```text
+/// score(matrix[r,c] → growth[r]) = PREVIOUS(frac[r]) · Δmatrix[r,c] / |Δgrowth[r]|
+///                                = 0.5·Δm / (0.5·(Δm + Δm)) = 0.5
+/// ```
+///
+/// and each of the 4 per-circuit loops scores 0.5 sustained (the two
+/// loops through a slot's c1/c2 cells sum to the slot's full +1).
 #[test]
-fn un_hoisted_iterated_dim_feeder_co_source_closure_stays_loud() {
+fn iterated_dim_feeder_co_source_closure_scores_real_values() {
     let project = TestProject::new("gh743_co_source")
         .with_sim_time(0.0, 8.0, 1.0)
         .named_dimension("D1", &["r1", "r2"])
@@ -3460,11 +3493,608 @@ fn un_hoisted_iterated_dim_feeder_co_source_closure_stays_loud() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("LTM-enabled compilation should succeed");
 
-    // Every loop score through the un-hoisted matrix→growth edge fails
-    // fragment compile and is WARNED -- the loud conservative floor.
+    // The warned zero-stubs are GONE: every LTM fragment compiles.
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .collect();
+    assert!(
+        assembly.is_empty(),
+        "the co-source closure must compile every LTM fragment cleanly; got: {assembly:?}"
+    );
+
+    // The read-slice element edges admit no cross-row circuits: only the
+    // 4 diagonal per-(row, slot) score names exist (no
+    // `matrix[r1,..]→growth[r2]`-style names anywhere).
+    for v in &ltm_vars {
+        assert!(
+            !(v.name.contains("matrix[r1") && v.name.contains("growth[r2]")),
+            "no cross-row score may exist; got {}",
+            v.name
+        );
+        assert!(
+            !(v.name.contains("matrix[r2") && v.name.contains("growth[r1]")),
+            "no cross-row score may exist; got {}",
+            v.name
+        );
+    }
+
+    // The per-row co-source equation, hand-derived: the changed-first
+    // body partial with the FEEDER pinned to the row and frozen
+    // (`PREVIOUS(frac[d1·r1])`) -- the GH #744 machinery's
+    // mismatched-arity by-dim-name pin.
+    let m_r1c1 = format!("{LINK_SCORE_PREFIX}matrix[r1,c1]\u{2192}growth[r1]");
+    let var = ltm_var(&ltm_vars, &m_r1c1);
+    assert_eq!(
+        var.equation.source_text(),
+        "if (TIME = INITIAL_TIME) then 0 else if ((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1])) = 0) OR ((matrix[d1\u{B7}r1,d2\u{B7}c1] - \
+         PREVIOUS(matrix[d1\u{B7}r1,d2\u{B7}c1])) = 0) then 0 else \
+         SAFEDIV((PREVIOUS(growth[d1\u{B7}r1]) + ((matrix[d1\u{B7}r1, d2\u{B7}c1] * \
+         PREVIOUS(frac[d1\u{B7}r1])) - (PREVIOUS(matrix[d1\u{B7}r1, d2\u{B7}c1]) * \
+         PREVIOUS(frac[d1\u{B7}r1]))) - PREVIOUS(growth[d1\u{B7}r1])), \
+         ABS((growth[d1\u{B7}r1] - PREVIOUS(growth[d1\u{B7}r1]))), 0) * \
+         SIGN((matrix[d1\u{B7}r1,d2\u{B7}c1] - PREVIOUS(matrix[d1\u{B7}r1,d2\u{B7}c1])))",
+        "the per-row co-source changed-first equation must hold the feeder frozen at the row"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    const TOL: f64 = 1e-9;
+
+    // Per-row co-source scores: 0.5 at every step past the first.
+    for (row, cell) in [("r1", "c1"), ("r1", "c2"), ("r2", "c1"), ("r2", "c2")] {
+        let name = format!("{LINK_SCORE_PREFIX}matrix[{row},{cell}]\u{2192}growth[{row}]");
+        let series = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() <= TOL,
+                "{name} at step {step}: got {v}, expected 0.5 (the row's share of \
+                 the two-cell slot)."
+            );
+        }
+    }
+
+    // 4 per-circuit scalar loops, each 0.5 sustained past startup -- real
+    // values where the pre-T5 path emitted warned zero-stubs.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        4,
+        "expected one scalar loop per (row, cell) circuit; got {loop_names:?}"
+    );
+    for name in &loop_names {
+        let series = series_at(&results, offset_of(&results, name));
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 0.5).abs() <= TOL,
+                "{name} at step {step}: got {v}, expected a sustained 0.5 (the \
+                 pre-T5 loud floor stubbed these to 0)."
+            );
+        }
+    }
+}
+
+/// GH #767 (T5, bilinear additivity -- the GH #744 (iv) property extended
+/// to BOTH halves being sources of the same variable-backed agg): with
+/// `matrix` AND `frac` both varying, the co-source rows' changed-FIRST
+/// numerators (`PREVIOUS(frac[r])·Δmatrix[r,c]`) plus the feeder's
+/// changed-LAST numerator (`Σ_c matrix[r,c]·Δfrac[r]`) telescope exactly
+/// to `Δgrowth[r]` per slot:
+///
+/// ```text
+/// Δgrowth[r] = Σ_c (m_c·f - m'_c·f') = Σ_c m_c·(f - f') + Σ_c f'·(m_c - m'_c)
+/// ```
+///
+/// Numerators are reconstructed from the emitted scores
+/// (`numerator = score · |Δgrowth| · SIGN(Δsource)`), so this pins the
+/// additivity of what LTM actually reports.
+#[test]
+fn feeder_plus_co_source_row_scores_are_additive() {
+    let project = TestProject::new("gh767_additive")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1] * 0.05",
+            None,
+        )
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("growth[D1]", "SUM(matrix[D1, *] * frac[D1])", None)
+        .build_datamodel();
+
+    let (results, _) = run_ltm(&project);
+
+    for row in ["r1", "r2"] {
+        let growth = series_at(&results, offset_of(&results, &format!("growth[{row}]")));
+        let frac = series_at(&results, offset_of(&results, &format!("frac[{row}]")));
+        let feeder_score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}frac[{row}]\u{2192}growth[{row}]"),
+            ),
+        );
+        let cells: Vec<(Vec<f64>, Vec<f64>)> = ["c1", "c2"]
+            .iter()
+            .map(|cell| {
+                let score = series_at(
+                    &results,
+                    offset_of(
+                        &results,
+                        &format!("{LINK_SCORE_PREFIX}matrix[{row},{cell}]\u{2192}growth[{row}]"),
+                    ),
+                );
+                let m = series_at(
+                    &results,
+                    offset_of(&results, &format!("matrix[{row},{cell}]")),
+                );
+                (score, m)
+            })
+            .collect();
+
+        let mut contributing = 0usize;
+        for t in 1..growth.len() {
+            let d_growth = growth[t] - growth[t - 1];
+            let d_frac = frac[t] - frac[t - 1];
+            if d_growth == 0.0 || d_frac == 0.0 {
+                continue;
+            }
+            let mut sum = feeder_score[t] * d_growth.abs() * d_frac.signum();
+            let mut all_scored = true;
+            for (score, m) in &cells {
+                let d_m = m[t] - m[t - 1];
+                if d_m == 0.0 {
+                    all_scored = false;
+                    break;
+                }
+                sum += score[t] * d_growth.abs() * d_m.signum();
+            }
+            if !all_scored {
+                continue;
+            }
+            assert!(
+                (sum - d_growth).abs() <= 1e-9,
+                "slot {row} step {t}: feeder + co-source numerators {sum} != Δgrowth {d_growth}"
+            );
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "slot {row}: expected at least 3 steps where every source scored, got {contributing}"
+        );
+    }
+}
+
+/// GH #767 review (the REPEATED-DIM co-source hazard): a square co-source
+/// declared over the same dimension twice (`matrix[D1,D1]`) read as
+/// `SUM(matrix[*, D1] * frac[D1])` -- slice `[Reduced, Iterated]`, the
+/// ITERATED axis at position 1 while position 0 shares the dim NAME -- is
+/// ACCEPTED by the feeder clause, so the co-source row partial must pin
+/// the feeder dep at the slice's ITERATED axis position
+/// (`PREVIOUS(frac[d1·r2])` in `matrix[r1,r2]→growth[r2]`), never a
+/// first-match name lookup (which silently pinned position 0's REDUCED
+/// element, `frac[d1·r1]` -- a wrong-magnitude score with zero warnings,
+/// the exact silent-wrong-number class this epic forbids). The asymmetric
+/// per-element matrix and seeded pops make the wrong pin numerically
+/// visible: per-slot additivity (feeder changed-last + co-source rows
+/// changed-first == Δgrowth) holds only under the correct pin.
+#[test]
+fn repeated_dim_co_source_pins_feeder_at_iterated_axis() {
+    let project = TestProject::new("gh767_repeated_dim")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .array_with_ranges_direct(
+            "seed",
+            vec!["D1".into()],
+            vec![("r1", "100"), ("r2", "160")],
+            None,
+        )
+        .array_stock("pop[D1]", "seed[D1]", &["growth"], &[], None)
+        .array_with_ranges_direct(
+            "matrix",
+            vec!["D1".into(), "D1".into()],
+            vec![
+                ("r1,r1", "pop[r1] * 0.05"),
+                ("r1,r2", "pop[r1] * 0.06"),
+                ("r2,r1", "pop[r2] * 0.07"),
+                ("r2,r2", "pop[r2] * 0.08"),
+            ],
+            None,
+        )
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("growth[D1]", "SUM(matrix[*, D1] * frac[D1])", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .collect();
+    assert!(
+        assembly.is_empty(),
+        "the repeated-dim fixture must compile every LTM fragment cleanly; got: {assembly:?}"
+    );
+
+    // The off-iterated-row partial: the feeder must be pinned to the SLOT
+    // (the Iterated axis's element, r2), not the same-named Reduced axis's
+    // row element (r1).
+    let m_r1r2 = format!("{LINK_SCORE_PREFIX}matrix[r1,r2]\u{2192}growth[r2]");
+    let var = ltm_var(&ltm_vars, &m_r1r2);
+    let eq = var.equation.source_text();
+    assert!(
+        eq.contains("PREVIOUS(frac[d1\u{B7}r2])"),
+        "the feeder must be frozen at the slice's ITERATED axis element (the slot): {eq}"
+    );
+    assert!(
+        !eq.contains("frac[d1\u{B7}r1]"),
+        "the feeder must NOT be pinned to the same-named Reduced axis's row element: {eq}"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Per-slot additivity: feeder changed-last + co-source rows
+    // changed-first == Δgrowth exactly (numerators reconstructed from the
+    // emitted scores). Under the first-match mis-pin this is off by
+    // (frac[r] - frac[r1])·Σ_a Δmatrix[a,r] for slot r2.
+    for slot in ["r1", "r2"] {
+        let growth = series_at(&results, offset_of(&results, &format!("growth[{slot}]")));
+        let frac = series_at(&results, offset_of(&results, &format!("frac[{slot}]")));
+        let feeder_score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}frac[{slot}]\u{2192}growth[{slot}]"),
+            ),
+        );
+        let rows: Vec<(Vec<f64>, Vec<f64>)> = ["r1", "r2"]
+            .iter()
+            .map(|a| {
+                let score = series_at(
+                    &results,
+                    offset_of(
+                        &results,
+                        &format!("{LINK_SCORE_PREFIX}matrix[{a},{slot}]\u{2192}growth[{slot}]"),
+                    ),
+                );
+                let m = series_at(
+                    &results,
+                    offset_of(&results, &format!("matrix[{a},{slot}]")),
+                );
+                (score, m)
+            })
+            .collect();
+
+        let mut contributing = 0usize;
+        for t in 1..growth.len() {
+            let d_growth = growth[t] - growth[t - 1];
+            let d_frac = frac[t] - frac[t - 1];
+            if d_growth == 0.0 || d_frac == 0.0 {
+                continue;
+            }
+            let mut sum = feeder_score[t] * d_growth.abs() * d_frac.signum();
+            let mut all_scored = true;
+            for (score, m) in &rows {
+                let d_m = m[t] - m[t - 1];
+                if d_m == 0.0 {
+                    all_scored = false;
+                    break;
+                }
+                sum += score[t] * d_growth.abs() * d_m.signum();
+            }
+            if !all_scored {
+                continue;
+            }
+            assert!(
+                (sum - d_growth).abs() <= 1e-9 * d_growth.abs().max(1.0),
+                "slot {slot} step {t}: feeder + co-source numerators {sum} != Δgrowth \
+                 {d_growth} -- the repeated-dim mis-pin signature"
+            );
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "slot {slot}: expected at least 3 steps where every source scored, got {contributing}"
+        );
+    }
+}
+
+/// GH #767 review (Pinned-bearing canonical + feeder): a canonical slice
+/// with a PINNED axis (`SUM(cube[D1, c1, *] * frac[D1])`, slice
+/// `[Iterated, Pinned(c1), Reduced]`) is within the feeder clause's scope
+/// -- the clause keys only on the Iterated target dims, so the feeder's
+/// `[Iterated]` projection is accepted and everything scores: per-row
+/// names exist ONLY for the read `c1` cells (the Pinned axis admits no
+/// `c2` rows), zero warnings, and per-slot additivity (feeder
+/// changed-last + read-row changed-first numerators == Δgrowth) holds
+/// exactly.
+#[test]
+fn pinned_canonical_with_feeder_scores_additively() {
+    let project = TestProject::new("gh767_pinned_canonical")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .named_dimension("D3", &["k1", "k2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            "pop[D1] * 0.05",
+            None,
+        )
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("growth[D1]", "SUM(cube[D1, c1, *] * frac[D1])", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .collect();
+    assert!(
+        assembly.is_empty(),
+        "the Pinned-canonical feeder fixture must compile cleanly; got: {assembly:?}"
+    );
+
+    // Only the read `c1` rows get per-(row, slot) scores; the Pinned axis
+    // admits no c2 rows.
+    for v in &ltm_vars {
+        assert!(
+            !(v.name.starts_with(LINK_SCORE_PREFIX) && v.name.contains(",c2,")),
+            "an unread c2 row must get no score; got {}",
+            v.name
+        );
+    }
+    for slot in ["r1", "r2"] {
+        for k in ["k1", "k2"] {
+            let name = format!("{LINK_SCORE_PREFIX}cube[{slot},c1,{k}]\u{2192}growth[{slot}]");
+            assert!(
+                ltm_vars.iter().any(|v| v.name == name),
+                "missing read-row score {name}"
+            );
+        }
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    for slot in ["r1", "r2"] {
+        let growth = series_at(&results, offset_of(&results, &format!("growth[{slot}]")));
+        let frac = series_at(&results, offset_of(&results, &format!("frac[{slot}]")));
+        let feeder_score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}frac[{slot}]\u{2192}growth[{slot}]"),
+            ),
+        );
+        let rows: Vec<(Vec<f64>, Vec<f64>)> = ["k1", "k2"]
+            .iter()
+            .map(|k| {
+                let score = series_at(
+                    &results,
+                    offset_of(
+                        &results,
+                        &format!("{LINK_SCORE_PREFIX}cube[{slot},c1,{k}]\u{2192}growth[{slot}]"),
+                    ),
+                );
+                let c = series_at(
+                    &results,
+                    offset_of(&results, &format!("cube[{slot},c1,{k}]")),
+                );
+                (score, c)
+            })
+            .collect();
+
+        let mut contributing = 0usize;
+        for t in 1..growth.len() {
+            let d_growth = growth[t] - growth[t - 1];
+            let d_frac = frac[t] - frac[t - 1];
+            if d_growth == 0.0 || d_frac == 0.0 {
+                continue;
+            }
+            let mut sum = feeder_score[t] * d_growth.abs() * d_frac.signum();
+            let mut all_scored = true;
+            for (score, c) in &rows {
+                let d_c = c[t] - c[t - 1];
+                if d_c == 0.0 {
+                    all_scored = false;
+                    break;
+                }
+                sum += score[t] * d_growth.abs() * d_c.signum();
+            }
+            if !all_scored {
+                continue;
+            }
+            assert!(
+                (sum - d_growth).abs() <= 1e-9 * d_growth.abs().max(1.0),
+                "slot {slot} step {t}: feeder + read-row numerators {sum} != Δgrowth {d_growth}"
+            );
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "slot {slot}: expected at least 3 steps where every source scored, got {contributing}"
+        );
+    }
+}
+
+/// GH #767 (T5, the SYNTHETIC half): the INLINE form of the feeder shape
+/// (`growth[D1] = 1 + SUM(matrix[D1,*] * frac[D1])`) mints a synthetic agg
+/// whose feeder half rides the same per-`(row, slot)` changed-last emission
+/// (`frac[r1]→$⁚ltm⁚agg⁚0[r1]`), and the closure through the feeder is
+/// genuinely scored: zero warnings, +1 sustained per-circuit loops
+/// (`pop[r] → frac[r] → agg[r] → growth[r] → pop[r]`, with the agg trimmed
+/// from the reported loop and the agg→growth partial of `1 + agg` = +1).
+#[test]
+fn inline_feeder_reducer_synthetic_agg_closure_scores() {
+    let project = TestProject::new("gh767_inline")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("growth[D1]", "1 + SUM(matrix[D1, *] * frac[D1])", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The inline form mints the synthetic agg, with the feeder half's
+    // per-(row, slot) names.
+    let agg_aux = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    assert!(
+        ltm_vars.iter().any(|v| v.name == agg_aux),
+        "the inline feeder reducer must mint a synthetic agg; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    for row in ["r1", "r2"] {
+        let name = format!("{LINK_SCORE_PREFIX}frac[{row}]\u{2192}{agg_aux}[{row}]");
+        assert!(
+            ltm_vars.iter().any(|v| v.name == name),
+            "missing per-row feeder score {name}; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .collect();
+    assert!(
+        assembly.is_empty(),
+        "the inline feeder fixture must compile every LTM fragment cleanly; got: {assembly:?}"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    const TOL: f64 = 1e-9;
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        2,
+        "expected one per-circuit loop per D1 element; got {loop_names:?}"
+    );
+    for name in &loop_names {
+        let series = series_at(&results, offset_of(&results, name));
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 1.0).abs() <= TOL,
+                "{name} at step {step}: got {v}, expected +1 (isolated reinforcing \
+                 loop through the synthetic agg)."
+            );
+        }
+    }
+}
+
+/// The design's conservative boundary (the "feeders that are not
+/// projections" clause): a no-`Reduced` source whose slice is NOT the pure
+/// iterated projection -- here a PINNED axis, `w[D1, c1]` -- still declines
+/// the hoist, and the co-source closure keeps the LOUD degraded behavior:
+/// cross-element loop scores that fail fragment compile (their equations
+/// reference per-(row,slot) names the cartesian emitters never produce for
+/// the off-diagonal hops), each surfacing an Assembly `Warning` and reading
+/// a constant 0.
+///
+/// This is the loud sibling of the #758/#764 zero-stub class, NOT silent
+/// garbage. It pins that the T5 feeder clause widened acceptance ONLY for
+/// the all-`Iterated` projection: if the warnings here disappear, the
+/// scores must be real (a silent zero would be a regression). (The design
+/// doc's named non-projection example, `SUM(matrix[D1,*] * other[D2])`
+/// with a free reduced-axis index, is not expressible -- the engine
+/// rejects the equation outright -- so the Pinned-axis mix is the nearest
+/// compiling shape on the boundary.)
+#[test]
+fn non_projection_feeder_co_source_closure_stays_loud() {
+    let project = TestProject::new("gh767_non_projection")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1] * 0.05",
+            None,
+        )
+        .array_aux_direct("w", vec!["D1".into(), "D2".into()], "0.5", None)
+        .array_flow("growth[D1]", "SUM(matrix[D1, *] * w[D1, c1])", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The Pinned-axis mix must NOT be hoisted: no agg, so growth is not an
+    // agg target and the per-row feeder names don't exist.
+    assert!(
+        ltm_vars
+            .iter()
+            .all(|v| !v.name.contains("$\u{205A}ltm\u{205A}agg\u{205A}")),
+        "the Pinned-axis feeder mix must stay un-hoisted; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // Every cross-row loop score through the un-hoisted matrix→growth edge
+    // fails fragment compile and is WARNED -- the loud conservative floor.
     let diags = collect_all_diagnostics(&db, sync.project);
     let warned_loop_scores: Vec<&str> = diags
         .iter()
@@ -3477,8 +4107,8 @@ fn un_hoisted_iterated_dim_feeder_co_source_closure_stays_loud() {
         .collect();
     assert!(
         !warned_loop_scores.is_empty(),
-        "the co-source closure's unscoreable loops must surface Assembly warnings \
-         (silent zero would be a regression); diagnostics: {diags:?}"
+        "the non-projection closure's unscoreable loops must surface Assembly \
+         warnings (silent zero would be a regression); diagnostics: {diags:?}"
     );
 
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
@@ -4054,13 +4684,18 @@ fn previous_of_rank_compiles_per_element() {
 /// element from the first post-initial step (pre-fix it read a constant
 /// -100-class value off the 0-stubbed scalar helpers).
 ///
-/// The one remaining degradation in this fixture is OUT of #742's scope:
-/// `enumerate_agg_nodes` hoists the whole-extent `RANK(pop, 1)` into a
-/// scalar `$⁚ltm⁚agg⁚0` whose own (array-valued) equation cannot compile --
-/// the "RANK as the scored reducer itself" path (docs/tech-debt.md entry
-/// 27's family), tracked as GH #771. That failure is loud (one
-/// synthetic-variable Warning, pinned here) and zeroes only the agg-routed
-/// loop scores.
+/// GH #771 (shape-expressiveness T1): `RANK` is no longer hoisted into an
+/// aggregate node -- hoisting requires `reducer_collapses_to_scalar`
+/// (invariant I5), and RANK is array-valued, so the scalar `$⁚ltm⁚agg⁚0`
+/// whose own equation could not compile (and whose agg-routed loop scores
+/// were stubbed to 0 behind one pinned Warning) is never minted. The `pop`
+/// reference inside `RANK(pop, 1)` classifies by its syntactic shape
+/// (`Bare` -> diagonal edges), so this fixture now compiles with ZERO
+/// warnings and the direct `pop → grow` loop is genuinely enumerated.
+/// Residual (documented on `reducer_collapses_to_scalar`): loops through
+/// the rank *ordering* (element r's rank changing because element s moved
+/// past it) are not enumerated; the diagonal `pop → grow` loop scores ~0
+/// here because the ranks are constant in this regime -- pinned below.
 #[test]
 fn rank_frozen_subtree_link_score_scores_correctly() {
     let project = TestProject::new("gh742_rank")
@@ -4079,18 +4714,12 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("LTM-enabled compilation should succeed");
 
-    // The capture helpers compile: the ONLY degradation left is the
-    // out-of-scope RANK-hoisted scalar agg (see the doc comment).
+    // GH #771: RANK is de-hoisted, so no ill-shaped scalar agg exists and
+    // NOTHING warns -- the capture helpers and every link/loop score compile.
     let warnings = assembly_warnings(&db, sync.project);
-    assert_eq!(
-        warnings.len(),
-        1,
-        "only the RANK-hoisted agg may warn; got: {warnings:?}"
-    );
-    assert_eq!(
-        warnings[0].variable.as_deref(),
-        Some("$\u{205A}ltm\u{205A}agg\u{205A}0"),
-        "the remaining warning must be the RANK-hoisted synthetic agg; got: {warnings:?}"
+    assert!(
+        warnings.is_empty(),
+        "RANK de-hoist must leave zero warnings; got: {warnings:?}"
     );
 
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
@@ -4131,22 +4760,69 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
         }
     }
 
-    // The direct (non-agg-routed) per-element loop -- the A2A loop over
-    // Region (pop -> scale -> grow -> inflow -> pop) -- scores +1 once the
-    // flow-to-stock startup guard clears.
-    let loop_var = ltm
+    // Post-#771 the model has TWO Region-dimensioned loops: the
+    // scale-mediated one (pop -> scale -> grow -> inflow -> pop) and the
+    // direct rank-mediated one (pop -> grow -> inflow -> pop), which only
+    // exists now that the de-hoisted `pop` reference inside `RANK(pop, 1)`
+    // emits diagonal Bare edges. Tell them apart by the link-score names
+    // their loop-score equations reference.
+    fn eqn_text(v: &LtmSyntheticVar) -> &str {
+        match &v.equation {
+            datamodel::Equation::Scalar(t) => t,
+            datamodel::Equation::ApplyToAll(_, t) => t,
+            datamodel::Equation::Arrayed(..) => panic!("unexpected Arrayed loop score"),
+        }
+    }
+    let region_loops: Vec<&LtmSyntheticVar> = ltm
         .vars
         .iter()
         .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
-        .find(|v| v.dimensions == vec!["Region".to_string()])
+        .filter(|v| v.dimensions == vec!["Region".to_string()])
+        .collect();
+    assert_eq!(
+        region_loops.len(),
+        2,
+        "expected the scale-mediated and rank-mediated Region loops; got: {:?}",
+        region_loops
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // The scale-mediated loop scores +1 once the flow-to-stock startup
+    // guard clears (grow is linear in scale with a constant rank coefficient).
+    let scale_loop = region_loops
+        .iter()
+        .find(|v| eqn_text(v).contains("scale\u{2192}grow"))
         .expect("the per-element pop/scale/grow/inflow loop must be scored");
-    let base = offset_of(&results, &loop_var.name);
-    for slot in 0..slot_count(loop_var, &project.dimensions) {
+    let base = offset_of(&results, &scale_loop.name);
+    for slot in 0..slot_count(scale_loop, &project.dimensions) {
         let series = series_at(&results, base + slot);
         for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
             assert!(
                 (v - 1.0).abs() < 1e-6,
-                "loop score slot {slot} step {step} must be +1; got {series:?}"
+                "scale-loop score slot {slot} step {step} must be +1; got {series:?}"
+            );
+        }
+    }
+
+    // The rank-mediated loop (pop -> grow direct) scores ~0: the ranks are
+    // constant in this regime, so `grow`'s changed-first partial w.r.t.
+    // `pop` is flat. This pins the documented #771 residual -- the diagonal
+    // pop->grow coupling is enumerated but carries no score here, and
+    // cross-element rank-ordering loops are not enumerated at all.
+    let rank_loop = region_loops
+        .iter()
+        .find(|v| eqn_text(v).contains("pop\u{2192}grow"))
+        .expect("the direct pop/grow/inflow loop must be scored");
+    let base = offset_of(&results, &rank_loop.name);
+    for slot in 0..slot_count(rank_loop, &project.dimensions) {
+        let series = series_at(&results, base + slot);
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
+            assert!(
+                v.abs() < 1e-9,
+                "rank-loop score slot {slot} step {step} must be ~0 (constant ranks); \
+                 got {series:?}"
             );
         }
     }
@@ -4158,32 +4834,28 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
 /// `growth[Region, Age] = row_sum[Region] * 0.0001 * pop[Region, Age]`
 /// closing the feedback loop.
 ///
-/// As filed, this was a hard "PREVIOUS requires a variable reference after
-/// helper rewriting" compile failure; on the fragment-isolated pipeline it
-/// degraded to a warned 0-stub, and the GH #759 fix makes it genuinely
-/// score: both `pop[region, <elem>]` references classify `DynamicIndex` and
-/// stay live in the conservative partial, the `PREVIOUS(SUM(pop[region,
-/// young]))` guard term compiles through a per-element capture helper, and
-/// -- because `pop` is `row_sum`'s only dependency -- the score is exactly
-/// `+1` per element.
+/// Post-T6 of the shape-expressiveness design both `pop[Region, <elem>]`
+/// references classify `RefShape::PerElement`, and the three parts of the
+/// documented flip hold:
 ///
-/// Residual #525 conservatism, pinned LOUDLY below (the repo convention for
-/// degraded behavior): the `DynamicIndex` classification expands to
-/// cross-product element edges (`pop[a,*] -> row_sum[b]`), so the
-/// enumerator also reports cross-element "loops" that do not exist
-/// causally -- and they are SILENT CONFIDENT PHANTOMS, not zeros: each
-/// phantom's loop-score product composes per-slot link scores across the
-/// non-causal pathway (the cross edge reads the WRONG element's real link
-/// score at the target slot), so it carries a plausible-looking sustained
-/// value (~0.245 here) with no diagnostic. They also dilute the shared
-/// cycle partition's rel-score denominator (~20% in this repro), shrinking
-/// every REAL loop's relative importance. Extending
-/// `classify_iterated_dim_shape` to the iterated+literal mix (a per-element
-/// family pinned on the literal axes) removes them; tracked on GH #525
-/// (rescoped to exactly this residual). The exact-value pin below makes
-/// the phantoms visible in the suite so the future classifier fix must
-/// consciously flip these assertions (phantoms no longer enumerated)
-/// rather than silently changing scores.
+/// (a) the merged Bare arrayed link score `pop→row_sum` (which scored +1
+///     per slot with BOTH references live) is no longer emitted; instead
+///     the four per-(row, element) scalars `pop[{r},{age}]→row_sum[{r}]`
+///     each score ~0.5 in this symmetric repro -- each site now attributes
+///     only its own reference's share;
+/// (b) the single ApplyToAll loop through row_sum flips to per-circuit
+///     element-subscripted scalar loops (one per `(Region, Age)` circuit)
+///     whose equations reference the per-(row, element) names and carry
+///     real non-zero post-startup values;
+/// (c) the phantom cross-element loops (~0.245 silent confident scores,
+///     four of them pre-T6) are no longer enumerated AT ALL: the element
+///     graph emits only the pinned diagonal, so no loop-score equation
+///     contains the plain substring `pop→row_sum` -- exact as a substring
+///     check because every per-(row, element) name interposes the
+///     from-side `]` before the arrow (`pop[r,a]→row_sum[r]`).
+///
+/// The detected surface must biject with the scored one (the #746-era
+/// invariant) -- the per-circuit loops ride the same builders.
 #[test]
 fn gh525_two_reference_partially_iterated_row_sum_scores() {
     let project = TestProject::new("gh525_repro")
@@ -4211,43 +4883,245 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
         "every LTM fragment (capture helpers included) must compile; got: {warnings:?}"
     );
 
-    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end()
         .expect("VM simulation should run to completion");
     let results = vm.into_results();
 
-    // Both pop references stay live and pop is row_sum's only dependency,
-    // so the conservative partial reproduces delta-row_sum exactly: +1 per
-    // Region element from the first post-initial step.
-    let link_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}row_sum";
-    let base = offset_of(&results, link_name);
-    for slot in 0..2 {
-        let series = series_at(&results, base + slot);
-        assert_eq!(series[0], 0.0, "initial-step guard pins slot {slot} to 0");
-        for (step, &v) in series.iter().enumerate().skip(1) {
-            assert!(
-                (v - 1.0).abs() < 1e-9,
-                "pop->row_sum slot {slot} step {step} must score +1; got {series:?}"
-            );
+    // (a) the merged Bare arrayed score is gone...
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}row_sum"),
+        "the merged Bare pop\u{2192}row_sum score must not be emitted; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    // ...replaced by the four per-(row, element) scalars at ~0.5 each:
+    // both pops move identically in this symmetric repro, so each site's
+    // share of delta-row_sum is exactly half.
+    for r in ["a", "b"] {
+        for age in ["young", "old"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[{r},{age}]\u{2192}row_sum[{r}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            assert_eq!(series[0], 0.0, "initial-step guard pins {name} to 0");
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} step {step} must score 0.5 (its own reference's \
+                     share); got {series:?}"
+                );
+            }
         }
     }
 
-    // Every loop score is finite, and the same-element A2A loop through
-    // row_sum (dimensioned over the full Region x Age space) carries real
-    // non-zero values once the startup guard clears.
-    let mut saw_row_sum_loop = false;
-    // The PHANTOM loops (see the doc comment): the conservative
-    // cross-product enumerates SCALAR loops whose 6-factor cycle traverses
-    // pop -> row_sum at MIXED elements (two cross edges, each reading the
-    // other element's real per-slot link score). They are identifiable as
-    // the scalar (dimension-less) loop scores referencing pop->row_sum.
-    let mut phantom_count = 0usize;
+    // (b) the row_sum loop family is per-circuit element-subscripted
+    // scalar loops -- one per (Region, Age) circuit -- referencing the
+    // per-(row, element) names, with real non-zero post-startup values.
+    let eqn_text = |v: &LtmSyntheticVar| -> String {
+        match &v.equation {
+            datamodel::Equation::Scalar(t) => t.clone(),
+            datamodel::Equation::ApplyToAll(_, t) => t.clone(),
+            other => format!("{other:?}"),
+        }
+    };
+    let row_sum_loops: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .filter(|v| eqn_text(v).contains("row_sum"))
+        .collect();
+    assert_eq!(
+        row_sum_loops.len(),
+        4,
+        "one element-subscripted scalar loop per (Region, Age) circuit \
+         through row_sum; got: {:?}",
+        row_sum_loops.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    let mut seen_rows: Vec<String> = Vec::new();
+    for lv in &row_sum_loops {
+        assert!(
+            lv.dimensions.is_empty(),
+            "per-circuit loop {} must be scalar; got dims {:?}",
+            lv.name,
+            lv.dimensions
+        );
+        let text = eqn_text(lv);
+        let row = ["a", "b"]
+            .iter()
+            .flat_map(|r| ["young", "old"].iter().map(move |a| (r, a)))
+            .find(|(r, a)| text.contains(&format!("pop[{r},{a}]\u{2192}row_sum[{r}]")))
+            .map(|(r, a)| format!("{r},{a}"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "loop {} must reference a per-(row, element) \
+                     pop→row_sum scalar; eqn: {text}",
+                    lv.name
+                )
+            });
+        assert!(
+            !seen_rows.contains(&row),
+            "each circuit references a distinct row; duplicate {row}"
+        );
+        seen_rows.push(row);
+        let series = series_at(&results, offset_of(&results, &lv.name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "loop score {} must stay finite; got {series:?}",
+            lv.name
+        );
+        assert!(
+            series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
+            "loop score {} must carry real non-zero values; got {series:?}",
+            lv.name
+        );
+    }
+
+    // (c) the phantoms are gone at enumeration: no loop-score equation
+    // contains the plain substring `pop→row_sum` (the per-(row, element)
+    // names interpose `]` before the arrow, so this matches only the
+    // retired Bare A2A form the phantoms composed).
     for lv in ltm
         .vars
         .iter()
         .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
     {
+        let text = match &lv.equation {
+            datamodel::Equation::Scalar(t) => t.clone(),
+            datamodel::Equation::ApplyToAll(_, t) => t.clone(),
+            datamodel::Equation::Arrayed(_, slots, default, _) => {
+                let mut t: String = slots.iter().map(|(_, eq, _, _)| eq.clone()).collect();
+                if let Some(d) = default {
+                    t.push_str(d);
+                }
+                t
+            }
+        };
+        assert!(
+            !text.contains("pop\u{2192}row_sum"),
+            "no loop-score equation may reference the retired Bare \
+             pop\u{2192}row_sum name ({}): {text}",
+            lv.name
+        );
+    }
+
+    // The direct pop -> growth A2A loop survives unchanged (its edge is
+    // Bare-only).
+    assert!(
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .any(|v| v.dimensions == vec!["Region".to_string(), "Age".to_string()]),
+        "the direct pop/growth A2A loop must keep its ApplyToAll form; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // Cross-surface (the #746-era invariant): the detected loop set must
+    // biject with the scored loop-score ids -- the per-circuit loops ride
+    // the same builders on both surfaces.
+    let scored_ids: std::collections::BTreeSet<String> = ltm
+        .vars
+        .iter()
+        .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+        .map(|id| id.to_string())
+        .collect();
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    let detected_ids: std::collections::BTreeSet<String> =
+        detected.loops.iter().map(|l| l.id.clone()).collect();
+    assert_eq!(
+        detected_ids, scored_ids,
+        "detected ids must equal the scored loop-score ids for the \
+         PerElement circuit family"
+    );
+}
+
+/// GH #525 (T6, BROADCAST): a `PerElement` reference whose Iterated dims
+/// are a strict SUBSET of the target's -- `mid[D1,D2] = pop[D1, young] *
+/// 0.05` (`D1` iterated, `Age` pinned, `D2` broadcast). One row feeds every
+/// target element it projects from, so the per-(row, FULL-target-element)
+/// scalars are `pop[{r},young]→mid[{r},{d2}]` -- the to-side subscript is
+/// always the complete element tuple (a partial to-subscript would resolve
+/// nowhere). The loop through the hoisted `SUM(mid[D1,*])` closes the
+/// feedback, so the scores must compile AND resolve into real loop values.
+#[test]
+fn per_element_broadcast_mixed_subscript_scores() {
+    let project = TestProject::new("per_element_broadcast_e2e")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("pop[D1,Age]", "100", &["inflow"], &[], None)
+        .array_aux_direct(
+            "mid",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1, young] * 0.05",
+            None,
+        )
+        .array_flow("inflow[D1,Age]", "1 + SUM(mid[D1, *]) * 0.001", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the broadcast PerElement fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile; got: {warnings:?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // One scalar per (row, full target element): the row (r, young)
+    // broadcast over D2. `pop[D1,young]` is each mid slot's only moving
+    // input, so every scalar is exactly +1 from the first post-initial
+    // step.
+    for r in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[{r},young]\u{2192}mid[{r},{d2}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            assert_eq!(series[0], 0.0, "initial-step guard pins {name} to 0");
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 1.0).abs() < 1e-9,
+                    "{name} step {step} must score +1; got {series:?}"
+                );
+            }
+        }
+    }
+    // No cross-row or unread-row scores exist.
+    let score_names = ltm_score_var_names(&results);
+    assert!(
+        !score_names
+            .iter()
+            .any(|n| n.contains("pop[a,young]\u{2192}mid[b")
+                || n.contains("pop[b,young]\u{2192}mid[a")
+                || n.contains("pop[a,old]\u{2192}mid")
+                || n.contains("pop[b,old]\u{2192}mid")),
+        "only the pinned-diagonal broadcast rows may carry scores; got: {score_names:?}"
+    );
+
+    // The loops through the PerElement hop + hoisted reducer are scored:
+    // finite everywhere, non-zero post-startup.
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !loop_vars.is_empty(),
+        "the broadcast PerElement loops must be scored; vars: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    let mut saw_nonzero = false;
+    for lv in &loop_vars {
         let base = offset_of(&results, &lv.name);
         for slot in 0..slot_count(lv, &project.dimensions) {
             let series = series_at(&results, base + slot);
@@ -4256,63 +5130,758 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
                 "loop score {} slot {slot} must stay finite; got {series:?}",
                 lv.name
             );
-        }
-        if lv.dimensions.is_empty()
-            && let datamodel::Equation::Scalar(text) = &lv.equation
-            && text.contains("pop\u{2192}row_sum")
-        {
-            phantom_count += 1;
-            // Each phantom is a 6-factor product in which the four
-            // growth->pop / pop->row_sum factors are ~1 and the two
-            // row_sum->growth factors are each ~0.4949 (row_sum supplies
-            // about half of delta-growth in this symmetric repro), so the
-            // phantom reads ~0.4949^2 ~= 0.245 -- a confident, sustained,
-            // completely non-causal loop score. FLIP NOTE: when GH #525's
-            // classifier fix lands these loops are no longer enumerated;
-            // delete this block and assert no scalar pop->row_sum loop
-            // score exists.
-            let series = series_at(&results, offset_of(&results, &lv.name));
-            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
-                assert!(
-                    (v - 0.245).abs() < 1e-3,
-                    "phantom cross-element loop {} step {step} must read the \
-                     documented ~0.245 composed-cross-edge value; got {series:?}",
-                    lv.name
-                );
-            }
-        }
-        if lv.dimensions == vec!["Region".to_string(), "Age".to_string()] {
-            let eqn_text = match &lv.equation {
-                datamodel::Equation::ApplyToAll(_, t) => t.clone(),
-                other => format!("{other:?}"),
-            };
-            if eqn_text.contains("row_sum") {
-                saw_row_sum_loop = true;
-                for slot in 0..slot_count(lv, &project.dimensions) {
-                    let series = series_at(&results, base + slot);
-                    assert!(
-                        series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
-                        "the same-element loop through row_sum must carry real values \
-                         ({}, slot {slot}); got {series:?}",
-                        lv.name
-                    );
-                }
-            }
+            saw_nonzero |= series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0);
         }
     }
     assert!(
-        saw_row_sum_loop,
-        "an A2A loop through row_sum must be enumerated; vars: {:?}",
+        saw_nonzero,
+        "at least one loop through the broadcast PerElement hop must carry \
+         real values"
+    );
+
+    // Cross-surface bijection (the #746-era invariant).
+    let scored_ids: std::collections::BTreeSet<String> = ltm
+        .vars
+        .iter()
+        .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+        .map(|id| id.to_string())
+        .collect();
+    let detected_ids: std::collections::BTreeSet<String> =
+        model_detected_loops(&db, source_model, sync.project)
+            .loops
+            .iter()
+            .map(|l| l.id.clone())
+            .collect();
+    assert_eq!(detected_ids, scored_ids);
+}
+
+/// GH #525 (T6, MIXED `Bare`+`PerElement` edge): `growth[R,A] = (pop[R,A] +
+/// pop[R,young]) * 0.0001` -- the same `(pop, growth)` edge carries a Bare
+/// site (the all-iterated `pop[R,A]`) AND a PerElement site
+/// (`pop[R,young]`). Pins the resolver precedence from the design's
+/// section 3: the edge emits BOTH the Bare A2A score and the per-(row,
+/// element) scalars; every circuit routes per-circuit (the edge has a
+/// PerElement shape), and a hop both sites produce -- the
+/// `pop[r,young] → growth[r,young]` diagonal -- resolves to the
+/// `PerElement` scalar (the exact element-in-name form wins before the
+/// Bare-A2A subscripting fallback), attributing only the literal
+/// reference's share to that hop; the `(r,old)` circuits' hops resolve to
+/// the subscripted Bare name.
+///
+/// Values: the two pops stay element-wise equal in this symmetric model,
+/// so every score is exactly 0.5 -- the Bare A2A partial holds `pop[R,A]`
+/// live with `pop[R,young]` frozen, and each PerElement scalar holds the
+/// literal reference live with the Bare occurrence frozen.
+#[test]
+fn mixed_bare_and_per_element_edge_resolver_precedence() {
+    // NOTE: dimension names must not canonicalize to an element name (a
+    // dim literally named `A` collides with element `a` of the other dim,
+    // making the bare-element subscript `pop[a, young]` ambiguous at
+    // dimension resolution) -- use Region/Age like the GH #525 repro.
+    let project = TestProject::new("mixed_bare_per_element")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_stock("pop[Region,Age]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[Region,Age]",
+            "(pop[Region,Age] + pop[Region,young]) * 0.0001",
+            None,
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the mixed Bare+PerElement fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile; got: {warnings:?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Both forms exist: the Bare A2A score (the Bare site's) AND the four
+    // per-(row, element) scalars (the PerElement site's).
+    let bare_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth";
+    let bare_var = ltm_var(&ltm.vars, bare_name);
+    assert_eq!(
+        bare_var.dimensions,
+        vec!["Region".to_string(), "Age".to_string()],
+        "the Bare site keeps its A2A score over the target's dims"
+    );
+    let bare_base = offset_of(&results, bare_name);
+    for slot in 0..4 {
+        let series = series_at(&results, bare_base + slot);
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-6,
+                "Bare A2A slot {slot} step {step} must score 0.5 (the \
+                 PerElement occurrence is frozen); got {series:?}"
+            );
+        }
+    }
+    for r in ["a", "b"] {
+        for a in ["young", "old"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[{r},young]\u{2192}growth[{r},{a}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-6,
+                    "{name} step {step} must score 0.5 (the Bare occurrence \
+                     is frozen); got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Every circuit is per-circuit scalar (the edge carries a PerElement
+    // shape): 4 scalar loops, no ApplyToAll collapse.
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_vars.len(),
+        4,
+        "one scalar loop per (Region, Age) circuit; got: {:?}",
+        loop_vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    let eqn_text = |v: &LtmSyntheticVar| -> String {
+        match &v.equation {
+            datamodel::Equation::Scalar(t) => t.clone(),
+            other => format!("{other:?}"),
+        }
+    };
+    // Resolver precedence: the (r,young) circuits' pop→growth hop resolves
+    // to the PerElement scalar; the (r,old) circuits' hop falls back to
+    // the subscripted Bare A2A name.
+    let young_loops: Vec<&&LtmSyntheticVar> = loop_vars
+        .iter()
+        .filter(|v| {
+            let t = eqn_text(v);
+            t.contains("pop[a,young]\u{2192}growth[a,young]")
+                || t.contains("pop[b,young]\u{2192}growth[b,young]")
+        })
+        .collect();
+    assert_eq!(
+        young_loops.len(),
+        2,
+        "the two (r,young) circuits resolve their hop to the PerElement \
+         scalar; loops: {:?}",
+        loop_vars
+            .iter()
+            .map(|v| (v.name.as_str(), eqn_text(v)))
+            .collect::<Vec<_>>()
+    );
+    let old_loops: Vec<&&LtmSyntheticVar> = loop_vars
+        .iter()
+        .filter(|v| {
+            let t = eqn_text(v);
+            t.contains(&format!("\"{bare_name}\"[a,old]"))
+                || t.contains(&format!("\"{bare_name}\"[b,old]"))
+        })
+        .collect();
+    assert_eq!(
+        old_loops.len(),
+        2,
+        "the two (r,old) circuits subscript the Bare A2A name; loops: {:?}",
+        loop_vars
+            .iter()
+            .map(|v| (v.name.as_str(), eqn_text(v)))
+            .collect::<Vec<_>>()
+    );
+
+    // Loop values: each circuit's product is link(0.5) x flow-to-stock(1).
+    for lv in &loop_vars {
+        let series = series_at(&results, offset_of(&results, &lv.name));
+        assert!(series.iter().all(|v| v.is_finite()));
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 0.5).abs() < 1e-6,
+                "loop {} step {step} must score 0.5; got {series:?}",
+                lv.name
+            );
+        }
+    }
+}
+
+/// GH #525 (T6, risk 2: the MIXED scalar-node-bearing branch): a cycle
+/// through a `PerElement` hop that also contains a SCALAR node
+/// (`total = SUM(row_sum[*])`) takes the loop builder's mixed branch, whose
+/// link builder must keep BOTH subscripts on the PerElement hop so the
+/// per-circuit loop score resolves the `pop[{r},{age}]→row_sum[{r}]`
+/// scalar -- a routing/emission disagreement here would reference a
+/// nonexistent name and silently stub the loop to 0.
+#[test]
+fn per_element_hop_in_mixed_scalar_cycle_scores() {
+    // Region/Age (not R/A) for the same canonical-name-collision reason as
+    // the mixed fixture above.
+    let project = TestProject::new("per_element_mixed_branch")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_stock("pop[Region,Age]", "100", &["growth"], &[], None)
+        .array_aux("row_sum[Region]", "pop[Region, young] + pop[Region, old]")
+        .scalar_aux("total", "SUM(row_sum[*])")
+        .array_flow("growth[Region,Age]", "total * 0.0001", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the mixed-branch fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile; got: {warnings:?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Every circuit contains the scalar `total` node, so each is a scalar
+    // mixed-branch loop whose pop→row_sum hop references the per-(row,
+    // element) scalar.
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_vars.len(),
+        4,
+        "one mixed-branch scalar loop per (Region, Age) circuit; got: {:?}",
+        loop_vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    let mut saw_per_element_ref = 0usize;
+    for lv in &loop_vars {
+        let text = match &lv.equation {
+            datamodel::Equation::Scalar(t) => t.clone(),
+            other => format!("{other:?}"),
+        };
+        assert!(
+            !text.contains("pop\u{2192}row_sum"),
+            "no loop may reference the retired Bare pop\u{2192}row_sum name: {text}"
+        );
+        if ["a", "b"]
+            .iter()
+            .flat_map(|r| ["young", "old"].iter().map(move |a| (r, a)))
+            .any(|(r, a)| text.contains(&format!("pop[{r},{a}]\u{2192}row_sum[{r}]")))
+        {
+            saw_per_element_ref += 1;
+        }
+        let series = series_at(&results, offset_of(&results, &lv.name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "loop score {} must stay finite; got {series:?}",
+            lv.name
+        );
+        assert!(
+            series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
+            "loop score {} must carry real non-zero values (a silent stub \
+             means the mixed branch dropped the PerElement subscripts); \
+             got {series:?}",
+            lv.name
+        );
+    }
+    assert_eq!(
+        saw_per_element_ref, 4,
+        "every mixed-branch circuit references its per-(row, element) scalar"
+    );
+}
+
+/// GH #769: a `FixedIndex` reference into a DISJOINT-dim **ApplyToAll**
+/// target (`hub[D2] = pop[a1] * 0.05`, `pop` over `D1`) is recoverable via
+/// the #510 per-element construction generalized to A2A targets: one
+/// `$⁚ltm⁚link_score⁚pop[a1]→hub` emitted as an `Equation::ApplyToAll`
+/// over the TARGET's dims holding `pop[a1]` live. Pre-#769 the edge was
+/// swept into the GH #758 loud skip (one Warning, no link-score variable,
+/// every loop through it dropped); now the loop is genuinely scored with
+/// zero warnings.
+#[test]
+fn gh769_fixed_index_into_disjoint_a2a_target_scores() {
+    let project = TestProject::new("gh769_disjoint_a2a")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a1", "a2"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("pop[D1]", "100", &["inflow"], &[], None)
+        .array_aux("hub[D2]", "pop[a1] * 0.05")
+        .scalar_aux("refill", "SUM(hub[*])")
+        .array_flow("inflow[D1]", "refill * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the GH #769 fixture must compile with LTM enabled");
+
+    // Zero warnings: the edge is no longer loud-skipped.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the FixedIndex-into-A2A edge is scoreable; no warning may fire: {warnings:?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // The per-element construction: `pop[a1]→hub` ApplyToAll over D2.
+    let score_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop[a1]\u{2192}hub";
+    let score_var = ltm_var(&ltm.vars, score_name);
+    assert_eq!(
+        score_var.dimensions,
+        vec!["D2".to_string()],
+        "the GH #769 score is an ApplyToAll over the TARGET's dims"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // `pop[a1]` is each hub slot's only input: +1 from step 1 per slot.
+    let base = offset_of(&results, score_name);
+    for slot in 0..2 {
+        let series = series_at(&results, base + slot);
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "pop[a1]→hub slot {slot} step {step} must score +1; got {series:?}"
+            );
+        }
+    }
+
+    // The loops through the edge are scored: finite, non-zero post-startup.
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !loop_vars.is_empty(),
+        "loops through the GH #769 edge must be scored; vars: {:?}",
         ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
-    // Four phantoms: the a<->b cross circuit instantiated at the 2x2 Age-slot
-    // pairings of its two row_sum->growth hops ({young,old} per region).
+    let mut saw_nonzero = false;
+    for lv in &loop_vars {
+        let series = series_at(&results, offset_of(&results, &lv.name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "loop score {} must stay finite; got {series:?}",
+            lv.name
+        );
+        saw_nonzero |= series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0);
+    }
+    assert!(saw_nonzero, "the GH #769 loop must carry real values");
+}
+
+/// GH #525 (T6, risk 4: the forced-DISCOVERY twin of the repro). The
+/// per-(row, full-target-element) names are a new producer of the
+/// element-in-name grammar on NON-reducer edges, so discovery's
+/// `parse_link_offsets` must resolve them symmetrically with the
+/// exhaustive surface (the #748/#698 lesson): the strongest-path search
+/// finds the real per-element circuits through row_sum and never invents a
+/// phantom cross-element pop→row_sum pathway.
+#[test]
+fn gh525_discovery_twin_parses_per_element_names() {
+    let project = TestProject::new("gh525_discovery_twin")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_aux("row_sum[Region]", "pop[Region, young] + pop[Region, old]")
+        .array_flow(
+            "growth[Region, Age]",
+            "row_sum[Region] * 0.0001 * pop[Region, Age]",
+            None,
+        )
+        .array_stock("pop[Region, Age]", "100", &["growth"], &[], None)
+        .build_datamodel();
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the GH #525 repro")
+    .loops;
+
+    // The four REAL same-element direct loops are found, with parseable
+    // (finite) scores -- the new per-(row, element) names did not corrupt
+    // the search graph.
     assert_eq!(
-        phantom_count,
+        found.len(),
         4,
-        "the conservative cross-product enumerates exactly four phantom \
-         cross-element loops in this repro (GH #525 residual); vars: {:?}",
+        "discovery must find exactly the four real same-element loops; got: {:?}",
+        found
+            .iter()
+            .map(|fl| (&fl.loop_info.id, &fl.loop_info.links))
+            .collect::<Vec<_>>()
+    );
+    for fl in &found {
+        // No phantom: a loop visiting row_sum[r] (or any node) must read it
+        // from the SAME region element -- the per-element link scores parse
+        // into the pinned diagonal, never a cross-element pathway.
+        for (i, link) in fl.loop_info.links.iter().enumerate() {
+            let to = link.to.as_str();
+            if let Some(r) = to
+                .strip_prefix("row_sum[")
+                .and_then(|rest| rest.strip_suffix("]"))
+            {
+                let from = link.from.as_str();
+                assert!(
+                    from.starts_with(&format!("pop[{r},")),
+                    "link {i} of {:?} reads row_sum[{r}] from {from} -- a \
+                     phantom cross-element hop",
+                    fl.loop_info.id
+                );
+            }
+        }
+        // The per-timestep scores parse and stay finite.
+        assert!(
+            fl.scores.iter().all(|(_, v)| v.is_finite()),
+            "discovered loop {} scores must stay finite",
+            fl.loop_info.id
+        );
+        // Same-element: every node in the loop carries one (region, age)
+        // pair (the direct pop/growth diagonals).
+        let elems: std::collections::BTreeSet<&str> = fl
+            .loop_info
+            .links
+            .iter()
+            .flat_map(|l| [l.from.as_str(), l.to.as_str()])
+            .filter_map(|n| n.split_once('[').map(|(_, rest)| rest))
+            .collect();
+        assert_eq!(
+            elems.len(),
+            1,
+            "discovered loop {} must be same-element (no phantom mixing); \
+             nodes: {:?}",
+            fl.loop_info.id,
+            fl.loop_info.links
+        );
+    }
+    // KNOWN discovery residual (pre-existing, NOT a T6 regression): the
+    // row_sum circuits themselves are not discoverable because the
+    // partial-collapse hop's A2A score (`row_sum→growth`, dimensioned over
+    // the TARGET's [Region, Age]) is expanded by `parse_link_offsets`'s
+    // `expand_a2a_link_offsets` into edges whose FROM node is subscripted
+    // over the score's dims (`row_sum[a,young]`) -- a node that does not
+    // exist for the 1-D `row_sum` -- so the search path dead-ends at
+    // `row_sum[r]`. Pre-T6 the same fixture dead-ended one hop earlier
+    // (`pop[a]`, an invented node for the 2-D `pop`), so T6 strictly
+    // extends the discoverable prefix; the residual is the
+    // partial-collapse expansion itself (the GH #716 family).
+}
+
+/// GH #525 (T6 review boundary pin, the ALIASED ThroughAgg routing): the
+/// same `(pop, out)` edge carries a HOISTED `SUM(pop[R,*])` site and a
+/// mixed-subscript site inside a DECLINED `MEAN(w[R,*] * pop[R,young])`
+/// (differing co-source slices, so the MEAN is not hoisted). Routing is
+/// per-edge (`in_reducer && routed_aggs`), so BOTH in_reducer sites route
+/// `ThroughAgg` through the SUM's agg -- the mixed site's `PerElement`
+/// shape has NO `Direct` site and must emit nothing of its own.
+///
+/// Exhaustive mode is BYTE-IDENTICAL to the T5 parent `ad6bdeb8` (probe
+/// evidence: identical var/diag dumps): the loop-link caller emits the
+/// agg-routed hop's scores via its agg branches and never reaches the
+/// per-shape pass for the edge, so no Bare-named `pop→out` score existed
+/// pre-T6 either -- the shape's arrival changes nothing here. DISCOVERY
+/// mode (causal-edge iteration, which DOES reach the per-shape pass) is
+/// the one real flip: pre-T6 the site's `DynamicIndex` spelling minted an
+/// extra Bare-named `pop→out` score alongside the agg halves -- a
+/// duplicate direct pathway for a hop the halves already carry; post-T6
+/// it is gone.
+#[test]
+fn aliased_through_agg_per_element_site_emits_only_agg_halves() {
+    let fixture = || {
+        TestProject::new("aliased_through_agg")
+            .with_sim_time(0.0, 8.0, 1.0)
+            .named_dimension("R", &["r1", "r2"])
+            .named_dimension("Age", &["young", "old"])
+            .array_stock("pop[R,Age]", "100", &["growth"], &[], None)
+            .array_aux_direct("w", vec!["R".into(), "Age".into()], "0.5", None)
+            .array_aux_direct(
+                "out",
+                vec!["R".into()],
+                "SUM(pop[R,*]) + MEAN(w[R,*] * pop[R,young])",
+                None,
+            )
+            .array_flow("growth[R,Age]", "out[R] * 0.0001", None)
+            .build_datamodel()
+    };
+
+    // Exhaustive surface: agg halves only, no Bare and no per-element
+    // pop→out names, zero warnings (byte-identical to the parent).
+    let project = fixture();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("the aliased-routing fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile; got: {warnings:?}"
+    );
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+    for r in ["r1", "r2"] {
+        for age in ["young", "old"] {
+            let half = format!(
+                "{LINK_SCORE_PREFIX}pop[{r},{age}]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0[{r}]"
+            );
+            assert!(
+                names.contains(&half.as_str()),
+                "the SUM agg's source half {half} must exist; got: {names:?}"
+            );
+        }
+    }
+    let assert_no_pop_out_scores = |names: &[&str], mode: &str| {
+        assert!(
+            !names
+                .iter()
+                .any(|n| *n == format!("{LINK_SCORE_PREFIX}pop\u{2192}out")),
+            "{mode}: no Bare-named pop\u{2192}out score may exist for the \
+             ThroughAgg-routed edge; got: {names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.starts_with(&format!("{LINK_SCORE_PREFIX}pop["))
+                    && n.contains("\u{2192}out")),
+            "{mode}: the ThroughAgg-routed PerElement site must not emit \
+             per-(row, element) scalars (only a Direct site does); got: {names:?}"
+        );
+    };
+    assert_no_pop_out_scores(&names, "exhaustive");
+
+    // Discovery surface: the agg halves still carry the hop and the
+    // pre-T6 duplicate Bare-named `pop→out` (which the parent emitted in
+    // this mode) is retired.
+    let project = fixture();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+    assert_no_pop_out_scores(&names, "discovery");
+    assert!(
+        names
+            .iter()
+            .any(|n| n.contains("\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0")),
+        "discovery still emits the agg source halves; got: {names:?}"
+    );
+}
+
+/// GH #525 (T6 review corner pin): a `PerElement` target body that also
+/// references ANOTHER arrayed dep by iterated subscript --
+/// `row_sum[Region] = pop[Region, young] * other[Region]`. The per-(row,
+/// element) equation must pin `other[Region]` to the target element
+/// (`subscript_idents_at_element`'s dimension-name pinning), and with the
+/// constant `other = 2` the score is exact: the live `pop[r,young]` term
+/// reproduces delta-row_sum, so every scalar reads +1.
+///
+/// Parent (`ad6bdeb8`) evidence: this fixture emitted the merged Bare
+/// `pop→row_sum` score and a phantom-bearing u1..u5 loop set; the names
+/// asserted here did not exist (the test fails there).
+#[test]
+fn per_element_body_with_iterated_other_dep_scores() {
+    let project = TestProject::new("per_element_other_dep")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_stock("pop[Region,Age]", "100", &["growth"], &[], None)
+        .array_aux_direct("other", vec!["Region".into()], "2", None)
+        .array_aux_direct(
+            "row_sum",
+            vec!["Region".into()],
+            "pop[Region, young] * other[Region]",
+            None,
+        )
+        .array_flow("growth[Region,Age]", "row_sum[Region] * 0.0001", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the other-dep fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name == format!("{LINK_SCORE_PREFIX}pop\u{2192}row_sum")),
+        "the merged Bare score must not exist; got: {:?}",
         ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    for r in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}pop[{r},young]\u{2192}row_sum[{r}]");
+        // The other dep is pinned to the element (qualified, so the frozen
+        // PREVIOUS compiles to a direct LoadPrev), not left as an
+        // unresolvable bare dimension index.
+        let var = ltm_var(&ltm.vars, &name);
+        let eqn = match &var.equation {
+            datamodel::Equation::Scalar(t) => t.clone(),
+            other => format!("{other:?}"),
+        };
+        assert!(
+            eqn.contains(&format!("other[region\u{B7}{r}]")),
+            "{name} must pin other[Region] to the target element; eqn: {eqn}"
+        );
+        let series = series_at(&results, offset_of(&results, &name));
+        assert_eq!(series[0], 0.0, "initial-step guard pins {name} to 0");
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "{name} step {step} must score +1 (other is constant, the \
+                 live pop term reproduces delta-row_sum); got {series:?}"
+            );
+        }
+    }
+    // The unread `old` rows have no scores.
+    let score_names = ltm_score_var_names(&results);
+    assert!(
+        !score_names
+            .iter()
+            .any(|n| n.contains("old]\u{2192}row_sum")),
+        "unread rows must carry no pop\u{2192}row_sum scores; got: {score_names:?}"
+    );
+    // Loops through the hop are scored with real values.
+    let mut saw_nonzero = false;
+    for lv in ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+    {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(series.iter().all(|v| v.is_finite()));
+            saw_nonzero |= series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0);
+        }
+    }
+    assert!(saw_nonzero, "loops through the per-element hop must score");
+}
+
+/// GH #525 (T6 review corner pin): a MAPPED `PerElement` reference --
+/// `mid[State] = pop[State, young] * 0.05` over `pop[Region, Age]` with a
+/// positional `State→Region` mapping -- exercises
+/// `per_element_row_for_target`'s `mapped_element_correspondence` arm: the
+/// row's Region element is the positional preimage of the target's State
+/// element (s1↔r1, s2↔r2), so the emitted names carry the SOURCE-dim row
+/// and the diagonal only.
+///
+/// Parent (`ad6bdeb8`) evidence: this fixture classified `DynamicIndex`
+/// and took the GH #758 loud skip -- NO `pop→mid` score of any form plus
+/// exactly one unscoreable-edge Warning -- so both the zero-warnings and
+/// the name assertions here fail there (verified in a temp worktree).
+#[test]
+fn mapped_per_element_subscript_scores_positional_diagonal() {
+    let project = TestProject::new("mapped_per_element")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("Age", &["young", "old"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_stock("pop[Region,Age]", "100", &["inflow"], &[], None)
+        .array_aux_direct(
+            "mid",
+            vec!["State".into()],
+            "pop[State, young] * 0.05",
+            None,
+        )
+        .scalar_aux("total", "SUM(mid[*])")
+        .array_flow("inflow[Region,Age]", "total * 0.0001", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the mapped PerElement fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the mapped PerElement edge is scoreable; no warning may fire \
+         (pre-T6 it took the GH #758 loud skip): {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // The positional diagonal, with the row carrying the SOURCE (Region)
+    // element: exactly these two names, scoring exactly +1 (pop[r,young]
+    // is each mid slot's only moving input).
+    for (s, r) in [("s1", "r1"), ("s2", "r2")] {
+        let name = format!("{LINK_SCORE_PREFIX}pop[{r},young]\u{2192}mid[{s}]");
+        let series = series_at(&results, offset_of(&results, &name));
+        assert_eq!(series[0], 0.0, "initial-step guard pins {name} to 0");
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "{name} step {step} must score +1; got {series:?}"
+            );
+        }
+    }
+    let score_names = ltm_score_var_names(&results);
+    assert!(
+        !score_names
+            .iter()
+            .any(|n| n.contains("pop[r1,young]\u{2192}mid[s2]")
+                || n.contains("pop[r2,young]\u{2192}mid[s1]")
+                || n.contains("old]\u{2192}mid")
+                || *n == format!("{LINK_SCORE_PREFIX}pop\u{2192}mid")),
+        "only the positional diagonal's young rows may carry scores; got: {score_names:?}"
+    );
+
+    // The loop through the mapped hop is scored with real values.
+    let mut saw_nonzero = false;
+    for lv in ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+    {
+        let series = series_at(&results, offset_of(&results, &lv.name));
+        assert!(series.iter().all(|v| v.is_finite()));
+        saw_nonzero |= series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0);
+    }
+    assert!(
+        saw_nonzero,
+        "loops through the mapped PerElement hop must carry real values"
     );
 }
 
@@ -4443,4 +6012,2150 @@ fn gh746_arrayed_cycle_detected_and_scored_ids_biject() {
             l.polarity
         );
     }
+}
+
+/// GH #766 (shape-expressiveness T1): an INLINE reducer over a *proper
+/// subdimension* StarRange (`x = 1 + MEAN(arr[*:Core])`, `Core = {a, b}` a
+/// proper subdimension of `arr`'s `Region = {a, b, c}`) hoists into a
+/// synthetic agg whose read slice carries the SUBSET, so:
+///
+/// - only the subset rows get `arr[<row>] → agg` link scores -- no
+///   `arr[c] → agg` score variable exists (pre-fix the full parent extent
+///   was enumerated, minting a spurious `arr[c]` score);
+/// - the MEAN divisor is the SUBSET size (2), not the parent extent (3):
+///   the two subset rows grow by identical per-step deltas, so each row's
+///   changed-first linear partial reads exactly `(Δrow/2) / Δagg = 0.5`
+///   (the pre-fix full-extent divisor read 1/3);
+/// - no feedback loop is enumerated through the unread `arr[c]` row
+///   (pre-fix the element graph routed `arr[c] → agg`, so the enumerator
+///   discovered a loop the reducer never closes).
+///
+/// The `c` row grows 5x faster than the subset rows, so the agg-value
+/// assertion also pins that the SIMULATION reduces over the subset only
+/// (the agg aux keeps the original `mean(arr[*:core])` equation text --
+/// the compiled simulation already evaluates the subset; only LTM's row
+/// enumeration was coarse).
+#[test]
+fn inline_subset_reducer_mean_divisor_and_scores() {
+    let project = TestProject::new("gh766_inline_subset")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_with_ranges("factor[Region]", vec![("a", "1"), ("b", "1"), ("c", "5")])
+        .scalar_aux("x", "1 + MEAN(arr[*:Core])")
+        .array_flow("inflow[Region]", "x * 0.1 * factor[Region]", None)
+        .array_stock("arr[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "subset reducer must compile with zero warnings; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Only the subset rows are scored into the agg.
+    for row in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}{agg}");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected subset-row link score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    let phantom = format!("{LINK_SCORE_PREFIX}arr[c]\u{2192}{agg}");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != phantom),
+        "the unread `arr[c]` row must get NO link score into the agg; got {phantom:?}"
+    );
+
+    // No enumerated loop traverses the unread `arr[c]` row.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v == "arr[c]"),
+            "no loop may run through the unread arr[c] row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // The agg value is the mean over the SUBSET only; `c` diverges from the
+    // subset rows after the first step, so a full-extent mean would differ.
+    let agg_series = series_at(&results, offset_of(&results, agg));
+    let arr_a = series_at(&results, offset_of(&results, "arr[a]"));
+    let arr_b = series_at(&results, offset_of(&results, "arr[b]"));
+    let arr_c = series_at(&results, offset_of(&results, "arr[c]"));
+    for step in 0..agg_series.len() {
+        let subset_mean = (arr_a[step] + arr_b[step]) / 2.0;
+        assert!(
+            (agg_series[step] - subset_mean).abs() < 1e-9,
+            "agg at step {step} must be the subset mean {subset_mean}; got {}",
+            agg_series[step]
+        );
+    }
+    assert!(
+        arr_c.last().unwrap() > arr_a.last().unwrap(),
+        "fixture sanity: the out-of-subset row must diverge from the subset rows"
+    );
+
+    // The MEAN divisor is the subset size: with Δarr[a] == Δarr[b] each
+    // subset row's link score is exactly (Δrow/2)/Δagg = 0.5 once PREVIOUS
+    // has one step of history. (The buggy full-extent divisor read 1/3.)
+    for row in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}{agg}");
+        let series = series_at(&results, offset_of(&results, &name));
+        assert_eq!(
+            series[0], 0.0,
+            "initial-step guard pins arr[{row}]→agg to 0"
+        );
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-9,
+                "arr[{row}]→agg at step {step} must score 0.5 (subset divisor); got {series:?}"
+            );
+        }
+    }
+
+    // The subset loops (arr[a]/arr[b] → agg → x → inflow → arr) carry real,
+    // finite, non-zero scores once the flow-to-stock startup guard clears.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !loop_vars.is_empty(),
+        "the subset feedback loops must be scored"
+    );
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
+                assert!(
+                    v.is_finite() && v != 0.0,
+                    "loop score {} slot {slot} step {step} must be finite and non-zero; \
+                     got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// GH #766 (composition, end-to-end): a subset StarRange composed with an
+/// iterated axis -- `out[D1] = 1 + SUM(matrix[D1, *:SubD2])` closed in a
+/// feedback loop -- compiles with zero warnings and scores. The synthetic
+/// agg is ARRAYED over `D1` (`read_slice = [Iterated(d1), Reduced{subset}]`,
+/// pinned by `star_range_subset_composes_with_iterated_axis`); this fixture
+/// pins the emission side:
+///
+/// - per-(row, slot) link scores exist ONLY for the subset rows of each
+///   slot (`matrix[a,x]→agg[a]`, never `matrix[a,z]→agg[a]`);
+/// - with the two subset rows of a slot changing by identical deltas, each
+///   row's SUM partial reads exactly (Δrow/Δslot) = 0.5;
+/// - no loop is enumerated through the unread `z` rows, and every emitted
+///   loop score is finite and non-zero once the startup guard clears.
+#[test]
+fn iterated_subset_reducer_loop_scores_end_to_end() {
+    let project = TestProject::new("gh766_iterated_subset")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y", "z"])
+        .named_dimension("SubD2", &["x", "y"])
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_aux_direct(
+            "out",
+            vec!["D1".into()],
+            "1 + SUM(matrix[D1, *:SubD2])",
+            None,
+        )
+        .array_flow("inflow[D1]", "out[D1]", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "iterated+subset reducer must compile with zero warnings; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Per-(row, slot) scores for the subset rows of each slot only.
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}{agg}[{d1}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected subset-row link score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+        let phantom = format!("{LINK_SCORE_PREFIX}matrix[{d1},z]\u{2192}{agg}[{d1}]");
+        assert!(
+            ltm.vars.iter().all(|v| v.name != phantom),
+            "the unread z row must get NO link score into the agg slot; got {phantom:?}"
+        );
+    }
+
+    // No enumerated loop traverses the unread z rows.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the subset loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v.contains(",z]")),
+            "no loop may run through an unread z row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // SUM over the 2-row subset with equal per-step deltas: each subset
+    // row's changed-first partial is exactly half the slot's change.
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}{agg}[{d1}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            assert_eq!(
+                series[0], 0.0,
+                "initial-step guard pins matrix[{d1},{d2}]→agg[{d1}] to 0"
+            );
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "matrix[{d1},{d2}]→agg[{d1}] at step {step} must score 0.5; got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Every emitted loop score is finite and non-zero post-startup.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the subset loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
+                assert!(
+                    v.is_finite() && v != 0.0,
+                    "loop score {} slot {slot} step {step} must be finite and non-zero; \
+                     got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GH #765 / shape-expressiveness T3: variable-backed reduce slices score by
+// their read slice (Pinned axes fixed, subset axes enumerated, unread rows
+// silent), and the one inexpressible residual degrades loudly.
+// ---------------------------------------------------------------------------
+
+/// GH #765 (the headline fixture): a variable-backed Pinned-mixed partial
+/// reduce in a feedback loop -- `outf[D1] = MEAN(cube[D1,x,*])` over
+/// `cube[D1,D2,D3]`, closed through a `D1` stock. The per-result-row read
+/// slice is `{cube[d1,x,p], cube[d1,x,q]}` -- 2 cells -- so:
+///
+/// - the MEAN divisor is 2, not the full-cartesian 4: with both read rows
+///   changing by identical deltas each row's link score reads exactly 0.5
+///   (the pre-fix full-cartesian co-reduced slice read 0.25 -- the silent
+///   wrong-divisor value this fixture's 0.5 assertion guards, which is also
+///   the design's atomicity guard: deleting the gate's Pinned exclusion
+///   without the `read_slice_rows` derivation swap re-fires it);
+/// - the unread `cube[*,y,*]` rows get NO link score (pre-fix they got
+///   delta-ratio garbage of constant +1) and no enumerated loop traverses
+///   them (pre-fix: 16 warned 0-stub loop scores through the cross-product
+///   edges, plus one silently-wrong 0.25 loop);
+/// - zero assembly warnings: every emitted fragment compiles, the loud
+///   conservative regime this shape used to ride is gone.
+#[test]
+fn pinned_mixed_reduce_divisor_and_scores() {
+    let project = TestProject::new("gh765_pinned_mixed")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_aux_direct("outf", vec!["D1".into()], "MEAN(cube[D1, x, *])", None)
+        .array_flow("inflow[D1]", "outf[D1]", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the Pinned-mixed variable-backed reduce must compile with zero \
+         warnings; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    // Read rows only: the x slab of each D1 row gets a per-(row, slot)
+    // score; the y slab gets nothing.
+    for d1 in ["a", "b"] {
+        for d3 in ["p", "q"] {
+            let name = format!("{LINK_SCORE_PREFIX}cube[{d1},x,{d3}]\u{2192}outf[{d1}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected read-row link score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+            let phantom = format!("{LINK_SCORE_PREFIX}cube[{d1},y,{d3}]\u{2192}outf[{d1}]");
+            assert!(
+                ltm.vars.iter().all(|v| v.name != phantom),
+                "the unread y row must get NO link score; got {phantom:?}"
+            );
+        }
+    }
+
+    // No enumerated loop traverses an unread y row.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the read-row loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v.contains(",y,")),
+            "no loop may run through an unread y row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // MEAN over the 2-cell read slice with equal per-step deltas: each read
+    // row's changed-first partial is exactly (Δrow/2)/Δoutf = 0.5. The
+    // pre-fix full-cartesian divisor read 0.25.
+    for d1 in ["a", "b"] {
+        for d3 in ["p", "q"] {
+            let name = format!("{LINK_SCORE_PREFIX}cube[{d1},x,{d3}]\u{2192}outf[{d1}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            assert_eq!(series[0], 0.0, "initial-step guard pins {name} to 0");
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step} must score 0.5 (read-slice divisor 2, \
+                     not the full-cartesian 4 => 0.25); got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Each per-circuit loop score is the product 1 * 0.5 * 1 * 1 = 0.5 once
+    // the flow-to-stock startup guard clears.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the read-row loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "loop score {} slot {slot} step {step} must read 0.5; got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// GH #766 x T3: a VARIABLE-BACKED subset partial reduce in a feedback loop
+/// -- `out[D1] = MEAN(matrix[D1,*:SubD2])` as the whole RHS (the inline
+/// sibling is covered by `iterated_subset_reducer_loop_scores_end_to_end`;
+/// this shape was excluded from the variable-backed gate until T3). The
+/// per-slot read slice is the 2-element subset, so each subset row scores
+/// (Δrow/2)/Δout = 0.5, the unread `z` rows get no score and no loop, and
+/// the model compiles with zero warnings.
+#[test]
+fn variable_backed_subset_reduce_divisor_and_scores() {
+    let project = TestProject::new("gh766_vb_subset")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y", "z"])
+        .named_dimension("SubD2", &["x", "y"])
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_aux_direct("out", vec!["D1".into()], "MEAN(matrix[D1, *:SubD2])", None)
+        .array_flow("inflow[D1]", "out[D1]", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the subset variable-backed reduce must compile with zero warnings; \
+         got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}out[{d1}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected subset-row link score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+        let phantom = format!("{LINK_SCORE_PREFIX}matrix[{d1},z]\u{2192}out[{d1}]");
+        assert!(
+            ltm.vars.iter().all(|v| v.name != phantom),
+            "the unread z row must get NO link score; got {phantom:?}"
+        );
+    }
+
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the subset loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v.contains(",z]")),
+            "no loop may run through an unread z row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}out[{d1}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step} must score 0.5 (subset divisor); got {series:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Shape-expressiveness section 6 (scalar owner, Pinned slice):
+/// `total = SUM(pop[nyc,*])` in a feedback loop. The gate admits the
+/// scalar-result slice for a SCALAR owner -- the slot is the bare `total`
+/// node -- so element edges and link scores both cover exactly the read
+/// rows (`pop[nyc,*]`), and they match:
+///
+/// - `pop[nyc,p]→total` / `pop[nyc,q]→total` exist and read 0.5 (equal
+///   deltas, Δtotal twice each row's delta);
+/// - the unread `pop[boston,*]` rows get NO score (pre-T3 the
+///   full-cartesian derivation emitted nonzero garbage for them) and no
+///   loop runs through boston at all -- crucially no warned-phantom
+///   circuit through unread rows;
+/// - zero assembly warnings.
+#[test]
+fn scalar_owner_pinned_slice_reduce_scores_read_rows_only() {
+    let project = TestProject::new("t3_scalar_owner_pinned")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .scalar_aux("total", "SUM(pop[nyc, *])")
+        .array_flow("inflow[Region]", "total * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the scalar-owner pinned slice must compile with zero warnings; \
+         got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    for d2 in ["p", "q"] {
+        let name = format!("{LINK_SCORE_PREFIX}pop[nyc,{d2}]\u{2192}total");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected read-row link score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+        let phantom = format!("{LINK_SCORE_PREFIX}pop[boston,{d2}]\u{2192}total");
+        assert!(
+            ltm.vars.iter().all(|v| v.name != phantom),
+            "the unread boston row must get NO link score; got {phantom:?}"
+        );
+    }
+
+    // No loop traverses boston at all: the only edges into `total` come from
+    // the nyc rows, so boston's stock cannot close a circuit.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the read-row loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v.contains("boston")),
+            "no loop may run through the unread boston rows; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    for d2 in ["p", "q"] {
+        let name = format!("{LINK_SCORE_PREFIX}pop[nyc,{d2}]\u{2192}total");
+        let series = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-9,
+                "{name} at step {step} must score 0.5; got {series:?}"
+            );
+        }
+    }
+
+    // Per-circuit loop scores: 1 * 0.5 * 1 * 1 = 0.5 post-startup.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the read-row loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "loop score {} slot {slot} step {step} must read 0.5; got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// Shape-expressiveness section 6 (scalar owner, subset slice):
+/// `total = SUM(arr[*:Core])` in a feedback loop, `Core = {a, b}` a proper
+/// subdimension of `Region = {a, b, c}`. The scalar-result subset slice is
+/// admitted for the scalar owner, so only the subset rows get element edges
+/// and link scores (each 0.5 with equal subset deltas), `arr[c]` gets
+/// neither a score nor a loop, and the model compiles with zero warnings.
+#[test]
+fn scalar_owner_subset_slice_reduce_scores_read_rows_only() {
+    let project = TestProject::new("t3_scalar_owner_subset")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_with_ranges("factor[Region]", vec![("a", "1"), ("b", "1"), ("c", "5")])
+        .scalar_aux("total", "SUM(arr[*:Core])")
+        .array_flow("inflow[Region]", "total * 0.001 * factor[Region]", None)
+        .array_stock("arr[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the scalar-owner subset slice must compile with zero warnings; \
+         got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    for row in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}total");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected subset-row link score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    let phantom = format!("{LINK_SCORE_PREFIX}arr[c]\u{2192}total");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != phantom),
+        "the unread arr[c] row must get NO link score; got {phantom:?}"
+    );
+
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the subset loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v == "arr[c]"),
+            "no loop may run through the unread arr[c] row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    for row in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}total");
+        let series = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-9,
+                "{name} at step {step} must score 0.5 (subset divisor); got {series:?}"
+            );
+        }
+    }
+}
+
+/// Shape-expressiveness section 6 (the DECLINED residual): an ARRAYED-owner
+/// Pinned/subset broadcast slice -- `share[Region] = SUM(pop[nyc,*])`, a
+/// scalar-result slice broadcast over the owner's dims -- degrades to the
+/// GH #758 loud skip: exactly one Warning naming the `pop -> share` edge,
+/// NO `pop→share` link-score variable of any shape, and NO loop scores
+/// (every feedback loop here traverses the declined edge).
+///
+/// Pre-T3 this shape was SILENTLY WRONG (the unfiled GH #765 sibling),
+/// emitting full-cartesian per-(row, slot) garbage: `pop[boston,*]→
+/// share[boston]` scores read a constant delta-ratio +1.0 even though
+/// `share[boston] = SUM(pop[nyc,*])` does not read `pop[boston,*]` at all,
+/// the true `pop[nyc,*]→share[boston]` dependency had no score, and the
+/// `pop[nyc,*]→share[nyc]` partials (0.5) fed loop scores alongside 5
+/// warned 0-stub loops. (The full broadcast fan-out is T6's PerElement rule
+/// applied to variable-backed owners -- a tracked follow-up, not T3.)
+#[test]
+fn arrayed_owner_broadcast_pinned_slice_reduce_skips_loudly() {
+    let project = TestProject::new("t3_broadcast_decline")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("share", vec!["Region".into()], "SUM(pop[nyc, *])", None)
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // Exactly one Warning, naming the declined edge.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the declined broadcast slice must surface exactly one Warning; got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        panic!("expected an Assembly warning; got: {:?}", warnings[0]);
+    };
+    assert!(
+        msg.contains("pop") && msg.contains("share"),
+        "the Warning must name the declined edge; got: {msg}"
+    );
+
+    // No pop→share link-score variable of any shape, and no loop scores at
+    // all (every loop traverses the declined edge).
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let garbage: Vec<&str> = ltm
+        .vars
+        .iter()
+        .filter(|v| {
+            v.name.starts_with(LINK_SCORE_PREFIX)
+                && v.name.contains("pop")
+                && v.name.contains("share")
+        })
+        .map(|v| v.name.as_str())
+        .collect();
+    assert!(
+        garbage.is_empty(),
+        "the declined edge must emit NO link-score variable (pre-T3 it \
+         emitted full-cartesian garbage); got: {garbage:?}"
+    );
+    let loop_scores: Vec<&str> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .map(|v| v.name.as_str())
+        .collect();
+    assert!(
+        loop_scores.is_empty(),
+        "every loop traverses the declined edge, so no loop score may be \
+         emitted; got: {loop_scores:?}"
+    );
+
+    // The model itself still simulates fine -- the decline is an LTM
+    // analysis degradation, not a model error.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+}
+
+/// T3 golden pin (the design's "explicit golden assertion"): the ALIGNED
+/// variable-backed partial reduce (`inflow[D1] = SUM(matrix[D1,*])` in a
+/// loop) keeps byte-identical per-(row, slot) link-score emissions across
+/// the `read_slice_rows` derivation swap -- for an all-Iterated/full-extent
+/// slice the read rows ARE the cartesian rows, in the same row-major order
+/// with the same co-reduced grouping, so nothing about the emitted names or
+/// equation text may change.
+#[test]
+fn aligned_partial_reduce_emissions_stay_byte_identical() {
+    let project = TestProject::new("t3_aligned_golden")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_flow("inflow[D1]", "SUM(matrix[D1, *])", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    // All four read rows, in row-major order, each a scalar var.
+    let expected_names = [
+        format!("{LINK_SCORE_PREFIX}matrix[a,x]\u{2192}inflow[a]"),
+        format!("{LINK_SCORE_PREFIX}matrix[a,y]\u{2192}inflow[a]"),
+        format!("{LINK_SCORE_PREFIX}matrix[b,x]\u{2192}inflow[b]"),
+        format!("{LINK_SCORE_PREFIX}matrix[b,y]\u{2192}inflow[b]"),
+    ];
+    let emitted: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LINK_SCORE_PREFIX) && v.name.contains("matrix["))
+        .collect();
+    assert_eq!(
+        emitted.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+        expected_names
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>(),
+        "aligned per-(row, slot) names (and their order) must not change"
+    );
+
+    // The exact equation text of the first row's score, captured at the T3
+    // parent commit. Byte-identity here is the regression guard for the
+    // derivation swap on already-correct shapes.
+    let golden = "if (TIME = INITIAL_TIME) then 0 else if ((inflow[d1\u{B7}a] - \
+                  PREVIOUS(inflow[d1\u{B7}a])) = 0) OR ((matrix[d1\u{B7}a,d2\u{B7}x] - \
+                  PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x])) = 0) then 0 else \
+                  SAFEDIV((PREVIOUS(inflow[d1\u{B7}a]) + (matrix[d1\u{B7}a,d2\u{B7}x] - \
+                  PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x])) - PREVIOUS(inflow[d1\u{B7}a])), \
+                  ABS((inflow[d1\u{B7}a] - PREVIOUS(inflow[d1\u{B7}a]))), 0) * \
+                  SIGN((matrix[d1\u{B7}a,d2\u{B7}x] - PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x])))";
+    match &emitted[0].equation {
+        datamodel::Equation::Scalar(text) => assert_eq!(
+            text, golden,
+            "the aligned per-(row, slot) equation text must stay byte-identical"
+        ),
+        other => panic!("aligned per-(row, slot) score must be scalar; got {other:?}"),
+    }
+}
+
+/// T3 review follow-up pin (the corrected dispatch-widening justification):
+/// the OWN-dimension mixed StarRange family -- `out[D1] = SUM(matrix[D1,
+/// *:D2])` where `*:D2` names the axis's own (full) dimension, closed in a
+/// feedback loop. `classify_axis_access` resolves `*:D2` to
+/// `Reduced{subset: None}` (full extent, no bare `*`), so the slice is
+/// `[Iterated(d1), Reduced{None}]` and the variable-backed gate accepted it
+/// even PRE-T3 -- but `classify_subscript_shape` says `DynamicIndex` (a
+/// mixed iterated+StarRange subscript, the documented partial-StarRange
+/// classifier residual), and the element-graph dispatch's old
+/// `Wildcard`-only shape condition refused to route it while the loop
+/// builder's routing consults only the gate. Pre-T3 that family was
+/// therefore internally inconsistent: conservative CROSS-PRODUCT element
+/// edges feeding per-circuit loop routing -- 4 phantom warned 0-stub loops
+/// alongside the 4 real ones. The T3 `Wildcard | DynamicIndex` widening
+/// makes the dispatch consistent with the gate, so the family now gets
+/// first-class read-slice treatment:
+///
+/// - diagonal element edges only (`matrix[a,*] → out[a]`, never
+///   `matrix[a,*] → out[b]`);
+/// - per-(row, slot) scores for the diagonal only, each (Δrow/Δslot) = 0.5
+///   with the two rows of a slot changing by identical deltas;
+/// - exactly the 4 real loops, no phantoms, ZERO assembly warnings.
+#[test]
+fn own_dim_star_range_mixed_reduce_scores_read_slice() {
+    let project = TestProject::new("t3_own_dim_star_range")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_aux_direct("out", vec!["D1".into()], "SUM(matrix[D1, *:D2])", None)
+        .array_flow("inflow[D1]", "out[D1]", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the own-dim StarRange mixed reduce must compile with zero warnings \
+         (pre-T3: phantom cross-product loop scores fail-warned); got: {warnings:?}"
+    );
+
+    // Diagonal element edges only.
+    let edges = model_element_causal_edges(&db, sync.models["main"].source_model, sync.project);
+    let has_edge = |f: &str, t: &str| edges.edges.get(f).is_some_and(|ts| ts.contains(t));
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            assert!(
+                has_edge(&format!("matrix[{d1},{d2}]"), &format!("out[{d1}]")),
+                "expected diagonal edge matrix[{d1},{d2}] -> out[{d1}]; edges: {:?}",
+                edges.edges
+            );
+        }
+    }
+    assert!(
+        !has_edge("matrix[a,x]", "out[b]") && !has_edge("matrix[b,x]", "out[a]"),
+        "no cross-product edges may survive the read-slice routing; edges: {:?}",
+        edges.edges
+    );
+
+    // Per-(row, slot) scores for the diagonal only.
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}out[{d1}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected read-row link score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+        let other = if d1 == "a" { "b" } else { "a" };
+        for d2 in ["x", "y"] {
+            let phantom = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}out[{other}]");
+            assert!(
+                ltm.vars.iter().all(|v| v.name != phantom),
+                "no off-diagonal score may be emitted; got {phantom:?}"
+            );
+        }
+    }
+
+    // Exactly the 4 real same-element circuits, no phantoms.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert_eq!(
+        detected.loops.len(),
+        4,
+        "exactly the 4 read-row circuits (pre-T3: 4 real + 4 phantom); got: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
+    );
+    for l in &detected.loops {
+        let elems: Vec<&str> = l
+            .variables
+            .iter()
+            .filter_map(|v| {
+                let start = v.find('[')?;
+                Some(&v[start + 1..start + 2])
+            })
+            .collect();
+        assert!(
+            elems.windows(2).all(|w| w[0] == w[1]),
+            "every loop must stay on one D1 element; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // SUM over the 2-row full extent with equal per-step deltas: 0.5/row.
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}out[{d1}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step} must score 0.5; got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Each per-circuit loop score reads 1 * 0.5 * 1 * 1 = 0.5 post-startup.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the read-row loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "loop score {} slot {slot} step {step} must read 0.5; got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// T3 review follow-up pin (intended in-scope churn, previously unfixtured):
+/// the ALL-Pinned scalar-owner slice -- `total = SUM(pop[nyc,p])` in a
+/// feedback loop. The slice `[Pinned(nyc), Pinned(p)]` is non-trivial with
+/// no `Iterated` axis on a scalar owner, so the gate admits it and the
+/// read-slice derivation enumerates exactly ONE read row:
+///
+/// - only the true `pop[nyc,p]→total` link score is emitted, reading +1
+///   (`total` IS `pop[nyc,p]`, so the changed-first partial is exact);
+///   pre-T3 the full-cartesian derivation emitted 4 scores -- the 3 unread
+///   rows' constant delta-ratio +1.0 garbage alongside the true one;
+/// - the single real loop (through `pop[nyc,p]`) scores +1 post-startup,
+///   and no loop traverses an unread row;
+/// - zero assembly warnings.
+///
+/// (The element edges were already correct pre-T3 -- the reference site
+/// classifies `FixedIndex`, whose routing emits only the pinned row -- so
+/// this flip is purely the score side catching up to the edges.)
+#[test]
+fn scalar_owner_all_pinned_slice_reduce_scores_single_row() {
+    let project = TestProject::new("t3_all_pinned_scalar_owner")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .scalar_aux("total", "SUM(pop[nyc, p])")
+        .array_flow("inflow[Region]", "total * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the all-Pinned scalar-owner slice must compile with zero warnings; \
+         got: {warnings:?}"
+    );
+
+    // Only the single true score; none of the pre-T3 garbage names.
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let true_score = format!("{LINK_SCORE_PREFIX}pop[nyc,p]\u{2192}total");
+    assert!(
+        ltm.vars.iter().any(|v| v.name == true_score),
+        "expected the single read-row link score {true_score:?}; have: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    for unread in ["nyc,q", "boston,p", "boston,q"] {
+        let phantom = format!("{LINK_SCORE_PREFIX}pop[{unread}]\u{2192}total");
+        assert!(
+            ltm.vars.iter().all(|v| v.name != phantom),
+            "the unread pop[{unread}] row must get NO link score (pre-T3 it \
+             read constant +1.0 garbage); got {phantom:?}"
+        );
+    }
+
+    // The single real loop; nothing through unread rows.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert_eq!(
+        detected.loops.len(),
+        1,
+        "exactly one circuit (stock[nyc] -> pop[nyc,p] -> total -> \
+         inflow[nyc] -> stock[nyc]); got: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
+    );
+    for l in &detected.loops {
+        assert!(
+            !l.variables
+                .iter()
+                .any(|v| v.contains("boston") || v.contains(",q")),
+            "no loop may run through an unread row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // `total` IS `pop[nyc,p]`: the changed-first partial reads exactly +1.
+    let series = series_at(&results, offset_of(&results, &true_score));
+    assert_eq!(series[0], 0.0, "initial-step guard pins {true_score} to 0");
+    for (step, &v) in series.iter().enumerate().skip(1) {
+        assert!(
+            (v - 1.0).abs() < 1e-9,
+            "{true_score} at step {step} must score +1; got {series:?}"
+        );
+    }
+
+    // The lone loop score is the product 1 * 1 * 1 * 1 = +1 post-startup.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(loop_vars.len(), 1, "exactly one loop score variable");
+    let base = offset_of(&results, &loop_vars[0].name);
+    let series = series_at(&results, base);
+    for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+        assert!(
+            (v - 1.0).abs() < 1e-9,
+            "loop score {} step {step} must read +1; got {series:?}",
+            loop_vars[0].name
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GH #764 (shape-expressiveness T4): non-aligned variable-backed reduces --
+// result dims a BROADCAST (strict subset of the owner's dims) or a
+// PERMUTATION (different order) of the owner's dims -- mint SYNTHETIC aggs
+// (the GH #534 carve-out generalized) instead of keeping the conservative
+// cross-product with no matching scores.
+// ---------------------------------------------------------------------------
+
+/// GH #764, the BROADCAST shape end-to-end: `out[D1,D3] = SUM(matrix[D1,*])`
+/// (the reducer's result axis `D1` a strict subset of the owner's
+/// `[D1,D3]`) closed in a feedback loop. Pre-T4 the `matrix -> out` edge
+/// took the GH #758 loud conservative skip (its endpoint dims `[D1,D2]` vs
+/// `[D1,D3]` do not correspond): exactly one Assembly Warning, NO
+/// `matrix -> out` link score of any shape, and ZERO loop scores -- every
+/// loop through the edge was dropped. Post-T4 the whole-RHS reducer mints a
+/// synthetic agg arrayed over `[D1]`; the source half scores each read row
+/// per slot and the agg half broadcasts over `D3` via the GH #528
+/// projection, so the loops are genuinely scored.
+#[test]
+fn whole_rhs_broadcast_reduce_loop_scores_finite_and_sustained() {
+    let project = TestProject::new("t4_broadcast_loop")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        // The whole RHS is the broadcast partial reduce: result dims [D1],
+        // owner dims [D1,D3].
+        .array_aux_direct(
+            "out",
+            vec!["D1".into(), "D3".into()],
+            "SUM(matrix[D1, *])",
+            None,
+        )
+        // Closes the loop through the ALIGNED variable-backed reduce family
+        // (well-tested by `variable_backed_partial_reduce_loop_scores_*`).
+        .array_flow("inflow[D1]", "SUM(out[D1, *])", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // Zero warnings: pre-T4 this fixture surfaced exactly one GH #758
+    // "dimensions do not correspond" Warning on matrix -> out and dropped
+    // every loop.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the broadcast whole-RHS reduce must compile every LTM fragment cleanly; \
+         got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The synthetic agg aux is arrayed over the reducer's result dims [D1].
+    let agg_var = ltm_var(&ltm.vars, agg_name);
+    assert_eq!(
+        agg_var.dimensions,
+        vec!["D1".to_string()],
+        "the minted synthetic agg must be arrayed over the reducer's result dims"
+    );
+
+    // Source half: one per-(row, slot) score per read row.
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}{agg_name}[{d1}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected the source-half score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    // Agg half: the GH #528 projection broadcasts the [D1] slot over D3.
+    for (d1, d3) in [("a", "p"), ("a", "q"), ("b", "p"), ("b", "q")] {
+        let name = format!("{LINK_SCORE_PREFIX}{agg_name}[{d1}]\u{2192}out[{d1},{d3}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected the agg-half score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // Per-row attribution: the two co-reduced rows of each slot change by
+    // identical deltas (`matrix[d1,*] = stock[d1] * 0.1`), so each row's
+    // changed-first partial reads exactly 0.5.
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}{agg_name}[{d1}]");
+        let s = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-9,
+                "{name} at step {step}: expected 0.5 (two equal-delta co-reduced rows); \
+                 got {s:?}"
+            );
+        }
+    }
+    // Slot attribution: `out` IS the agg's value, so every agg-half score
+    // reads exactly 1 past the initial step.
+    for (d1, d3) in [("a", "p"), ("a", "q"), ("b", "p"), ("b", "q")] {
+        let name = format!("{LINK_SCORE_PREFIX}{agg_name}[{d1}]\u{2192}out[{d1},{d3}]");
+        let s = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "{name} at step {step}: expected exactly 1 (out IS the agg); got {s:?}"
+            );
+        }
+    }
+
+    // Exactly the 8 real loops (per (d1, d2, d3): stock[d1] -> matrix[d1,d2]
+    // -> agg[d1] -> out[d1,d3] -> inflow[d1] -> stock[d1]), every one
+    // routing through the agg, finite everywhere, and sustained non-zero.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        8,
+        "expected one loop per (d1, d2, d3) combination; got: {loop_names:?}"
+    );
+    for name in &loop_names {
+        let var = ltm_var(&ltm.vars, name);
+        assert!(
+            var.equation.source_text().contains(agg_name),
+            "every loop in this model routes through the synthetic agg; {name} does not: {}",
+            var.equation.source_text()
+        );
+        let base = offset_of(&results, name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let s = series_at(&results, base + slot);
+            for (step, &v) in s.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "loop score {name} slot {slot} at step {step} is not finite: {v}"
+                );
+            }
+            assert!(
+                s.iter()
+                    .skip(STARTUP_STEPS)
+                    .all(|v| v.abs() > MEANINGFUL_SCORE),
+                "loop score {name} slot {slot} must be sustained non-zero past the \
+                 startup guard; got: {s:?}"
+            );
+        }
+    }
+}
+
+/// GH #764, the PERMUTED shape end-to-end: `out[D2,D1] = SUM(cube[D1,D2,*])`
+/// (result dims `[D1,D2]` in slice order, the owner declared `[D2,D1]`)
+/// closed in a feedback loop. Pre-T4 the variable-backed gate declined the
+/// permutation but the OLD cartesian derivation still emitted per-(row,
+/// slot) scores while the element graph kept the conservative
+/// cross-product, so the phantom cross-product circuits referenced missing
+/// names: 184 "failed to compile" warned 0-stub loop scores alongside the
+/// real ones. Post-T4 the synthetic agg's slots are keyed by `result_dims`
+/// order and the GH #528 projection reorders per target element: exactly
+/// the real loops, zero warnings.
+#[test]
+fn whole_rhs_permuted_reduce_loop_scores_finite_and_sustained() {
+    let project = TestProject::new("t4_permuted_loop")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            "stock[D1,D2] * 0.1",
+            None,
+        )
+        // The whole RHS is the permuted partial reduce: result dims [D1,D2]
+        // (slice order), owner dims [D2,D1].
+        .array_aux_direct(
+            "out",
+            vec!["D2".into(), "D1".into()],
+            "SUM(cube[D1, D2, *])",
+            None,
+        )
+        .array_flow("inflow[D1,D2]", "out[D2, D1] * 0.5", None)
+        .array_stock("stock[D1,D2]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the permuted whole-RHS reduce must compile every LTM fragment cleanly \
+         (pre-T4: 184 warned 0-stub phantom loop scores); got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm_var(&ltm.vars, agg_name);
+    assert_eq!(
+        agg_var.dimensions,
+        vec!["D1".to_string(), "D2".to_string()],
+        "the synthetic agg's slots are keyed by result_dims (slice) order"
+    );
+
+    // Slot attribution under permutation: the agg side of the agg-half name
+    // carries the target element PROJECTED onto result_dims order --
+    // `agg[a,x] -> out[x,a]`, never the un-permuted `agg[x,a] -> out[x,a]`.
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let correct = format!("{LINK_SCORE_PREFIX}{agg_name}[{d1},{d2}]\u{2192}out[{d2},{d1}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == correct),
+            "expected the permuted agg-half score {correct:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+        let wrong = format!("{LINK_SCORE_PREFIX}{agg_name}[{d2},{d1}]\u{2192}out[{d2},{d1}]");
+        assert!(
+            !ltm.vars.iter().any(|v| v.name == wrong),
+            "the agg slot must be the result_dims-ordered projection; found mis-ordered \
+             {wrong:?}"
+        );
+    }
+    // Source half: one score per read row, slot in result_dims order.
+    for (d1, d2, d3) in [
+        ("a", "x", "p"),
+        ("a", "x", "q"),
+        ("a", "y", "p"),
+        ("a", "y", "q"),
+        ("b", "x", "p"),
+        ("b", "x", "q"),
+        ("b", "y", "p"),
+        ("b", "y", "q"),
+    ] {
+        let name = format!("{LINK_SCORE_PREFIX}cube[{d1},{d2},{d3}]\u{2192}{agg_name}[{d1},{d2}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected the source-half score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // Exactly the 8 real loops (per (d1, d2, d3): stock[d1,d2] ->
+    // cube[d1,d2,d3] -> agg[d1,d2] -> out[d2,d1] -> inflow[d1,d2] ->
+    // stock[d1,d2]); finite and sustained.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        8,
+        "expected one loop per (d1, d2, d3) combination; got: {loop_names:?}"
+    );
+    for name in &loop_names {
+        let var = ltm_var(&ltm.vars, name);
+        assert!(
+            var.equation.source_text().contains(agg_name),
+            "every loop in this model routes through the synthetic agg; {name} does not: {}",
+            var.equation.source_text()
+        );
+        let base = offset_of(&results, name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let s = series_at(&results, base + slot);
+            for (step, &v) in s.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "loop score {name} slot {slot} at step {step} is not finite: {v}"
+                );
+            }
+            assert!(
+                s.iter()
+                    .skip(STARTUP_STEPS)
+                    .all(|v| v.abs() > MEANINGFUL_SCORE),
+                "loop score {name} slot {slot} must be sustained non-zero past the \
+                 startup guard; got: {s:?}"
+            );
+        }
+    }
+}
+
+/// GH #764 ∩ GH #765 (the T3-report intersection): a non-aligned whole-RHS
+/// reduce that ALSO carries a Pinned axis -- `out[D1,D2] =
+/// SUM(cube[D1,nyc,*])` over `cube[D1,Region,D2]`, closed in a loop.
+/// Pre-T4 this shape rode the OLD full-cartesian link-score derivation
+/// byte-identically: it emitted per-(row, slot) scores for EVERY cube row
+/// including the unread `boston` rows (`cube[a,boston,x]→out[a,x]` read
+/// constant garbage), while the conservative cross-product element edges
+/// minted 184 warned 0-stub phantom loops. Post-T4 the minted synthetic
+/// agg's halves derive from `read_slice_rows` (Pinned-correct): only the
+/// `nyc` rows get scores, no LTM variable mentions `boston`, and the loops
+/// are genuinely scored with zero warnings.
+#[test]
+fn whole_rhs_broadcast_pinned_mix_scores_read_rows_only() {
+    let project = TestProject::new("t4_pinned_mix_loop")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "Region".into(), "D2".into()],
+            "stock[D1,D2] * 0.1",
+            None,
+        )
+        // Whole-RHS, Pinned Region axis, result dims [D1] broadcast over
+        // the owner's [D1,D2].
+        .array_aux_direct(
+            "out",
+            vec!["D1".into(), "D2".into()],
+            "SUM(cube[D1, nyc, *])",
+            None,
+        )
+        .array_flow("inflow[D1,D2]", "out[D1, D2] * 0.5", None)
+        .array_stock("stock[D1,D2]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the Pinned-bearing broadcast reduce must compile every LTM fragment cleanly \
+         (pre-T4: 184 warned 0-stub phantom loop scores); got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm_var(&ltm.vars, agg_name);
+    assert_eq!(agg_var.dimensions, vec!["D1".to_string()]);
+
+    // Pinned-correctness: only the nyc rows get source-half scores...
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name = format!("{LINK_SCORE_PREFIX}cube[{d1},nyc,{d2}]\u{2192}{agg_name}[{d1}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected the read-row score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    // ... and NO LTM variable of any kind mentions an unread boston row
+    // (pre-T4 the cartesian derivation scored them all).
+    let boston_garbage: Vec<&str> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("boston"))
+        .map(|v| v.name.as_str())
+        .collect();
+    assert!(
+        boston_garbage.is_empty(),
+        "unread (boston) rows must get NO scores or loops; got: {boston_garbage:?}"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // Per-row attribution: the two read rows of each slot change by equal
+    // deltas, so each scores 0.5.
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name = format!("{LINK_SCORE_PREFIX}cube[{d1},nyc,{d2}]\u{2192}{agg_name}[{d1}]");
+        let s = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-9,
+                "{name} at step {step}: expected 0.5 (two equal-delta read rows); got {s:?}"
+            );
+        }
+    }
+
+    // Exact loop census -- all causally real, no phantoms. Per D1 row the
+    // element graph is stock[d1,d2] -> cube[d1,nyc,d2] -> agg[d1] ->
+    // out[d1,d2'] -> inflow[d1,d2'] -> stock[d1,d2']:
+    // - 4 elementary DIAGONAL circuits (d2' == d2, one per (d1, d2));
+    // - 2 petal-stitched CROSS-D2 loops (one per d1): the two petals
+    //   agg[d1] -> out[d1,x] -> ... -> cube[d1,nyc,x] -> agg[d1] and the
+    //   y-twin revisit agg[d1], so Johnson cannot emit their combination
+    //   directly; `recover_cross_agg_loops` stitches each pairwise-disjoint
+    //   petal pair into ONE canonical loop. These are causally real
+    //   (out[d1,y] genuinely depends on stock[d1,x] through the agg).
+    // Total: exactly 6. Any drift means phantom loops were reintroduced
+    // (or real ones dropped).
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        6,
+        "expected 4 diagonal + 2 cross-D2 petal-stitched loops; got: {loop_names:?}"
+    );
+    for name in &loop_names {
+        let var = ltm_var(&ltm.vars, name);
+        assert!(
+            var.equation.source_text().contains(agg_name),
+            "every loop in this model routes through the synthetic agg; {name} does not: {}",
+            var.equation.source_text()
+        );
+        let base = offset_of(&results, name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let s = series_at(&results, base + slot);
+            for (step, &v) in s.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "loop score {name} slot {slot} at step {step} is not finite: {v}"
+                );
+            }
+            assert!(
+                s.iter()
+                    .skip(STARTUP_STEPS)
+                    .all(|v| v.abs() > MEANINGFUL_SCORE),
+                "loop score {name} slot {slot} must be sustained non-zero past the \
+                 startup guard; got: {s:?}"
+            );
+        }
+    }
+}
+
+/// T4 blast-radius golden pin: the GH #534 MAPPED whole-RHS reducer
+/// (`growth[State] = SUM(matrix[State,*])` over a positional `State→Region`
+/// mapping, in a loop) -- the carve-out T4 generalizes -- must keep
+/// byte-identical emissions across the unified minting condition: the same
+/// synthetic agg (arrayed over the TARGET dim), the same remapped
+/// source-half names, and the exact source-half equation text captured at
+/// the T4 parent commit.
+#[test]
+fn whole_rhs_mapped_reduce_emissions_stay_byte_identical() {
+    let project = TestProject::new("t4_mapped_golden")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["west", "east"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_mapping("State", &["CA", "NY"], "Region")
+        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["Region".into(), "D2".into()],
+            "pop[Region] * 0.05",
+            None,
+        )
+        .array_aux_direct(
+            "growth",
+            vec!["State".into()],
+            "SUM(matrix[State, *])",
+            None,
+        )
+        .array_flow("inflow[Region]", "SUM(growth[*]) * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the mapped whole-RHS reduce must stay warning-free; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg0 = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm_var(&ltm.vars, agg0);
+    assert_eq!(agg_var.dimensions, vec!["State".to_string()]);
+    assert_eq!(agg_var.equation.source_text(), "sum(matrix[state, *])");
+
+    // The remapped source-half names: each Region row feeds the slot of its
+    // positionally-corresponding State element.
+    for (region, state) in [("west", "ca"), ("east", "ny")] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{region},{d2}]\u{2192}{agg0}[{state}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected the remapped source-half score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // The exact source-half equation text captured at the T4 parent commit
+    // (148a17d8).
+    let golden = "if (TIME = INITIAL_TIME) then 0 else if ((\"$\u{205A}ltm\u{205A}agg\u{205A}0\"\
+[ca] - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca])) = 0) OR ((matrix[region\u{B7}west,\
+d2\u{B7}x] - PREVIOUS(matrix[region\u{B7}west,d2\u{B7}x])) = 0) then 0 else SAFEDIV((PREVIOUS\
+(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca]) + (matrix[region\u{B7}west,d2\u{B7}x] - PREVIOUS(\
+matrix[region\u{B7}west,d2\u{B7}x])) - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca])), \
+ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca] - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"\
+[ca]))), 0) * SIGN((matrix[region\u{B7}west,d2\u{B7}x] - PREVIOUS(matrix[region\u{B7}west,\
+d2\u{B7}x])))";
+    let name = format!("{LINK_SCORE_PREFIX}matrix[west,x]\u{2192}{agg0}[ca]");
+    let var = ltm_var(&ltm.vars, &name);
+    assert_eq!(
+        var.equation.source_text(),
+        golden,
+        "the mapped whole-RHS source-half equation text must stay byte-identical"
+    );
+}
+
+/// The mapped ∩ non-aligned INTERSECTION (T4 review finding 1):
+/// `growth[State,D3] = SUM(matrix[State,*])` over a positional
+/// `State→Region` mapping is mapped AND broadcast (`result_dims = [State]`,
+/// a strict subset of the owner's `[State,D3]`) -- mapped does NOT imply
+/// aligned. The mapped clause of `variable_backed_shape_is_expressible`
+/// fires first, and the synthetic machinery composes both halves cleanly:
+/// the source half remaps each Region row to its positionally-corresponding
+/// State slot, and the GH #528 projection broadcasts the [State]-arrayed
+/// agg over the owner's extra D3 dim. This pins the intersection the
+/// minting predicate's rustdoc documents, guarding against a future
+/// "simplification" that reorders/merges the clauses on an assumed
+/// mapped ⇒ aligned.
+#[test]
+fn whole_rhs_mapped_broadcast_intersection_scores_cleanly() {
+    let project = TestProject::new("t4_mapped_broadcast")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["west", "east"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .named_dimension_with_mapping("State", &["CA", "NY"], "Region")
+        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["Region".into(), "D2".into()],
+            "pop[Region] * 0.05",
+            None,
+        )
+        // Mapped (State→Region) AND broadcast (owner [State,D3], result
+        // dims [State]).
+        .array_aux_direct(
+            "growth",
+            vec!["State".into(), "D3".into()],
+            "SUM(matrix[State, *])",
+            None,
+        )
+        .array_flow("inflow[Region]", "SUM(growth[*, *]) * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the mapped+broadcast intersection must compile every LTM fragment cleanly; \
+         got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    // Canonical-sorted variable walk: `growth` < `inflow`, so growth's
+    // reducer is agg 0 (arrayed over the TARGET dim State) and inflow's
+    // whole-extent `SUM(growth[*,*])` sub-reducer is agg 1 (scalar).
+    let agg0 = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm_var(&ltm.vars, agg0);
+    assert_eq!(
+        agg_var.dimensions,
+        vec!["State".to_string()],
+        "the synthetic agg is arrayed over the reducer's TARGET result dim"
+    );
+
+    // Source half: REMAPPED rows -- each Region row feeds the slot of its
+    // positionally-corresponding State element.
+    for (region, state) in [("west", "ca"), ("east", "ny")] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{region},{d2}]\u{2192}{agg0}[{state}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected the remapped source-half score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+    // Agg half: the GH #528 projection BROADCASTS the [State] slot over the
+    // owner's extra D3 dim.
+    for (state, d3) in [("ca", "p"), ("ca", "q"), ("ny", "p"), ("ny", "q")] {
+        let name = format!("{LINK_SCORE_PREFIX}{agg0}[{state}]\u{2192}growth[{state},{d3}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected the broadcast agg-half score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // Per-row attribution: the two co-reduced D2 rows of each State slot
+    // change by identical deltas (`matrix[Region,*] = pop[Region] * 0.05`,
+    // equal initial stocks), so each remapped source half reads 0.5...
+    for (region, state) in [("west", "ca"), ("east", "ny")] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{region},{d2}]\u{2192}{agg0}[{state}]");
+            let s = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in s.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step}: expected 0.5 (two equal-delta co-reduced \
+                     rows); got {s:?}"
+                );
+            }
+        }
+    }
+    // ... and `growth` IS the agg's value, so every broadcast agg half
+    // reads exactly 1.
+    for (state, d3) in [("ca", "p"), ("ca", "q"), ("ny", "p"), ("ny", "q")] {
+        let name = format!("{LINK_SCORE_PREFIX}{agg0}[{state}]\u{2192}growth[{state},{d3}]");
+        let s = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "{name} at step {step}: expected exactly 1 (growth IS the agg); got {s:?}"
+            );
+        }
+    }
+
+    // Exactly the 8 real elementary loops -- one per (region, d2, d3):
+    // pop[region] -> matrix[region,d2] -> agg0[state] -> growth[state,d3]
+    // -> agg1 -> inflow[region] -> pop[region]. Each loop's score is the
+    // link product 0.5 (matrix row, two co-reduced D2 rows) * 1.0
+    // (agg0 -> growth) * 0.25 (growth -> agg1: four equal-delta growth
+    // elements feed the whole-extent SUM) * 1.0 (agg1 -> inflow) * 1.0
+    // (flow-to-stock, single-inflow stock) * 1.0 (pop -> matrix) = 0.125.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        8,
+        "expected one loop per (region, d2, d3) combination; got: {loop_names:?}"
+    );
+    for name in &loop_names {
+        let var = ltm_var(&ltm.vars, name);
+        assert!(
+            var.equation.source_text().contains(agg0),
+            "every loop routes through the mapped+broadcast agg; {name} does not: {}",
+            var.equation.source_text()
+        );
+        let base = offset_of(&results, name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let s = series_at(&results, base + slot);
+            for (step, &v) in s.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "loop score {name} slot {slot} at step {step} is not finite: {v}"
+                );
+            }
+            for (step, &v) in s.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    (v - 0.125).abs() < 1e-9,
+                    "loop score {name} slot {slot} at step {step}: expected exactly \
+                     0.125 (see the link-product derivation above); got {s:?}"
+                );
+            }
+        }
+    }
+}
+
+/// GH #751: a target equation hoisting TWO distinct ARRAYED sliced reducers
+/// (`two_sums[d1] = SUM(m1[d1,*]) + SUM(m2[d1,*])`) must pin the FROZEN
+/// co-agg's reference in each agg→target partial to the co-agg's own
+/// projected slot. Pre-fix, agg A's per-target-element partial froze co-agg
+/// B as the bare `previous("$⁚ltm⁚agg⁚1")` -- a multi-slot reference in a
+/// scalar equation -- so all four `agg[{r}]→two_sums[{r}]` fragments failed
+/// to compile (4 Assembly warnings), stubbing every agg→target link score
+/// AND all 8 loop scores through `two_sums` to constant 0.
+///
+/// Score derivation (`two_sums = A + B`, `A = SUM(m1[d1,*]) = 0.1·rowsum`,
+/// `B = 0.05·rowsum`): the changed-first numerator for A is
+/// `(A_t + B_{t-1}) - two_sums_{t-1} = ΔA`, so
+/// `score_A = |ΔA/Δtwo_sums| = 0.1/0.15 = 2/3` and `score_B = 1/3`.
+/// Each m1-family loop multiplies `score_A` by the row link (`0.5` -- each
+/// of the 2 co-reduced cells carries half the row's change) and three
+/// unit links, giving `1/3`; the m2 family gives `1/6`.
+#[test]
+fn gh751_two_arrayed_co_aggs_pin_frozen_agg_to_slot() {
+    let project = TestProject::new("gh751")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["r1", "r2"])
+        .named_dimension("d2", &["c1", "c2"])
+        .array_stock("pop[d1,d2]", "100", &["growth"], &[], None)
+        .array_flow("growth[d1,d2]", "two_sums[d1] * 0.01", None)
+        .array_aux("m1[d1,d2]", "pop[d1,d2] * 0.1")
+        .array_aux("m2[d1,d2]", "pop[d1,d2] * 0.05")
+        .array_aux("two_sums[d1]", "SUM(m1[d1,*]) + SUM(m2[d1,*])")
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // Every fragment compiles: no Assembly warnings at all (pre-fix: 4,
+    // one per failed agg[{r}]→two_sums[{r}] fragment).
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "two distinct arrayed co-aggs must compile warning-free; got: {warnings:?}"
+    );
+
+    // The frozen co-agg is pinned to ITS projected slot, never bare.
+    // (agg⁚0 = SUM(m1[d1,*]), agg⁚1 = SUM(m2[d1,*]) -- left-to-right
+    // minting order.)
+    let a0_to_r1 = ltm_var(
+        &ltm.vars,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0[r1]\u{2192}two_sums[r1]",
+    );
+    let eqn = a0_to_r1.equation.source_text();
+    assert!(
+        eqn.contains("previous(\"$\u{205A}ltm\u{205A}agg\u{205A}1\"[d1\u{B7}r1])"),
+        "the frozen co-agg must be PREVIOUS-pinned to its own projected slot; got: {eqn}"
+    );
+    assert!(
+        !eqn.contains("previous(\"$\u{205A}ltm\u{205A}agg\u{205A}1\")"),
+        "the frozen co-agg must not be referenced bare (a multi-slot reference in a \
+         scalar equation cannot compile); got: {eqn}"
+    );
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // Both aggs' agg→target halves score their analytic share.
+    for (agg_idx, expected) in [(0usize, 2.0 / 3.0), (1usize, 1.0 / 3.0)] {
+        for r in ["r1", "r2"] {
+            let name = format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}{agg_idx}[{r}]\u{2192}two_sums[{r}]"
+            );
+            let s = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in s.iter().enumerate().skip(1) {
+                assert!(
+                    (v - expected).abs() < 1e-9,
+                    "{name} at step {step}: expected {expected}; got {s:?}"
+                );
+            }
+        }
+    }
+
+    // Every loop score is finite and sustained at its analytic value:
+    // 1/3 for the m1-family loops, 1/6 for the m2 family. Classify each
+    // loop by which agg its equation references.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_vars.len(),
+        8,
+        "one loop per (agg, d1 row, co-reduced d2 cell); got: {:?}",
+        loop_vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    for v in loop_vars {
+        let expected = if v.equation.source_text().contains("agg\u{205A}0") {
+            1.0 / 3.0
+        } else {
+            1.0 / 6.0
+        };
+        let s = series_at(&results, offset_of(&results, &v.name));
+        for (step, &val) in s.iter().enumerate().skip(STARTUP_STEPS) {
+            assert!(
+                (val - expected).abs() < 1e-6,
+                "loop score {} at step {step}: expected {expected}; got {s:?}",
+                v.name
+            );
+        }
+    }
+}
+
+/// GH #751's SCALAR-co-agg twin (the GH #737-era family): two distinct
+/// WHOLE-EXTENT reducers in one scalar target (`tot = SUM(m1[*]) +
+/// SUM(m2[*])`) mint two SCALAR aggs, and a scalar co-agg's bare
+/// `PREVIOUS("$⁚ltm⁚agg⁚1")` freeze compiles as-is -- this shape already
+/// worked and must stay byte-identical under the per-ident pin map (a
+/// scalar agg has empty `result_dims`, so it gets no pin entry by
+/// construction). Pins the bare-PREVIOUS equation text, zero warnings, and
+/// the same 2/3 / 1/3 analytic shares as the arrayed twin.
+#[test]
+fn gh751_scalar_co_aggs_keep_bare_previous_freeze() {
+    let project = TestProject::new("gh751_scalar_twin")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["r1", "r2"])
+        .array_stock("pop[d1]", "100", &["growth"], &[], None)
+        .array_flow("growth[d1]", "tot * 0.01", None)
+        .array_aux("m1[d1]", "pop[d1] * 0.1")
+        .array_aux("m2[d1]", "pop[d1] * 0.05")
+        .scalar_aux("tot", "SUM(m1[*]) + SUM(m2[*])")
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "scalar co-aggs must compile warning-free; got: {warnings:?}"
+    );
+
+    // The scalar co-agg keeps its bare PREVIOUS freeze (byte-identity pin:
+    // no slot subscript exists to pin a scalar agg to).
+    let a0_to_tot = ltm_var(
+        &ltm.vars,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}tot",
+    );
+    let eqn = a0_to_tot.equation.source_text();
+    assert!(
+        eqn.contains("PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}1\")"),
+        "a scalar co-agg's freeze stays the bare PREVIOUS reference; got: {eqn}"
+    );
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    for (agg_idx, expected) in [(0usize, 2.0 / 3.0), (1usize, 1.0 / 3.0)] {
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}{agg_idx}\u{2192}tot"
+        );
+        let s = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - expected).abs() < 1e-9,
+                "{name} at step {step}: expected {expected}; got {s:?}"
+            );
+        }
+    }
+}
+
+/// GH #526: a TRANSPOSED non-live array dep in a loop's target equation.
+/// `growth[d1,d2] = pop[d1,d2] * 0.1 + arr[d2,d1] * 0.001` -- `arr[d2,d1]`
+/// is a genuine positional transposition (slot `(i,j)` reads element
+/// `(j,i)`), so the pre-fix collapse to a bare `PREVIOUS(arr)` froze the
+/// WRONG element: with the asymmetric constant `arr` here, the off-diagonal
+/// `pop→growth` slots scored 0.9940/1.0059 instead of exactly 1.0 (a
+/// silent magnitude error -- zero warnings; the recorded pre-fix
+/// signature). Post-fix the threaded dep dims flag the mismatch and the
+/// partial falls to the CHANGED-LAST convention, which keeps `arr[d2,d1]`
+/// live and verbatim: the numerator is `(growth - frozen)` = exactly
+/// `0.1·Δpop`, so every slot scores exactly 1.0, still with zero warnings.
+#[test]
+fn gh526_transposed_dep_partial_takes_changed_last() {
+    let project = TestProject::new("gh526")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["a", "b"])
+        .named_dimension("d2", &["x", "y"])
+        .array_with_ranges("base1[d1]", vec![("a", "1"), ("b", "2")])
+        .array_with_ranges("base2[d2]", vec![("x", "3"), ("y", "7")])
+        .array_aux("arr[d1,d2]", "base1[d1] * 10 + base2[d2]")
+        .array_stock("pop[d1,d2]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[d1,d2]",
+            "pop[d1,d2] * 0.1 + arr[d2,d1] * 0.001",
+            None,
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the changed-last fallback compiles; no warnings expected, got: {warnings:?}"
+    );
+
+    let v = ltm_var(
+        &ltm.vars,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth",
+    );
+    let eqn = v.equation.source_text();
+    assert!(
+        !eqn.contains("PREVIOUS(arr)"),
+        "the transposed dep must NOT be collapsed to the wrong-element bare freeze; got: {eqn}"
+    );
+    assert!(
+        eqn.contains("arr[d2, d1]"),
+        "changed-last keeps the transposed dep live and verbatim; got: {eqn}"
+    );
+    assert!(
+        eqn.contains("(growth - (PREVIOUS(pop) * 0.1 + arr[d2, d1] * 0.001))"),
+        "the numerator is the changed-last `(target - frozen)` form; got: {eqn}"
+    );
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    let base = offset_of(
+        &results,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth",
+    );
+    for slot in 0..4 {
+        let s = series_at(&results, base + slot);
+        for (step, &val) in s.iter().enumerate().skip(1) {
+            assert!(
+                (val - 1.0).abs() < 1e-9,
+                "pop→growth slot {slot} step {step}: arr is constant, so the score is \
+                 exactly 1.0 (pre-fix the off-diagonal slots read 0.9940/1.0059 -- the \
+                 wrong-element freeze); got {s:?}"
+            );
+        }
+    }
+    // The isolated loop's score is exactly 1 per slot past startup.
+    let loop_base = offset_of(&results, "$\u{205A}ltm\u{205A}loop_score\u{205A}r1");
+    for slot in 0..4 {
+        let s = series_at(&results, loop_base + slot);
+        for (step, &val) in s.iter().enumerate().skip(STARTUP_STEPS) {
+            assert!(
+                (val - 1.0).abs() < 1e-6,
+                "loop score slot {slot} step {step}: expected 1.0; got {s:?}"
+            );
+        }
+    }
+}
+
+/// GH #526 byte-identity controls: the NATURAL-position dep keeps the
+/// historical changed-first collapse (`PREVIOUS(arr)` -- exact, the bare
+/// freeze reads the same element), and a POSITIONALLY-MAPPED dep
+/// (`cost[State]` for `cost` declared over `Region`, `State→Region`) keeps
+/// it too via the shared `iterated_axis_slot_elements` gate. Both shapes
+/// collapsed before the fix and must keep collapsing -- the strict verdict
+/// only changes provably-mismatched references.
+#[test]
+fn gh526_natural_and_mapped_deps_keep_changed_first_collapse() {
+    // Natural position: arr[d1,d2] matching declared order.
+    let natural = TestProject::new("gh526_natural")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["a", "b"])
+        .named_dimension("d2", &["x", "y"])
+        .array_with_ranges("base1[d1]", vec![("a", "1"), ("b", "2")])
+        .array_with_ranges("base2[d2]", vec![("x", "3"), ("y", "7")])
+        .array_aux("arr[d1,d2]", "base1[d1] * 10 + base2[d2]")
+        .array_stock("pop[d1,d2]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[d1,d2]",
+            "pop[d1,d2] * 0.1 + arr[d1,d2] * 0.001",
+            None,
+        )
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &natural, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "natural-position fixture stays warning-free"
+    );
+    let eqn = ltm_var(
+        &ltm.vars,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth",
+    )
+    .equation
+    .source_text()
+    .to_string();
+    assert!(
+        eqn.contains("(pop * 0.1 + PREVIOUS(arr) * 0.001)"),
+        "the natural-position dep keeps the changed-first bare-PREVIOUS collapse; got: {eqn}"
+    );
+
+    // Positionally mapped: cost declared over region, referenced cost[state]
+    // inside an A2A-over-state equation with a positional state→region
+    // mapping -- the executed read resolves positionally, matching the bare
+    // broadcast, so the collapse is exact and retained.
+    let mapped = TestProject::new("gh526_mapped")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["west", "east"])
+        .named_dimension_with_mapping("state", &["ca", "ny"], "region")
+        .array_with_ranges("cost[region]", vec![("west", "3"), ("east", "7")])
+        .array_stock("pop[state]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[state]",
+            "pop[state] * 0.1 + cost[state] * 0.001",
+            None,
+        )
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &mapped, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "mapped fixture stays warning-free"
+    );
+    let eqn = ltm_var(
+        &ltm.vars,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth",
+    )
+    .equation
+    .source_text()
+    .to_string();
+    assert!(
+        eqn.contains("PREVIOUS(cost)") && !eqn.contains("PREVIOUS(cost["),
+        "the positionally-mapped dep keeps the changed-first collapse; got: {eqn}"
+    );
 }

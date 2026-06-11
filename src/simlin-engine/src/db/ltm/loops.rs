@@ -150,6 +150,40 @@ pub(crate) fn sub_model_output_ports(
     find_model_output_ports(db, model, project)
 }
 
+/// Whether `from -> to` is an accepted ITERATED-DIM PROJECTION-FEEDER edge
+/// into a variable-backed reduce (GH #767 / T5 of the shape-expressiveness
+/// design): `to` IS a variable-backed agg the shared
+/// [`crate::ltm_agg::variable_backed_reduce_agg`] gate admits, and `from`'s
+/// own slice is the all-`Iterated` projection (`frac` in
+/// `growth[D1] = SUM(matrix[D1,*] * frac[D1])`). The hop's only emitted
+/// scores are the per-`(row, slot)` scalars `{from}[d1]→{to}[d1]`, so the
+/// mixed-branch link builder must keep BOTH subscripts -- the same reason
+/// [`is_partial_reduce_edge`] exists, which this shape FAILS (the feeder's
+/// dims EQUAL the owner's, so the shape-only strictly-fewer-dims test says
+/// "same-element A2A"). Inert for every pre-T5 shape: a projection feeder
+/// requires a Reduced-bearing canonical slice alongside an all-`Iterated`
+/// per-source slice, which the identical-slices acceptance could never
+/// produce.
+fn is_projection_feeder_edge(
+    db: &dyn Db,
+    source_vars: &HashMap<String, SourceVariable>,
+    from: &str,
+    to: &str,
+    model: SourceModel,
+    project: SourceProject,
+) -> bool {
+    let Some(to_sv) = source_vars.get(to) else {
+        return false;
+    };
+    if to_sv.kind(db) == SourceVariableKind::Module {
+        return false;
+    }
+    let to_dims = variable_dimensions(db, *to_sv, project);
+    let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
+    crate::ltm_agg::variable_backed_reduce_agg(aggs, from, to, to_dims)
+        .is_some_and(|a| a.source_is_projection_feeder(from))
+}
+
 /// Whether the edge `from -> to` is a *partial reduce*: `from` is arrayed,
 /// `to` is arrayed with strictly fewer dimensions, and every `to` dimension
 /// is one of `from`'s (matched by name). That is exactly the shape
@@ -194,6 +228,37 @@ fn is_partial_reduce_edge(
     to_dims.iter().all(|td| from_names.contains(&td.name()))
 }
 
+/// `true` when the `(from, to)` edge carries a `PerElement`-classified
+/// reference site (GH #525, T6 of the shape-expressiveness design): the
+/// hop's only emitted link scores are the per-(row, full-target-element)
+/// scalars (`pop[r,young]→row_sum[r]`), so circuits traversing it must
+/// never collapse into a single A2A loop (an ApplyToAll loop-score
+/// equation would reference a nonexistent Bare name and silently stub) and
+/// the mixed-branch link builder must keep BOTH endpoint subscripts.
+///
+/// Keys on `model_edge_shapes` -- the same IR projection the element
+/// graph's expansion derives from (`model_ltm_reference_sites` via
+/// `ClassifiedSite::shape`) -- so expansion, emission, and loop routing
+/// consume one classification (the GH #752 single-gate pattern, mirroring
+/// `representative_has_partial_reduce_hop`'s shared
+/// `variable_backed_reduce_agg` gate).
+fn is_per_element_edge(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    from: &str,
+    to: &str,
+) -> bool {
+    crate::db::model_edge_shapes(db, model, project)
+        .edge_shapes
+        .get(&(from.to_string(), to.to_string()))
+        .is_some_and(|shapes| {
+            shapes
+                .iter()
+                .any(|s| matches!(s, crate::db::RefShape::PerElement { .. }))
+        })
+}
+
 /// Compute the cartesian product of element name lists as comma-joined
 /// subscript strings.
 ///
@@ -221,21 +286,26 @@ pub(super) fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<Str
 /// feeds and the co-reduced rows (the rows mapping to the *same* slot -- the
 /// `from`-slice the reducer combines for that slot, used as the
 /// `all_elements` argument for the per-element link-score equation builders).
-pub(super) struct ReadSliceRow {
+pub(crate) struct ReadSliceRow {
     /// The source element subscript (comma-joined element names).
-    pub(super) row: String,
+    pub(crate) row: String,
     /// The agg result slot's subscript (the `Iterated` axes' elements,
     /// comma-joined; empty when the agg is scalar).
-    pub(super) slot: String,
+    pub(crate) slot: String,
     /// All source rows mapping to `slot`, in row-major order.
-    pub(super) coreduced: Vec<String>,
+    pub(crate) coreduced: Vec<String>,
 }
 
-/// Enumerate the source rows a hoisted reducer reads, given the agg's
-/// `read_slice` (one [`crate::ltm_agg::AxisRead`] per `from`'s axis -- which
-/// holds because `from` is one of `agg`'s `source_vars`) and `from`'s
-/// dimension element lists. A `Pinned` axis is fixed to its single element; an
-/// `Iterated` or `Reduced` axis ranges over every element of that axis. The
+/// Enumerate the source rows a hoisted reducer reads, given `from`'s
+/// per-source `read_slice` (`AggNode::source_read_slice(from)` -- one
+/// [`crate::ltm_agg::AxisRead`] per `from`'s axis, which holds because
+/// `from` is one of the agg's `sources`) and `from`'s
+/// dimension element lists. A `Pinned` axis is fixed to its single element;
+/// an `Iterated` axis ranges over every element of that axis; a `Reduced`
+/// axis ranges over every element, or -- for a subset-bearing `Reduced`
+/// (a proper-subdimension StarRange, GH #766) -- over only the subset's
+/// elements, so unread rows get no per-row score and divisor-bearing
+/// reducers (MEAN, STDDEV) divide by the subset size via `coreduced`. The
 /// agg result slot for a row is its `Iterated` coordinates in order --
 /// remapped to the corresponding TARGET-dim element via
 /// [`crate::ltm_agg::iterated_axis_slot_elements`] when the axis is a
@@ -244,13 +314,13 @@ pub(super) struct ReadSliceRow {
 /// remapped agg-slot nodes.
 ///
 /// `None` when `read_slice` doesn't have one entry per `from` axis (it always
-/// should for a hoisted agg whose `source_vars` contains `from`), or when a
+/// should for a hoisted agg whose `sources` include `from`), or when a
 /// mapped `Iterated` axis has no usable slot remap (cannot happen for a slice
 /// `compute_read_slice` accepted -- both gate on the same helper over the
 /// same salsa dimension context -- but a stale invariant degrades to the
 /// caller's conservative fallback rather than mis-slotted scores): the caller
 /// then falls back to the conservative "every source element, scalar agg" form.
-pub(super) fn read_slice_rows(
+pub(crate) fn read_slice_rows(
     read_slice: &[crate::ltm_agg::AxisRead],
     from_dim_element_lists: &[Vec<String>],
     dim_ctx: &crate::dimensions::DimensionsContext,
@@ -271,7 +341,9 @@ pub(super) fn read_slice_rows(
                     crate::ltm_agg::iterated_axis_slot_elements(dim, source_dim, elems, dim_ctx)?;
                 Some((elems.clone(), Some(slots)))
             }
-            AxisRead::Reduced => Some((elems.clone(), None)),
+            AxisRead::Reduced { subset } => {
+                Some((subset.clone().unwrap_or_else(|| elems.clone()), None))
+            }
         })
         .collect::<Option<Vec<_>>>()?;
     // Cartesian product, tracking each row's full element tuple and its slot
@@ -692,12 +764,14 @@ pub(crate) fn build_element_level_loops(
             .iter()
             .any(|n| crate::ltm_agg::is_synthetic_agg_name(strip_subscript(n)));
 
-        // GH #752: a circuit traversing a VARIABLE-BACKED partial-reduce hop
-        // (`matrix[d1,d2] → inflow[d1]` where `inflow[D1] = SUM(matrix[D1,*])`
-        // is the whole RHS -- the variable IS the agg, so there is no
-        // synthetic agg node in the circuit) must likewise never collapse
-        // into a single A2A loop: the only emitted link scores for that hop
-        // are the per-`(row, slot)` scalars `matrix[d1,d2]→inflow[d1]` from
+        // GH #752 / GH #765: a circuit traversing a VARIABLE-BACKED reduce
+        // hop (`matrix[d1,d2] → inflow[d1]` where `inflow[D1] =
+        // SUM(matrix[D1,*])` -- Pinned/subset axes included since T3 of the
+        // shape-expressiveness design -- is the whole RHS; the variable IS
+        // the agg, so there is no synthetic agg node in the circuit) must
+        // likewise never collapse into a single A2A loop: the only emitted
+        // link scores for that hop are the per-`(row, slot)` scalars
+        // `matrix[d1,d2]→inflow[d1]` from
         // `try_cross_dimensional_link_scores` -- there is no dimensioned
         // `matrix→inflow` variable an A2A loop-score equation could
         // reference (and per-slot `slot_links` are ambiguous anyway: |D2|
@@ -706,13 +780,21 @@ pub(crate) fn build_element_level_loops(
         // `build_element_subscripted_links` keeps BOTH subscripts and
         // `loop_link_score_ref`'s per-element-in-name case resolves the
         // per-`(row, slot)` name. Gated on the SAME
-        // `variable_backed_partial_reduce_agg` decision the element graph's
-        // read-slice reroute uses, so a group is rerouted here exactly when
-        // its element edges (and the per-`(row, slot)` scores) are the
-        // diagonal family. Only computed for all-subscripted groups: a
-        // mixed circuit (a scalar node present) already handles the
-        // partial-reduce hop via `is_partial_reduce_edge` in the mixed
-        // branch's link builder.
+        // `variable_backed_reduce_agg` decision the element graph's
+        // read-slice reroute and the score derivation use, so a group is
+        // rerouted here exactly when its element edges (and the
+        // per-`(row, slot)` scores) are the read-row family. A
+        // PROJECTION-FEEDER hop (`frac[d1] → growth[d1]`, GH #767 / T5)
+        // is admitted by the same gate, so feeder-closure circuits route
+        // here too -- their only emitted scores are the per-`(row, slot)`
+        // changed-last scalars. Only the
+        // arrayed-owner (Iterated-armed) acceptance is reachable here -- a
+        // scalar-owner reduce hop has an unsubscripted `to` node, so its
+        // circuits take the mixed branch (whose link builder keeps the
+        // bracketed `from` for the full-reduce name). Only computed for
+        // all-subscripted groups: a mixed circuit (a scalar node present)
+        // already handles the reduce hop via `is_partial_reduce_edge` in
+        // the mixed branch's link builder.
         let representative_has_partial_reduce_hop = all_subscripted && {
             let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
             (0..representative.len()).any(|i| {
@@ -725,10 +807,22 @@ pub(crate) fn build_element_level_loops(
                     return false;
                 }
                 let to_dims = variable_dimensions(db, *to_sv, project);
-                crate::ltm_agg::variable_backed_partial_reduce_agg(aggs, from_var, to_var, to_dims)
+                crate::ltm_agg::variable_backed_reduce_agg(aggs, from_var, to_var, to_dims)
                     .is_some()
             })
         };
+
+        // GH #525 (T6): a circuit traversing a `PerElement`-classified hop
+        // (`pop[a,young] → row_sum[a]`) likewise must not collapse into an
+        // A2A loop -- the hop's only link scores are the per-(row,
+        // full-target-element) scalars. Same shared-IR rationale as the
+        // partial-reduce predicate above; see `is_per_element_edge`.
+        let representative_has_per_element_hop = all_subscripted
+            && (0..representative.len()).any(|i| {
+                let from_var = strip_subscript(representative[i]);
+                let to_var = strip_subscript(representative[(i + 1) % representative.len()]);
+                is_per_element_edge(db, model, project, from_var, to_var)
+            });
 
         // Detect cross-element circuits that should NOT be collapsed
         // into A2A loops. Two patterns indicate cross-element:
@@ -783,6 +877,7 @@ pub(crate) fn build_element_level_loops(
             && !is_cross_element
             && !representative_has_synthetic_agg
             && !representative_has_partial_reduce_hop
+            && !representative_has_per_element_hop
             && !representative.is_empty()
         {
             // Pure-dimension group: produce a single A2A loop.
@@ -891,6 +986,7 @@ pub(crate) fn build_element_level_loops(
         } else if is_cross_element
             || representative_has_synthetic_agg
             || representative_has_partial_reduce_hop
+            || representative_has_per_element_hop
         {
             // Cross-element circuits: a circuit that genuinely visits
             // different elements at different points -- e.g.
@@ -1049,20 +1145,36 @@ pub(crate) fn build_element_level_loops(
                         (from_raw, to_raw)
                     } else if from_subscripted
                         && to_subscripted
-                        && is_partial_reduce_edge(
+                        && (is_partial_reduce_edge(
                             db,
                             source_vars,
                             from_var_level,
                             to_var_level,
                             project,
-                        )
+                        ) || is_projection_feeder_edge(
+                            db,
+                            source_vars,
+                            from_var_level,
+                            to_var_level,
+                            model,
+                            project,
+                        ) || is_per_element_edge(
+                            db,
+                            model,
+                            project,
+                            from_var_level,
+                            to_var_level,
+                        ))
                     {
-                        // Partial reduce (`matrix[d1,d2] → row_sum[d1]`): the
-                        // link score is the per-`(reduced-elem, result-elem)`
-                        // scalar var `$⁚ltm⁚link_score⁚{from}[d1,d2]→{to}[d1]`
-                        // from `try_cross_dimensional_link_scores`, so keep
-                        // BOTH subscripts -- the source carries the collapsed
-                        // axis too.
+                        // Partial reduce (`matrix[d1,d2] → row_sum[d1]`), a
+                        // projection-feeder hop (`frac[d1] → growth[d1]`,
+                        // GH #767), or a PerElement hop (`pop[a,young] →
+                        // row_sum[a]`, GH #525): the link score is the
+                        // per-`(row, slot/element)` scalar var
+                        // (`$⁚ltm⁚link_score⁚{from}[d1,d2]→{to}[d1]` /
+                        // `{from}[d1]→{to}[d1]` /
+                        // `{from}[a,young]→{to}[a]`), so keep BOTH
+                        // subscripts.
                         (from_raw, to_raw)
                     } else if to_subscripted && to_is_arrayed {
                         // Scalar->arrayed or same-element A2A: keep `to[e]`,

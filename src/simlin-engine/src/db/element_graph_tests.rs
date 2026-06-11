@@ -851,9 +851,8 @@ fn element_graph_variable_backed_partial_reduce_routes_read_slice() {
 /// (`out[D1,D2] = SUM(cube[D1,D2,*])` over `cube[D1,D2,D3]`,
 /// `read_slice = [Iterated(d1), Iterated(d2), Reduced]`, `result_dims =
 /// [D1, D2]` equal to `out`'s dims in order): each cube row feeds only its
-/// own `(d1, d2)` slot. Pins that the Pinned-bearing exclusion in
-/// `variable_backed_partial_reduce_agg` does not over-exclude the
-/// all-`Iterated`/`Reduced` shapes.
+/// own `(d1, d2)` slot. Pins that `variable_backed_reduce_agg` keeps
+/// admitting the all-`Iterated`/`Reduced` shapes byte-identically.
 #[test]
 fn element_graph_variable_backed_two_axis_partial_reduce_routes_read_slice() {
     let project = TestProject::new("vb_two_axis_partial_reduce")
@@ -886,18 +885,17 @@ fn element_graph_variable_backed_two_axis_partial_reduce_routes_read_slice() {
     assert_no_edge(&result, "cube[b,y,p]", "out[a,x]");
 }
 
-/// GH #752 follow-up: a variable-backed partial reduce whose read slice
-/// carries a PINNED axis (`outf[D1] = MEAN(cube[D1,x,*])` -- `read_slice =
-/// [Iterated(d1), Pinned(x), Reduced]`) must NOT take the read-slice path:
-/// `try_cross_dimensional_link_scores` derives each slot's co-reduced slice
-/// from the FULL source cartesian product, ignoring Pinned axes, so its
-/// per-`(row, slot)` values are wrong for a pinned slice (the MEAN divisor
-/// counts unread rows; tracked separately). Until that derivation is fixed,
-/// `variable_backed_partial_reduce_agg` excludes Pinned-bearing slices so
-/// this shape stays on the LOUD conservative cross-product + fragment-warning
-/// regime instead of producing silently wrong numbers.
+/// GH #765 (shape-expressiveness T3): a variable-backed partial reduce whose
+/// read slice carries a PINNED axis (`outf[D1] = MEAN(cube[D1,x,*])` --
+/// `read_slice = [Iterated(d1), Pinned(x), Reduced]`) takes the read-slice
+/// routing: only the pinned `x` slab of each `D1` row feeds that row's slot.
+/// `try_cross_dimensional_link_scores` now derives its per-`(row, slot)`
+/// co-reduced slices from the same `read_slice_rows` (invariant I4), so the
+/// edges and the emitted scores cover the identical read rows -- the T1-era
+/// Pinned exclusion (which kept this shape on the loud conservative
+/// cross-product while the score derivation ignored Pinned axes) is gone.
 #[test]
-fn element_graph_variable_backed_pinned_mixed_reduce_stays_cross_product() {
+fn element_graph_variable_backed_pinned_mixed_reduce_routes_read_slice() {
     let project = TestProject::new("vb_pinned_mixed_reduce")
         .named_dimension("D1", &["a", "b"])
         .named_dimension("D2", &["x", "y"])
@@ -913,15 +911,90 @@ fn element_graph_variable_backed_pinned_mixed_reduce_stays_cross_product() {
 
     let result = element_edges(&project);
 
-    // The conservative cross-product: every cube element feeds every inflow
-    // slot -- including the off-diagonal and the unread (y-pinned-out) rows.
-    // This is a deliberate SUPERSET (loud regime: the loop scores over the
-    // phantom edges fail fragment compile with Warnings) rather than
-    // silently wrong per-(row, slot) scores.
+    // The read-slice diagonal: only the pinned x slab of each D1 row.
     assert_edge(&result, "cube[a,x,p]", "inflow[a]");
-    assert_edge(&result, "cube[a,x,p]", "inflow[b]");
-    assert_edge(&result, "cube[a,y,q]", "inflow[a]");
-    assert_edge(&result, "cube[b,x,p]", "inflow[a]");
+    assert_edge(&result, "cube[a,x,q]", "inflow[a]");
+    assert_edge(&result, "cube[b,x,p]", "inflow[b]");
+    assert_edge(&result, "cube[b,x,q]", "inflow[b]");
+
+    // No unread-row edges (the y slab is pinned out) and no off-diagonal
+    // cross-product edges.
+    assert_no_edge(&result, "cube[a,y,p]", "inflow[a]");
+    assert_no_edge(&result, "cube[a,y,q]", "inflow[a]");
+    assert_no_edge(&result, "cube[b,y,p]", "inflow[b]");
+    assert_no_edge(&result, "cube[a,x,p]", "inflow[b]");
+    assert_no_edge(&result, "cube[b,x,p]", "inflow[a]");
+}
+
+/// Shape-expressiveness section 6 (scalar owner): a variable-backed
+/// scalar-result Pinned slice (`total = SUM(pop[nyc,*])`) routes its element
+/// edges by the read slice -- only the `pop[nyc,*]` rows feed the bare
+/// `total` node (the slot of a scalar owner IS the owner). Pre-T3 the gate's
+/// `to_dims.is_empty()` early-return kept the conservative full-extent
+/// edges, whose unread-row scores were silent garbage.
+#[test]
+fn element_graph_variable_backed_scalar_owner_pinned_slice_routes_read_rows() {
+    let project = TestProject::new("vb_scalar_owner_pinned")
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .scalar_aux("total", "SUM(pop[nyc, *])")
+        .array_flow("inflow[Region]", "total * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None);
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "pop[nyc,p]", "total");
+    assert_edge(&result, "pop[nyc,q]", "total");
+    assert_no_edge(&result, "pop[boston,p]", "total");
+    assert_no_edge(&result, "pop[boston,q]", "total");
+}
+
+/// Shape-expressiveness section 6 (scalar owner, subset slice):
+/// `total = SUM(arr[*:Core])` over `arr[Region]` with `Core` a proper
+/// subdimension -- only the subset rows feed `total`.
+#[test]
+fn element_graph_variable_backed_scalar_owner_subset_slice_routes_read_rows() {
+    let project = TestProject::new("vb_scalar_owner_subset")
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_aux("arr[Region]", "10")
+        .scalar_aux("total", "SUM(arr[*:Core])");
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "arr[a]", "total");
+    assert_edge(&result, "arr[b]", "total");
+    assert_no_edge(&result, "arr[c]", "total");
+}
+
+/// Shape-expressiveness section 6 (the DECLINED residual): an ARRAYED-owner
+/// scalar-result Pinned slice (`share[Region] = SUM(pop[nyc,*])` -- no
+/// `Iterated` axis, arrayed `to`) stays on the conservative cross-product:
+/// the per-`(row, slot)` machinery cannot express a scalar reduce broadcast
+/// over the owner's dims, so the gate declines it and
+/// `try_cross_dimensional_link_scores` routes the edge to the GH #758 loud
+/// skip (no link scores, dropped loop scores, one Warning). The
+/// cross-product edges are a deliberate SUPERSET of the true reads.
+#[test]
+fn element_graph_variable_backed_broadcast_pinned_slice_stays_cross_product() {
+    let project = TestProject::new("vb_broadcast_pinned")
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct("pop", vec!["Region".into(), "D2".into()], "10", None)
+        .array_aux_direct("share", vec!["Region".into()], "SUM(pop[nyc, *])", None);
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "pop[nyc,p]", "share[nyc]");
+    assert_edge(&result, "pop[nyc,p]", "share[boston]");
+    assert_edge(&result, "pop[boston,q]", "share[nyc]");
+    assert_edge(&result, "pop[boston,q]", "share[boston]");
 }
 
 /// AC4.1 (element graph, sliced reducer): `target[Region] = pop[NYC, Adult] +
@@ -1490,16 +1563,17 @@ fn element_graph_mapped_reverse_declared_bare_is_diagonal() {
     assert_no_edge(&result, "x[b]", "target[s1]");
 }
 
-/// GH #527 (classifier consistency): a SUBSCRIPTED iterated-dim reference
-/// whose mapping is declared only in the reverse direction (`Region→State`,
-/// i.e. on the source's dimension) is NOT accepted by
-/// `classify_iterated_dim_shape`'s mapped arm (which checks
-/// `has_mapping_to(index_dim, source_dim)` only), so it classifies
-/// `DynamicIndex` and keeps the conservative cross-product. This pins the
-/// classification ⟺ expansion agreement: the diagonal is only emitted for
-/// shapes the classifier calls `Bare`.
+/// GH #757 (flipped from the GH #527-era conservative pin): a SUBSCRIPTED
+/// iterated-dim reference whose POSITIONAL mapping is declared only in the
+/// reverse direction (`Region→State`, i.e. on the source's dimension) now
+/// classifies `Bare` -- `classify_iterated_dim_shape`'s mapped arm gates on
+/// the same `mapped_element_correspondence` data `expand_same_element`
+/// consults (both declaration directions), so the subscripted form gets the
+/// same DIAGONAL the bare form (`element_graph_mapped_reverse_declared_bare_is_diagonal`)
+/// already got, matching the compiler's `translate_via_mapping` (which
+/// resolves both directions identically).
 #[test]
-fn element_graph_mapped_reverse_declared_subscripted_stays_cross_product() {
+fn element_graph_mapped_reverse_declared_subscripted_is_diagonal() {
     let project = TestProject::new("mapped_reverse_subscripted")
         .named_dimension_with_mapping("Region", &["a", "b"], "State")
         .named_dimension("State", &["s1", "s2"])
@@ -1509,9 +1583,75 @@ fn element_graph_mapped_reverse_declared_subscripted_stays_cross_product() {
     let result = element_edges(&project);
 
     assert_edge(&result, "x[a]", "target[s1]");
-    assert_edge(&result, "x[a]", "target[s2]");
-    assert_edge(&result, "x[b]", "target[s1]");
     assert_edge(&result, "x[b]", "target[s2]");
+    assert_no_edge(&result, "x[a]", "target[s2]");
+    assert_no_edge(&result, "x[b]", "target[s1]");
+}
+
+/// GH #525 (T6): a mixed iterated+literal subscript (`pop[Region, young]`
+/// inside an A2A-over-`Region` equation) classifies `PerElement` and the
+/// element graph emits ONLY the diagonal-with-pinned-axes edges -- the
+/// same-`Region` element pinned at `Age = young` -- never the conservative
+/// cross-product (`pop[a,*] -> row_sum[b]`) whose phantom circuits carried
+/// silent confident loop scores.
+#[test]
+fn element_graph_per_element_mixed_subscript_is_pinned_diagonal() {
+    let project = TestProject::new("per_element_mixed")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "100", None)
+        .array_aux_direct(
+            "row_sum",
+            vec!["Region".into()],
+            "pop[Region, young] + pop[Region, old]",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    // The two sites' pinned diagonals, and nothing else.
+    assert_edge(&result, "pop[a,young]", "row_sum[a]");
+    assert_edge(&result, "pop[a,old]", "row_sum[a]");
+    assert_edge(&result, "pop[b,young]", "row_sum[b]");
+    assert_edge(&result, "pop[b,old]", "row_sum[b]");
+    assert_no_edge(&result, "pop[a,young]", "row_sum[b]");
+    assert_no_edge(&result, "pop[a,old]", "row_sum[b]");
+    assert_no_edge(&result, "pop[b,young]", "row_sum[a]");
+    assert_no_edge(&result, "pop[b,old]", "row_sum[a]");
+}
+
+/// GH #525 (T6, broadcast): a `PerElement` reference whose Iterated dims
+/// are a strict SUBSET of the target's (`mid[D1,D2] = pop[D1, young] *
+/// 0.05` -- `D1` iterated, `Age` pinned, `D2` broadcast) emits one edge per
+/// (row, full target element): the row feeds every `D2` slot of its `D1`
+/// row, never another `D1` row, and the unpinned `Age` elements feed
+/// nothing.
+#[test]
+fn element_graph_per_element_broadcast_is_pinned_diagonal() {
+    let project = TestProject::new("per_element_broadcast")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct("pop", vec!["D1".into(), "Age".into()], "100", None)
+        .array_aux_direct(
+            "mid",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1, young] * 0.05",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "pop[a,young]", "mid[a,x]");
+    assert_edge(&result, "pop[a,young]", "mid[a,y]");
+    assert_edge(&result, "pop[b,young]", "mid[b,x]");
+    assert_edge(&result, "pop[b,young]", "mid[b,y]");
+    // No cross-D1 edges, and the unread `old` rows feed nothing.
+    assert_no_edge(&result, "pop[a,young]", "mid[b,x]");
+    assert_no_edge(&result, "pop[b,young]", "mid[a,x]");
+    assert_no_edge(&result, "pop[a,old]", "mid[a,x]");
+    assert_no_edge(&result, "pop[a,old]", "mid[a,y]");
+    assert_no_edge(&result, "pop[b,old]", "mid[b,x]");
 }
 
 /// GH #527: an EXPLICIT element-level mapping (here the different-
@@ -1764,14 +1904,14 @@ fn element_graph_element_mapped_sliced_reducer_stays_cross_product() {
     );
 }
 
-/// GH #534 (classifier-direction consistency): a sliced reducer whose
-/// mapping is declared only in the REVERSE direction (on the source's
-/// `Region` toward `State`) stays un-hoisted, mirroring
-/// `classify_iterated_dim_shape`'s declared-direction gate (GH #757 tracks
-/// the reverse-subscripted direction separately). Conservative cross-product,
-/// no agg node.
+/// GH #757 (flipped from the GH #534-era conservative pin): a sliced
+/// reducer whose POSITIONAL mapping is declared only in the REVERSE
+/// direction (on the source's `Region` toward `State`) is now hoisted --
+/// `classify_axis_access` gates on `mapped_element_correspondence`, which
+/// accepts both declaration directions -- so the element graph routes it
+/// through the remapped agg slots exactly like the forward-declared twin.
 #[test]
-fn element_graph_reverse_declared_mapped_sliced_reducer_stays_cross_product() {
+fn element_graph_reverse_declared_mapped_sliced_reducer_routes_remapped_agg() {
     let project = TestProject::new("reverse_mapped_sliced")
         .named_dimension_with_mapping("Region", &["r1", "r2"], "State")
         .named_dimension("D2", &["x", "y"])
@@ -1785,11 +1925,24 @@ fn element_graph_reverse_declared_mapped_sliced_reducer_stays_cross_product() {
         );
 
     let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
 
+    // Source rows route to the agg slot of the positionally-corresponding
+    // State element; the agg fans into the target diagonally.
+    assert_edge(&result, "matrix[r1,x]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r1,y]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r2,x]", &format!("{agg}[s2]"));
+    assert_edge(&result, "matrix[r2,y]", &format!("{agg}[s2]"));
+    assert_no_edge(&result, "matrix[r1,x]", &format!("{agg}[s2]"));
+    assert_no_edge(&result, "matrix[r2,x]", &format!("{agg}[s1]"));
+    assert_edge(&result, &format!("{agg}[s1]"), "growth[s1]");
+    assert_edge(&result, &format!("{agg}[s2]"), "growth[s2]");
+    assert_no_edge(&result, &format!("{agg}[s1]"), "growth[s2]");
+    // No conservative direct matrix → growth edges remain.
     for r in ["r1", "r2"] {
         for d2 in ["x", "y"] {
             for s in ["s1", "s2"] {
-                assert_edge(
+                assert_no_edge(
                     &result,
                     &format!("matrix[{r},{d2}]"),
                     &format!("growth[{s}]"),
@@ -1797,13 +1950,6 @@ fn element_graph_reverse_declared_mapped_sliced_reducer_stays_cross_product() {
             }
         }
     }
-    assert!(
-        !result
-            .edges
-            .keys()
-            .any(|k| k.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}")),
-        "a reverse-declared mapped sliced reducer must not route through an agg node"
-    );
 }
 
 /// GH #534 (scalar co-feeder composition): a mapped sliced reducer with a
@@ -1835,4 +1981,31 @@ fn element_graph_mapped_sliced_reducer_with_scalar_cofeeder() {
     // Scalar co-feeder: every agg slot.
     assert_edge(&result, "scale", &format!("{agg}[s1]"));
     assert_edge(&result, "scale", &format!("{agg}[s2]"));
+}
+
+/// GH #766 (element graph): an inline reducer over a *proper subdimension*
+/// StarRange (`x = 1 + MEAN(arr[*:Core])`, `Core = {a, b}` a proper
+/// subdimension of `Region = {a, b, c}`) is hoisted with a SUBSET-bearing
+/// `Reduced` axis, so only the subdimension's rows feed the agg --
+/// `arr[c]` (outside the subset) gets no edge. Pre-fix the slice claimed
+/// the full parent extent and `arr[c] → agg` was a spurious edge (loop
+/// enumeration could discover loops through a row the reducer never reads).
+#[test]
+fn element_graph_subset_star_range_reads_only_subdimension_rows() {
+    let project = TestProject::new("gh766_subset_elem_graph")
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_aux("arr[Region]", "10")
+        .scalar_aux("x", "1 + MEAN(arr[*:Core])");
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    assert_edge(&result, "arr[a]", agg);
+    assert_edge(&result, "arr[b]", agg);
+    assert_no_edge(&result, "arr[c]", agg);
+    assert_edge(&result, agg, "x");
+    // No direct reducer-side edges bypassing the agg.
+    assert_no_edge(&result, "arr[a]", "x");
+    assert_no_edge(&result, "arr[c]", "x");
 }

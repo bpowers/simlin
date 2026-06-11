@@ -101,14 +101,18 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// A site that is *not* a hoisted reducer's argument -- a bare dynamic index
 /// (`arr[i+1]`, a range), the dynamic-index reducer carve-out
 /// (`SUM(pop[idx, *])`, `idx` non-literal, reclassified to `DynamicIndex`),
-/// a mapped sliced reducer the correspondence declines (element-mapped --
-/// GH #756 -- or reverse-declared -- GH #757; `enumerate_agg_nodes` declines
-/// those, so the reference stays `Direct` and is reclassified
-/// `DynamicIndex`), or a direct `pop[idx]` alongside a `SUM(pop[*])` --
-/// keeps a conservative edge and a Bare-named link score, EXCEPT when both
-/// endpoints are arrayed with non-corresponding dimensions (the declined
-/// mapped-reducer cases): no compilable conservative score exists there, so
-/// the edge is skipped loudly with no link-score variable (GH #758).
+/// an ELEMENT-mapped sliced reducer the correspondence declines (GH #756;
+/// `enumerate_agg_nodes` declines it, so the reference stays `Direct` and
+/// is reclassified `DynamicIndex` -- the reverse-declared POSITIONAL pair
+/// is accepted since GH #757), or a direct `pop[idx]` alongside a
+/// `SUM(pop[*])` -- keeps a conservative edge and a Bare-named link score,
+/// EXCEPT when both endpoints are arrayed with non-corresponding dimensions
+/// (the declined mapped-reducer cases): no compilable conservative score
+/// exists there, so the edge is skipped loudly with no link-score variable
+/// (GH #758). A mixed iterated+literal subscript is no longer in the
+/// conservative family at all -- it classifies `PerElement` (GH #525) and
+/// gets exact diagonal-with-pinned-axes edges plus per-(row,
+/// full-target-element) scores.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
@@ -120,22 +124,49 @@ pub enum RefShape {
     /// `Vec<String>` carries the resolved element names per dimension
     /// in source order (canonical lowercase).
     FixedIndex(Vec<String>),
+    /// Mixed per-axis access (GH #525, T6 of the shape-expressiveness
+    /// design): a subscript with at least one ITERATED axis (a target-
+    /// equation iterated-dimension index lined up with the source's axis,
+    /// possibly through a positional mapping) and at least one PINNED axis
+    /// (a literal element) -- `pop[Region, young]` inside an
+    /// A2A-over-`Region` equation. `axes` carries one
+    /// [`crate::ltm_agg::AxisRead`] per source axis in declared order.
+    ///
+    /// Invariants (enforced by `classify_iterated_dim_shape`): no
+    /// `Reduced` entries (a non-reducer reference never collapses an
+    /// axis); not all-`Pinned` (that canonicalizes to `FixedIndex`) and
+    /// not all-`Iterated` (that canonicalizes to `Bare`) -- so every
+    /// existing `Bare`/`FixedIndex` link-score NAME is untouched and
+    /// `PerElement` is minted only where the pre-T6 classifier said
+    /// `DynamicIndex` and was wrong.
+    ///
+    /// The element graph emits the diagonal-with-pinned-axes edges
+    /// (`pop[r,young] -> row_sum[r]`, never the cross-product); emission
+    /// produces one scalar link score per (row, FULL target element),
+    /// named `$⁚ltm⁚link_score⁚{from}[{row}]→{to}[{e}]` -- the row is a
+    /// function of `e`: project `e` onto the `Iterated` axes (slot-
+    /// remapped for mapped pairs), fill `Pinned` axes with their
+    /// literals. The loop builder routes every circuit traversing a
+    /// `PerElement` edge to the per-circuit scalar path (no Bare A2A
+    /// name exists for the hop).
+    PerElement { axes: Vec<crate::ltm_agg::AxisRead> },
     /// `Expr2::Subscript(source, indices)` where at least one index is
     /// `IndexExpr2::Wildcard`, or every index is `Wildcard` / `StarRange`
     /// (the reducer-style whole-extent access). A reducer reference with
     /// this shape that `enumerate_agg_nodes` hoisted into a `$⁚ltm⁚agg⁚{n}`
     /// node is routed `ThroughAgg` (the shape is then ignored); a *whole-RHS*
     /// reducer's argument keeps this shape on its `Direct` site, where
-    /// `model_element_causal_edges` routes a PARTIAL reduce
-    /// (`row_sum[D1] = SUM(matrix[D1,*])`) by its read slice (GH #752,
-    /// `ltm_agg::variable_backed_partial_reduce_agg` -- only the diagonal
-    /// `matrix[d1,d2] → row_sum[d1]` rows, matching the per-`(row, slot)`
-    /// link scores) and projects a whole-extent reduce
-    /// (`total = SUM(population[*])`) to the conservative reduction /
-    /// broadcast into the (variable-backed-agg) target. The not-hoistable
-    /// dynamic-index reducer carve-out (`SUM(pop[idx,*])`) is reclassified by
-    /// `ltm_ir` as `DynamicIndex` rather than kept here (#514), so a `Direct`
-    /// `Wildcard` site never carries an *un*-hoisted sliced reducer.
+    /// `model_element_causal_edges` routes any non-trivial statically-
+    /// describable reduce (`row_sum[D1] = SUM(matrix[D1,*])`,
+    /// `outf[D1] = MEAN(cube[D1,x,*])`, `total = SUM(pop[nyc,*])`) by its
+    /// read slice (GH #752 / GH #765, `ltm_agg::variable_backed_reduce_agg`
+    /// -- only the READ rows, matching the per-read-row link scores) and
+    /// projects a whole-extent reduce (`total = SUM(population[*])`) to the
+    /// conservative reduction / broadcast into the (variable-backed-agg)
+    /// target. The not-hoistable dynamic-index reducer carve-out
+    /// (`SUM(pop[idx,*])`) is reclassified by `ltm_ir` as `DynamicIndex`
+    /// rather than kept here (#514), so a `Direct` `Wildcard` site never
+    /// carries an *un*-hoisted sliced reducer.
     Wildcard,
     /// `Expr2::Subscript(source, indices)` where at least one index is
     /// a non-literal expression (`@N`, `Range`, an arbitrary `Expr`, or a
@@ -184,6 +215,7 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// | non-empty   | any        | Wildcard / DynamicIndex       | full cross product (NxM)                      |
 /// | non-empty   | []         | FixedIndex(elems)             | `from[elems] -> to` (one edge)                |
 /// | non-empty   | non-empty  | FixedIndex(elems)             | `from[elems] -> to[d]` for each cartesian d   |
+/// | non-empty   | non-empty  | PerElement(axes)              | diagonal-with-pinned-axes: `from[row] -> to[e]` for every target element `e` whose projection onto the Iterated dims is `row`'s slot (broadcast over unshared target dims); GH #525 |
 ///
 /// `FixedIndex` carries the resolved per-dimension element names in
 /// source order; multi-dim fixed yields `from[e1,e2]`. Mixed
@@ -202,9 +234,10 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// here is only a variable-backed WHOLE-EXTENT reducer's argument
 /// (`total = SUM(population[*])`, the broadcast `share[R] = SUM(pop[*])`, or
 /// a partial reduce whose result axes don't equal the target's dims), a
-/// (rare) non-reducer whole-array reference, or a mapped sliced reducer the
-/// correspondence declines (element-mapped -- GH #756 -- or reverse-declared
-/// -- GH #757). The conservative cross product is sound for the element
+/// (rare) non-reducer whole-array reference, or an ELEMENT-mapped sliced
+/// reducer the correspondence declines (GH #756; the reverse-declared
+/// positional pair is hoisted since GH #757). The conservative cross
+/// product is sound for the element
 /// EDGES in all of those (a superset, never fewer); the declined
 /// mapped-reducer cases' link SCORES have no compilable conservative shape,
 /// so the emitter skips them loudly and loop scores through the edge are
@@ -328,20 +361,125 @@ fn emit_edges_for_reference(
                 entry.insert(to_node.clone());
             }
         }
+        RefShape::PerElement { axes } => {
+            // GH #525 (T6): the diagonal-with-pinned-axes expansion. The
+            // rows come from the SAME `read_slice_rows` derivation the agg
+            // machinery uses (invariant I4 of the shape-expressiveness
+            // design): a `Pinned` axis is fixed to its literal element, an
+            // `Iterated` axis ranges with its slot coordinate tracked
+            // (mapping-remapped for a positionally-mapped pair). With no
+            // `Reduced` axes (the variant invariant) the rows are 1:1 with
+            // slots. Each row feeds exactly the target elements whose
+            // projection onto the Iterated target dims equals its slot,
+            // broadcasting over target dims the reference does not iterate
+            // -- the same shared-dims rule `expand_same_element` applies
+            // for `Bare`. The pre-T6 cross-product (`pop[a,young] ->
+            // row_sum[b]`) is exactly what this arm exists to kill: those
+            // phantom edges minted non-causal loops carrying silent
+            // confident scores (~0.245 in the GH #525 repro).
+            use crate::ltm_agg::AxisRead;
+            let from_dim_element_lists: Vec<Vec<String>> =
+                from_dims.iter().map(dimension_element_names).collect();
+            let rows = crate::db::ltm::read_slice_rows(axes, &from_dim_element_lists, dim_ctx);
+            // Iterated target dims in slot order; every one must name a
+            // target dim for the slot projection to be meaningful (true by
+            // construction -- the classifier only mints `Iterated` for the
+            // target equation's own iterated dims -- but a mid-edit
+            // inconsistency degrades to the conservative cross-product
+            // below rather than dropping edges).
+            let iter_dims: Vec<&str> = axes
+                .iter()
+                .filter_map(|a| match a {
+                    AxisRead::Iterated { dim, .. } => Some(dim.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let slots_resolve = !to_is_scalar
+                && iter_dims
+                    .iter()
+                    .all(|id| to_dims.iter().any(|d| d.name() == *id));
+            if let (Some(rows), true) = (rows, slots_resolve) {
+                // Per target-dim position: `Some(j)` when that dim is the
+                // j-th slot coordinate, `None` for a broadcast dim.
+                let to_dim_slot_pos: Vec<Option<usize>> = to_dims
+                    .iter()
+                    .map(|d| iter_dims.iter().position(|id| *id == d.name()))
+                    .collect();
+                let target_set: BTreeSet<&String> = target_nodes.iter().collect();
+                for crate::db::ltm::ReadSliceRow { row, slot, .. } in &rows {
+                    let from_node = format!("{from_name}[{row}]");
+                    let slot_parts: Vec<&str> = slot.split(',').collect();
+                    // Candidate elements per target-dim position: the slot
+                    // coordinate where the dim is iterated, every element
+                    // where it broadcasts.
+                    let to_elem_options: Vec<Vec<String>> = to_dims
+                        .iter()
+                        .zip(&to_dim_slot_pos)
+                        .map(|(d, pos)| match pos {
+                            Some(j) => vec![slot_parts[*j].to_string()],
+                            None => dimension_element_names(d),
+                        })
+                        .collect();
+                    let mut to_tuples: Vec<Vec<&str>> = vec![vec![]];
+                    for options in &to_elem_options {
+                        let mut next = Vec::with_capacity(to_tuples.len() * options.len());
+                        for existing in &to_tuples {
+                            for opt in options {
+                                let mut extended = existing.clone();
+                                extended.push(opt.as_str());
+                                next.push(extended);
+                            }
+                        }
+                        to_tuples = next;
+                    }
+                    for to_elems in &to_tuples {
+                        let to_node = if to_elems.len() == 1 {
+                            format_element_name(to_name, to_elems[0])
+                        } else {
+                            format_multi_element_name(to_name, to_elems)
+                        };
+                        // `target_nodes` narrows the target side when the
+                        // reference sits in an `Ast::Arrayed` per-element
+                        // slot (mirroring the `Bare` arm's intersection).
+                        if target_element.is_some() && !target_set.contains(&to_node) {
+                            continue;
+                        }
+                        element_edges
+                            .entry(from_node.clone())
+                            .or_default()
+                            .insert(to_node);
+                    }
+                }
+            } else {
+                // Defensive fallback (stale slice invariant / scalar `to` /
+                // unresolvable slot dim): the conservative cross-product,
+                // a superset of the true reads -- never fewer edges.
+                for from_elem in cartesian_element_names(from_name, from_dims) {
+                    let entry = element_edges.entry(from_elem).or_default();
+                    for to_node in &target_nodes {
+                        entry.insert(to_node.clone());
+                    }
+                }
+            }
+        }
         RefShape::Wildcard | RefShape::DynamicIndex => {
             // Conservative full cross product over source elements.
             // `target_nodes` already restricts the target side when
             // inside an arrayed per-element expression. `DynamicIndex`
             // here is `arr[i+1]`, a range, or the not-hoistable-reducer
             // carve-out (`SUM(pop[idx,*])`, reclassified from `Wildcard` by
-            // the IR); `Wildcard` here is only a variable-backed
-            // WHOLE-EXTENT reducer's whole-RHS argument (a full reduction
-            // feeding every target element) or a rare non-reducer
-            // whole-array reference -- a hoisted *synthetic*-agg reducer
-            // reference is routed through the agg (`emit_agg_routed_edges`)
-            // and a variable-backed PARTIAL reducer's argument is routed by
-            // its read slice through the same helper (GH #752), so neither
-            // lands on this arm.
+            // the IR); `Wildcard` here is a variable-backed WHOLE-EXTENT
+            // reducer's whole-RHS argument (a full reduction feeding every
+            // target element), a DE-HOISTED array-valued reducer's wildcard
+            // arg (`RANK(pop[*], 1)` -- GH #771: RANK never sets
+            // `in_reducer`, so the IR's #514 reclassification doesn't fire
+            // and the site keeps its syntactic shape; the cross-product is
+            // the intended coarse-but-sound treatment), or a rare
+            // non-reducer whole-array reference -- a hoisted
+            // *synthetic*-agg reducer reference is routed through the agg
+            // (`emit_agg_routed_edges`) and a variable-backed PARTIAL
+            // reducer's argument is routed by its read slice through the
+            // same helper (GH #752), so neither lands on this arm.
             let from_elements = cartesian_element_names(from_name, from_dims);
             for from_elem in &from_elements {
                 let entry = element_edges.entry(from_elem.clone()).or_default();
@@ -625,9 +763,10 @@ fn expand_same_element(
 
 /// Emit the element edges for a reference routed through a hoisted aggregate
 /// node: `source[<read slice>] → agg[<iterated>]` then `agg[<iterated>] →
-/// to[e]`, where `agg.read_slice` (one [`AxisRead`] per source axis) decides
-/// which source rows feed each agg result slot and `agg.result_dims` (the
-/// `Iterated` axes' dims) decides how the agg fans out into `to`.
+/// to[e]`, where `from`'s read slice (`agg.source_read_slice(from)`, one
+/// [`AxisRead`] per source axis) decides which source rows feed each agg
+/// result slot and `agg.result_dims` (the `Iterated` axes' dims) decides how
+/// the agg fans out into `to`.
 ///
 /// - A [`AxisRead::Pinned`] axis fixes one element of the source on that axis.
 /// - An [`AxisRead::Iterated`] axis ranges; its element selects the agg result
@@ -635,10 +774,14 @@ fn expand_same_element(
 ///   TARGET-dim element via `iterated_axis_slot_elements` when the axis is a
 ///   positionally-mapped pair (GH #534; identity in the literal case).
 /// - A [`AxisRead::Reduced`] axis ranges over *every* element (each one feeds
-///   the same agg result slot). For the *element graph* a representative
-///   element would suffice for reachability, but emitting one edge per element
-///   matches `cross_element_loop_through_sum_reducer`'s whole-extent
-///   expectation and the per-element link scores need them all anyway.
+///   the same agg result slot) -- or, for a subset-bearing `Reduced` (a
+///   proper-subdimension StarRange, GH #766), over only the subset's
+///   elements, so an unread row gets no edge into the agg and loop
+///   enumeration cannot discover loops through it. For the *element graph* a
+///   representative element would suffice for reachability, but emitting one
+///   edge per element matches `cross_element_loop_through_sum_reducer`'s
+///   whole-extent expectation and the per-element link scores need them all
+///   anyway.
 ///
 /// When `read_slice` is all-`Reduced` (`result_dims` empty) the agg is scalar:
 /// every source element feeds `agg`, and `agg` broadcasts to every `to`
@@ -647,15 +790,17 @@ fn expand_same_element(
 ///
 /// A VARIABLE-BACKED agg (`is_synthetic == false`, GH #752 -- the target's
 /// whole RHS is the reducer, so `agg.name == to_name` and the gate
-/// `ltm_agg::variable_backed_partial_reduce_agg` guarantees `result_dims`
-/// equal `to`'s dims) emits only the source→slot half: the slot names ARE
-/// `to`'s element nodes, and an agg→to half would emit degenerate
-/// `to[e] → to[e]` self-edges.
+/// `ltm_agg::variable_backed_reduce_agg` guarantees `result_dims` equal
+/// `to`'s dims, or -- for a scalar-result slice -- that `to` is SCALAR, so
+/// the bare agg name IS `to`'s element node) emits only the source→slot
+/// half: the slot names ARE `to`'s element nodes, and an agg→to half would
+/// emit degenerate `to[e] → to[e]` self-edges.
 ///
-/// Defensive: if `read_slice` doesn't have one entry per source axis (it
-/// always should for a hoisted agg whose `source_vars` includes `from`), fall
-/// back to the conservative "every source element → agg" form so a stale
-/// invariant can't drop edges.
+/// Defensive: if `from`'s read slice doesn't have one entry per source axis
+/// (it always should for a hoisted agg whose `sources` include `from` --
+/// `source_read_slice` returns the empty slice for a non-source, which
+/// trips the same guard), fall back to the conservative "every source
+/// element → agg" form so a stale invariant can't drop edges.
 #[allow(clippy::too_many_arguments)]
 fn emit_agg_routed_edges(
     from_name: &str,
@@ -682,8 +827,11 @@ fn emit_agg_routed_edges(
     // result dim is the target's iterated dim, absent from the source's
     // declared dims). `read_slice_ok` keys the source-row layout
     // machinery below off the well-formed slice; it is independent of where the
-    // `Iterated` `Dimension`s come from.
-    let read_slice_ok = !from_dims.is_empty() && agg.read_slice.len() == from_dims.len();
+    // `Iterated` `Dimension`s come from. The slice is `from`'s OWN
+    // (per-source) slice -- empty for a non-source, which fails the arity
+    // check and degrades to the conservative fallback.
+    let read_slice = agg.source_read_slice(from_name);
+    let read_slice_ok = !from_dims.is_empty() && read_slice.len() == from_dims.len();
     let resolve_result_dim = |name: &str| -> Option<crate::dimensions::Dimension> {
         let canon = canonicalize(name);
         from_dims
@@ -778,7 +926,7 @@ fn emit_agg_routed_edges(
         // conservative fallback as a malformed `read_slice` rather than
         // emitting mis-slotted edges.
         let planned: Option<Vec<AxisPlan>> = if read_slice_ok {
-            agg.read_slice
+            read_slice
                 .iter()
                 .zip(from_dims)
                 .map(|(a, d)| match a {
@@ -800,8 +948,8 @@ fn emit_agg_routed_edges(
                             iterated_pos: Some(pos),
                         })
                     }
-                    AxisRead::Reduced => Some(AxisPlan {
-                        elems: dimension_element_names(d),
+                    AxisRead::Reduced { subset } => Some(AxisPlan {
+                        elems: subset.clone().unwrap_or_else(|| dimension_element_names(d)),
                         slot_elems: None,
                         iterated_pos: None,
                     }),
@@ -821,18 +969,20 @@ fn emit_agg_routed_edges(
         };
         let axis_plans: Vec<AxisPlan> = planned.unwrap_or_else(|| {
             // Conservative fallback: every source element, scalar agg. NOTE:
-            // for a VARIABLE-BACKED arrayed agg this fallback is NOT merely
-            // imprecise -- a scalar slot makes `agg_node_name` the BARE
-            // variable name (`inflow`), a node that does not exist in the
-            // element graph (an arrayed variable's nodes are all
+            // for a VARIABLE-BACKED *arrayed* agg this fallback is NOT
+            // merely imprecise -- a scalar slot makes `agg_node_name` the
+            // BARE variable name (`inflow`), a node that does not exist in
+            // the element graph (an arrayed variable's nodes are all
             // subscripted), so the edges dangle and any loop through the
-            // reducer silently disappears from enumeration. Unreachable by
-            // construction today (`variable_backed_partial_reduce_agg` only
-            // admits well-formed all-Iterated/Reduced slices, and the
-            // debug_asserts above pin the remap invariants), but if the gate
-            // is ever widened this fallback must be re-evaluated for the
-            // variable-backed case (e.g. fall back to the cross-product
-            // instead).
+            // reducer silently disappears from enumeration. (For a SCALAR
+            // variable-backed owner -- the section-6 scalar-result
+            // admission -- the bare name IS the element node, so the
+            // fallback is safe there.) Unreachable by construction today
+            // (`variable_backed_reduce_agg` only admits well-formed slices
+            // whose Iterated remaps exist, and the debug_asserts above pin
+            // the remap invariants), but if the gate is ever widened this
+            // fallback must be re-evaluated for the arrayed variable-backed
+            // case (e.g. fall back to the cross-product instead).
             from_dims
                 .iter()
                 .map(|d| AxisPlan {
@@ -1437,16 +1587,20 @@ pub struct EdgeShapesResult {
     /// `model_causal_edges`.
     pub edge_shapes: HashMap<(String, String), BTreeSet<RefShape>>,
     /// The variable-level edges with at least one `ThroughAgg`-routed
-    /// reference site: the element graph routes (part of) this edge
+    /// reference site -- the element graph routes (part of) this edge
     /// through a synthetic `$⁚ltm⁚agg⁚{n}` node instead of emitting a
-    /// direct `from → to` element edge. A cycle traversing such an edge
-    /// can never be scored from the variable-level circuit alone (the
-    /// direct link has no usable link-score variable -- GH #737), so
-    /// `classify_cycle` must send it to the element-level slow path
-    /// regardless of the edge's `RefShape`s. The distinction matters
-    /// exactly when the routed site's shape is `Bare` (a scalar feeder
-    /// of a hoisted reducer); an arrayed reducer argument is `Wildcard`
-    /// and already classifies as cross-element on shape alone.
+    /// direct `from → to` element edge -- PLUS the variable-backed
+    /// ITERATED-DIM PROJECTION-FEEDER edges (GH #767 / T5: `frac → growth`
+    /// for `growth[D1] = SUM(matrix[D1,*] * frac[D1])`, whose only emitted
+    /// scores are the per-`(row, slot)` changed-last scalars). A cycle
+    /// traversing either kind can never be scored from the variable-level
+    /// circuit alone (the direct link has no usable Bare link-score
+    /// variable -- GH #737), so `classify_cycle` must send it to the
+    /// element-level slow path regardless of the edge's `RefShape`s. The
+    /// distinction matters exactly when the routed site's shape is `Bare`
+    /// (a scalar feeder of a hoisted reducer, or the same-dims projection
+    /// feeder); an arrayed reducer argument is `Wildcard` and already
+    /// classifies as cross-element on shape alone.
     pub agg_routed_edges: BTreeSet<(String, String)>,
 }
 
@@ -1495,6 +1649,7 @@ pub fn model_edge_shapes(
 
     let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
     let mut agg_routed_edges: BTreeSet<(String, String)> = BTreeSet::new();
+    let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
     for (from_name, to_set) in &variable_edges.edges {
         for to_name in to_set {
             // Module edges and structural flow->stock edges short-circuit
@@ -1540,6 +1695,26 @@ pub fn model_edge_shapes(
                     .iter()
                     .any(|s| matches!(s.routing, crate::db::ltm_ir::SiteRouting::ThroughAgg { .. }))
             }) {
+                agg_routed_edges.insert((from_name.clone(), to_name.clone()));
+            }
+            // A variable-backed ITERATED-DIM PROJECTION-FEEDER edge (GH
+            // #767 / T5) is flagged for the same reason: its sites are
+            // Direct `Bare` (the agg IS the target, never synthetic), but
+            // the only emitted scores are the per-`(row, slot)` changed-last
+            // scalars, so a fast-path A2A loop would reference a Bare name
+            // that no longer exists. Gated on the SAME
+            // `variable_backed_reduce_agg` decision the element graph, the
+            // score derivation, and the slow-path loop routing consult.
+            // Inert pre-T5: the identical-slices acceptance could never
+            // produce a projection-feeder source.
+            let to_dims = source_vars
+                .get(to_name)
+                .filter(|sv| sv.kind(db) != super::SourceVariableKind::Module)
+                .map(|sv| super::variable_dimensions(db, *sv, project).as_slice())
+                .unwrap_or(&[]);
+            if crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from_name, to_name, to_dims)
+                .is_some_and(|a| a.source_is_projection_feeder(from_name))
+            {
                 agg_routed_edges.insert((from_name.clone(), to_name.clone()));
             }
         }
@@ -1602,23 +1777,26 @@ pub enum CycleClass {
 ///
 /// Classification rules (applied in order):
 ///
-/// 1. If any edge has a `Wildcard`, `DynamicIndex`, or `FixedIndex`
-///    shape (or any non-Bare shape co-existing with Bare),
+/// 1. If any edge has a `Wildcard`, `DynamicIndex`, `FixedIndex`, or
+///    `PerElement` shape (or any non-Bare shape co-existing with Bare),
 ///    `CrossElementOrMixed`. A FixedIndex reference pins the cycle to a
 ///    specific element subscript distinct from the rest of its
 ///    neighbours' broadcast semantics; the cycle cannot be emitted as
 ///    a single A2A loop. A Wildcard reducer pulls in cross-element
 ///    contributions, so the cycle is structurally cross-element.
 ///    DynamicIndex is conservatively treated like Wildcard.
-/// 2. If any edge is `ThroughAgg`-routed
-///    (`EdgeShapesResult::agg_routed_edges`), `CrossElementOrMixed` --
-///    even when every site shape is Bare. The element graph routes such
-///    an edge through a synthetic `$⁚ltm⁚agg⁚{n}` node, so the loop must
-///    be built from the element-level circuit that traverses the agg; a
-///    fast-path loop built from the variable-level circuit would compose
-///    the direct `from → to` link, which has no usable link-score
-///    variable (GH #737). The Bare-shaped case is a *scalar feeder* of a
-///    hoisted reducer (`scale` in `SUM(pop[*] * scale)`); arrayed
+/// 2. If any edge is in `EdgeShapesResult::agg_routed_edges` (a
+///    `ThroughAgg`-routed site, or a variable-backed projection-feeder
+///    edge -- GH #767), `CrossElementOrMixed` -- even when every site
+///    shape is Bare. The element graph routes a `ThroughAgg` edge through
+///    a synthetic `$⁚ltm⁚agg⁚{n}` node, and a feeder edge's only scores
+///    are per-`(row, slot)` scalars, so the loop must be built from the
+///    element-level circuit; a fast-path loop built from the
+///    variable-level circuit would compose the direct `from → to` link,
+///    which has no usable Bare link-score variable (GH #737). The
+///    Bare-shaped cases are a *scalar feeder* of a hoisted reducer
+///    (`scale` in `SUM(pop[*] * scale)`) and the same-dims projection
+///    feeder (`frac[D1]` in `SUM(matrix[D1,*] * frac[D1])`); arrayed
 ///    reducer arguments are `Wildcard` and already caught by rule 1.
 /// 3. If every variable has an empty dimension list (all scalar),
 ///    `PureScalar`.
@@ -1660,7 +1838,15 @@ pub(crate) fn classify_cycle(
         for shape in shapes {
             match shape {
                 RefShape::Bare => {}
-                RefShape::FixedIndex(_) | RefShape::Wildcard | RefShape::DynamicIndex => {
+                // `PerElement` (GH #525) forces the slow path like the other
+                // non-Bare shapes: the hop's only link scores are the
+                // per-(row, full-target-element) scalars, so a fast-path A2A
+                // loop-score equation would reference a nonexistent Bare
+                // name and silently stub.
+                RefShape::FixedIndex(_)
+                | RefShape::PerElement { .. }
+                | RefShape::Wildcard
+                | RefShape::DynamicIndex => {
                     return CycleClass::CrossElementOrMixed;
                 }
             }
@@ -1853,25 +2039,59 @@ pub fn model_element_causal_edges(
             for site in classified.expect("classified is Some -- checked above") {
                 match &site.routing {
                     crate::db::ltm_ir::SiteRouting::Direct => {
-                        // GH #752: a `Direct` `Wildcard` site whose target is
-                        // a VARIABLE-BACKED partial reducer (`inflow[D1] =
-                        // SUM(matrix[D1,*])` as the whole RHS -- the variable
-                        // IS the agg, so the site is not `ThroughAgg`) gets
-                        // the same read-slice routing a synthetic agg's
-                        // source half gets: `matrix[d1,d2] → inflow[d1]`,
-                        // never the phantom off-diagonal cross-product
-                        // (`SUM(matrix[a,*])` does not read row `b`). The
-                        // per-`(row, slot)` link scores
-                        // `try_cross_dimensional_link_scores` emits carry
-                        // exactly these diagonal edges' names, so loop scores
-                        // over them resolve; the cross-product's phantom
-                        // edges referenced names that were never emitted and
-                        // stubbed every loop score through the reducer to 0.
-                        // `variable_backed_partial_reduce_agg` is `None` for
-                        // the whole-extent / broadcast / permuted-axes
-                        // shapes, which keep the conservative arm below.
-                        if matches!(site.shape, RefShape::Wildcard)
-                            && let Some(vb_agg) = crate::ltm_agg::variable_backed_partial_reduce_agg(
+                        // GH #752 / GH #765: a `Direct` site whose target is
+                        // a VARIABLE-BACKED reducer (`inflow[D1] =
+                        // SUM(matrix[D1,*])`, `outf[D1] = MEAN(cube[D1,x,*])`,
+                        // `total = SUM(pop[nyc,*])` as the whole RHS -- the
+                        // variable IS the agg, so the site is not
+                        // `ThroughAgg`) gets the same read-slice routing a
+                        // synthetic agg's source half gets: only the rows
+                        // the slice READS, never the phantom off-diagonal /
+                        // unread-row cross-product (`SUM(matrix[a,*])` does
+                        // not read row `b`; `MEAN(cube[D1,x,*])` does not
+                        // read the `y` slab). The per-read-row link scores
+                        // `try_cross_dimensional_link_scores` derives from
+                        // the SAME `read_slice_rows` carry exactly these
+                        // edges' names, so loop scores over them resolve.
+                        // `variable_backed_reduce_agg` is `None` for the
+                        // whole-extent shape (which keeps the reference
+                        // walker's reduction/broadcast edges below) and the
+                        // GH #777 arrayed-owner scalar-result slice (the
+                        // loud-skip conservative arm). The GH #764
+                        // broadcast/permuted shapes no longer reach this
+                        // `Direct` dispatch at all: since T4 they mint
+                        // SYNTHETIC aggs, so their sites classify
+                        // `ThroughAgg` and take the arm below.
+                        //
+                        // Shape condition: a hoistable whole-RHS reducer
+                        // arg classifies `Wildcard` (any `*` index, or
+                        // all-`StarRange` per AC1.4) or `DynamicIndex` (the
+                        // coarse classifier shape of ANY mixed
+                        // iterated+StarRange subscript -- both the
+                        // proper-subdimension `SUM(matrix[D1,*:Sub])` and
+                        // the own-dimension `SUM(matrix[D1,*:D2])`, the
+                        // documented partial-StarRange classifier
+                        // residual). Both shapes route here; the gate
+                        // (which requires a statically-describable hoisted
+                        // slice) is the real decider, and a TRUE dynamic
+                        // index (`SUM(matrix[idx,*])`) is never hoisted, so
+                        // the gate is `None` for it. NOTE the own-dimension
+                        // StarRange family already PASSED the pre-T3 gate
+                        // (`*:D2` over the axis's own dim resolves to
+                        // `Reduced{subset: None}` with no bare `*`, an
+                        // all-Iterated/Reduced slice) while this dispatch's
+                        // old `Wildcard`-only condition refused to route it
+                        // -- and the loop builder's routing consults ONLY
+                        // the gate -- so that family got internally
+                        // inconsistent treatment: conservative
+                        // cross-product element edges but per-circuit loop
+                        // routing, i.e. warned phantom loops. Widening the
+                        // condition makes the dispatch consistent with the
+                        // gate, and the family now gets first-class
+                        // read-slice treatment (pinned by
+                        // `own_dim_star_range_mixed_reduce_scores_read_slice`).
+                        if matches!(site.shape, RefShape::Wildcard | RefShape::DynamicIndex)
+                            && let Some(vb_agg) = crate::ltm_agg::variable_backed_reduce_agg(
                                 agg_nodes, from_name, to_name, &to_dims,
                             )
                         {

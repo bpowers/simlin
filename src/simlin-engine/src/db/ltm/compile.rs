@@ -169,6 +169,34 @@ pub fn link_score_equation_text_shaped<'db>(
     // dimensions input, so this fn is recomputed when a dimension's
     // mappings change.
     let dim_ctx = project_dimensions_context(db, project);
+    // Declared dims of the target's ARRAY deps (canonical name -> dims),
+    // threaded into the GH #526 other-dep correspondence check so a
+    // transposed / position-mismatched non-live array dep is never
+    // collapsed to a wrong-element bare `PREVIOUS(dep)`. Scalar deps and
+    // deps with no resolvable source variable (implicit/synthetic names)
+    // are omitted -- the recognizer keeps its permissive legacy collapse
+    // for those.
+    let dep_dims: HashMap<String, Vec<crate::dimensions::Dimension>> = to_var
+        .ast()
+        .map(|ast| {
+            use crate::ast::Ast;
+            let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
+                Ast::Scalar(_) => &[],
+                Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
+            };
+            crate::variable::identifier_set(ast, target_ast_dims, None)
+                .into_iter()
+                .filter_map(|dep| {
+                    let sv = model.variables(db).get(dep.as_str())?;
+                    if sv.kind(db) == SourceVariableKind::Module {
+                        return None;
+                    }
+                    let dims = variable_dimensions(db, *sv, project);
+                    (!dims.is_empty()).then(|| (dep.as_str().to_string(), dims.clone()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     // The generator returns the equation already tagged with the target's
     // dimensionality (`Scalar`, `ApplyToAll`, or `Arrayed`). `dimensions`
     // and `compile_directly` are left at defaults here; the emission loop
@@ -188,6 +216,7 @@ pub fn link_score_equation_text_shaped<'db>(
         &to_var,
         &all_vars,
         Some(dim_ctx),
+        Some(&dep_dims),
     ) {
         Ok(eqn) => eqn,
         Err(err) => {
@@ -230,10 +259,11 @@ struct LoweredLtmVariable {
 /// This is [`lower_ltm_variable`]'s gate for the scoped re-lower, and it
 /// must be sound against `ast::expr3`'s Pass-1 decomposition set -- NOT
 /// the agg-hoistable reducer set (`ltm_agg::reducer_kind_from_name`),
-/// which differs in both directions: `SIZE` is never hoisted into an agg
-/// (its link score is constant 0) yet Pass-1 decomposes its argument
-/// exactly like `SUM`'s, while `RANK` is agg-hoistable yet Pass-1 never
-/// decomposes its arguments. Deriving the original (text-scan) gate from
+/// which differs: `SIZE` is never hoisted into an agg (its link score is
+/// constant 0) yet Pass-1 decomposes its argument exactly like `SUM`'s
+/// (and `RANK` -- recognized as a reducer, never hoisted post-GH #771 --
+/// is never Pass-1-decomposed either). Deriving the original (text-scan)
+/// gate from
 /// the wrong set silently stubbed any fragment embedding
 /// `SIZE(<array expression>)` -- the demonstrated GH #738 round-2
 /// regression, pinned by

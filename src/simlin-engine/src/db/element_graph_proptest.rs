@@ -36,6 +36,35 @@
 //! never silently go vacuous again. A deterministic companion test pins the
 //! same expectations on a fixed spec containing every reducer pattern.
 //!
+//! Two further shape families ride the same conventions (the 2026-06-11
+//! shape-expressiveness design): an iterated+literal MIXED subscript (the
+//! GH #525 `PerElement` family -- `wide[Dim, young]` or, axis order
+//! flipped, `wide[young, Dim]` inside an A2A-over-`Dim` equation,
+//! including the BROADCAST case where the target also iterates `Age`) and
+//! a SUBSET reducer (`SUM(v[*:Sub])`, a StarRange over a proper
+//! subdimension -- GH #766). Both property oracles enumerate expected rows
+//! via `read_slice_rows`, but their strength differs per family:
+//! production's `PerElement` expansion arm consumes the SAME function, so
+//! the mixed property is a shared-derivation consistency check and the
+//! deterministic companion (hand-pinned literal edge names, both axis
+//! orders) is the mixed family's SOLE independent oracle; production's
+//! agg-routed element edges, by contrast, come from `emit_agg_routed_edges`'
+//! own `AxisPlan` enumeration rather than `read_slice_rows` (the
+//! invariant-I4 deviation tracked as GH #783), so the subset property is
+//! genuinely DIFFERENTIAL -- two independent row enumerations that must
+//! agree. Each family has its own forced strategy + property
+//! (`forced_mixed_ref_specs_expand_to_pinned_diagonal`,
+//! `forced_subset_reducer_specs_route_subset_rows`) so the GH #739 vacuity
+//! guard applies -- a strategy that silently stops generating the shape
+//! fails the forced property's spec-level guard instead of quietly
+//! shrinking the sampled corpus -- and the fixed-seed distribution guard
+//! `mixed_ref_strategy_generates_both_axis_orders` pins that BOTH
+//! subscript orders (and both target shapes) keep being drawn. Generative
+//! scope boundaries: subset reducers are exercised INLINED only (the
+//! whole-RHS variable-backed `v = SUM(v0[*:Sub])` slice has deterministic
+//! pins in `element_graph_tests.rs`), and the feeder-x-subset interaction
+//! is generated only against the scalar `total` target.
+//!
 //! This file is a regression guard: it must pass on the existing
 //! collapsing classifier today and continue to pass after the Phase 2
 //! AST-walking refactor lands. It deliberately does NOT exercise the
@@ -56,6 +85,13 @@ use crate::test_common::TestProject;
 /// One reference pattern in a generated equation. `var_idx` is the index
 /// of the source variable to reference (always strictly less than the
 /// referencing variable's own index, to keep the dependency DAG acyclic).
+///
+/// The reducer patterns are deliberately SUM-only: every reducer here is
+/// hoisted, so the per-reducer agg-hop expectations assume `ThroughAgg`
+/// routing. If a later task adds RANK patterns to the strategy, their
+/// expectations must encode the DE-HOISTED `Direct` routing instead --
+/// RANK is array-valued and never hoisted (GH #771,
+/// `ltm_agg::reducer_is_hoistable`).
 #[derive(Debug, Clone)]
 enum RefPattern {
     /// `vN` -- bare same-element reference.
@@ -87,15 +123,45 @@ enum RefPattern {
     /// GH #533 both-scalar shape. Only emitted when the project includes a
     /// scalar variable.
     InlinedReducerScalarFeeder { var_idx: usize },
+    /// `1 + SUM(vN[*:Sub])` -- an INLINED reducer whose StarRange names the
+    /// proper subdimension `Sub` (the first `subset_size` elements of `Dim`,
+    /// GH #766): the hoisted agg's `Reduced` axis carries the subset, so
+    /// only the subset rows feed the synthetic agg node; the unread rows
+    /// get NO edge into it (and no direct edge to the target either). Only
+    /// emitted when `subset_size >= 1` (i.e. `dim_size >= 2` -- a
+    /// single-element dimension has no proper subdimension).
+    InlinedSubsetReducer { var_idx: usize },
+}
+
+/// Decomposed inlined-reducer pattern: which source it reduces, whether a
+/// scalar feeder is multiplied in, and whether the StarRange reads only the
+/// proper subdimension `Sub` (GH #766).
+struct InlinedReducerShape {
+    var_idx: usize,
+    feeder: bool,
+    subset: bool,
 }
 
 impl RefPattern {
-    /// `Some((source_var_idx, has_scalar_feeder))` when the pattern is an
-    /// inlined (synthetic-agg-minting) reducer.
-    fn inlined_reducer_parts(&self) -> Option<(usize, bool)> {
+    /// `Some(shape)` when the pattern is an inlined (synthetic-agg-minting)
+    /// reducer.
+    fn inlined_reducer_parts(&self) -> Option<InlinedReducerShape> {
         match self {
-            RefPattern::InlinedReducer { var_idx } => Some((*var_idx, false)),
-            RefPattern::InlinedReducerScalarFeeder { var_idx } => Some((*var_idx, true)),
+            RefPattern::InlinedReducer { var_idx } => Some(InlinedReducerShape {
+                var_idx: *var_idx,
+                feeder: false,
+                subset: false,
+            }),
+            RefPattern::InlinedReducerScalarFeeder { var_idx } => Some(InlinedReducerShape {
+                var_idx: *var_idx,
+                feeder: true,
+                subset: false,
+            }),
+            RefPattern::InlinedSubsetReducer { var_idx } => Some(InlinedReducerShape {
+                var_idx: *var_idx,
+                feeder: false,
+                subset: true,
+            }),
             _ => None,
         }
     }
@@ -122,6 +188,34 @@ struct ArrayedVarSpec {
 struct ScalarReducerTarget {
     var_idx: usize,
     with_scalar_feeder: bool,
+    /// `SUM(v{j}[*:Sub])` instead of `SUM(v{j}[*])` (GH #766): only the
+    /// `Sub` rows feed the agg. Only set when the spec's `subset_size >= 1`.
+    with_subset: bool,
+}
+
+/// Optional trailing pair of variables exercising the GH #525 `PerElement`
+/// family: a 2-D source `wide = v{var_idx}[Dim]` (a Bare reference
+/// broadcast over `Age`) plus a target whose equation references `wide`
+/// through a MIXED iterated+literal subscript. `age_first` picks the axis
+/// ORDER -- `wide[Dim, Age]` referenced as `wide[Dim, {age}]` (the literal
+/// pinning the SECOND axis) or, flipped, `wide[Age, Dim]` referenced as
+/// `wide[{age}, Dim]` (the literal pinning the FIRST axis) -- production
+/// is per-axis today with no ordering assumption, and this knob keeps the
+/// Phase 2 AST-walking refactor from growing one unnoticed. With
+/// `broadcast` false the target is `mixed[Dim]` (the Iterated dims equal
+/// the target's -- rows and slots 1:1); with `broadcast` true it is
+/// `mixed[Dim, Age]` (the Iterated dims a strict SUBSET of the target's, so
+/// each pinned row feeds every `Age` element of its `Dim` slot). Appended
+/// last and referenced by nothing, so acyclicity is preserved.
+#[derive(Debug, Clone)]
+struct MixedRefTarget {
+    var_idx: usize,
+    /// Index into [`AGE_ELEM_NAMES`]: which `Age` element the reference pins.
+    age_idx: usize,
+    broadcast: bool,
+    /// `wide[Age, Dim]` / `wide[{age}, Dim]` (the Pinned axis FIRST)
+    /// instead of `wide[Dim, Age]` / `wide[Dim, {age}]` (Pinned second).
+    age_first: bool,
 }
 
 /// Spec for the whole generated project. The `var_specs[i]` slot's
@@ -143,12 +237,56 @@ struct ProjectSpec {
     /// (see [`ScalarReducerTarget`]). `with_scalar_feeder` is only set when
     /// `include_scalar` is.
     scalar_reducer_target: Option<ScalarReducerTarget>,
+    /// Number of elements in the proper subdimension `Sub` (the first
+    /// `subset_size` entries of `Dim`'s elements). `0` when `dim_size == 1`
+    /// (no proper subdimension exists); otherwise `1 <= subset_size <
+    /// dim_size`, so `Sub` is always PROPER -- a same-cardinality "sub"
+    /// would normalize back to the full extent (`AxisRead` invariant I3)
+    /// and make the subset routing expectations wrong. Subset patterns are
+    /// only generated when `subset_size >= 1`, and the `Sub` dimension is
+    /// only declared when one of them is present.
+    subset_size: usize,
+    /// Optional GH #525 mixed iterated+literal reference block (see
+    /// [`MixedRefTarget`]).
+    mixed_ref_target: Option<MixedRefTarget>,
+}
+
+impl ProjectSpec {
+    /// `true` when any equation embeds an inlined (synthetic-agg-minting)
+    /// reducer -- the spec-level vacuity guard for the forced-reducer
+    /// property (equivalent to `expected_agg_routings` being non-empty:
+    /// that function derives exactly one routing per such reducer).
+    fn has_inlined_reducer(&self) -> bool {
+        self.scalar_reducer_target.is_some()
+            || self
+                .var_specs
+                .iter()
+                .any(|v| v.pattern.inlined_reducer_parts().is_some())
+    }
+
+    /// `true` when any inlined reducer reads through the proper
+    /// subdimension `Sub` (GH #766) -- the spec-level vacuity guard for the
+    /// forced-subset property.
+    fn has_subset_reducer(&self) -> bool {
+        self.var_specs
+            .iter()
+            .any(|v| v.pattern.inlined_reducer_parts().is_some_and(|s| s.subset))
+            || self
+                .scalar_reducer_target
+                .as_ref()
+                .is_some_and(|t| t.with_subset)
+    }
 }
 
 /// Element names for the synthetic dimension. The generator tops out at
 /// dim_size = 5, so we only need names through `e4`. Lowercase matches
 /// the canonical form the salsa pipeline uses for edge keys.
 const ELEM_NAMES: &[&str] = &["a", "b", "c", "d", "e"];
+
+/// Element names for the fixed second dimension `Age` declared by the
+/// GH #525 mixed-reference block. Disjoint from [`ELEM_NAMES`] so a pinned
+/// `Age` literal can never be confused with a `Dim` element.
+const AGE_ELEM_NAMES: &[&str] = &["young", "old"];
 
 /// Strategy: pick a reference pattern for variable `var_idx` given the
 /// project's dim size and whether a scalar exists.
@@ -161,6 +299,7 @@ fn pattern_strategy(
     var_idx: usize,
     dim_size: usize,
     include_scalar: bool,
+    has_subset: bool,
 ) -> BoxedStrategy<RefPattern> {
     if var_idx == 0 {
         return Just(RefPattern::Constant).boxed();
@@ -199,6 +338,13 @@ fn pattern_strategy(
                 .boxed(),
         );
     }
+    if has_subset {
+        variants.push(
+            (0..max_src)
+                .prop_map(|j| RefPattern::InlinedSubsetReducer { var_idx: j })
+                .boxed(),
+        );
+    }
     proptest::strategy::Union::new(variants).boxed()
 }
 
@@ -210,33 +356,65 @@ fn project_spec_strategy() -> impl Strategy<Value = ProjectSpec> {
 
     (dim_strategy, var_count_strategy, scalar_strategy).prop_flat_map(
         |(dim_size, var_count, include_scalar)| {
-            // Build the per-variable pattern strategies with the
-            // dim_size/include_scalar context closed over.
-            let pattern_strategies: Vec<BoxedStrategy<RefPattern>> = (0..var_count)
-                .map(|i| pattern_strategy(i, dim_size, include_scalar))
-                .collect();
-            // Optional scalar reducer target: roughly a third of specs get
-            // one, sourcing from any arrayed var (it is appended last and
-            // referenced by nothing, so acyclicity is preserved). The
-            // scalar-feeder form requires the scalar variable to exist.
-            let scalar_target_strategy =
-                proptest::option::weighted(0.34, (0..var_count, any::<bool>()));
-            (pattern_strategies, scalar_target_strategy).prop_map(
-                move |(patterns, scalar_target)| ProjectSpec {
-                    dim_size,
-                    var_specs: patterns
-                        .into_iter()
-                        .map(|pattern| ArrayedVarSpec { pattern })
-                        .collect(),
-                    include_scalar,
-                    scalar_reducer_target: scalar_target.map(|(var_idx, feeder)| {
-                        ScalarReducerTarget {
-                            var_idx,
-                            with_scalar_feeder: feeder && include_scalar,
-                        }
-                    }),
-                },
-            )
+            // A proper subdimension needs at least two parent elements;
+            // `subset_size == 0` marks "unavailable" for dim_size == 1.
+            let subset_strategy: BoxedStrategy<usize> = if dim_size >= 2 {
+                (1..dim_size).boxed()
+            } else {
+                Just(0usize).boxed()
+            };
+            subset_strategy.prop_flat_map(move |subset_size| {
+                // Build the per-variable pattern strategies with the
+                // dim_size/include_scalar/subset context closed over.
+                let pattern_strategies: Vec<BoxedStrategy<RefPattern>> = (0..var_count)
+                    .map(|i| pattern_strategy(i, dim_size, include_scalar, subset_size >= 1))
+                    .collect();
+                // Optional scalar reducer target: roughly a third of specs
+                // get one, sourcing from any arrayed var (it is appended
+                // last and referenced by nothing, so acyclicity is
+                // preserved). The scalar-feeder form requires the scalar
+                // variable to exist; the subset form a proper subdimension.
+                let scalar_target_strategy =
+                    proptest::option::weighted(0.34, (0..var_count, any::<bool>(), any::<bool>()));
+                // Optional GH #525 mixed-reference block, same one-third
+                // weighting (appended last, referenced by nothing). The
+                // last bool is the axis-order flip (`age_first`).
+                let mixed_strategy = proptest::option::weighted(
+                    0.34,
+                    (
+                        0..var_count,
+                        0..AGE_ELEM_NAMES.len(),
+                        any::<bool>(),
+                        any::<bool>(),
+                    ),
+                );
+                (pattern_strategies, scalar_target_strategy, mixed_strategy).prop_map(
+                    move |(patterns, scalar_target, mixed)| ProjectSpec {
+                        dim_size,
+                        var_specs: patterns
+                            .into_iter()
+                            .map(|pattern| ArrayedVarSpec { pattern })
+                            .collect(),
+                        include_scalar,
+                        scalar_reducer_target: scalar_target.map(|(var_idx, feeder, subset)| {
+                            ScalarReducerTarget {
+                                var_idx,
+                                with_scalar_feeder: feeder && include_scalar,
+                                with_subset: subset && subset_size >= 1,
+                            }
+                        }),
+                        subset_size,
+                        mixed_ref_target: mixed.map(|(var_idx, age_idx, broadcast, age_first)| {
+                            MixedRefTarget {
+                                var_idx,
+                                age_idx,
+                                broadcast,
+                                age_first,
+                            }
+                        }),
+                    },
+                )
+            })
         },
     )
 }
@@ -298,9 +476,98 @@ fn forced_reducer_spec_strategy() -> impl Strategy<Value = ProjectSpec> {
                     spec.scalar_reducer_target = Some(ScalarReducerTarget {
                         var_idx: src_idx.index(n),
                         with_scalar_feeder: feeder,
+                        with_subset: false,
                     });
                 }
             }
+            spec
+        })
+}
+
+/// Which subset-reducer shape `forced_subset_reducer_spec_strategy`
+/// injects: the arrayed-target pattern, the scalar `total` target, or the
+/// scalar target with the feeder multiplied INSIDE the subset slice
+/// (`1 + SUM(v{j}[*:Sub] * scalar_const)` -- the feeder-acceptance and
+/// subset interaction in one shape).
+#[derive(Debug, Clone, Copy)]
+enum ForcedSubsetKind {
+    ArrayedTarget,
+    ScalarTarget,
+    ScalarTargetScalarFeeder,
+}
+
+/// Strategy: a [`ProjectSpec`] GUARANTEED to contain at least one subset
+/// (`*:Sub`) reducer (GH #766) -- the structural non-vacuity guard for the
+/// subset family (GH #739): the base strategy only *sometimes* draws the
+/// pattern, so the subset property runs over this strategy and asserts
+/// `has_subset_reducer()` for every case.
+fn forced_subset_reducer_spec_strategy() -> impl Strategy<Value = ProjectSpec> {
+    let kind_strategy = prop_oneof![
+        Just(ForcedSubsetKind::ArrayedTarget),
+        Just(ForcedSubsetKind::ScalarTarget),
+        Just(ForcedSubsetKind::ScalarTargetScalarFeeder),
+    ];
+    (
+        project_spec_strategy(),
+        kind_strategy,
+        any::<prop::sample::Index>(),
+        any::<prop::sample::Index>(),
+    )
+        .prop_map(|(mut spec, kind, slot_idx, src_idx)| {
+            if spec.subset_size == 0 {
+                // dim_size 1 has no proper subdimension; widening the dim
+                // keeps every already-generated pattern valid (`FixedIndex`
+                // element indices only gain headroom).
+                spec.dim_size = 2;
+                spec.subset_size = 1;
+            }
+            let n = spec.var_specs.len(); // >= 2 by construction
+            match kind {
+                ForcedSubsetKind::ArrayedTarget => {
+                    // Overwrite one arrayed var's pattern (index >= 1 so a
+                    // strictly-earlier source exists; acyclicity preserved).
+                    let i = 1 + slot_idx.index(n - 1);
+                    let j = src_idx.index(i);
+                    spec.var_specs[i].pattern = RefPattern::InlinedSubsetReducer { var_idx: j };
+                }
+                ForcedSubsetKind::ScalarTarget | ForcedSubsetKind::ScalarTargetScalarFeeder => {
+                    let feeder = matches!(kind, ForcedSubsetKind::ScalarTargetScalarFeeder);
+                    if feeder {
+                        spec.include_scalar = true;
+                    }
+                    spec.scalar_reducer_target = Some(ScalarReducerTarget {
+                        var_idx: src_idx.index(n),
+                        with_scalar_feeder: feeder,
+                        with_subset: true,
+                    });
+                }
+            }
+            spec
+        })
+}
+
+/// Strategy: a [`ProjectSpec`] GUARANTEED to contain the GH #525
+/// mixed-reference block (both target shapes via the injected `broadcast`
+/// flag AND both subscript axis orders via `age_first`) -- the structural
+/// non-vacuity guard for the `PerElement` family (GH #739). The companion
+/// distribution guard `mixed_ref_strategy_generates_both_axis_orders`
+/// pins that all four (order x shape) variants keep being drawn.
+fn forced_mixed_ref_spec_strategy() -> impl Strategy<Value = ProjectSpec> {
+    (
+        project_spec_strategy(),
+        any::<prop::sample::Index>(),
+        any::<prop::sample::Index>(),
+        any::<bool>(),
+        any::<bool>(),
+    )
+        .prop_map(|(mut spec, src_idx, age_idx, broadcast, age_first)| {
+            let n = spec.var_specs.len();
+            spec.mixed_ref_target = Some(MixedRefTarget {
+                var_idx: src_idx.index(n),
+                age_idx: age_idx.index(AGE_ELEM_NAMES.len()),
+                broadcast,
+                age_first,
+            });
             spec
         })
 }
@@ -321,16 +588,22 @@ fn render_pattern(pattern: &RefPattern) -> String {
         RefPattern::InlinedReducerScalarFeeder { var_idx } => {
             format!("1 + SUM(v{var_idx}[*] * scalar_const)")
         }
+        RefPattern::InlinedSubsetReducer { var_idx } => format!("1 + SUM(v{var_idx}[*:Sub])"),
     }
 }
 
 /// Render the scalar `total` variable's inlined-reducer equation.
 fn render_scalar_reducer_target(target: &ScalarReducerTarget) -> String {
     let j = target.var_idx;
-    if target.with_scalar_feeder {
-        format!("1 + SUM(v{j}[*] * scalar_const)")
+    let slice = if target.with_subset {
+        format!("v{j}[*:Sub]")
     } else {
-        format!("1 + SUM(v{j}[*])")
+        format!("v{j}[*]")
+    };
+    if target.with_scalar_feeder {
+        format!("1 + SUM({slice} * scalar_const)")
+    } else {
+        format!("1 + SUM({slice})")
     }
 }
 
@@ -339,10 +612,20 @@ fn render_scalar_reducer_target(target: &ScalarReducerTarget) -> String {
 /// One named dimension `Dim` of size `dim_size` is created with the first
 /// `dim_size` entries of `ELEM_NAMES`. Each variable `vN` is added as an
 /// arrayed aux over `Dim` with the equation rendered from its spec. The
-/// optional `scalar_const` aux is constant `1` when present.
+/// optional `scalar_const` aux is constant `1` when present. When the spec
+/// contains a subset reducer, the proper subdimension `Sub` (the first
+/// `subset_size` elements of `Dim` -- a NAMED subdimension by element
+/// containment, like the GH #766 fixtures' `Core ⊂ Region`) is declared;
+/// when it contains the GH #525 mixed block, the `Age` dimension plus the
+/// `wide`/`mixed` pair are appended last (so specs without the new shapes
+/// build byte-identical projects to the pre-extension strategy).
 fn build_project(spec: &ProjectSpec) -> TestProject {
     let elements: Vec<&str> = ELEM_NAMES.iter().take(spec.dim_size).copied().collect();
     let mut project = TestProject::new("proptest_proj").named_dimension("Dim", &elements);
+    if spec.has_subset_reducer() {
+        let sub_elements: Vec<&str> = ELEM_NAMES.iter().take(spec.subset_size).copied().collect();
+        project = project.named_dimension("Sub", &sub_elements);
+    }
     if spec.include_scalar {
         project = project.scalar_aux("scalar_const", "1");
     }
@@ -353,6 +636,26 @@ fn build_project(spec: &ProjectSpec) -> TestProject {
     }
     if let Some(target) = &spec.scalar_reducer_target {
         project = project.scalar_aux("total", &render_scalar_reducer_target(target));
+    }
+    if let Some(mixed) = &spec.mixed_ref_target {
+        let age = AGE_ELEM_NAMES[mixed.age_idx];
+        // `age_first` flips the SOURCE's axis order (and with it which
+        // axis position the literal pins); the target's dims are
+        // independent of it.
+        let (wide_decl, mixed_eq) = if mixed.age_first {
+            ("wide[Age,Dim]", format!("wide[{age}, Dim] * 2"))
+        } else {
+            ("wide[Dim,Age]", format!("wide[Dim, {age}] * 2"))
+        };
+        project = project
+            .named_dimension("Age", AGE_ELEM_NAMES)
+            .array_aux(wide_decl, &format!("v{}[Dim]", mixed.var_idx));
+        let decl = if mixed.broadcast {
+            "mixed[Dim,Age]"
+        } else {
+            "mixed[Dim]"
+        };
+        project = project.array_aux(decl, &mixed_eq);
     }
     project
 }
@@ -446,6 +749,16 @@ fn project_to_variable_edges(elem_edges: &ElementCausalEdgesResult) -> BTreeSet<
 struct ExpectedAggRouting {
     sources: Vec<String>,
     targets: Vec<String>,
+    /// Source rows that must NOT feed the matched agg node: a subset
+    /// reducer's unread rows (`v{j}`'s elements outside `Sub`, GH #766).
+    /// Empty for whole-extent reducers. The existence check requires ONE
+    /// agg satisfying all three conditions (sources, targets, and no
+    /// forbidden source), so a spurious unread-row edge on the true agg
+    /// cannot be excused by some other node: no other agg carries the
+    /// `agg -> targets` hops (each target is fed only by its own
+    /// equation's reducers, and AST-identical texts dedupe to one node
+    /// with one identical subset).
+    forbidden_sources: Vec<String>,
     forbidden_direct: Vec<(String, String)>,
 }
 
@@ -459,42 +772,175 @@ fn cross_product(sources: &[String], targets: &[String]) -> Vec<(String, String)
 }
 
 /// Derive every inlined reducer's expected agg routing from the spec.
-/// All generated reducers are whole-extent over the single dimension, so
-/// the agg is scalar (bare name): sources are every element row of the
-/// reduced variable (plus `scalar_const` for the feeder forms) and targets
-/// are every element of an arrayed target or the bare `total` node.
-fn expected_agg_routings(spec: &ProjectSpec) -> Vec<ExpectedAggRouting> {
-    let elems: Vec<&str> = ELEM_NAMES.iter().take(spec.dim_size).copied().collect();
-    let source_rows =
-        |j: usize| -> Vec<String> { elems.iter().map(|e| format!("v{j}[{e}]")).collect() };
-    let mut routings = Vec::new();
-    for (i, var_spec) in spec.var_specs.iter().enumerate() {
-        if let Some((j, feeder)) = var_spec.pattern.inlined_reducer_parts() {
-            let mut sources = source_rows(j);
-            let targets: Vec<String> = elems.iter().map(|e| format!("v{i}[{e}]")).collect();
-            if feeder {
-                sources.push("scalar_const".to_string());
-            }
-            routings.push(ExpectedAggRouting {
-                forbidden_direct: cross_product(&sources, &targets),
-                sources,
-                targets,
-            });
+/// Every generated reducer collapses its single `Dim` axis, so the agg is
+/// scalar (bare name): sources are the element rows the reducer READS
+/// (every row for the whole-extent forms, only the `Sub` rows for the
+/// subset forms -- GH #766; plus `scalar_const` for the feeder forms) and
+/// targets are every element of an arrayed target or the bare `total`
+/// node -- the agg's full fan-out, since `result_dims` is empty for an
+/// all-`Reduced` slice.
+///
+/// The expected read rows are enumerated via `read_slice_rows`, with the
+/// per-axis access stated independently from the spec (`Reduced{subset}`).
+/// Production's agg-routed element edges do NOT come from
+/// `read_slice_rows`: `emit_agg_routed_edges` plans its rows with its own
+/// `AxisPlan` machinery (the invariant-I4 deviation tracked as GH #783).
+/// This expectation is therefore genuinely DIFFERENTIAL -- two independent
+/// enumerations of the same slice that must agree -- and the deterministic
+/// companion tests additionally hand-pin literal edge names, anchoring
+/// both enumerations to a fixed oracle.
+fn expected_agg_routings(
+    spec: &ProjectSpec,
+    dim_ctx: &crate::dimensions::DimensionsContext,
+) -> Vec<ExpectedAggRouting> {
+    use crate::ltm_agg::AxisRead;
+    let elems: Vec<String> = ELEM_NAMES
+        .iter()
+        .take(spec.dim_size)
+        .map(|e| e.to_string())
+        .collect();
+    let sub_elems: Vec<String> = ELEM_NAMES
+        .iter()
+        .take(spec.subset_size)
+        .map(|e| e.to_string())
+        .collect();
+    let read_rows = |j: usize, subset: bool| -> Vec<String> {
+        let axes = [AxisRead::Reduced {
+            subset: if subset {
+                Some(sub_elems.clone())
+            } else {
+                None
+            },
+        }];
+        let rows = crate::db::ltm::read_slice_rows(&axes, std::slice::from_ref(&elems), dim_ctx)
+            .expect("a Reduced-only slice over a declared dimension always yields rows");
+        rows.iter().map(|r| format!("v{j}[{}]", r.row)).collect()
+    };
+    let unread_rows = |j: usize, subset: bool| -> Vec<String> {
+        if !subset {
+            return Vec::new();
         }
-    }
-    if let Some(target) = &spec.scalar_reducer_target {
-        let mut sources = source_rows(target.var_idx);
-        if target.with_scalar_feeder {
+        elems
+            .iter()
+            .filter(|e| !sub_elems.contains(e))
+            .map(|e| format!("v{j}[{e}]"))
+            .collect()
+    };
+    let mut routings = Vec::new();
+    let mut push_routing = |j: usize, feeder: bool, subset: bool, targets: Vec<String>| {
+        let mut sources = read_rows(j, subset);
+        let forbidden_sources = unread_rows(j, subset);
+        if feeder {
             sources.push("scalar_const".to_string());
         }
-        let targets = vec!["total".to_string()];
+        // An unread row may not bypass the agg either: include it in the
+        // forbidden direct-source pool.
+        let direct_pool: Vec<String> = sources
+            .iter()
+            .chain(forbidden_sources.iter())
+            .cloned()
+            .collect();
         routings.push(ExpectedAggRouting {
-            forbidden_direct: cross_product(&sources, &targets),
+            forbidden_direct: cross_product(&direct_pool, &targets),
+            forbidden_sources,
             sources,
             targets,
         });
+    };
+    for (i, var_spec) in spec.var_specs.iter().enumerate() {
+        if let Some(shape) = var_spec.pattern.inlined_reducer_parts() {
+            let targets: Vec<String> = elems.iter().map(|e| format!("v{i}[{e}]")).collect();
+            push_routing(shape.var_idx, shape.feeder, shape.subset, targets);
+        }
+    }
+    if let Some(target) = &spec.scalar_reducer_target {
+        push_routing(
+            target.var_idx,
+            target.with_scalar_feeder,
+            target.with_subset,
+            vec!["total".to_string()],
+        );
     }
     routings
+}
+
+/// The exact `wide -> mixed` element-edge set the GH #525 block must
+/// produce: rows from `read_slice_rows` over the mixed reference's axes
+/// (`[Iterated(Dim), Pinned(age)]`, or the flipped `[Pinned(age),
+/// Iterated(Dim)]` for an `age_first` block -- the axes and the dim
+/// element lists swap together), each row feeding the target element(s)
+/// whose `Dim` coordinate is the row's slot -- exactly `mixed[{slot}]` for
+/// the 1:1 case, every `Age` element of `mixed[{slot},_]` for the
+/// broadcast case (the Iterated dims a strict subset of the target's).
+/// Empty when the spec has no mixed block.
+///
+/// NOTE: production's `PerElement` expansion arm
+/// (`emit_edges_for_reference`) consumes the SAME `read_slice_rows`
+/// function, so this oracle is a shared-derivation consistency check, not
+/// an independent one -- the deterministic companion
+/// `mixed_ref_specs_expand_to_pinned_diagonal` (hand-pinned literal edge
+/// names, both axis orders) is the mixed family's SOLE independent oracle.
+fn expected_mixed_edges(
+    spec: &ProjectSpec,
+    dim_ctx: &crate::dimensions::DimensionsContext,
+) -> BTreeSet<(String, String)> {
+    use crate::ltm_agg::AxisRead;
+    let Some(mixed) = &spec.mixed_ref_target else {
+        return BTreeSet::new();
+    };
+    let dim_elems: Vec<String> = ELEM_NAMES
+        .iter()
+        .take(spec.dim_size)
+        .map(|e| e.to_string())
+        .collect();
+    let age_elems: Vec<String> = AGE_ELEM_NAMES.iter().map(|e| e.to_string()).collect();
+    let iterated = AxisRead::Iterated {
+        dim: "dim".to_string(),
+        source_dim: "dim".to_string(),
+    };
+    let pinned = AxisRead::Pinned(AGE_ELEM_NAMES[mixed.age_idx].to_string());
+    let (axes, dim_lists) = if mixed.age_first {
+        ([pinned, iterated], [age_elems.clone(), dim_elems])
+    } else {
+        ([iterated, pinned], [dim_elems, age_elems.clone()])
+    };
+    let rows = crate::db::ltm::read_slice_rows(&axes, &dim_lists, dim_ctx)
+        .expect("an Iterated+Pinned slice over declared dimensions always yields rows");
+    let mut edges = BTreeSet::new();
+    for r in &rows {
+        let from = format!("wide[{}]", r.row);
+        if mixed.broadcast {
+            for age in &age_elems {
+                edges.insert((from.clone(), format!("mixed[{},{}]", r.slot, age)));
+            }
+        } else {
+            edges.insert((from.clone(), format!("mixed[{}]", r.slot)));
+        }
+    }
+    edges
+}
+
+/// Every element edge whose endpoints strip to the `(from_var, to_var)`
+/// variable pair -- the actual-side counterpart of `expected_mixed_edges`,
+/// asserted EQUAL so both failure directions (missing diagonal rows, extra
+/// cross-product rows) are caught.
+fn edges_between_vars(
+    elem_edges: &ElementCausalEdgesResult,
+    from_var: &str,
+    to_var: &str,
+) -> BTreeSet<(String, String)> {
+    let mut found = BTreeSet::new();
+    for (from, targets) in &elem_edges.edges {
+        if strip_subscript(from) != from_var {
+            continue;
+        }
+        for to in targets {
+            if strip_subscript(to) == to_var {
+                found.insert((from.clone(), to.clone()));
+            }
+        }
+    }
+    found
 }
 
 /// `true` when the raw element graph contains the edge `from -> to`.
@@ -507,9 +953,11 @@ fn has_element_edge(elem_edges: &ElementCausalEdgesResult, from: &str, to: &str)
 
 /// Verify every expected agg routing of `spec` against the raw element
 /// graph: for each inlined reducer there must exist ONE synthetic agg node
-/// carrying all of its `sources -> agg` and `agg -> targets` hops, and none
-/// of its `forbidden_direct` edges may exist. Returns a description of the
-/// first violation, for `prop_assert!` messages.
+/// carrying all of its `sources -> agg` and `agg -> targets` hops while
+/// carrying NONE of its `forbidden_sources -> agg` hops (a subset reducer's
+/// unread rows, GH #766), and none of its `forbidden_direct` edges may
+/// exist. Returns a description of the first violation, for `prop_assert!`
+/// messages.
 ///
 /// This is the assertion that makes the suite sensitive to the GH #533 bug
 /// class: a fast path that swaps the `scalar_const -> agg` hop for a direct
@@ -520,6 +968,7 @@ fn has_element_edge(elem_edges: &ElementCausalEdgesResult, from: &str, to: &str)
 /// the agg-hop existence half alone would miss (subset semantics).
 fn check_spec_agg_expectations(
     spec: &ProjectSpec,
+    dim_ctx: &crate::dimensions::DimensionsContext,
     elem_edges: &ElementCausalEdgesResult,
 ) -> Result<(), String> {
     let agg_nodes: BTreeSet<&str> = elem_edges
@@ -530,7 +979,7 @@ fn check_spec_agg_expectations(
         })
         .filter(|n| is_synthetic_agg_name(n))
         .collect();
-    for routing in expected_agg_routings(spec) {
+    for routing in expected_agg_routings(spec, dim_ctx) {
         let satisfied = agg_nodes.iter().any(|agg| {
             routing
                 .sources
@@ -540,11 +989,16 @@ fn check_spec_agg_expectations(
                     .targets
                     .iter()
                     .all(|t| has_element_edge(elem_edges, agg, t))
+                && routing
+                    .forbidden_sources
+                    .iter()
+                    .all(|s| !has_element_edge(elem_edges, s, agg))
         });
         if !satisfied {
             return Err(format!(
-                "no single synthetic agg node carries all hops {:?} -> agg -> {:?}; agg nodes = {:?}",
-                routing.sources, routing.targets, agg_nodes
+                "no single synthetic agg node carries all hops {:?} -> agg -> {:?} \
+                 while excluding the unread rows {:?} (GH #766); agg nodes = {:?}",
+                routing.sources, routing.targets, routing.forbidden_sources, agg_nodes
             ));
         }
         for (from, to) in &routing.forbidden_direct {
@@ -572,11 +1026,12 @@ fn flatten_variable_edges(var_edges: &crate::db::CausalEdgesResult) -> BTreeSet<
     flat
 }
 
-/// Shared per-spec pipeline + assertions for both properties: build the
+/// Shared per-spec pipeline + assertions for all the properties: build the
 /// project, sync it through salsa, then check (1) the projection invariant
-/// over the agg-collapsed element graph and (2) every inlined reducer's
-/// expected agg routing. Returns the raw element edges so the forced
-/// property can additionally assert agg-node existence.
+/// over the agg-collapsed element graph, (2) every inlined reducer's
+/// expected agg routing (subset-aware, GH #766), and (3) the GH #525 mixed
+/// block's exact pinned-diagonal edge set. Returns the raw element edges so
+/// the forced properties can additionally assert structural existence.
 fn check_spec(spec: &ProjectSpec) -> Result<ElementCausalEdgesResult, TestCaseError> {
     let project = build_project(spec);
     let datamodel = project.build_datamodel();
@@ -587,6 +1042,7 @@ fn check_spec(spec: &ProjectSpec) -> Result<ElementCausalEdgesResult, TestCaseEr
 
     let var_edges = model_causal_edges(&db, source_model, source_project);
     let elem_edges = model_element_causal_edges(&db, source_model, source_project);
+    let dim_ctx = crate::db::project_dimensions_context(&db, source_project);
 
     let var_set = flatten_variable_edges(var_edges);
     let projected = project_to_variable_edges(elem_edges);
@@ -600,12 +1056,25 @@ fn check_spec(spec: &ProjectSpec) -> Result<ElementCausalEdgesResult, TestCaseEr
         var_edges.edges
     );
 
-    if let Err(violation) = check_spec_agg_expectations(spec, elem_edges) {
+    if let Err(violation) = check_spec_agg_expectations(spec, dim_ctx, elem_edges) {
         return Err(TestCaseError::fail(format!(
             "agg routing violation: {violation}\nspec={spec:?}\nelement edges = {:?}",
             elem_edges.edges
         )));
     }
+
+    // GH #525: the mixed block's element edges must be EXACTLY the
+    // diagonal-with-pinned-axes rows -- never the cross-product, never a
+    // missing row. Both sets are empty when the spec has no mixed block.
+    let expected_mixed = expected_mixed_edges(spec, dim_ctx);
+    let actual_mixed = edges_between_vars(elem_edges, "wide", "mixed");
+    prop_assert_eq!(
+        &actual_mixed,
+        &expected_mixed,
+        "mixed-reference edges are not the pinned diagonal: spec={:?}\nelement edges = {:?}",
+        spec,
+        elem_edges.edges
+    );
 
     Ok(elem_edges.clone())
 }
@@ -645,9 +1114,8 @@ proptest! {
     /// [`ForcedReducerKind`] shapes with high probability.
     #[test]
     fn forced_reducer_specs_route_through_aggs(spec in forced_reducer_spec_strategy()) {
-        let routings = expected_agg_routings(&spec);
         prop_assert!(
-            !routings.is_empty(),
+            spec.has_inlined_reducer(),
             "forced strategy must inject at least one inlined reducer: spec={:?}",
             spec
         );
@@ -660,6 +1128,77 @@ proptest! {
         prop_assert!(
             has_agg_node,
             "forced-reducer spec minted no synthetic agg node: spec={:?}\nelement edges = {:?}",
+            spec,
+            elem_edges.edges
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    /// GH #525 / GH #739 non-vacuity guard: over specs FORCED to contain
+    /// the mixed iterated+literal reference block, the `wide -> mixed`
+    /// element edges must be exactly the diagonal-with-pinned-axes rows
+    /// (asserted inside `check_spec` against the `read_slice_rows`
+    /// derivation -- covering both target shapes and both subscript axis
+    /// orders), and the block must structurally EXIST: in the spec (a
+    /// stubbed-out injection fails the first assertion) and in the produced
+    /// element graph (equations that silently stop expanding to pinned
+    /// rows fail the second), so the `PerElement` coverage can never
+    /// silently go vacuous. Per-VARIANT generation (the axis-order /
+    /// target-shape flags, which this per-case guard cannot see) is pinned
+    /// by `mixed_ref_strategy_generates_both_axis_orders`.
+    #[test]
+    fn forced_mixed_ref_specs_expand_to_pinned_diagonal(
+        spec in forced_mixed_ref_spec_strategy()
+    ) {
+        prop_assert!(
+            spec.mixed_ref_target.is_some(),
+            "forced strategy must inject the mixed-reference block: spec={:?}",
+            spec
+        );
+
+        let elem_edges = check_spec(&spec)?;
+
+        let actual_mixed = edges_between_vars(&elem_edges, "wide", "mixed");
+        prop_assert!(
+            !actual_mixed.is_empty(),
+            "forced mixed spec produced no wide -> mixed element edges: spec={:?}\nelement edges = {:?}",
+            spec,
+            elem_edges.edges
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    /// GH #766 / GH #739 non-vacuity guard: over specs FORCED to contain a
+    /// subset (`*:Sub`) reducer, the agg routing checks must hold -- only
+    /// the subset rows feed the agg (the routing's `forbidden_sources`
+    /// excludes the unread rows from the SAME matched node) and the agg
+    /// fans out to every target element -- and a synthetic agg node must
+    /// structurally exist, so the subset coverage can never silently go
+    /// vacuous. A stubbed-out injection fails the spec-level guard.
+    #[test]
+    fn forced_subset_reducer_specs_route_subset_rows(
+        spec in forced_subset_reducer_spec_strategy()
+    ) {
+        prop_assert!(
+            spec.has_subset_reducer(),
+            "forced strategy must inject at least one subset reducer: spec={:?}",
+            spec
+        );
+
+        let elem_edges = check_spec(&spec)?;
+
+        let has_agg_node = elem_edges.edges.iter().any(|(from, targets)| {
+            is_synthetic_agg_name(from) || targets.iter().any(|t| is_synthetic_agg_name(t))
+        });
+        prop_assert!(
+            has_agg_node,
+            "forced-subset spec minted no synthetic agg node: spec={:?}\nelement edges = {:?}",
             spec,
             elem_edges.edges
         );
@@ -700,7 +1239,10 @@ fn inlined_reducer_specs_route_through_synthetic_aggs() {
         scalar_reducer_target: Some(ScalarReducerTarget {
             var_idx: 1,
             with_scalar_feeder: true,
+            with_subset: false,
         }),
+        subset_size: 0,
+        mixed_ref_target: None,
     };
 
     let project = build_project(&spec);
@@ -712,12 +1254,13 @@ fn inlined_reducer_specs_route_through_synthetic_aggs() {
 
     let var_edges = model_causal_edges(&db, source_model, source_project);
     let elem_edges = model_element_causal_edges(&db, source_model, source_project);
+    let dim_ctx = crate::db::project_dimensions_context(&db, source_project);
 
     // The spec derives three expected routings (v1's, v2's, total's); all
     // must be carried by synthetic agg nodes, with no direct feeder edges.
-    let routings = expected_agg_routings(&spec);
+    let routings = expected_agg_routings(&spec, dim_ctx);
     assert_eq!(routings.len(), 3, "spec must derive all three routings");
-    check_spec_agg_expectations(&spec, elem_edges)
+    check_spec_agg_expectations(&spec, dim_ctx, elem_edges)
         .unwrap_or_else(|violation| panic!("{violation}\nelement edges = {:?}", elem_edges.edges));
 
     // Belt-and-braces: the raw element graph really contains synthetic agg
@@ -737,5 +1280,287 @@ fn inlined_reducer_specs_route_through_synthetic_aggs() {
         project_to_variable_edges(elem_edges),
         flatten_variable_edges(var_edges),
         "projection mismatch on the fixed reducer spec"
+    );
+}
+
+/// Deterministic-companion pipeline helper: build the spec's project, sync
+/// it through salsa, and return the flattened variable-level edge set plus
+/// the raw element edges.
+fn edges_for_spec(spec: &ProjectSpec) -> (BTreeSet<(String, String)>, ElementCausalEdgesResult) {
+    let project = build_project(spec);
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let source_model = sync.models["main"].source;
+    let source_project = sync.project;
+    let var_edges = model_causal_edges(&db, source_model, source_project);
+    let elem_edges = model_element_causal_edges(&db, source_model, source_project);
+    (flatten_variable_edges(var_edges), elem_edges.clone())
+}
+
+/// Deterministic GH #766 companion: a fixed spec containing both subset-
+/// reducer forms (arrayed target `v1 = 1 + SUM(v0[*:Sub])`; scalar target
+/// `total = 1 + SUM(v0[*:Sub] * scalar_const)`, the feeder interaction)
+/// over `Dim = {a, b, c}` with `Sub = {a, b}` must route ONLY the `Sub`
+/// rows through the aggs. Edge names are hand-pinned literals --
+/// deliberately independent of `read_slice_rows` -- anchoring the
+/// property's differential comparison (test-side `read_slice_rows` vs
+/// production's `AxisPlan` enumeration in `emit_agg_routed_edges`,
+/// GH #783) to a fixed oracle.
+#[test]
+fn subset_reducer_specs_route_only_subset_rows() {
+    let spec = ProjectSpec {
+        dim_size: 3,
+        var_specs: vec![
+            ArrayedVarSpec {
+                pattern: RefPattern::Constant,
+            },
+            ArrayedVarSpec {
+                pattern: RefPattern::InlinedSubsetReducer { var_idx: 0 },
+            },
+        ],
+        include_scalar: true,
+        scalar_reducer_target: Some(ScalarReducerTarget {
+            var_idx: 0,
+            with_scalar_feeder: true,
+            with_subset: true,
+        }),
+        subset_size: 2,
+        mixed_ref_target: None,
+    };
+    let (var_set, elem_edges) = edges_for_spec(&spec);
+
+    // The unread row v0[c] (outside Sub = {a, b}) feeds NOTHING: not the
+    // aggs, not the targets.
+    assert!(
+        elem_edges.edges.get("v0[c]").is_none_or(|t| t.is_empty()),
+        "unread row v0[c] must have no outgoing edges: {:?}",
+        elem_edges.edges
+    );
+
+    let agg_feeding = |target: &str| -> String {
+        elem_edges
+            .edges
+            .iter()
+            .find_map(|(from, targets)| {
+                (is_synthetic_agg_name(from) && targets.contains(target)).then(|| from.clone())
+            })
+            .unwrap_or_else(|| panic!("no synthetic agg feeds {target}: {:?}", elem_edges.edges))
+    };
+    let incoming = |node: &str| -> BTreeSet<String> {
+        elem_edges
+            .edges
+            .iter()
+            .filter(|(_, targets)| targets.contains(node))
+            .map(|(from, _)| from.clone())
+            .collect()
+    };
+    let outgoing = |node: &str| -> BTreeSet<String> {
+        elem_edges.edges.get(node).cloned().unwrap_or_default()
+    };
+    let set =
+        |names: &[&str]| -> BTreeSet<String> { names.iter().map(|s| s.to_string()).collect() };
+
+    // v1's agg: exactly the Sub rows feed it, and -- the fan-out matching
+    // `result_dims` (empty for the all-Reduced slice, so a scalar agg
+    // broadcast) -- it feeds every v1 element.
+    let v1_agg = agg_feeding("v1[a]");
+    assert_eq!(
+        incoming(&v1_agg),
+        set(&["v0[a]", "v0[b]"]),
+        "exactly the Sub rows must feed v1's agg"
+    );
+    assert_eq!(
+        outgoing(&v1_agg),
+        set(&["v1[a]", "v1[b]", "v1[c]"]),
+        "v1's scalar agg must broadcast to every target element"
+    );
+
+    // total's agg: the Sub rows plus the scalar feeder.
+    let total_agg = agg_feeding("total");
+    assert_ne!(
+        v1_agg, total_agg,
+        "distinct reducer texts mint distinct aggs"
+    );
+    assert_eq!(
+        incoming(&total_agg),
+        set(&["scalar_const", "v0[a]", "v0[b]"]),
+        "exactly the Sub rows + the scalar feeder must feed total's agg"
+    );
+    assert_eq!(outgoing(&total_agg), set(&["total"]));
+
+    // And the agg-collapsed projection matches the variable-level edges.
+    assert_eq!(
+        project_to_variable_edges(&elem_edges),
+        var_set,
+        "projection mismatch on the fixed subset spec"
+    );
+}
+
+/// Deterministic GH #525 companion: fixed mixed-reference specs covering
+/// both target shapes AND both subscript axis orders (1:1 pinning `young`
+/// on the second axis; broadcast pinning `old`; the flipped `wide[Age,Dim]`
+/// declarations pinning the FIRST axis) must expand to EXACTLY the
+/// hand-pinned diagonal-with-pinned-axes edges. Production's expansion arm
+/// and the property oracle share `read_slice_rows`, so these literal edge
+/// names are the mixed family's SOLE independent oracle -- which is why
+/// the flipped order must be pinned here too, not only in the property.
+#[test]
+fn mixed_ref_specs_expand_to_pinned_diagonal() {
+    let base = ProjectSpec {
+        dim_size: 2,
+        var_specs: vec![
+            ArrayedVarSpec {
+                pattern: RefPattern::Constant,
+            },
+            ArrayedVarSpec {
+                pattern: RefPattern::Bare { var_idx: 0 },
+            },
+        ],
+        include_scalar: false,
+        scalar_reducer_target: None,
+        subset_size: 1,
+        mixed_ref_target: None,
+    };
+    let pin = |pairs: &[(&str, &str)]| -> BTreeSet<(String, String)> {
+        pairs
+            .iter()
+            .map(|(f, t)| (f.to_string(), t.to_string()))
+            .collect()
+    };
+
+    // 1:1 case: `mixed[Dim] = wide[Dim, young] * 2` -- the same-Dim
+    // diagonal pinned at Age = young; never the cross-product rows
+    // (`wide[a,old] -> mixed[a]`, `wide[a,young] -> mixed[b]`).
+    let mut spec = base.clone();
+    spec.mixed_ref_target = Some(MixedRefTarget {
+        var_idx: 0,
+        age_idx: 0,
+        broadcast: false,
+        age_first: false,
+    });
+    let (var_set, elem_edges) = edges_for_spec(&spec);
+    assert_eq!(
+        edges_between_vars(&elem_edges, "wide", "mixed"),
+        pin(&[("wide[a,young]", "mixed[a]"), ("wide[b,young]", "mixed[b]"),]),
+        "1:1 mixed reference must expand to the pinned diagonal: {:?}",
+        elem_edges.edges
+    );
+    assert_eq!(
+        project_to_variable_edges(&elem_edges),
+        var_set,
+        "projection mismatch on the 1:1 mixed spec"
+    );
+
+    // Broadcast case, pinning the OTHER Age element:
+    // `mixed[Dim,Age] = wide[Dim, old] * 2` -- the Iterated dims (`Dim`)
+    // are a strict subset of the target's, so each pinned row feeds BOTH
+    // Age slots of its Dim coordinate (and no other Dim's slots).
+    let mut spec = base.clone();
+    spec.mixed_ref_target = Some(MixedRefTarget {
+        var_idx: 0,
+        age_idx: 1,
+        broadcast: true,
+        age_first: false,
+    });
+    let (var_set, elem_edges) = edges_for_spec(&spec);
+    assert_eq!(
+        edges_between_vars(&elem_edges, "wide", "mixed"),
+        pin(&[
+            ("wide[a,old]", "mixed[a,young]"),
+            ("wide[a,old]", "mixed[a,old]"),
+            ("wide[b,old]", "mixed[b,young]"),
+            ("wide[b,old]", "mixed[b,old]"),
+        ]),
+        "broadcast mixed reference must feed every Age slot of its Dim row: {:?}",
+        elem_edges.edges
+    );
+    assert_eq!(
+        project_to_variable_edges(&elem_edges),
+        var_set,
+        "projection mismatch on the broadcast mixed spec"
+    );
+
+    // FLIPPED axis order, 1:1: `wide[Age,Dim]` referenced as
+    // `mixed[Dim] = wide[young, Dim] * 2` -- the literal pins axis 0, the
+    // iterated dim rides axis 1, so the row subscripts are `[age, dim]`.
+    let mut spec = base.clone();
+    spec.mixed_ref_target = Some(MixedRefTarget {
+        var_idx: 0,
+        age_idx: 0,
+        broadcast: false,
+        age_first: true,
+    });
+    let (var_set, elem_edges) = edges_for_spec(&spec);
+    assert_eq!(
+        edges_between_vars(&elem_edges, "wide", "mixed"),
+        pin(&[("wide[young,a]", "mixed[a]"), ("wide[young,b]", "mixed[b]"),]),
+        "Pinned-first 1:1 mixed reference must expand to the pinned diagonal: {:?}",
+        elem_edges.edges
+    );
+    assert_eq!(
+        project_to_variable_edges(&elem_edges),
+        var_set,
+        "projection mismatch on the Pinned-first 1:1 mixed spec"
+    );
+
+    // FLIPPED axis order, broadcast, pinning the other element:
+    // `mixed[Dim,Age] = wide[old, Dim] * 2`.
+    let mut spec = base;
+    spec.mixed_ref_target = Some(MixedRefTarget {
+        var_idx: 0,
+        age_idx: 1,
+        broadcast: true,
+        age_first: true,
+    });
+    let (var_set, elem_edges) = edges_for_spec(&spec);
+    assert_eq!(
+        edges_between_vars(&elem_edges, "wide", "mixed"),
+        pin(&[
+            ("wide[old,a]", "mixed[a,young]"),
+            ("wide[old,a]", "mixed[a,old]"),
+            ("wide[old,b]", "mixed[b,young]"),
+            ("wide[old,b]", "mixed[b,old]"),
+        ]),
+        "Pinned-first broadcast mixed reference must feed every Age slot of its Dim row: {:?}",
+        elem_edges.edges
+    );
+    assert_eq!(
+        project_to_variable_edges(&elem_edges),
+        var_set,
+        "projection mismatch on the Pinned-first broadcast mixed spec"
+    );
+}
+
+/// GH #739 distribution guard for the mixed family's generation VARIANTS:
+/// a fixed-seed sample of `forced_mixed_ref_spec_strategy` must produce
+/// every (axis order x target shape) combination. The per-case forced
+/// property can only see a missing BLOCK, not a missing variant -- if the
+/// strategy silently stopped flipping `age_first` (or `broadcast`), every
+/// case would still pass it -- so this guard samples the strategy directly
+/// (no salsa pipeline; 64 draws, deterministic RNG) and fails loudly when
+/// any of the four variants stops being drawn.
+#[test]
+fn mixed_ref_strategy_generates_both_axis_orders() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    let mut runner = TestRunner::deterministic();
+    let strategy = forced_mixed_ref_spec_strategy();
+    let mut seen = [[false; 2]; 2]; // [age_first][broadcast]
+    for _ in 0..64 {
+        let spec = strategy
+            .new_tree(&mut runner)
+            .expect("forced mixed strategy must generate a spec")
+            .current();
+        let mixed = spec
+            .mixed_ref_target
+            .expect("forced strategy always injects the mixed block");
+        seen[mixed.age_first as usize][mixed.broadcast as usize] = true;
+    }
+    assert!(
+        seen.iter().flatten().all(|s| *s),
+        "a fixed-seed 64-draw sample must cover both axis orders x both \
+         target shapes; saw [age_first][broadcast] = {seen:?}"
     );
 }

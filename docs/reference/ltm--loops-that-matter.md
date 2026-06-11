@@ -273,23 +273,31 @@ re-evaluation per input per variable).
 > **"changed-last"** attribution --
 > `Delta_x(z) = z(x_current, w_current) - z(x_previous, w_current)`, only the isolated
 > input frozen, every other reference left live -- whenever the changed-first partial
-> cannot be rendered as a compilable equation. That happens exactly when freezing the
-> "everything else" would put an **array slice inside `PREVIOUS()`**
-> (`PREVIOUS(matrix[D1,*])`), which Simlin's equation compiler has no lagged-array-view
-> path for; expressing changed-first there would require synthesizing a per-element
-> frozen helper per arrayed reference (a cost and complexity tradeoff, not an
-> impossibility). Two shapes hit the fallback today:
+> cannot be rendered as a *correct*, compilable equation. Three shapes hit the
+> fallback today:
 >
-> - the link score for a **scalar feeder of a hoisted array reducer** (`scale` in
->   `SUM(pop[*] * scale)`, scored as the `scale -> $...agg...` half of the routed
->   edge), the original changed-last case; and
+> - freezing the "everything else" would put an **array slice inside `PREVIOUS()`**
+>   (`PREVIOUS(matrix[D1,*])`), which Simlin's equation compiler has no
+>   lagged-array-view path for (expressing changed-first there would require
+>   synthesizing a per-element frozen helper per arrayed reference -- a cost and
+>   complexity tradeoff, not an impossibility). This covers the link score for a
+>   **scalar feeder of a hoisted array reducer** (`scale` in `SUM(pop[*] * scale)`,
+>   scored as the `scale -> $...agg...` half of the routed edge), the original
+>   changed-last case;
 > - the conservative (un-hoisted) per-shape link scores -- the aux-to-aux,
 >   stock-to-flow, and per-element-slot generators -- when the target's equation
 >   embeds a reducer the aggregate-node machinery declined to hoist and the isolated
 >   input sits *inside* it next to a sliced co-source, e.g. the **iterated-dim feeder**
 >   `frac` in `growth[D1] = SUM(matrix[D1,*] * frac[D1])` (GH #743): changed-first
 >   would freeze `PREVIOUS(matrix[D1,*])`, so Simlin emits
->   `growth - SUM(matrix[D1,*] * PREVIOUS(frac))` instead.
+>   `growth - SUM(matrix[D1,*] * PREVIOUS(frac))` instead; and
+> - an A2A partial whose body references a non-isolated array dep subscripted by the
+>   target's iterated dimension at a **known position-mismatched axis** (a transposed
+>   dep like `arr[d2, d1]` inside a body iterated over `d1`, GH #526): changed-first
+>   would have to collapse the dep to a single *wrong* element (the positional
+>   correspondence does not hold), so the changed-first leg is rejected as doomed
+>   rather than silently freezing the wrong slot, and the changed-last form -- which
+>   leaves the dep live and needs no collapse -- is used instead.
 >
 > If *both* legs are unrenderable -- the changed-last freeze would itself lag an array
 > slice, or the isolated input has no matching occurrence to freeze (the frozen

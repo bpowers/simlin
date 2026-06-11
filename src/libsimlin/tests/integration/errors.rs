@@ -576,26 +576,46 @@ fn test_get_errors_no_ltm_diagnostics_when_ltm_never_requested() {
 /// accumulator, so `simlin_project_get_errors` surfaces it after an
 /// LTM-enabled sim was created.
 ///
-/// The fixture is the GH #742 RANK shape (`grow[Region] = scale[Region] *
-/// RANK(pop, 1)` in a feedback loop): the array-valued RANK is hoisted into
-/// a scalar `$⁚ltm⁚agg⁚0` aggregate whose own fragment is ill-typed and
-/// genuinely fails to compile today (a real, non-injected failure). The
-/// previous fixture here was the GH #759 pinned-index repro, retired when
-/// #759's fix made its helpers compile; the assertion matches the shared
-/// "failed to compile" wording rather than one diagnostic sub-class, so the
-/// test keeps covering the FFI harvest channel as individual shapes get
-/// fixed (the engine-side guard-injected
-/// `test_model_ltm_fragment_diagnostics_covers_implicit_helpers` covers the
-/// implicit-helper diagnostic leg independently of any real-shape lifetime).
+/// The fixture is a NON-PROJECTION-feeder co-source closure
+/// (`growth[D1] = SUM(matrix[D1,*] * w[D1, c1])` with the feedback loop
+/// closed through the wildcard-read co-source `matrix`): the Pinned-axis
+/// no-`Reduced` source `w[D1, c1]` falls outside the GH #767 / T5
+/// projection-feeder acceptance, so the reducer is not hoisted, the element
+/// graph keeps the conservative cross-product, and the cross-row circuits'
+/// loop scores reference per-`(row, slot)` link-score names the cartesian
+/// emitters never produce -- those fragments genuinely fail to compile (a
+/// real, non-injected failure; pinned engine-side by
+/// `non_projection_feeder_co_source_closure_stays_loud`). The previous
+/// fixtures here were the GH #759 pinned-index repro (retired when #759's
+/// fix made its helpers compile), the GH #742 RANK-hoisted agg (retired
+/// when the GH #771 de-hoist stopped minting the ill-shaped agg), the
+/// GH #765 Pinned-bearing variable-backed mixed reduce (retired when T3 of
+/// the shape-expressiveness design made its read-slice scores compile
+/// cleanly), and the GH #743 iterated-dim-feeder closure (retired when
+/// T5's I1 feeder clause hoisted it -- GH #767); the assertion matches the
+/// shared "failed to compile" wording rather than one diagnostic
+/// sub-class, so the test keeps covering the FFI harvest channel as
+/// individual shapes get fixed. (The engine-side guard-injected
+/// `test_model_ltm_fragment_diagnostics_covers_implicit_helpers` covers
+/// the implicit-helper diagnostic leg independently of any real-shape
+/// lifetime; if a future task fixes this shape too and no organic failure
+/// shape remains, the engine-`pub(crate)` `LtmFragmentFailureGuard`
+/// injection hook will need re-exporting for FFI tests.)
 #[test]
 fn test_get_errors_surfaces_ltm_fragment_failure_after_ltm_sim() {
     let datamodel = TestProject::new("get_errors_fragment_fail")
         .with_sim_time(0.0, 8.0, 1.0)
-        .named_dimension("Region", &["north", "south"])
-        .array_aux("scale[Region]", "pop[Region] * 0.01")
-        .array_aux("grow[Region]", "scale[Region] * RANK(pop, 1)")
-        .array_flow("inflow[Region]", "grow[Region]", None)
-        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1] * 0.05",
+            None,
+        )
+        .array_aux_direct("w", vec!["D1".into(), "D2".into()], "0.5", None)
+        .array_flow("growth[D1]", "SUM(matrix[D1, *] * w[D1, c1])", None)
         .build_datamodel();
     let proj = open_project_from_datamodel(&datamodel);
 

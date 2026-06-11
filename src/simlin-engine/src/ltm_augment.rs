@@ -34,6 +34,16 @@ pub(crate) struct IteratedDimCtx<'a> {
     pub source_dim_names: &'a [String],
     pub target_iterated_dims: &'a [String],
     pub dim_ctx: Option<&'a crate::dimensions::DimensionsContext>,
+    /// Declared dimensions of the target's NON-LIVE array deps, keyed by
+    /// canonical dep name (GH #526). Threaded by the db-bearing per-shape
+    /// link-score path so [`classify_other_dep_iterated_dim_subscript`]
+    /// can require position-and-mapping correspondence before collapsing
+    /// an iterated-dim subscript on a non-live dep to a bare
+    /// `PREVIOUS(dep)`. `None` (or a dep absent from the map -- an
+    /// implicit/synthetic name with no resolvable declaration) keeps the
+    /// historical permissive collapse: declaring an unresolvable dep a
+    /// mismatch would loud-skip edges that are correct today.
+    pub dep_dims: Option<&'a HashMap<String, Vec<crate::dimensions::Dimension>>>,
 }
 
 /// Recognize an *iterated-dimension* `Expr0` subscript on the *live source*
@@ -66,9 +76,9 @@ pub(crate) struct IteratedDimCtx<'a> {
 /// dimension).
 fn is_live_source_iterated_dim_subscript(
     indices: &[IndexExpr0],
+    source_dim_elements: &[Vec<String>],
     ctx: Option<&IteratedDimCtx<'_>>,
 ) -> bool {
-    use crate::common::CanonicalDimensionName;
     let Some(ctx) = ctx else { return false };
     if indices.is_empty() || indices.len() != ctx.source_dim_names.len() {
         return false;
@@ -81,77 +91,223 @@ fn is_live_source_iterated_dim_subscript(
         if !ctx.target_iterated_dims.iter().any(|t| t == &d) {
             return false;
         }
-        let src_name = &ctx.source_dim_names[i];
-        if &d == src_name {
-            continue;
+        if !expr0_iterated_axis_lines_up(&d, i, source_dim_elements, ctx) {
+            return false;
         }
-        // AC3.5: a mapped dimension is treated the same way -- don't
-        // special-case it, just don't exclude it. (No mapping context => no
-        // mapped-dimension recognition; the by-name check above still applies.)
-        if let Some(dim_ctx) = ctx.dim_ctx {
-            let d_canon = CanonicalDimensionName::from_raw(&d);
-            let src_canon = CanonicalDimensionName::from_raw(src_name);
-            if dim_ctx.has_mapping_to(&d_canon, &src_canon) {
-                continue;
-            }
-        }
-        return false;
     }
     true
 }
 
-/// Recognize an iterated-dimension subscript on a *non-live-source*
+/// Does iterated-dimension index `d` (canonical) line up with the live
+/// source's `i`-th axis -- by name, or through a usable positional-mapping
+/// remap? The mapped arm consults the SAME
+/// [`crate::ltm_agg::iterated_axis_slot_elements`] /
+/// `mapped_element_correspondence` gate the Expr2 classifier
+/// (`ltm_agg::classify_axis_access`) uses -- BOTH declaration directions
+/// (GH #757), positional mappings only (GH #756) -- so the partial
+/// builder's live-shape match and the reference-site IR agree by
+/// construction. (No mapping context ⇒ no mapped recognition; the by-name
+/// check still applies.)
+fn expr0_iterated_axis_lines_up(
+    d: &str,
+    i: usize,
+    source_dim_elements: &[Vec<String>],
+    ctx: &IteratedDimCtx<'_>,
+) -> bool {
+    let src_name = &ctx.source_dim_names[i];
+    if d == src_name.as_str() {
+        return true;
+    }
+    let Some(dim_ctx) = ctx.dim_ctx else {
+        return false;
+    };
+    let Some(elems) = source_dim_elements.get(i) else {
+        return false;
+    };
+    crate::ltm_agg::iterated_axis_slot_elements(d, src_name, elems, dim_ctx).is_some()
+}
+
+/// The per-axis [`crate::ltm_agg::AxisRead`] vector of a subscript whose
+/// every index is either an iterated-dimension name lined up with the
+/// source's axis at that position or a literal element of that axis
+/// (position-STRICT, matching the Expr2 side's per-axis
+/// `resolve_literal_axis_index`) -- the Expr0 sibling of the
+/// `classify_axis_access`-derived classification
+/// `db::ltm_ir::classify_iterated_dim_shape` performs, minus the `Reduced`
+/// arm (a wildcard/StarRange index returns `None`; direct references never
+/// collapse an axis, and the `Wildcard` precedence check already ran).
+/// `None` when any index is neither -- the caller falls through to the
+/// legacy literal pass / `DynamicIndex`.
+fn classify_expr0_per_element_axes(
+    indices: &[IndexExpr0],
+    source_dim_elements: &[Vec<String>],
+    ctx: &IteratedDimCtx<'_>,
+) -> Option<Vec<crate::ltm_agg::AxisRead>> {
+    use crate::ltm_agg::AxisRead;
+    if indices.is_empty()
+        || indices.len() != ctx.source_dim_names.len()
+        || indices.len() != source_dim_elements.len()
+    {
+        return None;
+    }
+    let mut axes = Vec::with_capacity(indices.len());
+    for (i, idx) in indices.iter().enumerate() {
+        if let IndexExpr0::Expr(Expr0::Var(name, _)) = idx {
+            let d = canonicalize(name.as_str()).into_owned();
+            if ctx.target_iterated_dims.iter().any(|t| t == &d) {
+                if !expr0_iterated_axis_lines_up(&d, i, source_dim_elements, ctx) {
+                    return None;
+                }
+                axes.push(AxisRead::Iterated {
+                    dim: d,
+                    source_dim: ctx.source_dim_names[i].clone(),
+                });
+                continue;
+            }
+        }
+        // Position-strict literal resolution: the Expr2 classifier resolves
+        // each index against ITS axis only, so the any-dimension fallback
+        // `resolve_literal_element_index` carries (for the legacy
+        // FixedIndex match) must not apply here -- a cross-axis literal
+        // would build a `Pinned` the IR never minted, breaking the
+        // live-shape equality match.
+        let candidate = match idx {
+            IndexExpr0::Expr(Expr0::Var(name, _)) => canonicalize(name.as_str()).into_owned(),
+            IndexExpr0::Expr(Expr0::Const(s, _, _)) => s.parse::<u32>().ok()?.to_string(),
+            _ => return None,
+        };
+        if !source_dim_elements[i].iter().any(|e| e == &candidate) {
+            return None;
+        }
+        axes.push(AxisRead::Pinned(candidate));
+    }
+    Some(axes)
+}
+
+/// Verdict of [`classify_other_dep_iterated_dim_subscript`] for an
+/// iterated-dimension subscript on a non-live-source dependency.
+#[derive(Debug, PartialEq, Eq)]
+enum OtherDepIteratedVerdict {
+    /// Collapse the subscript to a bare `Var(dep)` before the `PREVIOUS()`
+    /// wrap: the indices correspond position-for-position to the dep's
+    /// declared axes (so the bare reference reads the same element under
+    /// the target's A2A expansion), or the dep's dims are un-threadable
+    /// and the historical permissive collapse applies.
+    Collapse,
+    /// Not an iterated-dim subscript at all (a literal, wildcard, or
+    /// dynamic index, or a name outside the target's iterated dims):
+    /// normal subscript handling.
+    NotIterated,
+    /// Every index names a target-iterated dimension, but the dep's known
+    /// declared axes provably do NOT correspond positionally -- a
+    /// transposed (`arr[D2,D1]` for `arr[D1,D2]`) or
+    /// position-mismatched-mapped reference. Collapsing would freeze the
+    /// WRONG element (a silent magnitude error, GH #526); the caller
+    /// abandons the changed-first partial instead (the changed-last
+    /// fallback keeps the dep live and verbatim, or the partial fails
+    /// loudly).
+    Mismatch,
+}
+
+/// Classify an iterated-dimension subscript on a *non-live-source*
 /// dependency (e.g. `pop[Region,Age]` in `growth[Region,Age] =
 /// row_sum[Region] * c * pop[Region,Age]` while building the partial for
-/// `(row_sum, growth)`). We don't know the dep's declared dimensions here
-/// (the partial builder works on equation text + a dep *name* set), so this
-/// is the conservative check: every index is a bare `Var` naming one of the
-/// target's iterated dimensions, and there are at most as many indices as
-/// the target has iterated dimensions. When it matches,
+/// `(row_sum, growth)`). On [`OtherDepIteratedVerdict::Collapse`],
 /// `wrap_non_matching_in_previous` collapses the subscript to a bare
 /// `Var(dep)` before wrapping it in `PREVIOUS()` -- avoiding the
 /// `PREVIOUS(Subscript(...))` codegen assertion.
 ///
-/// For the *natural* (non-transposed, same-position) case -- the dep is
-/// declared over exactly those iteration dimensions in the same order, so
-/// each `dep[d_i]` in slot `(d_0, d_1, ...)` reads element `(d_0, d_1,
-/// ...)` -- the frozen `PREVIOUS(dep)` picks the same element
-/// `PREVIOUS(dep[...])` would, and the collapse is exact.
+/// The firing precondition is unchanged from the pre-GH#526 recognizer:
+/// every index is a bare `Var` naming one of the target's iterated
+/// dimensions, with at most as many indices as the target has iterated
+/// dimensions (anything else is [`OtherDepIteratedVerdict::NotIterated`]).
 ///
-/// For *non-natural-position* array deps the collapse is
-/// conservative-by-design (never a codegen error, and the link-score SIGN
-/// factor -- the sign of `dep`'s value -- is preserved when `dep` is
-/// positive) but magnitude-imprecise. The *transposed* sub-case
-/// (`arr[D2,D1]` inside an A2A-over-`D1×D2` equation where `arr` is
-/// declared `D1×D2`): in slot `(d1, d2)` the equation reads `arr[d2,d1]`,
-/// but `PREVIOUS(arr)` freezes `arr[d1,d2]_prev` -- the wrong element, so
-/// the magnitude of the link-score contribution is off (the sign is still
-/// right if `arr` is positive). The *mapped-but-position-mismatched*
-/// sub-case (`dep[D2]` where `dep` is over `D1` and `D2` maps to `D1`)
-/// similarly over-collapses to the `D1`-element rather than the mapped
-/// `D2`-element. Such models are already not statically scoreable in
-/// pre-#511 LTM; the precise non-natural-position handling is a known
-/// limitation tracked as GH #526. (NOT the GH #762 reducer-body work,
-/// which covers the source→agg per-row partials in
-/// [`generate_nonlinear_body_partial`]; this is the other-dep
-/// iterated-subscript collapse in target-equation partials.)
-fn is_other_dep_iterated_dim_subscript(
+/// What the verdict adds (GH #526) is the position-and-mapping
+/// correspondence check against the dep's DECLARED dimensions
+/// ([`IteratedDimCtx::dep_dims`], threaded by the db-bearing per-shape
+/// path). For the *natural* case -- index `i` names (or positionally maps
+/// to) the dep's `i`-th declared dimension -- each `dep[d_0, d_1, ...]`
+/// in slot `(e_0, e_1, ...)` reads element `(e_0, e_1, ...)`, the same
+/// element the bare `PREVIOUS(dep)` freezes, so the collapse is exact:
+/// `Collapse`. A *transposed* reference (`arr[D2,D1]` for `arr` declared
+/// `[D1,D2]`) is a genuine positional transposition in the executed
+/// simulation -- in slot `(i, j)` it reads element `(j, i)` -- so the
+/// collapse would freeze `arr[i,j]_prev` instead of `arr[j,i]_prev`, a
+/// silent magnitude error in the link score: `Mismatch`, never collapsed.
+/// The same holds for an arity mismatch and for a mapped pair without a
+/// usable positional correspondence (the
+/// [`crate::ltm_agg::iterated_axis_slot_elements`] gate, shared with the
+/// live-source recognizer's mapped arm).
+///
+/// A dep whose declared dims are UN-THREADABLE -- `dep_dims` is `None`
+/// (callers without db access) or the dep is absent from the map (an
+/// implicit/synthetic name) -- keeps the historical permissive
+/// `Collapse`: declaring it a mismatch would loud-skip edges that are
+/// correct today. (NOT the GH #762 reducer-body work, which covers the
+/// source->agg per-row partials in `generate_nonlinear_body_partial`;
+/// this is the other-dep iterated-subscript collapse in target-equation
+/// partials.)
+fn classify_other_dep_iterated_dim_subscript(
+    dep: &Ident<Canonical>,
     indices: &[IndexExpr0],
     ctx: Option<&IteratedDimCtx<'_>>,
-) -> bool {
-    let Some(ctx) = ctx else { return false };
+) -> OtherDepIteratedVerdict {
+    let Some(ctx) = ctx else {
+        return OtherDepIteratedVerdict::NotIterated;
+    };
     if indices.is_empty() || indices.len() > ctx.target_iterated_dims.len() {
-        return false;
+        return OtherDepIteratedVerdict::NotIterated;
     }
-    indices.iter().all(|idx| match idx {
-        IndexExpr0::Expr(Expr0::Var(name, _)) => {
-            let d = canonicalize(name.as_str());
-            ctx.target_iterated_dims
-                .iter()
-                .any(|t| t.as_str() == d.as_ref())
+    let mut index_dims: Vec<String> = Vec::with_capacity(indices.len());
+    for idx in indices {
+        match idx {
+            IndexExpr0::Expr(Expr0::Var(name, _)) => {
+                let d = canonicalize(name.as_str()).into_owned();
+                if !ctx.target_iterated_dims.iter().any(|t| t == &d) {
+                    return OtherDepIteratedVerdict::NotIterated;
+                }
+                index_dims.push(d);
+            }
+            _ => return OtherDepIteratedVerdict::NotIterated,
         }
-        _ => false,
-    })
+    }
+    let Some(dep_dims) = ctx.dep_dims.and_then(|m| m.get(dep.as_str())) else {
+        // Un-threadable dep dims: the historical permissive collapse.
+        return OtherDepIteratedVerdict::Collapse;
+    };
+    if index_dims.len() != dep_dims.len() {
+        return OtherDepIteratedVerdict::Mismatch;
+    }
+    for (d, dep_dim) in index_dims.iter().zip(dep_dims) {
+        if !other_dep_axis_lines_up(d, dep_dim, ctx) {
+            return OtherDepIteratedVerdict::Mismatch;
+        }
+    }
+    OtherDepIteratedVerdict::Collapse
+}
+
+/// Does iterated-dimension index `d` (canonical) line up with a non-live
+/// dep's declared axis `dep_dim` -- by name, or through a usable
+/// positional-mapping remap? The dep-side sibling of
+/// [`expr0_iterated_axis_lines_up`], consulting the SAME
+/// [`crate::ltm_agg::iterated_axis_slot_elements`] /
+/// `mapped_element_correspondence` gate (both declaration directions,
+/// positional mappings only) so the live-source and other-dep recognizers
+/// can never disagree about which mapped pairs are usable.
+fn other_dep_axis_lines_up(
+    d: &str,
+    dep_dim: &crate::dimensions::Dimension,
+    ctx: &IteratedDimCtx<'_>,
+) -> bool {
+    let dep_dim_name = canonicalize(dep_dim.name());
+    if d == dep_dim_name.as_ref() {
+        return true;
+    }
+    let Some(dim_ctx) = ctx.dim_ctx else {
+        return false;
+    };
+    let elems = dimension_element_names(dep_dim);
+    crate::ltm_agg::iterated_axis_slot_elements(d, dep_dim_name.as_ref(), &elems, dim_ctx).is_some()
 }
 
 /// Classify an `Expr0` subscript's shape based on its indices.
@@ -267,8 +423,26 @@ fn classify_expr0_subscript_shape(
     // `db::ltm_ir::classify_iterated_dim_shape`. Checked before the
     // literal-element pass because a dimension name (`Region`) is not a
     // literal element, so it would otherwise fall to `DynamicIndex`.
-    if is_live_source_iterated_dim_subscript(indices, iter_ctx) {
+    if is_live_source_iterated_dim_subscript(indices, source_dim_elements, iter_ctx) {
         return RefShape::Bare;
+    }
+    // GH #525 (T6): a mixed iterated+literal subscript (`pop[Region, young]`
+    // inside an A2A-over-`Region` equation) is `PerElement`, mirroring
+    // `classify_iterated_dim_shape`'s `classify_axis_access`-derived mixed
+    // arm -- the partial builder's live-shape match must agree with the
+    // reference-site IR (the documented sync requirement). All-`Pinned`
+    // falls through to the literal pass (`FixedIndex`), and all-`Iterated`
+    // is the `Bare` case above, so this arm fires only for a genuine mix.
+    if let Some(ctx) = iter_ctx
+        && let Some(axes) = classify_expr0_per_element_axes(indices, source_dim_elements, ctx)
+    {
+        let n_iterated = axes
+            .iter()
+            .filter(|a| matches!(a, crate::ltm_agg::AxisRead::Iterated { .. }))
+            .count();
+        if n_iterated > 0 && n_iterated < axes.len() {
+            return RefShape::PerElement { axes };
+        }
     }
     let mut elems = Vec::with_capacity(indices.len());
     for (i, idx) in indices.iter().enumerate() {
@@ -382,10 +556,32 @@ fn expr0_contains_live_match(
     }
 }
 
+/// Out-channels of [`wrap_non_matching_in_previous`], threaded through the
+/// recursion as one mutable sink.
+#[derive(Default)]
+struct WrapOutcome {
+    /// The *first* `live_source` occurrence left live (in document order,
+    /// after the transform); see the `live_ref` paragraph on
+    /// [`wrap_non_matching_in_previous`].
+    live_ref: Option<Expr0>,
+    /// GH #526: set when a KNOWN position-mismatched other-dep iterated
+    /// subscript was encountered ([`OtherDepIteratedVerdict::Mismatch`]).
+    /// The changed-first partial is then unusable -- collapsing would
+    /// freeze the wrong element, and not collapsing leaves a
+    /// `PREVIOUS(Subscript(dim-name indices))` whose capture helper cannot
+    /// compile -- so callers abandon it: `shaped_guard_form_text` falls to
+    /// the changed-last convention (which keeps the dep live and
+    /// verbatim), and `build_partial_equation_shaped_with_live_ref`
+    /// returns the loud `UnfreezablePartial` error.
+    other_dep_mismatch: bool,
+}
+
 /// Walk an `Expr0` tree and wrap variable references in `PREVIOUS()` except
 /// those whose access shape matches the live shape for the given source,
-/// recording into `live_ref` the *first* `live_source` occurrence left
-/// live (in document order, after the transform).
+/// recording into `out.live_ref` the *first* `live_source` occurrence left
+/// live (in document order, after the transform) and into
+/// `out.other_dep_mismatch` whether a GH #526 mismatched other-dep
+/// subscript doomed the changed-first form.
 ///
 /// `live_source` identifies the source variable whose live shape is held
 /// out from `PREVIOUS` wrapping. `live_shape` declares which AST occurrences
@@ -409,7 +605,7 @@ fn expr0_contains_live_match(
 /// vs the `PREVIOUS(Subscript(...))` the pre-#511 code produced). Pass
 /// `None` for callers whose live source is scalar (no source subscripts).
 ///
-/// `live_ref` ends up holding the bare `Var(live_source)` for a `Bare`
+/// `out.live_ref` ends up holding the bare `Var(live_source)` for a `Bare`
 /// shape, or the (already index-transformed) `Subscript(live_source, ...)`
 /// for `FixedIndex`/`Wildcard`/`DynamicIndex`. Callers use this captured
 /// subtree to build the link-score's source-side normalizer: it is the
@@ -417,7 +613,7 @@ fn expr0_contains_live_match(
 /// exact source velocity feeding the `SIGN` factor -- crucially, a
 /// per-element / per-slice expression rather than the (possibly
 /// multi-dimensional) bare `live_source`, which would be a dimension error
-/// in a scalar link-score equation. Pass `&mut None` to ignore it.
+/// in a scalar link-score equation.
 ///
 /// `dims_ctx` is the project-wide dimensions context used by
 /// [`qualify_element_index`] to recognize (and qualify) subscript indices
@@ -434,7 +630,7 @@ fn wrap_non_matching_in_previous(
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
-    live_ref: &mut Option<Expr0>,
+    out: &mut WrapOutcome,
 ) -> Expr0 {
     match expr {
         Expr0::Const(..) => expr,
@@ -445,8 +641,8 @@ fn wrap_non_matching_in_previous(
                 // shape (FixedIndex / Wildcard / DynamicIndex) doesn't
                 // match a bare reference, so we wrap.
                 if matches!(live_shape, RefShape::Bare) {
-                    if live_ref.is_none() {
-                        *live_ref = Some(expr.clone());
+                    if out.live_ref.is_none() {
+                        out.live_ref = Some(expr.clone());
                     }
                     expr
                 } else {
@@ -468,12 +664,14 @@ fn wrap_non_matching_in_previous(
             // rewritten, so simulation still evaluates `live_source[d_i]`.
             // For the live source we use the precise position-matched check;
             // for a non-live dep (`pop[Region,Age]` while building the
-            // `row_sum -> growth` partial) the conservative all-indices-are-
-            // iterated-dims check (the dep's arity isn't known here). Either
-            // way, the alternative -- `PREVIOUS(Subscript(...))` -- trips the
+            // `row_sum -> growth` partial) the verdict-based check, which
+            // collapses only on exact (or un-threadable-dims permissive)
+            // positional correspondence and flags a KNOWN mismatch instead
+            // of freezing the wrong element (GH #526). Either way, the
+            // alternative -- `PREVIOUS(Subscript(...))` -- trips the
             // codegen assertion.
             if &canonical == live_source {
-                if is_live_source_iterated_dim_subscript(&indices, iter_ctx) {
+                if is_live_source_iterated_dim_subscript(&indices, source_dim_elements, iter_ctx) {
                     return wrap_non_matching_in_previous(
                         Expr0::Var(ident, loc),
                         live_source,
@@ -482,22 +680,34 @@ fn wrap_non_matching_in_previous(
                         source_dim_elements,
                         iter_ctx,
                         dims_ctx,
-                        live_ref,
+                        out,
                     );
                 }
-            } else if other_deps.contains(&canonical)
-                && is_other_dep_iterated_dim_subscript(&indices, iter_ctx)
-            {
-                return wrap_non_matching_in_previous(
-                    Expr0::Var(ident, loc),
-                    live_source,
-                    live_shape,
-                    other_deps,
-                    source_dim_elements,
-                    iter_ctx,
-                    dims_ctx,
-                    live_ref,
-                );
+            } else if other_deps.contains(&canonical) {
+                match classify_other_dep_iterated_dim_subscript(&canonical, &indices, iter_ctx) {
+                    OtherDepIteratedVerdict::Collapse => {
+                        return wrap_non_matching_in_previous(
+                            Expr0::Var(ident, loc),
+                            live_source,
+                            live_shape,
+                            other_deps,
+                            source_dim_elements,
+                            iter_ctx,
+                            dims_ctx,
+                            out,
+                        );
+                    }
+                    OtherDepIteratedVerdict::Mismatch => {
+                        // GH #526: collapsing would freeze the WRONG element.
+                        // Record the doom and fall through to the normal
+                        // wrap; the caller abandons this changed-first form
+                        // (changed-last fallback, or the loud error), so the
+                        // PREVIOUS(Subscript(..)) produced below is never
+                        // emitted.
+                        out.other_dep_mismatch = true;
+                    }
+                    OtherDepIteratedVerdict::NotIterated => {}
+                }
             }
             // Classify the subscript's shape using the ORIGINAL indices
             // BEFORE recursing into them. If a user variable shares a
@@ -545,13 +755,14 @@ fn wrap_non_matching_in_previous(
                                 source_dim_elements,
                                 iter_ctx,
                                 dims_ctx,
+                                out,
                             )
                         }
                     })
                     .collect();
                 let subscript = Expr0::Subscript(ident, indices, loc);
-                if live_ref.is_none() {
-                    *live_ref = Some(subscript.clone());
+                if out.live_ref.is_none() {
+                    out.live_ref = Some(subscript.clone());
                 }
                 return subscript;
             }
@@ -570,6 +781,7 @@ fn wrap_non_matching_in_previous(
                         source_dim_elements,
                         iter_ctx,
                         dims_ctx,
+                        out,
                     )
                 })
                 .collect();
@@ -622,7 +834,7 @@ fn wrap_non_matching_in_previous(
                         source_dim_elements,
                         iter_ctx,
                         dims_ctx,
-                        live_ref,
+                        out,
                     )
                 }));
                 return Expr0::App(UntypedBuiltinFn(name, new_args), loc);
@@ -666,7 +878,7 @@ fn wrap_non_matching_in_previous(
                         source_dim_elements,
                         iter_ctx,
                         dims_ctx,
-                        live_ref,
+                        out,
                     )
                 })
                 .collect();
@@ -682,7 +894,7 @@ fn wrap_non_matching_in_previous(
                 source_dim_elements,
                 iter_ctx,
                 dims_ctx,
-                live_ref,
+                out,
             )),
             loc,
         ),
@@ -696,7 +908,7 @@ fn wrap_non_matching_in_previous(
                 source_dim_elements,
                 iter_ctx,
                 dims_ctx,
-                live_ref,
+                out,
             )),
             Box::new(wrap_non_matching_in_previous(
                 *rhs,
@@ -706,7 +918,7 @@ fn wrap_non_matching_in_previous(
                 source_dim_elements,
                 iter_ctx,
                 dims_ctx,
-                live_ref,
+                out,
             )),
             loc,
         ),
@@ -719,7 +931,7 @@ fn wrap_non_matching_in_previous(
                 source_dim_elements,
                 iter_ctx,
                 dims_ctx,
-                live_ref,
+                out,
             )),
             Box::new(wrap_non_matching_in_previous(
                 *then_expr,
@@ -729,7 +941,7 @@ fn wrap_non_matching_in_previous(
                 source_dim_elements,
                 iter_ctx,
                 dims_ctx,
-                live_ref,
+                out,
             )),
             Box::new(wrap_non_matching_in_previous(
                 *else_expr,
@@ -739,7 +951,7 @@ fn wrap_non_matching_in_previous(
                 source_dim_elements,
                 iter_ctx,
                 dims_ctx,
-                live_ref,
+                out,
             )),
             loc,
         ),
@@ -790,6 +1002,7 @@ fn qualify_element_index(
     )))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wrap_index_non_matching_in_previous(
     index: IndexExpr0,
     live_source: &Ident<Canonical>,
@@ -798,6 +1011,7 @@ fn wrap_index_non_matching_in_previous(
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    out: &mut WrapOutcome,
 ) -> IndexExpr0 {
     // An index that unambiguously names a dimension element is an element
     // selector, never a causal reference: qualify it and leave it unwrapped
@@ -854,8 +1068,11 @@ fn wrap_index_non_matching_in_previous(
     // Indices are inner content of a live reference (or of a
     // PREVIOUS-wrapped one); a `live_source` occurrence reachable only
     // through an index is not the live reference itself, so do not
-    // capture it -- pass a throwaway sink.
-    match index {
+    // capture it -- pass a throwaway live-ref sink. The GH #526
+    // `other_dep_mismatch` doom DOES propagate: an index-nested mismatched
+    // collapse dooms the changed-first partial just the same.
+    let mut idx_out = WrapOutcome::default();
+    let result = match index {
         IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_non_matching_in_previous(
             e,
             live_source,
@@ -864,7 +1081,7 @@ fn wrap_index_non_matching_in_previous(
             source_dim_elements,
             iter_ctx,
             dims_ctx,
-            &mut None,
+            &mut idx_out,
         )),
         IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
             wrap_non_matching_in_previous(
@@ -875,7 +1092,7 @@ fn wrap_index_non_matching_in_previous(
                 source_dim_elements,
                 iter_ctx,
                 dims_ctx,
-                &mut None,
+                &mut idx_out,
             ),
             wrap_non_matching_in_previous(
                 r,
@@ -885,12 +1102,14 @@ fn wrap_index_non_matching_in_previous(
                 source_dim_elements,
                 iter_ctx,
                 dims_ctx,
-                &mut None,
+                &mut idx_out,
             ),
             loc,
         ),
         other => other,
-    }
+    };
+    out.other_dep_mismatch |= idx_out.other_dep_mismatch;
+    result
 }
 
 /// A parse failure in a ceteris-paribus partial-equation builder.
@@ -949,7 +1168,7 @@ pub(crate) struct PartialEquationError {
 }
 
 impl PartialEquationError {
-    fn new(equation_text: &str) -> Self {
+    pub(crate) fn new(equation_text: &str) -> Self {
         PartialEquationError {
             equation_text: equation_text.to_string(),
             kind: PartialEquationErrorKind::Parse,
@@ -1030,7 +1249,13 @@ pub(crate) fn build_partial_equation_shaped(
 ///
 /// Returns `Err([`PartialEquationError`])` when `equation_text` fails to
 /// parse -- see [`build_partial_equation_shaped`] for why this is a loud
-/// error rather than a silent lowercased-input fallback (GH #311).
+/// error rather than a silent lowercased-input fallback (GH #311) -- or
+/// when the changed-first wrap hit a GH #526 mismatched other-dep
+/// subscript (`WrapOutcome::other_dep_mismatch`): the collapse would have
+/// frozen the WRONG element, so the partial fails with the loud
+/// `UnfreezablePartial` instead of a silent magnitude error. (Callers that
+/// can fall back to the changed-last convention route through
+/// [`shaped_guard_form_text`], which does so for this doom class.)
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_partial_equation_shaped_with_live_ref(
     equation_text: &str,
@@ -1041,7 +1266,7 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
     iter_ctx: Option<&IteratedDimCtx<'_>>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Result<(String, Option<Expr0>), PartialEquationError> {
-    let (transformed, live_ref) = wrap_changed_first_ast(
+    let (transformed, out) = wrap_changed_first_ast(
         equation_text,
         deps,
         live_source,
@@ -1050,13 +1275,17 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
         iter_ctx,
         dims_ctx,
     )?;
-    Ok((print_eqn(&transformed), live_ref))
+    if out.other_dep_mismatch {
+        return Err(PartialEquationError::unfreezable(equation_text));
+    }
+    Ok((print_eqn(&transformed), out.live_ref))
 }
 
 /// The shared changed-first transform: filter `deps` down to the
 /// other-deps set, parse `equation_text`, and PREVIOUS-wrap via
 /// [`wrap_non_matching_in_previous`] -- returning the transformed AST (not
-/// printed text) plus the captured live reference. The single
+/// printed text) plus the [`WrapOutcome`] out-channels (the captured live
+/// reference and the GH #526 mismatch doom flag). The single
 /// implementation behind both [`build_partial_equation_shaped_with_live_ref`]
 /// (which prints it) and [`shaped_guard_form_text`] (which doom-checks the
 /// AST before printing), so the two can never drift on dep filtering,
@@ -1076,7 +1305,7 @@ fn wrap_changed_first_ast(
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
-) -> Result<(Expr0, Option<Expr0>), PartialEquationError> {
+) -> Result<(Expr0, WrapOutcome), PartialEquationError> {
     let other_deps: HashSet<Ident<Canonical>> = deps
         .iter()
         .filter(|d| *d != live_source && normalize_module_ref(d) != *live_source)
@@ -1087,7 +1316,7 @@ fn wrap_changed_first_ast(
         return Err(PartialEquationError::new(equation_text));
     };
 
-    let mut live_ref: Option<Expr0> = None;
+    let mut out = WrapOutcome::default();
     let transformed = wrap_non_matching_in_previous(
         ast,
         live_source,
@@ -1096,9 +1325,9 @@ fn wrap_changed_first_ast(
         source_dim_elements,
         iter_ctx,
         dims_ctx,
-        &mut live_ref,
+        &mut out,
     );
-    Ok((transformed, live_ref))
+    Ok((transformed, out))
 }
 
 /// Is `expr` *array-slice-valued* -- does it contain a wildcard/star-range
@@ -1249,7 +1478,11 @@ fn wrap_live_shaped_in_previous(
                 // same element a bare reference would in each slot, and the
                 // IR classifies such a site `Bare`.
                 if matches!(live_shape, RefShape::Bare)
-                    && is_live_source_iterated_dim_subscript(&indices, iter_ctx)
+                    && is_live_source_iterated_dim_subscript(
+                        &indices,
+                        source_dim_elements,
+                        iter_ctx,
+                    )
                 {
                     let bare = Expr0::Var(ident, loc);
                     if frozen_ref.is_none() {
@@ -1362,18 +1595,26 @@ fn wrap_live_shaped_in_previous(
 ///    everything else at `PREVIOUS`, numerator
 ///    `(partial - PREVIOUS(target))`.
 /// 2. **Changed-last**, when the changed-first partial would embed
-///    `PREVIOUS` of an array slice (see [`contains_unfreezable_previous`]):
+///    `PREVIOUS` of an array slice (see [`contains_unfreezable_previous`])
+///    or hit a GH #526 mismatched other-dep iterated subscript
+///    ([`WrapOutcome::other_dep_mismatch`] -- collapsing would freeze the
+///    WRONG element; changed-last instead keeps the transposed dep LIVE
+///    and verbatim, so it compiles exactly like the target's own equation
+///    and the numerator attributes only the live source's change):
 ///    freeze ONLY the matching `from` occurrences and keep everything else
 ///    current, numerator `(target - frozen)`. This is the
 ///    [`generate_scalar_feeder_to_agg_equation`] convention -- a
 ///    first-order-equal discrete attribution of `Δz` to `Δx` (see that
 ///    function's rustdoc and the convention note in
-///    `docs/reference/ltm--loops-that-matter.md`) -- and is what makes the
-///    un-hoisted iterated-dim-feeder reducer class
-///    (`growth[D1] = SUM(matrix[D1,*] * frac[D1])`, the GH #743 fixture)
-///    genuinely scoreable: the wildcard co-source slice stays verbatim
-///    (compiling exactly like the target's own equation) and only the
-///    feeder is lagged.
+///    `docs/reference/ltm--loops-that-matter.md`) -- and is what makes an
+///    UN-HOISTED feeder-bearing reducer genuinely scoreable: the wildcard
+///    co-source slice stays verbatim (compiling exactly like the target's
+///    own equation) and only the feeder is lagged. (The original GH #743
+///    fixture, `growth[D1] = SUM(matrix[D1,*] * frac[D1])`, is HOISTED
+///    since the GH #767 / T5 feeder clause and takes the per-`(row, slot)`
+///    [`generate_iterated_feeder_to_agg_equation`] form instead; this
+///    chooser still serves the shapes the I1 acceptance declines, e.g. the
+///    Pinned-axis mix `SUM(matrix[D1,*] * w[D1, c1])`.)
 /// 3. `Err(UnfreezablePartial)` when both conventions are doomed (or
 ///    changed-last has no matching occurrence to freeze, which would
 ///    silently score a constant 0): the caller skips the score variable
@@ -1391,7 +1632,7 @@ fn shaped_guard_form_text(
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
     target_ref: &str,
 ) -> Result<String, PartialEquationError> {
-    let (changed_first, live_ref) = wrap_changed_first_ast(
+    let (changed_first, out) = wrap_changed_first_ast(
         equation_text,
         deps,
         from,
@@ -1400,11 +1641,11 @@ fn shaped_guard_form_text(
         iter_ctx,
         dims_ctx,
     )?;
-    if !contains_unfreezable_previous(&changed_first) {
+    if !out.other_dep_mismatch && !contains_unfreezable_previous(&changed_first) {
         let source_ref = source_ref_for_guard(
             from,
             shape,
-            live_ref.as_ref(),
+            out.live_ref.as_ref(),
             source_dim_names,
             source_dim_elements,
         );
@@ -1585,6 +1826,131 @@ pub(crate) fn generate_scalar_feeder_to_agg_equation(
     Ok(link_score_guard_form_with_numerator(
         &numerator, &agg_q, &feeder_q,
     ))
+}
+
+/// Generate the per-`(row, slot)` link-score equation for an ITERATED-DIM
+/// PROJECTION FEEDER of a hoisted reducer (GH #767 / T5 of the
+/// shape-expressiveness design): `frac` in
+/// `growth[D1] = SUM(matrix[D1,*] * frac[D1])`, whose accepted slice is
+/// the all-`Iterated` projection of the canonical slice, read 1:1 per agg
+/// result slot.
+///
+/// Like the scalar feeder ([`generate_scalar_feeder_to_agg_equation`]),
+/// the changed-FIRST partial is uncompilable for a feeder: it would freeze
+/// the co-source's wildcard slice as a lagged whole-array read
+/// (`SUM(PREVIOUS(matrix[d1·r1, *]) * frac[d1·r1])`, the GH #541 class).
+/// So the per-slot equation uses the changed-LAST attribution -- evaluate
+/// the reducer's equation pinned to the slot with ONLY the feeder frozen
+/// (`SUM(matrix[d1·r1, *] * PREVIOUS(frac[d1·r1]))`, which compiles: the
+/// co-source slice stays verbatim, the frozen feeder is a scalar
+/// fixed-element `LoadPrev`) and subtract it from the agg slot's current
+/// value. For a bilinear body the feeder's changed-last numerator is
+/// exactly complementary to the co-source rows' changed-first numerators
+/// per slot (`Σ_c Δ_matrix[r,c] + Δ_frac[r] = Δgrowth[r]` identically) --
+/// the same complementarity documented on the scalar feeder, now per row.
+///
+/// `iterated_dims` are the canonical slot axes' dimension names (the
+/// feeder's own axis dims -- acceptance guarantees they equal the
+/// canonical `Iterated` target dims, in order, unmapped), and
+/// `slot_parts_qualified` the slot's qualified elements, parallel to it.
+/// Every subscript index in `agg_equation_text` naming one of
+/// `iterated_dims` is pinned to the slot's element (the executed A2A
+/// resolution for that slot), then the feeder's references are frozen.
+///
+/// Returns `Err` when the text does not parse (the GH #311 loud-failure
+/// contract) or when no feeder occurrence was frozen (the numerator would
+/// be a silent constant 0 -- the GH #743 unfreezable contract).
+pub(crate) fn generate_iterated_feeder_to_agg_equation(
+    feeder: &str,
+    agg_name: &str,
+    agg_equation_text: &str,
+    iterated_dims: &[String],
+    slot_parts_qualified: &[String],
+) -> Result<String, PartialEquationError> {
+    let Ok(Some(ast)) = Expr0::new(agg_equation_text, LexerType::Equation) else {
+        return Err(PartialEquationError::new(agg_equation_text));
+    };
+    let pinned = pin_iterated_dim_indices(ast, iterated_dims, slot_parts_qualified);
+    let feeder_ident = Ident::<Canonical>::new(feeder);
+    let frozen = print_eqn(&wrap_matching_in_previous(pinned.clone(), &feeder_ident));
+    if frozen == print_eqn(&pinned) {
+        // No feeder occurrence was frozen: the "frozen" evaluation would
+        // equal the agg slot itself and the score a silent constant 0.
+        return Err(PartialEquationError::unfreezable(agg_equation_text));
+    }
+    let slot = slot_parts_qualified.join(",");
+    let agg_ref = format!("{}[{}]", quote_ident(agg_name), slot);
+    // The feeder's row equals the slot 1:1 (unmapped projection acceptance),
+    // and its axes ARE the slot's dimensions, so the slot subscript is also
+    // the feeder's own qualified row reference.
+    let feeder_ref = format!("{}[{}]", quote_ident(feeder), slot);
+    let numerator = format!("({agg_ref} - ({frozen}))");
+    Ok(link_score_guard_form_with_numerator(
+        &numerator,
+        &agg_ref,
+        &feeder_ref,
+    ))
+}
+
+/// Pin every subscript index of `expr` that is a bare `Var` naming one of
+/// `dims` (canonical dimension names) to the parallel element of `parts`
+/// -- the slot-resolution step of
+/// [`generate_iterated_feeder_to_agg_equation`]. Wildcards, StarRanges,
+/// literals, and indices naming other dimensions are left untouched (a
+/// co-source's `Reduced` wildcard must stay a whole-slice read), and
+/// expression indices are recursed into.
+fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> Expr0 {
+    match expr {
+        Expr0::Const(..) | Expr0::Var(..) => expr,
+        Expr0::Subscript(ident, indices, loc) => {
+            let indices = indices
+                .into_iter()
+                .map(|idx| match idx {
+                    IndexExpr0::Expr(Expr0::Var(name, vloc)) => {
+                        let n = canonicalize(name.as_str());
+                        match dims.iter().position(|d| d.as_str() == n.as_ref()) {
+                            Some(pos) => IndexExpr0::Expr(Expr0::Var(
+                                RawIdent::new_from_str(&parts[pos]),
+                                vloc,
+                            )),
+                            None => IndexExpr0::Expr(Expr0::Var(name, vloc)),
+                        }
+                    }
+                    IndexExpr0::Expr(e) => {
+                        IndexExpr0::Expr(pin_iterated_dim_indices(e, dims, parts))
+                    }
+                    other => other,
+                })
+                .collect();
+            Expr0::Subscript(ident, indices, loc)
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => Expr0::App(
+            UntypedBuiltinFn(
+                name,
+                args.into_iter()
+                    .map(|a| pin_iterated_dim_indices(a, dims, parts))
+                    .collect(),
+            ),
+            loc,
+        ),
+        Expr0::Op1(op, arg, loc) => Expr0::Op1(
+            op,
+            Box::new(pin_iterated_dim_indices(*arg, dims, parts)),
+            loc,
+        ),
+        Expr0::Op2(op, l, r, loc) => Expr0::Op2(
+            op,
+            Box::new(pin_iterated_dim_indices(*l, dims, parts)),
+            Box::new(pin_iterated_dim_indices(*r, dims, parts)),
+            loc,
+        ),
+        Expr0::If(c, t, f, loc) => Expr0::If(
+            Box::new(pin_iterated_dim_indices(*c, dims, parts)),
+            Box::new(pin_iterated_dim_indices(*t, dims, parts)),
+            Box::new(pin_iterated_dim_indices(*f, dims, parts)),
+            loc,
+        ),
+    }
 }
 
 /// Replace every bare `Var(id)` reference in `equation_text` where `id`
@@ -1789,7 +2155,7 @@ fn subscript_idents_in_expr0(
 /// dimension (the target self-reference is pinned implicitly via the
 /// already-subscripted `to[element]` reference the guard form is built
 /// around). The source itself is never in this set: an arrayed-agg source is
-/// pinned via `source_pin_element` instead, since the full target tuple
+/// pinned via its `source_pins` entry instead, since the full target tuple
 /// over-subscripts it in the broadcast case (GH #528).
 ///
 /// `source_ref_override`: the pre-rendered (quoted, possibly element-pinned)
@@ -1800,16 +2166,24 @@ fn subscript_idents_in_expr0(
 /// partial) numerator do; a bare agg reference in a scalar equation would not
 /// compile and the link score would stub to zero.
 ///
-/// `source_pin_element`: the (qualified) element tuple to pin `from`'s
-/// references to in the partial BODY, or `None` for a true scalar source
-/// (no pinning). The arrayed-agg caller passes the target element's
-/// projection onto the agg's `result_dims` axes -- the same slot the
-/// link-score name and `source_ref_override` carry. Pinning the agg through
-/// `to_deps_to_subscript` instead would use the target's FULL element tuple,
-/// which over-subscripts the agg in the broadcast case (`agg[D1]` feeding
-/// `to[D1,D2]`): the fragment fails to compile and the score is stubbed to a
-/// constant 0 (GH #528). For the diagonal case (`result_dims` == `to`'s
-/// dims) the projection IS the full tuple, so the equation is unchanged.
+/// `source_pins`: the per-ident pin map (GH #751) -- for each `(ident,
+/// slot)` entry, that ident's references in the partial BODY are pinned to
+/// the (qualified) `slot` element tuple. Empty for a true scalar source
+/// (no pinning). The arrayed-agg caller passes one entry per ARRAYED agg
+/// referenced by the substituted equation: the LIVE agg's entry carries the
+/// target element's projection onto its `result_dims` axes -- the same slot
+/// the link-score name and `source_ref_override` carry (GH #528) -- and
+/// each frozen co-agg (a second hoisted reducer in the same target
+/// equation) carries the projection onto ITS OWN `result_dims`, so its
+/// `PREVIOUS(...)` freeze reads one slot instead of the ill-typed bare
+/// multi-slot reference that failed fragment compile and stubbed the score
+/// to 0 (GH #751). Pinning these idents through `to_deps_to_subscript`
+/// instead would use the target's FULL element tuple, which over-subscripts
+/// an agg in the broadcast case (`agg[D1]` feeding `to[D1,D2]`): the
+/// fragment fails to compile and the score is stubbed to a constant 0
+/// (GH #528). For the diagonal case (`result_dims` == `to`'s dims) the
+/// projection IS the full tuple, so the equation is unchanged. A SCALAR
+/// co-agg needs no entry: its bare `PREVIOUS(name)` freeze compiles as-is.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_scalar_to_element_equation(
     from: &str,
@@ -1819,7 +2193,7 @@ pub(crate) fn generate_scalar_to_element_equation(
     to_deps: &HashSet<Ident<Canonical>>,
     to_deps_to_subscript: &HashSet<Ident<Canonical>>,
     source_ref_override: Option<&str>,
-    source_pin_element: Option<&str>,
+    source_pins: &[(Ident<Canonical>, String)],
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Result<String, PartialEquationError> {
     let from_canonical = Ident::new(from);
@@ -1840,20 +2214,383 @@ pub(crate) fn generate_scalar_to_element_equation(
         None,
         dims_ctx,
     )?;
-    let partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element)?;
-    // Pin the source's own references (live numerator occurrence and any
-    // PREVIOUS-wrapped ones alike) to its projected slot -- a separate pass
-    // from the full-tuple `to_deps_to_subscript` pinning above.
-    let partial = match source_pin_element {
-        Some(slot) => {
-            let source_only: HashSet<Ident<Canonical>> =
-                std::iter::once(from_canonical.clone()).collect();
-            subscript_idents_at_element(&partial, &source_only, slot)?
-        }
-        None => partial,
-    };
+    let mut partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element)?;
+    // Pin each mapped ident's references (the live source's numerator
+    // occurrence and any PREVIOUS-wrapped co-agg freezes alike) to its own
+    // projected slot -- separate passes from the full-tuple
+    // `to_deps_to_subscript` pinning above, because each agg's slot is the
+    // projection onto ITS `result_dims`, not the target's full tuple. The
+    // passes touch disjoint idents, so application order is irrelevant.
+    for (ident, slot) in source_pins {
+        let one: HashSet<Ident<Canonical>> = std::iter::once(ident.clone()).collect();
+        partial = subscript_idents_at_element(&partial, &one, slot)?;
+    }
     let source_ref = source_ref_override.unwrap_or(&from_q);
     Ok(link_score_guard_form(&partial, &to_elem, source_ref))
+}
+
+/// Read-only context for [`rewrite_per_element_source_refs`]: everything the
+/// walker needs to substitute the live source's subscript indices for one
+/// `(site, target element)` instantiation of a `PerElement` link score
+/// (GH #525, T6 of the shape-expressiveness design).
+struct PerElementRefCtx<'a> {
+    /// The live source variable (canonical).
+    from: &'a Ident<Canonical>,
+    /// The emitting site's per-axis access vector
+    /// ([`RefShape::PerElement`]'s `axes`).
+    site_axes: &'a [crate::ltm_agg::AxisRead],
+    /// The row this `(site, e)` instantiation reads -- BARE element names,
+    /// one per source axis (parallel to `site_axes`). Occurrences matching
+    /// `site_axes` are rewritten to exactly these indices so the subsequent
+    /// changed-first wrap's `FixedIndex(row)` live shape matches them.
+    row_parts_bare: &'a [String],
+    /// Element-name lists per source axis (position-strict resolution).
+    source_dim_elements: &'a [Vec<String>],
+    /// The source's declared dimensions (for index qualification).
+    from_dims: &'a [crate::dimensions::Dimension],
+    /// Target-iterated dim (canonical) -> (element of `e` for that dim,
+    /// its index within the dim) -- the projection data `e` supplies.
+    target_elem_by_dim: &'a HashMap<String, (String, usize)>,
+    /// The iterated-dim recognition context (live source's axes + target
+    /// iterated dims + mapping context).
+    iter_ctx: &'a IteratedDimCtx<'a>,
+    dim_ctx: &'a crate::dimensions::DimensionsContext,
+}
+
+/// Qualify one element of one axis (`"nyc"` over `Region` ->
+/// `"region\u{B7}nyc"`), via the same defensive rules as
+/// [`qualify_element_csv`].
+fn qualify_axis_element(elem: &str, dim: &crate::dimensions::Dimension) -> String {
+    qualify_element_csv(elem, std::slice::from_ref(dim))
+}
+
+/// The source row a per-axis access vector reads for one full target
+/// element: project the target element onto the `Iterated` axes
+/// (slot-remapped through `mapped_element_correspondence` for a
+/// positionally-mapped pair -- the correspondence is indexed by TARGET
+/// element position and yields the source element the executed simulation
+/// reads) and fill `Pinned` axes with their literals. One bare element
+/// name per axis, in source-axis order. `None` when an `Iterated` dim is
+/// missing from the target projection or the mapped remap is unusable (a
+/// mid-edit inconsistency; callers degrade conservatively) -- and for any
+/// `Reduced` axis, which the `PerElement` invariant excludes.
+///
+/// This is the SINGLE row derivation for the `PerElement` family's
+/// emission: the link-score NAME's row (computed by
+/// `emit_per_element_link_scores`) and the equation's live-reference row
+/// (computed by [`rewrite_per_element_source_refs`]) both come from here,
+/// so they cannot disagree.
+pub(crate) fn per_element_row_for_target(
+    axes: &[crate::ltm_agg::AxisRead],
+    target_elem_by_dim: &HashMap<String, (String, usize)>,
+    dim_ctx: &crate::dimensions::DimensionsContext,
+) -> Option<Vec<String>> {
+    use crate::common::CanonicalDimensionName;
+    use crate::ltm_agg::AxisRead;
+    axes.iter()
+        .map(|ax| match ax {
+            AxisRead::Pinned(e) => Some(e.clone()),
+            AxisRead::Iterated { dim, source_dim } => {
+                let (elem, idx) = target_elem_by_dim.get(dim)?;
+                if dim == source_dim {
+                    Some(elem.clone())
+                } else {
+                    let corr = dim_ctx.mapped_element_correspondence(
+                        &CanonicalDimensionName::from_raw(dim),
+                        &CanonicalDimensionName::from_raw(source_dim),
+                    )?;
+                    corr.get(*idx).map(|e| e.as_str().to_string())
+                }
+            }
+            AxisRead::Reduced { .. } => None,
+        })
+        .collect()
+}
+
+/// Rewrite every reference to the live source inside a `PerElement` link
+/// score's target body so the subsequent changed-first wrap and the final
+/// scalar equation are well-formed for one `(site, target element)`
+/// instantiation -- the index-substitution mechanism of `pin_body_to_row`
+/// (the GH #744 reducer-body machinery) lifted to target-equation bodies
+/// (T6 of the shape-expressiveness design):
+///
+/// - an occurrence whose per-axis classification EQUALS the emitting
+///   site's `axes` is rewritten to the row's BARE element indices -- the
+///   changed-first wrap then holds it live via its `FixedIndex(row)`
+///   live shape (and only it: every other source occurrence ends up
+///   shaped differently);
+/// - any other fully-classifiable occurrence (a different `PerElement`
+///   shape, an all-`Iterated` Bare-shaped subscript, an all-`Pinned`
+///   literal subscript) is rewritten to ITS OWN row for this target
+///   element, QUALIFIED (`region\u{B7}a`) so the wrap's `PREVIOUS(...)`
+///   freeze compiles to a direct LoadPrev in the scalar fragment;
+/// - a BARE `Var` occurrence of the source (the mixed `Bare`+`PerElement`
+///   edge's other site) is pinned to the target element's projection onto
+///   the source's own axes when every axis resolves (same-element
+///   semantics), qualified -- else left for the wrap's conservative
+///   freeze;
+/// - a partially-classifiable subscript (a wildcard slice, a dynamic
+///   index) gets only its resolvable iterated-dim indices substituted
+///   (qualified; meaning-preserving -- the iterated dim IS that element
+///   in this slot), leaving the rest for the wrap's conservative
+///   handling.
+///
+/// Inside `PREVIOUS(...)`/`INIT(...)` calls the live-match rewrite is
+/// suppressed (`force_qualified`): the contents are already lagged/frozen
+/// and the wrap never recurses into them, so a bare-row rewrite there
+/// could never be the live reference -- qualified substitution keeps the
+/// frozen read compiling to a direct slot.
+fn rewrite_per_element_source_refs(
+    expr: Expr0,
+    ctx: &PerElementRefCtx<'_>,
+    force_qualified: bool,
+) -> Expr0 {
+    let qualify_row = |row: &[String]| -> Vec<IndexExpr0> {
+        row.iter()
+            .zip(ctx.from_dims)
+            .map(|(part, dim)| {
+                IndexExpr0::Expr(Expr0::Var(
+                    RawIdent::new_from_str(&qualify_axis_element(part, dim)),
+                    crate::ast::Loc::default(),
+                ))
+            })
+            .collect()
+    };
+    match expr {
+        Expr0::Const(..) => expr,
+        Expr0::Var(ref ident, loc) => {
+            if &Ident::<Canonical>::new(ident.as_str()) != ctx.from {
+                return expr;
+            }
+            // Same-element pin of a bare source reference: each axis reads
+            // the target element's coordinate for that axis's own dim.
+            let bare_axes: Vec<crate::ltm_agg::AxisRead> = ctx
+                .from_dims
+                .iter()
+                .map(|d| crate::ltm_agg::AxisRead::Iterated {
+                    dim: d.name().to_string(),
+                    source_dim: d.name().to_string(),
+                })
+                .collect();
+            match per_element_row_for_target(&bare_axes, ctx.target_elem_by_dim, ctx.dim_ctx) {
+                Some(row) => Expr0::Subscript(ident.clone(), qualify_row(&row), loc),
+                None => expr,
+            }
+        }
+        Expr0::Subscript(ident, indices, loc) => {
+            if &Ident::<Canonical>::new(ident.as_str()) != ctx.from {
+                // Another variable's subscript: recurse into expression
+                // indices (a nested source reference can hide there).
+                let indices =
+                    indices
+                        .into_iter()
+                        .map(|idx| match idx {
+                            IndexExpr0::Expr(e) => IndexExpr0::Expr(
+                                rewrite_per_element_source_refs(e, ctx, force_qualified),
+                            ),
+                            other => other,
+                        })
+                        .collect();
+                return Expr0::Subscript(ident, indices, loc);
+            }
+            if let Some(occ_axes) =
+                classify_expr0_per_element_axes(&indices, ctx.source_dim_elements, ctx.iter_ctx)
+            {
+                if !force_qualified && occ_axes == ctx.site_axes {
+                    // The emitting site's own shape: rewrite to the row's
+                    // bare elements so the changed-first wrap's
+                    // `FixedIndex(row)` live shape matches it.
+                    let indices = ctx
+                        .row_parts_bare
+                        .iter()
+                        .map(|p| {
+                            IndexExpr0::Expr(Expr0::Var(
+                                RawIdent::new_from_str(p),
+                                crate::ast::Loc::default(),
+                            ))
+                        })
+                        .collect();
+                    return Expr0::Subscript(ident, indices, loc);
+                }
+                if let Some(row) =
+                    per_element_row_for_target(&occ_axes, ctx.target_elem_by_dim, ctx.dim_ctx)
+                {
+                    return Expr0::Subscript(ident, qualify_row(&row), loc);
+                }
+                return Expr0::Subscript(ident, indices, loc);
+            }
+            // Partially classifiable: substitute only the resolvable
+            // iterated-dim indices (qualified), leave the rest (wildcards,
+            // literals, dynamic expressions) for the wrap's conservative
+            // handling.
+            let indices = indices
+                .into_iter()
+                .enumerate()
+                .map(|(i, idx)| {
+                    let substituted = match &idx {
+                        IndexExpr0::Expr(Expr0::Var(name, _)) => {
+                            let d = canonicalize(name.as_str()).into_owned();
+                            if i < ctx.from_dims.len()
+                                && ctx.iter_ctx.target_iterated_dims.contains(&d)
+                                && expr0_iterated_axis_lines_up(
+                                    &d,
+                                    i,
+                                    ctx.source_dim_elements,
+                                    ctx.iter_ctx,
+                                )
+                            {
+                                let ax = crate::ltm_agg::AxisRead::Iterated {
+                                    dim: d,
+                                    source_dim: ctx.iter_ctx.source_dim_names[i].clone(),
+                                };
+                                per_element_row_for_target(
+                                    std::slice::from_ref(&ax),
+                                    ctx.target_elem_by_dim,
+                                    ctx.dim_ctx,
+                                )
+                                .map(|row| qualify_axis_element(&row[0], &ctx.from_dims[i]))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    match substituted {
+                        Some(part) => IndexExpr0::Expr(Expr0::Var(
+                            RawIdent::new_from_str(&part),
+                            crate::ast::Loc::default(),
+                        )),
+                        None => idx,
+                    }
+                })
+                .collect();
+            Expr0::Subscript(ident, indices, loc)
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            let lagged = name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init");
+            let args = args
+                .into_iter()
+                .map(|a| rewrite_per_element_source_refs(a, ctx, force_qualified || lagged))
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, inner, loc) => Expr0::Op1(
+            op,
+            Box::new(rewrite_per_element_source_refs(
+                *inner,
+                ctx,
+                force_qualified,
+            )),
+            loc,
+        ),
+        Expr0::Op2(op, l, r, loc) => Expr0::Op2(
+            op,
+            Box::new(rewrite_per_element_source_refs(*l, ctx, force_qualified)),
+            Box::new(rewrite_per_element_source_refs(*r, ctx, force_qualified)),
+            loc,
+        ),
+        Expr0::If(c, t, f, loc) => Expr0::If(
+            Box::new(rewrite_per_element_source_refs(*c, ctx, force_qualified)),
+            Box::new(rewrite_per_element_source_refs(*t, ctx, force_qualified)),
+            Box::new(rewrite_per_element_source_refs(*f, ctx, force_qualified)),
+            loc,
+        ),
+    }
+}
+
+/// Generate the per-(row, full-target-element) scalar link-score equation
+/// for one `PerElement` reference site (GH #525, T6 of the
+/// shape-expressiveness design): the partial of target element
+/// `element_qualified`'s equation w.r.t. the live source's `site_axes`
+/// occurrence, with
+///
+/// - the live occurrence rewritten to the concrete row subscript
+///   `{from}[{row}]` (a real `Expr0::Subscript`, never `SUM(...)`-wrapped)
+///   and held live by the changed-first wrap's internal `FixedIndex(row)`
+///   shape,
+/// - every OTHER source occurrence pinned to ITS row for this element and
+///   frozen at `PREVIOUS` (each is attributed by its own link score:
+///   another `PerElement` site's scalar, the Bare A2A score of a mixed
+///   edge, a `FixedIndex` site's per-element score),
+/// - the target's other arrayed deps element-pinned via
+///   [`subscript_idents_at_element`] (`to_deps_to_subscript` must NOT
+///   contain the source -- its pinning is the rewrite pass's job), and
+/// - the guard form's target/source references pinned to
+///   `to[{element}]` / `{from}[{row}]`.
+///
+/// `row_parts_bare` is the row [`per_element_row_for_target`] derives for
+/// `site_axes` at this element -- the caller computes it once and uses it
+/// for the variable NAME too, so name and equation cannot disagree.
+#[allow(clippy::too_many_arguments)] // threads the per-(site, element) emission context
+pub(crate) fn generate_per_element_link_equation(
+    from: &str,
+    to: &str,
+    site_axes: &[crate::ltm_agg::AxisRead],
+    row_parts_bare: &[String],
+    element_qualified: &str,
+    to_elem_eqn_text: &str,
+    to_deps: &HashSet<Ident<Canonical>>,
+    to_deps_to_subscript: &HashSet<Ident<Canonical>>,
+    from_dims: &[crate::dimensions::Dimension],
+    target_elem_by_dim: &HashMap<String, (String, usize)>,
+    target_iterated_dims: &[String],
+    dims_ctx: &crate::dimensions::DimensionsContext,
+) -> Result<String, PartialEquationError> {
+    let from_canonical = Ident::<Canonical>::new(from);
+    let source_dim_elements: Vec<Vec<String>> =
+        from_dims.iter().map(dimension_element_names).collect();
+    let source_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims,
+        dim_ctx: Some(dims_ctx),
+        // The changed-first wrap below runs with `iter_ctx: None` (the
+        // source's iterated subscripts are rewritten away first), so the
+        // GH #526 other-dep verdict never consults this ctx; no dep dims
+        // to thread.
+        dep_dims: None,
+    };
+    let Ok(Some(ast)) = Expr0::new(to_elem_eqn_text, LexerType::Equation) else {
+        return Err(PartialEquationError::new(to_elem_eqn_text));
+    };
+    let ref_ctx = PerElementRefCtx {
+        from: &from_canonical,
+        site_axes,
+        row_parts_bare,
+        source_dim_elements: &source_dim_elements,
+        from_dims,
+        target_elem_by_dim,
+        iter_ctx: &iter_ctx,
+        dim_ctx: dims_ctx,
+    };
+    let rewritten = rewrite_per_element_source_refs(ast, &ref_ctx, false);
+    let rewritten_text = print_eqn(&rewritten);
+    // The changed-first wrap: the rewritten live occurrence is the only one
+    // matching `FixedIndex(row)` (every other source occurrence was pinned
+    // QUALIFIED, which classifies `DynamicIndex` and freezes). No
+    // iterated-dim context: the source's iterated subscripts no longer
+    // exist (rewritten above), and other deps' iterated indices are pinned
+    // by `subscript_idents_at_element`'s dimension-name pinning below.
+    let live_shape = RefShape::FixedIndex(row_parts_bare.to_vec());
+    let partial = build_partial_equation_shaped(
+        &rewritten_text,
+        to_deps,
+        &from_canonical,
+        &live_shape,
+        &source_dim_elements,
+        None,
+        Some(dims_ctx),
+    )?;
+    let partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element_qualified)?;
+    let row_qualified: String = row_parts_bare
+        .iter()
+        .zip(from_dims)
+        .map(|(part, dim)| qualify_axis_element(part, dim))
+        .collect::<Vec<_>>()
+        .join(",");
+    let to_elem = format!("{}[{element_qualified}]", quote_ident(to));
+    let source_ref = format!("{}[{row_qualified}]", quote_ident(from));
+    Ok(link_score_guard_form(&partial, &to_elem, &source_ref))
 }
 
 /// Generate the `agg → scalar-target` link-score equation: the partial of
@@ -2011,6 +2748,13 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 /// - `FixedIndex(elems)`: `$⁚ltm⁚link_score⁚{from}[{elems_joined}]→{to}` —
 ///   the per-element prefixed-from form also used by
 ///   `try_cross_dimensional_link_scores`.
+/// - `PerElement` NEVER reaches this function: its names carry BOTH a
+///   from-side row and a to-side element
+///   (`$⁚ltm⁚link_score⁚{from}[{row}]→{to}[{e}]`, the existing per-(row,
+///   slot) grammar) and are minted directly by
+///   `emit_per_element_link_scores` (GH #525, T6);
+///   `emit_per_shape_link_scores` filters the shape out before its
+///   name-dedup loop.
 /// - `Wildcard` / `DynamicIndex`: same as `Bare`. The emitter dedups by the
 ///   resulting name, so any such slot collapses onto the canonical Bare name
 ///   rather than minting a `⁚wildcard`/`⁚dynamic` variant. Every
@@ -2021,8 +2765,14 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 ///   shapes that reach `emit_per_shape_link_scores` are a *whole-RHS*
 ///   variable-backed reducer's argument (`total = SUM(population[*])`), a
 ///   bare dynamic index (`arr[i+1]`), the dynamic-index reducer carve-out
-///   (`SUM(pop[idx, *])`), or a mapped sliced reducer the correspondence
-///   declines (element-mapped -- GH #756 -- or reverse-declared -- GH #757).
+///   (`SUM(pop[idx, *])`), a mapped sliced reducer the correspondence
+///   declines (element-mapped, the GH #756 positional-only rule;
+///   reverse-declared positional pairs are accepted since GH #757),
+///   or a DE-HOISTED array-valued reducer's wildcard arg
+///   (`RANK(pop[*], 1)` -- GH #771: RANK is not `reducer_is_hoistable`, so
+///   its wildcard-subscripted argument stays a `Direct` `Wildcard` site and
+///   collapses onto the canonical Bare name here; the bare-arg spelling
+///   `RANK(pop, 1)` classifies `Bare` directly).
 ///   A coarse conservative score is the intended semantics where the
 ///   endpoint dimensions correspond; when both endpoints are arrayed and
 ///   they do NOT (the declined mapped-reducer cases above), no compilable
@@ -2377,8 +3127,14 @@ fn target_iterated_dim_names_canonical(to_var: &Variable) -> Vec<String> {
 /// salsa-tracked caller; `None` is harmless -- by-name recognition still
 /// applies).
 ///
+/// `dep_dims` carries the declared dimensions of the target's non-live
+/// array deps (canonical name -> dims), threaded into the GH #526
+/// other-dep correspondence check; `None` keeps the historical permissive
+/// collapse for every dep (legacy / db-less callers).
+///
 /// Flow-to-stock links use a fixed structural formula and ignore `shape`,
-/// `source_dim_elements`, and `dim_ctx`.
+/// `source_dim_elements`, `dim_ctx`, and `dep_dims`.
+#[allow(clippy::too_many_arguments)] // threads the link-score generation context
 pub(crate) fn generate_link_score_equation_for_link(
     from: &Ident<Canonical>,
     to: &Ident<Canonical>,
@@ -2387,6 +3143,7 @@ pub(crate) fn generate_link_score_equation_for_link(
     to_var: &Variable,
     all_vars: &HashMap<Ident<Canonical>, Variable>,
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
 ) -> Result<Equation, PartialEquationError> {
     generate_link_score_equation(
         from,
@@ -2396,6 +3153,7 @@ pub(crate) fn generate_link_score_equation_for_link(
         to_var,
         all_vars,
         dim_ctx,
+        dep_dims,
     )
 }
 
@@ -2415,6 +3173,7 @@ fn generate_link_score_equation(
     to_var: &Variable,
     all_vars: &HashMap<Ident<Canonical>, Variable>,
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
 ) -> Result<Equation, PartialEquationError> {
     // Check if this is a stock-to-flow link
     let is_stock_to_flow = matches!(all_vars.get(from), Some(Variable::Stock { .. }))
@@ -2448,6 +3207,7 @@ fn generate_link_score_equation(
             &source_dim_names,
             to_var,
             dim_ctx,
+            dep_dims,
         )
     } else {
         // Use standard auxiliary-to-auxiliary formula
@@ -2460,6 +3220,7 @@ fn generate_link_score_equation(
             &source_dim_names,
             to_var,
             dim_ctx,
+            dep_dims,
         )
     }
 }
@@ -2598,6 +3359,7 @@ fn build_arrayed_link_score_equation(
     apply_default_to_missing: bool,
     target_ref: &str,
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
 ) -> Result<Equation, PartialEquationError> {
     // The #511 iterated-dimension context for the per-slot partials: each
     // per-element slot can itself reference `from` by an iterated dimension
@@ -2612,6 +3374,7 @@ fn build_arrayed_link_score_equation(
         source_dim_names,
         target_iterated_dims: &target_iterated_dims,
         dim_ctx,
+        dep_dims,
     };
     // A subscript like `source[m]` where `m` is an element of *`source`'s*
     // dimension `D3` (disjoint from the target's `D1 x D2`) is not filtered
@@ -2778,6 +3541,7 @@ fn scalar_eqn_text_or_zero(target_var: &Variable) -> String {
 }
 
 /// Generate auxiliary-to-auxiliary link score equation
+#[allow(clippy::too_many_arguments)] // threads the link-score generation context
 fn generate_auxiliary_to_auxiliary_equation(
     from: &Ident<Canonical>,
     to: &Ident<Canonical>,
@@ -2786,6 +3550,7 @@ fn generate_auxiliary_to_auxiliary_equation(
     source_dim_names: &[String],
     to_var: &Variable,
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
 ) -> Result<Equation, PartialEquationError> {
     use crate::ast::Ast;
 
@@ -2810,6 +3575,7 @@ fn generate_auxiliary_to_auxiliary_equation(
             *apply_default,
             &to_q,
             dim_ctx,
+            dep_dims,
         );
     }
 
@@ -2831,6 +3597,7 @@ fn generate_auxiliary_to_auxiliary_equation(
         source_dim_names,
         target_iterated_dims: &target_iterated_dims,
         dim_ctx,
+        dep_dims,
     };
     let text = shaped_guard_form_text(
         &to_equation,
@@ -2875,7 +3642,15 @@ fn source_ref_for_guard(
         RefShape::Bare | RefShape::FixedIndex(_) => {
             shape_aware_source_ref(from.as_str(), shape, source_dim_names, source_dim_elements)
         }
-        RefShape::Wildcard | RefShape::DynamicIndex => match live_ref {
+        // `PerElement` never reaches the shaped per-(from, to, shape) path:
+        // `emit_per_shape_link_scores` diverts it to the per-(row,
+        // full-target-element) emitter (`emit_per_element_link_scores`),
+        // whose equations are built by `generate_per_element_link_equation`
+        // with an internal `FixedIndex` live shape. The `SUM(...)`-wrapped
+        // live-slice fallback here is defensive only (sign/zero-guard-safe,
+        // like the Wildcard/DynamicIndex conservative slices).
+        RefShape::Wildcard | RefShape::DynamicIndex | RefShape::PerElement { .. } => match live_ref
+        {
             Some(r) => format!("SUM({})", print_eqn(r)),
             None => format!("SUM({})", quote_ident(from.as_str())),
         },
@@ -3063,6 +3838,7 @@ fn generate_flow_to_stock_equation(
 /// per-element partials via [`build_arrayed_link_score_equation`]; a
 /// scalar or A2A flow yields `Equation::Scalar` / `Equation::ApplyToAll`
 /// respectively.
+#[allow(clippy::too_many_arguments)] // threads the link-score generation context
 fn generate_stock_to_flow_equation(
     stock: &Ident<Canonical>,
     flow: &Ident<Canonical>,
@@ -3071,6 +3847,7 @@ fn generate_stock_to_flow_equation(
     source_dim_names: &[String],
     flow_var: &Variable,
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
 ) -> Result<Equation, PartialEquationError> {
     // For stock-to-flow, we need to calculate how the stock influences the flow
     // This is similar to auxiliary-to-auxiliary but we know the 'from' is a stock
@@ -3094,6 +3871,7 @@ fn generate_stock_to_flow_equation(
             *apply_default,
             target_ref,
             dim_ctx,
+            dep_dims,
         );
     }
 
@@ -3114,6 +3892,7 @@ fn generate_stock_to_flow_equation(
         source_dim_names,
         target_iterated_dims: &target_iterated_dims,
         dim_ctx,
+        dep_dims,
     };
     // Link score formula from LTM paper: |Δxz/Δz| × sign(Δxz/Δx)
     // For stock-to-flow: x=stock, z=flow. The stock side respects
@@ -3739,6 +4518,23 @@ pub(crate) struct ReducerBodyCtx<'a> {
     /// `SUM(matrix[State,*])` over `matrix[Region,..]`); `None` disables the
     /// mapped recognition (the by-name check still applies).
     pub dims_ctx: Option<&'a crate::dimensions::DimensionsContext>,
+    /// The live source's accepted read slice (one
+    /// [`crate::ltm_agg::AxisRead`] per row axis, parallel to
+    /// `row_dim_names`) when the reducer is a hoisted agg --
+    /// `AggNode::source_read_slice(live_source)` -- or `None` on the
+    /// un-hoisted conservative paths. It resolves a MISMATCHED-arity dep's
+    /// dimension-name index (a GH #767 projection feeder, `frac[d1]`) to
+    /// the row position whose axis is `Iterated` over that target dim --
+    /// the executed A2A coordinate the index reads. The resolution must be
+    /// positional, not first-match-by-name: a REPEATED-dim co-source
+    /// (`matrix[D1,D1]` read as `SUM(matrix[*, D1] * frac[D1])`, slice
+    /// `[Reduced, Iterated]`) has the dim name at BOTH positions, and
+    /// pinning the feeder at the Reduced position freezes the wrong
+    /// element -- a silently wrong score. Without a slice the by-name
+    /// lookup requires the name to be UNIQUE among `row_dim_names`
+    /// (ambiguity bails to the delta-ratio fallback, the pre-GH #767
+    /// behavior for mismatched deps).
+    pub live_read_slice: Option<&'a [crate::ltm_agg::AxisRead]>,
 }
 
 /// Substitute one subscript index of an arrayed body reference with the
@@ -3814,14 +4610,60 @@ fn pin_body_index(
     }
 }
 
+/// Resolve a MISMATCHED-arity dep's dimension-name index (canonical `name`)
+/// to the row position it reads -- the GH #767 projection-feeder pin's
+/// resolution step.
+///
+/// With the live source's accepted slice available
+/// ([`ReducerBodyCtx::live_read_slice`]) the answer is the position whose
+/// axis is `Iterated` over target dim `name`: the executed A2A equation
+/// resolves the index to the iteration's `name`-coordinate, which is
+/// exactly the row element at the slice's Iterated axis. This is robust to
+/// a REPEATED dim name among the row's axes (`matrix[D1,D1]` with slice
+/// `[Reduced, Iterated]`): the Reduced position shares the NAME but is the
+/// co-reduced coordinate, not the slot -- pinning there freezes the wrong
+/// element (a silently wrong score, the GH #767 review finding). Two
+/// `Iterated` axes over the same dim cannot reach the per-row emitters
+/// (such a slice's `result_dims` duplicate the dim, declined by the
+/// variable-backed gate / feeder clause), but the resolution still
+/// requires uniqueness defensively.
+///
+/// Without a slice (the un-hoisted conservative families) the name must
+/// match exactly ONE of `row_dim_names`; an ambiguous name returns `None`
+/// (the caller bails to the delta-ratio fallback -- the pre-GH #767
+/// behavior for every mismatched dep).
+fn resolve_mismatched_index_position(name: &str, ctx: &ReducerBodyCtx<'_>) -> Option<usize> {
+    use crate::ltm_agg::AxisRead;
+    fn unique(mut it: impl Iterator<Item = usize>) -> Option<usize> {
+        let pos = it.next()?;
+        it.next().is_none().then_some(pos)
+    }
+    match ctx.live_read_slice {
+        Some(slice) => unique(slice.iter().enumerate().filter_map(|(i, ax)| match ax {
+            AxisRead::Iterated { dim, .. } if dim == name => Some(i),
+            _ => None,
+        })),
+        None => unique(
+            ctx.row_dim_names
+                .iter()
+                .enumerate()
+                .filter_map(|(i, d)| (d.as_str() == name).then_some(i)),
+        ),
+    }
+}
+
 /// Rewrite a reducer body so every arrayed reference reads exactly the
 /// given source row: wildcard / iterated-dim / literal indices are replaced
 /// by the row's (qualified) elements, and a bare arrayed-variable reference
-/// gains the full row subscript. `None` when the body cannot be safely
-/// pinned (an index that doesn't correspond to the row's axes, an arrayed
-/// reference with a different axis count, a nested array reducer, or a
-/// FIXED-literal reference to the live source -- see below) -- the caller
-/// bails to the delta-ratio fallback.
+/// gains the full row subscript. An arrayed reference with a DIFFERENT
+/// axis count than the row (a GH #767 projection feeder, `frac[d1]` in the
+/// 2-D `matrix` row partial) is pinned at the row position
+/// [`resolve_mismatched_index_position`] resolves each index to. `None`
+/// when the body cannot be safely pinned (an index that doesn't correspond
+/// to the row's axes, a mismatched-axis reference with a non-dim-name or
+/// ambiguous index, a nested array reducer, or a FIXED-literal reference
+/// to the live source -- see below) -- the caller bails to the delta-ratio
+/// fallback.
 ///
 /// Review I1 on GH #744: a live-source reference whose indices are ALL
 /// fixed literals (`pop[north]` in `SUM(pop[*] * pop[north])`) reads the
@@ -3863,8 +4705,45 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
                 .arrayed_dep_dims
                 .get(canonicalize(ident.as_str()).as_ref())
             {
-                if n_dims != row_parts.len() || indices.len() != row_parts.len() {
+                if indices.len() != n_dims {
                     return None;
+                }
+                if n_dims != row_parts.len() {
+                    // An arrayed dep with a DIFFERENT axis count than the
+                    // live source's row (the GH #767 projection-feeder
+                    // shape: `frac[d1]` inside the row partial of the 2-D
+                    // co-source `matrix[d1,*]`). Positional substitution is
+                    // meaningless, but a reference indexed SOLELY by
+                    // dimension names resolvable to a UNIQUE row axis is
+                    // pinnable: for the executed slot every co-reduced row
+                    // shares the iterated coordinates, and a reduced-axis-
+                    // named index reads exactly the row's element at that
+                    // axis -- in both cases the pinned (frozen) reference
+                    // is the value the executed equation reads, so the
+                    // single-row cancellation invariant holds. Resolution
+                    // is by [`resolve_mismatched_index_position`] (the
+                    // live slice's Iterated axis when available, else a
+                    // unique name match); anything else (a wildcard, a
+                    // literal, a dim outside the row's axes, an AMBIGUOUS
+                    // dim name) bails to the delta-ratio fallback. Such a
+                    // dep can never be the live source (the live source's
+                    // axis count equals the row's by construction), so the
+                    // `any_moving` live-bail below is not relevant here.
+                    let pinned: Vec<IndexExpr0> = indices
+                        .iter()
+                        .map(|idx| match idx {
+                            IndexExpr0::Expr(Expr0::Var(name, _)) => {
+                                let n = canonicalize(name.as_str());
+                                let pos = resolve_mismatched_index_position(n.as_ref(), ctx)?;
+                                Some(IndexExpr0::Expr(Expr0::Var(
+                                    RawIdent::new_from_str(&row_parts[pos]),
+                                    crate::ast::Loc::default(),
+                                )))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    return Some(Expr0::Subscript(ident, pinned, loc));
                 }
                 let mut any_moving = false;
                 let pinned: Vec<IndexExpr0> = indices
