@@ -4625,3 +4625,76 @@ fn scalar_target_reducer_variants_fragments_compile() {
         assert_agg_fragments_compile(eqn, &failures);
     }
 }
+
+/// PR #784 review (P3): a degenerate SQUARE-source agg -- a reducer whose
+/// iterated axes carry the SAME target dim twice (`x[D1] =
+/// 1 + SUM(cube[D1,D1,*] * frac[D1,D1])`, `result_dims == ["D1","D1"]`)
+/// with a square projection feeder (`frac[D1,D1]`) -- must NOT emit the
+/// feeder's per-`(row, slot)` changed-last scores: the per-slot equation
+/// pins each reducer-text index BY DIM NAME, which is ambiguous for the
+/// duplicated dim (pre-fix, every `d1` occurrence pinned to the FIRST slot
+/// part, so the off-diagonal slot `[r1,r2]` froze `frac[r1,r1]` -- a
+/// silently wrong score). The rows are loudly skipped instead
+/// (`emit_ltm_partial_equation_warning`, the GH #743 unfreezable
+/// machinery), mirroring `resolve_mismatched_index_position`'s uniqueness
+/// defense on the co-source body path.
+#[test]
+fn square_source_duplicate_dim_feeder_scores_are_loudly_skipped() {
+    let project = TestProject::new("square_feeder")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("D1", &["R1", "R2"])
+        .named_dimension("D2", &["C1", "C2"])
+        .array_aux("cube[D1,D1,D2]", "1")
+        .array_aux("frac[D1,D1]", "0.0001 * pop[D1]")
+        .array_stock("pop[D1]", "100", &["x"], &[], None)
+        .array_flow("x[D1]", "1 + SUM(cube[D1, D1, *] * frac[D1, D1])", None);
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+
+    // Sanity: the square feeder really is accepted as an iterated-dim
+    // projection feeder of the minted synthetic agg (the shape under test
+    // reaches the feeder emitter at all).
+    let aggs = crate::ltm_agg::enumerate_agg_nodes(&db, model, sync.project);
+    let agg = aggs
+        .aggs
+        .iter()
+        .find(|a| a.is_synthetic)
+        .expect("the inline square-source reducer must mint a synthetic agg");
+    assert_eq!(agg.result_dims, vec!["D1", "D1"]);
+    assert!(agg.source_is_projection_feeder("frac"));
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let feeder_prefix = "$\u{205A}ltm\u{205A}link_score\u{205A}frac[";
+    let feeder_vars: Vec<&str> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(feeder_prefix))
+        .map(|v| v.name.as_str())
+        .collect();
+    assert!(
+        feeder_vars.is_empty(),
+        "ambiguous duplicate-dim slot pins must be loudly skipped, not \
+         emitted with the wrong row frozen; got: {feeder_vars:?}"
+    );
+
+    // The skip is loud: one UnfreezablePartial warning per skipped row,
+    // naming the feeder link-score variable.
+    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+    let has_feeder_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+        d.severity == DiagnosticSeverity::Warning
+            && d.variable
+                .as_deref()
+                .is_some_and(|v| v.starts_with(feeder_prefix))
+            && matches!(
+                &d.error,
+                DiagnosticError::Assembly(msg) if msg.contains("could not be generated")
+            )
+    });
+    assert!(
+        has_feeder_warning,
+        "the skipped feeder rows must surface a Warning; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+}

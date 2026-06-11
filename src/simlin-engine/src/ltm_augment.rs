@@ -1858,8 +1858,12 @@ pub(crate) fn generate_scalar_feeder_to_agg_equation(
 /// resolution for that slot), then the feeder's references are frozen.
 ///
 /// Returns `Err` when the text does not parse (the GH #311 loud-failure
-/// contract) or when no feeder occurrence was frozen (the numerator would
-/// be a silent constant 0 -- the GH #743 unfreezable contract).
+/// contract), when no feeder occurrence was frozen (the numerator would
+/// be a silent constant 0 -- the GH #743 unfreezable contract), or when a
+/// slot pin is AMBIGUOUS -- a repeated dim name among `iterated_dims` (a
+/// degenerate square-source agg, PR #784 review) makes the by-name index
+/// resolution unable to tell which slot part an index means, so a pinned
+/// equation could freeze the wrong source row (a silently wrong score).
 pub(crate) fn generate_iterated_feeder_to_agg_equation(
     feeder: &str,
     agg_name: &str,
@@ -1870,7 +1874,12 @@ pub(crate) fn generate_iterated_feeder_to_agg_equation(
     let Ok(Some(ast)) = Expr0::new(agg_equation_text, LexerType::Equation) else {
         return Err(PartialEquationError::new(agg_equation_text));
     };
-    let pinned = pin_iterated_dim_indices(ast, iterated_dims, slot_parts_qualified);
+    // An ambiguous slot pin is the GH #743 unfreezable class: the
+    // changed-last convention cannot be rendered as a correct equation, and
+    // the changed-first one was already ruled out (see above). The caller
+    // warns and skips the row.
+    let pinned = pin_iterated_dim_indices(ast, iterated_dims, slot_parts_qualified)
+        .ok_or_else(|| PartialEquationError::unfreezable(agg_equation_text))?;
     let feeder_ident = Ident::<Canonical>::new(feeder);
     let frozen = print_eqn(&wrap_matching_in_previous(pinned.clone(), &feeder_ident));
     if frozen == print_eqn(&pinned) {
@@ -1899,8 +1908,29 @@ pub(crate) fn generate_iterated_feeder_to_agg_equation(
 /// literals, and indices naming other dimensions are left untouched (a
 /// co-source's `Reduced` wildcard must stay a whole-slice read), and
 /// expression indices are recursed into.
-fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> Expr0 {
-    match expr {
+///
+/// Returns `None` when an index names a dim that occurs MORE THAN ONCE in
+/// `dims` (a degenerate square-source agg whose slot axes repeat a dim,
+/// PR #784 review): the by-name resolution cannot tell which slot part the
+/// index means, and first-match would pin every occurrence to the FIRST
+/// part -- silently freezing the wrong source row for any off-diagonal
+/// slot. Mirrors [`resolve_mismatched_index_position`]'s uniqueness
+/// defense; the caller converts `None` into the loud unfreezable error.
+fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> Option<Expr0> {
+    /// The unique position of `name` in `dims`: `None` for an ambiguous
+    /// (repeated) dim name, `Some(None)` for a name not in `dims` (left
+    /// untouched), `Some(Some(pos))` for the unambiguous match.
+    fn unique_dim_position(dims: &[String], name: &str) -> Option<Option<usize>> {
+        let mut it = dims
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| (d.as_str() == name).then_some(i));
+        match it.next() {
+            None => Some(None),
+            Some(pos) => it.next().is_none().then_some(Some(pos)),
+        }
+    }
+    Some(match expr {
         Expr0::Const(..) | Expr0::Var(..) => expr,
         Expr0::Subscript(ident, indices, loc) => {
             let indices = indices
@@ -1908,20 +1938,20 @@ fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> E
                 .map(|idx| match idx {
                     IndexExpr0::Expr(Expr0::Var(name, vloc)) => {
                         let n = canonicalize(name.as_str());
-                        match dims.iter().position(|d| d.as_str() == n.as_ref()) {
-                            Some(pos) => IndexExpr0::Expr(Expr0::Var(
+                        match unique_dim_position(dims, n.as_ref())? {
+                            Some(pos) => Some(IndexExpr0::Expr(Expr0::Var(
                                 RawIdent::new_from_str(&parts[pos]),
                                 vloc,
-                            )),
-                            None => IndexExpr0::Expr(Expr0::Var(name, vloc)),
+                            ))),
+                            None => Some(IndexExpr0::Expr(Expr0::Var(name, vloc))),
                         }
                     }
                     IndexExpr0::Expr(e) => {
-                        IndexExpr0::Expr(pin_iterated_dim_indices(e, dims, parts))
+                        Some(IndexExpr0::Expr(pin_iterated_dim_indices(e, dims, parts)?))
                     }
-                    other => other,
+                    other => Some(other),
                 })
-                .collect();
+                .collect::<Option<Vec<_>>>()?;
             Expr0::Subscript(ident, indices, loc)
         }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => Expr0::App(
@@ -1929,28 +1959,28 @@ fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> E
                 name,
                 args.into_iter()
                     .map(|a| pin_iterated_dim_indices(a, dims, parts))
-                    .collect(),
+                    .collect::<Option<Vec<_>>>()?,
             ),
             loc,
         ),
         Expr0::Op1(op, arg, loc) => Expr0::Op1(
             op,
-            Box::new(pin_iterated_dim_indices(*arg, dims, parts)),
+            Box::new(pin_iterated_dim_indices(*arg, dims, parts)?),
             loc,
         ),
         Expr0::Op2(op, l, r, loc) => Expr0::Op2(
             op,
-            Box::new(pin_iterated_dim_indices(*l, dims, parts)),
-            Box::new(pin_iterated_dim_indices(*r, dims, parts)),
+            Box::new(pin_iterated_dim_indices(*l, dims, parts)?),
+            Box::new(pin_iterated_dim_indices(*r, dims, parts)?),
             loc,
         ),
         Expr0::If(c, t, f, loc) => Expr0::If(
-            Box::new(pin_iterated_dim_indices(*c, dims, parts)),
-            Box::new(pin_iterated_dim_indices(*t, dims, parts)),
-            Box::new(pin_iterated_dim_indices(*f, dims, parts)),
+            Box::new(pin_iterated_dim_indices(*c, dims, parts)?),
+            Box::new(pin_iterated_dim_indices(*t, dims, parts)?),
+            Box::new(pin_iterated_dim_indices(*f, dims, parts)?),
             loc,
         ),
-    }
+    })
 }
 
 /// Replace every bare `Var(id)` reference in `equation_text` where `id`
