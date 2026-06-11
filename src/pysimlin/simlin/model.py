@@ -716,12 +716,11 @@ class Model:
         are only comparable WITHIN a partition, so group loops by partition to
         present each feedback subsystem separately. Indices are dense and
         result-scoped -- key on :attr:`Partition.stocks` for a durable
-        identity. That stock set matches across the exhaustive (``Model.loops``)
-        and discovery (:attr:`Analysis.partitions`) surfaces only for SCALAR
-        models: this exhaustive surface partitions stocks at VARIABLE
-        granularity (``population``) while discovery partitions at ELEMENT
-        granularity (``population[nyc]``), so an arrayed model's two surfaces
-        differ in granularity.
+        identity. Both the exhaustive (``Model.loops``) and discovery
+        (:attr:`Analysis.partitions`) surfaces partition stocks at ELEMENT
+        granularity (``population[nyc]``; plain names for scalar models), so
+        the stock set is a usable cross-surface key for scalar and arrayed
+        models alike.
 
         Returns:
             Tuple of Partition objects (exhaustive/structural surface).

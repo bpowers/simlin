@@ -51,9 +51,9 @@ pub struct ReadModelOutput {
     /// The cycle partitions referenced by `loopDominance` (each summary's
     /// `partition` indexes this list).  Elided when empty to preserve the
     /// stable wire shape; the stock SET of each entry is the durable per-result
-    /// identity.  It matches the exhaustive (`Model.loops`) surface's stock set
-    /// only for SCALAR models -- this surface is element-level, the exhaustive
-    /// surface variable-level, so they differ in granularity for arrayed models.
+    /// identity.  Both this surface and the exhaustive (`Model.loops`) surface
+    /// partition stocks at element granularity (GH #746), so the stock sets
+    /// are a usable cross-surface key for scalar and arrayed models alike.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub partitions: Vec<PartitionOutput>,
     pub dominant_loops_by_period: Vec<DominantPeriodOutput>,

@@ -3279,6 +3279,53 @@ fn cross_agg_loop_recovery_truncates_at_budget() {
     );
 }
 
+/// GH #746: the detected surface (`model_detected_loops`) and the scored
+/// surface must assign IDENTICAL loop ids EVEN WHEN the cross-agg loop
+/// budget truncates the enumeration. Both surfaces build their loop set
+/// through the same `build_loops_from_tiered` with the same
+/// `cross_agg_loop_budget()`, so a clipped enumeration clips identically on
+/// both sides and the runtime id join (`reclassify_loops_from_results`,
+/// pysimlin's `get_relative_loop_score`) stays sound. (The pre-#746 detected
+/// surface had a SEPARATE expansion with its own silent 64-variant cap --
+/// `expand_loops_through_routed_aggs`, now deleted -- whose trip desynced
+/// the two id sequences with no Warning; sharing the builder removes that
+/// failure mode structurally: there is no second budget to trip.)
+#[test]
+fn truncated_cross_agg_recovery_keeps_detected_and_scored_ids_aligned() {
+    const TEST_BUDGET: usize = 3;
+    let project = share_reducer_loop_fixture(5);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    // Hold the override across BOTH queries: each runs the cross-agg
+    // recovery under the same budget (and `model_ltm_variables` is salsa-
+    // memoized besides).
+    let _budget_guard = super::AggLoopBudgetGuard::new(TEST_BUDGET);
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    assert!(
+        ltm.agg_recovery_truncated,
+        "precondition: the budget must actually clip this fixture"
+    );
+
+    let scored_ids: std::collections::BTreeSet<&str> = ltm
+        .vars
+        .iter()
+        .filter_map(|v| {
+            v.name
+                .strip_prefix("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+        })
+        .collect();
+    let detected = crate::db::model_detected_loops(&db, model, sync.project);
+    let detected_ids: std::collections::BTreeSet<&str> =
+        detected.loops.iter().map(|l| l.id.as_str()).collect();
+    assert_eq!(
+        detected_ids, scored_ids,
+        "a truncated cross-agg enumeration must clip both surfaces identically \
+         (same builder, same budget) so the id join stays sound"
+    );
+}
+
 /// AC5.3 (no regression): a model whose reducer-in-a-loop has 3 disjoint
 /// petals (under the production budget) recovers exactly the 3 pairwise
 /// combinations (`{p0,p1}`, `{p0,p2}`, `{p1,p2}`) plus the full 3-petal

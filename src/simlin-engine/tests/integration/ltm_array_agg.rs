@@ -2506,23 +2506,42 @@ fn arrayed_co_source_feeder_loop_is_balancing() {
         .expect("LTM-enabled compilation should succeed");
     let source_model = sync.models["main"].source_model;
 
-    // Detected surface: the weight loop must be Balancing -- and above all
+    // Detected surface: the weight loops must be Balancing -- and above all
     // NOT a confident Reinforcing. (The runtime weight→agg series for this
     // fixture is pinned NEGATIVE by the GH #744 body-aware partial -- see
     // `co_source_weight_to_agg_link_score_tracks_true_partial` -- so the
-    // static label and the runtime series now agree in sign.)
+    // static label and the runtime series now agree in sign.) Since GH #746
+    // the detected surface shares the scored surface's per-element loop
+    // builder, so the weight cycle surfaces once per region with
+    // element-subscripted variables (`weight[north]`).
     let detected = model_detected_loops(&db, source_model, sync.project).clone();
-    let weight_loop = detected
+    let weight_loops: Vec<_> = detected
         .loops
         .iter()
-        .find(|l| l.variables.iter().any(|v| v == "weight"))
-        .expect("the weight loop must be detected");
-    assert_eq!(
-        weight_loop.polarity,
-        DetectedLoopPolarity::Balancing,
-        "∂agg/∂weight[e] = -pop[e] < 0: the weight loop is balancing; a Reinforcing label \
-         here is the I1b confidently-wrong-label regression"
+        .filter(|l| {
+            l.variables
+                .iter()
+                .any(|v| v == "weight" || v.starts_with("weight["))
+        })
+        .collect();
+    assert!(
+        !weight_loops.is_empty(),
+        "the weight loop(s) must be detected; got {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
     );
+    for weight_loop in &weight_loops {
+        assert_eq!(
+            weight_loop.polarity,
+            DetectedLoopPolarity::Balancing,
+            "∂agg/∂weight[e] = -pop[e] < 0: the weight loop is balancing; a Reinforcing label \
+             here is the I1b confidently-wrong-label regression ({:?})",
+            weight_loop.variables
+        );
+    }
 
     // Scored surface: the per-element weight loops' ids must carry the b
     // prefix (same discriminating hop analysis, shared helper).
@@ -4295,4 +4314,133 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
          cross-element loops in this repro (GH #525 residual); vars: {:?}",
         ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
+}
+
+/// GH #746: for a feedback cycle through an ARRAYED variable the detected
+/// surface (`model_detected_loops`) and the scored surface
+/// (`model_ltm_variables`) must enumerate THE SAME loop set with identical
+/// ids, because the runtime join (`reclassify_loops_from_results`, pysimlin's
+/// `get_relative_loop_score`) reads `$⁚ltm⁚loop_score⁚{id}` keyed purely on
+/// the detected id.
+///
+/// Pre-fix the two surfaces enumerated DIFFERENT loop sets here: detected
+/// reported one variable-level loop per cycle ({feeder, pool/growth} -- two
+/// ids), while scored enumerated the pool/growth cycle once as an A2A loop
+/// plus the feeder cycle PER ELEMENT ({A2A, feeder[a], feeder[b]} -- three
+/// ids), both numbering their own sequence from the shared `r{n}` namespace.
+/// The detected pool/growth loop's id then resolved to a per-slot FEEDER
+/// loop's scalar series: a silent wrong-series join on the production FFI
+/// surface (and `loop_partitions[id]` reported 1 slot where the true A2A
+/// series has 2).
+#[test]
+fn gh746_arrayed_cycle_detected_and_scored_ids_biject() {
+    let project = TestProject::new("gh746_arrayed_cycle")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("r1", &["a", "b"])
+        .named_dimension("r2", &["x", "y"])
+        .array_aux("matrix[r1,r2]", "2")
+        .array_stock("pool[r1]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[r1]",
+            "0.01 * pool[r1] + SUM(matrix[r1,*] * scale)",
+            None,
+        )
+        .scalar_aux("scale", "0.001 * SUM(pool[*]) + 0.01")
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    let scored_ids: std::collections::BTreeSet<String> = ltm
+        .vars
+        .iter()
+        .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+        .map(|id| id.to_string())
+        .collect();
+    let detected = model_detected_loops(&db, source_model, sync.project).clone();
+    let detected_ids: std::collections::BTreeSet<String> =
+        detected.loops.iter().map(|l| l.id.clone()).collect();
+    assert_eq!(
+        detected_ids,
+        scored_ids,
+        "arrayed cycle: detected ids must equal the scored loop-score ids (the runtime \
+         join is keyed purely on the id); detected loops: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
+    );
+
+    // The pool/growth cycle is the A2A loop: its id must resolve to the
+    // ARRAYED loop-score series (one slot per r1 element). Pre-fix the
+    // detected pool/growth loop's id landed on a per-slot feeder loop's
+    // SCALAR series instead.
+    let a2a_loop = detected
+        .loops
+        .iter()
+        .find(|l| !l.variables.iter().any(|v| v == "scale"))
+        .expect("the pool/growth A2A loop must be detected");
+    assert_eq!(
+        ltm.loop_partitions
+            .get(&a2a_loop.id)
+            .map(|slots| slots.len()),
+        Some(2),
+        "the detected pool/growth loop's id must join the 2-slot A2A series \
+         (loop_partitions: {:?})",
+        ltm.loop_partitions
+    );
+
+    // The feeder cycle surfaces per element, mirroring the scored surface.
+    let feeder_loops: Vec<_> = detected
+        .loops
+        .iter()
+        .filter(|l| l.variables.iter().any(|v| v == "scale"))
+        .collect();
+    assert_eq!(
+        feeder_loops.len(),
+        2,
+        "one detected feeder loop per r1 element; got: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
+    );
+    for l in &detected.loops {
+        assert!(
+            !l.variables
+                .iter()
+                .any(|v| v.contains("\u{205A}agg\u{205A}")),
+            "DetectedLoop.variables must not leak synthetic agg nodes; {:?}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    // Runtime join: every detected loop classifies from its OWN series. All
+    // hops are positive here (matrix > 0, both reducers SUM), so every loop
+    // is reinforcing both structurally and at runtime.
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    let mut runtime_loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut runtime_loops, &results, &ltm.loop_partitions);
+    for l in &runtime_loops {
+        assert!(
+            matches!(
+                l.polarity,
+                DetectedLoopPolarity::Reinforcing | DetectedLoopPolarity::MostlyReinforcing
+            ),
+            "loop {} ({:?}) must classify reinforcing from its own series; got {:?}",
+            l.id,
+            l.variables,
+            l.polarity
+        );
+    }
 }
