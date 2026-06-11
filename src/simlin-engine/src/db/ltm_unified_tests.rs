@@ -703,6 +703,97 @@ fn test_ltm_mode_and_variables_agree_on_stateless_gate() {
     }
 }
 
+/// GH #749: a stock-free model whose only state is a PREVIOUS lag
+/// (`a = PREVIOUS(b, 0); b = a * k` -- compiles, simulates as a one-DT
+/// memory) is NOT stateless: `PREVIOUS(x)` retains state (LTM ref section
+/// 7), so the lagged cycle is a genuine feedback loop. The stateless early
+/// return must NOT fire: the loop is scored in exhaustive mode, and the
+/// user discovery flag is honored (pre-#749 the stateless arm preceded the
+/// flag, so `model_ltm_mode` reported Exhaustive even under forced
+/// discovery while `model_detected_loops` still enumerated the loop --
+/// detected-but-never-scored).
+#[test]
+fn test_stockless_previous_lagged_cycle_is_not_stateless() {
+    use crate::db::{LtmMode, model_ltm_mode};
+    use salsa::Setter;
+
+    for discovery in [false, true] {
+        let project = crate::test_common::TestProject::new("prev_cycle_gate")
+            .aux("a", "PREVIOUS(b, 0)", None)
+            .aux("b", "a * 0.5 + 1", None)
+            .build_datamodel();
+        let mut db = SimlinDb::default();
+        let (source_project, model) = {
+            let sync = sync_from_datamodel(&db, &project);
+            (sync.project, sync.models["main"].source)
+        };
+        source_project.set_ltm_enabled(&mut db).to(true);
+        source_project.set_ltm_discovery_mode(&mut db).to(discovery);
+
+        let mode = model_ltm_mode(&db, model, source_project);
+        let ltm = model_ltm_variables(&db, model, source_project);
+        assert_eq!(ltm.mode, mode, "the two surfaces must agree on the mode");
+        let expected = if discovery {
+            LtmMode::Discovery
+        } else {
+            LtmMode::Exhaustive
+        };
+        assert_eq!(
+            mode, expected,
+            "a PREVIOUS-lagged cycle is state, so the normal mode gates apply \
+             (discovery={discovery})"
+        );
+        assert!(
+            ltm.vars.iter().any(|v| v.name.contains("link_score")),
+            "the lagged cycle's edges must be scored (discovery={discovery}); got: {:?}",
+            ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+        );
+        if !discovery {
+            assert!(
+                ltm.vars
+                    .iter()
+                    .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+                "exhaustive mode must emit the lagged loop's loop_score; got: {:?}",
+                ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// GH #749 (the gate stays conservative): PREVIOUS state only matters when
+/// it is on a dt-phase reference. A stock-free, PREVIOUS-free model is
+/// still stateless and takes the early bail -- this guards the new lagged
+/// leg against over-firing on arbitrary stockless models.
+#[test]
+fn test_stockless_previous_free_model_still_bails() {
+    use crate::db::{LtmMode, model_ltm_mode};
+    use salsa::Setter;
+
+    let project = crate::test_common::TestProject::new("no_prev_gate")
+        .aux("a", "10", None)
+        .aux("b", "a * 0.5 + 1", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    assert_eq!(
+        model_ltm_mode(&db, model, source_project),
+        LtmMode::Exhaustive,
+        "a genuinely stateless model is always Exhaustive (the bail precedes the flag)"
+    );
+    let ltm = model_ltm_variables(&db, model, source_project);
+    assert!(
+        ltm.vars.is_empty(),
+        "a genuinely stateless model emits no LTM vars; got: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+}
+
 /// Auto-flip must surface a `CompilationDiagnostic::Warning` so the
 /// caller can explain the mode change to the user.  The diagnostic is
 /// accumulated by `model_ltm_variables` itself (not via

@@ -193,9 +193,10 @@ pub(super) fn ltm_non_euler_diagnostic_message(method: datamodel::SimMethod) -> 
     )
 }
 
-/// THE shared stateless predicate for the LTM early-return gates (GH #748):
-/// a model is stateless when it has no parent-level stocks AND no
-/// (transitively) stock-carrying module instance.
+/// THE shared stateless predicate for the LTM early-return gates (GH #748,
+/// GH #749): a model is stateless when it has no parent-level stocks, no
+/// PREVIOUS-lagged dt dependency, AND no (transitively) stock-carrying
+/// module instance.
 ///
 /// Both `model_ltm_mode`'s stateless ⇒ `Exhaustive` arm and
 /// `model_ltm_variables`' early return consume THIS function (the latter
@@ -213,12 +214,59 @@ pub(super) fn ltm_non_euler_diagnostic_message(method: datamodel::SimMethod) -> 
 /// class (no link scores, no loop scores, and pinned loops were never even
 /// validated). The module leg only runs for parent-stock-free models (the
 /// `&&` short-circuits on the common stock-bearing case).
+///
+/// The lagged leg (GH #749): `PREVIOUS(x)` is discrete state -- a one-DT
+/// memory the LTM reference (section 7) explicitly treats as state -- so a
+/// stockless cycle broken by a PREVIOUS-lagged reference (`a = PREVIOUS(b);
+/// b = a * k`) is genuine feedback that COMPILES (the dep-graph ordering
+/// gate prunes PREVIOUS edges), falsifying the old "any stockless cycle is
+/// a compile-time circular dependency" rationale. Bailing on such a model
+/// made `model_ltm_variables` emit nothing (and drop pins without a
+/// diagnostic) while `model_detected_loops` still enumerated the loop.
 fn model_is_stateless(
     db: &dyn Db,
+    model: SourceModel,
     project: SourceProject,
     edges: &super::CausalEdgesResult,
 ) -> bool {
-    edges.stocks.is_empty() && !modules_carry_state(db, project, edges)
+    edges.stocks.is_empty()
+        && !model_has_lagged_dt_deps(db, model, project)
+        && !modules_carry_state(db, project, edges)
+}
+
+/// Whether any of the model's own (parent-level) variables carries a
+/// PREVIOUS-lagged dt dependency -- the lagged-state leg of
+/// [`model_is_stateless`] (GH #749).
+///
+/// Checks `previous_only` references (`dt_previous_referenced_vars`): a
+/// reference that appears both inside and outside `PREVIOUS(...)` keeps its
+/// instantaneous edge, so a cycle through it could only compile if some
+/// OTHER edge breaks it -- and that breaking edge is itself previous-only
+/// (or a stock, which the first leg already caught). `previous_only`
+/// presence is therefore exactly the conservative superset of "a
+/// PREVIOUS-lagged feedback cycle can exist here": a lagged-but-acyclic
+/// model merely runs the normal enumeration path and scores nothing, which
+/// is output-equivalent to the bail.
+///
+/// Deliberately parent-level only: module-INTERNAL lagged state is not
+/// counted (mirroring pin validation, which cannot see inside a module's
+/// pathway either), so the scored and pinned surfaces agree on that shape
+/// -- both treat a module whose only state is PREVIOUS as stateless.
+///
+/// Uses the same empty module-ident context / empty input set as
+/// `model_causal_edges`, so the per-variable dependency queries are shared
+/// salsa cache hits.
+fn model_has_lagged_dt_deps(db: &dyn Db, model: SourceModel, project: SourceProject) -> bool {
+    let empty_ctx = super::ModuleIdentContext::new(db, vec![]);
+    let empty_inputs = super::ModuleInputSet::empty(db);
+    model.variables(db).values().any(|sv| {
+        !matches!(
+            sv.kind(db),
+            SourceVariableKind::Stock | SourceVariableKind::Module
+        ) && !super::variable_direct_dependencies(db, *sv, project, empty_ctx, empty_inputs)
+            .dt_previous_referenced_vars
+            .is_empty()
+    })
 }
 
 /// Whether any module instance this model references (transitively) carries
@@ -958,14 +1006,16 @@ pub fn model_ltm_var_name_index(
 ///      `MAX_LTM_SCC_NODES` (the late flip).
 ///
 /// A stateless model -- the shared `model_is_stateless` predicate: no
-/// parent-level stocks AND no module-internal state -- has no feedback loops,
-/// so no flip can occur: it is always `Exhaustive`. `model_ltm_variables`'
-/// stateless early return consumes the SAME predicate (plus its
-/// `!has_input_ports` leg) and reads its bail `mode` from this query, so the
-/// two gates cannot drift. A parent-stock-free model whose state lives inside
-/// modules is NOT stateless (GH #748): feedback through a stock-carrying
-/// module is genuine, so it falls through to the normal gates like any
-/// stock-bearing model.
+/// parent-level stocks, no PREVIOUS-lagged dt dependency, AND no
+/// module-internal state -- has no feedback loops, so no flip can occur: it
+/// is always `Exhaustive`. `model_ltm_variables`' stateless early return
+/// consumes the SAME predicate (plus its `!has_input_ports` leg) and reads
+/// its bail `mode` from this query, so the two gates cannot drift. A
+/// parent-stock-free model whose state lives inside modules is NOT
+/// stateless (GH #748), and neither is one whose only state is a
+/// PREVIOUS-lagged reference (GH #749 -- a one-DT memory is discrete
+/// state): both fall through to the normal gates like any stock-bearing
+/// model.
 /// This query intentionally accumulates NO diagnostics -- the
 /// auto-flip `Warning`s stay in `model_ltm_variables` so they are emitted once
 /// (a `returns(ref)` tracked query read by multiple callers would otherwise
@@ -976,7 +1026,7 @@ pub fn model_ltm_mode(db: &dyn Db, model: SourceModel, project: SourceProject) -
     use super::{LtmMode, causal_graph_from_edges, model_causal_edges, model_loop_circuits_tiered};
 
     let edges_result = model_causal_edges(db, model, project);
-    if model_is_stateless(db, project, edges_result) {
+    if model_is_stateless(db, model, project, edges_result) {
         return LtmMode::Exhaustive;
     }
 
@@ -1065,12 +1115,13 @@ pub fn model_ltm_variables(
     };
     let has_input_ports = !pathways.is_empty();
 
-    if !has_input_ports && model_is_stateless(db, project, edges_result) {
-        // A stateless model (no stocks anywhere, parent-level or
-        // module-internal) with no input-port pathways has nothing to score:
-        // no feedback loops to enumerate (any causal cycle would be an
-        // instantaneous algebraic loop, which is a compile error -- so no
-        // mode flip can occur) and no module interface to expose.
+    if !has_input_ports && model_is_stateless(db, model, project, edges_result) {
+        // A stateless model (no stocks anywhere -- parent-level or
+        // module-internal -- and no PREVIOUS-lagged dependency, GH #749)
+        // with no input-port pathways has nothing to score: no feedback
+        // loops to enumerate (any causal cycle would be an instantaneous
+        // algebraic loop, which is a compile error -- so no mode flip can
+        // occur) and no module interface to expose.
         //
         // `mode` is read from `model_ltm_mode` rather than hardcoded: its
         // stateless arm fires on the SAME `model_is_stateless` predicate, so

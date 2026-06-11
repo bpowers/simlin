@@ -1661,6 +1661,143 @@ fn module_only_root_loop_scored_in_exhaustive_mode() {
     assert_eq!(loop_partitions.values().next(), Some(&vec![None]));
 }
 
+/// A stockless cycle whose only state is a PREVIOUS lag:
+/// `a = PREVIOUS(b, 0); b = a * 0.5 + 1`. No stock anywhere; the model
+/// compiles (the dep-graph gate prunes PREVIOUS for ordering) and simulates
+/// as a genuine first-order lag (b converges to 2).
+fn previous_cycle_project() -> datamodel::Project {
+    let mut p = TestProject::new("prev_cycle")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("a", "PREVIOUS(b, 0)", None)
+        .aux("b", "a * 0.5 + 1", None)
+        .build_datamodel();
+    assign_uids(&mut p);
+    p
+}
+
+/// GH #749: `PREVIOUS(x)` is discrete state -- a one-DT memory (LTM ref
+/// section 7 lists PREVIOUS among the builtins that "retain state", scored
+/// via the perfect-mixing approximation) -- so a stockless PREVIOUS-lagged
+/// cycle IS a feedback loop and a pin on it must validate. Discovery mode
+/// makes the fix observable end-to-end: the pin is the only way to score
+/// the loop there.
+///
+/// Pre-#749 behavior: pin validation rejected the cycle with the false
+/// rationale "contains no stock" (the cycle is not a compile-time circular
+/// dependency -- it compiles and the enumerator scores it), and on this
+/// stock-free fixture the stateless early return (GH #748's gate, which did
+/// not count PREVIOUS as state) bailed before pin validation even ran, so
+/// the pin was dropped without ANY diagnostic.
+#[test]
+fn stockless_previous_lagged_pin_scored_in_discovery_mode() {
+    let mut project = previous_cycle_project();
+    pin_loop(&mut project, "main", "lag loop", &["a", "b"]);
+
+    let (results, loop_partitions, _ltm_vars) = run_ltm_discovery(&project);
+
+    let pin_loop_var = "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1";
+    assert!(
+        results.offsets.contains_key(pin_loop_var),
+        "a pin on a PREVIOUS-lagged stockless cycle must emit its loop_score; \
+         loop-score offsets: {:?}",
+        results
+            .offsets
+            .keys()
+            .filter(|k| k.as_str().contains("loop_score"))
+            .collect::<Vec<_>>()
+    );
+    assert_loop_score_is_link_product(&results, "pin1");
+
+    // Each variable on the cycle has exactly one input, so the loop fully
+    // accounts for its own activity: the score is exactly 1 once behavior
+    // begins (it is 0 at t0, before any lagged value exists).
+    let off = results.offsets[pin_loop_var];
+    for step in 1..results.step_count {
+        let v = results.data[step * results.step_size + off];
+        assert!(
+            (v - 1.0).abs() < 1e-12,
+            "the lag loop's score must be exactly 1 once active; step {step} = {v}"
+        );
+    }
+
+    // No stock resolves in the parent partition map, so the pin registers a
+    // single unresolved (`None`) partition slot -- like a module-internal
+    // stock pin.
+    assert_eq!(loop_partitions.get("pin1"), Some(&vec![None]));
+
+    // The accepted pin must not surface the (false) "contains no stock"
+    // rejection.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| format!("{:?}", d.error).contains("contains no stock")),
+        "an accepted PREVIOUS-lagged pin must not warn 'contains no stock'; got: {:?}",
+        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+    );
+}
+
+/// GH #749 (the exhaustive side, no pin needed for the disagreement): the
+/// enumerator and the scored surface must AGREE on the PREVIOUS-lagged
+/// cycle. The model is stock-free, so pre-#749 the stateless early return
+/// suppressed all scoring while `model_detected_loops` still REPORTED the
+/// loop -- detected-but-never-scored. Now the lagged dependency counts as
+/// state: the loop is enumerated AND scored, and a pin on it dedups onto
+/// the enumerated loop, transferring its name (the same contract as any
+/// stock-bearing cycle).
+#[test]
+fn stockless_previous_lagged_pin_dedups_onto_enumerated_loop() {
+    let mut project = previous_cycle_project();
+    pin_loop(&mut project, "main", "lag loop", &["a", "b"]);
+
+    let (results, loop_partitions, mode) = run_ltm(&project);
+    assert_eq!(
+        mode,
+        LtmMode::Exhaustive,
+        "a two-variable lagged cycle stays exhaustive"
+    );
+
+    // The enumerated loop is scored...
+    let loop_score_vars: Vec<String> = results
+        .offsets
+        .keys()
+        .map(|k| k.as_str().to_string())
+        .filter(|k| k.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .collect();
+    assert_eq!(
+        loop_score_vars.len(),
+        1,
+        "the lagged cycle must be scored exactly once; got: {loop_score_vars:?}"
+    );
+    // ...under its enumerated id (the pin deduped onto it, no pin{n} var).
+    assert!(
+        !loop_score_vars[0].contains("pin"),
+        "the duplicate pin must dedup onto the enumerated loop: {loop_score_vars:?}"
+    );
+    assert!(
+        !loop_partitions.keys().any(|k| k.starts_with("pin")),
+        "deduped pin must not register a partition"
+    );
+
+    // The detected surface reports the same loop, carrying the pin's name.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let detected = model_detected_loops(&db, source_model, sync.project).clone();
+    assert_eq!(
+        detected.loops.len(),
+        1,
+        "detected surface must report the lagged loop: {:?}",
+        detected.loops.iter().map(|l| &l.id).collect::<Vec<_>>()
+    );
+    assert_eq!(detected.loops[0].name.as_deref(), Some("lag loop"));
+}
+
 /// GH #748 (the gate's negative side): a root whose only module is a
 /// stockless PASSTHROUGH -- no state anywhere, parent-level or
 /// module-internal -- still takes the stateless early return. Discovery
