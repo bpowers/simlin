@@ -37,20 +37,33 @@
 //! same expectations on a fixed spec containing every reducer pattern.
 //!
 //! Two further shape families ride the same conventions (the 2026-06-11
-//! shape-expressiveness design): an iterated+literal MIXED subscript
-//! (`wide[Dim, young]` inside an A2A-over-`Dim` equation -- the GH #525
-//! `PerElement` family, including the BROADCAST case where the target also
-//! iterates `Age`) and a SUBSET reducer (`SUM(v[*:Sub])`, a StarRange over
-//! a proper subdimension -- GH #766). Their expected edges derive from
-//! `read_slice_rows`, the design's single row-derivation source of truth
-//! (invariant I4), and each family has its own forced strategy + property
+//! shape-expressiveness design): an iterated+literal MIXED subscript (the
+//! GH #525 `PerElement` family -- `wide[Dim, young]` or, axis order
+//! flipped, `wide[young, Dim]` inside an A2A-over-`Dim` equation,
+//! including the BROADCAST case where the target also iterates `Age`) and
+//! a SUBSET reducer (`SUM(v[*:Sub])`, a StarRange over a proper
+//! subdimension -- GH #766). Both property oracles enumerate expected rows
+//! via `read_slice_rows`, but their strength differs per family:
+//! production's `PerElement` expansion arm consumes the SAME function, so
+//! the mixed property is a shared-derivation consistency check and the
+//! deterministic companion (hand-pinned literal edge names, both axis
+//! orders) is the mixed family's SOLE independent oracle; production's
+//! agg-routed element edges, by contrast, come from `emit_agg_routed_edges`'
+//! own `AxisPlan` enumeration rather than `read_slice_rows` (the
+//! invariant-I4 deviation tracked as GH #783), so the subset property is
+//! genuinely DIFFERENTIAL -- two independent row enumerations that must
+//! agree. Each family has its own forced strategy + property
 //! (`forced_mixed_ref_specs_expand_to_pinned_diagonal`,
 //! `forced_subset_reducer_specs_route_subset_rows`) so the GH #739 vacuity
-//! guard applies: a strategy that silently stops generating the shape fails
-//! the forced property's spec-level guard instead of quietly shrinking the
-//! sampled corpus. Deterministic companions hand-pin literal edge names so
-//! a `read_slice_rows` regression cannot mask itself inside the derived
-//! property expectations.
+//! guard applies -- a strategy that silently stops generating the shape
+//! fails the forced property's spec-level guard instead of quietly
+//! shrinking the sampled corpus -- and the fixed-seed distribution guard
+//! `mixed_ref_strategy_generates_both_axis_orders` pins that BOTH
+//! subscript orders (and both target shapes) keep being drawn. Generative
+//! scope boundaries: subset reducers are exercised INLINED only (the
+//! whole-RHS variable-backed `v = SUM(v0[*:Sub])` slice has deterministic
+//! pins in `element_graph_tests.rs`), and the feeder-x-subset interaction
+//! is generated only against the scalar `total` target.
 //!
 //! This file is a regression guard: it must pass on the existing
 //! collapsing classifier today and continue to pass after the Phase 2
@@ -181,11 +194,16 @@ struct ScalarReducerTarget {
 }
 
 /// Optional trailing pair of variables exercising the GH #525 `PerElement`
-/// family: a 2-D source `wide[Dim, Age] = v{var_idx}[Dim]` (a Bare
-/// reference broadcast over `Age`) plus a target whose equation references
-/// `wide` through a MIXED iterated+literal subscript, `wide[Dim, {age}]`.
-/// With `broadcast` false the target is `mixed[Dim]` (the Iterated dims
-/// equal the target's -- rows and slots 1:1); with `broadcast` true it is
+/// family: a 2-D source `wide = v{var_idx}[Dim]` (a Bare reference
+/// broadcast over `Age`) plus a target whose equation references `wide`
+/// through a MIXED iterated+literal subscript. `age_first` picks the axis
+/// ORDER -- `wide[Dim, Age]` referenced as `wide[Dim, {age}]` (the literal
+/// pinning the SECOND axis) or, flipped, `wide[Age, Dim]` referenced as
+/// `wide[{age}, Dim]` (the literal pinning the FIRST axis) -- production
+/// is per-axis today with no ordering assumption, and this knob keeps the
+/// Phase 2 AST-walking refactor from growing one unnoticed. With
+/// `broadcast` false the target is `mixed[Dim]` (the Iterated dims equal
+/// the target's -- rows and slots 1:1); with `broadcast` true it is
 /// `mixed[Dim, Age]` (the Iterated dims a strict SUBSET of the target's, so
 /// each pinned row feeds every `Age` element of its `Dim` slot). Appended
 /// last and referenced by nothing, so acyclicity is preserved.
@@ -195,6 +213,9 @@ struct MixedRefTarget {
     /// Index into [`AGE_ELEM_NAMES`]: which `Age` element the reference pins.
     age_idx: usize,
     broadcast: bool,
+    /// `wide[Age, Dim]` / `wide[{age}, Dim]` (the Pinned axis FIRST)
+    /// instead of `wide[Dim, Age]` / `wide[Dim, {age}]` (Pinned second).
+    age_first: bool,
 }
 
 /// Spec for the whole generated project. The `var_specs[i]` slot's
@@ -356,10 +377,16 @@ fn project_spec_strategy() -> impl Strategy<Value = ProjectSpec> {
                 let scalar_target_strategy =
                     proptest::option::weighted(0.34, (0..var_count, any::<bool>(), any::<bool>()));
                 // Optional GH #525 mixed-reference block, same one-third
-                // weighting (appended last, referenced by nothing).
+                // weighting (appended last, referenced by nothing). The
+                // last bool is the axis-order flip (`age_first`).
                 let mixed_strategy = proptest::option::weighted(
                     0.34,
-                    (0..var_count, 0..AGE_ELEM_NAMES.len(), any::<bool>()),
+                    (
+                        0..var_count,
+                        0..AGE_ELEM_NAMES.len(),
+                        any::<bool>(),
+                        any::<bool>(),
+                    ),
                 );
                 (pattern_strategies, scalar_target_strategy, mixed_strategy).prop_map(
                     move |(patterns, scalar_target, mixed)| ProjectSpec {
@@ -377,11 +404,12 @@ fn project_spec_strategy() -> impl Strategy<Value = ProjectSpec> {
                             }
                         }),
                         subset_size,
-                        mixed_ref_target: mixed.map(|(var_idx, age_idx, broadcast)| {
+                        mixed_ref_target: mixed.map(|(var_idx, age_idx, broadcast, age_first)| {
                             MixedRefTarget {
                                 var_idx,
                                 age_idx,
                                 broadcast,
+                                age_first,
                             }
                         }),
                     },
@@ -519,22 +547,26 @@ fn forced_subset_reducer_spec_strategy() -> impl Strategy<Value = ProjectSpec> {
 }
 
 /// Strategy: a [`ProjectSpec`] GUARANTEED to contain the GH #525
-/// mixed-reference block (both the 1:1 and the broadcast target shapes,
-/// via the injected `broadcast` flag) -- the structural non-vacuity guard
-/// for the `PerElement` family (GH #739).
+/// mixed-reference block (both target shapes via the injected `broadcast`
+/// flag AND both subscript axis orders via `age_first`) -- the structural
+/// non-vacuity guard for the `PerElement` family (GH #739). The companion
+/// distribution guard `mixed_ref_strategy_generates_both_axis_orders`
+/// pins that all four (order x shape) variants keep being drawn.
 fn forced_mixed_ref_spec_strategy() -> impl Strategy<Value = ProjectSpec> {
     (
         project_spec_strategy(),
         any::<prop::sample::Index>(),
         any::<prop::sample::Index>(),
         any::<bool>(),
+        any::<bool>(),
     )
-        .prop_map(|(mut spec, src_idx, age_idx, broadcast)| {
+        .prop_map(|(mut spec, src_idx, age_idx, broadcast, age_first)| {
             let n = spec.var_specs.len();
             spec.mixed_ref_target = Some(MixedRefTarget {
                 var_idx: src_idx.index(n),
                 age_idx: age_idx.index(AGE_ELEM_NAMES.len()),
                 broadcast,
+                age_first,
             });
             spec
         })
@@ -606,18 +638,24 @@ fn build_project(spec: &ProjectSpec) -> TestProject {
         project = project.scalar_aux("total", &render_scalar_reducer_target(target));
     }
     if let Some(mixed) = &spec.mixed_ref_target {
+        let age = AGE_ELEM_NAMES[mixed.age_idx];
+        // `age_first` flips the SOURCE's axis order (and with it which
+        // axis position the literal pins); the target's dims are
+        // independent of it.
+        let (wide_decl, mixed_eq) = if mixed.age_first {
+            ("wide[Age,Dim]", format!("wide[{age}, Dim] * 2"))
+        } else {
+            ("wide[Dim,Age]", format!("wide[Dim, {age}] * 2"))
+        };
         project = project
             .named_dimension("Age", AGE_ELEM_NAMES)
-            .array_aux("wide[Dim,Age]", &format!("v{}[Dim]", mixed.var_idx));
+            .array_aux(wide_decl, &format!("v{}[Dim]", mixed.var_idx));
         let decl = if mixed.broadcast {
             "mixed[Dim,Age]"
         } else {
             "mixed[Dim]"
         };
-        project = project.array_aux(
-            decl,
-            &format!("wide[Dim, {}] * 2", AGE_ELEM_NAMES[mixed.age_idx]),
-        );
+        project = project.array_aux(decl, &mixed_eq);
     }
     project
 }
@@ -742,12 +780,15 @@ fn cross_product(sources: &[String], targets: &[String]) -> Vec<(String, String)
 /// node -- the agg's full fan-out, since `result_dims` is empty for an
 /// all-`Reduced` slice.
 ///
-/// The read rows come from the SAME `read_slice_rows` derivation
-/// production consumes (the shape-expressiveness design's invariant I4 --
-/// the single row-derivation source of truth), with the per-axis access
-/// stated independently from the spec (`Reduced{subset}`). The
-/// deterministic companion tests hand-pin literal edge names so a
-/// `read_slice_rows` regression cannot hide inside this shared derivation.
+/// The expected read rows are enumerated via `read_slice_rows`, with the
+/// per-axis access stated independently from the spec (`Reduced{subset}`).
+/// Production's agg-routed element edges do NOT come from
+/// `read_slice_rows`: `emit_agg_routed_edges` plans its rows with its own
+/// `AxisPlan` machinery (the invariant-I4 deviation tracked as GH #783).
+/// This expectation is therefore genuinely DIFFERENTIAL -- two independent
+/// enumerations of the same slice that must agree -- and the deterministic
+/// companion tests additionally hand-pin literal edge names, anchoring
+/// both enumerations to a fixed oracle.
 fn expected_agg_routings(
     spec: &ProjectSpec,
     dim_ctx: &crate::dimensions::DimensionsContext,
@@ -825,12 +866,20 @@ fn expected_agg_routings(
 
 /// The exact `wide -> mixed` element-edge set the GH #525 block must
 /// produce: rows from `read_slice_rows` over the mixed reference's axes
-/// (`[Iterated(Dim), Pinned(age)]` -- the same invariant-I4 derivation the
-/// `PerElement` expansion arm consumes), each row feeding the target
-/// element(s) whose `Dim` coordinate is the row's slot -- exactly
-/// `mixed[{slot}]` for the 1:1 case, every `Age` element of
-/// `mixed[{slot},_]` for the broadcast case (the Iterated dims a strict
-/// subset of the target's). Empty when the spec has no mixed block.
+/// (`[Iterated(Dim), Pinned(age)]`, or the flipped `[Pinned(age),
+/// Iterated(Dim)]` for an `age_first` block -- the axes and the dim
+/// element lists swap together), each row feeding the target element(s)
+/// whose `Dim` coordinate is the row's slot -- exactly `mixed[{slot}]` for
+/// the 1:1 case, every `Age` element of `mixed[{slot},_]` for the
+/// broadcast case (the Iterated dims a strict subset of the target's).
+/// Empty when the spec has no mixed block.
+///
+/// NOTE: production's `PerElement` expansion arm
+/// (`emit_edges_for_reference`) consumes the SAME `read_slice_rows`
+/// function, so this oracle is a shared-derivation consistency check, not
+/// an independent one -- the deterministic companion
+/// `mixed_ref_specs_expand_to_pinned_diagonal` (hand-pinned literal edge
+/// names, both axis orders) is the mixed family's SOLE independent oracle.
 fn expected_mixed_edges(
     spec: &ProjectSpec,
     dim_ctx: &crate::dimensions::DimensionsContext,
@@ -845,14 +894,17 @@ fn expected_mixed_edges(
         .map(|e| e.to_string())
         .collect();
     let age_elems: Vec<String> = AGE_ELEM_NAMES.iter().map(|e| e.to_string()).collect();
-    let axes = [
-        AxisRead::Iterated {
-            dim: "dim".to_string(),
-            source_dim: "dim".to_string(),
-        },
-        AxisRead::Pinned(AGE_ELEM_NAMES[mixed.age_idx].to_string()),
-    ];
-    let rows = crate::db::ltm::read_slice_rows(&axes, &[dim_elems, age_elems.clone()], dim_ctx)
+    let iterated = AxisRead::Iterated {
+        dim: "dim".to_string(),
+        source_dim: "dim".to_string(),
+    };
+    let pinned = AxisRead::Pinned(AGE_ELEM_NAMES[mixed.age_idx].to_string());
+    let (axes, dim_lists) = if mixed.age_first {
+        ([pinned, iterated], [age_elems.clone(), dim_elems])
+    } else {
+        ([iterated, pinned], [dim_elems, age_elems.clone()])
+    };
+    let rows = crate::db::ltm::read_slice_rows(&axes, &dim_lists, dim_ctx)
         .expect("an Iterated+Pinned slice over declared dimensions always yields rows");
     let mut edges = BTreeSet::new();
     for r in &rows {
@@ -1089,12 +1141,14 @@ proptest! {
     /// the mixed iterated+literal reference block, the `wide -> mixed`
     /// element edges must be exactly the diagonal-with-pinned-axes rows
     /// (asserted inside `check_spec` against the `read_slice_rows`
-    /// derivation -- covering both the 1:1 and the broadcast target
-    /// shapes), and the block must structurally EXIST: in the spec (a
+    /// derivation -- covering both target shapes and both subscript axis
+    /// orders), and the block must structurally EXIST: in the spec (a
     /// stubbed-out injection fails the first assertion) and in the produced
     /// element graph (equations that silently stop expanding to pinned
     /// rows fail the second), so the `PerElement` coverage can never
-    /// silently go vacuous.
+    /// silently go vacuous. Per-VARIANT generation (the axis-order /
+    /// target-shape flags, which this per-case guard cannot see) is pinned
+    /// by `mixed_ref_strategy_generates_both_axis_orders`.
     #[test]
     fn forced_mixed_ref_specs_expand_to_pinned_diagonal(
         spec in forced_mixed_ref_spec_strategy()
@@ -1249,9 +1303,10 @@ fn edges_for_spec(spec: &ProjectSpec) -> (BTreeSet<(String, String)>, ElementCau
 /// `total = 1 + SUM(v0[*:Sub] * scalar_const)`, the feeder interaction)
 /// over `Dim = {a, b, c}` with `Sub = {a, b}` must route ONLY the `Sub`
 /// rows through the aggs. Edge names are hand-pinned literals --
-/// deliberately independent of `read_slice_rows`, so a regression in the
-/// shared derivation cannot mask itself inside the property expectations
-/// that DO derive from it.
+/// deliberately independent of `read_slice_rows` -- anchoring the
+/// property's differential comparison (test-side `read_slice_rows` vs
+/// production's `AxisPlan` enumeration in `emit_agg_routed_edges`,
+/// GH #783) to a fixed oracle.
 #[test]
 fn subset_reducer_specs_route_only_subset_rows() {
     let spec = ProjectSpec {
@@ -1342,11 +1397,14 @@ fn subset_reducer_specs_route_only_subset_rows() {
     );
 }
 
-/// Deterministic GH #525 companion: fixed mixed-reference specs (the 1:1
-/// target shape pinning `young`, and the broadcast shape pinning `old`)
-/// must expand to EXACTLY the hand-pinned diagonal-with-pinned-axes edges.
-/// Like the subset companion, the literal edge names are the independent
-/// oracle for the `read_slice_rows`-derived property expectations.
+/// Deterministic GH #525 companion: fixed mixed-reference specs covering
+/// both target shapes AND both subscript axis orders (1:1 pinning `young`
+/// on the second axis; broadcast pinning `old`; the flipped `wide[Age,Dim]`
+/// declarations pinning the FIRST axis) must expand to EXACTLY the
+/// hand-pinned diagonal-with-pinned-axes edges. Production's expansion arm
+/// and the property oracle share `read_slice_rows`, so these literal edge
+/// names are the mixed family's SOLE independent oracle -- which is why
+/// the flipped order must be pinned here too, not only in the property.
 #[test]
 fn mixed_ref_specs_expand_to_pinned_diagonal() {
     let base = ProjectSpec {
@@ -1379,6 +1437,7 @@ fn mixed_ref_specs_expand_to_pinned_diagonal() {
         var_idx: 0,
         age_idx: 0,
         broadcast: false,
+        age_first: false,
     });
     let (var_set, elem_edges) = edges_for_spec(&spec);
     assert_eq!(
@@ -1397,11 +1456,12 @@ fn mixed_ref_specs_expand_to_pinned_diagonal() {
     // `mixed[Dim,Age] = wide[Dim, old] * 2` -- the Iterated dims (`Dim`)
     // are a strict subset of the target's, so each pinned row feeds BOTH
     // Age slots of its Dim coordinate (and no other Dim's slots).
-    let mut spec = base;
+    let mut spec = base.clone();
     spec.mixed_ref_target = Some(MixedRefTarget {
         var_idx: 0,
         age_idx: 1,
         broadcast: true,
+        age_first: false,
     });
     let (var_set, elem_edges) = edges_for_spec(&spec);
     assert_eq!(
@@ -1419,5 +1479,88 @@ fn mixed_ref_specs_expand_to_pinned_diagonal() {
         project_to_variable_edges(&elem_edges),
         var_set,
         "projection mismatch on the broadcast mixed spec"
+    );
+
+    // FLIPPED axis order, 1:1: `wide[Age,Dim]` referenced as
+    // `mixed[Dim] = wide[young, Dim] * 2` -- the literal pins axis 0, the
+    // iterated dim rides axis 1, so the row subscripts are `[age, dim]`.
+    let mut spec = base.clone();
+    spec.mixed_ref_target = Some(MixedRefTarget {
+        var_idx: 0,
+        age_idx: 0,
+        broadcast: false,
+        age_first: true,
+    });
+    let (var_set, elem_edges) = edges_for_spec(&spec);
+    assert_eq!(
+        edges_between_vars(&elem_edges, "wide", "mixed"),
+        pin(&[("wide[young,a]", "mixed[a]"), ("wide[young,b]", "mixed[b]"),]),
+        "Pinned-first 1:1 mixed reference must expand to the pinned diagonal: {:?}",
+        elem_edges.edges
+    );
+    assert_eq!(
+        project_to_variable_edges(&elem_edges),
+        var_set,
+        "projection mismatch on the Pinned-first 1:1 mixed spec"
+    );
+
+    // FLIPPED axis order, broadcast, pinning the other element:
+    // `mixed[Dim,Age] = wide[old, Dim] * 2`.
+    let mut spec = base;
+    spec.mixed_ref_target = Some(MixedRefTarget {
+        var_idx: 0,
+        age_idx: 1,
+        broadcast: true,
+        age_first: true,
+    });
+    let (var_set, elem_edges) = edges_for_spec(&spec);
+    assert_eq!(
+        edges_between_vars(&elem_edges, "wide", "mixed"),
+        pin(&[
+            ("wide[old,a]", "mixed[a,young]"),
+            ("wide[old,a]", "mixed[a,old]"),
+            ("wide[old,b]", "mixed[b,young]"),
+            ("wide[old,b]", "mixed[b,old]"),
+        ]),
+        "Pinned-first broadcast mixed reference must feed every Age slot of its Dim row: {:?}",
+        elem_edges.edges
+    );
+    assert_eq!(
+        project_to_variable_edges(&elem_edges),
+        var_set,
+        "projection mismatch on the Pinned-first broadcast mixed spec"
+    );
+}
+
+/// GH #739 distribution guard for the mixed family's generation VARIANTS:
+/// a fixed-seed sample of `forced_mixed_ref_spec_strategy` must produce
+/// every (axis order x target shape) combination. The per-case forced
+/// property can only see a missing BLOCK, not a missing variant -- if the
+/// strategy silently stopped flipping `age_first` (or `broadcast`), every
+/// case would still pass it -- so this guard samples the strategy directly
+/// (no salsa pipeline; 64 draws, deterministic RNG) and fails loudly when
+/// any of the four variants stops being drawn.
+#[test]
+fn mixed_ref_strategy_generates_both_axis_orders() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    let mut runner = TestRunner::deterministic();
+    let strategy = forced_mixed_ref_spec_strategy();
+    let mut seen = [[false; 2]; 2]; // [age_first][broadcast]
+    for _ in 0..64 {
+        let spec = strategy
+            .new_tree(&mut runner)
+            .expect("forced mixed strategy must generate a spec")
+            .current();
+        let mixed = spec
+            .mixed_ref_target
+            .expect("forced strategy always injects the mixed block");
+        seen[mixed.age_first as usize][mixed.broadcast as usize] = true;
+    }
+    assert!(
+        seen.iter().flatten().all(|s| *s),
+        "a fixed-seed 64-draw sample must cover both axis orders x both \
+         target shapes; saw [age_first][broadcast] = {seen:?}"
     );
 }
