@@ -244,14 +244,20 @@ fn model_is_stateless(
 /// OTHER edge breaks it -- and that breaking edge is itself previous-only
 /// (or a stock, which the first leg already caught). `previous_only`
 /// presence is therefore exactly the conservative superset of "a
-/// PREVIOUS-lagged feedback cycle can exist here": a lagged-but-acyclic
-/// model merely runs the normal enumeration path and scores nothing, which
-/// is output-equivalent to the bail.
+/// PREVIOUS-lagged feedback cycle can exist here". A lagged-but-acyclic
+/// model runs the normal enumeration path: in exhaustive mode it scores
+/// nothing (no loops, so no link or loop scores -- same output as the
+/// bail), but in DISCOVERY mode it now emits link scores for every causal
+/// edge where the old gate emitted none. That difference is deliberate
+/// stock/lag parity: a no-feedback STOCK model never bailed either, and
+/// discovery's contract is "score all edges of any state-carrying model".
 ///
 /// Deliberately parent-level only: module-INTERNAL lagged state is not
 /// counted (mirroring pin validation, which cannot see inside a module's
 /// pathway either), so the scored and pinned surfaces agree on that shape
-/// -- both treat a module whose only state is PREVIOUS as stateless.
+/// -- both treat a module whose only state is PREVIOUS as stateless
+/// (GH #773). A parent-level lag OF a module output (`PREVIOUS(m.out)`)
+/// IS counted: the previous_only entry is the parent variable's own.
 ///
 /// Uses the same empty module-ident context / empty input set as
 /// `model_causal_edges`, so the per-variable dependency queries are shared

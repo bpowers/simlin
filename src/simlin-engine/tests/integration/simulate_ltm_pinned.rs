@@ -1687,6 +1687,74 @@ fn pinned_loop_through_stockless_passthrough_rejected() {
     );
 }
 
+/// GH #749 follow-up: a parent-level PREVIOUS lag of a MODULE OUTPUT
+/// (`reader = PREVIOUS(sub.output, 0)` through a stockless passthrough
+/// `sub`) is a lagged edge like any other and the pin must validate. The
+/// lagged dependency is recorded UN-normalized (`sub·output`) while the
+/// cycle node is the module-normalized `sub`, so `cycle_has_lagged_edge`
+/// must normalize each previous_only entry through the same
+/// `normalize_module_ref_str` collapse `model_causal_edges` applies --
+/// without it the pin is rejected "contains no stock" even though the
+/// stateless gate counts the lag (non-emptiness needs no normalization),
+/// the enumerator scores the loop, AND the post-#749 rejection message
+/// ("... or other state, such as a PREVIOUS-lagged reference") is false
+/// for the cycle.
+#[test]
+fn previous_lagged_module_output_pin_scored_in_discovery_mode() {
+    let mut project =
+        module_pin_project(vec![sub_aux("input", "0"), sub_aux("output", "input * 2")]);
+    // Retarget the reader to a PREVIOUS-lagged read of the module output:
+    // the lag is the cycle's ONLY state (the passthrough sub is stockless),
+    // and it is what lets the otherwise-algebraic cycle compile.
+    for v in &mut project.models[0].variables {
+        if let datamodel::Variable::Aux(a) = v
+            && a.ident == "reader"
+        {
+            a.equation = datamodel::Equation::Scalar("PREVIOUS(sub.output, 0)".to_string());
+        }
+    }
+    pin_loop(
+        &mut project,
+        "main",
+        "lagged module loop",
+        &["driver", "sub", "reader"],
+    );
+
+    let (results, loop_partitions, _ltm_vars) = run_ltm_discovery(&project);
+
+    let pin_loop_var = "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1";
+    assert!(
+        results.offsets.contains_key(pin_loop_var),
+        "a pin whose only state is a PREVIOUS lag of a module output must emit its \
+         loop_score; loop-score offsets: {:?}",
+        results
+            .offsets
+            .keys()
+            .filter(|k| k.as_str().contains("loop_score"))
+            .collect::<Vec<_>>()
+    );
+    assert_loop_score_is_link_product(&results, "pin1");
+    assert_eq!(
+        loop_partitions.get("pin1"),
+        Some(&vec![None]),
+        "no stock resolves, so the pin registers a single unresolved partition slot"
+    );
+
+    // The accepted pin must not surface the "contains no stock" rejection.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| format!("{:?}", d.error).contains("contains no stock")),
+        "an accepted lagged-module-output pin must not warn 'contains no stock'; got: {:?}",
+        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+    );
+}
+
 /// GH #748 (the headline case, no pin involved): a module-only root --
 /// feedback `driver -> sub(with internal INTEG) -> reader -> driver`, zero
 /// parent-level stocks -- must run the LTM pass and score the loop in

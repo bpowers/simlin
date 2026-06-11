@@ -277,12 +277,17 @@ pub(crate) fn model_pinned_loops(
 /// -- and that breaking edge is itself previous-only or a stock (which the
 /// caller's stock check already accepted).
 ///
-/// Module and stock nodes are skipped: a stock is state in its own right
-/// (the caller's check), and a module's lagged INTERNAL state is
-/// deliberately invisible here, mirroring `model_is_stateless`'s
-/// parent-level-only lagged leg. Uses the same empty module-ident context /
-/// empty input set as `model_causal_edges`, so the per-variable dependency
-/// queries are shared salsa cache hits.
+/// Module and stock nodes are skipped as the EDGE TARGET: a stock is state
+/// in its own right (the caller's check), and a module's lagged INTERNAL
+/// state is deliberately invisible here, mirroring `model_is_stateless`'s
+/// parent-level-only lagged leg (GH #773). A module as the edge SOURCE is
+/// fine: `reader = PREVIOUS(sub.output, 0)` is a parent-level lag of the
+/// module's output, recorded in previous_only as the UN-normalized
+/// `sub·output` -- while the cycle node is the module-normalized `sub` --
+/// so each entry is collapsed through the same `normalize_module_ref_str`
+/// the causal-edge builder applies before comparing. Uses the same empty
+/// module-ident context / empty input set as `model_causal_edges`, so the
+/// per-variable dependency queries are shared salsa cache hits.
 fn cycle_has_lagged_edge(
     db: &dyn Db,
     project: SourceProject,
@@ -304,7 +309,8 @@ fn cycle_has_lagged_edge(
         }
         variable_direct_dependencies(db, *sv, project, empty_ctx, empty_inputs)
             .dt_previous_referenced_vars
-            .contains(from.as_str())
+            .iter()
+            .any(|dep| crate::db::analysis::normalize_module_ref_str(dep) == from.as_str())
     })
 }
 
