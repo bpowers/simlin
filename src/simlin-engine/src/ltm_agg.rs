@@ -35,9 +35,11 @@
 //!   *entire* dt-equation of a scalar or apply-to-all variable
 //!   (`total_population = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`).
 //!   That variable *is* the aggregate node; no synthetic is minted. One
-//!   exception: a whole-RHS reducer with a MAPPED iterated axis (GH #534)
-//!   mints a synthetic agg instead -- see the carve-out comment in
-//!   [`walk_var_equation`]. Each such
+//!   exception: a whole-RHS reducer whose shape the variable-backed
+//!   machinery cannot express -- a MAPPED iterated axis (GH #534) or
+//!   NON-ALIGNED result dims (broadcast/permuted, GH #764) -- mints a
+//!   synthetic agg instead; see
+//!   [`variable_backed_shape_is_expressible`]. Each such
 //!   variable is its own distinct agg node -- variable-backed aggs are never
 //!   deduped and never reused by an inline use of the same reducer text (an
 //!   inline use must get its own *synthetic* node, since the element-graph
@@ -88,12 +90,16 @@
 //! variable-backed reducers (`total = SUM(pop[*])`, including the broadcast
 //! `share[R] = SUM(pop[*])`) keep the normal reference walker's
 //! reduction/broadcast edges, which are already the true reads for those
-//! shapes; the gate's remaining declines -- partial reduce broadcast over
-//! extra target dims / permuted axes (GH #764) and the ARRAYED-owner
-//! scalar-result Pinned/subset slice (`share[R] = SUM(pop[nyc,*])`, the
-//! GH #758 loud skip) -- keep the conservative cross-product, a SUPERSET of
-//! the true reads, with the latter's scores loudly skipped rather than
-//! silently wrong (see [`variable_backed_reduce_agg`]).
+//! shapes. A whole-RHS partial reduce whose result dims are NON-ALIGNED
+//! with the owner's dims -- broadcast over extra target dims or permuted
+//! axes (GH #764 / T4 of the shape-expressiveness design) -- mints a
+//! SYNTHETIC agg instead, like the mapped GH #534 case (see
+//! [`variable_backed_shape_is_expressible`], the one minting condition).
+//! The gate's remaining decline -- the ARRAYED-owner scalar-result
+//! Pinned/subset slice (`share[R] = SUM(pop[nyc,*])`, no `Iterated` axis,
+//! GH #777) -- keeps the conservative cross-product, a SUPERSET of the
+//! true reads, with its scores loudly skipped (the GH #758 treatment)
+//! rather than silently wrong (see [`variable_backed_reduce_agg`]).
 
 use std::collections::HashMap;
 
@@ -674,23 +680,17 @@ fn walk_var_equation(
     if let Expr2::App(builtin, _, _) = expr
         && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
         && let Some(read_slice) = combined_read_slice(builtin, ctx)
-        // A whole-RHS reducer with a MAPPED iterated axis (GH #534,
-        // `out[State] = SUM(matrix[State,*])` over a positionally-mapped
-        // pair) is NOT variable-backed: it falls through to
-        // `walk_subexpr_for_aggs`, which mints a *synthetic* agg for the
-        // same reducer text. The variable-backed link-score path
-        // (`try_cross_dimensional_link_scores`'s partial-reduce arm) matches
-        // result axes against source axes BY NAME, so a remapped pair falls
-        // off it onto `emit_per_shape_link_scores`' `Wildcard` partial --
-        // whose PREVIOUS-wrapping mangles the iterated index into the
-        // non-compiling `matrix[PREVIOUS(state),*]` (a silently-stubbed
-        // constant-0 score). Routing through a synthetic agg instead gives
-        // the whole-RHS case the same remapped two-half scoring as an
-        // inline mapped reducer, at the cost of one synthetic aux
-        // duplicating the variable's value.
-        && !read_slice.iter().any(
-            |a| matches!(a, AxisRead::Iterated { dim, source_dim } if dim != source_dim),
-        )
+        // A whole-RHS reducer whose slice/result shape the variable-backed
+        // machinery cannot express is NOT variable-backed: it falls through
+        // to `walk_subexpr_for_aggs`, which mints a *synthetic* agg for the
+        // same reducer text (at the cost of one synthetic aux duplicating
+        // the variable's value) and rides the well-tested two-half scoring
+        // + the GH #528 agg-to-target projection. See
+        // [`variable_backed_shape_is_expressible`] for the one minting
+        // condition (the GH #534 mapped carve-out, generalized to the
+        // GH #764 broadcast/permuted result shapes by T4 of the
+        // shape-expressiveness design).
+        && variable_backed_shape_is_expressible(&read_slice, ctx.target_iterated_dims)
     {
         // Whole-RHS reducer: the variable IS the aggregate node. The agg
         // node's result shape is the *reducer's* result shape (the `Iterated`
@@ -723,6 +723,80 @@ fn walk_var_equation(
         next_synthetic_n,
         /* in_reducer = */ false,
     );
+}
+
+/// The ONE minting condition for whole-RHS reducers (shape-expressiveness
+/// design, T4): `true` when the variable-backed machinery -- the
+/// [`variable_backed_reduce_agg`] gate, `try_cross_dimensional_link_scores`'
+/// per-`(row, slot)` derivation, and `emit_agg_routed_edges`' source→slot
+/// routing, all of which key slots by NAME against the owning variable's
+/// element nodes -- can express this slice with the variable itself as the
+/// aggregate node. `false` routes the reducer through
+/// `walk_subexpr_for_aggs`, which mints a *synthetic* agg arrayed over the
+/// slice's `Iterated` target dims instead.
+///
+/// Not expressible (⇒ synthetic):
+/// - **Mapped iterated axis** (GH #534, `out[State] = SUM(matrix[State,*])`
+///   over a positionally-mapped `State→Region` pair): the variable-backed
+///   link-score path matches result axes against source axes BY NAME, so a
+///   remapped pair falls off it onto `emit_per_shape_link_scores`'
+///   `Wildcard` partial -- whose PREVIOUS-wrapping mangles the iterated
+///   index into the non-compiling `matrix[PREVIOUS(state),*]` (a
+///   silently-stubbed constant-0 score). Note the mapped case is NOT
+///   subsumed by the alignment clause below: the `Iterated` axis carries
+///   the TARGET dim, so its result dims equal the owner's dims -- which is
+///   exactly why the remap, not the shape, is what the name-keyed path
+///   cannot express.
+/// - **Non-aligned result dims** (GH #764): the `Iterated` axes' target
+///   dims, in slice order, differ from the owner's declared dims -- a
+///   BROADCAST (`out[D1,D3] = SUM(matrix[D1,*])`, strict subset) or a
+///   PERMUTATION (`out[D2,D1] = SUM(cube[D1,D2,*])`, different order). A
+///   per-`(row, slot)` slot must name a complete `to` element in declared
+///   order, which neither shape's slots do; the synthetic agg's slots are
+///   keyed by `result_dims` order and the GH #528 projection
+///   (`agg_pin_for_target` / `expand_same_element`'s name-matched
+///   projection) handles the broadcast fan-out and the reordering.
+///
+/// Expressible (⇒ the variable IS the agg, byte-identical to pre-T4):
+/// - an ALIGNED partial reduce (`Iterated` dims == the owner's dims, in
+///   order -- Pinned/subset axes included);
+/// - any slice with NO `Iterated` axis: the full-extent reduce
+///   (`total = SUM(pop[*])`, `share[R] = SUM(pop[*])` -- the inert
+///   reference-walker family), the scalar-owner Pinned/subset slice
+///   (`total = SUM(pop[nyc,*])`, admitted by the gate), and the
+///   ARRAYED-owner Pinned/subset slice (`share[R] = SUM(pop[nyc,*])`,
+///   GH #777 -- deliberately kept on the gate's loud-skip decline, NOT
+///   widened into here: it has no `Iterated` axis, so its broadcast needs
+///   the design's section-3 `PerElement` rule, T6 machinery).
+///
+/// `target_iterated_dims` are the owner's A2A dims (canonical, declared
+/// order; empty for a scalar owner). An `Iterated` axis's `dim` is always
+/// one of them by construction (`classify_axis_access` only mints
+/// `Iterated` for a target iterated dim), so "non-aligned" here can only
+/// mean strict subset, permutation, or a duplicated dim (a square source
+/// read as `SUM(sq[D1,D1,*])` -- routed synthetic, matching what the
+/// inline form of the same text already does).
+fn variable_backed_shape_is_expressible(
+    read_slice: &[AxisRead],
+    target_iterated_dims: &[String],
+) -> bool {
+    let mut iterated_dims: Vec<&str> = Vec::new();
+    for axis in read_slice {
+        if let AxisRead::Iterated { dim, source_dim } = axis {
+            if dim != source_dim {
+                return false; // mapped pair (GH #534)
+            }
+            iterated_dims.push(dim.as_str());
+        }
+    }
+    // Scalar-result slices (no Iterated axis) are always expressible-or-
+    // gate-declined as the variable itself; an Iterated-armed slice must
+    // align exactly with the owner's declared dims (GH #764).
+    iterated_dims.is_empty()
+        || iterated_dims
+            .iter()
+            .copied()
+            .eq(target_iterated_dims.iter().map(String::as_str))
 }
 
 /// Recursively walk an expression looking for *maximal* reducer
@@ -1415,14 +1489,15 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
 ///   Warning, no link-score variable, loop scores through the edge
 ///   dropped). The full broadcast fan-out is the design's section 3
 ///   `PerElement` rule applied to variable-backed owners -- T6 machinery,
-///   tracked as a follow-up.
-/// - a whole-RHS partial reduce BROADCAST over extra target dims
-///   (`out[D1,D3] = SUM(matrix[D1,*])`): `result_dims` a strict subset of
-///   `to`'s dims, so a slot does not name a complete `to` element (GH #764,
-///   T4 mints synthetic aggs for these).
-/// - a permuted-axes whole-RHS reduce: slot coordinates are in
-///   `Iterated`-axis (source) order, which would mis-subscript `to`
-///   (GH #764 likewise).
+///   tracked as GH #777.
+///
+/// The Iterated-arm alignment check below (`result_dims` == `to`'s dims,
+/// in order) is defense-in-depth since T4: a whole-RHS reduce with
+/// NON-ALIGNED result dims (broadcast `out[D1,D3] = SUM(matrix[D1,*])` /
+/// permuted axes, GH #764) never registers a variable-backed agg anymore
+/// -- [`variable_backed_shape_is_expressible`] routes it to a synthetic
+/// agg at minting -- so every Iterated-armed variable-backed agg reaching
+/// this gate is aligned by construction.
 pub(crate) fn variable_backed_reduce_agg<'a>(
     aggs: &'a AggNodesResult,
     from: &str,
@@ -1453,7 +1528,9 @@ pub(crate) fn variable_backed_reduce_agg<'a>(
             .any(|ax| matches!(ax, AxisRead::Iterated { .. }))
         {
             // Aligned partial reduce: each slot names a complete `to`
-            // element. Broadcast/permuted result dims stay declined (#764).
+            // element. Non-aligned (broadcast/permuted, GH #764) result
+            // dims cannot occur here since T4 -- they mint synthetic aggs
+            // at enumeration -- so this check is pure defense.
             a.result_dims.len() == to_dims.len()
                 && a.result_dims
                     .iter()
@@ -2421,6 +2498,162 @@ mod tests {
         assert_eq!(agg.result_dims, vec!["State".to_string()]);
     }
 
+    /// GH #764 (T4): the whole-RHS BROADCAST twin -- `out[D1,D3] =
+    /// SUM(matrix[D1,*])`, `result_dims` (`[D1]`) a strict subset of the
+    /// owner's dims (`[D1,D3]`) -- mints a SYNTHETIC agg, generalizing the
+    /// GH #534 carve-out: the variable-backed per-`(row, slot)` machinery
+    /// requires each slot to name a complete `to` element, which a
+    /// broadcast slot does not. The synthetic agg is arrayed over
+    /// `result_dims` and rides the two-half emitters + the GH #528
+    /// agg-to-target projection.
+    #[test]
+    fn whole_rhs_broadcast_partial_reduce_mints_synthetic_agg() {
+        let project = TestProject::new("whole_rhs_broadcast_764")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension("D3", &["p", "q"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct(
+                "out",
+                vec!["D1".into(), "D3".into()],
+                "SUM(matrix[D1, *])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| a.is_synthetic),
+            "a whole-RHS BROADCAST reducer must mint a synthetic agg (not variable-backed); \
+             got: {:?}",
+            result.aggs
+        );
+        let agg = result
+            .aggs_in_var("out")
+            .next()
+            .expect("expected a synthetic agg owned by `out`");
+        assert_eq!(agg.name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
+        assert_eq!(
+            agg.canonical_read_slice(),
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Reduced { subset: None }
+            ]
+        );
+        assert_eq!(agg.result_dims, vec!["D1".to_string()]);
+        assert_eq!(source_names(agg), vec!["matrix"]);
+    }
+
+    /// GH #764 (T4): the whole-RHS PERMUTED twin -- `out[D2,D1] =
+    /// SUM(cube[D1,D2,*])`, `result_dims` (`[D1,D2]`, slice order) in a
+    /// different order than the owner's dims (`[D2,D1]`) -- mints a
+    /// SYNTHETIC agg too: variable-backed slot coordinates are in
+    /// `Iterated`-axis order, which would mis-subscript `to`. Slots of the
+    /// synthetic agg are keyed by `result_dims` order, and the GH #528
+    /// projection reorders per target element.
+    #[test]
+    fn whole_rhs_permuted_partial_reduce_mints_synthetic_agg() {
+        let project = TestProject::new("whole_rhs_permuted_764")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension("D3", &["p", "q"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "D2".into(), "D3".into()],
+                "1",
+                None,
+            )
+            .array_aux_direct(
+                "out",
+                vec!["D2".into(), "D1".into()],
+                "SUM(cube[D1, D2, *])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| a.is_synthetic),
+            "a whole-RHS PERMUTED reducer must mint a synthetic agg (not variable-backed); \
+             got: {:?}",
+            result.aggs
+        );
+        let agg = result
+            .aggs_in_var("out")
+            .next()
+            .expect("expected a synthetic agg owned by `out`");
+        assert_eq!(
+            agg.result_dims,
+            vec!["D1".to_string(), "D2".to_string()],
+            "result_dims stay in Iterated-axis (slice) order, not the owner's declared order"
+        );
+        assert_eq!(
+            agg.canonical_read_slice(),
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Iterated {
+                    dim: "d2".to_string(),
+                    source_dim: "d2".to_string()
+                },
+                AxisRead::Reduced { subset: None }
+            ]
+        );
+    }
+
+    /// GH #764 ∩ GH #765 (T4): a non-aligned whole-RHS reduce that ALSO
+    /// carries a `Pinned` axis (`out[D1,D2] = SUM(cube[D1,nyc,*])` over
+    /// `cube[D1,Region,D2]`) mints a synthetic agg whose slice keeps the
+    /// `Pinned` axis -- so the synthetic-half emitters (which are
+    /// Pinned-correct via `read_slice_rows`) score only the read rows.
+    /// Pre-T4 this shape rode the OLD full-cartesian link-score
+    /// derivation, scoring unread (`boston`) rows.
+    #[test]
+    fn whole_rhs_broadcast_pinned_mix_mints_synthetic_agg() {
+        let project = TestProject::new("whole_rhs_broadcast_pinned_764")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("Region", &["nyc", "boston"])
+            .named_dimension("D2", &["x", "y"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "Region".into(), "D2".into()],
+                "1",
+                None,
+            )
+            .array_aux_direct(
+                "out",
+                vec!["D1".into(), "D2".into()],
+                "SUM(cube[D1, nyc, *])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| a.is_synthetic),
+            "a Pinned-bearing non-aligned whole-RHS reducer must mint a synthetic agg; got: {:?}",
+            result.aggs
+        );
+        let agg = result
+            .aggs_in_var("out")
+            .next()
+            .expect("expected a synthetic agg owned by `out`");
+        assert_eq!(agg.result_dims, vec!["D1".to_string()]);
+        assert_eq!(
+            agg.canonical_read_slice(),
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Pinned("nyc".to_string()),
+                AxisRead::Reduced { subset: None }
+            ]
+        );
+    }
+
     /// GH #534: `iterated_axis_slot_elements` -- identity for the literal
     /// case, the positional preimage for a mapped pair, `None` for an
     /// element-mapped or unmapped pair.
@@ -2922,10 +3155,12 @@ mod tests {
         );
     }
 
-    /// GH #764 boundary (unchanged by T3): a partial reduce BROADCAST over
-    /// extra target dims (`out[D1,D3] = SUM(matrix[D1,*])` -- `result_dims`
-    /// a strict subset of `to`'s dims) stays declined; a slot does not name
-    /// a complete `to` element. T4 routes these to synthetic aggs.
+    /// GH #764 boundary (T4): a partial reduce BROADCAST over extra target
+    /// dims (`out[D1,D3] = SUM(matrix[D1,*])` -- `result_dims` a strict
+    /// subset of `to`'s dims) never reaches the variable-backed gate at all
+    /// anymore: T4's minting condition routes it to a SYNTHETIC agg, so
+    /// `variable_backed_reduce_agg` finds no variable-backed candidate (its
+    /// Iterated-arm alignment check stays as defense).
     #[test]
     fn reduce_gate_declines_broadcast_result_dims() {
         let project = TestProject::new("gate_broadcast_result")
@@ -2948,7 +3183,12 @@ mod tests {
         let to_dims = resolve_dims(&db, sync.project, &["d1", "d3"]);
         assert!(
             variable_backed_reduce_agg(result, "matrix", "out", &to_dims).is_none(),
-            "broadcast result_dims must stay declined (GH #764, T4's scope)"
+            "a broadcast whole-RHS reduce must have no variable-backed agg (GH #764)"
+        );
+        assert!(
+            result.aggs.iter().all(|a| a.is_synthetic),
+            "T4 mints a synthetic agg for the broadcast shape; got: {:?}",
+            result.aggs
         );
     }
 

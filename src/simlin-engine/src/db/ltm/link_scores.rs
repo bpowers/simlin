@@ -225,10 +225,13 @@ pub(super) fn link_score_dimensions(
 /// element edges `emit_agg_routed_edges` derives from the same slice. For
 /// an all-`Iterated`/full-extent slice the read rows ARE the cartesian
 /// rows (byte-identical to the pre-T3 derivation). The full `from_dims`
-/// cartesian product below remains only for edges with NO accepted
-/// variable-backed agg: the not-hoisted conservative family (dynamic-index
-/// reducers, declined mappings, GH #743 slice disagreements) and the
-/// GH #764 broadcast/permuted result shapes, all byte-identical to pre-T3.
+/// cartesian product below remains only for edges with NO variable-backed
+/// agg at all: the not-hoisted conservative family (dynamic-index
+/// reducers, declined mappings, GH #743 slice disagreements),
+/// byte-identical to pre-T3. (The GH #764 broadcast/permuted result shapes
+/// used to ride it too; since T4 they mint SYNTHETIC aggs at enumeration,
+/// so their edges route through the two-half agg emitters and never reach
+/// this function.)
 ///
 /// The one newly-LOUD decline: an ARRAYED-owner scalar-result Pinned/subset
 /// slice whose owner dims are a SUBSET of the source's
@@ -343,8 +346,10 @@ pub(super) fn try_cross_dimensional_link_scores(
     // first so the gate's decline reasons can be told apart: an accepted agg
     // takes the `read_slice_rows` path; an agg the gate declines because its
     // slice is non-trivial but scalar-result on an ARRAYED owner is the loud
-    // skip; every other decline (trivial slice, GH #764 broadcast/permuted)
-    // falls through to the pre-T3 cartesian derivation byte-identically.
+    // skip; the remaining decline (the trivial full-extent slice) falls
+    // through to the pre-T3 cartesian derivation byte-identically. (The
+    // GH #764 non-aligned shapes no longer appear here: since T4 they mint
+    // synthetic aggs, so no variable-backed agg exists for them.)
     if let Some(vb_agg) = agg_nodes
         .aggs_in_var(to)
         .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))

@@ -5600,3 +5600,514 @@ fn scalar_owner_all_pinned_slice_reduce_scores_single_row() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// GH #764 (shape-expressiveness T4): non-aligned variable-backed reduces --
+// result dims a BROADCAST (strict subset of the owner's dims) or a
+// PERMUTATION (different order) of the owner's dims -- mint SYNTHETIC aggs
+// (the GH #534 carve-out generalized) instead of keeping the conservative
+// cross-product with no matching scores.
+// ---------------------------------------------------------------------------
+
+/// GH #764, the BROADCAST shape end-to-end: `out[D1,D3] = SUM(matrix[D1,*])`
+/// (the reducer's result axis `D1` a strict subset of the owner's
+/// `[D1,D3]`) closed in a feedback loop. Pre-T4 the `matrix -> out` edge
+/// took the GH #758 loud conservative skip (its endpoint dims `[D1,D2]` vs
+/// `[D1,D3]` do not correspond): exactly one Assembly Warning, NO
+/// `matrix -> out` link score of any shape, and ZERO loop scores -- every
+/// loop through the edge was dropped. Post-T4 the whole-RHS reducer mints a
+/// synthetic agg arrayed over `[D1]`; the source half scores each read row
+/// per slot and the agg half broadcasts over `D3` via the GH #528
+/// projection, so the loops are genuinely scored.
+#[test]
+fn whole_rhs_broadcast_reduce_loop_scores_finite_and_sustained() {
+    let project = TestProject::new("t4_broadcast_loop")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        // The whole RHS is the broadcast partial reduce: result dims [D1],
+        // owner dims [D1,D3].
+        .array_aux_direct(
+            "out",
+            vec!["D1".into(), "D3".into()],
+            "SUM(matrix[D1, *])",
+            None,
+        )
+        // Closes the loop through the ALIGNED variable-backed reduce family
+        // (well-tested by `variable_backed_partial_reduce_loop_scores_*`).
+        .array_flow("inflow[D1]", "SUM(out[D1, *])", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // Zero warnings: pre-T4 this fixture surfaced exactly one GH #758
+    // "dimensions do not correspond" Warning on matrix -> out and dropped
+    // every loop.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the broadcast whole-RHS reduce must compile every LTM fragment cleanly; \
+         got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The synthetic agg aux is arrayed over the reducer's result dims [D1].
+    let agg_var = ltm_var(&ltm.vars, agg_name);
+    assert_eq!(
+        agg_var.dimensions,
+        vec!["D1".to_string()],
+        "the minted synthetic agg must be arrayed over the reducer's result dims"
+    );
+
+    // Source half: one per-(row, slot) score per read row.
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}{agg_name}[{d1}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected the source-half score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    // Agg half: the GH #528 projection broadcasts the [D1] slot over D3.
+    for (d1, d3) in [("a", "p"), ("a", "q"), ("b", "p"), ("b", "q")] {
+        let name = format!("{LINK_SCORE_PREFIX}{agg_name}[{d1}]\u{2192}out[{d1},{d3}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected the agg-half score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // Per-row attribution: the two co-reduced rows of each slot change by
+    // identical deltas (`matrix[d1,*] = stock[d1] * 0.1`), so each row's
+    // changed-first partial reads exactly 0.5.
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}{agg_name}[{d1}]");
+        let s = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-9,
+                "{name} at step {step}: expected 0.5 (two equal-delta co-reduced rows); \
+                 got {s:?}"
+            );
+        }
+    }
+    // Slot attribution: `out` IS the agg's value, so every agg-half score
+    // reads exactly 1 past the initial step.
+    for (d1, d3) in [("a", "p"), ("a", "q"), ("b", "p"), ("b", "q")] {
+        let name = format!("{LINK_SCORE_PREFIX}{agg_name}[{d1}]\u{2192}out[{d1},{d3}]");
+        let s = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "{name} at step {step}: expected exactly 1 (out IS the agg); got {s:?}"
+            );
+        }
+    }
+
+    // Exactly the 8 real loops (per (d1, d2, d3): stock[d1] -> matrix[d1,d2]
+    // -> agg[d1] -> out[d1,d3] -> inflow[d1] -> stock[d1]), every one
+    // routing through the agg, finite everywhere, and sustained non-zero.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        8,
+        "expected one loop per (d1, d2, d3) combination; got: {loop_names:?}"
+    );
+    for name in &loop_names {
+        let var = ltm_var(&ltm.vars, name);
+        assert!(
+            var.equation.source_text().contains(agg_name),
+            "every loop in this model routes through the synthetic agg; {name} does not: {}",
+            var.equation.source_text()
+        );
+        let base = offset_of(&results, name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let s = series_at(&results, base + slot);
+            for (step, &v) in s.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "loop score {name} slot {slot} at step {step} is not finite: {v}"
+                );
+            }
+            assert!(
+                s.iter()
+                    .skip(STARTUP_STEPS)
+                    .all(|v| v.abs() > MEANINGFUL_SCORE),
+                "loop score {name} slot {slot} must be sustained non-zero past the \
+                 startup guard; got: {s:?}"
+            );
+        }
+    }
+}
+
+/// GH #764, the PERMUTED shape end-to-end: `out[D2,D1] = SUM(cube[D1,D2,*])`
+/// (result dims `[D1,D2]` in slice order, the owner declared `[D2,D1]`)
+/// closed in a feedback loop. Pre-T4 the variable-backed gate declined the
+/// permutation but the OLD cartesian derivation still emitted per-(row,
+/// slot) scores while the element graph kept the conservative
+/// cross-product, so the phantom cross-product circuits referenced missing
+/// names: 184 "failed to compile" warned 0-stub loop scores alongside the
+/// real ones. Post-T4 the synthetic agg's slots are keyed by `result_dims`
+/// order and the GH #528 projection reorders per target element: exactly
+/// the real loops, zero warnings.
+#[test]
+fn whole_rhs_permuted_reduce_loop_scores_finite_and_sustained() {
+    let project = TestProject::new("t4_permuted_loop")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            "stock[D1,D2] * 0.1",
+            None,
+        )
+        // The whole RHS is the permuted partial reduce: result dims [D1,D2]
+        // (slice order), owner dims [D2,D1].
+        .array_aux_direct(
+            "out",
+            vec!["D2".into(), "D1".into()],
+            "SUM(cube[D1, D2, *])",
+            None,
+        )
+        .array_flow("inflow[D1,D2]", "out[D2, D1] * 0.5", None)
+        .array_stock("stock[D1,D2]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the permuted whole-RHS reduce must compile every LTM fragment cleanly \
+         (pre-T4: 184 warned 0-stub phantom loop scores); got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm_var(&ltm.vars, agg_name);
+    assert_eq!(
+        agg_var.dimensions,
+        vec!["D1".to_string(), "D2".to_string()],
+        "the synthetic agg's slots are keyed by result_dims (slice) order"
+    );
+
+    // Slot attribution under permutation: the agg side of the agg-half name
+    // carries the target element PROJECTED onto result_dims order --
+    // `agg[a,x] -> out[x,a]`, never the un-permuted `agg[x,a] -> out[x,a]`.
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let correct = format!("{LINK_SCORE_PREFIX}{agg_name}[{d1},{d2}]\u{2192}out[{d2},{d1}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == correct),
+            "expected the permuted agg-half score {correct:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+        let wrong = format!("{LINK_SCORE_PREFIX}{agg_name}[{d2},{d1}]\u{2192}out[{d2},{d1}]");
+        assert!(
+            !ltm.vars.iter().any(|v| v.name == wrong),
+            "the agg slot must be the result_dims-ordered projection; found mis-ordered \
+             {wrong:?}"
+        );
+    }
+    // Source half: one score per read row, slot in result_dims order.
+    for (d1, d2, d3) in [
+        ("a", "x", "p"),
+        ("a", "x", "q"),
+        ("a", "y", "p"),
+        ("a", "y", "q"),
+        ("b", "x", "p"),
+        ("b", "x", "q"),
+        ("b", "y", "p"),
+        ("b", "y", "q"),
+    ] {
+        let name = format!("{LINK_SCORE_PREFIX}cube[{d1},{d2},{d3}]\u{2192}{agg_name}[{d1},{d2}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected the source-half score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // Exactly the 8 real loops (per (d1, d2, d3): stock[d1,d2] ->
+    // cube[d1,d2,d3] -> agg[d1,d2] -> out[d2,d1] -> inflow[d1,d2] ->
+    // stock[d1,d2]); finite and sustained.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        8,
+        "expected one loop per (d1, d2, d3) combination; got: {loop_names:?}"
+    );
+    for name in &loop_names {
+        let var = ltm_var(&ltm.vars, name);
+        assert!(
+            var.equation.source_text().contains(agg_name),
+            "every loop in this model routes through the synthetic agg; {name} does not: {}",
+            var.equation.source_text()
+        );
+        let base = offset_of(&results, name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let s = series_at(&results, base + slot);
+            for (step, &v) in s.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "loop score {name} slot {slot} at step {step} is not finite: {v}"
+                );
+            }
+            assert!(
+                s.iter()
+                    .skip(STARTUP_STEPS)
+                    .all(|v| v.abs() > MEANINGFUL_SCORE),
+                "loop score {name} slot {slot} must be sustained non-zero past the \
+                 startup guard; got: {s:?}"
+            );
+        }
+    }
+}
+
+/// GH #764 ∩ GH #765 (the T3-report intersection): a non-aligned whole-RHS
+/// reduce that ALSO carries a Pinned axis -- `out[D1,D2] =
+/// SUM(cube[D1,nyc,*])` over `cube[D1,Region,D2]`, closed in a loop.
+/// Pre-T4 this shape rode the OLD full-cartesian link-score derivation
+/// byte-identically: it emitted per-(row, slot) scores for EVERY cube row
+/// including the unread `boston` rows (`cube[a,boston,x]→out[a,x]` read
+/// constant garbage), while the conservative cross-product element edges
+/// minted 184 warned 0-stub phantom loops. Post-T4 the minted synthetic
+/// agg's halves derive from `read_slice_rows` (Pinned-correct): only the
+/// `nyc` rows get scores, no LTM variable mentions `boston`, and the loops
+/// are genuinely scored with zero warnings.
+#[test]
+fn whole_rhs_broadcast_pinned_mix_scores_read_rows_only() {
+    let project = TestProject::new("t4_pinned_mix_loop")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "Region".into(), "D2".into()],
+            "stock[D1,D2] * 0.1",
+            None,
+        )
+        // Whole-RHS, Pinned Region axis, result dims [D1] broadcast over
+        // the owner's [D1,D2].
+        .array_aux_direct(
+            "out",
+            vec!["D1".into(), "D2".into()],
+            "SUM(cube[D1, nyc, *])",
+            None,
+        )
+        .array_flow("inflow[D1,D2]", "out[D1, D2] * 0.5", None)
+        .array_stock("stock[D1,D2]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the Pinned-bearing broadcast reduce must compile every LTM fragment cleanly \
+         (pre-T4: 184 warned 0-stub phantom loop scores); got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm_var(&ltm.vars, agg_name);
+    assert_eq!(agg_var.dimensions, vec!["D1".to_string()]);
+
+    // Pinned-correctness: only the nyc rows get source-half scores...
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name = format!("{LINK_SCORE_PREFIX}cube[{d1},nyc,{d2}]\u{2192}{agg_name}[{d1}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected the read-row score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    // ... and NO LTM variable of any kind mentions an unread boston row
+    // (pre-T4 the cartesian derivation scored them all).
+    let boston_garbage: Vec<&str> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("boston"))
+        .map(|v| v.name.as_str())
+        .collect();
+    assert!(
+        boston_garbage.is_empty(),
+        "unread (boston) rows must get NO scores or loops; got: {boston_garbage:?}"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // Per-row attribution: the two read rows of each slot change by equal
+    // deltas, so each scores 0.5.
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name = format!("{LINK_SCORE_PREFIX}cube[{d1},nyc,{d2}]\u{2192}{agg_name}[{d1}]");
+        let s = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-9,
+                "{name} at step {step}: expected 0.5 (two equal-delta read rows); got {s:?}"
+            );
+        }
+    }
+
+    // Loops through the agg exist (the per-(d1,d2) diagonals plus the
+    // cross-D2 petal recoveries within each D1 row), every one finite and
+    // sustained.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        loop_names.len() >= 4,
+        "expected at least the four per-(d1,d2) diagonal loops; got: {loop_names:?}"
+    );
+    for name in &loop_names {
+        let var = ltm_var(&ltm.vars, name);
+        assert!(
+            var.equation.source_text().contains(agg_name),
+            "every loop in this model routes through the synthetic agg; {name} does not: {}",
+            var.equation.source_text()
+        );
+        let base = offset_of(&results, name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let s = series_at(&results, base + slot);
+            for (step, &v) in s.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "loop score {name} slot {slot} at step {step} is not finite: {v}"
+                );
+            }
+            assert!(
+                s.iter()
+                    .skip(STARTUP_STEPS)
+                    .all(|v| v.abs() > MEANINGFUL_SCORE),
+                "loop score {name} slot {slot} must be sustained non-zero past the \
+                 startup guard; got: {s:?}"
+            );
+        }
+    }
+}
+
+/// T4 blast-radius golden pin: the GH #534 MAPPED whole-RHS reducer
+/// (`growth[State] = SUM(matrix[State,*])` over a positional `State→Region`
+/// mapping, in a loop) -- the carve-out T4 generalizes -- must keep
+/// byte-identical emissions across the unified minting condition: the same
+/// synthetic agg (arrayed over the TARGET dim), the same remapped
+/// source-half names, and the exact source-half equation text captured at
+/// the T4 parent commit.
+#[test]
+fn whole_rhs_mapped_reduce_emissions_stay_byte_identical() {
+    let project = TestProject::new("t4_mapped_golden")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["west", "east"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension_with_mapping("State", &["CA", "NY"], "Region")
+        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["Region".into(), "D2".into()],
+            "pop[Region] * 0.05",
+            None,
+        )
+        .array_aux_direct(
+            "growth",
+            vec!["State".into()],
+            "SUM(matrix[State, *])",
+            None,
+        )
+        .array_flow("inflow[Region]", "SUM(growth[*]) * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the mapped whole-RHS reduce must stay warning-free; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg0 = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm_var(&ltm.vars, agg0);
+    assert_eq!(agg_var.dimensions, vec!["State".to_string()]);
+    assert_eq!(agg_var.equation.source_text(), "sum(matrix[state, *])");
+
+    // The remapped source-half names: each Region row feeds the slot of its
+    // positionally-corresponding State element.
+    for (region, state) in [("west", "ca"), ("east", "ny")] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{region},{d2}]\u{2192}{agg0}[{state}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected the remapped source-half score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // The exact source-half equation text captured at the T4 parent commit
+    // (148a17d8).
+    let golden = "if (TIME = INITIAL_TIME) then 0 else if ((\"$\u{205A}ltm\u{205A}agg\u{205A}0\"\
+[ca] - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca])) = 0) OR ((matrix[region\u{B7}west,\
+d2\u{B7}x] - PREVIOUS(matrix[region\u{B7}west,d2\u{B7}x])) = 0) then 0 else SAFEDIV((PREVIOUS\
+(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca]) + (matrix[region\u{B7}west,d2\u{B7}x] - PREVIOUS(\
+matrix[region\u{B7}west,d2\u{B7}x])) - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca])), \
+ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca] - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"\
+[ca]))), 0) * SIGN((matrix[region\u{B7}west,d2\u{B7}x] - PREVIOUS(matrix[region\u{B7}west,\
+d2\u{B7}x])))";
+    let name = format!("{LINK_SCORE_PREFIX}matrix[west,x]\u{2192}{agg0}[ca]");
+    let var = ltm_var(&ltm.vars, &name);
+    assert_eq!(
+        var.equation.source_text(),
+        golden,
+        "the mapped whole-RHS source-half equation text must stay byte-identical"
+    );
+}

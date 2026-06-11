@@ -1885,8 +1885,14 @@ pub fn model_element_causal_edges(
                         // the SAME `read_slice_rows` carry exactly these
                         // edges' names, so loop scores over them resolve.
                         // `variable_backed_reduce_agg` is `None` for the
-                        // whole-extent / broadcast / permuted-axes shapes,
-                        // which keep the conservative arm below.
+                        // whole-extent shape (which keeps the reference
+                        // walker's reduction/broadcast edges below) and the
+                        // GH #777 arrayed-owner scalar-result slice (the
+                        // loud-skip conservative arm). The GH #764
+                        // broadcast/permuted shapes no longer reach this
+                        // `Direct` dispatch at all: since T4 they mint
+                        // SYNTHETIC aggs, so their sites classify
+                        // `ThroughAgg` and take the arm below.
                         //
                         // Shape condition: a hoistable whole-RHS reducer
                         // arg classifies `Wildcard` (any `*` index, or
