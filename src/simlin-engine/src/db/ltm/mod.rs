@@ -52,6 +52,12 @@ pub(crate) use link_scores::emit_ltm_partial_equation_warning;
 #[cfg(test)]
 pub(crate) use link_scores::ltm_partial_equation_warning_message;
 pub(crate) use loops::build_loops_from_tiered;
+// The single row/slot derivation (invariant I4 of the shape-expressiveness
+// design), re-exported for `db::analysis::emit_edges_for_reference`'s
+// `PerElement` arm (GH #525) so the element graph's
+// diagonal-with-pinned-axes expansion and the link-score emitters derive
+// rows from one function.
+pub(crate) use loops::{ReadSliceRow, read_slice_rows};
 // The cross-element-through-aggregate petal-stitching core, shared by the
 // exhaustive recovery (`recover_cross_agg_loops`) and discovery
 // (`ltm_finding`, GH #696) so both enumerate exactly the same cross-agg loops.

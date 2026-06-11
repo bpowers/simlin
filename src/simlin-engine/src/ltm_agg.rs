@@ -72,8 +72,9 @@
 //! is per-result-slot constant, the arrayed generalization of the GH #737
 //! scalar feeder). The carve-outs: a reducer over a *dynamic index*
 //! (`SUM(pop[idx,*])`, `idx` non-literal) is not statically describable, a
-//! mapped iterated axis whose mapping is element-mapped (GH #756),
-//! reverse-declared (GH #757), or non-positional is declined, a StarRange
+//! mapped iterated axis whose mapping is element-mapped (GH #756) or
+//! non-positional is declined (a positional mapping is accepted in EITHER
+//! declaration direction since GH #757), a StarRange
 //! naming a NON-subdimension (a mid-edit inconsistency that must not
 //! silently widen to the full extent) is declined -- `compute_read_slice`
 //! returns `None`, the reducer is not hoisted, and its reference stays on
@@ -285,7 +286,12 @@ pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
 ///   every element of that axis feeds the agg result slot; with
 ///   `subset: Some(elems)` (a StarRange over a PROPER subdimension,
 ///   GH #766) only the subdimension's elements do.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+///
+/// `PartialOrd`/`Ord`/`Hash` ride along because `RefShape::PerElement`
+/// (GH #525, T6 of the shape-expressiveness design) embeds an
+/// `AxisRead` vector and `RefShape` lives in `BTreeSet`s /
+/// `HashSet`-keyed dedup maps downstream.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum AxisRead {
     /// A single literal element of this source axis is read (`pop[NYC, *]`).
     /// Carries the canonical element name.
@@ -1199,11 +1205,12 @@ fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<Axis
 }
 
 /// Classify ONE subscript index against one source axis -- the single
-/// per-axis access classifier (shape-expressiveness design, T1). Shared by
-/// [`compute_read_slice`] (reducer args); the direct-reference classifier
-/// (`db::ltm_ir::classify_iterated_dim_shape`) is rewired onto it in a later
-/// task of the same design, so the reducer path and the reference path can
-/// never disagree about an axis.
+/// per-axis access classifier (shape-expressiveness design, T1/T6). Shared
+/// by [`compute_read_slice`] (reducer args) AND the direct-reference
+/// classifier (`db::ltm_ir::classify_iterated_dim_shape`, which rejects
+/// `Reduced` results -- a non-reducer reference never collapses an axis),
+/// so the reducer path and the reference path can never disagree about an
+/// axis.
 ///
 /// Returns `None` for anything not statically describable (a dynamic
 /// expression, a `@N` position, a `Range`, a declined mapping, a StarRange
@@ -1222,11 +1229,13 @@ fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<Axis
 ///   widen to the full extent.
 /// - `IndexExpr2::Expr(Expr2::Var(d, ..))` where `d` (canonical) is one of
 ///   the *target equation's* iterated dimensions AND matches the source's
-///   axis dimension either *by name* or via a positional dimension MAPPING
-///   declared on `d` toward it (`has_mapping_to(d, src)` -- the same
-///   declared direction `classify_iterated_dim_shape`'s mapped arm accepts
-///   -- with a usable [`iterated_axis_slot_elements`] remap, which inherits
-///   `mapped_element_correspondence`'s positional-only gate)
+///   axis dimension either *by name* or via a usable
+///   [`iterated_axis_slot_elements`] remap -- which consults
+///   `mapped_element_correspondence` and therefore accepts a positional
+///   dimension MAPPING declared in EITHER direction (GH #757 widened the
+///   former `has_mapping_to(d, src)` forward-declared-only gate; the
+///   correspondence helper already handled both declaration directions and
+///   carries the GH #756 positional-only gate)
 ///   ⇒ [`AxisRead::Iterated`] carrying the `(d, src)` pair (GH #534). The
 ///   three `Iterated`-axis consumers (`emit_agg_routed_edges`,
 ///   `read_slice_rows` behind `emit_source_to_agg_link_scores`, and
@@ -1234,26 +1243,23 @@ fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<Axis
 ///   row to the slot of its positionally-corresponding target element
 ///   through the same helper. Declined (⇒ `None`, conservative): an
 ///   explicit element-mapped pair (execution resolves positionally and
-///   ignores the map -- GH #756), a mapping declared only in the REVERSE
-///   direction (on the source's dimension; GH #757 tracks that direction's
-///   classification separately -- do not widen here), an unmapped
-///   position-mismatched pair, and a non-positional size mismatch.
-///   (`classify_iterated_dim_shape`'s own mapped branch -- a
-///   *whole*-equation-iterated subscript, not a sliced reducer argument --
-///   is a separate code path and is unaffected.)
+///   ignores the map -- GH #756), an unmapped position-mismatched pair,
+///   and a non-positional size mismatch.
+///   (`classify_iterated_dim_shape` consumes this classifier directly
+///   since T6, so the direct-reference path and the reducer path accept
+///   the identical mapped set by construction.)
 /// - `IndexExpr2::Expr(Expr2::Var(elem, ..))` or `Expr2::Const` resolving to
 ///   a literal element / 1-based index of the axis's dimension ⇒
 ///   [`AxisRead::Pinned`] carrying that element's canonical name.
 /// - anything else (`DimPosition`, `Range`, a non-literal `Expr`, a
 ///   `Var`/`Const` that resolves to neither an iterated dim nor a literal
 ///   element) ⇒ `None`.
-fn classify_axis_access(
+pub(crate) fn classify_axis_access(
     idx: &IndexExpr2,
     axis_dim: &crate::dimensions::Dimension,
     target_iterated_dims: &[String],
     dim_ctx: &crate::dimensions::DimensionsContext,
 ) -> Option<AxisRead> {
-    use crate::common::CanonicalDimensionName;
     match idx {
         IndexExpr2::Wildcard(_) => Some(AxisRead::Reduced { subset: None }),
         IndexExpr2::StarRange(named, _) => {
@@ -1304,23 +1310,19 @@ fn classify_axis_access(
                     // The iterated dim names a *different* source axis: a
                     // positional remap (`State→Region`, GH #534) is accepted
                     // -- carrying the (target, source) pair so the emitters
-                    // remap each row to its slot -- when (a) the mapping is
-                    // declared on the iterated dim toward the source's dim
-                    // (the same direction `classify_iterated_dim_shape`'s
-                    // mapped arm accepts; the reverse-declared direction is
-                    // GH #757 and stays conservative) and (b) the slot remap
-                    // exists (positional mappings only: explicit element
-                    // maps decline via `mapped_element_correspondence`'s
-                    // GH #756 gate). Everything else -- a plain position
-                    // mismatch, an element-mapped or reverse-declared pair
-                    // -- declines, keeping the reference on the
-                    // conservative path.
-                    let d_canon = CanonicalDimensionName::from_raw(name_str);
-                    let src_canon = CanonicalDimensionName::from_raw(src_dim_name);
+                    // remap each row to its slot -- when the slot remap
+                    // exists. `iterated_axis_slot_elements` consults
+                    // `mapped_element_correspondence`, which accepts BOTH
+                    // declaration directions (GH #757 -- the former
+                    // `has_mapping_to(d, src)` forward-only pre-gate was
+                    // dropped) and declines explicit element maps (execution
+                    // resolves positionally and ignores the map, the GH #756
+                    // gate). Everything else -- a plain position mismatch,
+                    // an element-mapped pair -- declines, keeping the
+                    // reference on the conservative path.
                     let elems = crate::ltm_augment::dimension_element_names(axis_dim);
-                    if dim_ctx.has_mapping_to(&d_canon, &src_canon)
-                        && iterated_axis_slot_elements(name_str, src_dim_name, &elems, dim_ctx)
-                            .is_some()
+                    if iterated_axis_slot_elements(name_str, src_dim_name, &elems, dim_ctx)
+                        .is_some()
                     {
                         Some(AxisRead::Iterated {
                             dim: name_str.to_string(),
@@ -2616,14 +2618,17 @@ mod tests {
         assert!(result.synthetic_by_key.is_empty());
     }
 
-    /// GH #534 (conservative gate, reverse-declared): a sliced reducer whose
-    /// mapping is declared only in the REVERSE direction (on the source's
-    /// `Region` toward `State`) stays un-hoisted, matching the direction
-    /// `classify_iterated_dim_shape`'s mapped arm accepts
-    /// (`has_mapping_to(iterated, source)` only; the reverse-subscripted
-    /// direction is tracked by GH #757 -- not widened here).
+    /// GH #757 (flipped from the GH #534-era conservative pin): a sliced
+    /// reducer whose POSITIONAL mapping is declared only in the REVERSE
+    /// direction (on the source's `Region` toward `State`) is now hoisted --
+    /// `classify_axis_access`'s mapped arm gates on
+    /// `iterated_axis_slot_elements` / `mapped_element_correspondence`,
+    /// which accepts both declaration directions (the compiler's
+    /// `translate_via_mapping` resolves both, so declining one direction
+    /// was pure over-conservatism). The slice and `result_dims` are
+    /// identical to the forward-declared twin.
     #[test]
-    fn reverse_declared_mapped_sliced_reducer_is_not_hoisted() {
+    fn reverse_declared_mapped_sliced_reducer_is_hoisted() {
         let project = TestProject::new("reverse_mapped_slice")
             .named_dimension_with_mapping("Region", &["r1", "r2"], "State")
             .named_dimension("D2", &["x", "y"])
@@ -2637,12 +2642,24 @@ mod tests {
             );
 
         let result = agg_nodes(&project);
-        assert!(
-            result.aggs.iter().all(|a| !a.reads_var("matrix")),
-            "a reverse-declared mapped sliced reducer must not be hoisted; got: {:?}",
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "the reverse-declared positionally-mapped sliced reducer must be hoisted; got: {:?}",
             result.aggs
         );
-        assert!(result.synthetic_by_key.is_empty());
+        assert_eq!(
+            synthetic[0].canonical_read_slice(),
+            vec![
+                AxisRead::Iterated {
+                    dim: "state".to_string(),
+                    source_dim: "region".to_string()
+                },
+                AxisRead::Reduced { subset: None }
+            ]
+        );
+        assert_eq!(synthetic[0].result_dims, vec!["State".to_string()]);
     }
 
     /// GH #534: the whole-RHS twin -- `out[State] = SUM(matrix[State,*])`

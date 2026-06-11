@@ -663,12 +663,13 @@ impl DimensionsContext {
     /// - **Direction**: both declaration directions are honored, mirroring
     ///   [`Self::translate_via_mapping`] (which the compiler's subscript /
     ///   A2A resolution uses): a mapping declared on `iterated_dim` toward
-    ///   `source_dim` -- the direction `classify_iterated_dim_shape`'s
-    ///   mapped-`Bare` arm accepts via `has_mapping_to(iterated, source)`
-    ///   -- or one declared on `source_dim` toward `iterated_dim` (which
-    ///   only arises for *bare* references; a subscripted reference with a
-    ///   reverse-declared mapping classifies `DynamicIndex` upstream and
-    ///   never consults this correspondence).
+    ///   `source_dim` or one declared on `source_dim` toward
+    ///   `iterated_dim`. Since GH #757 the classifiers
+    ///   (`classify_iterated_dim_shape` via
+    ///   `ltm_agg::classify_axis_access`) gate their mapped arms on this
+    ///   same correspondence, so subscripted references accept both
+    ///   directions too -- classification, expansion, and the compiler
+    ///   resolve the identical mapped set.
     /// - **Transitivity**: single-hop only, matching `has_mapping_to`. A
     ///   chained `A→B→C` mapping yields `None` for the `(A, C)` pair, just
     ///   as the classifier declines it.

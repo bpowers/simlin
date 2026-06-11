@@ -1563,16 +1563,17 @@ fn element_graph_mapped_reverse_declared_bare_is_diagonal() {
     assert_no_edge(&result, "x[b]", "target[s1]");
 }
 
-/// GH #527 (classifier consistency): a SUBSCRIPTED iterated-dim reference
-/// whose mapping is declared only in the reverse direction (`Region→State`,
-/// i.e. on the source's dimension) is NOT accepted by
-/// `classify_iterated_dim_shape`'s mapped arm (which checks
-/// `has_mapping_to(index_dim, source_dim)` only), so it classifies
-/// `DynamicIndex` and keeps the conservative cross-product. This pins the
-/// classification ⟺ expansion agreement: the diagonal is only emitted for
-/// shapes the classifier calls `Bare`.
+/// GH #757 (flipped from the GH #527-era conservative pin): a SUBSCRIPTED
+/// iterated-dim reference whose POSITIONAL mapping is declared only in the
+/// reverse direction (`Region→State`, i.e. on the source's dimension) now
+/// classifies `Bare` -- `classify_iterated_dim_shape`'s mapped arm gates on
+/// the same `mapped_element_correspondence` data `expand_same_element`
+/// consults (both declaration directions), so the subscripted form gets the
+/// same DIAGONAL the bare form (`element_graph_mapped_reverse_declared_bare_is_diagonal`)
+/// already got, matching the compiler's `translate_via_mapping` (which
+/// resolves both directions identically).
 #[test]
-fn element_graph_mapped_reverse_declared_subscripted_stays_cross_product() {
+fn element_graph_mapped_reverse_declared_subscripted_is_diagonal() {
     let project = TestProject::new("mapped_reverse_subscripted")
         .named_dimension_with_mapping("Region", &["a", "b"], "State")
         .named_dimension("State", &["s1", "s2"])
@@ -1582,9 +1583,75 @@ fn element_graph_mapped_reverse_declared_subscripted_stays_cross_product() {
     let result = element_edges(&project);
 
     assert_edge(&result, "x[a]", "target[s1]");
-    assert_edge(&result, "x[a]", "target[s2]");
-    assert_edge(&result, "x[b]", "target[s1]");
     assert_edge(&result, "x[b]", "target[s2]");
+    assert_no_edge(&result, "x[a]", "target[s2]");
+    assert_no_edge(&result, "x[b]", "target[s1]");
+}
+
+/// GH #525 (T6): a mixed iterated+literal subscript (`pop[Region, young]`
+/// inside an A2A-over-`Region` equation) classifies `PerElement` and the
+/// element graph emits ONLY the diagonal-with-pinned-axes edges -- the
+/// same-`Region` element pinned at `Age = young` -- never the conservative
+/// cross-product (`pop[a,*] -> row_sum[b]`) whose phantom circuits carried
+/// silent confident loop scores.
+#[test]
+fn element_graph_per_element_mixed_subscript_is_pinned_diagonal() {
+    let project = TestProject::new("per_element_mixed")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "100", None)
+        .array_aux_direct(
+            "row_sum",
+            vec!["Region".into()],
+            "pop[Region, young] + pop[Region, old]",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    // The two sites' pinned diagonals, and nothing else.
+    assert_edge(&result, "pop[a,young]", "row_sum[a]");
+    assert_edge(&result, "pop[a,old]", "row_sum[a]");
+    assert_edge(&result, "pop[b,young]", "row_sum[b]");
+    assert_edge(&result, "pop[b,old]", "row_sum[b]");
+    assert_no_edge(&result, "pop[a,young]", "row_sum[b]");
+    assert_no_edge(&result, "pop[a,old]", "row_sum[b]");
+    assert_no_edge(&result, "pop[b,young]", "row_sum[a]");
+    assert_no_edge(&result, "pop[b,old]", "row_sum[a]");
+}
+
+/// GH #525 (T6, broadcast): a `PerElement` reference whose Iterated dims
+/// are a strict SUBSET of the target's (`mid[D1,D2] = pop[D1, young] *
+/// 0.05` -- `D1` iterated, `Age` pinned, `D2` broadcast) emits one edge per
+/// (row, full target element): the row feeds every `D2` slot of its `D1`
+/// row, never another `D1` row, and the unpinned `Age` elements feed
+/// nothing.
+#[test]
+fn element_graph_per_element_broadcast_is_pinned_diagonal() {
+    let project = TestProject::new("per_element_broadcast")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct("pop", vec!["D1".into(), "Age".into()], "100", None)
+        .array_aux_direct(
+            "mid",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1, young] * 0.05",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    assert_edge(&result, "pop[a,young]", "mid[a,x]");
+    assert_edge(&result, "pop[a,young]", "mid[a,y]");
+    assert_edge(&result, "pop[b,young]", "mid[b,x]");
+    assert_edge(&result, "pop[b,young]", "mid[b,y]");
+    // No cross-D1 edges, and the unread `old` rows feed nothing.
+    assert_no_edge(&result, "pop[a,young]", "mid[b,x]");
+    assert_no_edge(&result, "pop[b,young]", "mid[a,x]");
+    assert_no_edge(&result, "pop[a,old]", "mid[a,x]");
+    assert_no_edge(&result, "pop[a,old]", "mid[a,y]");
+    assert_no_edge(&result, "pop[b,old]", "mid[b,x]");
 }
 
 /// GH #527: an EXPLICIT element-level mapping (here the different-
@@ -1837,14 +1904,14 @@ fn element_graph_element_mapped_sliced_reducer_stays_cross_product() {
     );
 }
 
-/// GH #534 (classifier-direction consistency): a sliced reducer whose
-/// mapping is declared only in the REVERSE direction (on the source's
-/// `Region` toward `State`) stays un-hoisted, mirroring
-/// `classify_iterated_dim_shape`'s declared-direction gate (GH #757 tracks
-/// the reverse-subscripted direction separately). Conservative cross-product,
-/// no agg node.
+/// GH #757 (flipped from the GH #534-era conservative pin): a sliced
+/// reducer whose POSITIONAL mapping is declared only in the REVERSE
+/// direction (on the source's `Region` toward `State`) is now hoisted --
+/// `classify_axis_access` gates on `mapped_element_correspondence`, which
+/// accepts both declaration directions -- so the element graph routes it
+/// through the remapped agg slots exactly like the forward-declared twin.
 #[test]
-fn element_graph_reverse_declared_mapped_sliced_reducer_stays_cross_product() {
+fn element_graph_reverse_declared_mapped_sliced_reducer_routes_remapped_agg() {
     let project = TestProject::new("reverse_mapped_sliced")
         .named_dimension_with_mapping("Region", &["r1", "r2"], "State")
         .named_dimension("D2", &["x", "y"])
@@ -1858,11 +1925,24 @@ fn element_graph_reverse_declared_mapped_sliced_reducer_stays_cross_product() {
         );
 
     let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
 
+    // Source rows route to the agg slot of the positionally-corresponding
+    // State element; the agg fans into the target diagonally.
+    assert_edge(&result, "matrix[r1,x]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r1,y]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r2,x]", &format!("{agg}[s2]"));
+    assert_edge(&result, "matrix[r2,y]", &format!("{agg}[s2]"));
+    assert_no_edge(&result, "matrix[r1,x]", &format!("{agg}[s2]"));
+    assert_no_edge(&result, "matrix[r2,x]", &format!("{agg}[s1]"));
+    assert_edge(&result, &format!("{agg}[s1]"), "growth[s1]");
+    assert_edge(&result, &format!("{agg}[s2]"), "growth[s2]");
+    assert_no_edge(&result, &format!("{agg}[s1]"), "growth[s2]");
+    // No conservative direct matrix → growth edges remain.
     for r in ["r1", "r2"] {
         for d2 in ["x", "y"] {
             for s in ["s1", "s2"] {
-                assert_edge(
+                assert_no_edge(
                     &result,
                     &format!("matrix[{r},{d2}]"),
                     &format!("growth[{s}]"),
@@ -1870,13 +1950,6 @@ fn element_graph_reverse_declared_mapped_sliced_reducer_stays_cross_product() {
             }
         }
     }
-    assert!(
-        !result
-            .edges
-            .keys()
-            .any(|k| k.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}")),
-        "a reverse-declared mapped sliced reducer must not route through an agg node"
-    );
 }
 
 /// GH #534 (scalar co-feeder composition): a mapped sliced reducer with a

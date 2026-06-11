@@ -1743,31 +1743,24 @@ fn arrayed_per_element_init_keeps_per_slot_identity() {
     );
 }
 
-/// The GH #525 partially-iterated-subscript shape now compiles AND scores
-/// (resolved by the GH #759 dimension-name-index fix).
+/// The GH #525 partially-iterated-subscript shape compiles AND scores --
+/// since T6 of the shape-expressiveness design via the `PerElement`
+/// classification (the iterated+literal mix `pop[region,young]` no longer
+/// lands in `DynamicIndex`).
 ///
 /// The model: an arrayed stock `pop[region,age]`, a row-reducer
 /// `row_sum[region] = pop[region,young] * 2` (a partially iterated
 /// subscript -- `young` is fixed, `region` is iterated), and a flow
 /// `growth[region,age] = row_sum[region] * 0.0001 * pop[region,age]` that
-/// closes a feedback loop. The `pop[region,young]` reference still
-/// classifies `DynamicIndex` (the classifier's all-iterated rule doesn't
-/// cover the iterated+literal mix), but the conservative partial it
-/// produces is now compilable: before the #759 fix the iterated dim name
-/// `region` was PREVIOUS-wrapped inside the subscript
-/// (`pop[PREVIOUS(region), young]` / `PREVIOUS(SUM(pop[PREVIOUS(region),
-/// young]))`), the fragment and its capture helpers failed, and the score
-/// was stubbed to 0 with a Warning (a hard `NotSimulatable` on the
-/// pre-fragment-isolation path the original #525 filing hit). Now the
-/// index stays verbatim, the `PREVIOUS(SUM(pop[region, young]))` guard
-/// term compiles through a per-element capture helper, and the score
-/// carries its true value.
+/// closes a feedback loop. The reference's link scores are the
+/// per-(row, full-target-element) scalars
+/// `$⁚ltm⁚link_score⁚pop[{r},young]→row_sum[{r}]` -- one per target
+/// element, with the row projected from it -- replacing the merged
+/// Bare-named conservative score of the pre-T6 `DynamicIndex` family.
 ///
-/// `row_sum` depends on nothing but `pop`, so the conservative
-/// all-references-live partial reproduces Δrow_sum exactly: the score is
-/// `+1` from the first post-initial step. The residual #525 conservatism
-/// -- the `DynamicIndex` cross-product element edges enumerating
-/// cross-element loops that don't exist causally -- is tracked on GH #525.
+/// `pop[region,young]` is the slot's only moving input, so the
+/// per-element partial reproduces Δrow_sum exactly: each scalar scores
+/// `+1` from the first post-initial step.
 #[test]
 fn partially_iterated_subscript_link_score_compiles_and_scores() {
     let project = TestProject::new("ltm525_scored")
@@ -1808,20 +1801,37 @@ fn partially_iterated_subscript_link_score_compiles_and_scores() {
         .expect("VM simulation should run to completion");
     let results = vm.into_results();
 
-    // `pop` is row_sum's only dependency, so the conservative partial is
-    // exact: +1 per element from the first post-initial step.
-    let link_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}row_sum";
-    let base = offset_of(&results, link_name);
-    for slot in 0..2 {
-        let series = series_at(&results, base + slot);
-        assert_eq!(series[0], 0.0, "initial-step guard pins slot {slot} to 0");
+    // The merged Bare-named conservative score is retired; the
+    // per-(row, full-target-element) scalars carry the edge instead.
+    let score_names = ltm_score_var_names(&results);
+    assert!(
+        !score_names
+            .iter()
+            .any(|n| n == "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}row_sum"),
+        "the merged Bare pop\u{2192}row_sum score must not exist post-T6; got: {score_names:?}"
+    );
+    // `pop[region,young]` is the slot's only moving input, so each
+    // per-element scalar is exact: +1 from the first post-initial step.
+    for r in ["a", "b"] {
+        let link_name = format!("{LINK_SCORE_PREFIX}pop[{r},young]\u{2192}row_sum[{r}]");
+        let series = series_at(&results, offset_of(&results, &link_name));
+        assert_eq!(series[0], 0.0, "initial-step guard pins {link_name} to 0");
         for (step, &v) in series.iter().enumerate().skip(1) {
             assert!(
                 (v - 1.0).abs() < 1e-9,
-                "pop->row_sum slot {slot} step {step} must score +1; got {series:?}"
+                "{link_name} step {step} must score +1; got {series:?}"
             );
         }
     }
+    // The unread `old` rows get no score at all (the pre-T6 cross-product
+    // family would have attributed them through the merged Bare name).
+    assert!(
+        !score_names
+            .iter()
+            .any(|n| n.contains("pop[a,old]\u{2192}row_sum")
+                || n.contains("pop[b,old]\u{2192}row_sum")),
+        "unread rows must have no pop\u{2192}row_sum scores; got: {score_names:?}"
+    );
 
     // The sibling link score still carries real values (nothing regressed).
     let sibling = "$\u{205A}ltm\u{205A}link_score\u{205A}row_sum\u{2192}growth";
@@ -4824,32 +4834,28 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
 /// `growth[Region, Age] = row_sum[Region] * 0.0001 * pop[Region, Age]`
 /// closing the feedback loop.
 ///
-/// As filed, this was a hard "PREVIOUS requires a variable reference after
-/// helper rewriting" compile failure; on the fragment-isolated pipeline it
-/// degraded to a warned 0-stub, and the GH #759 fix makes it genuinely
-/// score: both `pop[region, <elem>]` references classify `DynamicIndex` and
-/// stay live in the conservative partial, the `PREVIOUS(SUM(pop[region,
-/// young]))` guard term compiles through a per-element capture helper, and
-/// -- because `pop` is `row_sum`'s only dependency -- the score is exactly
-/// `+1` per element.
+/// Post-T6 of the shape-expressiveness design both `pop[Region, <elem>]`
+/// references classify `RefShape::PerElement`, and the three parts of the
+/// documented flip hold:
 ///
-/// Residual #525 conservatism, pinned LOUDLY below (the repo convention for
-/// degraded behavior): the `DynamicIndex` classification expands to
-/// cross-product element edges (`pop[a,*] -> row_sum[b]`), so the
-/// enumerator also reports cross-element "loops" that do not exist
-/// causally -- and they are SILENT CONFIDENT PHANTOMS, not zeros: each
-/// phantom's loop-score product composes per-slot link scores across the
-/// non-causal pathway (the cross edge reads the WRONG element's real link
-/// score at the target slot), so it carries a plausible-looking sustained
-/// value (~0.245 here) with no diagnostic. They also dilute the shared
-/// cycle partition's rel-score denominator (~20% in this repro), shrinking
-/// every REAL loop's relative importance. Extending
-/// `classify_iterated_dim_shape` to the iterated+literal mix (a per-element
-/// family pinned on the literal axes) removes them; tracked on GH #525
-/// (rescoped to exactly this residual). The exact-value pin below makes
-/// the phantoms visible in the suite so the future classifier fix must
-/// consciously flip these assertions (phantoms no longer enumerated)
-/// rather than silently changing scores.
+/// (a) the merged Bare arrayed link score `pop→row_sum` (which scored +1
+///     per slot with BOTH references live) is no longer emitted; instead
+///     the four per-(row, element) scalars `pop[{r},{age}]→row_sum[{r}]`
+///     each score ~0.5 in this symmetric repro -- each site now attributes
+///     only its own reference's share;
+/// (b) the single ApplyToAll loop through row_sum flips to per-circuit
+///     element-subscripted scalar loops (one per `(Region, Age)` circuit)
+///     whose equations reference the per-(row, element) names and carry
+///     real non-zero post-startup values;
+/// (c) the phantom cross-element loops (~0.245 silent confident scores,
+///     four of them pre-T6) are no longer enumerated AT ALL: the element
+///     graph emits only the pinned diagonal, so no loop-score equation
+///     contains the plain substring `pop→row_sum` -- exact as a substring
+///     check because every per-(row, element) name interposes the
+///     from-side `]` before the arrow (`pop[r,a]→row_sum[r]`).
+///
+/// The detected surface must biject with the scored one (the #746-era
+/// invariant) -- the per-circuit loops ride the same builders.
 #[test]
 fn gh525_two_reference_partially_iterated_row_sum_scores() {
     let project = TestProject::new("gh525_repro")
@@ -4877,43 +4883,245 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
         "every LTM fragment (capture helpers included) must compile; got: {warnings:?}"
     );
 
-    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end()
         .expect("VM simulation should run to completion");
     let results = vm.into_results();
 
-    // Both pop references stay live and pop is row_sum's only dependency,
-    // so the conservative partial reproduces delta-row_sum exactly: +1 per
-    // Region element from the first post-initial step.
-    let link_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}row_sum";
-    let base = offset_of(&results, link_name);
-    for slot in 0..2 {
-        let series = series_at(&results, base + slot);
-        assert_eq!(series[0], 0.0, "initial-step guard pins slot {slot} to 0");
-        for (step, &v) in series.iter().enumerate().skip(1) {
-            assert!(
-                (v - 1.0).abs() < 1e-9,
-                "pop->row_sum slot {slot} step {step} must score +1; got {series:?}"
-            );
+    // (a) the merged Bare arrayed score is gone...
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}row_sum"),
+        "the merged Bare pop\u{2192}row_sum score must not be emitted; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    // ...replaced by the four per-(row, element) scalars at ~0.5 each:
+    // both pops move identically in this symmetric repro, so each site's
+    // share of delta-row_sum is exactly half.
+    for r in ["a", "b"] {
+        for age in ["young", "old"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[{r},{age}]\u{2192}row_sum[{r}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            assert_eq!(series[0], 0.0, "initial-step guard pins {name} to 0");
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} step {step} must score 0.5 (its own reference's \
+                     share); got {series:?}"
+                );
+            }
         }
     }
 
-    // Every loop score is finite, and the same-element A2A loop through
-    // row_sum (dimensioned over the full Region x Age space) carries real
-    // non-zero values once the startup guard clears.
-    let mut saw_row_sum_loop = false;
-    // The PHANTOM loops (see the doc comment): the conservative
-    // cross-product enumerates SCALAR loops whose 6-factor cycle traverses
-    // pop -> row_sum at MIXED elements (two cross edges, each reading the
-    // other element's real per-slot link score). They are identifiable as
-    // the scalar (dimension-less) loop scores referencing pop->row_sum.
-    let mut phantom_count = 0usize;
+    // (b) the row_sum loop family is per-circuit element-subscripted
+    // scalar loops -- one per (Region, Age) circuit -- referencing the
+    // per-(row, element) names, with real non-zero post-startup values.
+    let eqn_text = |v: &LtmSyntheticVar| -> String {
+        match &v.equation {
+            datamodel::Equation::Scalar(t) => t.clone(),
+            datamodel::Equation::ApplyToAll(_, t) => t.clone(),
+            other => format!("{other:?}"),
+        }
+    };
+    let row_sum_loops: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .filter(|v| eqn_text(v).contains("row_sum"))
+        .collect();
+    assert_eq!(
+        row_sum_loops.len(),
+        4,
+        "one element-subscripted scalar loop per (Region, Age) circuit \
+         through row_sum; got: {:?}",
+        row_sum_loops.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    let mut seen_rows: Vec<String> = Vec::new();
+    for lv in &row_sum_loops {
+        assert!(
+            lv.dimensions.is_empty(),
+            "per-circuit loop {} must be scalar; got dims {:?}",
+            lv.name,
+            lv.dimensions
+        );
+        let text = eqn_text(lv);
+        let row = ["a", "b"]
+            .iter()
+            .flat_map(|r| ["young", "old"].iter().map(move |a| (r, a)))
+            .find(|(r, a)| text.contains(&format!("pop[{r},{a}]\u{2192}row_sum[{r}]")))
+            .map(|(r, a)| format!("{r},{a}"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "loop {} must reference a per-(row, element) \
+                     pop→row_sum scalar; eqn: {text}",
+                    lv.name
+                )
+            });
+        assert!(
+            !seen_rows.contains(&row),
+            "each circuit references a distinct row; duplicate {row}"
+        );
+        seen_rows.push(row);
+        let series = series_at(&results, offset_of(&results, &lv.name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "loop score {} must stay finite; got {series:?}",
+            lv.name
+        );
+        assert!(
+            series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
+            "loop score {} must carry real non-zero values; got {series:?}",
+            lv.name
+        );
+    }
+
+    // (c) the phantoms are gone at enumeration: no loop-score equation
+    // contains the plain substring `pop→row_sum` (the per-(row, element)
+    // names interpose `]` before the arrow, so this matches only the
+    // retired Bare A2A form the phantoms composed).
     for lv in ltm
         .vars
         .iter()
         .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
     {
+        let text = match &lv.equation {
+            datamodel::Equation::Scalar(t) => t.clone(),
+            datamodel::Equation::ApplyToAll(_, t) => t.clone(),
+            datamodel::Equation::Arrayed(_, slots, default, _) => {
+                let mut t: String = slots.iter().map(|(_, eq, _, _)| eq.clone()).collect();
+                if let Some(d) = default {
+                    t.push_str(d);
+                }
+                t
+            }
+        };
+        assert!(
+            !text.contains("pop\u{2192}row_sum"),
+            "no loop-score equation may reference the retired Bare \
+             pop\u{2192}row_sum name ({}): {text}",
+            lv.name
+        );
+    }
+
+    // The direct pop -> growth A2A loop survives unchanged (its edge is
+    // Bare-only).
+    assert!(
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .any(|v| v.dimensions == vec!["Region".to_string(), "Age".to_string()]),
+        "the direct pop/growth A2A loop must keep its ApplyToAll form; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // Cross-surface (the #746-era invariant): the detected loop set must
+    // biject with the scored loop-score ids -- the per-circuit loops ride
+    // the same builders on both surfaces.
+    let scored_ids: std::collections::BTreeSet<String> = ltm
+        .vars
+        .iter()
+        .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+        .map(|id| id.to_string())
+        .collect();
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    let detected_ids: std::collections::BTreeSet<String> =
+        detected.loops.iter().map(|l| l.id.clone()).collect();
+    assert_eq!(
+        detected_ids, scored_ids,
+        "detected ids must equal the scored loop-score ids for the \
+         PerElement circuit family"
+    );
+}
+
+/// GH #525 (T6, BROADCAST): a `PerElement` reference whose Iterated dims
+/// are a strict SUBSET of the target's -- `mid[D1,D2] = pop[D1, young] *
+/// 0.05` (`D1` iterated, `Age` pinned, `D2` broadcast). One row feeds every
+/// target element it projects from, so the per-(row, FULL-target-element)
+/// scalars are `pop[{r},young]→mid[{r},{d2}]` -- the to-side subscript is
+/// always the complete element tuple (a partial to-subscript would resolve
+/// nowhere). The loop through the hoisted `SUM(mid[D1,*])` closes the
+/// feedback, so the scores must compile AND resolve into real loop values.
+#[test]
+fn per_element_broadcast_mixed_subscript_scores() {
+    let project = TestProject::new("per_element_broadcast_e2e")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("pop[D1,Age]", "100", &["inflow"], &[], None)
+        .array_aux_direct(
+            "mid",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1, young] * 0.05",
+            None,
+        )
+        .array_flow("inflow[D1,Age]", "1 + SUM(mid[D1, *]) * 0.001", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the broadcast PerElement fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile; got: {warnings:?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // One scalar per (row, full target element): the row (r, young)
+    // broadcast over D2. `pop[D1,young]` is each mid slot's only moving
+    // input, so every scalar is exactly +1 from the first post-initial
+    // step.
+    for r in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[{r},young]\u{2192}mid[{r},{d2}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            assert_eq!(series[0], 0.0, "initial-step guard pins {name} to 0");
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 1.0).abs() < 1e-9,
+                    "{name} step {step} must score +1; got {series:?}"
+                );
+            }
+        }
+    }
+    // No cross-row or unread-row scores exist.
+    let score_names = ltm_score_var_names(&results);
+    assert!(
+        !score_names
+            .iter()
+            .any(|n| n.contains("pop[a,young]\u{2192}mid[b")
+                || n.contains("pop[b,young]\u{2192}mid[a")
+                || n.contains("pop[a,old]\u{2192}mid")
+                || n.contains("pop[b,old]\u{2192}mid")),
+        "only the pinned-diagonal broadcast rows may carry scores; got: {score_names:?}"
+    );
+
+    // The loops through the PerElement hop + hoisted reducer are scored:
+    // finite everywhere, non-zero post-startup.
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !loop_vars.is_empty(),
+        "the broadcast PerElement loops must be scored; vars: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    let mut saw_nonzero = false;
+    for lv in &loop_vars {
         let base = offset_of(&results, &lv.name);
         for slot in 0..slot_count(lv, &project.dimensions) {
             let series = series_at(&results, base + slot);
@@ -4922,64 +5130,467 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
                 "loop score {} slot {slot} must stay finite; got {series:?}",
                 lv.name
             );
-        }
-        if lv.dimensions.is_empty()
-            && let datamodel::Equation::Scalar(text) = &lv.equation
-            && text.contains("pop\u{2192}row_sum")
-        {
-            phantom_count += 1;
-            // Each phantom is a 6-factor product in which the four
-            // growth->pop / pop->row_sum factors are ~1 and the two
-            // row_sum->growth factors are each ~0.4949 (row_sum supplies
-            // about half of delta-growth in this symmetric repro), so the
-            // phantom reads ~0.4949^2 ~= 0.245 -- a confident, sustained,
-            // completely non-causal loop score. FLIP NOTE: when GH #525's
-            // classifier fix lands these loops are no longer enumerated;
-            // delete this block and assert no scalar pop->row_sum loop
-            // score exists.
-            let series = series_at(&results, offset_of(&results, &lv.name));
-            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
-                assert!(
-                    (v - 0.245).abs() < 1e-3,
-                    "phantom cross-element loop {} step {step} must read the \
-                     documented ~0.245 composed-cross-edge value; got {series:?}",
-                    lv.name
-                );
-            }
-        }
-        if lv.dimensions == vec!["Region".to_string(), "Age".to_string()] {
-            let eqn_text = match &lv.equation {
-                datamodel::Equation::ApplyToAll(_, t) => t.clone(),
-                other => format!("{other:?}"),
-            };
-            if eqn_text.contains("row_sum") {
-                saw_row_sum_loop = true;
-                for slot in 0..slot_count(lv, &project.dimensions) {
-                    let series = series_at(&results, base + slot);
-                    assert!(
-                        series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
-                        "the same-element loop through row_sum must carry real values \
-                         ({}, slot {slot}); got {series:?}",
-                        lv.name
-                    );
-                }
-            }
+            saw_nonzero |= series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0);
         }
     }
     assert!(
-        saw_row_sum_loop,
-        "an A2A loop through row_sum must be enumerated; vars: {:?}",
-        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        saw_nonzero,
+        "at least one loop through the broadcast PerElement hop must carry \
+         real values"
     );
-    // Four phantoms: the a<->b cross circuit instantiated at the 2x2 Age-slot
-    // pairings of its two row_sum->growth hops ({young,old} per region).
+
+    // Cross-surface bijection (the #746-era invariant).
+    let scored_ids: std::collections::BTreeSet<String> = ltm
+        .vars
+        .iter()
+        .filter_map(|v| v.name.strip_prefix(LOOP_SCORE_PREFIX))
+        .map(|id| id.to_string())
+        .collect();
+    let detected_ids: std::collections::BTreeSet<String> =
+        model_detected_loops(&db, source_model, sync.project)
+            .loops
+            .iter()
+            .map(|l| l.id.clone())
+            .collect();
+    assert_eq!(detected_ids, scored_ids);
+}
+
+/// GH #525 (T6, MIXED `Bare`+`PerElement` edge): `growth[R,A] = (pop[R,A] +
+/// pop[R,young]) * 0.0001` -- the same `(pop, growth)` edge carries a Bare
+/// site (the all-iterated `pop[R,A]`) AND a PerElement site
+/// (`pop[R,young]`). Pins the resolver precedence from the design's
+/// section 3: the edge emits BOTH the Bare A2A score and the per-(row,
+/// element) scalars; every circuit routes per-circuit (the edge has a
+/// PerElement shape), and a hop both sites produce -- the
+/// `pop[r,young] → growth[r,young]` diagonal -- resolves to the
+/// `PerElement` scalar (the exact element-in-name form wins before the
+/// Bare-A2A subscripting fallback), attributing only the literal
+/// reference's share to that hop; the `(r,old)` circuits' hops resolve to
+/// the subscripted Bare name.
+///
+/// Values: the two pops stay element-wise equal in this symmetric model,
+/// so every score is exactly 0.5 -- the Bare A2A partial holds `pop[R,A]`
+/// live with `pop[R,young]` frozen, and each PerElement scalar holds the
+/// literal reference live with the Bare occurrence frozen.
+#[test]
+fn mixed_bare_and_per_element_edge_resolver_precedence() {
+    // NOTE: dimension names must not canonicalize to an element name (a
+    // dim literally named `A` collides with element `a` of the other dim,
+    // making the bare-element subscript `pop[a, young]` ambiguous at
+    // dimension resolution) -- use Region/Age like the GH #525 repro.
+    let project = TestProject::new("mixed_bare_per_element")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_stock("pop[Region,Age]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[Region,Age]",
+            "(pop[Region,Age] + pop[Region,young]) * 0.0001",
+            None,
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the mixed Bare+PerElement fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile; got: {warnings:?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Both forms exist: the Bare A2A score (the Bare site's) AND the four
+    // per-(row, element) scalars (the PerElement site's).
+    let bare_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth";
+    let bare_var = ltm_var(&ltm.vars, bare_name);
     assert_eq!(
-        phantom_count,
+        bare_var.dimensions,
+        vec!["Region".to_string(), "Age".to_string()],
+        "the Bare site keeps its A2A score over the target's dims"
+    );
+    let bare_base = offset_of(&results, bare_name);
+    for slot in 0..4 {
+        let series = series_at(&results, bare_base + slot);
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-6,
+                "Bare A2A slot {slot} step {step} must score 0.5 (the \
+                 PerElement occurrence is frozen); got {series:?}"
+            );
+        }
+    }
+    for r in ["a", "b"] {
+        for a in ["young", "old"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[{r},young]\u{2192}growth[{r},{a}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-6,
+                    "{name} step {step} must score 0.5 (the Bare occurrence \
+                     is frozen); got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Every circuit is per-circuit scalar (the edge carries a PerElement
+    // shape): 4 scalar loops, no ApplyToAll collapse.
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_vars.len(),
         4,
-        "the conservative cross-product enumerates exactly four phantom \
-         cross-element loops in this repro (GH #525 residual); vars: {:?}",
+        "one scalar loop per (Region, Age) circuit; got: {:?}",
+        loop_vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    let eqn_text = |v: &LtmSyntheticVar| -> String {
+        match &v.equation {
+            datamodel::Equation::Scalar(t) => t.clone(),
+            other => format!("{other:?}"),
+        }
+    };
+    // Resolver precedence: the (r,young) circuits' pop→growth hop resolves
+    // to the PerElement scalar; the (r,old) circuits' hop falls back to
+    // the subscripted Bare A2A name.
+    let young_loops: Vec<&&LtmSyntheticVar> = loop_vars
+        .iter()
+        .filter(|v| {
+            let t = eqn_text(v);
+            t.contains("pop[a,young]\u{2192}growth[a,young]")
+                || t.contains("pop[b,young]\u{2192}growth[b,young]")
+        })
+        .collect();
+    assert_eq!(
+        young_loops.len(),
+        2,
+        "the two (r,young) circuits resolve their hop to the PerElement \
+         scalar; loops: {:?}",
+        loop_vars
+            .iter()
+            .map(|v| (v.name.as_str(), eqn_text(v)))
+            .collect::<Vec<_>>()
+    );
+    let old_loops: Vec<&&LtmSyntheticVar> = loop_vars
+        .iter()
+        .filter(|v| {
+            let t = eqn_text(v);
+            t.contains(&format!("\"{bare_name}\"[a,old]"))
+                || t.contains(&format!("\"{bare_name}\"[b,old]"))
+        })
+        .collect();
+    assert_eq!(
+        old_loops.len(),
+        2,
+        "the two (r,old) circuits subscript the Bare A2A name; loops: {:?}",
+        loop_vars
+            .iter()
+            .map(|v| (v.name.as_str(), eqn_text(v)))
+            .collect::<Vec<_>>()
+    );
+
+    // Loop values: each circuit's product is link(0.5) x flow-to-stock(1).
+    for lv in &loop_vars {
+        let series = series_at(&results, offset_of(&results, &lv.name));
+        assert!(series.iter().all(|v| v.is_finite()));
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 0.5).abs() < 1e-6,
+                "loop {} step {step} must score 0.5; got {series:?}",
+                lv.name
+            );
+        }
+    }
+}
+
+/// GH #525 (T6, risk 2: the MIXED scalar-node-bearing branch): a cycle
+/// through a `PerElement` hop that also contains a SCALAR node
+/// (`total = SUM(row_sum[*])`) takes the loop builder's mixed branch, whose
+/// link builder must keep BOTH subscripts on the PerElement hop so the
+/// per-circuit loop score resolves the `pop[{r},{age}]→row_sum[{r}]`
+/// scalar -- a routing/emission disagreement here would reference a
+/// nonexistent name and silently stub the loop to 0.
+#[test]
+fn per_element_hop_in_mixed_scalar_cycle_scores() {
+    // Region/Age (not R/A) for the same canonical-name-collision reason as
+    // the mixed fixture above.
+    let project = TestProject::new("per_element_mixed_branch")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_stock("pop[Region,Age]", "100", &["growth"], &[], None)
+        .array_aux("row_sum[Region]", "pop[Region, young] + pop[Region, old]")
+        .scalar_aux("total", "SUM(row_sum[*])")
+        .array_flow("growth[Region,Age]", "total * 0.0001", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the mixed-branch fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile; got: {warnings:?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Every circuit contains the scalar `total` node, so each is a scalar
+    // mixed-branch loop whose pop→row_sum hop references the per-(row,
+    // element) scalar.
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_vars.len(),
+        4,
+        "one mixed-branch scalar loop per (Region, Age) circuit; got: {:?}",
+        loop_vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    let mut saw_per_element_ref = 0usize;
+    for lv in &loop_vars {
+        let text = match &lv.equation {
+            datamodel::Equation::Scalar(t) => t.clone(),
+            other => format!("{other:?}"),
+        };
+        assert!(
+            !text.contains("pop\u{2192}row_sum"),
+            "no loop may reference the retired Bare pop\u{2192}row_sum name: {text}"
+        );
+        if ["a", "b"]
+            .iter()
+            .flat_map(|r| ["young", "old"].iter().map(move |a| (r, a)))
+            .any(|(r, a)| text.contains(&format!("pop[{r},{a}]\u{2192}row_sum[{r}]")))
+        {
+            saw_per_element_ref += 1;
+        }
+        let series = series_at(&results, offset_of(&results, &lv.name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "loop score {} must stay finite; got {series:?}",
+            lv.name
+        );
+        assert!(
+            series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0),
+            "loop score {} must carry real non-zero values (a silent stub \
+             means the mixed branch dropped the PerElement subscripts); \
+             got {series:?}",
+            lv.name
+        );
+    }
+    assert_eq!(
+        saw_per_element_ref, 4,
+        "every mixed-branch circuit references its per-(row, element) scalar"
+    );
+}
+
+/// GH #769: a `FixedIndex` reference into a DISJOINT-dim **ApplyToAll**
+/// target (`hub[D2] = pop[a1] * 0.05`, `pop` over `D1`) is recoverable via
+/// the #510 per-element construction generalized to A2A targets: one
+/// `$⁚ltm⁚link_score⁚pop[a1]→hub` emitted as an `Equation::ApplyToAll`
+/// over the TARGET's dims holding `pop[a1]` live. Pre-#769 the edge was
+/// swept into the GH #758 loud skip (one Warning, no link-score variable,
+/// every loop through it dropped); now the loop is genuinely scored with
+/// zero warnings.
+#[test]
+fn gh769_fixed_index_into_disjoint_a2a_target_scores() {
+    let project = TestProject::new("gh769_disjoint_a2a")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a1", "a2"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("pop[D1]", "100", &["inflow"], &[], None)
+        .array_aux("hub[D2]", "pop[a1] * 0.05")
+        .scalar_aux("refill", "SUM(hub[*])")
+        .array_flow("inflow[D1]", "refill * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the GH #769 fixture must compile with LTM enabled");
+
+    // Zero warnings: the edge is no longer loud-skipped.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the FixedIndex-into-A2A edge is scoreable; no warning may fire: {warnings:?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // The per-element construction: `pop[a1]→hub` ApplyToAll over D2.
+    let score_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop[a1]\u{2192}hub";
+    let score_var = ltm_var(&ltm.vars, score_name);
+    assert_eq!(
+        score_var.dimensions,
+        vec!["D2".to_string()],
+        "the GH #769 score is an ApplyToAll over the TARGET's dims"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // `pop[a1]` is each hub slot's only input: +1 from step 1 per slot.
+    let base = offset_of(&results, score_name);
+    for slot in 0..2 {
+        let series = series_at(&results, base + slot);
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "pop[a1]→hub slot {slot} step {step} must score +1; got {series:?}"
+            );
+        }
+    }
+
+    // The loops through the edge are scored: finite, non-zero post-startup.
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !loop_vars.is_empty(),
+        "loops through the GH #769 edge must be scored; vars: {:?}",
         ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
+    let mut saw_nonzero = false;
+    for lv in &loop_vars {
+        let series = series_at(&results, offset_of(&results, &lv.name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "loop score {} must stay finite; got {series:?}",
+            lv.name
+        );
+        saw_nonzero |= series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0);
+    }
+    assert!(saw_nonzero, "the GH #769 loop must carry real values");
+}
+
+/// GH #525 (T6, risk 4: the forced-DISCOVERY twin of the repro). The
+/// per-(row, full-target-element) names are a new producer of the
+/// element-in-name grammar on NON-reducer edges, so discovery's
+/// `parse_link_offsets` must resolve them symmetrically with the
+/// exhaustive surface (the #748/#698 lesson): the strongest-path search
+/// finds the real per-element circuits through row_sum and never invents a
+/// phantom cross-element pop→row_sum pathway.
+#[test]
+fn gh525_discovery_twin_parses_per_element_names() {
+    let project = TestProject::new("gh525_discovery_twin")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_aux("row_sum[Region]", "pop[Region, young] + pop[Region, old]")
+        .array_flow(
+            "growth[Region, Age]",
+            "row_sum[Region] * 0.0001 * pop[Region, Age]",
+            None,
+        )
+        .array_stock("pop[Region, Age]", "100", &["growth"], &[], None)
+        .build_datamodel();
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the GH #525 repro")
+    .loops;
+
+    // The four REAL same-element direct loops are found, with parseable
+    // (finite) scores -- the new per-(row, element) names did not corrupt
+    // the search graph.
+    assert_eq!(
+        found.len(),
+        4,
+        "discovery must find exactly the four real same-element loops; got: {:?}",
+        found
+            .iter()
+            .map(|fl| (&fl.loop_info.id, &fl.loop_info.links))
+            .collect::<Vec<_>>()
+    );
+    for fl in &found {
+        // No phantom: a loop visiting row_sum[r] (or any node) must read it
+        // from the SAME region element -- the per-element link scores parse
+        // into the pinned diagonal, never a cross-element pathway.
+        for (i, link) in fl.loop_info.links.iter().enumerate() {
+            let to = link.to.as_str();
+            if let Some(r) = to
+                .strip_prefix("row_sum[")
+                .and_then(|rest| rest.strip_suffix("]"))
+            {
+                let from = link.from.as_str();
+                assert!(
+                    from.starts_with(&format!("pop[{r},")),
+                    "link {i} of {:?} reads row_sum[{r}] from {from} -- a \
+                     phantom cross-element hop",
+                    fl.loop_info.id
+                );
+            }
+        }
+        // The per-timestep scores parse and stay finite.
+        assert!(
+            fl.scores.iter().all(|(_, v)| v.is_finite()),
+            "discovered loop {} scores must stay finite",
+            fl.loop_info.id
+        );
+        // Same-element: every node in the loop carries one (region, age)
+        // pair (the direct pop/growth diagonals).
+        let elems: std::collections::BTreeSet<&str> = fl
+            .loop_info
+            .links
+            .iter()
+            .flat_map(|l| [l.from.as_str(), l.to.as_str()])
+            .filter_map(|n| n.split_once('[').map(|(_, rest)| rest))
+            .collect();
+        assert_eq!(
+            elems.len(),
+            1,
+            "discovered loop {} must be same-element (no phantom mixing); \
+             nodes: {:?}",
+            fl.loop_info.id,
+            fl.loop_info.links
+        );
+    }
+    // KNOWN discovery residual (pre-existing, NOT a T6 regression): the
+    // row_sum circuits themselves are not discoverable because the
+    // partial-collapse hop's A2A score (`row_sum→growth`, dimensioned over
+    // the TARGET's [Region, Age]) is expanded by `parse_link_offsets`'s
+    // `expand_a2a_link_offsets` into edges whose FROM node is subscripted
+    // over the score's dims (`row_sum[a,young]`) -- a node that does not
+    // exist for the 1-D `row_sum` -- so the search path dead-ends at
+    // `row_sum[r]`. Pre-T6 the same fixture dead-ended one hop earlier
+    // (`pop[a]`, an invented node for the 2-D `pop`), so T6 strictly
+    // extends the discoverable prefix; the residual is the
+    // partial-collapse expansion itself (the GH #716 family).
 }
 
 /// GH #746: for a feedback cycle through an ARRAYED variable the detected

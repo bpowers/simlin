@@ -631,17 +631,33 @@ with a loud `PartialEquationError` fallback.
   the noise floor. The #738 round measured +/-5% wall-clock noise; effects
   smaller than that are adjudicated on `instructions` / `branch-misses`.
 - **Protocol (named for the riskiest tasks, T5 and T6)**: warmed, interleaved
-  A/B on two worktrees (never destructive git toggling), `perf stat -r 5` on
-  the existing C-LEARN LTM compile benchmark (`benches/compiler.rs`), debug
-  assertions off. A regression >5% wall-clock or >2% instructions blocks the
-  task pending diagnosis.
+  A/B on two worktrees (never destructive git toggling), `perf stat -r 5`,
+  debug assertions off. *(As-landed amendment, T5/T6.)* The "existing C-LEARN
+  LTM compile benchmark" this section originally cited does NOT exist --
+  `benches/compiler.rs` compiles C-LEARN without LTM enabled. The substitute
+  protocol both tasks used: an identical UNCOMMITTED harness on both trees
+  (3x LTM-enabled C-LEARN `compile_project_incremental`, fresh salsa db
+  each, release), `perf stat -r 5`, two interleaved rounds,
+  instructions-adjudicated. A regression >5% wall-clock or >2% instructions
+  blocks the task pending diagnosis.
 - **Slot/var-count guard**: T4 and T6 add synthetic vars (one aux per
   non-aligned variable-backed reduce; per-`(row, slot)` scores per `PerElement`
   site). C-LEARN currently sits at 29,764 layout slots against the 65,536 u16
-  ceiling (#654); the C-LEARN structural test grows an assertion that the
-  emitted LTM var count changes by less than 1% (C-LEARN's FixedIndex-heavy
-  per-element equations classify `FixedIndex`, not `PerElement`, so the
-  expected delta is ~0).
+  ceiling (#654); the C-LEARN structural test grows an assertion pinning the
+  emitted LTM var count (the `clearn_ltm_var_count_guardrail` `#[ignore]`
+  test). *(As-landed amendment, T6.)* The original "<1% var-count change,
+  expected delta ~0" expectation rested on a wrong premise: C-LEARN DOES
+  contain nine GH #525-family iterated+literal edges
+  (`effective_target_year -> sorted_target_year` and friends). The measured
+  delta is total LTM vars 6,605 -> 6,713 (+108, **+1.64%**) -- nine merged
+  Bare-named conservative scores replaced by 117 per-(row,
+  full-target-element) scalars -- while the resource the guard actually
+  protects, the per-step layout row width, SHRANK: 31,132 -> 30,928 slots
+  (**-0.66%**), because each retired merged score was a multi-slot A2A
+  variable whose conservative partial also synthesized per-element
+  capture-helper auxes. Perf under the substitute protocol: instructions
+  -0.3%/-0.6% across the two rounds (T6 is slightly cheaper), inside all
+  gates.
 
 ## Open risks for the adversarial reviewer
 

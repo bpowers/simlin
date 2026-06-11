@@ -5352,6 +5352,55 @@ fn corpus_clearn_macros_import() {
 /// `#[ignore]`d: C-LEARN is ~53k lines / 1.4 MB (~4-5s just to parse on
 /// release, far more to compile+run); it must not run in the capped default
 /// `cargo test` set. All sibling C-LEARN tests follow this convention.
+/// The shape-expressiveness phase's emitted-LTM-var-count guardrail
+/// (T4/T6 of `docs/design-plans/2026-06-11-ltm-shape-expressiveness.md`):
+/// C-LEARN's emitted LTM synthetic-variable count is pinned EXACTLY, so any
+/// change to LTM emission on a real large model is a conscious, reviewed
+/// flip of this number -- the #654 layout-slot ceiling (65,536 u16 slots)
+/// is the resource it protects.
+///
+/// As-landed T6 numbers (vs parent `ad6bdeb8`): total LTM vars
+/// 6,605 -> 6,713 (+108, +1.64%) -- C-LEARN contains nine GH #525-family
+/// iterated+literal edges (`effective_target_year -> sorted_target_year`
+/// and friends), each flipping from ONE merged Bare-named conservative
+/// score to per-(row, full-target-element) scalars. The VAR count grows,
+/// but the LAYOUT (the #654 concern) shrinks: the per-step result-row
+/// width went 31,132 -> 30,928 slots (-204, -0.66%), because each retired
+/// merged score was a multi-slot A2A variable whose conservative partial
+/// also synthesized per-element capture-helper auxes, while the
+/// per-element scalars compile to direct LoadPrev reads.
+// Run with: cargo test --release -- --ignored clearn_ltm_var_count_guardrail
+#[test]
+#[ignore]
+fn clearn_ltm_var_count_guardrail() {
+    use simlin_engine::db::{model_ltm_variables, set_project_ltm_enabled};
+
+    let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let total: usize = sync
+        .models
+        .values()
+        .map(|m| {
+            model_ltm_variables(&db, m.source_model, sync.project)
+                .vars
+                .len()
+        })
+        .sum();
+    assert_eq!(
+        total, 6713,
+        "C-LEARN's emitted LTM var count moved; if this is an intentional \
+         emission change, re-derive the layout-slot impact (the #654 \
+         ceiling) and update this pin with the new numbers"
+    );
+}
+
 // Run with: cargo test --release -- --ignored compiles_and_runs_clearn_structural
 #[test]
 #[ignore]

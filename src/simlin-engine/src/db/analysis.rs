@@ -101,14 +101,18 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// A site that is *not* a hoisted reducer's argument -- a bare dynamic index
 /// (`arr[i+1]`, a range), the dynamic-index reducer carve-out
 /// (`SUM(pop[idx, *])`, `idx` non-literal, reclassified to `DynamicIndex`),
-/// a mapped sliced reducer the correspondence declines (element-mapped --
-/// GH #756 -- or reverse-declared -- GH #757; `enumerate_agg_nodes` declines
-/// those, so the reference stays `Direct` and is reclassified
-/// `DynamicIndex`), or a direct `pop[idx]` alongside a `SUM(pop[*])` --
-/// keeps a conservative edge and a Bare-named link score, EXCEPT when both
-/// endpoints are arrayed with non-corresponding dimensions (the declined
-/// mapped-reducer cases): no compilable conservative score exists there, so
-/// the edge is skipped loudly with no link-score variable (GH #758).
+/// an ELEMENT-mapped sliced reducer the correspondence declines (GH #756;
+/// `enumerate_agg_nodes` declines it, so the reference stays `Direct` and
+/// is reclassified `DynamicIndex` -- the reverse-declared POSITIONAL pair
+/// is accepted since GH #757), or a direct `pop[idx]` alongside a
+/// `SUM(pop[*])` -- keeps a conservative edge and a Bare-named link score,
+/// EXCEPT when both endpoints are arrayed with non-corresponding dimensions
+/// (the declined mapped-reducer cases): no compilable conservative score
+/// exists there, so the edge is skipped loudly with no link-score variable
+/// (GH #758). A mixed iterated+literal subscript is no longer in the
+/// conservative family at all -- it classifies `PerElement` (GH #525) and
+/// gets exact diagonal-with-pinned-axes edges plus per-(row,
+/// full-target-element) scores.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
@@ -120,6 +124,32 @@ pub enum RefShape {
     /// `Vec<String>` carries the resolved element names per dimension
     /// in source order (canonical lowercase).
     FixedIndex(Vec<String>),
+    /// Mixed per-axis access (GH #525, T6 of the shape-expressiveness
+    /// design): a subscript with at least one ITERATED axis (a target-
+    /// equation iterated-dimension index lined up with the source's axis,
+    /// possibly through a positional mapping) and at least one PINNED axis
+    /// (a literal element) -- `pop[Region, young]` inside an
+    /// A2A-over-`Region` equation. `axes` carries one
+    /// [`crate::ltm_agg::AxisRead`] per source axis in declared order.
+    ///
+    /// Invariants (enforced by `classify_iterated_dim_shape`): no
+    /// `Reduced` entries (a non-reducer reference never collapses an
+    /// axis); not all-`Pinned` (that canonicalizes to `FixedIndex`) and
+    /// not all-`Iterated` (that canonicalizes to `Bare`) -- so every
+    /// existing `Bare`/`FixedIndex` link-score NAME is untouched and
+    /// `PerElement` is minted only where the pre-T6 classifier said
+    /// `DynamicIndex` and was wrong.
+    ///
+    /// The element graph emits the diagonal-with-pinned-axes edges
+    /// (`pop[r,young] -> row_sum[r]`, never the cross-product); emission
+    /// produces one scalar link score per (row, FULL target element),
+    /// named `$⁚ltm⁚link_score⁚{from}[{row}]→{to}[{e}]` -- the row is a
+    /// function of `e`: project `e` onto the `Iterated` axes (slot-
+    /// remapped for mapped pairs), fill `Pinned` axes with their
+    /// literals. The loop builder routes every circuit traversing a
+    /// `PerElement` edge to the per-circuit scalar path (no Bare A2A
+    /// name exists for the hop).
+    PerElement { axes: Vec<crate::ltm_agg::AxisRead> },
     /// `Expr2::Subscript(source, indices)` where at least one index is
     /// `IndexExpr2::Wildcard`, or every index is `Wildcard` / `StarRange`
     /// (the reducer-style whole-extent access). A reducer reference with
@@ -185,6 +215,7 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// | non-empty   | any        | Wildcard / DynamicIndex       | full cross product (NxM)                      |
 /// | non-empty   | []         | FixedIndex(elems)             | `from[elems] -> to` (one edge)                |
 /// | non-empty   | non-empty  | FixedIndex(elems)             | `from[elems] -> to[d]` for each cartesian d   |
+/// | non-empty   | non-empty  | PerElement(axes)              | diagonal-with-pinned-axes: `from[row] -> to[e]` for every target element `e` whose projection onto the Iterated dims is `row`'s slot (broadcast over unshared target dims); GH #525 |
 ///
 /// `FixedIndex` carries the resolved per-dimension element names in
 /// source order; multi-dim fixed yields `from[e1,e2]`. Mixed
@@ -203,9 +234,10 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// here is only a variable-backed WHOLE-EXTENT reducer's argument
 /// (`total = SUM(population[*])`, the broadcast `share[R] = SUM(pop[*])`, or
 /// a partial reduce whose result axes don't equal the target's dims), a
-/// (rare) non-reducer whole-array reference, or a mapped sliced reducer the
-/// correspondence declines (element-mapped -- GH #756 -- or reverse-declared
-/// -- GH #757). The conservative cross product is sound for the element
+/// (rare) non-reducer whole-array reference, or an ELEMENT-mapped sliced
+/// reducer the correspondence declines (GH #756; the reverse-declared
+/// positional pair is hoisted since GH #757). The conservative cross
+/// product is sound for the element
 /// EDGES in all of those (a superset, never fewer); the declined
 /// mapped-reducer cases' link SCORES have no compilable conservative shape,
 /// so the emitter skips them loudly and loop scores through the edge are
@@ -327,6 +359,107 @@ fn emit_edges_for_reference(
             let entry = element_edges.entry(from_node).or_default();
             for to_node in &target_nodes {
                 entry.insert(to_node.clone());
+            }
+        }
+        RefShape::PerElement { axes } => {
+            // GH #525 (T6): the diagonal-with-pinned-axes expansion. The
+            // rows come from the SAME `read_slice_rows` derivation the agg
+            // machinery uses (invariant I4 of the shape-expressiveness
+            // design): a `Pinned` axis is fixed to its literal element, an
+            // `Iterated` axis ranges with its slot coordinate tracked
+            // (mapping-remapped for a positionally-mapped pair). With no
+            // `Reduced` axes (the variant invariant) the rows are 1:1 with
+            // slots. Each row feeds exactly the target elements whose
+            // projection onto the Iterated target dims equals its slot,
+            // broadcasting over target dims the reference does not iterate
+            // -- the same shared-dims rule `expand_same_element` applies
+            // for `Bare`. The pre-T6 cross-product (`pop[a,young] ->
+            // row_sum[b]`) is exactly what this arm exists to kill: those
+            // phantom edges minted non-causal loops carrying silent
+            // confident scores (~0.245 in the GH #525 repro).
+            use crate::ltm_agg::AxisRead;
+            let from_dim_element_lists: Vec<Vec<String>> =
+                from_dims.iter().map(dimension_element_names).collect();
+            let rows = crate::db::ltm::read_slice_rows(axes, &from_dim_element_lists, dim_ctx);
+            // Iterated target dims in slot order; every one must name a
+            // target dim for the slot projection to be meaningful (true by
+            // construction -- the classifier only mints `Iterated` for the
+            // target equation's own iterated dims -- but a mid-edit
+            // inconsistency degrades to the conservative cross-product
+            // below rather than dropping edges).
+            let iter_dims: Vec<&str> = axes
+                .iter()
+                .filter_map(|a| match a {
+                    AxisRead::Iterated { dim, .. } => Some(dim.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let slots_resolve = !to_is_scalar
+                && iter_dims
+                    .iter()
+                    .all(|id| to_dims.iter().any(|d| d.name() == *id));
+            if let (Some(rows), true) = (rows, slots_resolve) {
+                // Per target-dim position: `Some(j)` when that dim is the
+                // j-th slot coordinate, `None` for a broadcast dim.
+                let to_dim_slot_pos: Vec<Option<usize>> = to_dims
+                    .iter()
+                    .map(|d| iter_dims.iter().position(|id| *id == d.name()))
+                    .collect();
+                let target_set: BTreeSet<&String> = target_nodes.iter().collect();
+                for crate::db::ltm::ReadSliceRow { row, slot, .. } in &rows {
+                    let from_node = format!("{from_name}[{row}]");
+                    let slot_parts: Vec<&str> = slot.split(',').collect();
+                    // Candidate elements per target-dim position: the slot
+                    // coordinate where the dim is iterated, every element
+                    // where it broadcasts.
+                    let to_elem_options: Vec<Vec<String>> = to_dims
+                        .iter()
+                        .zip(&to_dim_slot_pos)
+                        .map(|(d, pos)| match pos {
+                            Some(j) => vec![slot_parts[*j].to_string()],
+                            None => dimension_element_names(d),
+                        })
+                        .collect();
+                    let mut to_tuples: Vec<Vec<&str>> = vec![vec![]];
+                    for options in &to_elem_options {
+                        let mut next = Vec::with_capacity(to_tuples.len() * options.len());
+                        for existing in &to_tuples {
+                            for opt in options {
+                                let mut extended = existing.clone();
+                                extended.push(opt.as_str());
+                                next.push(extended);
+                            }
+                        }
+                        to_tuples = next;
+                    }
+                    for to_elems in &to_tuples {
+                        let to_node = if to_elems.len() == 1 {
+                            format_element_name(to_name, to_elems[0])
+                        } else {
+                            format_multi_element_name(to_name, to_elems)
+                        };
+                        // `target_nodes` narrows the target side when the
+                        // reference sits in an `Ast::Arrayed` per-element
+                        // slot (mirroring the `Bare` arm's intersection).
+                        if target_element.is_some() && !target_set.contains(&to_node) {
+                            continue;
+                        }
+                        element_edges
+                            .entry(from_node.clone())
+                            .or_default()
+                            .insert(to_node);
+                    }
+                }
+            } else {
+                // Defensive fallback (stale slice invariant / scalar `to` /
+                // unresolvable slot dim): the conservative cross-product,
+                // a superset of the true reads -- never fewer edges.
+                for from_elem in cartesian_element_names(from_name, from_dims) {
+                    let entry = element_edges.entry(from_elem).or_default();
+                    for to_node in &target_nodes {
+                        entry.insert(to_node.clone());
+                    }
+                }
             }
         }
         RefShape::Wildcard | RefShape::DynamicIndex => {
@@ -1644,8 +1777,8 @@ pub enum CycleClass {
 ///
 /// Classification rules (applied in order):
 ///
-/// 1. If any edge has a `Wildcard`, `DynamicIndex`, or `FixedIndex`
-///    shape (or any non-Bare shape co-existing with Bare),
+/// 1. If any edge has a `Wildcard`, `DynamicIndex`, `FixedIndex`, or
+///    `PerElement` shape (or any non-Bare shape co-existing with Bare),
 ///    `CrossElementOrMixed`. A FixedIndex reference pins the cycle to a
 ///    specific element subscript distinct from the rest of its
 ///    neighbours' broadcast semantics; the cycle cannot be emitted as
@@ -1705,7 +1838,15 @@ pub(crate) fn classify_cycle(
         for shape in shapes {
             match shape {
                 RefShape::Bare => {}
-                RefShape::FixedIndex(_) | RefShape::Wildcard | RefShape::DynamicIndex => {
+                // `PerElement` (GH #525) forces the slow path like the other
+                // non-Bare shapes: the hop's only link scores are the
+                // per-(row, full-target-element) scalars, so a fast-path A2A
+                // loop-score equation would reference a nonexistent Bare
+                // name and silently stub.
+                RefShape::FixedIndex(_)
+                | RefShape::PerElement { .. }
+                | RefShape::Wildcard
+                | RefShape::DynamicIndex => {
                     return CycleClass::CrossElementOrMixed;
                 }
             }

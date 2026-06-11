@@ -707,40 +707,19 @@ fn test_ltm_mapped_dimension_loop_scores_diagonal_and_nonzero() {
     }
 }
 
-/// PR #761 review (r3389029131): a REVERSE-declared mapped SUBSCRIPTED
-/// reference must keep the SCALAR (conservative) link score.
-///
-/// Fixture: the `State↔Region` mapping is declared ONLY on `Region`
-/// (toward `State`). `x[Region] = stock[Region] * 2` is the
-/// forward-declared case (`has_mapping_to(Region, State)` holds), so
-/// `classify_iterated_dim_shape` says `Bare` and the `stock→x` edge gets
-/// the mapped DIAGONAL element edges + an arrayed link score.
-/// `inflow[State] = x[State] * 0.1` is the REVERSE-declared subscripted
-/// case (`has_mapping_to(State, Region)` does NOT hold), so it classifies
-/// `DynamicIndex` and the element graph emits the conservative
-/// CROSS-PRODUCT (GH #757). `mapped_element_correspondence` succeeds for
-/// this pair regardless of declaration direction (the bare-reference case
-/// needs both), so without the Bare-shape gate `link_score_dimensions`
-/// retargeted the `x→inflow` score to ApplyToAll over `State` -- per-slot
-/// DIAGONAL partials -- while the loop circuits traverse the off-diagonal
-/// cross-product edges and read those slots by target-element subscript
-/// (`"$⁚ltm⁚link_score⁚x→inflow"[s2]` for the spurious edge
-/// `x[r1]→inflow[s2]`, which actually holds the `x[r2]→inflow[s2]`
-/// partial): spurious NONZERO loop scores where the pre-#527 behavior was
-/// a conservative zero.
-///
-/// With the gate, the mapped-correspondence arm only fires when the edge
-/// has a Bare-classified site -- exactly when `expand_same_element` emits
-/// the diagonal -- so `x→inflow` is denied the arrayed retarget. A scalar
-/// score for it would reference arrayed variables in scalar context and
-/// never compile, so since GH #758 the emitter skips the edge entirely:
-/// ONE Warning naming it, NO `x→inflow` link-score variable, and the loop
-/// scores through the edge dropped (including the positionally-true
-/// diagonal loops -- the residual conservatism GH #757 tracks lifting by
-/// fixing the classification itself). Before #758 this was a warned
-/// constant-0 stub plus a cascade of per-loop fragment-failure warnings.
+/// GH #757 (flipped from the GH #758-era loud-skip pin): `inflow[State] =
+/// x[State] * 0.1` over `x[Region]` with the mapping declared in the
+/// REVERSE direction (on `Region` toward `State`) now classifies `Bare` --
+/// `classify_iterated_dim_shape` gates its mapped arm on the same
+/// `mapped_element_correspondence` data `expand_same_element` consults
+/// (both declaration directions), matching the compiler's
+/// `translate_via_mapping`. The element graph emits the mapping DIAGONAL,
+/// `link_score_dimensions`' Bare-site gate passes, so the `x→inflow` score
+/// is the arrayed (per-slot diagonal) A2A form and the loops through it
+/// are genuinely scored -- ending the conservatism where every loop
+/// through the edge was dropped with a Warning.
 #[test]
-fn test_ltm_reverse_declared_subscripted_link_score_is_skipped_loudly() {
+fn test_ltm_reverse_declared_subscripted_link_score_is_diagonal() {
     use crate::test_common::TestProject;
     use salsa::Setter;
 
@@ -760,17 +739,17 @@ fn test_ltm_reverse_declared_subscripted_link_score_is_skipped_loudly() {
     source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm_vars = crate::db::model_ltm_variables(&db, source_model, source_project);
-    // The DynamicIndex-classified reverse-declared edge is denied the
-    // arrayed retarget, and its scalar form can't compile, so NO x→inflow
-    // link score is emitted at all (GH #758 loud skip).
-    assert!(
-        !ltm_vars
+    // The reverse-declared subscripted edge now classifies Bare: the score
+    // is the arrayed diagonal form over the TARGET's dims.
+    assert_eq!(
+        ltm_vars
             .vars
             .iter()
-            .any(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}x\u{2192}inflow"),
-        "reverse-declared subscripted x[State] classifies DynamicIndex \
-         (cross-product element edges); its conservative score has no \
-         compilable shape, so the edge must be skipped loudly (GH #758)"
+            .find(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}x\u{2192}inflow")
+            .expect("missing LTM var x→inflow (the GH #757 diagonal score)")
+            .dimensions,
+        vec!["State".to_string()],
+        "reverse-declared subscripted x[State] must keep the target's dims"
     );
     // The Bare-classified forward edge keeps the arrayed (diagonal) score.
     assert_eq!(
@@ -784,18 +763,14 @@ fn test_ltm_reverse_declared_subscripted_link_score_is_skipped_loudly() {
         "forward-declared Bare edge stock[Region]→x keeps the target's dims"
     );
 
-    // Behavioral: every enumerated loop traverses the unscoreable x→inflow
-    // edge, so no loop scores are emitted (GH #758 -- the loops are dropped
-    // from scoring rather than stubbed to warned zeros). Before the
-    // PR #761 gate, the off-diagonal circuits read wrong-slot diagonal
-    // partials and scored spuriously non-zero.
+    // The loops through the edge are scored (pre-#757 every one was
+    // dropped with a Warning).
     assert!(
-        !ltm_vars
+        ltm_vars
             .vars
             .iter()
             .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
-        "every loop traverses the unscoreable edge, so no loop score may be \
-         emitted; got: {:?}",
+        "loops through the now-diagonal edge must be scored; got: {:?}",
         ltm_vars
             .vars
             .iter()
@@ -803,31 +778,39 @@ fn test_ltm_reverse_declared_subscripted_link_score_is_skipped_loudly() {
             .collect::<Vec<_>>()
     );
 
-    // The single unscoreable-edge Warning names the edge.
+    // No unscoreable-edge Warning fires for the edge anymore.
     let diags = crate::db::collect_all_diagnostics(&db, source_project);
     assert!(
-        diags.iter().any(|d| {
+        !diags.iter().any(|d| {
             d.severity == crate::db::DiagnosticSeverity::Warning
                 && matches!(&d.error, crate::db::DiagnosticError::Assembly(msg)
                     if msg.contains("x -> inflow"))
         }),
-        "the unscoreable x→inflow edge must surface a Warning; got: {diags:?}"
+        "the x→inflow edge is scoreable now; no Warning may fire: {diags:?}"
     );
 
-    // The model still compiles and simulates with LTM enabled.
+    // The model compiles and simulates with LTM enabled, and the loop score
+    // carries real non-zero values past the startup guard.
     let compiled = compile_project_incremental(&db, source_project, "main")
         .expect("LTM compile of the reverse-declared mapped model should succeed");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
-
-    // No loop-score series exist in the layout either.
+    let results = vm.into_results();
+    let loop_offset = results
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_str().contains("\u{205A}loop_score\u{205A}"))
+        .map(|(_, &off)| off)
+        .expect("a loop-score series must exist");
+    let series: Vec<f64> = results.iter().map(|row| row[loop_offset]).collect();
     assert!(
-        !compiled
-            .offsets
-            .keys()
-            .any(|k| k.as_str().contains("\u{205A}loop_score\u{205A}")),
-        "no loop-score slots should be laid out"
+        series.iter().all(|v| v.is_finite()),
+        "loop score must stay finite; got {series:?}"
+    );
+    assert!(
+        series.iter().skip(3).any(|&v| v != 0.0),
+        "loop score must carry real non-zero values; got {series:?}"
     );
 }
 

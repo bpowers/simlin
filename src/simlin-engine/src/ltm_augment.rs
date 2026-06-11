@@ -66,9 +66,9 @@ pub(crate) struct IteratedDimCtx<'a> {
 /// dimension).
 fn is_live_source_iterated_dim_subscript(
     indices: &[IndexExpr0],
+    source_dim_elements: &[Vec<String>],
     ctx: Option<&IteratedDimCtx<'_>>,
 ) -> bool {
-    use crate::common::CanonicalDimensionName;
     let Some(ctx) = ctx else { return false };
     if indices.is_empty() || indices.len() != ctx.source_dim_names.len() {
         return false;
@@ -81,23 +81,97 @@ fn is_live_source_iterated_dim_subscript(
         if !ctx.target_iterated_dims.iter().any(|t| t == &d) {
             return false;
         }
-        let src_name = &ctx.source_dim_names[i];
-        if &d == src_name {
-            continue;
+        if !expr0_iterated_axis_lines_up(&d, i, source_dim_elements, ctx) {
+            return false;
         }
-        // AC3.5: a mapped dimension is treated the same way -- don't
-        // special-case it, just don't exclude it. (No mapping context => no
-        // mapped-dimension recognition; the by-name check above still applies.)
-        if let Some(dim_ctx) = ctx.dim_ctx {
-            let d_canon = CanonicalDimensionName::from_raw(&d);
-            let src_canon = CanonicalDimensionName::from_raw(src_name);
-            if dim_ctx.has_mapping_to(&d_canon, &src_canon) {
+    }
+    true
+}
+
+/// Does iterated-dimension index `d` (canonical) line up with the live
+/// source's `i`-th axis -- by name, or through a usable positional-mapping
+/// remap? The mapped arm consults the SAME
+/// [`crate::ltm_agg::iterated_axis_slot_elements`] /
+/// `mapped_element_correspondence` gate the Expr2 classifier
+/// (`ltm_agg::classify_axis_access`) uses -- BOTH declaration directions
+/// (GH #757), positional mappings only (GH #756) -- so the partial
+/// builder's live-shape match and the reference-site IR agree by
+/// construction. (No mapping context ⇒ no mapped recognition; the by-name
+/// check still applies.)
+fn expr0_iterated_axis_lines_up(
+    d: &str,
+    i: usize,
+    source_dim_elements: &[Vec<String>],
+    ctx: &IteratedDimCtx<'_>,
+) -> bool {
+    let src_name = &ctx.source_dim_names[i];
+    if d == src_name.as_str() {
+        return true;
+    }
+    let Some(dim_ctx) = ctx.dim_ctx else {
+        return false;
+    };
+    let Some(elems) = source_dim_elements.get(i) else {
+        return false;
+    };
+    crate::ltm_agg::iterated_axis_slot_elements(d, src_name, elems, dim_ctx).is_some()
+}
+
+/// The per-axis [`crate::ltm_agg::AxisRead`] vector of a subscript whose
+/// every index is either an iterated-dimension name lined up with the
+/// source's axis at that position or a literal element of that axis
+/// (position-STRICT, matching the Expr2 side's per-axis
+/// `resolve_literal_axis_index`) -- the Expr0 sibling of the
+/// `classify_axis_access`-derived classification
+/// `db::ltm_ir::classify_iterated_dim_shape` performs, minus the `Reduced`
+/// arm (a wildcard/StarRange index returns `None`; direct references never
+/// collapse an axis, and the `Wildcard` precedence check already ran).
+/// `None` when any index is neither -- the caller falls through to the
+/// legacy literal pass / `DynamicIndex`.
+fn classify_expr0_per_element_axes(
+    indices: &[IndexExpr0],
+    source_dim_elements: &[Vec<String>],
+    ctx: &IteratedDimCtx<'_>,
+) -> Option<Vec<crate::ltm_agg::AxisRead>> {
+    use crate::ltm_agg::AxisRead;
+    if indices.is_empty()
+        || indices.len() != ctx.source_dim_names.len()
+        || indices.len() != source_dim_elements.len()
+    {
+        return None;
+    }
+    let mut axes = Vec::with_capacity(indices.len());
+    for (i, idx) in indices.iter().enumerate() {
+        if let IndexExpr0::Expr(Expr0::Var(name, _)) = idx {
+            let d = canonicalize(name.as_str()).into_owned();
+            if ctx.target_iterated_dims.iter().any(|t| t == &d) {
+                if !expr0_iterated_axis_lines_up(&d, i, source_dim_elements, ctx) {
+                    return None;
+                }
+                axes.push(AxisRead::Iterated {
+                    dim: d,
+                    source_dim: ctx.source_dim_names[i].clone(),
+                });
                 continue;
             }
         }
-        return false;
+        // Position-strict literal resolution: the Expr2 classifier resolves
+        // each index against ITS axis only, so the any-dimension fallback
+        // `resolve_literal_element_index` carries (for the legacy
+        // FixedIndex match) must not apply here -- a cross-axis literal
+        // would build a `Pinned` the IR never minted, breaking the
+        // live-shape equality match.
+        let candidate = match idx {
+            IndexExpr0::Expr(Expr0::Var(name, _)) => canonicalize(name.as_str()).into_owned(),
+            IndexExpr0::Expr(Expr0::Const(s, _, _)) => s.parse::<u32>().ok()?.to_string(),
+            _ => return None,
+        };
+        if !source_dim_elements[i].iter().any(|e| e == &candidate) {
+            return None;
+        }
+        axes.push(AxisRead::Pinned(candidate));
     }
-    true
+    Some(axes)
 }
 
 /// Recognize an iterated-dimension subscript on a *non-live-source*
@@ -267,8 +341,26 @@ fn classify_expr0_subscript_shape(
     // `db::ltm_ir::classify_iterated_dim_shape`. Checked before the
     // literal-element pass because a dimension name (`Region`) is not a
     // literal element, so it would otherwise fall to `DynamicIndex`.
-    if is_live_source_iterated_dim_subscript(indices, iter_ctx) {
+    if is_live_source_iterated_dim_subscript(indices, source_dim_elements, iter_ctx) {
         return RefShape::Bare;
+    }
+    // GH #525 (T6): a mixed iterated+literal subscript (`pop[Region, young]`
+    // inside an A2A-over-`Region` equation) is `PerElement`, mirroring
+    // `classify_iterated_dim_shape`'s `classify_axis_access`-derived mixed
+    // arm -- the partial builder's live-shape match must agree with the
+    // reference-site IR (the documented sync requirement). All-`Pinned`
+    // falls through to the literal pass (`FixedIndex`), and all-`Iterated`
+    // is the `Bare` case above, so this arm fires only for a genuine mix.
+    if let Some(ctx) = iter_ctx
+        && let Some(axes) = classify_expr0_per_element_axes(indices, source_dim_elements, ctx)
+    {
+        let n_iterated = axes
+            .iter()
+            .filter(|a| matches!(a, crate::ltm_agg::AxisRead::Iterated { .. }))
+            .count();
+        if n_iterated > 0 && n_iterated < axes.len() {
+            return RefShape::PerElement { axes };
+        }
     }
     let mut elems = Vec::with_capacity(indices.len());
     for (i, idx) in indices.iter().enumerate() {
@@ -473,7 +565,7 @@ fn wrap_non_matching_in_previous(
             // way, the alternative -- `PREVIOUS(Subscript(...))` -- trips the
             // codegen assertion.
             if &canonical == live_source {
-                if is_live_source_iterated_dim_subscript(&indices, iter_ctx) {
+                if is_live_source_iterated_dim_subscript(&indices, source_dim_elements, iter_ctx) {
                     return wrap_non_matching_in_previous(
                         Expr0::Var(ident, loc),
                         live_source,
@@ -949,7 +1041,7 @@ pub(crate) struct PartialEquationError {
 }
 
 impl PartialEquationError {
-    fn new(equation_text: &str) -> Self {
+    pub(crate) fn new(equation_text: &str) -> Self {
         PartialEquationError {
             equation_text: equation_text.to_string(),
             kind: PartialEquationErrorKind::Parse,
@@ -1249,7 +1341,11 @@ fn wrap_live_shaped_in_previous(
                 // same element a bare reference would in each slot, and the
                 // IR classifies such a site `Bare`.
                 if matches!(live_shape, RefShape::Bare)
-                    && is_live_source_iterated_dim_subscript(&indices, iter_ctx)
+                    && is_live_source_iterated_dim_subscript(
+                        &indices,
+                        source_dim_elements,
+                        iter_ctx,
+                    )
                 {
                     let bare = Expr0::Var(ident, loc);
                     if frozen_ref.is_none() {
@@ -1984,6 +2080,365 @@ pub(crate) fn generate_scalar_to_element_equation(
     Ok(link_score_guard_form(&partial, &to_elem, source_ref))
 }
 
+/// Read-only context for [`rewrite_per_element_source_refs`]: everything the
+/// walker needs to substitute the live source's subscript indices for one
+/// `(site, target element)` instantiation of a `PerElement` link score
+/// (GH #525, T6 of the shape-expressiveness design).
+struct PerElementRefCtx<'a> {
+    /// The live source variable (canonical).
+    from: &'a Ident<Canonical>,
+    /// The emitting site's per-axis access vector
+    /// ([`RefShape::PerElement`]'s `axes`).
+    site_axes: &'a [crate::ltm_agg::AxisRead],
+    /// The row this `(site, e)` instantiation reads -- BARE element names,
+    /// one per source axis (parallel to `site_axes`). Occurrences matching
+    /// `site_axes` are rewritten to exactly these indices so the subsequent
+    /// changed-first wrap's `FixedIndex(row)` live shape matches them.
+    row_parts_bare: &'a [String],
+    /// Element-name lists per source axis (position-strict resolution).
+    source_dim_elements: &'a [Vec<String>],
+    /// The source's declared dimensions (for index qualification).
+    from_dims: &'a [crate::dimensions::Dimension],
+    /// Target-iterated dim (canonical) -> (element of `e` for that dim,
+    /// its index within the dim) -- the projection data `e` supplies.
+    target_elem_by_dim: &'a HashMap<String, (String, usize)>,
+    /// The iterated-dim recognition context (live source's axes + target
+    /// iterated dims + mapping context).
+    iter_ctx: &'a IteratedDimCtx<'a>,
+    dim_ctx: &'a crate::dimensions::DimensionsContext,
+}
+
+/// Qualify one element of one axis (`"nyc"` over `Region` ->
+/// `"region\u{B7}nyc"`), via the same defensive rules as
+/// [`qualify_element_csv`].
+fn qualify_axis_element(elem: &str, dim: &crate::dimensions::Dimension) -> String {
+    qualify_element_csv(elem, std::slice::from_ref(dim))
+}
+
+/// The source row a per-axis access vector reads for one full target
+/// element: project the target element onto the `Iterated` axes
+/// (slot-remapped through `mapped_element_correspondence` for a
+/// positionally-mapped pair -- the correspondence is indexed by TARGET
+/// element position and yields the source element the executed simulation
+/// reads) and fill `Pinned` axes with their literals. One bare element
+/// name per axis, in source-axis order. `None` when an `Iterated` dim is
+/// missing from the target projection or the mapped remap is unusable (a
+/// mid-edit inconsistency; callers degrade conservatively) -- and for any
+/// `Reduced` axis, which the `PerElement` invariant excludes.
+///
+/// This is the SINGLE row derivation for the `PerElement` family's
+/// emission: the link-score NAME's row (computed by
+/// `emit_per_element_link_scores`) and the equation's live-reference row
+/// (computed by [`rewrite_per_element_source_refs`]) both come from here,
+/// so they cannot disagree.
+pub(crate) fn per_element_row_for_target(
+    axes: &[crate::ltm_agg::AxisRead],
+    target_elem_by_dim: &HashMap<String, (String, usize)>,
+    dim_ctx: &crate::dimensions::DimensionsContext,
+) -> Option<Vec<String>> {
+    use crate::common::CanonicalDimensionName;
+    use crate::ltm_agg::AxisRead;
+    axes.iter()
+        .map(|ax| match ax {
+            AxisRead::Pinned(e) => Some(e.clone()),
+            AxisRead::Iterated { dim, source_dim } => {
+                let (elem, idx) = target_elem_by_dim.get(dim)?;
+                if dim == source_dim {
+                    Some(elem.clone())
+                } else {
+                    let corr = dim_ctx.mapped_element_correspondence(
+                        &CanonicalDimensionName::from_raw(dim),
+                        &CanonicalDimensionName::from_raw(source_dim),
+                    )?;
+                    corr.get(*idx).map(|e| e.as_str().to_string())
+                }
+            }
+            AxisRead::Reduced { .. } => None,
+        })
+        .collect()
+}
+
+/// Rewrite every reference to the live source inside a `PerElement` link
+/// score's target body so the subsequent changed-first wrap and the final
+/// scalar equation are well-formed for one `(site, target element)`
+/// instantiation -- the index-substitution mechanism of `pin_body_to_row`
+/// (the GH #744 reducer-body machinery) lifted to target-equation bodies
+/// (T6 of the shape-expressiveness design):
+///
+/// - an occurrence whose per-axis classification EQUALS the emitting
+///   site's `axes` is rewritten to the row's BARE element indices -- the
+///   changed-first wrap then holds it live via its `FixedIndex(row)`
+///   live shape (and only it: every other source occurrence ends up
+///   shaped differently);
+/// - any other fully-classifiable occurrence (a different `PerElement`
+///   shape, an all-`Iterated` Bare-shaped subscript, an all-`Pinned`
+///   literal subscript) is rewritten to ITS OWN row for this target
+///   element, QUALIFIED (`region\u{B7}a`) so the wrap's `PREVIOUS(...)`
+///   freeze compiles to a direct LoadPrev in the scalar fragment;
+/// - a BARE `Var` occurrence of the source (the mixed `Bare`+`PerElement`
+///   edge's other site) is pinned to the target element's projection onto
+///   the source's own axes when every axis resolves (same-element
+///   semantics), qualified -- else left for the wrap's conservative
+///   freeze;
+/// - a partially-classifiable subscript (a wildcard slice, a dynamic
+///   index) gets only its resolvable iterated-dim indices substituted
+///   (qualified; meaning-preserving -- the iterated dim IS that element
+///   in this slot), leaving the rest for the wrap's conservative
+///   handling.
+///
+/// Inside `PREVIOUS(...)`/`INIT(...)` calls the live-match rewrite is
+/// suppressed (`force_qualified`): the contents are already lagged/frozen
+/// and the wrap never recurses into them, so a bare-row rewrite there
+/// could never be the live reference -- qualified substitution keeps the
+/// frozen read compiling to a direct slot.
+fn rewrite_per_element_source_refs(
+    expr: Expr0,
+    ctx: &PerElementRefCtx<'_>,
+    force_qualified: bool,
+) -> Expr0 {
+    let qualify_row = |row: &[String]| -> Vec<IndexExpr0> {
+        row.iter()
+            .zip(ctx.from_dims)
+            .map(|(part, dim)| {
+                IndexExpr0::Expr(Expr0::Var(
+                    RawIdent::new_from_str(&qualify_axis_element(part, dim)),
+                    crate::ast::Loc::default(),
+                ))
+            })
+            .collect()
+    };
+    match expr {
+        Expr0::Const(..) => expr,
+        Expr0::Var(ref ident, loc) => {
+            if &Ident::<Canonical>::new(ident.as_str()) != ctx.from {
+                return expr;
+            }
+            // Same-element pin of a bare source reference: each axis reads
+            // the target element's coordinate for that axis's own dim.
+            let bare_axes: Vec<crate::ltm_agg::AxisRead> = ctx
+                .from_dims
+                .iter()
+                .map(|d| crate::ltm_agg::AxisRead::Iterated {
+                    dim: d.name().to_string(),
+                    source_dim: d.name().to_string(),
+                })
+                .collect();
+            match per_element_row_for_target(&bare_axes, ctx.target_elem_by_dim, ctx.dim_ctx) {
+                Some(row) => Expr0::Subscript(ident.clone(), qualify_row(&row), loc),
+                None => expr,
+            }
+        }
+        Expr0::Subscript(ident, indices, loc) => {
+            if &Ident::<Canonical>::new(ident.as_str()) != ctx.from {
+                // Another variable's subscript: recurse into expression
+                // indices (a nested source reference can hide there).
+                let indices =
+                    indices
+                        .into_iter()
+                        .map(|idx| match idx {
+                            IndexExpr0::Expr(e) => IndexExpr0::Expr(
+                                rewrite_per_element_source_refs(e, ctx, force_qualified),
+                            ),
+                            other => other,
+                        })
+                        .collect();
+                return Expr0::Subscript(ident, indices, loc);
+            }
+            if let Some(occ_axes) =
+                classify_expr0_per_element_axes(&indices, ctx.source_dim_elements, ctx.iter_ctx)
+            {
+                if !force_qualified && occ_axes == ctx.site_axes {
+                    // The emitting site's own shape: rewrite to the row's
+                    // bare elements so the changed-first wrap's
+                    // `FixedIndex(row)` live shape matches it.
+                    let indices = ctx
+                        .row_parts_bare
+                        .iter()
+                        .map(|p| {
+                            IndexExpr0::Expr(Expr0::Var(
+                                RawIdent::new_from_str(p),
+                                crate::ast::Loc::default(),
+                            ))
+                        })
+                        .collect();
+                    return Expr0::Subscript(ident, indices, loc);
+                }
+                if let Some(row) =
+                    per_element_row_for_target(&occ_axes, ctx.target_elem_by_dim, ctx.dim_ctx)
+                {
+                    return Expr0::Subscript(ident, qualify_row(&row), loc);
+                }
+                return Expr0::Subscript(ident, indices, loc);
+            }
+            // Partially classifiable: substitute only the resolvable
+            // iterated-dim indices (qualified), leave the rest (wildcards,
+            // literals, dynamic expressions) for the wrap's conservative
+            // handling.
+            let indices = indices
+                .into_iter()
+                .enumerate()
+                .map(|(i, idx)| {
+                    let substituted = match &idx {
+                        IndexExpr0::Expr(Expr0::Var(name, _)) => {
+                            let d = canonicalize(name.as_str()).into_owned();
+                            if i < ctx.from_dims.len()
+                                && ctx.iter_ctx.target_iterated_dims.contains(&d)
+                                && expr0_iterated_axis_lines_up(
+                                    &d,
+                                    i,
+                                    ctx.source_dim_elements,
+                                    ctx.iter_ctx,
+                                )
+                            {
+                                let ax = crate::ltm_agg::AxisRead::Iterated {
+                                    dim: d,
+                                    source_dim: ctx.iter_ctx.source_dim_names[i].clone(),
+                                };
+                                per_element_row_for_target(
+                                    std::slice::from_ref(&ax),
+                                    ctx.target_elem_by_dim,
+                                    ctx.dim_ctx,
+                                )
+                                .map(|row| qualify_axis_element(&row[0], &ctx.from_dims[i]))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    match substituted {
+                        Some(part) => IndexExpr0::Expr(Expr0::Var(
+                            RawIdent::new_from_str(&part),
+                            crate::ast::Loc::default(),
+                        )),
+                        None => idx,
+                    }
+                })
+                .collect();
+            Expr0::Subscript(ident, indices, loc)
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            let lagged = name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init");
+            let args = args
+                .into_iter()
+                .map(|a| rewrite_per_element_source_refs(a, ctx, force_qualified || lagged))
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, inner, loc) => Expr0::Op1(
+            op,
+            Box::new(rewrite_per_element_source_refs(
+                *inner,
+                ctx,
+                force_qualified,
+            )),
+            loc,
+        ),
+        Expr0::Op2(op, l, r, loc) => Expr0::Op2(
+            op,
+            Box::new(rewrite_per_element_source_refs(*l, ctx, force_qualified)),
+            Box::new(rewrite_per_element_source_refs(*r, ctx, force_qualified)),
+            loc,
+        ),
+        Expr0::If(c, t, f, loc) => Expr0::If(
+            Box::new(rewrite_per_element_source_refs(*c, ctx, force_qualified)),
+            Box::new(rewrite_per_element_source_refs(*t, ctx, force_qualified)),
+            Box::new(rewrite_per_element_source_refs(*f, ctx, force_qualified)),
+            loc,
+        ),
+    }
+}
+
+/// Generate the per-(row, full-target-element) scalar link-score equation
+/// for one `PerElement` reference site (GH #525, T6 of the
+/// shape-expressiveness design): the partial of target element
+/// `element_qualified`'s equation w.r.t. the live source's `site_axes`
+/// occurrence, with
+///
+/// - the live occurrence rewritten to the concrete row subscript
+///   `{from}[{row}]` (a real `Expr0::Subscript`, never `SUM(...)`-wrapped)
+///   and held live by the changed-first wrap's internal `FixedIndex(row)`
+///   shape,
+/// - every OTHER source occurrence pinned to ITS row for this element and
+///   frozen at `PREVIOUS` (each is attributed by its own link score:
+///   another `PerElement` site's scalar, the Bare A2A score of a mixed
+///   edge, a `FixedIndex` site's per-element score),
+/// - the target's other arrayed deps element-pinned via
+///   [`subscript_idents_at_element`] (`to_deps_to_subscript` must NOT
+///   contain the source -- its pinning is the rewrite pass's job), and
+/// - the guard form's target/source references pinned to
+///   `to[{element}]` / `{from}[{row}]`.
+///
+/// `row_parts_bare` is the row [`per_element_row_for_target`] derives for
+/// `site_axes` at this element -- the caller computes it once and uses it
+/// for the variable NAME too, so name and equation cannot disagree.
+#[allow(clippy::too_many_arguments)] // threads the per-(site, element) emission context
+pub(crate) fn generate_per_element_link_equation(
+    from: &str,
+    to: &str,
+    site_axes: &[crate::ltm_agg::AxisRead],
+    row_parts_bare: &[String],
+    element_qualified: &str,
+    to_elem_eqn_text: &str,
+    to_deps: &HashSet<Ident<Canonical>>,
+    to_deps_to_subscript: &HashSet<Ident<Canonical>>,
+    from_dims: &[crate::dimensions::Dimension],
+    target_elem_by_dim: &HashMap<String, (String, usize)>,
+    target_iterated_dims: &[String],
+    dims_ctx: &crate::dimensions::DimensionsContext,
+) -> Result<String, PartialEquationError> {
+    let from_canonical = Ident::<Canonical>::new(from);
+    let source_dim_elements: Vec<Vec<String>> =
+        from_dims.iter().map(dimension_element_names).collect();
+    let source_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims,
+        dim_ctx: Some(dims_ctx),
+    };
+    let Ok(Some(ast)) = Expr0::new(to_elem_eqn_text, LexerType::Equation) else {
+        return Err(PartialEquationError::new(to_elem_eqn_text));
+    };
+    let ref_ctx = PerElementRefCtx {
+        from: &from_canonical,
+        site_axes,
+        row_parts_bare,
+        source_dim_elements: &source_dim_elements,
+        from_dims,
+        target_elem_by_dim,
+        iter_ctx: &iter_ctx,
+        dim_ctx: dims_ctx,
+    };
+    let rewritten = rewrite_per_element_source_refs(ast, &ref_ctx, false);
+    let rewritten_text = print_eqn(&rewritten);
+    // The changed-first wrap: the rewritten live occurrence is the only one
+    // matching `FixedIndex(row)` (every other source occurrence was pinned
+    // QUALIFIED, which classifies `DynamicIndex` and freezes). No
+    // iterated-dim context: the source's iterated subscripts no longer
+    // exist (rewritten above), and other deps' iterated indices are pinned
+    // by `subscript_idents_at_element`'s dimension-name pinning below.
+    let live_shape = RefShape::FixedIndex(row_parts_bare.to_vec());
+    let partial = build_partial_equation_shaped(
+        &rewritten_text,
+        to_deps,
+        &from_canonical,
+        &live_shape,
+        &source_dim_elements,
+        None,
+        Some(dims_ctx),
+    )?;
+    let partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element_qualified)?;
+    let row_qualified: String = row_parts_bare
+        .iter()
+        .zip(from_dims)
+        .map(|(part, dim)| qualify_axis_element(part, dim))
+        .collect::<Vec<_>>()
+        .join(",");
+    let to_elem = format!("{}[{element_qualified}]", quote_ident(to));
+    let source_ref = format!("{}[{row_qualified}]", quote_ident(from));
+    Ok(link_score_guard_form(&partial, &to_elem, &source_ref))
+}
+
 /// Generate the `agg → scalar-target` link-score equation: the partial of
 /// `to`'s (scalar) equation w.r.t. the aggregate node `agg_name` held live,
 /// everything else PREVIOUS. `to_eqn_text` is the target's equation text with
@@ -2139,6 +2594,13 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 /// - `FixedIndex(elems)`: `$⁚ltm⁚link_score⁚{from}[{elems_joined}]→{to}` —
 ///   the per-element prefixed-from form also used by
 ///   `try_cross_dimensional_link_scores`.
+/// - `PerElement` NEVER reaches this function: its names carry BOTH a
+///   from-side row and a to-side element
+///   (`$⁚ltm⁚link_score⁚{from}[{row}]→{to}[{e}]`, the existing per-(row,
+///   slot) grammar) and are minted directly by
+///   `emit_per_element_link_scores` (GH #525, T6);
+///   `emit_per_shape_link_scores` filters the shape out before its
+///   name-dedup loop.
 /// - `Wildcard` / `DynamicIndex`: same as `Bare`. The emitter dedups by the
 ///   resulting name, so any such slot collapses onto the canonical Bare name
 ///   rather than minting a `⁚wildcard`/`⁚dynamic` variant. Every
@@ -2150,7 +2612,8 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 ///   variable-backed reducer's argument (`total = SUM(population[*])`), a
 ///   bare dynamic index (`arr[i+1]`), the dynamic-index reducer carve-out
 ///   (`SUM(pop[idx, *])`), a mapped sliced reducer the correspondence
-///   declines (element-mapped -- GH #756 -- or reverse-declared -- GH #757),
+///   declines (element-mapped, the GH #756 positional-only rule;
+///   reverse-declared positional pairs are accepted since GH #757),
 ///   or a DE-HOISTED array-valued reducer's wildcard arg
 ///   (`RANK(pop[*], 1)` -- GH #771: RANK is not `reducer_is_hoistable`, so
 ///   its wildcard-subscripted argument stays a `Direct` `Wildcard` site and
@@ -3008,7 +3471,15 @@ fn source_ref_for_guard(
         RefShape::Bare | RefShape::FixedIndex(_) => {
             shape_aware_source_ref(from.as_str(), shape, source_dim_names, source_dim_elements)
         }
-        RefShape::Wildcard | RefShape::DynamicIndex => match live_ref {
+        // `PerElement` never reaches the shaped per-(from, to, shape) path:
+        // `emit_per_shape_link_scores` diverts it to the per-(row,
+        // full-target-element) emitter (`emit_per_element_link_scores`),
+        // whose equations are built by `generate_per_element_link_equation`
+        // with an internal `FixedIndex` live shape. The `SUM(...)`-wrapped
+        // live-slice fallback here is defensive only (sign/zero-guard-safe,
+        // like the Wildcard/DynamicIndex conservative slices).
+        RefShape::Wildcard | RefShape::DynamicIndex | RefShape::PerElement { .. } => match live_ref
+        {
             Some(r) => format!("SUM({})", print_eqn(r)),
             None => format!("SUM({})", quote_ident(from.as_str())),
         },
