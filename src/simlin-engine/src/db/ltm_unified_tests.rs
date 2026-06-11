@@ -611,6 +611,189 @@ fn test_model_ltm_variables_circuit_budget_truncation_flips_to_discovery() {
     );
 }
 
+/// GH #748 parity guard: `model_ltm_mode` and `model_ltm_variables` must
+/// agree across the STATELESS gate boundary -- both consume the shared
+/// `model_is_stateless` predicate, and the variables query's stateless bail
+/// reads its `mode` from `model_ltm_mode` rather than hardcoding -- so a
+/// future edit that adds a state source to one site cannot make
+/// `model_detected_loops` (a `model_ltm_mode` reader) and the emitted
+/// vars/mode diverge (the #761-class two-surface drift; #748 itself was a
+/// two-site predicate change).
+///
+/// Sweeps the 2x2 of {stateless passthrough, module-internal state} x
+/// {exhaustive, user-forced discovery} on the same module-only-root shape
+/// (`driver -> sub -> reader -> driver`, zero parent-level stocks). The
+/// queries operate on the causal graph, so the stateless CYCLIC fixture is
+/// fine here even though it would fail compilation (algebraic circular
+/// dependency) -- that keeps the two fixtures structurally identical except
+/// for the state.
+#[test]
+fn test_ltm_mode_and_variables_agree_on_stateless_gate() {
+    use crate::db::{LtmMode, model_ltm_mode};
+    use salsa::Setter;
+
+    for sub_has_stock in [false, true] {
+        for discovery in [false, true] {
+            let sub_vars = if sub_has_stock {
+                vec![
+                    x_aux("input", "0", None),
+                    x_flow("chg", "(input - output) / 3", None),
+                    x_stock("output", "0", &["chg"], &[], None),
+                ]
+            } else {
+                vec![
+                    x_aux("input", "0", None),
+                    x_aux("output", "input * 2", None),
+                ]
+            };
+            let main = x_model(
+                "main",
+                vec![
+                    x_aux("driver", "100 + reader * 0.5", None),
+                    x_aux("reader", "sub.output", None),
+                    x_module("sub", &[("driver", "sub.input")], None),
+                ],
+            );
+            let project = crate::testutils::x_project(
+                datamodel::SimSpecs::default(),
+                &[main, x_model("sub", sub_vars)],
+            );
+
+            let mut db = SimlinDb::default();
+            let (source_project, model) = {
+                let sync = sync_from_datamodel(&db, &project);
+                (sync.project, sync.models["main"].source)
+            };
+            source_project.set_ltm_enabled(&mut db).to(true);
+            source_project.set_ltm_discovery_mode(&mut db).to(discovery);
+
+            let mode = model_ltm_mode(&db, model, source_project);
+            let ltm = model_ltm_variables(&db, model, source_project);
+            assert_eq!(
+                ltm.mode, mode,
+                "model_ltm_variables.mode must equal model_ltm_mode \
+                 (sub_has_stock={sub_has_stock}, discovery={discovery})"
+            );
+            if sub_has_stock {
+                // Module-internal state: the pass runs (the #748 positive
+                // side) and the user discovery flag is honored.
+                let expected = if discovery {
+                    LtmMode::Discovery
+                } else {
+                    LtmMode::Exhaustive
+                };
+                assert_eq!(mode, expected);
+                assert!(
+                    !ltm.vars.is_empty(),
+                    "module-state root must emit LTM vars (discovery={discovery})"
+                );
+            } else {
+                // Stateless: the early bail fires on both queries -- always
+                // Exhaustive (no feedback is possible, so no flip), zero
+                // vars, EVEN under the user discovery flag (the stateless
+                // arm precedes the flag in model_ltm_mode's gate order).
+                assert_eq!(mode, LtmMode::Exhaustive);
+                assert!(
+                    ltm.vars.is_empty(),
+                    "stateless root must emit no LTM vars (discovery={discovery}); got: {:?}",
+                    ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+}
+
+/// GH #749: a stock-free model whose only state is a PREVIOUS lag
+/// (`a = PREVIOUS(b, 0); b = a * k` -- compiles, simulates as a one-DT
+/// memory) is NOT stateless: `PREVIOUS(x)` retains state (LTM ref section
+/// 7), so the lagged cycle is a genuine feedback loop. The stateless early
+/// return must NOT fire: the loop is scored in exhaustive mode, and the
+/// user discovery flag is honored (pre-#749 the stateless arm preceded the
+/// flag, so `model_ltm_mode` reported Exhaustive even under forced
+/// discovery while `model_detected_loops` still enumerated the loop --
+/// detected-but-never-scored).
+#[test]
+fn test_stockless_previous_lagged_cycle_is_not_stateless() {
+    use crate::db::{LtmMode, model_ltm_mode};
+    use salsa::Setter;
+
+    for discovery in [false, true] {
+        let project = crate::test_common::TestProject::new("prev_cycle_gate")
+            .aux("a", "PREVIOUS(b, 0)", None)
+            .aux("b", "a * 0.5 + 1", None)
+            .build_datamodel();
+        let mut db = SimlinDb::default();
+        let (source_project, model) = {
+            let sync = sync_from_datamodel(&db, &project);
+            (sync.project, sync.models["main"].source)
+        };
+        source_project.set_ltm_enabled(&mut db).to(true);
+        source_project.set_ltm_discovery_mode(&mut db).to(discovery);
+
+        let mode = model_ltm_mode(&db, model, source_project);
+        let ltm = model_ltm_variables(&db, model, source_project);
+        assert_eq!(ltm.mode, mode, "the two surfaces must agree on the mode");
+        let expected = if discovery {
+            LtmMode::Discovery
+        } else {
+            LtmMode::Exhaustive
+        };
+        assert_eq!(
+            mode, expected,
+            "a PREVIOUS-lagged cycle is state, so the normal mode gates apply \
+             (discovery={discovery})"
+        );
+        assert!(
+            ltm.vars.iter().any(|v| v.name.contains("link_score")),
+            "the lagged cycle's edges must be scored (discovery={discovery}); got: {:?}",
+            ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+        );
+        if !discovery {
+            assert!(
+                ltm.vars
+                    .iter()
+                    .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+                "exhaustive mode must emit the lagged loop's loop_score; got: {:?}",
+                ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// GH #749 (the gate stays conservative): PREVIOUS state only matters when
+/// it is on a dt-phase reference. A stock-free, PREVIOUS-free model is
+/// still stateless and takes the early bail -- this guards the new lagged
+/// leg against over-firing on arbitrary stockless models.
+#[test]
+fn test_stockless_previous_free_model_still_bails() {
+    use crate::db::{LtmMode, model_ltm_mode};
+    use salsa::Setter;
+
+    let project = crate::test_common::TestProject::new("no_prev_gate")
+        .aux("a", "10", None)
+        .aux("b", "a * 0.5 + 1", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    assert_eq!(
+        model_ltm_mode(&db, model, source_project),
+        LtmMode::Exhaustive,
+        "a genuinely stateless model is always Exhaustive (the bail precedes the flag)"
+    );
+    let ltm = model_ltm_variables(&db, model, source_project);
+    assert!(
+        ltm.vars.is_empty(),
+        "a genuinely stateless model emits no LTM vars; got: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+}
+
 /// Auto-flip must surface a `CompilationDiagnostic::Warning` so the
 /// caller can explain the mode change to the user.  The diagnostic is
 /// accumulated by `model_ltm_variables` itself (not via
@@ -734,33 +917,28 @@ fn test_ltm_disabled_gate_suppresses_auto_flip_warning() {
 // LTM synthetic-fragment compile-failure diagnostics
 // ---------------------------------------------------------------------------
 
-/// Build a model whose LTM augmentation emits a synthetic equation the
-/// fragment compiler genuinely rejects, so the diagnostic pass has a real
-/// failure to surface.
+/// Build a feedback loop through a *variable-backed* partial reducer
+/// (`inflow[D1] = SUM(matrix[D1,*])` is the whole RHS, so `inflow` itself
+/// is the agg) closed through a `D1` stock that broadcasts into the
+/// `D1 x D2` matrix.
 ///
-/// This used to be a `SMTH1`-in-loop model, but that hazard (the
-/// composite-reference link score into a stdlib-macro module) was fixed in
-/// GH #548 (`build_submodel_metadata` now registers the sub-model's LTM
-/// composite var, so the cross-module reference resolves). The fixture is a
-/// *variable-backed* partial reducer (`inflow[D1] = SUM(matrix[D1,*])` is
-/// the whole RHS, so `inflow` itself is the agg) closed into a feedback loop
-/// through a `D1` stock that broadcasts into the `D1 x D2` matrix.
-/// Variable-backed aggs take the conservative cross-product in the element
-/// graph, and the resulting loop-score equations reference link-score names
-/// that don't exist for a partial reduce -- the bare A2A
-/// `"...matrix→inflow"` and the subscripted-per-element
-/// `"...matrix[a,x]→inflow"[b]` forms, where only the per-`(row, slot)`
-/// scalar `matrix[a,x]→inflow[a]` vars are emitted -- so the loop-score
-/// fragments fail to compile and `assemble_module` would silently stub them
-/// to 0. The diagnostic pass must surface that. (This fixture originally
-/// leaned on the GH #528 broadcast over-subscription of a *synthetic*
-/// arrayed agg, which is now fixed; the variable-backed loop-score
-/// name-resolution gap here is a distinct, still-open failure.)
-///
-/// Using a genuinely-unfixed failure (rather than a once-broken-now-fixed
-/// one) keeps these diagnostic-infrastructure tests decoupled from any
-/// single bug's lifetime -- the test-coupling concern of GH #547.
-fn build_model_with_failing_ltm_fragment(name: &str) -> datamodel::Project {
+/// This was the fragment-diagnostics POSITIVE fixture while GH #752 was
+/// open: the element graph kept the conservative cross-product for the
+/// variable-backed reducer reference, and the loop-score equations over
+/// the phantom off-diagonal edges referenced link-score names that were
+/// never emitted (the bare A2A `"...matrix→inflow"` and the
+/// subscripted-per-element `"...matrix[a,x]→inflow"[b]` forms; only the
+/// per-`(row, slot)` scalars `matrix[a,x]→inflow[a]` exist), so they
+/// failed fragment compile. GH #752 retired that cross-product (read-slice
+/// diagonal element edges + per-circuit loops that resolve the
+/// per-`(row, slot)` scores), so this model now compiles every LTM
+/// fragment -- pinned by
+/// `test_variable_backed_partial_reduce_emits_no_fragment_warning`. The
+/// positive fragment-failure tests now use the deterministic
+/// [`crate::db::LtmFragmentFailureGuard`] injection hook instead of a real
+/// bug, resolving the GH #547 test-debt coupling (a positive fixture that
+/// leans on a real bug breaks when that bug is fixed).
+fn build_variable_backed_partial_reduce_project(name: &str) -> datamodel::Project {
     TestProject::new(name)
         .with_sim_time(0.0, 5.0, 1.0)
         .named_dimension("D1", &["a", "b"])
@@ -789,12 +967,19 @@ fn is_ltm_fragment_failure(d: &crate::db::Diagnostic) -> bool {
 /// Without this the failure is silent: the variable keeps a layout slot,
 /// reads a constant 0, and the model still simulates, so the degraded
 /// loop/link score masquerades as a correct result.
+///
+/// The failure is INJECTED via `LtmFragmentFailureGuard` (GH #547) rather
+/// than relying on a real fragment-compile bug, so this test exercises only
+/// the diagnostic pass and survives every such bug being fixed (the prior
+/// fixture leaned on GH #752 and broke when it was).
 #[test]
 fn test_ltm_fragment_compile_failure_surfaces_warning() {
-    use crate::db::collect_model_diagnostics;
+    use crate::db::{LtmFragmentFailureGuard, collect_model_diagnostics};
     use salsa::Setter;
 
-    let project = build_model_with_failing_ltm_fragment("frag_fail_surface");
+    // A plain scalar feedback loop whose fragments all genuinely compile;
+    // the guard then deterministically fails its loop-score fragment.
+    let project = build_chain_scc_project("frag_fail_surface", 5);
     let mut db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
@@ -802,6 +987,7 @@ fn test_ltm_fragment_compile_failure_surfaces_warning() {
     };
     source_project.set_ltm_enabled(&mut db).to(true);
 
+    let _force_failure = LtmFragmentFailureGuard::new("loop_score");
     let diags = collect_model_diagnostics(&db, source_model, source_project);
 
     let frag_failures: Vec<_> = diags
@@ -819,34 +1005,34 @@ fn test_ltm_fragment_compile_failure_surfaces_warning() {
         frag_failures.iter().all(|d| {
             d.variable
                 .as_deref()
-                .is_some_and(|v| v.contains("$\u{205A}ltm\u{205A}"))
+                .is_some_and(|v| v.contains("$\u{205A}ltm\u{205A}loop_score"))
         }),
-        "fragment-failure warnings must name the LTM synthetic variable; \
-         got: {frag_failures:?}"
+        "fragment-failure warnings must name the LTM synthetic variable the \
+         guard failed; got: {frag_failures:?}"
     );
 }
 
 /// The compile-failure warning is accumulated by `model_ltm_fragment_diagnostics`
 /// itself. Asserting on the tracked function directly isolates the
 /// emission from the `model_all_diagnostics` wiring exercised by
-/// `test_ltm_fragment_compile_failure_surfaces_warning`.
+/// `test_ltm_fragment_compile_failure_surfaces_warning`. Like that test,
+/// the failure is injected via `LtmFragmentFailureGuard` (GH #547).
 #[test]
 fn test_model_ltm_fragment_diagnostics_emits_warning() {
-    use crate::db::CompilationDiagnostic;
+    use crate::db::{CompilationDiagnostic, LtmFragmentFailureGuard};
     use salsa::Setter;
 
-    let project = build_model_with_failing_ltm_fragment("frag_fail_direct");
+    let project = build_chain_scc_project("frag_fail_direct", 5);
     let mut db = SimlinDb::default();
     let (source_project, model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
     // Mirror the production reachability of this pass (`model_all_diagnostics`
-    // only runs it when `ltm_enabled`); the broadcast-agg failure surfaces
-    // regardless of the flag, but enabling it keeps the test faithful to how
-    // the diagnostic is actually triggered.
+    // only runs it when `ltm_enabled`).
     source_project.set_ltm_enabled(&mut db).to(true);
 
+    let _force_failure = LtmFragmentFailureGuard::new("loop_score");
     model_ltm_fragment_diagnostics(&db, model, source_project);
     let diags = model_ltm_fragment_diagnostics::accumulated::<CompilationDiagnostic>(
         &db,
@@ -859,9 +1045,84 @@ fn test_model_ltm_fragment_diagnostics_emits_warning() {
             .iter()
             .any(|CompilationDiagnostic(d)| is_ltm_fragment_failure(d)),
         "model_ltm_fragment_diagnostics must accumulate a compile-failure \
-         Warning for the broadcast arrayed-aggregate loop score; got: {:?}",
+         Warning for the guard-failed loop-score fragment; got: {:?}",
         diags.iter().map(|c| &c.0).collect::<Vec<_>>()
     );
+}
+
+/// GH #741: `model_ltm_fragment_diagnostics` must also cover the LTM
+/// *implicit helpers* (the PREVIOUS/INIT-capture auxes synthesized while
+/// parsing LTM equations, `$⁚$⁚ltm⁚…⁚arg{n}`). `assemble_module` drops a
+/// failed helper fragment exactly as it drops a failed synthetic-var
+/// fragment -- the helper keeps its layout slot and reads a constant 0,
+/// corrupting every link score that consumes it -- but before #741 NO
+/// warning was emitted anywhere for the helper leg.
+///
+/// The failure is injected via `LtmFragmentFailureGuard` (the same GH #547
+/// mechanism the synthetic-var tests use, extended to the helper compile
+/// path) so this test survives every real helper-compile bug being fixed.
+/// The fixture's flow-to-stock link score genuinely mints `arg0` helpers
+/// (its `PREVIOUS(PREVIOUS(cap_flow))` nested capture), pinned below so the
+/// guard pattern cannot silently match nothing.
+#[test]
+fn test_model_ltm_fragment_diagnostics_covers_implicit_helpers() {
+    use crate::db::{CompilationDiagnostic, LtmFragmentFailureGuard, model_ltm_implicit_var_info};
+    use salsa::Setter;
+
+    let project = build_chain_scc_project("implicit_frag_fail", 5);
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    // Vacuity guard: the fixture must genuinely synthesize implicit
+    // helpers, or the forced-failure pattern below matches nothing.
+    let info = model_ltm_implicit_var_info(&db, model, source_project);
+    assert!(
+        info.keys().any(|k| k.contains("arg0")),
+        "fixture must mint PREVIOUS-capture (arg0) helpers; got: {:?}",
+        info.keys().collect::<Vec<_>>()
+    );
+
+    // `arg0` matches only the implicit helpers (no LTM synthetic variable
+    // name carries it), so the synthetic-var loop emits nothing and any
+    // warning below is the helper leg's.
+    let _force_failure = LtmFragmentFailureGuard::new("arg0");
+    model_ltm_fragment_diagnostics(&db, model, source_project);
+    let diags = model_ltm_fragment_diagnostics::accumulated::<CompilationDiagnostic>(
+        &db,
+        model,
+        source_project,
+    );
+
+    let helper_failures: Vec<_> = diags
+        .iter()
+        .filter(|CompilationDiagnostic(d)| is_ltm_fragment_failure(d))
+        .collect();
+    assert!(
+        !helper_failures.is_empty(),
+        "a failed LTM implicit-helper fragment must surface a Warning; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+    // Each warning names the helper (the `variable` field) AND its parent
+    // LTM score variable (in the message), so a caller can locate both the
+    // stubbed slot and the score it degrades.
+    for CompilationDiagnostic(d) in &helper_failures {
+        assert!(
+            d.variable.as_deref().is_some_and(|v| v.contains("arg0")),
+            "helper-failure warning must name the helper; got: {d:?}"
+        );
+        let crate::db::DiagnosticError::Assembly(msg) = &d.error else {
+            panic!("helper-failure warning must be an Assembly diagnostic: {d:?}");
+        };
+        assert!(
+            msg.contains("synthesized while parsing LTM variable")
+                && msg.contains("$\u{205A}ltm\u{205A}"),
+            "helper-failure message must name the parent LTM variable; got: {msg}"
+        );
+    }
 }
 
 /// Regression guard: a model whose LTM synthetic fragments all compile
@@ -897,19 +1158,104 @@ fn test_clean_ltm_model_emits_no_fragment_warning() {
     );
 }
 
+/// GH #752 regression: the feedback loop through a variable-backed partial
+/// reducer -- the model that WAS the fragment-diagnostics positive fixture
+/// while the bug was open -- must now compile every LTM fragment and emit
+/// ZERO fragment-failure warnings (its loop scores resolve the
+/// per-`(row, slot)` link-score names over the read-slice diagonal edges).
+#[test]
+fn test_variable_backed_partial_reduce_emits_no_fragment_warning() {
+    use crate::db::collect_model_diagnostics;
+    use salsa::Setter;
+
+    let project = build_variable_backed_partial_reduce_project("vb_partial_reduce_clean");
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_model_diagnostics(&db, source_model, source_project);
+
+    let frag_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| is_ltm_fragment_failure(d))
+        .collect();
+    assert!(
+        frag_failures.is_empty(),
+        "every loop score through a variable-backed partial reducer must \
+         compile (GH #752); got: {frag_failures:?}"
+    );
+}
+
+/// GH #752 follow-up: a variable-backed partial reduce with a PINNED axis
+/// in its read slice (`inflow[D1] = MEAN(cube[D1,x,*])`) is EXCLUDED from
+/// the read-slice routing -- `try_cross_dimensional_link_scores`' co-reduced
+/// slice ignores Pinned axes, so its per-`(row, slot)` values are wrong for
+/// a pinned slice (the MEAN divisor counts unread rows; GH #765).
+/// The shape must stay on the LOUD conservative regime: cross-product
+/// element edges whose loop scores reference never-emitted names and surface
+/// fragment-failure Warnings, rather than compiling cleanly against silently
+/// wrong scores. When the co-reduced-slice derivation is fixed, this test
+/// flips to the zero-warning assertion and the gate's Pinned exclusion goes.
+#[test]
+fn test_variable_backed_pinned_mixed_reduce_stays_on_warned_path() {
+    use crate::db::collect_model_diagnostics;
+    use salsa::Setter;
+
+    let project = TestProject::new("vb_pinned_mixed_warned")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .array_flow("inflow[D1]", "MEAN(cube[D1,x,*])", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_model_diagnostics(&db, source_model, source_project);
+
+    let frag_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| is_ltm_fragment_failure(d))
+        .collect();
+    assert!(
+        !frag_failures.is_empty(),
+        "a Pinned-bearing variable-backed partial reduce must stay on the \
+         loud conservative path (fragment-failure Warnings) until the \
+         per-(row, slot) co-reduced-slice derivation handles Pinned axes; \
+         got no fragment warnings: {diags:?}"
+    );
+}
+
 /// Counterpart to the surfacing test: when LTM is disabled,
 /// `collect_model_diagnostics` must not run the LTM fragment-diagnostic
 /// pass -- a model with a failing LTM fragment whose caller never asked
-/// for LTM should not emit the warning. Mirrors
+/// for LTM should not emit the warning. The guard stays active for the
+/// whole collection, so the absence of the warning proves the pass never
+/// ran, not that the fragments happened to compile. Mirrors
 /// `test_ltm_disabled_gate_suppresses_auto_flip_warning`.
 #[test]
 fn test_ltm_disabled_does_not_surface_fragment_failure_warning() {
-    use crate::db::collect_model_diagnostics;
+    use crate::db::{LtmFragmentFailureGuard, collect_model_diagnostics};
 
-    let project = build_model_with_failing_ltm_fragment("frag_fail_disabled");
+    let project = build_chain_scc_project("frag_fail_disabled", 5);
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
+    let _force_failure = LtmFragmentFailureGuard::new("loop_score");
 
     assert!(
         !sync.project.ltm_enabled(&db),
@@ -945,7 +1291,11 @@ fn test_ltm_disabled_does_not_surface_fragment_failure_warning() {
 fn test_ltm_partial_equation_warning_message_contract() {
     let var_name = "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target";
     let eqn_text = "source * other";
-    let msg = super::ltm::ltm_partial_equation_warning_message(var_name, eqn_text);
+    let parse_err = crate::ltm_augment::PartialEquationError {
+        equation_text: eqn_text.to_string(),
+        kind: crate::ltm_augment::PartialEquationErrorKind::Parse,
+    };
+    let msg = super::ltm::ltm_partial_equation_warning_message(var_name, &parse_err);
 
     assert!(
         msg.contains(var_name),
@@ -963,6 +1313,26 @@ fn test_ltm_partial_equation_warning_message_contract() {
         msg.contains("magnitude of 1"),
         "the warning must explain the silent magnitude-1 hazard; got: {msg}"
     );
+
+    // GH #743: the unfreezable-partial kind names the variable and the
+    // equation too, and explains the silently-stubbed-helper hazard.
+    let unfreezable_err = crate::ltm_augment::PartialEquationError {
+        equation_text: eqn_text.to_string(),
+        kind: crate::ltm_augment::PartialEquationErrorKind::UnfreezablePartial,
+    };
+    let msg = super::ltm::ltm_partial_equation_warning_message(var_name, &unfreezable_err);
+    assert!(
+        msg.contains(var_name),
+        "the unfreezable warning must name the skipped variable; got: {msg}"
+    );
+    assert!(
+        msg.contains(eqn_text),
+        "the unfreezable warning must include the equation text; got: {msg}"
+    );
+    assert!(
+        msg.contains("array slice"),
+        "the unfreezable warning must explain the unfreezable-slice cause; got: {msg}"
+    );
 }
 
 /// Test-only salsa-tracked query that drives the production accumulating
@@ -977,6 +1347,7 @@ fn test_ltm_partial_equation_warning_message_contract() {
 fn ltm311_emit_probe(db: &dyn crate::db::Db, model: SourceModel, _project: SourceProject) {
     let err = crate::ltm_augment::PartialEquationError {
         equation_text: "source * other".to_string(),
+        kind: crate::ltm_augment::PartialEquationErrorKind::Parse,
     };
     super::ltm::emit_ltm_partial_equation_warning(
         db,
@@ -1493,6 +1864,7 @@ fn build_loops_for_test(project: &TestProject) -> Vec<crate::ltm::Loop> {
         &var_graph,
         source_vars,
         &db,
+        model,
         sync.project,
         dm_dims.as_slice(),
         MAX_CROSS_AGG_LOOPS,
@@ -1775,6 +2147,7 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
             &var_graph,
             source_vars,
             &db,
+            model,
             source_project,
             dm_dims.as_slice(),
             MAX_CROSS_AGG_LOOPS,
@@ -2557,6 +2930,7 @@ fn scalar_feeder_cycle_routes_through_agg_node() {
         &var_graph,
         source_vars,
         &db,
+        model,
         sync.project,
         dm_dims.as_slice(),
         MAX_CROSS_AGG_LOOPS,
@@ -2996,6 +3370,53 @@ fn cross_agg_loop_recovery_truncates_at_budget() {
     );
 }
 
+/// GH #746: the detected surface (`model_detected_loops`) and the scored
+/// surface must assign IDENTICAL loop ids EVEN WHEN the cross-agg loop
+/// budget truncates the enumeration. Both surfaces build their loop set
+/// through the same `build_loops_from_tiered` with the same
+/// `cross_agg_loop_budget()`, so a clipped enumeration clips identically on
+/// both sides and the runtime id join (`reclassify_loops_from_results`,
+/// pysimlin's `get_relative_loop_score`) stays sound. (The pre-#746 detected
+/// surface had a SEPARATE expansion with its own silent 64-variant cap --
+/// `expand_loops_through_routed_aggs`, now deleted -- whose trip desynced
+/// the two id sequences with no Warning; sharing the builder removes that
+/// failure mode structurally: there is no second budget to trip.)
+#[test]
+fn truncated_cross_agg_recovery_keeps_detected_and_scored_ids_aligned() {
+    const TEST_BUDGET: usize = 3;
+    let project = share_reducer_loop_fixture(5);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    // Hold the override across BOTH queries: each runs the cross-agg
+    // recovery under the same budget (and `model_ltm_variables` is salsa-
+    // memoized besides).
+    let _budget_guard = super::AggLoopBudgetGuard::new(TEST_BUDGET);
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    assert!(
+        ltm.agg_recovery_truncated,
+        "precondition: the budget must actually clip this fixture"
+    );
+
+    let scored_ids: std::collections::BTreeSet<&str> = ltm
+        .vars
+        .iter()
+        .filter_map(|v| {
+            v.name
+                .strip_prefix("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+        })
+        .collect();
+    let detected = crate::db::model_detected_loops(&db, model, sync.project);
+    let detected_ids: std::collections::BTreeSet<&str> =
+        detected.loops.iter().map(|l| l.id.as_str()).collect();
+    assert_eq!(
+        detected_ids, scored_ids,
+        "a truncated cross-agg enumeration must clip both surfaces identically \
+         (same builder, same budget) so the id join stays sound"
+    );
+}
+
 /// AC5.3 (no regression): a model whose reducer-in-a-loop has 3 disjoint
 /// petals (under the production budget) recovers exactly the 3 pairwise
 /// combinations (`{p0,p1}`, `{p0,p2}`, `{p1,p2}`) plus the full 3-petal
@@ -3075,6 +3496,7 @@ fn cross_agg_two_petal_loops_match_pre_fix_content() {
         &var_graph,
         source_vars,
         &db,
+        model,
         sync.project,
         dm_dims.as_slice(),
         MAX_CROSS_AGG_LOOPS,
@@ -3302,6 +3724,7 @@ fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
         &var_graph,
         source_vars,
         &db,
+        model,
         sync.project,
         dm_dims.as_slice(),
         MAX_CROSS_AGG_LOOPS,

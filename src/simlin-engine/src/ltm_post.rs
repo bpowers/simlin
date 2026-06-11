@@ -21,12 +21,48 @@ use indexmap::IndexMap;
 use crate::common::{Canonical, Ident};
 use crate::results::Results;
 
-/// A `(partition, slot)` bucket key for the per-element normalization grid.
-type BucketKey = (Option<usize>, usize);
+/// A `(group, slot)` bucket key for the per-element normalization grid.
+type BucketKey = (NormGroup, usize);
 /// A `(loop_index, read_slot)` pair: which loop contributes to a bucket and
 /// which of its own `loop_score` slots is read (0 for a broadcast scalar
 /// loop, the bucket's slot for an arrayed loop).
 type BucketMember = (usize, usize);
+
+/// The normalization group a loop's slot belongs to (GH #750).
+///
+/// Loops whose cycle partition resolves share a [`NormGroup::Partition`]
+/// group and normalize against each other.  A slot whose partition is
+/// unresolved (`None` -- a loop genuinely below the parent stock graph:
+/// module-internal-stock loops, PREVIOUS-lagged stockless loops) gets a
+/// [`NormGroup::Solo`] group keyed by the loop's emission-order index, so
+/// two UNRELATED unpartitioned loops can never share a denominator -- the
+/// GH #487-class cross-pollution the old shared default `None` bucket
+/// reintroduced.  A solo loop's relative score collapses to the documented
+/// lone-pin degeneracy: sign-preserving `+/-1` when active, `0` via
+/// SAFEDIV-0 when not.  (Loops genuinely coupled through module-internal
+/// state are under-merged by this rule -- each normalizes alone instead of
+/// against its true siblings; resolving partitions for state-carrying
+/// module instances is the tracked refinement that would move those loops
+/// out of the `None` bucket entirely.)
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) enum NormGroup {
+    /// A resolved cycle partition (the engine-internal partition index).
+    Partition(usize),
+    /// An unresolved-partition loop, alone in its own group.  The payload is
+    /// the loop's index in the caller's emission-order loop list, which is
+    /// unique per loop -- the value itself is never interpreted.
+    Solo(usize),
+}
+
+impl NormGroup {
+    /// Build the group for loop `loop_idx`'s partition value.
+    pub(crate) fn for_loop(partition: Option<usize>, loop_idx: usize) -> NormGroup {
+        match partition {
+            Some(p) => NormGroup::Partition(p),
+            None => NormGroup::Solo(loop_idx),
+        }
+    }
+}
 
 /// One loop's `|loop_score|` contribution to a partition-sum denominator,
 /// with `NaN` summands excluded.
@@ -116,11 +152,14 @@ fn slot_partition(
 /// vector (as produced by `model_ltm_variables`; length 1 for a
 /// scalar/cross-element/mixed loop, one entry per element for an A2A loop).
 /// This function reports only slot 0 for every loop and groups loops by
-/// their *slot-0* partition (`loop_partitions[id][0]`) -- the catch-all
-/// `None` cohort still groups together for loops genuinely below the parent
-/// graph.  This preserves the pre-Phase-2 scalar contract (one series per
-/// loop), so existing libsimlin/pysimlin/TS callers see no shape change;
-/// callers that want genuine per-element normalization use
+/// their *slot-0* partition (`loop_partitions[id][0]`).  A loop whose
+/// partition is unresolved (`None` -- genuinely below the parent stock
+/// graph: module-internal-stock loops, PREVIOUS-lagged stockless loops)
+/// normalizes ALONE (GH #750, [`NormGroup::Solo`]): unrelated subsystems
+/// must not cross-normalize, so its relative score collapses to the lone-pin
+/// degeneracy below.  This preserves the pre-Phase-2 scalar contract (one
+/// series per loop), so existing libsimlin/pysimlin/TS callers see no shape
+/// change; callers that want genuine per-element normalization use
 /// [`compute_rel_loop_scores_per_element`].
 ///
 /// The denominator uses SAFEDIV-0 semantics: when the partition sum at
@@ -190,11 +229,17 @@ pub fn compute_rel_loop_scores(
         .map(|id| results.offsets.get(&loop_score_ident(id)).copied())
         .collect();
 
-    // Group loops by their slot-0 partition (the convenience-view key).
-    let mut partition_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+    // Group loops by their slot-0 partition (the convenience-view key).  An
+    // unresolved (`None`) partition gets a per-loop Solo group (GH #750):
+    // unpartitioned loops have no provable coupling, so they never share a
+    // denominator.
+    let mut partition_groups: HashMap<NormGroup, Vec<usize>> = HashMap::new();
     for (i, id) in loop_ids.iter().enumerate() {
         partition_groups
-            .entry(slot_partition(loop_partitions, id, 0))
+            .entry(NormGroup::for_loop(
+                slot_partition(loop_partitions, id, 0),
+                i,
+            ))
             .or_default()
             .push(i);
     }
@@ -243,13 +288,18 @@ pub fn compute_rel_loop_scores(
 ///
 /// [`compute_rel_loop_scores`] collapses every loop's `loop_score` to
 /// slot 0.  This function keeps every slot, and -- crucially -- groups
-/// slots by `(slot_partition(id, k), k)` rather than by a single per-loop
-/// partition.  So an A2A loop over an element-wise-coupled dimension (every
-/// slot in partition `p`) lands in buckets `(p, 0)`, `(p, 1)`, ...; an A2A
-/// loop over an element-wise-uncoupled dimension spreads across `(p0, 0)`,
-/// `(p1, 1)`, ... -- which is precisely why two disconnected per-element
-/// feedback subsystems over the same dimension stop cross-normalizing
-/// (GH #487).
+/// slots by `(NormGroup, k)` (the slot's partition, or the loop's own
+/// [`NormGroup::Solo`] group when unresolved -- GH #750) rather than by a
+/// single per-loop partition.  So an A2A loop over an element-wise-coupled
+/// dimension (every slot in partition `p`) lands in buckets `(p, 0)`,
+/// `(p, 1)`, ...; an A2A loop over an element-wise-uncoupled dimension
+/// spreads across `(p0, 0)`, `(p1, 1)`, ... -- which is precisely why two
+/// disconnected per-element feedback subsystems over the same dimension
+/// stop cross-normalizing (GH #487); and an unresolved (`None`) slot
+/// normalizes against that loop alone, so unrelated
+/// module-internal-stock / lagged-stockless loops do not cross-normalize
+/// either (the same #487-class pollution, in the old shared `None`
+/// bucket).
 ///
 /// `loop_partitions` is the per-slot partition map from
 /// `model_ltm_variables`; the loop's slot count is `loop_partitions[id].len()`
@@ -294,16 +344,23 @@ pub fn compute_rel_loop_scores_per_element(
         .map(|id| loop_n_slots(loop_partitions, id))
         .collect();
 
-    // For each partition, the set of slot indices where some loop is in it.
-    // A scalar loop contributes its single slot 0; an arrayed loop
-    // contributes its per-slot partitions.  This drives the broadcast stride
-    // for scalar loops (a scalar loop in partition `p` is "compared in" every
-    // slot of `p`'s buckets) and lets us pre-build the bucket membership.
-    let mut partition_slots: BTreeMap<Option<usize>, BTreeSet<usize>> = BTreeMap::new();
+    // For each normalization group, the set of slot indices where some loop
+    // is in it.  A scalar loop contributes its single slot 0; an arrayed
+    // loop contributes its per-slot partitions.  This drives the broadcast
+    // stride for scalar loops (a scalar loop in partition `p` is "compared
+    // in" every slot of `p`'s buckets) and lets us pre-build the bucket
+    // membership.  An unresolved (`None`) slot maps to the loop's own Solo
+    // group (GH #750), so a scalar `None` loop never broadcasts into an
+    // unrelated arrayed `None` loop's slots -- and never stretches its own
+    // stride to that loop's slot count.
+    let mut partition_slots: BTreeMap<NormGroup, BTreeSet<usize>> = BTreeMap::new();
     for (i, id) in loop_ids.iter().enumerate() {
         for k in 0..n_slots[i] {
             partition_slots
-                .entry(slot_partition(loop_partitions, id, k))
+                .entry(NormGroup::for_loop(
+                    slot_partition(loop_partitions, id, k),
+                    i,
+                ))
                 .or_default()
                 .insert(k);
         }
@@ -318,7 +375,7 @@ pub fn compute_rel_loop_scores_per_element(
             if n_slots[i] > 1 {
                 n_slots[i]
             } else {
-                let p = slot_partition(loop_partitions, id, 0);
+                let p = NormGroup::for_loop(slot_partition(loop_partitions, id, 0), i);
                 partition_slots
                     .get(&p)
                     .and_then(|ks| ks.iter().max().copied())
@@ -339,9 +396,10 @@ pub fn compute_rel_loop_scores_per_element(
             continue;
         }
         if n_slots[i] <= 1 {
-            // Scalar loop: appears in every slot of its (slot-0) partition,
-            // always reading slot 0.
-            let p = slot_partition(loop_partitions, id, 0);
+            // Scalar loop: appears in every slot of its (slot-0) group,
+            // always reading slot 0.  A Solo group covers only slot 0, so a
+            // `None`-partition scalar loop is its own single bucket.
+            let p = NormGroup::for_loop(slot_partition(loop_partitions, id, 0), i);
             if let Some(ks) = partition_slots.get(&p) {
                 for &k in ks {
                     members.entry((p, k)).or_default().push((i, 0));
@@ -349,7 +407,7 @@ pub fn compute_rel_loop_scores_per_element(
             }
         } else {
             for k in 0..n_slots[i] {
-                let p = slot_partition(loop_partitions, id, k);
+                let p = NormGroup::for_loop(slot_partition(loop_partitions, id, k), i);
                 members.entry((p, k)).or_default().push((i, k));
             }
         }
@@ -1237,15 +1295,26 @@ mod tests {
                 slots[i].get(k).copied().flatten()
             }
         };
-        // For each partition, the set of slot indices some loop occupies in
-        // it (a scalar loop occupies only slot 0): used for the scalar
+        // The normalization group of loop `i`'s slot `k`: the resolved
+        // partition, or the loop's own Solo group when unresolved (GH #750
+        // -- unrelated unpartitioned loops never share a bucket).
+        // Re-derived inline so the oracle stays structurally independent of
+        // the production grouping.
+        let slot_group = |i: usize, k: usize| -> NormGroup {
+            match slot_part(i, k) {
+                Some(p) => NormGroup::Partition(p),
+                None => NormGroup::Solo(i),
+            }
+        };
+        // For each group, the set of slot indices some loop occupies in it
+        // (a scalar loop occupies only slot 0): used for the scalar
         // broadcast stride and to know whether a scalar loop "appears" at a
         // given output slot.
-        let mut partition_slots: BTreeMap<Option<usize>, BTreeSet<usize>> = BTreeMap::new();
+        let mut partition_slots: BTreeMap<NormGroup, BTreeSet<usize>> = BTreeMap::new();
         for (i, &ns) in n_slots.iter().enumerate() {
             for k in 0..ns {
                 partition_slots
-                    .entry(slot_part(i, k))
+                    .entry(slot_group(i, k))
                     .or_default()
                     .insert(k);
             }
@@ -1255,7 +1324,7 @@ mod tests {
                 if n_slots[i] > 1 {
                     n_slots[i]
                 } else {
-                    let p = slot_part(i, 0);
+                    let p = slot_group(i, 0);
                     partition_slots
                         .get(&p)
                         .and_then(|ks| ks.iter().max().copied())
@@ -1265,23 +1334,23 @@ mod tests {
                 }
             })
             .collect();
-        // Is loop `j` a member of the bucket (partition `p`, output slot
+        // Is loop `j` a member of the bucket (group `p`, output slot
         // `k`)?  If so, which of its own slots does it read?
         //
-        // A scalar loop is in `(p, k)` iff its (slot-0) partition is `p`
+        // A scalar loop is in `(p, k)` iff its (slot-0) group is `p`
         // AND `k` is a slot index *some* loop occupies in `p`
         // (`partition_slots[p]`) -- the engine only pushes a scalar member
         // into the slots its partition actually spans, so a stride that
         // overshoots a gap leaves that output position at 0.0.
-        let read_slot_in_bucket = |j: usize, p: Option<usize>, k: usize| -> Option<usize> {
+        let read_slot_in_bucket = |j: usize, p: NormGroup, k: usize| -> Option<usize> {
             if n_slots[j] <= 1 {
                 let covers_k = partition_slots.get(&p).is_some_and(|ks| ks.contains(&k));
-                if slot_part(j, 0) == p && covers_k {
+                if slot_group(j, 0) == p && covers_k {
                     Some(0)
                 } else {
                     None
                 }
-            } else if k < n_slots[j] && slot_part(j, k) == p {
+            } else if k < n_slots[j] && slot_group(j, k) == p {
                 Some(k)
             } else {
                 None
@@ -1297,7 +1366,7 @@ mod tests {
                 // `k < n_slots` (and stride == n_slots, so no overshoot);
                 // a scalar loop occupies only the slots its partition
                 // covers (its stride may overshoot a gap).
-                let p = slot_part(i, k);
+                let p = slot_group(i, k);
                 let Some(read_i) = read_slot_in_bucket(i, p, k) else {
                     continue;
                 };
@@ -1615,21 +1684,76 @@ mod tests {
     }
 
     #[test]
-    fn unpartitioned_loops_share_default_group() {
-        // Loops with `None` partition (no parent-level stock) should share
-        // a single default group, matching the old compile-time emitter's
-        // grouping of `partition_for_loop` -> `None` loops.
-        let series_a = &[3.0][..];
-        let series_b = &[1.0][..];
+    fn unpartitioned_loops_normalize_independently() {
+        // GH #750: a `None` partition means "no provable stock-to-stock
+        // coupling" (module-internal-stock loops, PREVIOUS-lagged stockless
+        // loops), so two `None`-partition loops must NOT cross-normalize --
+        // they may be entirely unrelated subsystems.  Each gets its own
+        // singleton group, collapsing to the documented lone-pin degeneracy
+        // (sign-preserving +/-1, or 0 via SAFEDIV-0).  The old behavior
+        // pooled them into one default bucket (rel = 0.75 / 0.25 here), the
+        // GH #487-class cross-pollution.
+        let series_a = &[3.0, 0.0][..];
+        let series_b = &[-1.0, 2.0][..];
         let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
         let partitions = mapping(&[("A", None), ("B", None)]);
 
         let scored = compute_rel_loop_scores(&results, &partitions);
         let rel_a = scored.get("A").unwrap();
         let rel_b = scored.get("B").unwrap();
-        // Shared denom of 3 + 1 = 4.
-        assert!((rel_a[0] - 0.75).abs() < 1e-12);
-        assert!((rel_b[0] - 0.25).abs() < 1e-12);
+        // Each loop's denom is its own |score|: sign in, SAFEDIV-0 on zero.
+        assert!((rel_a[0] - 1.0).abs() < 1e-12, "got {}", rel_a[0]);
+        assert_eq!(rel_a[1], 0.0, "a zero score normalizes to 0 via SAFEDIV-0");
+        assert!((rel_b[0] - (-1.0)).abs() < 1e-12, "got {}", rel_b[0]);
+        assert!((rel_b[1] - 1.0).abs() < 1e-12, "got {}", rel_b[1]);
+    }
+
+    #[test]
+    fn unpartitioned_loops_resolved_partitions_unaffected() {
+        // The singleton rule applies ONLY to `None`-partition loops: loops
+        // with a resolved partition keep normalizing against their partition
+        // siblings, bit-for-bit (the GH #468 emission-order sum).
+        let series_a = &[3.0][..];
+        let series_b = &[1.0][..];
+        let series_c = &[2.0][..];
+        let results = make_results_for_loops(&[("A", series_a), ("B", series_b), ("C", series_c)]);
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0)), ("C", None)]);
+
+        let scored = compute_rel_loop_scores(&results, &partitions);
+        assert!((scored.get("A").unwrap()[0] - 0.75).abs() < 1e-12);
+        assert!((scored.get("B").unwrap()[0] - 0.25).abs() < 1e-12);
+        assert!((scored.get("C").unwrap()[0] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn unpartitioned_loops_do_not_pool_per_element() {
+        // Per-element twin of `unpartitioned_loops_normalize_independently`
+        // (GH #750): a scalar `None`-partition loop must not broadcast into
+        // an unrelated arrayed `None`-partition loop's slot buckets (which
+        // would both dilute the arrayed loop's slots and stretch the scalar
+        // loop's stride to the arrayed loop's slot count).
+        let n_slots: usize = 2;
+        // One step: A is scalar (one slot, score 3); B is arrayed over 2
+        // slots (scores 4 and 6).  Data shape is `loop_data[i][step][slot]`.
+        let loop_data = vec![vec![vec![3.0]], vec![vec![4.0, 6.0]]];
+        let results = make_arrayed_results(&["A", "B"], &[1, n_slots], &loop_data);
+        let partitions = mapping_per_slot(&[("A", vec![None]), ("B", vec![None, None])]);
+
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
+        let a = rel.get("A").unwrap();
+        let b = rel.get("B").unwrap();
+        // A stays a single-slot series normalized against itself only.
+        assert_eq!(
+            a.len(),
+            1,
+            "a None-partition scalar loop keeps stride 1 (no broadcast into \
+             unrelated None loops' slots); got {a:?}"
+        );
+        assert!((a[0] - 1.0).abs() < 1e-12, "got {}", a[0]);
+        // B's slots normalize against B alone (each slot its own bucket).
+        assert_eq!(b.len(), n_slots);
+        assert!((b[0] - 1.0).abs() < 1e-12, "got {}", b[0]);
+        assert!((b[1] - 1.0).abs() < 1e-12, "got {}", b[1]);
     }
 
     /// The streaming `compute_partition_denominator` +

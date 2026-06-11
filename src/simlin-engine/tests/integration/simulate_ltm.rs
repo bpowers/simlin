@@ -6451,15 +6451,14 @@ fn find_partial_reduce_offset(
 /// `SUM(matrix[D1,*])`, so `row_sum` itself is the (variable-backed) aggregate
 /// node -- `result_dims = [D1]`, `read_slice = [Iterated(d1), Reduced]` (the
 /// `D1` axis is iterated over the A2A dimension space, the `D2` axis reduced).
-/// Variable-backed aggs are real variable nodes, so the `(matrix, row_sum)`
-/// element edges go through the normal reference walker (which classifies
-/// `matrix[D1,*]` as `Wildcard` -> the conservative `matrix[d1,d2] ->
-/// row_sum[d1']` cross-product), *not* the synthetic-agg reroute that #514
-/// tightened for *inline* reducer subexpressions. So besides the clean
-/// 4-cycles `matrix[d1,d2] -> row_sum[d1] -> total -> growth[d1,d2] ->
-/// matrix[d1,d2]` there are still spurious cross-element loops; the assertions
-/// only require that a real partial-reduce link score is emitted, carries
-/// non-degenerate values, and is referenced by some loop score.
+/// Variable-backed aggs are real variable nodes (no synthetic `$⁚ltm⁚agg⁚{n}`
+/// is minted), and since GH #752 the element graph routes the
+/// `(matrix, row_sum)` edge by the read slice -- only the diagonal
+/// `matrix[d1,d2] -> row_sum[d1]` rows, never the phantom off-diagonal
+/// cross-product -- so the loops are exactly the clean 4-cycles
+/// `matrix[d1,d2] -> row_sum[d1] -> total -> growth[d1,d2] -> matrix[d1,d2]`.
+/// The assertions require that a real partial-reduce link score is emitted,
+/// carries non-degenerate values, and is referenced by some loop score.
 fn build_partial_reduce_model(name: &str) -> simlin_engine::datamodel::Project {
     use simlin_engine::datamodel::{self, Equation, Variable};
 
@@ -6647,12 +6646,11 @@ fn test_partial_reduce_cross_element_loop() {
     // link scores. The elementary loop that runs through `row_sum` is the
     // per-element 4-cycle `matrix[d1,d2] -> row_sum[d1] -> total ->
     // growth[d1,d2] -> matrix[d1,d2]` (`growth` references the scalar
-    // full-reduce `total`, not `row_sum` directly); the conservative
-    // full-cross-product element graph for the `SUM(matrix[D1,*])`
-    // reference also produces spurious cross-element loops (fixed in
-    // Phase 5), but at least one loop_score equation must reference a
-    // real `matrix[d1,d2]->row_sum[d1]` link score for the partial reduce
-    // to contribute at all -- independent of which cycle it lands in.
+    // full-reduce `total`, not `row_sum` directly); since GH #752 the
+    // read-slice element edges make those 4-cycles the only loops (no
+    // spurious cross-element circuits), and at least one loop_score
+    // equation must reference a real `matrix[d1,d2]->row_sum[d1]` link
+    // score for the partial reduce to contribute at all.
     let loop_score_var_count = results
         .offsets
         .keys()
@@ -7438,6 +7436,93 @@ fn test_disjoint_dim_unscoreable_edge_warns_and_emits_no_link_score() {
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end()
         .expect("unscoreable-edge model should still compile and simulate");
+}
+
+/// GH #758 round 2 (the #510 unification): a feedback loop through an
+/// unscoreable disjoint-dim edge (an `Ast::Arrayed` target referencing the
+/// disjoint-dim source via a dynamic index) is DROPPED from loop scoring,
+/// covered by the single unscoreable-edge Warning -- instead of emitting
+/// loop scores whose subscripted references to the never-emitted
+/// `source[m]→target` names fail fragment compile (one cascading Warning
+/// per loop, all series zero-stubbed).
+#[test]
+fn test_disjoint_dynamic_index_loop_scores_dropped() {
+    use simlin_engine::test_common::TestProject;
+
+    // Loop: source[j] -> target[a] (the DynamicIndex disjoint edge) ->
+    // $⁚agg⁚0 (SUM(target[*])) -> grow[j] -> source[j].
+    let project = TestProject::new("disjoint_dyn_idx_loop")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D3", &["m", "n"])
+        .array_stock("source[D3]", "100", &["grow"], &[], None)
+        .aux("idx", "1", None)
+        .array_with_ranges_direct(
+            "target",
+            vec!["D1".to_string()],
+            vec![("a", "source[idx] * 0.1"), ("b", "2")],
+            None,
+        )
+        .array_flow("grow[D3]", "SUM(target[*]) * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // No source...→target link score of any shape, and no loop scores --
+    // every enumerated loop traverses the unscoreable edge.
+    assert!(
+        !ltm.vars.iter().any(|v| {
+            v.name
+                .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}source")
+                && v.name.contains("\u{2192}target")
+        }),
+        "the unscoreable disjoint edge must emit no source...→target link score; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+        "loops through the unscoreable disjoint edge must be dropped, not \
+         zero-stubbed; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // Exactly ONE Assembly warning: the unscoreable-edge diagnostic, which
+    // names the edge and announces the loop drop. (Before the unification:
+    // the edge warning PLUS one fragment-failure warning per loop score.)
+    let diags = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.severity == simlin_engine::db::DiagnosticSeverity::Warning
+                && matches!(d.error, simlin_engine::db::DiagnosticError::Assembly(_))
+        })
+        .collect();
+    assert_eq!(
+        assembly.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable edge); got: {assembly:?}"
+    );
+    let simlin_engine::db::DiagnosticError::Assembly(msg) = &assembly[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("source") && msg.contains("target") && msg.contains("not be scored"),
+        "the warning must name the edge and announce the loop drop; got: {msg}"
+    );
+
+    // The model still simulates.
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("unscoreable-edge loop model should still simulate");
 }
 
 /// No regression: the existing full-reduce (`SUM(population[*])` -> scalar)

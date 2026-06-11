@@ -4526,7 +4526,17 @@ fn try_detect_ltm_loops_incremental(
         };
 
         let variables: Vec<String> = {
-            let mut vars = dl.variables.clone();
+            // A cross-element loop's variables carry element subscripts
+            // (`pool[a]` -- the detected surface shares the scored surface's
+            // per-element loop builder since GH #746), but layout matches
+            // chain entries against view-element idents, which are
+            // variable-level. Strip the subscripts so the loop-aware
+            // placement heuristics keep firing for arrayed models.
+            let mut vars: Vec<String> = dl
+                .variables
+                .iter()
+                .map(|v| crate::ltm::strip_subscript(v).to_string())
+                .collect();
             if let Some(first) = vars.first().cloned() {
                 vars.push(first);
             }

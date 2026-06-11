@@ -170,13 +170,12 @@ impl From<simlin_engine::analysis::LoopSummary> for LoopDominanceSummary {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartitionOutput {
-    /// The partition's stock names (element-level for arrayed models), sorted
-    /// lexicographically.  This SET is the durable per-result identity.  It
-    /// matches the exhaustive (`Model.loops`) surface's stock set only for
-    /// SCALAR models: this analyze output partitions stocks at ELEMENT
-    /// granularity (`population[nyc]`) while the exhaustive surface partitions
-    /// at VARIABLE granularity (`population`), so an arrayed model's two
-    /// surfaces differ in granularity.
+    /// The partition's stock names (element-level for arrayed models, e.g.
+    /// `population[nyc]`), sorted lexicographically.  This SET is the durable
+    /// per-result identity.  Since GH #746 the exhaustive (`Model.loops`)
+    /// surface partitions at the same ELEMENT granularity, so the stock sets
+    /// agree across the two surfaces for scalar AND arrayed models (indices
+    /// remain result-scoped and may differ).
     pub stocks: Vec<String>,
     /// Number of loops in the returned `loopDominance` list that belong to
     /// this partition.

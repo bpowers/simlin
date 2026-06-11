@@ -1361,6 +1361,56 @@ fn test_rank_and_filter_removes_low_contribution() {
 }
 
 #[test]
+fn test_rank_and_filter_unpartitioned_loops_do_not_cross_normalize() {
+    // GH #750: two loops whose stocks resolve to NO parent-level partition
+    // (e.g. module-internal-stock loops in two unrelated module instances)
+    // must not share a normalization bucket.  Pre-#750 they pooled into one
+    // default `None` group, so the tiny loop's peak relative contribution was
+    // ~1e-7 of the unrelated big loop's total and the MIN_CONTRIBUTION
+    // retention filter dropped it -- an unrelated subsystem silently censored
+    // a loop that is 100% of its OWN activity.  Each `None` loop is now its
+    // own singleton group: both retained, both classified solo (their
+    // relative score is +/-1 by construction, so they rank after competing
+    // loops).
+    let mut loops = vec![
+        make_found_loop(
+            &[("big_a", "big_b"), ("big_b", "big_a")],
+            &["mod_one\u{00B7}stock"],
+            LoopPolarity::Reinforcing,
+            1000.0,
+        ),
+        make_found_loop(
+            &[("tiny_a", "tiny_b"), ("tiny_b", "tiny_a")],
+            &["mod_two\u{00B7}stock"],
+            LoopPolarity::Balancing,
+            0.0001,
+        ),
+    ];
+
+    // Neither stock is keyed in the parent-level partition map, so both
+    // loops' partitions resolve to `None`.
+    let partitions = CyclePartitions {
+        partitions: vec![],
+        stock_partition: HashMap::new(),
+    };
+    let meta = rank_and_filter(&mut loops, &partitions);
+
+    assert_eq!(
+        loops.len(),
+        2,
+        "a None-partition loop must not be filtered against an unrelated \
+         None-partition loop's activity"
+    );
+    // Both keep `partition: None` (the metadata surface is unchanged: no
+    // provable coupling means no partition entry).
+    assert!(loops.iter().all(|l| l.partition.is_none()));
+    assert!(
+        meta.is_empty(),
+        "None loops contribute no partition entries"
+    );
+}
+
+#[test]
 fn test_rank_and_filter_preserves_score_ordering() {
     let mut loops = vec![
         make_found_loop(

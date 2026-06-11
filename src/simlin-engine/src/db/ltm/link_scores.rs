@@ -137,9 +137,11 @@ pub(super) fn link_score_dimensions(
     // retargeting its (Bare-named, since Wildcard/DynamicIndex collapse
     // onto the Bare name) score to the target's dims would shape per-slot
     // DIAGONAL partials that the off-diagonal loop links then read by
-    // target-element subscript -- wrong-slot values instead of the
-    // conservative scalar stub (GH #758). A mixed edge (a Bare site AND a
-    // DynamicIndex site on the same `(from, to)`) keeps the arrayed score
+    // target-element subscript -- silent wrong-slot values. Denied the
+    // retarget, such an edge instead takes the GH #758 loud skip in
+    // `emit_per_shape_link_scores` (no link-score variable, loop scores
+    // through the edge dropped, one Warning). A mixed edge (a Bare site AND
+    // a DynamicIndex site on the same `(from, to)`) keeps the arrayed score
     // -- the Bare site needs it -- while its cross-product links still read
     // diagonal slots; that is the pre-existing mixed-shape conservatism
     // family, not changed here. The same-NAME arms below stay
@@ -267,13 +269,29 @@ pub(super) fn try_cross_dimensional_link_scores(
     // The source is a reducer argument. Classify the reducing function
     // in the target's equation.
     let to_var = reconstruct_single_variable(db, model, project, to)?;
-    let (reducer_kind, reducer_name, is_bare) =
-        crate::ltm_augment::classify_reducer(&to_var, from)?;
+    let classified = crate::ltm_augment::classify_reducer(&to_var, from)?;
 
-    if reducer_kind == crate::ltm_augment::ReducerKind::Constant {
+    if classified.kind == crate::ltm_augment::ReducerKind::Constant {
         // SIZE is constant; link score is always 0. Skip entirely.
         return Some(vec![]);
     }
+
+    // The body-aware partial context (GH #744): without it the linear
+    // shortcut would score each row as the bare source element, ignoring
+    // any coefficient the reducer body applies to the source
+    // (`SUM(pop[*] * (1 - weight[*]))` w.r.t. `weight` has the
+    // sign-flipping coefficient `-pop[e]`).
+    let (arrayed_dep_dims, model_deps) =
+        reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
+    let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
+    let body_ctx = crate::ltm_augment::ReducerBodyCtx {
+        body_text: &classified.body_text,
+        live_source: from,
+        arrayed_dep_dims: &arrayed_dep_dims,
+        model_deps: &model_deps,
+        row_dim_names: &row_dim_names,
+        dims_ctx: Some(project_dimensions_context(db, project)),
+    };
 
     // Compute the cartesian product of all source dimensions to get
     // per-element subscripts. For a single dimension, this is just the
@@ -307,9 +325,10 @@ pub(super) fn try_cross_dimensional_link_scores(
                 to,
                 qualified_element,
                 &qualified_elements,
-                &reducer_kind,
-                reducer_name,
-                is_bare,
+                &classified.kind,
+                classified.name,
+                classified.is_bare,
+                Some(&body_ctx),
             );
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
@@ -380,9 +399,10 @@ pub(super) fn try_cross_dimensional_link_scores(
             &crate::ltm_augment::qualify_element_csv(source_elem, from_dims),
             &crate::ltm_augment::qualify_element_csv(&result_elem, to_dims),
             &qualified_coreduced,
-            &reducer_kind,
-            reducer_name,
-            is_bare,
+            &classified.kind,
+            classified.name,
+            classified.is_bare,
+            Some(&body_ctx),
         );
         cross_vars.push(LtmSyntheticVar {
             name: var_name,
@@ -610,10 +630,13 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
 /// edge that is not statically scoreable (the target's per-element
 /// equations reference the source via a dynamic index, so which target
 /// slots depend on which source elements can't be decided at compile
-/// time). The edge gets *no* link-score variable -- a missing link score
-/// is graceful (loop/path scores referencing it get the zero-contribution
-/// stub-dep fallback) and far less misleading than the scalarized stand-in
-/// the pre-#510 path produced.
+/// time). The edge gets *no* link-score variable, and -- like the GH #758
+/// dim-incompatible class -- the caller records it in `unscoreable_edges`
+/// so loop scores traversing it are dropped (their product could only be
+/// a guaranteed-zero stub). Sub-model *pathway* scores referencing the
+/// missing name still get the fragment compiler's zero-contribution
+/// stub-dep fallback. Both are far less misleading than the scalarized
+/// stand-in the pre-#510 path produced.
 pub(super) fn emit_unscoreable_disjoint_edge_warning(
     db: &dyn Db,
     model: SourceModel,
@@ -625,7 +648,44 @@ pub(super) fn emit_unscoreable_disjoint_edge_warning(
         "LTM link score for edge {from} -> {to} could not be computed: {to} is a \
          per-element-equation arrayed variable whose equations reference {from} via a \
          dynamic index, which is not statically scoreable; this edge will have no \
-         link-score variable"
+         link-score variable and feedback loops through it will not be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
+/// Accumulate the GH #758 `Warning` for an arrayed -> arrayed conservative
+/// edge whose endpoint dimensions do not correspond (so
+/// [`link_score_dimensions`] returned empty). The conservative per-shape
+/// link score for such an edge has no compilable shape: the scalar form's
+/// guard references the multi-slot target (and the partial body the arrayed
+/// deps) in scalar context -- a fragment-compile failure stubbed to a
+/// constant 0 -- while an arrayed (target-dims) form would compile but
+/// mis-attribute: the element graph expands these edges as the conservative
+/// CROSS-PRODUCT, so off-diagonal loop links would read the per-slot
+/// DIAGONAL partial of the wrong slot (silent wrong numbers; the PR #761
+/// Bare-site gate exists precisely to prevent that). The edge therefore
+/// gets *no* link-score variable and the caller drops loop scores through
+/// it -- one clear diagnostic instead of a cascade of per-fragment
+/// warnings over guaranteed-zero stubs.
+pub(super) fn emit_unscoreable_conservative_edge_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    from: &str,
+    to: &str,
+) {
+    use salsa::Accumulator;
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: both variables \
+         are arrayed but their dimensions do not correspond (e.g. an element-mapped or \
+         unmapped dimension pair), so the conservative score has no compilable shape; \
+         this edge will have no link-score variable and feedback loops through it will \
+         not be scored"
     );
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
@@ -646,10 +706,10 @@ pub(super) fn emit_unscoreable_disjoint_edge_warning(
 /// so the caller skips emitting the variable and calls this to make the
 /// degradation visible. This is the "loud failure" sibling of
 /// [`emit_unscoreable_disjoint_edge_warning`] -- and it is *not* redundant
-/// with `model_ltm_fragment_diagnostics`: that pass only catches synthetic
-/// equations that fail to *compile*, whereas the silent-fallback bug this
-/// replaces produced an equation that compiled cleanly while computing a
-/// constant `|Δz/Δz| = 1` magnitude.
+/// with `model_ltm_fragment_diagnostics`: that pass only catches LTM
+/// equations (synthetic vars and implicit helpers) that fail to *compile*,
+/// whereas the silent-fallback bug this replaces produced an equation that
+/// compiled cleanly while computing a constant `|Δz/Δz| = 1` magnitude.
 pub(crate) fn emit_ltm_partial_equation_warning(
     db: &dyn Db,
     model: SourceModel,
@@ -660,31 +720,44 @@ pub(crate) fn emit_ltm_partial_equation_warning(
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
         variable: Some(variable_name.to_string()),
-        error: DiagnosticError::Assembly(ltm_partial_equation_warning_message(
-            variable_name,
-            &err.equation_text,
-        )),
+        error: DiagnosticError::Assembly(ltm_partial_equation_warning_message(variable_name, err)),
         severity: DiagnosticSeverity::Warning,
     })
     .accumulate(db);
 }
 
-/// The human-readable message body for a GH #311 partial-equation parse
-/// failure. Pure (functional core) so the diagnostic's wording -- which
-/// names the offending variable and equation text and explains the
-/// silent-magnitude-1 hazard the fix prevents -- is testable without driving
-/// a salsa accumulator.
+/// The human-readable message body for a partial-equation failure -- a
+/// GH #311 parse failure, or a GH #743 unfreezable partial (neither
+/// ceteris-paribus convention can be rendered as a compilable equation).
+/// Pure (functional core) so the diagnostic's wording -- which names the
+/// offending variable and equation text and explains the silent-garbage
+/// hazard the loud skip prevents -- is testable without driving a salsa
+/// accumulator.
 pub(crate) fn ltm_partial_equation_warning_message(
     variable_name: &str,
-    equation_text: &str,
+    err: &crate::ltm_augment::PartialEquationError,
 ) -> String {
-    format!(
-        "LTM link-score variable '{variable_name}' could not be generated: the \
-         ceteris-paribus partial requires parsing the target's equation, but \
-         '{equation_text}' did not parse. The variable is skipped rather than \
-         emitted with a non-ceteris-paribus equation (which would silently \
-         score a constant magnitude of 1)."
-    )
+    use crate::ltm_augment::PartialEquationErrorKind;
+    let equation_text = &err.equation_text;
+    match err.kind {
+        PartialEquationErrorKind::Parse => format!(
+            "LTM link-score variable '{variable_name}' could not be generated: the \
+             ceteris-paribus partial requires parsing the target's equation, but \
+             '{equation_text}' did not parse. The variable is skipped rather than \
+             emitted with a non-ceteris-paribus equation (which would silently \
+             score a constant magnitude of 1)."
+        ),
+        PartialEquationErrorKind::UnfreezablePartial => format!(
+            "LTM link-score variable '{variable_name}' could not be generated: the \
+             ceteris-paribus partial of '{equation_text}' would freeze an array \
+             slice inside PREVIOUS(), which cannot compile, and the changed-last \
+             fallback could not be rendered either (its freeze would also lag an \
+             array slice, or the source has no matching occurrence to freeze). The \
+             variable is skipped rather than emitted with a silently-stubbed helper \
+             (which would poison the score with a plausible-looking wrong constant \
+             -- GH #743)."
+        ),
+    }
 }
 
 /// Emit per-distinct-source-element link scores for a disjoint-dim
@@ -712,8 +785,12 @@ pub(crate) fn ltm_partial_equation_warning_message(
 ///  - `Some(vec![])` when the target references `from` via a non-literal
 ///    index (a `DynamicIndex` site -- or, defensively, a `Wildcard`/`Bare`
 ///    site that can't be a literal-element reference into a disjoint-dim
-///    target): a `Warning` is accumulated and no link score is emitted, and
-///    the caller must *not* fall through to `emit_per_shape_link_scores`;
+///    target): a `Warning` is accumulated (once -- the edge is recorded in
+///    `unscoreable_edges`, which both dedups the warning and makes
+///    `model_ltm_variables` drop loop scores traversing the edge, the same
+///    GH #758 treatment the dim-incompatible per-shape class gets) and no
+///    link score is emitted, and the caller must *not* fall through to
+///    `emit_per_shape_link_scores`;
 ///  - `None` when the edge isn't an arrayed -> disjoint-dim-`Ast::Arrayed`
 ///    edge at all -- the caller's existing emission path handles it.
 ///
@@ -729,6 +806,7 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
     to: &str,
     model: SourceModel,
     project: SourceProject,
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> Option<Vec<LtmSyntheticVar>> {
     // Both ends must be arrayed, non-module variables.
     let from_sv = source_vars.get(from)?;
@@ -786,7 +864,13 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
                 }
             }
             RefShape::Bare | RefShape::Wildcard | RefShape::DynamicIndex => {
-                emit_unscoreable_disjoint_edge_warning(db, model, from, to);
+                // Record the edge so loop scores through it are dropped
+                // (GH #758 unification); the insert also dedups the warning
+                // when the pinned-loop pass re-visits the edge (whose
+                // `emitted_edges` set only tracks edges that emitted a var).
+                if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                    emit_unscoreable_disjoint_edge_warning(db, model, from, to);
+                }
                 return Some(vec![]);
             }
         }
@@ -860,6 +944,13 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
 /// resulting name and keep the first occurrence -- the AST walk records
 /// `Bare` before any subscripted reference, so the canonical-Bare link
 /// score wins the slot when both a bare and a subscripted reference exist.
+///
+/// `unscoreable_edges` collects the (from, to) edges the GH #758 gate
+/// declines to score (arrayed endpoints whose dimensions don't correspond
+/// -- see [`emit_unscoreable_conservative_edge_warning`]); the caller
+/// (`model_ltm_variables`) drops loop scores traversing them. The warning
+/// is accumulated only on first insertion, so an edge re-visited by the
+/// pinned-loop pass doesn't warn twice.
 #[allow(clippy::too_many_arguments)] // helper threads through emission context
 pub(super) fn emit_per_shape_link_scores(
     db: &dyn Db,
@@ -872,6 +963,7 @@ pub(super) fn emit_per_shape_link_scores(
     dm_dims: &[crate::datamodel::Dimension],
     skip_reducer_shapes: bool,
     vars: &mut Vec<LtmSyntheticVar>,
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) {
     let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
     // The distinct `shape` fields of `(from, to)`'s classified sites,
@@ -902,8 +994,44 @@ pub(super) fn emit_per_shape_link_scores(
     shapes.retain(|shape| {
         emitted_names.insert(crate::ltm_augment::link_score_var_name(from, to, shape))
     });
+    if shapes.is_empty() {
+        // Every shape was a suppressed reducer-arg Wildcard: nothing to
+        // emit (the agg halves carry the edge's scores).
+        return;
+    }
 
     let target_dims = link_score_dimensions(db, source_vars, from, to, model, project, dm_dims);
+
+    // GH #758: when BOTH endpoints are arrayed non-module variables but
+    // `link_score_dimensions` found no correspondence (`target_dims`
+    // empty), every per-shape equation this loop would emit is
+    // broken-by-construction -- `retarget_ltm_equation_dims` collapses it
+    // to a SCALAR equation whose guard form references the multi-slot
+    // target (and whose partial body references the arrayed deps) in
+    // scalar context, so the fragment never compiles and the score is
+    // silently stubbed to 0 while every loop score through the edge
+    // fail-warns in a cascade. The arrayed alternative is forbidden by the
+    // PR #761 Bare-site gate (the element edges are the conservative
+    // cross-product, so per-slot diagonal partials would be read at wrong
+    // slots). Degrade loudly instead: one Warning naming the edge, no
+    // link-score variable, and (via `unscoreable_edges`) no loop scores
+    // through it. The declined mapped sliced reducers (element-mapped GH
+    // #756, reverse-declared GH #757) land here, as do disjoint-dim
+    // ApplyToAll-target references and incompatible-dim dynamic-index
+    // reducers -- all previously warned zero-stubs.
+    let arrayed_non_module = |name: &str| -> bool {
+        source_vars
+            .get(name)
+            .filter(|sv| sv.kind(db) != SourceVariableKind::Module)
+            .map(|sv| !variable_dimensions(db, *sv, project).is_empty())
+            .unwrap_or(false)
+    };
+    if target_dims.is_empty() && arrayed_non_module(from) && arrayed_non_module(to) {
+        if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+            emit_unscoreable_conservative_edge_warning(db, model, from, to);
+        }
+        return;
+    }
 
     for shape in shapes {
         let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
@@ -947,6 +1075,33 @@ pub(super) fn emit_per_shape_link_scores(
     }
 }
 
+/// Build the owned inputs for a [`crate::ltm_augment::ReducerBodyCtx`]:
+/// for every model variable a reducer body references, its membership in
+/// the freeze set (`model_deps`) and -- when arrayed -- its declared
+/// dimension count (`arrayed_dep_dims`, the row-pinning gate). Identifiers
+/// in the body that are not model variables (dimension/element names in
+/// subscripts, TIME) are excluded, so the body partial leaves them live,
+/// matching `build_partial_equation_shaped`'s deps-only freezing.
+fn reducer_body_ctx_parts(
+    db: &dyn Db,
+    source_vars: &HashMap<String, SourceVariable>,
+    project: SourceProject,
+    body_text: &str,
+) -> (HashMap<String, usize>, HashSet<String>) {
+    let mut arrayed_dep_dims: HashMap<String, usize> = HashMap::new();
+    let mut model_deps: HashSet<String> = HashSet::new();
+    for ident in crate::ltm_augment::expr_reference_idents(body_text) {
+        if let Some(sv) = source_vars.get(&ident) {
+            model_deps.insert(ident.clone());
+            let dims = variable_dimensions(db, *sv, project);
+            if !dims.is_empty() {
+                arrayed_dep_dims.insert(ident, dims.len());
+            }
+        }
+    }
+    (arrayed_dep_dims, model_deps)
+}
+
 /// Emit the `source[<read row>] → agg` link-score half: one scalar
 /// `$⁚ltm⁚link_score⁚{from}[<row>]→{agg}` (when the agg is scalar) or
 /// `$⁚ltm⁚link_score⁚{from}[<row>]→{agg}[<slot>]` (when the agg is arrayed
@@ -960,7 +1115,10 @@ pub(super) fn emit_per_shape_link_scores(
 /// `coreduced` set (the rows mapping to the same agg slot -- the
 /// `from`-slice combined for that slot) is the `all_elements` for the
 /// MEAN divisor / nonlinear expansion. The agg's *own* equation is exactly
-/// the reducer, so the "bare" algebraic shortcut applies.
+/// the reducer call (no surrounding arithmetic), but its argument may
+/// apply a coefficient to `from`, so the SUM/MEAN row partial is built
+/// from the reducer BODY via a `ReducerBodyCtx` (GH #744) rather than the
+/// bare-source algebraic shortcut.
 ///
 /// A *scalar* `from` is the GH #737 scalar-feeder case (`scale` in
 /// `SUM(pop[*] * scale)`): there are no read rows, the element graph emits
@@ -1043,14 +1201,30 @@ pub(super) fn emit_source_to_agg_link_scores(
     let Some(agg_var) = reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project) else {
         return;
     };
-    let Some((reducer_kind, reducer_name, _is_bare)) =
-        crate::ltm_augment::classify_reducer(&agg_var, from)
-    else {
+    let Some(classified) = crate::ltm_augment::classify_reducer(&agg_var, from) else {
         return;
     };
-    if reducer_kind == crate::ltm_augment::ReducerKind::Constant {
+    if classified.kind == crate::ltm_augment::ReducerKind::Constant {
         return;
     }
+    // The body-aware partial context (GH #744). The agg's own equation is
+    // exactly the reducer call (`classified.is_bare` is true by
+    // construction), but its ARGUMENT may apply a coefficient to `from`
+    // (`SUM(pop[*] * (1 - weight[*]))` w.r.t. `weight` has the
+    // sign-flipping coefficient `-pop[e]`); the body context lets the
+    // Linear arm build the true changed-first row partial instead of
+    // asserting ∂agg/∂from[e] = 1.
+    let (arrayed_dep_dims, model_deps) =
+        reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
+    let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
+    let body_ctx = crate::ltm_augment::ReducerBodyCtx {
+        body_text: &classified.body_text,
+        live_source: from,
+        arrayed_dep_dims: &arrayed_dep_dims,
+        model_deps: &model_deps,
+        row_dim_names: &row_dim_names,
+        dims_ctx: Some(project_dimensions_context(db, project)),
+    };
     let dim_element_lists: Vec<Vec<String>> = from_dims
         .iter()
         .map(crate::ltm_augment::dimension_element_names)
@@ -1099,9 +1273,10 @@ pub(super) fn emit_source_to_agg_link_scores(
                     &agg.name,
                     &qualified_row,
                     &qualified_coreduced,
-                    &reducer_kind,
-                    reducer_name,
-                    /* is_bare = */ true,
+                    &classified.kind,
+                    classified.name,
+                    classified.is_bare,
+                    Some(&body_ctx),
                 ),
             )
         } else {
@@ -1116,9 +1291,10 @@ pub(super) fn emit_source_to_agg_link_scores(
                     &qualified_row,
                     slot,
                     &qualified_coreduced,
-                    &reducer_kind,
-                    reducer_name,
-                    /* is_bare = */ true,
+                    &classified.kind,
+                    classified.name,
+                    classified.is_bare,
+                    Some(&body_ctx),
                 ),
             )
         };
@@ -1490,6 +1666,9 @@ pub(super) fn emit_agg_to_target_link_scores(
 /// `LtmSyntheticVar`s into the `Vec`. The discovery / sub-model caller
 /// passes `false` since it iterates causal edges (not loop links) and the
 /// `from → agg`/`agg → to` edges aren't separately visited there.
+///
+/// `unscoreable_edges` is threaded to [`emit_per_shape_link_scores`]'s
+/// GH #758 gate; see its doc.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_link_scores_for_edge(
     db: &dyn Db,
@@ -1502,6 +1681,7 @@ pub(super) fn emit_link_scores_for_edge(
     dm_dims: &[crate::datamodel::Dimension],
     skip_agg_halves: bool,
     vars: &mut Vec<LtmSyntheticVar>,
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) {
     // The set of synthetic aggs `(from, to)` routes through, read off
     // the reference-site IR (the unique `ThroughAgg` `AggRef`s of this
@@ -1557,6 +1737,7 @@ pub(super) fn emit_link_scores_for_edge(
             dm_dims,
             /* skip_reducer_shapes = */ true,
             vars,
+            unscoreable_edges,
         );
         return;
     }
@@ -1580,12 +1761,20 @@ pub(super) fn emit_link_scores_for_edge(
     // (`Ast::Arrayed`) target (GH #510): one link score per distinct
     // referenced source element, each `Equation::Arrayed` over `to`'s
     // dims. `Some(vec![])` means the edge is genuinely unscoreable (a
-    // dynamic-index source): a `Warning` was accumulated and no link
-    // score is emitted -- crucially, we *don't* fall through to
-    // `emit_per_shape_link_scores`, which would build a scalarized stand-in.
-    if let Some(disjoint_vars) =
-        try_disjoint_dim_arrayed_link_scores(db, source_vars, from, to, model, project)
-    {
+    // dynamic-index source): a `Warning` was accumulated, the edge was
+    // recorded in `unscoreable_edges` (so loop scores through it are
+    // dropped -- the GH #758 treatment), and no link score is emitted --
+    // crucially, we *don't* fall through to `emit_per_shape_link_scores`,
+    // which would build a scalarized stand-in.
+    if let Some(disjoint_vars) = try_disjoint_dim_arrayed_link_scores(
+        db,
+        source_vars,
+        from,
+        to,
+        model,
+        project,
+        unscoreable_edges,
+    ) {
         vars.extend(disjoint_vars);
         return;
     }
@@ -1600,5 +1789,6 @@ pub(super) fn emit_link_scores_for_edge(
         dm_dims,
         /* skip_reducer_shapes = */ false,
         vars,
+        unscoreable_edges,
     );
 }

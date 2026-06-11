@@ -201,7 +201,13 @@ fn classify_subscript_shape(
 ///   1. it has exactly one index per source dimension (a *partially*
 ///      iterated subscript -- some indices iterated, some literal/wildcard
 ///      -- is out of scope for Phase 3 and stays with its
-///      `classify_subscript_shape` result; Phase 4 handles sliced reducers),
+///      `classify_subscript_shape` result; Phase 4 handles sliced reducers.
+///      The partially-iterated NON-reducer reference (`pop[Region, young]`
+///      inside an A2A-over-`Region` equation, GH #525) therefore classifies
+///      `DynamicIndex`: since the GH #759 fix its conservative partial
+///      compiles and scores, but the element graph still expands it to the
+///      cross-product -- the per-element family pinned on the literal axes
+///      that would tighten it is tracked on GH #525),
 ///   2. every index `d_i` is a bare `Var` naming a dimension that is one of
 ///      the target equation's iterated dimensions (`target_iterated_dims`),
 ///      *and*
@@ -636,9 +642,12 @@ pub(crate) fn model_ltm_reference_sites(
             // includes `from` -- i.e. `to`'s whole equation is exactly the
             // reducer (`total = SUM(population[*])`, `row_sum[D1] =
             // SUM(matrix[D1,*])`). In that case the `(from, to)` edge *is* the
-            // agg edge: `emit_edges_for_reference` projects the `Wildcard`
-            // syntactic shape correctly (a reduction into the scalar/lower-
-            // rank `to`), so it must keep its `Wildcard` shape.
+            // agg edge and the reference keeps its `Wildcard` shape:
+            // `model_element_causal_edges` routes the partial-reduce case by
+            // its read slice (GH #752, via
+            // `ltm_agg::variable_backed_partial_reduce_agg`) and projects the
+            // whole-extent case as the reduction/broadcast via
+            // `emit_edges_for_reference`.
             let to_is_variable_backed_agg = agg_nodes
                 .by_var
                 .get(to_name_str)

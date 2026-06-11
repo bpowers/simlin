@@ -570,6 +570,67 @@ fn test_get_errors_no_ltm_diagnostics_when_ltm_never_requested() {
     }
 }
 
+/// GH #741: an LTM *fragment-compile-failure* warning must flow through the
+/// same `LtmEnabledGuard` harvest as the auto-flip warning above -- it rides
+/// the identical `model_all_diagnostics` -> `model_ltm_fragment_diagnostics`
+/// accumulator, so `simlin_project_get_errors` surfaces it after an
+/// LTM-enabled sim was created.
+///
+/// The fixture is the GH #742 RANK shape (`grow[Region] = scale[Region] *
+/// RANK(pop, 1)` in a feedback loop): the array-valued RANK is hoisted into
+/// a scalar `$⁚ltm⁚agg⁚0` aggregate whose own fragment is ill-typed and
+/// genuinely fails to compile today (a real, non-injected failure). The
+/// previous fixture here was the GH #759 pinned-index repro, retired when
+/// #759's fix made its helpers compile; the assertion matches the shared
+/// "failed to compile" wording rather than one diagnostic sub-class, so the
+/// test keeps covering the FFI harvest channel as individual shapes get
+/// fixed (the engine-side guard-injected
+/// `test_model_ltm_fragment_diagnostics_covers_implicit_helpers` covers the
+/// implicit-helper diagnostic leg independently of any real-shape lifetime).
+#[test]
+fn test_get_errors_surfaces_ltm_fragment_failure_after_ltm_sim() {
+    let datamodel = TestProject::new("get_errors_fragment_fail")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["north", "south"])
+        .array_aux("scale[Region]", "pop[Region] * 0.01")
+        .array_aux("grow[Region]", "scale[Region] * RANK(pop, 1)")
+        .array_flow("inflow[Region]", "grow[Region]", None)
+        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut model_err: *mut SimlinError = ptr::null_mut();
+        let model =
+            simlin_project_get_model(proj, ptr::null(), &mut model_err as *mut *mut SimlinError);
+        assert!(model_err.is_null());
+        assert!(!model.is_null());
+
+        // Create an LTM-enabled sim so the project records the LTM request.
+        let mut sim_err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut sim_err as *mut *mut SimlinError);
+        assert!(sim_err.is_null(), "LTM sim creation should succeed");
+        assert!(!sim.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "get_errors must return the fragment-failure warning"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "failed to compile"),
+            "the LTM fragment compile-failure warning must reach get_errors after an LTM sim"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// The LTM-requested flag must survive subsequent non-LTM operations on the
 /// project: after an LTM sim and then a plain non-LTM sim, the auto-flip
 /// warning must still be reachable through `get_errors`.

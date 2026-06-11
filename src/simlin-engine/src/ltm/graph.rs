@@ -1403,16 +1403,17 @@ fn all_module_stocks(
 ///   loop content rather than enumeration order.
 ///
 /// Synthetic `$⁚ltm⁚agg⁚{n}` nodes are INCLUDED in the key like any other
-/// node (GH #737 / review C1b). Both id-bearing surfaces now carry the agg
-/// hops explicitly in their links -- the scored loops are built from the
-/// element graph and `model_detected_loops` splices its ThroughAgg-routed
-/// edges through the same agg nodes
-/// (`db::ltm::expand_loops_through_routed_aggs`) -- so the keys match
-/// EXACTLY across surfaces, two loops differing only in WHICH agg they route
-/// through stay totally ordered (`agg⁚0` vs `agg⁚1`), and the cross-surface
-/// numbering never leans on a tied-key stable-sort fallback. (A round-1 fix
-/// stripped agg names here to reconcile the then-agg-free detected surface;
-/// that left multi-agg sibling loops key-tied and is reverted.)
+/// node (GH #737 / review C1b). Both id-bearing surfaces carry the agg hops
+/// explicitly in their links -- and since GH #746 they don't merely speak
+/// the same node language: `model_detected_loops` builds its exhaustive loop
+/// set with the SAME `build_loops_from_tiered` + `recover_agg_hop_polarities`
+/// sequence the scored surface uses, so the keys (and the resulting id
+/// sequences) match EXACTLY across surfaces by construction. Two loops
+/// differing only in WHICH agg they route through stay totally ordered
+/// (`agg⁚0` vs `agg⁚1`), and the cross-surface numbering never leans on a
+/// tied-key stable-sort fallback. (A GH #737 round-1 fix stripped agg names
+/// here to reconcile the then-agg-free detected surface; that left multi-agg
+/// sibling loops key-tied and is reverted.)
 fn loop_id_sort_key(loop_item: &Loop) -> (String, Vec<String>) {
     let mut vars: Vec<String> = loop_item
         .links

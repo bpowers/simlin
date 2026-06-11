@@ -610,15 +610,23 @@ impl<'a> BuiltinVisitor<'a> {
             // wildcard/range index lives inside an array-reducer (handled by
             // its own array-view path), so we do not descend into indices here.
             Subscript(_, _, _) => false,
-            // An array-reducer (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/`RANK`/`SIZE`)
-            // collapses its arrayed argument to a SCALAR, so a bare arrayed name
-            // inside it (`SUM(hfc_emissions)`) is well-typed in a *scalar*
-            // helper -- it does NOT need the arrayed-helper path, and wrapping
-            // `SUM(arr)` in an `ApplyToAll` would broadcast a scalar reduce
-            // across the active dims and corrupt the result (LTM link-score
-            // numerators are exactly this shape). Do not descend into a reducer.
+            // A scalar-collapsing array reducer (`SUM`/`MEAN`/`MIN`/`MAX`/
+            // `STDDEV`/`SIZE`) collapses its arrayed argument to a SCALAR, so
+            // a bare arrayed name inside it (`SUM(hfc_emissions)`) is
+            // well-typed in a *scalar* helper -- it does NOT need the
+            // arrayed-helper path, and wrapping `SUM(arr)` in an `ApplyToAll`
+            // would broadcast a scalar reduce across the active dims and
+            // corrupt the result (LTM link-score numerators are exactly this
+            // shape). Do not descend into such a reducer. `RANK` is in the
+            // reducer table but is ARRAY-valued (Vensim's VECTOR RANK), so a
+            // bare arrayed name inside it MUST take the arrayed-helper path:
+            // captured into a scalar helper, `rank(pop, 1)` is ill-typed and
+            // the helper fragment fails (GH #742). The lowercasing is
+            // defensive belt-and-suspenders: parsed `Expr0` function names
+            // are already lowercase by construction (the parser lowercases
+            // function-call identifiers).
             App(UntypedBuiltinFn(func, args), _) => {
-                crate::ltm_agg::reducer_kind_from_name(func.as_str(), args.len()).is_none()
+                !crate::ltm_agg::reducer_collapses_to_scalar(&func.to_ascii_lowercase(), args.len())
                     && args.iter().any(|a| self.arg_has_bare_var_ref(a))
             }
             Op1(_, r, _) => self.arg_has_bare_var_ref(r),

@@ -65,10 +65,20 @@
 //!
 //! Whole-RHS partial reduces (`row_sum[D1] = SUM(matrix[D1,*])`) *are*
 //! recognized -- the variable is the agg, `result_dims` carries its dims, and
-//! `read_slice` records the `Iterated`/`Reduced` axis split -- but the
-//! element-graph reroute leaves the conservative full-cross-product in place
-//! for variable-backed aggs (the edges to/from a real variable node already
-//! exist via the normal reference walker).
+//! `read_slice` records the `Iterated`/`Reduced` axis split. The element
+//! graph routes them by the read slice too (GH #752,
+//! [`variable_backed_partial_reduce_agg`]): each source row feeds only its
+//! own `row_sum[<slot>]` element node -- matching the per-`(row, slot)` link
+//! scores `try_cross_dimensional_link_scores` emits -- never the phantom
+//! off-diagonal cross-product (whose loop scores referenced names that were
+//! never emitted and stubbed to 0). Whole-extent variable-backed reducers
+//! (`total = SUM(pop[*])`, including the broadcast `share[R] = SUM(pop[*])`)
+//! keep the normal reference walker's reduction/broadcast edges, which are
+//! already the true reads for those shapes; the gate's other exclusions
+//! (partial reduce broadcast over extra target dims / permuted axes --
+//! GH #764 -- and Pinned-bearing mixed slices, see
+//! [`variable_backed_partial_reduce_agg`]) keep the conservative
+//! cross-product, a SUPERSET of the true reads on the loud warned path.
 
 use std::collections::HashMap;
 
@@ -136,6 +146,31 @@ pub(crate) fn reducer_kind_from_name(name: &str, arity: usize) -> Option<Reducer
         "size" => Some(ReducerKind::Constant),
         _ => None,
     }
+}
+
+/// `true` when `name`/`arity` (lowercase, like [`reducer_kind_from_name`])
+/// names an array builtin whose RESULT is a scalar -- the genuinely reducing
+/// set (`SUM`, 1-arg `MEAN`/`MIN`/`MAX`, `STDDEV`, `SIZE`).
+///
+/// Callers lowercase the name before calling; that normalization is
+/// defensive belt-and-suspenders, not load-bearing -- parsed `Expr0`
+/// function names are already lowercase by construction (the parser
+/// lowercases function-call identifiers, and LTM-generated uppercase
+/// reducer text is re-parsed before any of these predicates see it).
+///
+/// `RANK` is recognized as a reducer by [`reducer_kind_from_name`] (the agg
+/// machinery enumerates and scores it like one), but `RANK(arr, dir)` is
+/// ARRAY-valued -- the rank of each element, Vensim's VECTOR RANK -- so any
+/// consumer deciding "does this subtree collapse to a scalar" must exclude
+/// it (GH #742): treating a frozen `PREVIOUS(RANK(arr, dir))` subtree as
+/// scalar routes the capture into a per-element *scalar* helper whose
+/// equation is ill-typed (array-valued in scalar context), the helper
+/// fragment fails, and the consuming score silently corrupts. The two
+/// consumers are `builtins_visitor::arg_has_bare_var_ref` (the GH #541
+/// arrayed-capture gate) and `ltm_augment::expr_is_array_slice_valued` (the
+/// GH #743 unfreezable-`PREVIOUS` detector).
+pub(crate) fn reducer_collapses_to_scalar(name: &str, arity: usize) -> bool {
+    reducer_kind_from_name(name, arity).is_some() && name != "rank"
 }
 
 /// [`reducer_kind_from_name`] applied to a `BuiltinFn`.
@@ -844,7 +879,7 @@ fn reducer_source_vars(
 ///   dimension -- matching `classify_subscript_shape`'s AC1.4 treatment of an
 ///   all-`StarRange` subscript as `Wildcard`. The element-graph reroute then
 ///   over-approximates the unread rows, exactly as before; tightening this is
-///   tracked separately.)
+///   tracked as GH #766.)
 /// - `IndexExpr2::Expr(Expr2::Var(d, ..))` where `d` (canonical) is one of
 ///   the *target equation's* iterated dimensions AND matches the source's
 ///   `i`-th declared dimension either *by name* or via a positional
@@ -1148,6 +1183,69 @@ fn result_dims_from_read_slice(
 /// `true` when `name` is a synthetic aggregate-node name (`$⁚ltm⁚agg⁚{n}`).
 pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
     name.starts_with(AGG_NAME_PREFIX)
+}
+
+/// The variable-backed PARTIAL-reduce aggregate node for the causal edge
+/// `from -> to`, if any (GH #752): `to`'s entire dt-equation is a reducer
+/// reading `from` (`to` IS the agg, `is_synthetic == false`) with at least
+/// one [`AxisRead::Iterated`] axis, and the agg's `result_dims` are exactly
+/// `to`'s declared dims, in order -- so each agg result slot names a complete
+/// `to` element and the element graph can route the read-slice rows straight
+/// to `to[<slot>]` (the diagonal `matrix[d1,d2] → row_sum[d1]` family whose
+/// per-`(row, slot)` link scores `try_cross_dimensional_link_scores` emits).
+///
+/// This is the single gate shared by the element-graph reroute
+/// (`model_element_causal_edges`' `Direct`-`Wildcard` dispatch) and the loop
+/// builder (`build_element_level_loops`' per-circuit routing), so the two can
+/// never disagree about which edges carry per-`(row, slot)` scores.
+///
+/// `None` (callers keep the conservative path) for:
+/// - a whole-extent / pinned-only variable-backed reducer
+///   (`total = SUM(pop[*])`, `share[R] = SUM(pop[*])`): no `Iterated` axis;
+///   the reduction / broadcast edges the conservative path emits are already
+///   the true reads.
+/// - a whole-RHS partial reduce broadcast over extra target dims
+///   (`out[D1,D3] = SUM(matrix[D1,*])`): `result_dims` is a strict subset of
+///   `to`'s dims, so a slot does not name a complete `to` element (and the
+///   per-`(row, slot)` link scores are not emitted for that shape either).
+/// - a permuted-axes whole-RHS reduce: slot coordinates are in
+///   `Iterated`-axis (source) order, which would mis-subscript `to`.
+/// - a PINNED-bearing mixed slice (`outf[D1] = MEAN(cube[D1,x,*])`):
+///   `try_cross_dimensional_link_scores` derives each slot's co-reduced
+///   slice from the FULL source cartesian product, ignoring `Pinned` axes,
+///   so its per-`(row, slot)` values are wrong for a pinned slice (e.g. the
+///   MEAN divisor counts the unread rows -- GH #765). Accepting
+///   the slice here would trade the loud conservative regime (cross-product
+///   edges whose loop scores fail fragment compile with `Warning`s) for
+///   silently wrong numbers; the exclusion goes when that derivation
+///   respects the read slice.
+pub(crate) fn variable_backed_partial_reduce_agg<'a>(
+    aggs: &'a AggNodesResult,
+    from: &str,
+    to: &str,
+    to_dims: &[crate::dimensions::Dimension],
+) -> Option<&'a AggNode> {
+    if to_dims.is_empty() {
+        return None;
+    }
+    aggs.aggs_in_var(to).find(|a| {
+        !a.is_synthetic
+            && a.name == to
+            && a.source_vars.iter().any(|s| s == from)
+            && a.read_slice
+                .iter()
+                .any(|ax| matches!(ax, AxisRead::Iterated { .. }))
+            // Every axis Iterated or Reduced: a Pinned-bearing slice is
+            // excluded (see the rustdoc's last bullet).
+            && a.read_slice
+                .iter()
+                .all(|ax| matches!(ax, AxisRead::Iterated { .. } | AxisRead::Reduced))
+            && a.result_dims.len() == to_dims.len()
+            && a.result_dims
+                .iter()
+                .zip(to_dims)
+                .all(|(rd, td)| canonicalize(rd).as_ref() == td.name())
+    })
 }
 
 /// Collect the canonical names of all model variables referenced (directly or

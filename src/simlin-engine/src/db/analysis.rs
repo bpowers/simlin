@@ -105,7 +105,10 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// GH #756 -- or reverse-declared -- GH #757; `enumerate_agg_nodes` declines
 /// those, so the reference stays `Direct` and is reclassified
 /// `DynamicIndex`), or a direct `pop[idx]` alongside a `SUM(pop[*])` --
-/// keeps a conservative edge and a Bare-named link score.
+/// keeps a conservative edge and a Bare-named link score, EXCEPT when both
+/// endpoints are arrayed with non-corresponding dimensions (the declined
+/// mapped-reducer cases): no compilable conservative score exists there, so
+/// the edge is skipped loudly with no link-score variable (GH #758).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
@@ -122,12 +125,16 @@ pub enum RefShape {
     /// (the reducer-style whole-extent access). A reducer reference with
     /// this shape that `enumerate_agg_nodes` hoisted into a `$⁚ltm⁚agg⁚{n}`
     /// node is routed `ThroughAgg` (the shape is then ignored); a *whole-RHS*
-    /// reducer's argument (`total = SUM(population[*])`,
-    /// `row_sum[D1] = SUM(matrix[D1,*])`) keeps this shape on its `Direct`
-    /// site, where it projects to the conservative reduction / cross-product
-    /// into the (variable-backed-agg) target. The not-hoistable dynamic-index
-    /// reducer carve-out (`SUM(pop[idx,*])`) is reclassified by `ltm_ir`
-    /// as `DynamicIndex` rather than kept here (#514), so a `Direct`
+    /// reducer's argument keeps this shape on its `Direct` site, where
+    /// `model_element_causal_edges` routes a PARTIAL reduce
+    /// (`row_sum[D1] = SUM(matrix[D1,*])`) by its read slice (GH #752,
+    /// `ltm_agg::variable_backed_partial_reduce_agg` -- only the diagonal
+    /// `matrix[d1,d2] → row_sum[d1]` rows, matching the per-`(row, slot)`
+    /// link scores) and projects a whole-extent reduce
+    /// (`total = SUM(population[*])`) to the conservative reduction /
+    /// broadcast into the (variable-backed-agg) target. The not-hoistable
+    /// dynamic-index reducer carve-out (`SUM(pop[idx,*])`) is reclassified by
+    /// `ltm_ir` as `DynamicIndex` rather than kept here (#514), so a `Direct`
     /// `Wildcard` site never carries an *un*-hoisted sliced reducer.
     Wildcard,
     /// `Expr2::Subscript(source, indices)` where at least one index is
@@ -187,15 +194,21 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 ///
 /// A `ThroughAgg`-routed reference never reaches here -- those are routed
 /// through a synthetic aggregate node by `emit_agg_routed_edges` (only the
-/// read-slice rows). After #514 the `Direct` not-hoistable-reducer carve-out
-/// (`SUM(pop[idx,*])`) is reclassified by the IR as `DynamicIndex`, so a
-/// `Direct` `Wildcard` site is now only a variable-backed reducer's whole-RHS
-/// argument (`total = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`),
-/// a (rare) non-reducer whole-array reference, or a mapped sliced reducer the
+/// read-slice rows) -- and neither does a variable-backed PARTIAL reducer's
+/// `Wildcard` argument (`row_sum[D1] = SUM(matrix[D1,*])`), which the caller
+/// routes by its read slice through the same helper (GH #752). After #514
+/// the `Direct` not-hoistable-reducer carve-out (`SUM(pop[idx,*])`) is
+/// reclassified by the IR as `DynamicIndex`, so a `Wildcard` site reaching
+/// here is only a variable-backed WHOLE-EXTENT reducer's argument
+/// (`total = SUM(population[*])`, the broadcast `share[R] = SUM(pop[*])`, or
+/// a partial reduce whose result axes don't equal the target's dims), a
+/// (rare) non-reducer whole-array reference, or a mapped sliced reducer the
 /// correspondence declines (element-mapped -- GH #756 -- or reverse-declared
 /// -- GH #757). The conservative cross product is sound for the element
-/// EDGES in all of those (a superset, never fewer); note the declined
-/// mapped-reducer cases' link SCORES are separately broken (GH #758).
+/// EDGES in all of those (a superset, never fewer); the declined
+/// mapped-reducer cases' link SCORES have no compilable conservative shape,
+/// so the emitter skips them loudly and loop scores through the edge are
+/// dropped (GH #758, `emit_unscoreable_conservative_edge_warning`).
 #[allow(clippy::too_many_arguments)]
 fn emit_edges_for_reference(
     from_name: &str,
@@ -321,11 +334,14 @@ fn emit_edges_for_reference(
             // inside an arrayed per-element expression. `DynamicIndex`
             // here is `arr[i+1]`, a range, or the not-hoistable-reducer
             // carve-out (`SUM(pop[idx,*])`, reclassified from `Wildcard` by
-            // the IR); `Wildcard` here is only a variable-backed reducer's
-            // whole-RHS argument (a reduction into a scalar/lower-rank `to`)
-            // or a rare non-reducer whole-array reference -- a hoisted
-            // *synthetic*-agg reducer reference is routed through the agg
-            // (`emit_agg_routed_edges`) and never lands on this arm.
+            // the IR); `Wildcard` here is only a variable-backed
+            // WHOLE-EXTENT reducer's whole-RHS argument (a full reduction
+            // feeding every target element) or a rare non-reducer
+            // whole-array reference -- a hoisted *synthetic*-agg reducer
+            // reference is routed through the agg (`emit_agg_routed_edges`)
+            // and a variable-backed PARTIAL reducer's argument is routed by
+            // its read slice through the same helper (GH #752), so neither
+            // lands on this arm.
             let from_elements = cartesian_element_names(from_name, from_dims);
             for from_elem in &from_elements {
                 let entry = element_edges.entry(from_elem.clone()).or_default();
@@ -629,6 +645,13 @@ fn expand_same_element(
 /// element -- the pre-Phase-4 behavior. `target_element` (a per-element
 /// `Ast::Arrayed` slot) pins the `agg → to` half to that single target.
 ///
+/// A VARIABLE-BACKED agg (`is_synthetic == false`, GH #752 -- the target's
+/// whole RHS is the reducer, so `agg.name == to_name` and the gate
+/// `ltm_agg::variable_backed_partial_reduce_agg` guarantees `result_dims`
+/// equal `to`'s dims) emits only the source→slot half: the slot names ARE
+/// `to`'s element nodes, and an agg→to half would emit degenerate
+/// `to[e] → to[e]` self-edges.
+///
 /// Defensive: if `read_slice` doesn't have one entry per source axis (it
 /// always should for a hoisted agg whose `source_vars` includes `from`), fall
 /// back to the conservative "every source element → agg" form so a stale
@@ -797,7 +820,19 @@ fn emit_agg_routed_edges(
             0
         };
         let axis_plans: Vec<AxisPlan> = planned.unwrap_or_else(|| {
-            // Conservative fallback: every source element, scalar agg.
+            // Conservative fallback: every source element, scalar agg. NOTE:
+            // for a VARIABLE-BACKED arrayed agg this fallback is NOT merely
+            // imprecise -- a scalar slot makes `agg_node_name` the BARE
+            // variable name (`inflow`), a node that does not exist in the
+            // element graph (an arrayed variable's nodes are all
+            // subscripted), so the edges dangle and any loop through the
+            // reducer silently disappears from enumeration. Unreachable by
+            // construction today (`variable_backed_partial_reduce_agg` only
+            // admits well-formed all-Iterated/Reduced slices, and the
+            // debug_asserts above pin the remap invariants), but if the gate
+            // is ever widened this fallback must be re-evaluated for the
+            // variable-backed case (e.g. fall back to the cross-product
+            // instead).
             from_dims
                 .iter()
                 .map(|d| AxisPlan {
@@ -841,6 +876,19 @@ fn emit_agg_routed_edges(
                 .or_default()
                 .insert(agg_node_name(slot));
         }
+    }
+
+    // A VARIABLE-BACKED agg IS the target (`agg.name == to_name`, GH #752):
+    // the source→slot edges above already land on real `to[<slot>]` element
+    // nodes, and an agg→to half would only emit degenerate `to[e] → to[e]`
+    // self-edges (spurious 1-cycles for Johnson). Only synthetic aggs need
+    // the second half.
+    if !agg.is_synthetic {
+        debug_assert_eq!(
+            agg.name, to_name,
+            "a variable-backed agg routed through emit_agg_routed_edges must be the target itself"
+        );
+        return;
     }
 
     // Agg → to edges. With no `Iterated` axes the agg is scalar and broadcasts
@@ -986,19 +1034,21 @@ pub struct DetectedLoop {
     /// (a pure module-internal loop).  A single index suffices because a
     /// feedback loop's stocks form one strongly-connected set and therefore
     /// belong to exactly one cycle partition (mirroring the discovery
-    /// `FoundLoop::partition` / `LoopSummary::partition` shape).  Indices are
+    /// `FoundLoop::partition` / `LoopSummary::partition` shape); for an A2A
+    /// loop -- whose element slots CAN fall in different partitions when the
+    /// dimension is element-wise uncoupled -- this is the first resolving
+    /// slot's partition, and the scored surface's
+    /// `LtmVariablesResult::loop_partitions[id]` carries the full per-slot
+    /// vector (see `resolve_loop_partitions`).  Indices are
     /// dense and assigned in first-appearance order over this result's final
     /// loop list -- they identify partitions *within one detected-loops result
     /// only* and are NOT stable across runs or model edits (the underlying SCC
     /// numbering renumbers when stocks are added or renamed).  Consumers that
     /// need a durable identity should key on the partition's stock-name set
-    /// instead.  That stock set is a reliable cross-surface key only for SCALAR
-    /// models: this exhaustive surface computes partitions over the
-    /// VARIABLE-level stock graph (stocks `pop`, `prey`) while the discovery
-    /// surface (`ltm_finding`) computes them over the ELEMENT-level graph
-    /// (`pop[nyc]`), so for an ARRAYED model the two surfaces' stock sets match
-    /// in identity but differ in *granularity* (variable-level `pop` here vs
-    /// element-level `pop[nyc]` there).
+    /// instead.  Both this exhaustive surface and the discovery surface
+    /// (`ltm_finding`) compute partitions over the ELEMENT-level stock graph
+    /// (`pop[nyc]`; plain names for scalar models -- GH #746), so the stock
+    /// set is a usable cross-surface key for scalar and arrayed models alike.
     pub partition: Option<usize>,
 }
 
@@ -1036,12 +1086,10 @@ pub struct DetectedLoopsResult {
     /// indexes this list).  Dense, in first-appearance order over the final
     /// loop list; result-scoped.  Reuses the discovery surface's
     /// [`crate::ltm_finding::DiscoveredPartition`] so the two surfaces report
-    /// partitions in the same shape.  The stock SETS match exactly only for
-    /// SCALAR models: these partitions are computed over the VARIABLE-level
-    /// stock graph (`compute_cycle_partitions` on `causal_graph_with_modules`),
-    /// whereas the discovery surface computes them over the ELEMENT-level
-    /// graph, so an arrayed model's exhaustive stocks are variable-level (`pop`)
-    /// and its discovery stocks are element-level (`pop[nyc]`).
+    /// partitions in the same shape -- and, since GH #746, at the same
+    /// ELEMENT granularity (`model_element_cycle_partitions`; `pop[nyc]`,
+    /// plain names for scalar models), so the partition stock SETS are a
+    /// usable cross-surface key for scalar and arrayed models alike.
     pub partitions: Vec<crate::ltm_finding::DiscoveredPartition>,
 }
 
@@ -1805,6 +1853,40 @@ pub fn model_element_causal_edges(
             for site in classified.expect("classified is Some -- checked above") {
                 match &site.routing {
                     crate::db::ltm_ir::SiteRouting::Direct => {
+                        // GH #752: a `Direct` `Wildcard` site whose target is
+                        // a VARIABLE-BACKED partial reducer (`inflow[D1] =
+                        // SUM(matrix[D1,*])` as the whole RHS -- the variable
+                        // IS the agg, so the site is not `ThroughAgg`) gets
+                        // the same read-slice routing a synthetic agg's
+                        // source half gets: `matrix[d1,d2] → inflow[d1]`,
+                        // never the phantom off-diagonal cross-product
+                        // (`SUM(matrix[a,*])` does not read row `b`). The
+                        // per-`(row, slot)` link scores
+                        // `try_cross_dimensional_link_scores` emits carry
+                        // exactly these diagonal edges' names, so loop scores
+                        // over them resolve; the cross-product's phantom
+                        // edges referenced names that were never emitted and
+                        // stubbed every loop score through the reducer to 0.
+                        // `variable_backed_partial_reduce_agg` is `None` for
+                        // the whole-extent / broadcast / permuted-axes
+                        // shapes, which keep the conservative arm below.
+                        if matches!(site.shape, RefShape::Wildcard)
+                            && let Some(vb_agg) = crate::ltm_agg::variable_backed_partial_reduce_agg(
+                                agg_nodes, from_name, to_name, &to_dims,
+                            )
+                        {
+                            emit_agg_routed_edges(
+                                from_name,
+                                to_name,
+                                &from_dims,
+                                &to_dims,
+                                vb_agg,
+                                site.target_element.as_deref(),
+                                dim_ctx,
+                                &mut element_edges,
+                            );
+                            continue;
+                        }
                         emit_edges_for_reference(
                             from_name,
                             to_name,
@@ -1900,10 +1982,17 @@ pub fn model_loop_circuits(
 
 /// Detect feedback loops with polarity analysis and deterministic IDs.
 ///
-/// Builds a full CausalGraph from salsa-tracked causal edges and
-/// reconstructed variable ASTs, then runs Johnson's algorithm with
-/// polarity analysis. Loop IDs (r1, b1, u1, ...) match those used
-/// by LTM augmentation.
+/// In exhaustive mode the loop set is built with the SAME machinery the
+/// scored surface (`model_ltm_variables`) uses -- the tiered enumerator
+/// (`model_loop_circuits_tiered`) feeding `build_loops_from_tiered` and the
+/// shared `recover_agg_hop_polarities` pass -- so the loop set, polarities,
+/// and ids (r1, b1, u1, ...) are identical to LTM augmentation's BY
+/// CONSTRUCTION for every model shape (GH #746): scalar cycles, same-element
+/// A2A cycles (one arrayed loop), cross-element/mixed cycles (one loop per
+/// element instance, element-subscripted variables -- like a cross-element
+/// pin's), and agg-routed cycles. The runtime id join
+/// (`reclassify_loops_from_results`, pysimlin's `get_relative_loop_score`)
+/// depends on this bijection; see the comment on the enumeration below.
 ///
 /// **Discovery gate**: this query consults the SHARED [`model_ltm_mode`]
 /// query for the exhaustive-vs-discovery decision, the same way
@@ -1928,24 +2017,30 @@ pub fn model_loop_circuits(
 /// (`simlin_analyze_get_loops`) and the layout path
 /// (`layout::try_detect_ltm_loops_incremental`) hit this function directly, so
 /// the shared gate protects them too.
-/// Resolve each loop's cycle partition over the parent-level stock graph and
-/// dense-remap the engine-internal partition indices to result-scoped ones,
-/// mirroring `ltm_finding::attach_partition_metadata` so the exhaustive and
-/// discovery surfaces are consistent by construction.
+/// Resolve each loop's cycle partition over the ELEMENT-level stock graph
+/// (`model_element_cycle_partitions` -- the same granularity the scored
+/// surface's `loop_partitions` and `ltm_finding::attach_partition_metadata`
+/// use) and dense-remap the engine-internal partition indices to
+/// result-scoped ones, so the exhaustive and discovery surfaces are
+/// consistent by construction.
 ///
 /// `loops` is the FINAL ordered loop list (enumerated then pinned, in the same
 /// order the returned `DetectedLoop`s appear).  For each loop its single
-/// cycle-partition index is the first partition any of its stocks resolves to
-/// (`partition_for_loop` then `.flatten().next()`).  Every loop that reaches
-/// this exhaustive surface is constructed single-slot (`Loop.dimensions` is
-/// always `vec![]` here -- the enumerated loops are built that way in
-/// `ltm::graph` and the pinned ones are element-subscripted scalar loops), so
-/// `partition_for_loop` always takes its single-slot scalar branch and returns
-/// a one-element vector.  The `.flatten().next()` collapse is therefore trivial
-/// (it picks that lone slot); it is NOT multi-slot A2A handling, which never
-/// reaches this path.  The result is `(per_loop_partition, partitions)`:
-/// `per_loop_partition[i]` is `loops[i]`'s dense result-scoped index (or
-/// `None`), and `partitions` is the `DiscoveredPartition` list in
+/// cycle-partition index is the first partition any of its slots resolves to
+/// (`partition_for_loop` then `.flatten().next()`).  Scalar, cross-element,
+/// and mixed loops are single-slot, so the collapse picks their lone slot's
+/// partition.  An A2A loop (`Loop.dimensions` non-empty -- since GH #746 the
+/// enumerated loops come from the scored surface's `build_loops_from_tiered`,
+/// which emits them, and a pure-A2A pin does too) is multi-slot: the collapse
+/// reports the FIRST slot whose element-level stocks resolve.  For the common
+/// coupled A2A loop every slot shares one partition so the choice is
+/// immaterial; for an element-wise-uncoupled A2A loop (per-slot partitions
+/// genuinely differ) the single `DetectedLoop.partition` index is a
+/// representative, not the full per-slot story -- the scored surface's
+/// `LtmVariablesResult::loop_partitions[id]` carries the complete per-slot
+/// vector for callers that need it.  The result is `(per_loop_partition,
+/// partitions)`: `per_loop_partition[i]` is `loops[i]`'s dense result-scoped
+/// index (or `None`), and `partitions` is the `DiscoveredPartition` list in
 /// first-appearance order with `loop_count` counting exactly the loops in
 /// `loops` that resolve to each partition.
 fn resolve_loop_partitions(
@@ -1989,12 +2084,35 @@ pub fn model_detected_loops(
     model: SourceModel,
     project: SourceProject,
 ) -> DetectedLoopsResult {
+    use crate::common::{Canonical, Ident};
+
     let graph = causal_graph_with_modules(db, model, project);
-    // The cycle partitions over the SAME module-aware parent stock graph the
-    // loops are enumerated on, and the project's declared dimensions for A2A
-    // per-slot resolution -- both needed to attach result-scoped partition
-    // metadata to every reported loop (enumerated and pinned alike).
-    let partitions = graph.compute_cycle_partitions();
+    // The ELEMENT-level cycle partitions -- the same granularity the scored
+    // surface (`model_ltm_variables`) and the discovery surface
+    // (`ltm_finding::attach_partition_metadata`) partition on -- plus the
+    // project's declared dimensions for A2A per-slot resolution, both needed
+    // to attach result-scoped partition metadata to every reported loop
+    // (enumerated and pinned alike). Element granularity is required here
+    // because the loops this surface now shares with the scored builder
+    // carry element-level stock names (`pool[a]`) for A2A and cross-element
+    // cycles, which a variable-level stock map could never resolve; it also
+    // makes the partition STOCK SETS agree across the exhaustive and
+    // discovery surfaces for arrayed models (GH #746 / #685 -- the stock set
+    // is the durable cross-surface identity, so the two surfaces must spell
+    // it at the same granularity).
+    let partitions_result = model_element_cycle_partitions(db, model, project);
+    let partitions = crate::ltm::CyclePartitions {
+        partitions: partitions_result
+            .partitions
+            .iter()
+            .map(|p| p.iter().map(|s| Ident::<Canonical>::new(s)).collect())
+            .collect(),
+        stock_partition: partitions_result
+            .stock_partition
+            .iter()
+            .map(|(k, v)| (Ident::<Canonical>::new(k), *v))
+            .collect(),
+    };
     let dims = project_datamodel_dims(db, project);
 
     // Pinned loops are always surfaced, in both modes. This is the FFI half of
@@ -2031,18 +2149,46 @@ pub fn model_detected_loops(
         };
     }
 
-    // The shared `model_ltm_mode` gate (consulted above) flips dense models
-    // to discovery before this point, so the budget should never bind here
-    // -- the module-aware graph has the same parent adjacency the gate's
-    // tiered enumeration measured. The budgeted call is defense-in-depth
-    // for any residual structural divergence between the two graphs: on
-    // truncation, degrade to the same pins-only result the discovery
-    // branch returns rather than OOMing or panicking.
-    let Ok(loops) = graph.find_loops_with_limit(crate::ltm::ltm_circuit_budget()) else {
+    // GH #737 / GH #746: build the exhaustive loop set with the SAME
+    // machinery the scored surface (`model_ltm_variables`) uses -- the tiered
+    // enumerator (`model_loop_circuits_tiered`), `build_loops_from_tiered`
+    // (which runs `assign_loop_ids` over the merged set), and the SAME
+    // `recover_agg_hop_polarities` pass. The polarity-prefixed loop ids
+    // reported here are the key the runtime join
+    // (`reclassify_loops_from_results`, pysimlin's `get_relative_loop_score`)
+    // reads `$⁚ltm⁚loop_score⁚{id}` with, so ANY divergence in loop set,
+    // polarity, or ordering between the surfaces makes a detected loop read
+    // ANOTHER loop's series. Sharing the builder makes the two id sequences
+    // identical BY CONSTRUCTION for every model shape -- scalar cycles,
+    // same-element A2A cycles (one arrayed loop), cross-element/mixed cycles
+    // (one loop per element instance), and agg-routed cycles -- where the
+    // previous variable-level Johnson + per-agg splice
+    // (`expand_loops_through_routed_aggs`, now deleted) only bijected for
+    // all-scalar cycles and silently diverged on arrayed ones (GH #746's
+    // wrong-series join). The shared cross-agg recovery budget
+    // (`cross_agg_loop_budget`) truncates both surfaces identically, so even
+    // a clipped enumeration keeps the ids aligned; `model_ltm_variables`
+    // owns the human-facing truncation `Warning` (this is a plain function,
+    // not a salsa query, so it cannot accumulate diagnostics itself).
+    //
+    // The only remaining detected-without-scored loops are the GH #758
+    // unscoreable-edge drops (the scored surface filters those AFTER id
+    // assignment, never renumbering) and discovery mode -- both degrade to a
+    // loud ABSENT series (the join skips ids with no `loop_score`), never a
+    // wrong one.
+    //
+    // The shared `model_ltm_mode` gate (consulted above) flips truncated or
+    // oversized-slow-path models to discovery before this point, so neither
+    // condition should bind here; the check is defense-in-depth for any
+    // residual divergence -- degrade to the same pins-only result the
+    // discovery branch returns rather than consuming an unreliable
+    // (truncated) circuit list.
+    let tiered = model_loop_circuits_tiered(db, model, project);
+    if tiered.truncated || tiered.slow_path_largest_scc > crate::ltm::MAX_LTM_SCC_NODES {
         debug_assert!(
             false,
-            "model_detected_loops: circuit budget bound in exhaustive mode; \
-             model_ltm_mode should have flipped this model to discovery"
+            "model_detected_loops: tiered enumeration truncated (or slow-path SCC oversized) \
+             in exhaustive mode; model_ltm_mode should have flipped this model to discovery"
         );
         let pin_ltm: Vec<crate::ltm::Loop> = pinned
             .loops
@@ -2064,42 +2210,30 @@ pub fn model_detected_loops(
             loops,
             partitions: parts,
         };
-    };
-    // GH #737 (review C1/C1b): make this surface's loop set agree with the
-    // scored surface's for agg-routed cycles. The polarity-prefixed loop ids
-    // reported here are the key the runtime join
-    // (`reclassify_loops_from_results`, pysimlin's
-    // `get_relative_loop_score`) reads `$⁚ltm⁚loop_score⁚{id}` with, so a
-    // loop-count or polarity divergence makes a detected loop read ANOTHER
-    // loop's series. Two steps, sharing the scored surface's machinery:
-    //
-    // 1. splice each ThroughAgg-routed edge into explicit
-    //    `from → $⁚ltm⁚agg⁚{n} → to` hops, ONE LOOP PER ROUTED AGG (a
-    //    feeder read by two hoisted reducers is two scored loops);
-    // 2. run the SAME `recover_agg_hop_polarities` pass the scored/pinned
-    //    surfaces run, so the spliced hops get identical polarities.
-    //
-    // With the links now speaking the same node language on both surfaces,
-    // `assign_loop_ids`' content sort orders them identically wherever the
-    // loop sets biject (every all-scalar cycle; arrayed cycles remain the
-    // pre-existing variable-level-vs-element-level divergent class).
-    let had_loops = !loops.is_empty();
-    let mut loops =
-        crate::db::ltm::expand_loops_through_routed_aggs(loops, &graph, db, model, project);
-    if had_loops {
-        crate::ltm::assign_loop_ids(&mut loops);
-        crate::db::ltm::recover_agg_hop_polarities(&mut loops, &graph, db, model, project);
     }
+    let source_vars = model.variables(db);
+    let (mut loops, _truncated_aggs) = crate::db::ltm::build_loops_from_tiered(
+        tiered,
+        &graph,
+        source_vars,
+        db,
+        model,
+        project,
+        dims.as_slice(),
+        crate::db::ltm::cross_agg_loop_budget(),
+    );
+    crate::db::ltm::recover_agg_hop_polarities(&mut loops, &graph, db, model, project);
     // Variable-level canonical rotation of a scored loop, used both to dedup a
     // pin's loops against the enumerated set and to transfer the pin's name
     // onto the surviving enumerated loop it duplicates.
     //
     // Both sides keep their synthetic `$⁚ltm⁚agg⁚{n}` nodes in the rotation
-    // (GH #737 / C1b): the enumerated loops are agg-spliced above and a
-    // pin's element-graph expansion carries the agg hops too, so raw
-    // rotations match exactly -- and a multi-agg cycle's per-agg pin variants
-    // dedup against (and transfer the pin's name onto) their OWN enumerated
-    // counterparts rather than collapsing onto one.
+    // (GH #737 / C1b): the enumerated loops carry agg hops from the element
+    // graph (`build_loops_from_tiered`'s slow path) and a pin's element-graph
+    // expansion carries them too, so raw rotations match exactly -- and a
+    // multi-agg cycle's per-agg pin variants dedup against (and transfer the
+    // pin's name onto) their OWN enumerated counterparts rather than
+    // collapsing onto one.
     let loop_rotation = |l: &crate::ltm::Loop| -> Vec<String> {
         let seq: Vec<String> = l
             .links
@@ -2149,11 +2283,14 @@ pub fn model_detected_loops(
         resolve_loop_partitions(&final_loops, &partitions, dims.as_slice());
 
     let enumerated_loops = loops.into_iter().map(|l| {
-        // Extract variable names from the loop's links. Spliced
+        // Extract variable names from the loop's links. Synthetic
         // `$⁚ltm⁚agg⁚{n}` hops are an LTM scoring implementation detail and
         // are trimmed from the user-facing list (mirroring
         // `detected_loop_from_loop`); they stay in the links so the id sort
-        // key and the pin-dedup rotation see them.
+        // key and the pin-dedup rotation see them. A cross-element loop's
+        // links carry element subscripts, so its variables are
+        // element-subscripted (`pool[a]`) -- the same convention a
+        // cross-element pin's `detected_loop_from_loop` output uses.
         let is_agg =
             |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
         let mut vars = Vec::new();
@@ -3861,12 +3998,11 @@ mod polarity_confidence_tests {
 /// loop surface (`DetectedLoop::partition` + `DetectedLoopsResult::partitions`,
 /// GH #685).  Partition indices are result-scoped on both the exhaustive and
 /// the discovery surface, so the cross-surface tests key on the partition's
-/// stock-name SET, not the dense index.  That stock set is a reliable
-/// cross-surface key only for SCALAR models (this surface partitions stocks at
-/// VARIABLE granularity, discovery at ELEMENT granularity) -- the scalar
-/// agreement is pinned by `exhaustive_and_discovery_partitions_agree_..._scalar`
-/// and the arrayed granularity *divergence* by
-/// `exhaustive_and_discovery_partitions_diverge_in_granularity_arrayed`.
+/// stock-name SET, not the dense index.  Both surfaces partition stocks at
+/// ELEMENT granularity (GH #746), so the stock set is a usable cross-surface
+/// key for scalar and arrayed models alike -- pinned by
+/// `exhaustive_and_discovery_partitions_agree_..._scalar` and
+/// `exhaustive_and_discovery_partitions_agree_on_stock_sets_arrayed`.
 #[cfg(test)]
 mod detected_loop_partition_tests {
     use super::*;
@@ -3978,10 +4114,10 @@ mod detected_loop_partition_tests {
 
     /// For a SCALAR model the exhaustive and discovery surfaces must agree on
     /// the partition STOCK SETS.  Indices are result-scoped and may differ; the
-    /// stock-name sets must not -- because at scalar granularity a stock's
-    /// variable-level name and its (sole) element-level name coincide.  The
-    /// arrayed counterpart (`..._diverge_in_granularity_arrayed`) pins the
-    /// granularity divergence that makes this scalar-only.
+    /// stock-name sets must not -- a scalar stock's variable-level name and
+    /// its (sole) element-level name coincide.  The arrayed counterpart
+    /// (`..._agree_on_stock_sets_arrayed`) pins the same agreement at element
+    /// granularity (GH #746).
     #[test]
     fn exhaustive_and_discovery_partitions_agree_on_stock_sets_scalar() {
         let project = TestProject::new("two_loops_xsurface")
@@ -4021,18 +4157,19 @@ mod detected_loop_partition_tests {
         );
     }
 
-    /// For an ARRAYED (A2A) model the two surfaces partition stocks at
-    /// DIFFERENT granularity, so their stock SETS do NOT match: the exhaustive
-    /// surface (`model_detected_loops` -> `compute_cycle_partitions` over the
-    /// VARIABLE-level stock graph) names the bare variable `population`, while
-    /// the discovery surface (`analyze_model` -> element-level graph) names the
-    /// per-element stocks `population[nyc]` / `population[boston]`.  This pins
-    /// the documented contract: the stock set is a reliable cross-surface key
-    /// only for scalar models.  It fails loudly if someone later "fixes" one
-    /// surface to match the other's granularity without updating the contract
-    /// in the partition rustdocs and the FFI / pysimlin / MCP docstrings.
+    /// For an ARRAYED (A2A) model the two surfaces now partition stocks at the
+    /// SAME (element-level) granularity (GH #746): `model_detected_loops`
+    /// resolves partitions over `model_element_cycle_partitions` -- the same
+    /// element-keyed map the scored surface's `loop_partitions` and the
+    /// discovery surface's `attach_partition_metadata` use -- so the partition
+    /// STOCK SETS (the durable cross-surface identity) agree for arrayed
+    /// models too, naming the per-element stocks `population[nyc]` /
+    /// `population[boston]` on both surfaces.  (Before GH #746 the exhaustive
+    /// surface partitioned the VARIABLE-level stock graph, naming a bare
+    /// `population`, so the stock set was a reliable cross-surface key only
+    /// for scalar models -- the divergence this test used to pin.)
     #[test]
-    fn exhaustive_and_discovery_partitions_diverge_in_granularity_arrayed() {
+    fn exhaustive_and_discovery_partitions_agree_on_stock_sets_arrayed() {
         // population[Region] coupled to itself through SUM(population[*]) is the
         // canonical cross-element A2A loop: one variable-level SCC ({population})
         // that the element graph expands into per-region element stocks.
@@ -4070,33 +4207,27 @@ mod detected_loop_partition_tests {
             "discovery must report a partition for the A2A loop"
         );
 
-        // Exhaustive is variable-level: a BARE `population`, no element subscript.
-        assert!(
-            exhaustive_stocks.contains("population"),
-            "exhaustive partition must name the variable-level stock `population`, got {exhaustive_stocks:?}"
-        );
-        assert!(
-            exhaustive_stocks.iter().all(|s| !s.contains('[')),
-            "exhaustive partition stocks are variable-level (no `[elem]`), got {exhaustive_stocks:?}"
-        );
+        // Both surfaces are element-level: subscripted `population[nyc]` etc.,
+        // and no bare variable-level `population`.
+        for (label, stocks) in [
+            ("exhaustive", &exhaustive_stocks),
+            ("discovery", &discovery_stocks),
+        ] {
+            assert!(
+                stocks.iter().any(|s| s.starts_with("population[")),
+                "{label} partition must name element-level stocks like `population[nyc]`, got {stocks:?}"
+            );
+            assert!(
+                !stocks.contains("population"),
+                "{label} partition must NOT carry the bare variable-level `population`, got {stocks:?}"
+            );
+        }
 
-        // Discovery is element-level: subscripted `population[nyc]` etc., and no
-        // bare `population`.
-        assert!(
-            discovery_stocks
-                .iter()
-                .any(|s| s.starts_with("population[")),
-            "discovery partition must name element-level stocks like `population[nyc]`, got {discovery_stocks:?}"
-        );
-        assert!(
-            !discovery_stocks.contains("population"),
-            "discovery partition must NOT carry the bare variable-level `population`, got {discovery_stocks:?}"
-        );
-
-        // The sets therefore differ -- the granularity divergence the contract documents.
-        assert_ne!(
+        // The granularities now match, so the stock SETS are a usable
+        // cross-surface key for arrayed models too.
+        assert_eq!(
             exhaustive_stocks, discovery_stocks,
-            "arrayed exhaustive (variable-level) and discovery (element-level) stock sets must differ in granularity"
+            "exhaustive and discovery must report the same element-level partition stock sets"
         );
     }
 }

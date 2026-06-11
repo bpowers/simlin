@@ -56,14 +56,6 @@ pub(crate) use loops::build_loops_from_tiered;
 // exhaustive recovery (`recover_cross_agg_loops`) and discovery
 // (`ltm_finding`, GH #696) so both enumerate exactly the same cross-agg loops.
 pub(crate) use loops::sub_model_output_ports;
-// The detected-FFI-surface agg-routing expansion + the shared agg-hop
-// polarity recovery, consumed by `db::analysis::model_detected_loops` so its
-// loop set, polarities, and ids agree with the scored surface (GH #737 /
-// C1b): the expansion splices ThroughAgg-routed edges into explicit
-// `from → $⁚ltm⁚agg⁚{n} → to` hops (one loop per routed agg), and the SAME
-// `recover_agg_hop_polarities` pass the scored/pinned surfaces run patches
-// the spliced hops.
-pub(crate) use loops::expand_loops_through_routed_aggs;
 pub(crate) use loops::{
     StitchPetal, collect_agg_petals, cross_agg_loop_budget, stitch_cross_agg_petals,
 };
@@ -74,6 +66,8 @@ pub(crate) use pinned::model_pinned_loops;
 // modules -- `ltm_tests` (mounted here, reached via `super::`) and the
 // db-root-mounted `ltm_unified_tests` (reached through `db.rs`'s `use ltm::*`
 // glob) -- so they would warn as unused in a non-test lib build.
+#[cfg(test)]
+pub(crate) use compile::LtmFragmentFailureGuard;
 #[cfg(test)]
 pub(crate) use compile::compile_ltm_equation_fragment;
 #[cfg(test)]
@@ -197,6 +191,129 @@ pub(super) fn ltm_non_euler_diagnostic_message(method: datamodel::SimMethod) -> 
          integration method to Euler, or disable LTM analysis.",
         sim_method_display_name(method),
     )
+}
+
+/// THE shared stateless predicate for the LTM early-return gates (GH #748,
+/// GH #749): a model is stateless when it has no parent-level stocks, no
+/// PREVIOUS-lagged dt dependency, AND no (transitively) stock-carrying
+/// module instance.
+///
+/// Both `model_ltm_mode`'s stateless ⇒ `Exhaustive` arm and
+/// `model_ltm_variables`' early return consume THIS function (the latter
+/// adding its `!has_input_ports` leg on top), so the two gates cannot drift
+/// apart: a future state source added here is seen by both queries -- and
+/// therefore by `model_detected_loops`, which reads `model_ltm_mode`. #748
+/// itself was exactly such a two-site predicate change, and the
+/// `test_ltm_mode_and_variables_agree_on_stateless_gate` parity guard pins
+/// the agreement.
+///
+/// `edges.stocks` is parent-level only, so the parent-level test alone is
+/// wrong for a root like `driver -> sub_model(with internal INTEG) ->
+/// reader -> driver`: genuine feedback and genuine state, zero parent-level
+/// stocks -- bailing on it made LTM silently emit nothing for that model
+/// class (no link scores, no loop scores, and pinned loops were never even
+/// validated). The module leg only runs for parent-stock-free models (the
+/// `&&` short-circuits on the common stock-bearing case).
+///
+/// The lagged leg (GH #749): `PREVIOUS(x)` is discrete state -- a one-DT
+/// memory the LTM reference (section 7) explicitly treats as state -- so a
+/// stockless cycle broken by a PREVIOUS-lagged reference (`a = PREVIOUS(b);
+/// b = a * k`) is genuine feedback that COMPILES (the dep-graph ordering
+/// gate prunes PREVIOUS edges), falsifying the old "any stockless cycle is
+/// a compile-time circular dependency" rationale. Bailing on such a model
+/// made `model_ltm_variables` emit nothing (and drop pins without a
+/// diagnostic) while `model_detected_loops` still enumerated the loop.
+fn model_is_stateless(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    edges: &super::CausalEdgesResult,
+) -> bool {
+    edges.stocks.is_empty()
+        && !model_has_lagged_dt_deps(db, model, project)
+        && !modules_carry_state(db, project, edges)
+}
+
+/// Whether any of the model's own (parent-level) variables carries a
+/// PREVIOUS-lagged dt dependency -- the lagged-state leg of
+/// [`model_is_stateless`] (GH #749).
+///
+/// Checks `previous_only` references (`dt_previous_referenced_vars`): a
+/// reference that appears both inside and outside `PREVIOUS(...)` keeps its
+/// instantaneous edge, so a cycle through it could only compile if some
+/// OTHER edge breaks it -- and that breaking edge is itself previous-only
+/// (or a stock, which the first leg already caught). `previous_only`
+/// presence is therefore exactly the conservative superset of "a
+/// PREVIOUS-lagged feedback cycle can exist here". A lagged-but-acyclic
+/// model runs the normal enumeration path: in exhaustive mode it scores
+/// nothing (no loops, so no link or loop scores -- same output as the
+/// bail), but in DISCOVERY mode it now emits link scores for every causal
+/// edge where the old gate emitted none. That difference is deliberate
+/// stock/lag parity: a no-feedback STOCK model never bailed either, and
+/// discovery's contract is "score all edges of any state-carrying model".
+///
+/// Deliberately parent-level only: module-INTERNAL lagged state is not
+/// counted (mirroring pin validation, which cannot see inside a module's
+/// pathway either), so the scored and pinned surfaces agree on that shape
+/// -- both treat a module whose only state is PREVIOUS as stateless
+/// (GH #773). A parent-level lag OF a module output (`PREVIOUS(m.out)`)
+/// IS counted: the previous_only entry is the parent variable's own.
+///
+/// Uses the same empty module-ident context / empty input set as
+/// `model_causal_edges`, so the per-variable dependency queries are shared
+/// salsa cache hits.
+fn model_has_lagged_dt_deps(db: &dyn Db, model: SourceModel, project: SourceProject) -> bool {
+    let empty_ctx = super::ModuleIdentContext::new(db, vec![]);
+    let empty_inputs = super::ModuleInputSet::empty(db);
+    model.variables(db).values().any(|sv| {
+        !matches!(
+            sv.kind(db),
+            SourceVariableKind::Stock | SourceVariableKind::Module
+        ) && !super::variable_direct_dependencies(db, *sv, project, empty_ctx, empty_inputs)
+            .dt_previous_referenced_vars
+            .is_empty()
+    })
+}
+
+/// Whether any module instance this model references (transitively) carries
+/// state: a stock in the instance's sub-model, or in any module that
+/// sub-model references in turn. The module leg of [`model_is_stateless`] --
+/// call that, not this, in gate logic.
+///
+/// Checking `dynamic_modules` non-emptiness instead would be over-inclusive:
+/// a model whose only module is a stockless passthrough has no state
+/// anywhere, so any causal cycle through it is an instantaneous algebraic
+/// loop (a `CircularDependency` compile error, not feedback) and the early
+/// bail -- with its "always Exhaustive, no mode flip possible" invariant --
+/// remains correct for it.
+///
+/// The walk visits each distinct sub-MODEL definition once (not each
+/// instance), guarded by a visited set so module recursion (invalid, but
+/// defended against) cannot loop. `model_causal_edges` is salsa-cached, so
+/// each step is a map lookup.
+fn modules_carry_state(
+    db: &dyn Db,
+    project: SourceProject,
+    edges: &super::CausalEdgesResult,
+) -> bool {
+    let project_models = project.models(db);
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: Vec<String> = edges.dynamic_modules.values().cloned().collect();
+    while let Some(model_name) = queue.pop() {
+        let canonical = canonicalize(&model_name).into_owned();
+        if !visited.insert(canonical.clone()) {
+            continue;
+        }
+        let Some(sub_model) = project_models.get(canonical.as_str()) else {
+            continue;
+        };
+        let sub_edges = model_causal_edges(db, *sub_model, project);
+        if !sub_edges.stocks.is_empty() {
+            return true;
+        }
+        queue.extend(sub_edges.dynamic_modules.values().cloned());
+    }
+    false
 }
 
 /// The model's full variable-name set, for the LTM equation parse path.
@@ -754,7 +871,17 @@ pub fn model_ltm_implicit_var_info(
                     })
                     .unwrap_or(1)
             } else {
-                1
+                // A non-module helper is usually a scalar aux (1 slot), but
+                // an ARRAYED capture helper -- the GH #541 arrayed
+                // `PREVIOUS`/`INIT` capture, extended to array-valued builtin
+                // subtrees like `rank(pop, 1)` by GH #742 -- occupies
+                // product(dim lengths) slots. Laid out at size 1 it would
+                // overlap its successors' slots and consumers would read it
+                // as scalar.
+                ltm_implicit_helper_size(
+                    crate::db::project_dimensions_context(db, project),
+                    implicit_dm_var,
+                )
             };
 
             result.insert(
@@ -773,6 +900,29 @@ pub fn model_ltm_implicit_var_info(
     }
 
     result
+}
+
+/// Slot count of a non-module LTM implicit helper: 1 for a scalar helper
+/// aux, product(dim lengths) for an arrayed (`Equation::ApplyToAll` /
+/// `Equation::Arrayed`) capture helper. An unknown dimension name degrades
+/// to 1 per axis (defensive -- the helper's own fragment compile rejects it
+/// loudly).
+fn ltm_implicit_helper_size(
+    dim_ctx: &crate::dimensions::DimensionsContext,
+    var: &datamodel::Variable,
+) -> usize {
+    match var.get_equation() {
+        Some(datamodel::Equation::ApplyToAll(dim_names, _))
+        | Some(datamodel::Equation::Arrayed(dim_names, _, _, _)) => dim_names
+            .iter()
+            .map(|n| {
+                let canonical = crate::common::CanonicalDimensionName::from_raw(n);
+                dim_ctx.get(&canonical).map(|d| d.len()).unwrap_or(1)
+            })
+            .product::<usize>()
+            .max(1),
+        _ => 1,
+    }
 }
 
 /// The module-typed projection of [`model_ltm_implicit_var_info`]: each
@@ -861,9 +1011,18 @@ pub fn model_ltm_var_name_index(
 ///   4. the cross-element / mixed slow-path subgraph's largest SCC exceeds
 ///      `MAX_LTM_SCC_NODES` (the late flip).
 ///
-/// A stock-free model has no feedback loops, so no flip can occur: it is
-/// always `Exhaustive`, matching `model_ltm_variables`'s stock-free early
-/// return. This query intentionally accumulates NO diagnostics -- the
+/// A stateless model -- the shared `model_is_stateless` predicate: no
+/// parent-level stocks, no PREVIOUS-lagged dt dependency, AND no
+/// module-internal state -- has no feedback loops, so no flip can occur: it
+/// is always `Exhaustive`. `model_ltm_variables`' stateless early return
+/// consumes the SAME predicate (plus its `!has_input_ports` leg) and reads
+/// its bail `mode` from this query, so the two gates cannot drift. A
+/// parent-stock-free model whose state lives inside modules is NOT
+/// stateless (GH #748), and neither is one whose only state is a
+/// PREVIOUS-lagged reference (GH #749 -- a one-DT memory is discrete
+/// state): both fall through to the normal gates like any stock-bearing
+/// model.
+/// This query intentionally accumulates NO diagnostics -- the
 /// auto-flip `Warning`s stay in `model_ltm_variables` so they are emitted once
 /// (a `returns(ref)` tracked query read by multiple callers would otherwise
 /// double-accumulate). `model_ltm_variables` sets its returned `mode` from
@@ -873,7 +1032,7 @@ pub fn model_ltm_mode(db: &dyn Db, model: SourceModel, project: SourceProject) -
     use super::{LtmMode, causal_graph_from_edges, model_causal_edges, model_loop_circuits_tiered};
 
     let edges_result = model_causal_edges(db, model, project);
-    if edges_result.stocks.is_empty() {
+    if model_is_stateless(db, model, project, edges_result) {
         return LtmMode::Exhaustive;
     }
 
@@ -946,9 +1105,14 @@ pub fn model_ltm_variables(
     // input->output pathways the parent's per-exit-port link score needs
     // scored (PR #684): its internals are a pure aux chain LTM scores
     // exactly, so it must emit pathway/composite vars even though it has no
-    // stocks. A genuinely stock-free ROOT model has no parent reading
-    // `module·var`, so `sub_model_output_ports` is empty and
-    // `has_input_ports` is false -- the early return below still fires.
+    // stocks. A stateless ROOT model has no parent reading `module·var`, so
+    // `sub_model_output_ports` is empty and `has_input_ports` is false -- the
+    // early return below still fires for it. "Stateless" means no
+    // parent-level stocks AND no module-internal state (the shared
+    // `model_is_stateless` predicate, also consumed by `model_ltm_mode`): a
+    // parent-stock-free root whose only state lives inside modules (a
+    // SMOOTH/DELAY instance or a stock-carrying user sub-model) has genuine
+    // feedback, so the predicate's module leg lets it through (GH #748).
     let output_ports = sub_model_output_ports(db, model, project);
     let (pathways, truncated_pathway_ports) = if output_ports.is_empty() {
         (HashMap::new(), Vec::new())
@@ -957,16 +1121,26 @@ pub fn model_ltm_variables(
     };
     let has_input_ports = !pathways.is_empty();
 
-    if edges_result.stocks.is_empty() && !has_input_ports {
-        // A stock-free model with no input-port pathways has nothing to
-        // score: no feedback loops to enumerate (so no mode flip can occur)
-        // and no module interface to expose. Report the exhaustive default.
+    if !has_input_ports && model_is_stateless(db, model, project, edges_result) {
+        // A stateless model (no stocks anywhere -- parent-level or
+        // module-internal -- and no PREVIOUS-lagged dependency, GH #749)
+        // with no input-port pathways has nothing to score: no feedback
+        // loops to enumerate (any causal cycle would be an instantaneous
+        // algebraic loop, which is a compile error -- so no mode flip can
+        // occur) and no module interface to expose.
+        //
+        // `mode` is read from `model_ltm_mode` rather than hardcoded: its
+        // stateless arm fires on the SAME `model_is_stateless` predicate, so
+        // by construction this reads `Exhaustive` -- but reading the shared
+        // query keeps this surface and `model_detected_loops` (another
+        // `model_ltm_mode` reader) structurally incapable of drifting, same
+        // as the non-bail `mode` read at the bottom of this function.
         return LtmVariablesResult {
             vars: vec![],
             loop_partitions: indexmap::IndexMap::new(),
             agg_recovery_truncated: false,
             pathways_truncated: false,
-            mode: LtmMode::Exhaustive,
+            mode: model_ltm_mode(db, model, project),
         };
     }
 
@@ -1235,6 +1409,7 @@ pub fn model_ltm_variables(
                 &var_graph,
                 source_vars,
                 db,
+                model,
                 project,
                 dm_dims,
                 cross_agg_budget,
@@ -1286,6 +1461,16 @@ pub fn model_ltm_variables(
     let mut loop_partitions: indexmap::IndexMap<String, Vec<Option<usize>>> =
         indexmap::IndexMap::new();
 
+    // GH #758: the (from, to) edges the conservative per-shape emitter
+    // declined to score (arrayed endpoints whose dimensions don't
+    // correspond -- see `emit_unscoreable_conservative_edge_warning`).
+    // Such an edge has no link-score variable, so a loop-score product
+    // through it could only be a guaranteed-zero stub (its fragment either
+    // fail-warns on the subscripted missing name or silently multiplies a
+    // 0 stub-dep): loop scores traversing any of these edges are dropped
+    // below, covered by the edge's single Warning.
+    let mut unscoreable_edges: HashSet<(String, String)> = HashSet::new();
+
     // Part 1: Link scores.
     // Sub-models and discovery mode need scores for ALL edges (pathways
     // reference arbitrary edges). Exhaustive root models only need
@@ -1311,6 +1496,7 @@ pub fn model_ltm_variables(
                     dm_dims,
                     /* skip_agg_halves = */ false,
                     &mut vars,
+                    &mut unscoreable_edges,
                 );
             }
         }
@@ -1383,6 +1569,7 @@ pub fn model_ltm_variables(
                         dm_dims,
                         /* skip_agg_halves = */ true,
                         &mut vars,
+                        &mut unscoreable_edges,
                     );
                 }
             }
@@ -1397,7 +1584,45 @@ pub fn model_ltm_variables(
     // Uses element-level cycle partitions so that cross-element feedback
     // is detected correctly (e.g., population[NYC] and population[Boston]
     // in the same partition when connected through migration).
+
+    // Whether a loop traverses an edge the GH #758 gate declined to score
+    // (checking both the representative link cycle and any per-slot link
+    // cycles). Such a loop's score product would multiply a never-emitted
+    // link-score name -- a guaranteed-zero stub -- so it is dropped from
+    // scoring; the edge's single Warning covers the degradation. Takes the
+    // edge set as a parameter (rather than capturing `unscoreable_edges`)
+    // because the pinned-loop pass below still mutates the set between
+    // calls.
+    fn traverses_unscoreable(
+        l: &crate::ltm::Loop,
+        unscoreable_edges: &HashSet<(String, String)>,
+    ) -> bool {
+        let link_hits = |links: &[crate::ltm::Link]| {
+            links.iter().any(|link| {
+                unscoreable_edges.contains(&(
+                    strip_subscript(link.from.as_str()).to_string(),
+                    strip_subscript(link.to.as_str()).to_string(),
+                ))
+            })
+        };
+        link_hits(&l.links) || l.slot_links.iter().any(|(_, links)| link_hits(links))
+    }
+
     if let Some(ref detected_loops) = loops {
+        // GH #758: drop loops through unscoreable edges. The common case
+        // (no unscoreable edge) borrows `detected_loops` unfiltered so the
+        // hot path allocates nothing.
+        let filtered_loops: Vec<crate::ltm::Loop>;
+        let detected_loops: &[crate::ltm::Loop] = if unscoreable_edges.is_empty() {
+            detected_loops
+        } else {
+            filtered_loops = detected_loops
+                .iter()
+                .filter(|l| !traverses_unscoreable(l, &unscoreable_edges))
+                .cloned()
+                .collect();
+            &filtered_loops
+        };
         let partitions_result = model_element_cycle_partitions(db, model, project);
         let partitions = CyclePartitions {
             partitions: partitions_result
@@ -1590,6 +1815,12 @@ pub fn model_ltm_variables(
                 .filter(|l| !enumerated_rotations.contains(&canonical_variable_rotation(l)))
                 .collect();
 
+            // GH #758: warn at most once per PIN (not per element-level
+            // instance) when its cycle traverses an unscoreable edge -- a
+            // cross-element pin can expand to many `pin{n}⁚{j}` instances,
+            // and one warning per instance is the same cascade the
+            // unscoreable-edge treatment exists to avoid.
+            let mut warned_unscoreable_pin = false;
             for pin_loop in loops_to_emit {
                 // Emit any link scores this loop's cycle needs that aren't
                 // present, with the same per-link agg-hop dispatch the
@@ -1635,8 +1866,36 @@ pub fn model_ltm_variables(
                             dm_dims,
                             /* skip_agg_halves = */ true,
                             &mut vars,
+                            &mut unscoreable_edges,
                         );
                     }
+                }
+
+                // GH #758: a pin whose cycle traverses an unscoreable edge
+                // has no link score to multiply -- its loop score could only
+                // be a guaranteed-zero stub (or a warned fragment failure).
+                // Warn naming the pin (mirroring the invalid-pin treatment;
+                // once per pin, not per instance) and skip the instance.
+                // Checked AFTER the link-score emission above so the gate
+                // has classified this cycle's edges even when no enumerated
+                // loop visited them.
+                if traverses_unscoreable(pin_loop, &unscoreable_edges) {
+                    if !warned_unscoreable_pin {
+                        warned_unscoreable_pin = true;
+                        CompilationDiagnostic(Diagnostic {
+                            model: model.name(db).clone(),
+                            variable: None,
+                            error: DiagnosticError::Assembly(format!(
+                                "pinned loop '{}' traverses a causal edge whose link \
+                                 score could not be computed (see the unscoreable-edge \
+                                 warning); its affected instances are not scored",
+                                pin.name
+                            )),
+                            severity: DiagnosticSeverity::Warning,
+                        })
+                        .accumulate(db);
+                    }
+                    continue;
                 }
 
                 // Register this loop's cycle partition(s): a per-slot vector

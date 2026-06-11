@@ -1170,6 +1170,142 @@ fn test_rel_loop_score_partition_sums_to_one_for_in_partition_loops() {
     }
 }
 
+/// GH #750 (the FFI streaming path): two UNRELATED loops whose only state
+/// lives inside different module instances both resolve a `None` cycle
+/// partition.  The relative-loop-score FFI must normalize each ALONE (its
+/// score is 0 or +/-1 at every step), not against the other's activity --
+/// the streaming `ensure_denom_for_element` membership rule must match the
+/// engine's full-sweep `NormGroup::Solo` grouping.
+#[test]
+fn test_rel_loop_score_unpartitioned_loops_do_not_cross_normalize() {
+    use simlin_engine::datamodel;
+
+    // Two disjoint module-internal-stock loops:
+    //   driver{i} -> sub{i}(internal INTEG) -> reader{i} -> driver{i}
+    // Different gains so the two raw loop scores genuinely differ (a pooled
+    // denominator would visibly dilute both).
+    let mut p = TestProject::new("two_module_loops")
+        .with_sim_time(0.0, 12.0, 0.25)
+        .aux("driver1", "100 + reader1 * 0.5", None)
+        .aux("reader1", "sub1.output", None)
+        .aux("driver2", "50 + reader2 * 0.25", None)
+        .aux("reader2", "sub2.output", None)
+        .build_datamodel();
+    for i in ["1", "2"] {
+        p.models[0]
+            .variables
+            .push(datamodel::Variable::Module(datamodel::Module {
+                ident: format!("sub{i}"),
+                model_name: "sub".to_string(),
+                documentation: String::new(),
+                units: None,
+                references: vec![datamodel::ModuleReference {
+                    src: format!("driver{i}"),
+                    dst: format!("sub{i}.input"),
+                }],
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }));
+    }
+    p.models.push(datamodel::Model {
+        name: "sub".to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "input".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chg".to_string(),
+                equation: datamodel::Equation::Scalar("(input - output) / 3".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "output".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chg".to_string()],
+                outflows: vec![],
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+
+    let project = engine_serde::serialize(&p).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(err.is_null());
+        err = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        err = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        err = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        assert_eq!(
+            (*loops).count,
+            2,
+            "the two disjoint module loops must both surface"
+        );
+
+        let mut saw_active = false;
+        for l in loop_slice {
+            let id = CStr::from_ptr(l.id).to_str().unwrap().to_string();
+            assert_eq!(
+                l.partition, -1,
+                "a module-internal-stock loop has no parent-level partition"
+            );
+            let rel = get_rel_score(sim, &id);
+            for (t, &v) in rel.iter().enumerate() {
+                assert!(
+                    v == 0.0 || (v.abs() - 1.0).abs() < 1e-12,
+                    "an unpartitioned loop normalizes alone, so its relative \
+                     score is 0 or +/-1; {id}[{t}] = {v}"
+                );
+                if v != 0.0 {
+                    saw_active = true;
+                }
+            }
+        }
+        assert!(saw_active, "the loops transfer signal, so scores activate");
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// After `simlin_sim_reset`, the cache must not serve stale
 /// denominators.  Without re-running, `results` is `None` and the
 /// FFI should return a "no results" error rather than using a
@@ -2861,6 +2997,112 @@ fn test_get_loops_carries_cycle_partition() {
         );
         assert_eq!(part_slice[0].loop_count, (*loops).count);
 
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// GH #746: the runtime id join must be sound for a feedback cycle through an
+/// ARRAYED variable.  Pre-fix, `model_detected_loops` reported one
+/// variable-level loop per cycle while the scored surface enumerated the
+/// pool/growth cycle as an A2A loop plus the feeder cycle PER ELEMENT, both
+/// numbering from the shared `r{n}` namespace -- so the detected pool/growth
+/// loop's id resolved to a per-slot FEEDER loop's scalar series: reading
+/// `simlin_analyze_get_relative_loop_score("{id}[a]")` for it errored ("not
+/// arrayed") and `simlin_analyze_get_loops_runtime` classified it from the
+/// wrong series.  Post-fix the detected surface shares the scored surface's
+/// loop builder, so ids biject for every model shape.
+#[test]
+fn gh746_arrayed_cycle_runtime_join_is_sound() {
+    let test_project = TestProject::new("gh746_arrayed_ffi")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("r1", &["a", "b"])
+        .named_dimension("r2", &["x", "y"])
+        .array_aux("matrix[r1,r2]", "2")
+        .array_stock("pool[r1]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[r1]",
+            "0.01 * pool[r1] + SUM(matrix[r1,*] * scale)",
+            None,
+        )
+        .aux("scale", "0.001 * SUM(pool[*]) + 0.01", None);
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    unsafe {
+        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
+
+        // The structural surface enumerates the SAME loop set the scored
+        // surface emits series for: the pool/growth A2A loop plus one feeder
+        // loop per r1 element (pre-fix: two variable-level loops).
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        assert!(!loops.is_null());
+        assert_eq!(
+            (*loops).count,
+            3,
+            "one A2A pool/growth loop + one feeder loop per r1 element"
+        );
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+
+        // Find the A2A pool/growth loop: the one whose variable list does not
+        // mention the scalar feeder `scale`.
+        let a2a = loop_slice
+            .iter()
+            .find(|l| {
+                let vars = c_string_array(l.variables, l.var_count);
+                !vars.iter().any(|v| v == "scale")
+            })
+            .expect("the pool/growth A2A loop must be detected");
+        let a2a_id = CStr::from_ptr(a2a.id).to_str().unwrap().to_string();
+
+        // Its id must join the ARRAYED loop-score series: an
+        // element-subscripted query resolves.  Pre-fix this id landed on a
+        // feeder loop's scalar series and the subscripted query errored.
+        let by_element = read_relative_loop_series(sim, &format!("{a2a_id}[a]"));
+        assert!(
+            by_element.is_ok(),
+            "the A2A loop id must accept an element-subscripted rel-score query \
+             (proof it joined the arrayed series); got {by_element:?}"
+        );
+
+        // Every loop's id resolves to SOME series (bijection: no silent
+        // absence either).
+        for l in loop_slice {
+            let id = CStr::from_ptr(l.id).to_str().unwrap().to_string();
+            let series = read_relative_loop_series(sim, &id);
+            assert!(
+                series.is_ok(),
+                "loop {id} must have a relative-score series; got {series:?}"
+            );
+        }
+
+        // The runtime surface classifies every loop from its OWN series: all
+        // hops here are positive, so every loop stays in the reinforcing
+        // family.
+        err = ptr::null_mut();
+        let runtime = simlin_analyze_get_loops_runtime(sim, &mut err);
+        assert!(err.is_null());
+        assert!(!runtime.is_null());
+        assert_eq!((*runtime).count, (*loops).count);
+        let rt_slice = std::slice::from_raw_parts((*runtime).loops, (*runtime).count);
+        for l in rt_slice {
+            let id = CStr::from_ptr(l.id).to_str().unwrap();
+            assert!(
+                matches!(
+                    l.polarity,
+                    SimlinLoopPolarity::Reinforcing | SimlinLoopPolarity::MostlyReinforcing
+                ),
+                "loop {id} must classify reinforcing from its own runtime series"
+            );
+        }
+
+        simlin_free_loops(runtime);
         simlin_free_loops(loops);
         simlin_sim_unref(sim);
         simlin_model_unref(model);

@@ -20,9 +20,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::common::{Canonical, Ident};
 use crate::db::{
-    CycleClass, Db, LoopCircuitsResult, SourceModel, SourceProject, SourceVariable,
-    causal_graph_with_modules, classify_cycle, model_edge_shapes, model_element_causal_edges,
-    project_datamodel_dims, variable_dimensions,
+    CycleClass, Db, LoopCircuitsResult, ModuleIdentContext, ModuleInputSet, SourceModel,
+    SourceProject, SourceVariable, SourceVariableKind, causal_graph_with_modules, classify_cycle,
+    model_edge_shapes, model_element_causal_edges, project_datamodel_dims, variable_dimensions,
+    variable_direct_dependencies,
 };
 use crate::ltm::{Loop, strip_subscript};
 
@@ -160,34 +161,44 @@ pub(crate) fn model_pinned_loops(
             continue;
         };
 
-        // A standard feedback loop includes at least one stock (LTM ref 2.1).
-        // A stockless cycle is usually a compile-time circular dependency,
-        // not a feedback loop, so reject it with a clear message. (The one
-        // exception is a stockless cycle broken by PREVIOUS: it compiles and
-        // the enumerator currently scores it, so this rejection makes the two
-        // surfaces disagree there -- tracked as GH #749.)
+        // A standard feedback loop includes at least one state variable (LTM
+        // ref 2.1). State is a stock OR a PREVIOUS-lagged reference (GH #749:
+        // `PREVIOUS(x)` is a one-DT memory, listed among the state-retaining
+        // builtins in LTM ref section 7) -- a stockless cycle with neither is
+        // an instantaneous algebraic loop (a compile-time circular
+        // dependency), not a feedback loop, so reject it with a clear
+        // message. A stockless cycle broken by PREVIOUS compiles, the
+        // enumerator scores it, and so must the pin -- the two surfaces
+        // agree.
         //
         // "Stock" here counts state INSIDE any module instance the cycle
         // traverses (GH #673): a SMOOTH/DELAY instance or user sub-model whose
         // internal stock is the loop's only state is a genuine feedback loop.
-        // The loop-detection surface (`find_loops_with_limit`, behind
-        // `detect_loops` / `model_detected_loops`) attaches module-internal
-        // stocks via the same `enrich_with_module_stocks` enrichment instead
-        // of filtering, as does the PureScalar pin arm's
-        // `build_loop_from_cycle` below -- so validation and the loops both
-        // surfaces construct can never disagree about module-internal state.
+        // The standalone `detect_loops` surface (`find_loops_with_limit`)
+        // attaches module-internal stocks via this same
+        // `enrich_with_module_stocks` enrichment instead of filtering, as
+        // does the PureScalar pin arm's `build_loop_from_cycle` below.
+        // (`model_detected_loops` itself now builds loops with the scored
+        // surface's `build_loops_from_tiered` -- GH #746 -- whose fast path
+        // uses bare `find_stocks_in_loop` without enrichment; that is
+        // behaviorally equivalent here because `DetectedLoop` does not
+        // expose stocks and module-internal stocks never resolve in the
+        // parent partition map either way.)
         // A cycle through a stockless *passthrough* module enriches to
         // nothing and is still rejected -- it is instantaneous end to end.
+        // (Module-INTERNAL lagged state is likewise not counted, mirroring
+        // `model_is_stateless`'s parent-level-only lagged leg, so the scored
+        // and pinned surfaces agree on that shape too.)
         let parent_stocks = graph.find_stocks_in_loop(&cycle);
         let has_stock = !graph
             .enrich_with_module_stocks(&cycle, parent_stocks)
             .is_empty();
-        if !has_stock {
+        if !has_stock && !cycle_has_lagged_edge(db, project, source_vars, &cycle) {
             result.invalid.push((
                 spec.name.clone(),
                 format!(
                     "pinned loop '{}' contains no stock; a feedback loop must pass through at \
-                     least one stock",
+                     least one stock (or other state, such as a PREVIOUS-lagged reference)",
                     spec.name
                 ),
             ));
@@ -251,6 +262,56 @@ pub(crate) fn model_pinned_loops(
     }
 
     result
+}
+
+/// Whether any edge `from -> to` of the ordered cycle is a PREVIOUS-lagged
+/// reference: `to` references `from` ONLY inside `PREVIOUS(...)` in its dt
+/// equation (`dt_previous_referenced_vars`, the `previous_only`
+/// classification). Such an edge is the one-DT memory that lets a stockless
+/// cycle compile -- and `PREVIOUS` retains state (LTM ref section 7), so the
+/// cycle is a genuine feedback loop the pin validation must accept (GH #749).
+///
+/// `previous_only` (rather than any-PREVIOUS) is the right test: a reference
+/// appearing both inside and outside `PREVIOUS` keeps its instantaneous
+/// edge, so a cycle through it only compiles when some OTHER edge breaks it
+/// -- and that breaking edge is itself previous-only or a stock (which the
+/// caller's stock check already accepted).
+///
+/// Module and stock nodes are skipped as the EDGE TARGET: a stock is state
+/// in its own right (the caller's check), and a module's lagged INTERNAL
+/// state is deliberately invisible here, mirroring `model_is_stateless`'s
+/// parent-level-only lagged leg (GH #773). A module as the edge SOURCE is
+/// fine: `reader = PREVIOUS(sub.output, 0)` is a parent-level lag of the
+/// module's output, recorded in previous_only as the UN-normalized
+/// `sub·output` -- while the cycle node is the module-normalized `sub` --
+/// so each entry is collapsed through the same `normalize_module_ref_str`
+/// the causal-edge builder applies before comparing. Uses the same empty
+/// module-ident context / empty input set as `model_causal_edges`, so the
+/// per-variable dependency queries are shared salsa cache hits.
+fn cycle_has_lagged_edge(
+    db: &dyn Db,
+    project: SourceProject,
+    source_vars: &HashMap<String, SourceVariable>,
+    cycle: &[Ident<Canonical>],
+) -> bool {
+    let empty_ctx = ModuleIdentContext::new(db, vec![]);
+    let empty_inputs = ModuleInputSet::empty(db);
+    cycle.iter().enumerate().any(|(i, from)| {
+        let to = &cycle[(i + 1) % cycle.len()];
+        let Some(sv) = source_vars.get(to.as_str()) else {
+            return false;
+        };
+        if matches!(
+            sv.kind(db),
+            SourceVariableKind::Stock | SourceVariableKind::Module
+        ) {
+            return false;
+        }
+        variable_direct_dependencies(db, *sv, project, empty_ctx, empty_inputs)
+            .dt_previous_referenced_vars
+            .iter()
+            .any(|dep| crate::db::analysis::normalize_module_ref_str(dep) == from.as_str())
+    })
 }
 
 /// Assign pin-derived ids to a pin's expanded loops: the plain `pin{n}` when
@@ -397,6 +458,7 @@ fn expand_pin_on_element_graph(
         var_graph,
         source_vars,
         db,
+        model,
         project,
         dm_dims,
         cross_agg_loop_budget(),

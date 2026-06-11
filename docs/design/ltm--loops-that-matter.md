@@ -441,10 +441,15 @@ variant.
 
 `model_ltm_variables` no longer suppresses LTM vars for a stockless sub-model
 that has parent-visible input→output pathways: the stock-free early return now
-fires only when the model has neither stocks nor input-port pathways (so a
-stock-free *root* model -- with no parent reading `module·var`, hence no output
-ports -- still emits nothing). A passthrough therefore emits the same
-`$⁚ltm⁚path⁚{port}⁚{idx}` / `$⁚ltm⁚composite⁚{port}` vars a dynamic module does.
+fires only when the model is genuinely STATELESS -- neither parent-level
+stocks, nor input-port pathways, nor (since GH #748) any transitively
+stock-carrying module instance (`modules_carry_state`). A parent-stock-free
+*root* whose only state lives inside modules (a SMOOTH/DELAY instance or a
+user sub-model with an INTEG) therefore runs the pass and scores its loops; a
+truly stateless root -- with no parent reading `module·var`, hence no output
+ports, and no module-internal state -- still emits nothing. A passthrough
+sub-model emits the same `$⁚ltm⁚path⁚{port}⁚{idx}` / `$⁚ltm⁚composite⁚{port}`
+vars a dynamic module does.
 
 The composite alone is, however, the WRONG score for a loop through a
 *multi-output* module: the composite max-abs-selects across ALL of the module's
@@ -1531,10 +1536,11 @@ not the one scored. The enumerator finds and scores both directions in
 exhaustive mode (canonical-rotation dedup keeps them distinct), so this
 gap bites only in discovery mode or when the user expects the *other*
 direction's score. Tracked as a known limitation; resolving it requires
-extending the pin primitive to carry cycle order. Relatedly, a pin whose
-only stock is module-internal is rejected by the has-stock validation
-(which checks parent-level stocks only) even though the enumerator finds
-the equivalent loop.
+extending the pin primitive to carry cycle order. (A pin whose only stock
+is module-internal validates since GH #673: the has-stock validation counts
+stocks inside traversed modules via the same `enrich_with_module_stocks`
+enrichment the enumerator applies -- and since GH #748 the LTM pass itself
+runs on such module-only roots at all.)
 
 In exhaustive mode, a scored pin loop whose variable-cycle rotation matches an
 enumerated loop is skipped (the enumerated loop already carries a correct

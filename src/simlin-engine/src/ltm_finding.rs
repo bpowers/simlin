@@ -20,6 +20,7 @@ use crate::common::{Canonical, Ident, Result};
 use crate::datamodel;
 use crate::db::LtmSyntheticVar;
 use crate::ltm::{CausalGraph, CyclePartitions, Link, LinkPolarity, Loop, LoopPolarity};
+use crate::ltm_post::NormGroup;
 use crate::project::Project;
 use crate::results::Results;
 
@@ -2817,8 +2818,15 @@ fn rank_and_filter(
     // `vec![]`), so `partition_for_loop` returns a length-1 vector; collapse it
     // to slot 0. The empty `dims` slice is fine -- it's only consulted for A2A
     // loops, which discovery never produces. A loop whose stocks resolve to no
-    // parent-level partition (a pure module-internal loop) maps to `None`,
-    // which groups with its peers exactly as any other partition key.
+    // parent-level partition (a pure module-internal loop, or a
+    // PREVIOUS-lagged stockless loop) maps to its own `NormGroup::Solo`
+    // group (GH #750): unrelated unpartitioned loops must not share a
+    // denominator or count as each other's "competition" -- pre-#750 they
+    // pooled into one default `None` bucket, so an unrelated big loop could
+    // push a small module-internal loop below MIN_CONTRIBUTION and censor
+    // it entirely.  This matches `ltm_post::compute_rel_loop_scores`' Solo
+    // grouping, so the discovery and pinned-loop relative-score surfaces
+    // agree.
     let slot0 = |fl: &FoundLoop| -> Option<usize> {
         partitions
             .partition_for_loop(&fl.loop_info, &[])
@@ -2826,32 +2834,38 @@ fn rank_and_filter(
             .copied()
             .flatten()
     };
-    let loop_partitions: Vec<Option<usize>> = found_loops.iter().map(slot0).collect();
+    let loop_groups: Vec<NormGroup> = found_loops
+        .iter()
+        .enumerate()
+        .map(|(i, fl)| NormGroup::for_loop(slot0(fl), i))
+        .collect();
 
-    // Group loops by partition over the FULL discovered set (before retention
-    // or cap).  Drives both the relative-score denominators below and the
-    // competing-vs-solo classification: a loop is "competing" iff its
-    // partition holds at least one other discovered loop, the same population
-    // its denominator sums over -- so "solo" means exactly "its relative
-    // score is ±1 by construction".
-    let mut partition_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-    for (i, &partition) in loop_partitions.iter().enumerate() {
-        partition_groups.entry(partition).or_default().push(i);
+    // Group loops by normalization group over the FULL discovered set
+    // (before retention or cap).  Drives both the relative-score
+    // denominators below and the competing-vs-solo classification: a loop is
+    // "competing" iff its group holds at least one other discovered loop,
+    // the same population its denominator sums over -- so "solo" means
+    // exactly "its relative score is ±1 by construction" (a Solo-group loop
+    // is solo by definition).
+    let mut partition_groups: HashMap<NormGroup, Vec<usize>> = HashMap::new();
+    for (i, &group) in loop_groups.iter().enumerate() {
+        partition_groups.entry(group).or_default().push(i);
     }
-    let competing: Vec<bool> = loop_partitions
+    let competing: Vec<bool> = loop_groups
         .iter()
         .map(|p| partition_groups[p].len() >= 2)
         .collect();
 
-    // Per-partition per-timestep totals: Σ|score_j[t]| over the partition's
-    // loops, NaN excluded (an undefined score is not signal; matches GH #542's
+    // Per-group per-timestep totals: Σ|score_j[t]| over the group's loops,
+    // NaN excluded (an undefined score is not signal; matches GH #542's
     // denom_summand). Inf is kept -- a real divergence at a dominance
     // inflection. Computed over ALL discovered loops, before any cap, so the
     // denominator reflects the whole partition (the truncate-before-filter
-    // order of GH #310 used to compute totals over only the top-200 survivors).
-    let mut partition_totals: HashMap<Option<usize>, Vec<f64>> = HashMap::new();
+    // order of GH #310 used to compute totals over only the top-200
+    // survivors). A Solo-group total is just that loop's own |score| series.
+    let mut partition_totals: HashMap<NormGroup, Vec<f64>> = HashMap::new();
     if step_count > 0 {
-        for (&partition, indices) in &partition_groups {
+        for (&group, indices) in &partition_groups {
             let mut totals = vec![0.0; step_count];
             for &idx in indices {
                 for (i, &(_, score)) in found_loops[idx].scores.iter().enumerate() {
@@ -2860,7 +2874,7 @@ fn rank_and_filter(
                     }
                 }
             }
-            partition_totals.insert(partition, totals);
+            partition_totals.insert(group, totals);
         }
     }
 
@@ -2871,15 +2885,17 @@ fn rank_and_filter(
     if step_count > 0 {
         let mut keep = vec![false; found_loops.len()];
         for (idx, fl) in found_loops.iter().enumerate() {
-            let totals = &partition_totals[&loop_partitions[idx]];
+            let totals = &partition_totals[&loop_groups[idx]];
             keep[idx] = fl.scores.iter().enumerate().any(|(i, &(_, score))| {
                 !score.is_nan() && totals[i] > 0.0 && score.abs() / totals[i] >= MIN_CONTRIBUTION
             });
         }
-        // Partitions and competing flags of the surviving loops, in the same
+        // Groups and competing flags of the surviving loops, in the same
         // order `retain` will leave them, so the relative-importance pass
-        // below indexes the right partition for each loop.
-        let retained_partitions: Vec<Option<usize>> = loop_partitions
+        // below indexes the right group for each loop. The retained `Solo`
+        // keys carry their pre-retention indices -- they are only ever used
+        // as opaque `partition_totals` keys, never re-derived.
+        let retained_groups: Vec<NormGroup> = loop_groups
             .iter()
             .zip(&keep)
             .filter_map(|(&p, &k)| k.then_some(p))
@@ -2893,11 +2909,11 @@ fn rank_and_filter(
         // retain() visits in index order; drive it off the precomputed mask.
         let mut keep_iter = keep.iter();
         found_loops.retain(|_| *keep_iter.next().unwrap());
-        debug_assert_eq!(retained_partitions.len(), found_loops.len());
+        debug_assert_eq!(retained_groups.len(), found_loops.len());
 
         rank_truncate_and_id(
             found_loops,
-            &retained_partitions,
+            &retained_groups,
             &retained_competing,
             &partition_totals,
         );
@@ -2984,15 +3000,16 @@ fn signed_relative_scores(fl: &FoundLoop, totals: &[f64]) -> Vec<f64> {
 /// test-overridden) cap, assign IDs, and leave the loops in the ranking order
 /// callers consume.
 ///
-/// `loop_partitions[i]` is the cycle partition of `found_loops[i]`,
-/// `competing[i]` whether that partition holds at least one other discovered
-/// loop, and `partition_totals` the per-partition per-timestep denominator --
+/// `loop_groups[i]` is the normalization group of `found_loops[i]` (its
+/// cycle partition, or its own Solo group when unresolved -- GH #750),
+/// `competing[i]` whether that group holds at least one other discovered
+/// loop, and `partition_totals` the per-group per-timestep denominator --
 /// all as built by `rank_and_filter` over the full discovered set.
 fn rank_truncate_and_id(
     found_loops: &mut Vec<FoundLoop>,
-    loop_partitions: &[Option<usize>],
+    loop_groups: &[NormGroup],
     competing: &[bool],
-    partition_totals: &HashMap<Option<usize>, Vec<f64>>,
+    partition_totals: &HashMap<NormGroup, Vec<f64>>,
 ) {
     // Pair each loop with its partition-relative importance statistic, then sort
     // and truncate the pair vector so the (non-Copy) FoundLoop move is a single
@@ -3009,7 +3026,7 @@ fn rank_truncate_and_id(
         .into_iter()
         .enumerate()
         .map(|(idx, mut fl)| {
-            let totals = &partition_totals[&loop_partitions[idx]];
+            let totals = &partition_totals[&loop_groups[idx]];
             let mean_rel = mean_relative_contribution(&fl, totals);
             let key = loop_sort_key(&fl.loop_info);
             fl.rel_scores = signed_relative_scores(&fl, totals);

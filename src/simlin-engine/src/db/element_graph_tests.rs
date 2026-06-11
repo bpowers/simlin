@@ -793,6 +793,137 @@ fn element_graph_whole_rhs_scalar_reducer_is_its_own_agg_node() {
     assert_no_edge(&result, "pop[boston]", "migration[nyc]");
 }
 
+/// GH #752 (element graph, variable-backed partial reduce): a whole-RHS
+/// partial reducer (`inflow[D1] = SUM(matrix[D1,*])` is the ENTIRE
+/// dt-equation, so `inflow` itself is the variable-backed agg --
+/// `is_synthetic == false`, `result_dims = [D1]`, `read_slice =
+/// [Iterated(d1), Reduced]`) gets read-slice-driven element edges, exactly
+/// like a synthetic agg's source half: each `matrix[d1,d2]` row feeds ONLY
+/// its own slot `inflow[d1]`. Before the fix the variable-backed reference
+/// stayed on the conservative `Wildcard` cross-product, whose phantom
+/// off-diagonal `matrix[a,x] -> inflow[b]` edges produced loop-score
+/// equations referencing link-score names (`"matrix[a,x]→inflow"[b]`, the
+/// bare A2A `"matrix→inflow"`) that `try_cross_dimensional_link_scores`
+/// never emits -- only the per-`(row, slot)` scalars
+/// `matrix[a,x]→inflow[a]` exist -- so every loop score through the
+/// reducer failed fragment compile and was silently stubbed to 0.
+#[test]
+fn element_graph_variable_backed_partial_reduce_routes_read_slice() {
+    let project = TestProject::new("vb_partial_reduce_elem_graph")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux("matrix[D1,D2]", "stock[D1] * 0.1")
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .array_flow("inflow[D1]", "SUM(matrix[D1,*])", None);
+
+    let result = element_edges(&project);
+
+    // No synthetic agg node: the variable IS the agg.
+    assert!(
+        !result
+            .edges
+            .keys()
+            .any(|k| k.contains("\u{205A}agg\u{205A}"))
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t.contains("\u{205A}agg\u{205A}"))),
+        "a variable-backed partial reducer must not produce a synthetic agg node; got: {:?}",
+        result.edges
+    );
+
+    // The read-slice diagonal: each matrix row feeds only its own D1 slot.
+    assert_edge(&result, "matrix[a,x]", "inflow[a]");
+    assert_edge(&result, "matrix[a,y]", "inflow[a]");
+    assert_edge(&result, "matrix[b,x]", "inflow[b]");
+    assert_edge(&result, "matrix[b,y]", "inflow[b]");
+
+    // No phantom off-diagonal cross-product edges: `SUM(matrix[a,*])` never
+    // reads row `b` and vice versa.
+    assert_no_edge(&result, "matrix[a,x]", "inflow[b]");
+    assert_no_edge(&result, "matrix[a,y]", "inflow[b]");
+    assert_no_edge(&result, "matrix[b,x]", "inflow[a]");
+    assert_no_edge(&result, "matrix[b,y]", "inflow[a]");
+}
+
+/// GH #752 (two iterated axes): the read-slice routing also covers a
+/// variable-backed partial reduce whose target iterates TWO axes
+/// (`out[D1,D2] = SUM(cube[D1,D2,*])` over `cube[D1,D2,D3]`,
+/// `read_slice = [Iterated(d1), Iterated(d2), Reduced]`, `result_dims =
+/// [D1, D2]` equal to `out`'s dims in order): each cube row feeds only its
+/// own `(d1, d2)` slot. Pins that the Pinned-bearing exclusion in
+/// `variable_backed_partial_reduce_agg` does not over-exclude the
+/// all-`Iterated`/`Reduced` shapes.
+#[test]
+fn element_graph_variable_backed_two_axis_partial_reduce_routes_read_slice() {
+    let project = TestProject::new("vb_two_axis_partial_reduce")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            "10",
+            None,
+        )
+        .array_aux_direct(
+            "out",
+            vec!["D1".into(), "D2".into()],
+            "SUM(cube[D1,D2,*])",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    // Diagonal slots only.
+    assert_edge(&result, "cube[a,x,p]", "out[a,x]");
+    assert_edge(&result, "cube[a,x,q]", "out[a,x]");
+    assert_edge(&result, "cube[b,y,p]", "out[b,y]");
+    assert_edge(&result, "cube[b,y,q]", "out[b,y]");
+    // No cross-slot edges.
+    assert_no_edge(&result, "cube[a,x,p]", "out[a,y]");
+    assert_no_edge(&result, "cube[a,x,p]", "out[b,x]");
+    assert_no_edge(&result, "cube[b,y,p]", "out[a,x]");
+}
+
+/// GH #752 follow-up: a variable-backed partial reduce whose read slice
+/// carries a PINNED axis (`outf[D1] = MEAN(cube[D1,x,*])` -- `read_slice =
+/// [Iterated(d1), Pinned(x), Reduced]`) must NOT take the read-slice path:
+/// `try_cross_dimensional_link_scores` derives each slot's co-reduced slice
+/// from the FULL source cartesian product, ignoring Pinned axes, so its
+/// per-`(row, slot)` values are wrong for a pinned slice (the MEAN divisor
+/// counts unread rows; tracked separately). Until that derivation is fixed,
+/// `variable_backed_partial_reduce_agg` excludes Pinned-bearing slices so
+/// this shape stays on the LOUD conservative cross-product + fragment-warning
+/// regime instead of producing silently wrong numbers.
+#[test]
+fn element_graph_variable_backed_pinned_mixed_reduce_stays_cross_product() {
+    let project = TestProject::new("vb_pinned_mixed_reduce")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .array_flow("inflow[D1]", "MEAN(cube[D1,x,*])", None);
+
+    let result = element_edges(&project);
+
+    // The conservative cross-product: every cube element feeds every inflow
+    // slot -- including the off-diagonal and the unread (y-pinned-out) rows.
+    // This is a deliberate SUPERSET (loud regime: the loop scores over the
+    // phantom edges fail fragment compile with Warnings) rather than
+    // silently wrong per-(row, slot) scores.
+    assert_edge(&result, "cube[a,x,p]", "inflow[a]");
+    assert_edge(&result, "cube[a,x,p]", "inflow[b]");
+    assert_edge(&result, "cube[a,y,q]", "inflow[a]");
+    assert_edge(&result, "cube[b,x,p]", "inflow[a]");
+}
+
 /// AC4.1 (element graph, sliced reducer): `target[Region] = pop[NYC, Adult] +
 /// SUM(pop[NYC, *])` over `pop[Region, Age]` (Region={NYC, Boston}, Age={Adult,
 /// Child}). The maximal `SUM(pop[NYC, *])` subexpression is hoisted into a
