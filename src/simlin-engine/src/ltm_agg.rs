@@ -497,7 +497,9 @@ impl AggNode {
     /// all-`Iterated` (a projection of the canonical slice onto the shared
     /// iterated axes -- per-result-slot constant), while the canonical
     /// slice carries a `Reduced` axis (a genuine reduction exists for the
-    /// feeder to feed). The acceptance in `combined_read_slice` guarantees
+    /// feeder to feed; the canonical slice may also carry `Pinned` axes --
+    /// the Iterated-only requirement is on the feeder's slice, not the
+    /// canonical one). The acceptance in `combined_read_slice` guarantees
     /// an accepted feeder's Iterated target dims equal the canonical
     /// slice's, in order, and are unmapped -- so a feeder's
     /// `read_slice_rows` rows are 1:1 with the agg's result slots.
@@ -1429,7 +1431,9 @@ fn combined_read_slice(
 ///   `Iterated` target dims, in order -- the projection of the canonical
 ///   slice onto its iterated axes, so [`crate::db`]'s `read_slice_rows`
 ///   derives 1:1 feeder rows-to-slots and the per-row changed-last feeder
-///   equation can pin the slot element into the reducer text. The ordered
+///   equation can pin the slot element into the reducer text. The
+///   Iterated-only requirement is on the FEEDER's slice; a Pinned-bearing
+///   CANONICAL slice (`SUM(cube[D1, c1, *] * frac[D1])`) is in scope. The ordered
 ///   EQUALITY (not the design's looser "drawn from the set" subset
 ///   wording) is deliberate: a proper-subset feeder's rows would each
 ///   feed every slot they project from -- a broadcast the per-`(row,
@@ -3431,13 +3435,10 @@ mod tests {
     }
 
     // --- T2 (shape-expressiveness design): per-source `AggNode` invariant
-    // pins. Acceptance in T2 stays "all arrayed slices identical"
-    // (`combined_read_slice`); these tests pin the per-source REPRESENTATION
-    // invariants (I2, I3b, sorted ordering) and characterize the declines
-    // the identical-slices agreement check already enforces. I1's *feeder
-    // clause* is deliberately NOT pinned here -- it is unreachable until T5
-    // widens the acceptance, and a pin now would be vacuous (the GH #739
-    // trap); it lands with T5's RED fixtures.
+    // pins -- the per-source REPRESENTATION invariants (I2, I3b, sorted
+    // ordering) and the declines `accept_source_slices` enforces. I1's
+    // *feeder clause* pins (deferred from T2 to avoid the GH #739 vacuity
+    // trap) landed with T5's RED fixtures, in the section above.
 
     /// T2 / I3b ordering: `sources` is sorted by canonical variable name
     /// regardless of AST occurrence order -- `SUM(b[*] + a[*])` (with `b`
@@ -3488,13 +3489,11 @@ mod tests {
         );
     }
 
-    /// T2 / I3b decline (GREEN characterization, not a behavior change):
-    /// the same variable referenced with two DIFFERENT slices
-    /// (`SUM(a[*] + a[p])` -- `[Reduced]` vs `[Pinned(p)]`) declines the
-    /// hoist. In T2 this is enforced by `combined_read_slice`'s
-    /// per-REFERENCE agreement check (strictly stronger than a per-variable
-    /// check); the pin keeps I3b from regressing if a later task relaxes
-    /// the global agreement to per-source acceptance (T5).
+    /// T2 / I3b decline: the same variable referenced with two DIFFERENT
+    /// slices (`SUM(a[*] + a[p])` -- `[Reduced]` vs `[Pinned(p)]`) declines
+    /// the hoist -- since T5, `accept_source_slices`' per-variable
+    /// one-slice check (the I3b clause); the pin keeps I3b from regressing
+    /// under the widened per-source acceptance.
     #[test]
     fn duplicate_var_with_conflicting_slices_declines_hoist() {
         let project = TestProject::new("dup_var_conflicting")
@@ -3514,8 +3513,8 @@ mod tests {
     /// T2 / I1 decline (GREEN characterization): two co-sources with
     /// DIFFERING `Reduced` subsets (`SUM(a[*:Sub1] + b[*:Sub2])`) decline
     /// the hoist -- their co-reduced rows per slot would disagree, so no
-    /// canonical slice exists. Enforced by the same identical-slices
-    /// agreement check (subset is part of `AxisRead` equality).
+    /// canonical slice exists. Enforced by `accept_source_slices`'
+    /// co-source-identity clause (subset is part of `AxisRead` equality).
     #[test]
     fn differing_reduced_subsets_decline_hoist() {
         let project = TestProject::new("differing_subsets")
@@ -3710,6 +3709,46 @@ mod tests {
         assert!(agg.source_read_slice("scale").is_empty());
         assert!(agg.source_is_projection_feeder("frac"));
         assert!(!agg.source_is_projection_feeder("scale"));
+    }
+
+    /// T5 / I1 (review MINOR-5): a PINNED-bearing CANONICAL slice is within
+    /// the feeder clause's scope -- the clause keys only on the canonical
+    /// slice's Iterated target dims, so `SUM(cube[D1, c1, *] * frac[D1])`
+    /// hoists with canonical `[Iterated, Pinned(c1), Reduced]` and the
+    /// feeder's own `[Iterated]` projection. (It is the FEEDER's slice that
+    /// must be Iterated-only, not the canonical one.)
+    #[test]
+    fn pinned_bearing_canonical_with_feeder_hoists() {
+        let project = TestProject::new("pinned_canonical_feeder")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .named_dimension("D3", &["k1", "k2"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "D2".into(), "D3".into()],
+                "5",
+                None,
+            )
+            .array_aux("frac[D1]", "0.5")
+            .array_aux("growth[D1]", "1 + SUM(cube[D1, c1, *] * frac[D1])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        let agg = synthetic[0];
+        assert_eq!(
+            agg.source_read_slice("cube"),
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Pinned("c1".to_string()),
+                AxisRead::Reduced { subset: None }
+            ]
+        );
+        assert!(agg.source_is_projection_feeder("frac"));
+        assert_eq!(agg.result_dims, vec!["D1".to_string()]);
     }
 
     /// T5 / I1 decline: a no-`Reduced` source with a PINNED axis is NOT a

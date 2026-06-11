@@ -3872,6 +3872,23 @@ pub(crate) struct ReducerBodyCtx<'a> {
     /// `SUM(matrix[State,*])` over `matrix[Region,..]`); `None` disables the
     /// mapped recognition (the by-name check still applies).
     pub dims_ctx: Option<&'a crate::dimensions::DimensionsContext>,
+    /// The live source's accepted read slice (one
+    /// [`crate::ltm_agg::AxisRead`] per row axis, parallel to
+    /// `row_dim_names`) when the reducer is a hoisted agg --
+    /// `AggNode::source_read_slice(live_source)` -- or `None` on the
+    /// un-hoisted conservative paths. It resolves a MISMATCHED-arity dep's
+    /// dimension-name index (a GH #767 projection feeder, `frac[d1]`) to
+    /// the row position whose axis is `Iterated` over that target dim --
+    /// the executed A2A coordinate the index reads. The resolution must be
+    /// positional, not first-match-by-name: a REPEATED-dim co-source
+    /// (`matrix[D1,D1]` read as `SUM(matrix[*, D1] * frac[D1])`, slice
+    /// `[Reduced, Iterated]`) has the dim name at BOTH positions, and
+    /// pinning the feeder at the Reduced position freezes the wrong
+    /// element -- a silently wrong score. Without a slice the by-name
+    /// lookup requires the name to be UNIQUE among `row_dim_names`
+    /// (ambiguity bails to the delta-ratio fallback, the pre-GH #767
+    /// behavior for mismatched deps).
+    pub live_read_slice: Option<&'a [crate::ltm_agg::AxisRead]>,
 }
 
 /// Substitute one subscript index of an arrayed body reference with the
@@ -3947,17 +3964,60 @@ fn pin_body_index(
     }
 }
 
+/// Resolve a MISMATCHED-arity dep's dimension-name index (canonical `name`)
+/// to the row position it reads -- the GH #767 projection-feeder pin's
+/// resolution step.
+///
+/// With the live source's accepted slice available
+/// ([`ReducerBodyCtx::live_read_slice`]) the answer is the position whose
+/// axis is `Iterated` over target dim `name`: the executed A2A equation
+/// resolves the index to the iteration's `name`-coordinate, which is
+/// exactly the row element at the slice's Iterated axis. This is robust to
+/// a REPEATED dim name among the row's axes (`matrix[D1,D1]` with slice
+/// `[Reduced, Iterated]`): the Reduced position shares the NAME but is the
+/// co-reduced coordinate, not the slot -- pinning there freezes the wrong
+/// element (a silently wrong score, the GH #767 review finding). Two
+/// `Iterated` axes over the same dim cannot reach the per-row emitters
+/// (such a slice's `result_dims` duplicate the dim, declined by the
+/// variable-backed gate / feeder clause), but the resolution still
+/// requires uniqueness defensively.
+///
+/// Without a slice (the un-hoisted conservative families) the name must
+/// match exactly ONE of `row_dim_names`; an ambiguous name returns `None`
+/// (the caller bails to the delta-ratio fallback -- the pre-GH #767
+/// behavior for every mismatched dep).
+fn resolve_mismatched_index_position(name: &str, ctx: &ReducerBodyCtx<'_>) -> Option<usize> {
+    use crate::ltm_agg::AxisRead;
+    fn unique(mut it: impl Iterator<Item = usize>) -> Option<usize> {
+        let pos = it.next()?;
+        it.next().is_none().then_some(pos)
+    }
+    match ctx.live_read_slice {
+        Some(slice) => unique(slice.iter().enumerate().filter_map(|(i, ax)| match ax {
+            AxisRead::Iterated { dim, .. } if dim == name => Some(i),
+            _ => None,
+        })),
+        None => unique(
+            ctx.row_dim_names
+                .iter()
+                .enumerate()
+                .filter_map(|(i, d)| (d.as_str() == name).then_some(i)),
+        ),
+    }
+}
+
 /// Rewrite a reducer body so every arrayed reference reads exactly the
 /// given source row: wildcard / iterated-dim / literal indices are replaced
 /// by the row's (qualified) elements, and a bare arrayed-variable reference
 /// gains the full row subscript. An arrayed reference with a DIFFERENT
 /// axis count than the row (a GH #767 projection feeder, `frac[d1]` in the
-/// 2-D `matrix` row partial) is pinned BY DIM NAME when every index names
-/// one of the row's axes. `None` when the body cannot be safely pinned (an
-/// index that doesn't correspond to the row's axes, a mismatched-axis
-/// reference with a non-dim-name index, a nested array reducer, or a
-/// FIXED-literal reference to the live source -- see below) -- the caller
-/// bails to the delta-ratio fallback.
+/// 2-D `matrix` row partial) is pinned at the row position
+/// [`resolve_mismatched_index_position`] resolves each index to. `None`
+/// when the body cannot be safely pinned (an index that doesn't correspond
+/// to the row's axes, a mismatched-axis reference with a non-dim-name or
+/// ambiguous index, a nested array reducer, or a FIXED-literal reference
+/// to the live source -- see below) -- the caller bails to the delta-ratio
+/// fallback.
 ///
 /// Review I1 on GH #744: a live-source reference whose indices are ALL
 /// fixed literals (`pop[north]` in `SUM(pop[*] * pop[north])`) reads the
@@ -4008,28 +4068,27 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
                     // shape: `frac[d1]` inside the row partial of the 2-D
                     // co-source `matrix[d1,*]`). Positional substitution is
                     // meaningless, but a reference indexed SOLELY by
-                    // dimension names that appear among the row's axes is
-                    // pinnable BY NAME: for the executed slot every
-                    // co-reduced row shares the iterated coordinates, and a
-                    // reduced-axis-named index reads exactly the row's
-                    // element at that axis -- in both cases the pinned
-                    // (frozen) reference is the value the executed equation
-                    // reads, so the single-row cancellation invariant
-                    // holds. Anything else (a wildcard, a literal, a dim
-                    // outside the row's axes) bails to the delta-ratio
-                    // fallback as before. Such a dep can never be the live
-                    // source (the live source's axis count equals the
-                    // row's by construction), so the `any_moving` live-bail
-                    // below is not relevant here.
+                    // dimension names resolvable to a UNIQUE row axis is
+                    // pinnable: for the executed slot every co-reduced row
+                    // shares the iterated coordinates, and a reduced-axis-
+                    // named index reads exactly the row's element at that
+                    // axis -- in both cases the pinned (frozen) reference
+                    // is the value the executed equation reads, so the
+                    // single-row cancellation invariant holds. Resolution
+                    // is by [`resolve_mismatched_index_position`] (the
+                    // live slice's Iterated axis when available, else a
+                    // unique name match); anything else (a wildcard, a
+                    // literal, a dim outside the row's axes, an AMBIGUOUS
+                    // dim name) bails to the delta-ratio fallback. Such a
+                    // dep can never be the live source (the live source's
+                    // axis count equals the row's by construction), so the
+                    // `any_moving` live-bail below is not relevant here.
                     let pinned: Vec<IndexExpr0> = indices
                         .iter()
                         .map(|idx| match idx {
                             IndexExpr0::Expr(Expr0::Var(name, _)) => {
                                 let n = canonicalize(name.as_str());
-                                let pos = ctx
-                                    .row_dim_names
-                                    .iter()
-                                    .position(|d| d.as_str() == n.as_ref())?;
+                                let pos = resolve_mismatched_index_position(n.as_ref(), ctx)?;
                                 Some(IndexExpr0::Expr(Expr0::Var(
                                     RawIdent::new_from_str(&row_parts[pos]),
                                     crate::ast::Loc::default(),

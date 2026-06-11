@@ -179,12 +179,38 @@ unit tests):
   co-sources with *different* subsets are declined: their co-reduced rows
   per slot would disagree). That shared slice is the **canonical slice**,
   and its `Iterated` target dims (in order) are `result_dims`. A feeder is
-  accepted iff its slice consists only of `Iterated` axes drawn from the
-  canonical `Iterated` target-dim set (its value is then constant per
-  result slot). Anything else declines the hoist. This is the #767
-  acceptance rule, replacing `combined_read_slice`'s identical-slices
-  requirement (`ltm_agg.rs:1064-1077`); with zero feeders it degenerates to
-  exactly today's rule.
+  accepted iff its slice consists only of UNMAPPED `Iterated` axes whose
+  target dims **equal the canonical slice's `Iterated` target dims, in
+  order** (its value is then constant per result slot, and its
+  `read_slice_rows` rows are 1:1 with the agg's result slots). Anything
+  else declines the hoist. This is the #767 acceptance rule, replacing
+  `combined_read_slice`'s identical-slices requirement
+  (`ltm_agg.rs:1064-1077`); with zero feeders it degenerates to exactly
+  today's rule.
+
+  *(As-landed amendment, T5 review-adjudicated.)* The clause was
+  originally worded "`Iterated` axes drawn from the canonical `Iterated`
+  target-dim **set**", which would admit a proper-SUBSET feeder
+  (`w[D1]` against a canonical `[Iterated(D1), Iterated(D2), Reduced]`)
+  -- but that wording is internally inconsistent with this design's own
+  "1:1 rows" consequence (the #767 row in the falls-out table): a subset
+  feeder's rows each feed *every* slot they project from, so its
+  per-`(row, slot)` names would be under-subscripted (`w[r1] -> agg[r1]`
+  does not name a complete slot of a `[D1, D2]` agg) and its
+  changed-last equation would leave the unprojected iterated index free.
+  Likewise a PERMUTED feeder's `read_slice_rows` slots (derived in the
+  source's axis order) would mis-name the `result_dims`-ordered slots.
+  Ordered equality is therefore the implemented rule; subset/permuted
+  feeders decline (conservative + loud, the pre-T5 behavior). The subset
+  shape's proper home is T6's broadcast machinery (the section-3
+  per-`(row, full-target-element)` rule), not the feeder clause. The
+  Iterated-only requirement is on the FEEDER's slice; a Pinned-bearing
+  CANONICAL slice (`SUM(cube[D1, c1, *] * frac[D1])`) is in scope. A
+  REPEATED-dim co-source (`matrix[D1,D1]` read as
+  `SUM(matrix[*, D1] * frac[D1])`) is accepted, and the co-source row
+  partial must resolve the feeder's index at the slice's ITERATED axis
+  POSITION (not first-match by name -- the name is ambiguous across the
+  Reduced/Iterated axes; `resolve_mismatched_index_position`).
 - **I2 (arity):** `read_slice.len()` equals the source's declared dim count.
 - **I3 (subset):** a `Reduced::subset` is a non-empty proper subset of the
   axis's elements; `None` means full extent.
@@ -406,10 +432,18 @@ predicate. This lands IN T3, atomically with the score-side change.
   recreates the #525 phantom pathology (cross-product edges reading diagonal
   scores) and is rejected. Residual documented in `reducer_collapses_to_scalar`
   rustdoc + a follow-up issue filed at landing time.
-- **Feeders that are not projections** (e.g. `SUM(matrix[D1,*] * other[D2])`
-  reading an axis outside the canonical slice): `combined_read_slice` still
-  declines; the edge keeps the #743 changed-last conservative score and the
-  loud co-source degradation.
+- **Feeders that are not projections**: `combined_read_slice` /
+  `accept_source_slices` still decline; the edge keeps the #743
+  changed-last conservative score and the loud co-source degradation.
+  *(As-landed amendment, T5.)* The example originally given here,
+  `SUM(matrix[D1,*] * other[D2])` (a free reduced-axis index), is NOT a
+  real inhabitant of this boundary -- the engine rejects the equation
+  outright as a dimension error, so the shape never reaches LTM. The
+  nearest *compiling* non-projection shapes are the Pinned-axis mix
+  (`SUM(matrix[D1,*] * w[D1, c1])` -- the engine-side
+  `non_projection_feeder_co_source_closure_stays_loud` pin and the
+  libsimlin fragment-failure fixture), dim-subset and permuted feeders,
+  and mapped-Iterated-axis combinations.
 
 ## Implementation tasks
 

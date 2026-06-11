@@ -3672,6 +3672,282 @@ fn feeder_plus_co_source_row_scores_are_additive() {
     }
 }
 
+/// GH #767 review (the REPEATED-DIM co-source hazard): a square co-source
+/// declared over the same dimension twice (`matrix[D1,D1]`) read as
+/// `SUM(matrix[*, D1] * frac[D1])` -- slice `[Reduced, Iterated]`, the
+/// ITERATED axis at position 1 while position 0 shares the dim NAME -- is
+/// ACCEPTED by the feeder clause, so the co-source row partial must pin
+/// the feeder dep at the slice's ITERATED axis position
+/// (`PREVIOUS(frac[d1·r2])` in `matrix[r1,r2]→growth[r2]`), never a
+/// first-match name lookup (which silently pinned position 0's REDUCED
+/// element, `frac[d1·r1]` -- a wrong-magnitude score with zero warnings,
+/// the exact silent-wrong-number class this epic forbids). The asymmetric
+/// per-element matrix and seeded pops make the wrong pin numerically
+/// visible: per-slot additivity (feeder changed-last + co-source rows
+/// changed-first == Δgrowth) holds only under the correct pin.
+#[test]
+fn repeated_dim_co_source_pins_feeder_at_iterated_axis() {
+    let project = TestProject::new("gh767_repeated_dim")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .array_with_ranges_direct(
+            "seed",
+            vec!["D1".into()],
+            vec![("r1", "100"), ("r2", "160")],
+            None,
+        )
+        .array_stock("pop[D1]", "seed[D1]", &["growth"], &[], None)
+        .array_with_ranges_direct(
+            "matrix",
+            vec!["D1".into(), "D1".into()],
+            vec![
+                ("r1,r1", "pop[r1] * 0.05"),
+                ("r1,r2", "pop[r1] * 0.06"),
+                ("r2,r1", "pop[r2] * 0.07"),
+                ("r2,r2", "pop[r2] * 0.08"),
+            ],
+            None,
+        )
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("growth[D1]", "SUM(matrix[*, D1] * frac[D1])", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .collect();
+    assert!(
+        assembly.is_empty(),
+        "the repeated-dim fixture must compile every LTM fragment cleanly; got: {assembly:?}"
+    );
+
+    // The off-iterated-row partial: the feeder must be pinned to the SLOT
+    // (the Iterated axis's element, r2), not the same-named Reduced axis's
+    // row element (r1).
+    let m_r1r2 = format!("{LINK_SCORE_PREFIX}matrix[r1,r2]\u{2192}growth[r2]");
+    let var = ltm_var(&ltm_vars, &m_r1r2);
+    let eq = var.equation.source_text();
+    assert!(
+        eq.contains("PREVIOUS(frac[d1\u{B7}r2])"),
+        "the feeder must be frozen at the slice's ITERATED axis element (the slot): {eq}"
+    );
+    assert!(
+        !eq.contains("frac[d1\u{B7}r1]"),
+        "the feeder must NOT be pinned to the same-named Reduced axis's row element: {eq}"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Per-slot additivity: feeder changed-last + co-source rows
+    // changed-first == Δgrowth exactly (numerators reconstructed from the
+    // emitted scores). Under the first-match mis-pin this is off by
+    // (frac[r] - frac[r1])·Σ_a Δmatrix[a,r] for slot r2.
+    for slot in ["r1", "r2"] {
+        let growth = series_at(&results, offset_of(&results, &format!("growth[{slot}]")));
+        let frac = series_at(&results, offset_of(&results, &format!("frac[{slot}]")));
+        let feeder_score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}frac[{slot}]\u{2192}growth[{slot}]"),
+            ),
+        );
+        let rows: Vec<(Vec<f64>, Vec<f64>)> = ["r1", "r2"]
+            .iter()
+            .map(|a| {
+                let score = series_at(
+                    &results,
+                    offset_of(
+                        &results,
+                        &format!("{LINK_SCORE_PREFIX}matrix[{a},{slot}]\u{2192}growth[{slot}]"),
+                    ),
+                );
+                let m = series_at(
+                    &results,
+                    offset_of(&results, &format!("matrix[{a},{slot}]")),
+                );
+                (score, m)
+            })
+            .collect();
+
+        let mut contributing = 0usize;
+        for t in 1..growth.len() {
+            let d_growth = growth[t] - growth[t - 1];
+            let d_frac = frac[t] - frac[t - 1];
+            if d_growth == 0.0 || d_frac == 0.0 {
+                continue;
+            }
+            let mut sum = feeder_score[t] * d_growth.abs() * d_frac.signum();
+            let mut all_scored = true;
+            for (score, m) in &rows {
+                let d_m = m[t] - m[t - 1];
+                if d_m == 0.0 {
+                    all_scored = false;
+                    break;
+                }
+                sum += score[t] * d_growth.abs() * d_m.signum();
+            }
+            if !all_scored {
+                continue;
+            }
+            assert!(
+                (sum - d_growth).abs() <= 1e-9 * d_growth.abs().max(1.0),
+                "slot {slot} step {t}: feeder + co-source numerators {sum} != Δgrowth \
+                 {d_growth} -- the repeated-dim mis-pin signature"
+            );
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "slot {slot}: expected at least 3 steps where every source scored, got {contributing}"
+        );
+    }
+}
+
+/// GH #767 review (Pinned-bearing canonical + feeder): a canonical slice
+/// with a PINNED axis (`SUM(cube[D1, c1, *] * frac[D1])`, slice
+/// `[Iterated, Pinned(c1), Reduced]`) is within the feeder clause's scope
+/// -- the clause keys only on the Iterated target dims, so the feeder's
+/// `[Iterated]` projection is accepted and everything scores: per-row
+/// names exist ONLY for the read `c1` cells (the Pinned axis admits no
+/// `c2` rows), zero warnings, and per-slot additivity (feeder
+/// changed-last + read-row changed-first numerators == Δgrowth) holds
+/// exactly.
+#[test]
+fn pinned_canonical_with_feeder_scores_additively() {
+    let project = TestProject::new("gh767_pinned_canonical")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .named_dimension("D3", &["k1", "k2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            "pop[D1] * 0.05",
+            None,
+        )
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("growth[D1]", "SUM(cube[D1, c1, *] * frac[D1])", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .collect();
+    assert!(
+        assembly.is_empty(),
+        "the Pinned-canonical feeder fixture must compile cleanly; got: {assembly:?}"
+    );
+
+    // Only the read `c1` rows get per-(row, slot) scores; the Pinned axis
+    // admits no c2 rows.
+    for v in &ltm_vars {
+        assert!(
+            !(v.name.starts_with(LINK_SCORE_PREFIX) && v.name.contains(",c2,")),
+            "an unread c2 row must get no score; got {}",
+            v.name
+        );
+    }
+    for slot in ["r1", "r2"] {
+        for k in ["k1", "k2"] {
+            let name = format!("{LINK_SCORE_PREFIX}cube[{slot},c1,{k}]\u{2192}growth[{slot}]");
+            assert!(
+                ltm_vars.iter().any(|v| v.name == name),
+                "missing read-row score {name}"
+            );
+        }
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    for slot in ["r1", "r2"] {
+        let growth = series_at(&results, offset_of(&results, &format!("growth[{slot}]")));
+        let frac = series_at(&results, offset_of(&results, &format!("frac[{slot}]")));
+        let feeder_score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}frac[{slot}]\u{2192}growth[{slot}]"),
+            ),
+        );
+        let rows: Vec<(Vec<f64>, Vec<f64>)> = ["k1", "k2"]
+            .iter()
+            .map(|k| {
+                let score = series_at(
+                    &results,
+                    offset_of(
+                        &results,
+                        &format!("{LINK_SCORE_PREFIX}cube[{slot},c1,{k}]\u{2192}growth[{slot}]"),
+                    ),
+                );
+                let c = series_at(
+                    &results,
+                    offset_of(&results, &format!("cube[{slot},c1,{k}]")),
+                );
+                (score, c)
+            })
+            .collect();
+
+        let mut contributing = 0usize;
+        for t in 1..growth.len() {
+            let d_growth = growth[t] - growth[t - 1];
+            let d_frac = frac[t] - frac[t - 1];
+            if d_growth == 0.0 || d_frac == 0.0 {
+                continue;
+            }
+            let mut sum = feeder_score[t] * d_growth.abs() * d_frac.signum();
+            let mut all_scored = true;
+            for (score, c) in &rows {
+                let d_c = c[t] - c[t - 1];
+                if d_c == 0.0 {
+                    all_scored = false;
+                    break;
+                }
+                sum += score[t] * d_growth.abs() * d_c.signum();
+            }
+            if !all_scored {
+                continue;
+            }
+            assert!(
+                (sum - d_growth).abs() <= 1e-9 * d_growth.abs().max(1.0),
+                "slot {slot} step {t}: feeder + read-row numerators {sum} != Δgrowth {d_growth}"
+            );
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "slot {slot}: expected at least 3 steps where every source scored, got {contributing}"
+        );
+    }
+}
+
 /// GH #767 (T5, the SYNTHETIC half): the INLINE form of the feeder shape
 /// (`growth[D1] = 1 + SUM(matrix[D1,*] * frac[D1])`) mints a synthetic agg
 /// whose feeder half rides the same per-`(row, slot)` changed-last emission

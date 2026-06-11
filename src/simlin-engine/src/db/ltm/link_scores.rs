@@ -354,6 +354,17 @@ pub(super) fn try_cross_dimensional_link_scores(
     let (arrayed_dep_dims, model_deps) =
         reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
+    // The live source's accepted slice, when `to` IS a variable-backed agg
+    // reading `from`: lets the body partial resolve a mismatched-arity
+    // feeder dep's index at the slice's ITERATED axis position -- sound
+    // for a repeated-dim co-source like `matrix[D1,D1]`, where a by-name
+    // lookup is ambiguous (see `resolve_mismatched_index_position`). The
+    // un-hoisted cartesian family has no agg and keeps `None` (unique
+    // by-name resolution with the ambiguity bail).
+    let live_read_slice = agg_nodes
+        .aggs_in_var(to)
+        .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))
+        .map(|a| a.source_read_slice(from));
     let body_ctx = crate::ltm_augment::ReducerBodyCtx {
         body_text: &classified.body_text,
         live_source: from,
@@ -361,6 +372,7 @@ pub(super) fn try_cross_dimensional_link_scores(
         model_deps: &model_deps,
         row_dim_names: &row_dim_names,
         dims_ctx: Some(project_dimensions_context(db, project)),
+        live_read_slice,
     };
 
     // Compute the cartesian product of all source dimensions to get
@@ -1537,6 +1549,10 @@ pub(super) fn emit_source_to_agg_link_scores(
         model_deps: &model_deps,
         row_dim_names: &row_dim_names,
         dims_ctx: Some(project_dimensions_context(db, project)),
+        // The live source's accepted slice: resolves a mismatched-arity
+        // feeder dep's index at the Iterated axis position (sound for
+        // repeated-dim co-sources; see `resolve_mismatched_index_position`).
+        live_read_slice: Some(agg.source_read_slice(from)),
     };
     let dim_element_lists: Vec<Vec<String>> = from_dims
         .iter()

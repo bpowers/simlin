@@ -919,6 +919,7 @@ struct BodyCtxFixture {
     arrayed_dep_dims: std::collections::HashMap<String, usize>,
     model_deps: HashSet<String>,
     row_dim_names: Vec<String>,
+    live_read_slice: Option<Vec<crate::ltm_agg::AxisRead>>,
 }
 
 impl BodyCtxFixture {
@@ -942,7 +943,16 @@ impl BodyCtxFixture {
             arrayed_dep_dims,
             model_deps,
             row_dim_names: row_dims.iter().map(|s| s.to_string()).collect(),
+            live_read_slice: None,
         }
+    }
+
+    /// Attach the live source's accepted read slice (the hoisted-agg
+    /// callers' configuration), enabling the Iterated-axis-position
+    /// resolution of mismatched-arity dep indices.
+    fn with_live_slice(mut self, slice: Vec<crate::ltm_agg::AxisRead>) -> Self {
+        self.live_read_slice = Some(slice);
+        self
     }
 
     fn ctx(&self) -> ReducerBodyCtx<'_> {
@@ -953,6 +963,7 @@ impl BodyCtxFixture {
             model_deps: &self.model_deps,
             row_dim_names: &self.row_dim_names,
             dims_ctx: None,
+            live_read_slice: self.live_read_slice.as_deref(),
         }
     }
 }
@@ -1118,6 +1129,81 @@ fn test_body_aware_projection_feeder_dep_pins_by_dim_name() {
         eq.contains(&format!("PREVIOUS(growth) + (({live}) - ({frozen}))")),
         "the changed-first partial must pin the feeder by dim name and freeze it: {eq}"
     );
+}
+
+/// GH #767 review (the repeated-dim hazard): with the live source's slice
+/// available, a mismatched-arity feeder dep's index resolves to the
+/// slice's ITERATED axis position -- for `matrix[D1,D1]` read as
+/// `SUM(matrix[*, D1] * frac[D1])` (slice `[Reduced, Iterated]`, row
+/// `(r1, r2)` feeding slot `r2`) the feeder pins to `frac[d1·r2]`, never
+/// the same-named Reduced axis's `r1` element a first-match name lookup
+/// would pick (a silently wrong frozen co-factor).
+#[test]
+fn test_body_aware_repeated_dim_feeder_pins_at_iterated_axis() {
+    use crate::ltm_agg::AxisRead;
+    let elements = vec!["d1·r1,d1·r2".to_string(), "d1·r2,d1·r2".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "matrix[*, d1] * frac[d1]",
+        "matrix",
+        &[("matrix", 2), ("frac", 1)],
+        &[],
+        &["d1", "d1"],
+    )
+    .with_live_slice(vec![
+        AxisRead::Reduced { subset: None },
+        AxisRead::Iterated {
+            dim: "d1".to_string(),
+            source_dim: "d1".to_string(),
+        },
+    ]);
+    let eq = generate_element_to_scalar_equation(
+        "matrix",
+        "growth",
+        "d1·r1,d1·r2",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(
+        eq.contains("PREVIOUS(frac[d1·r2])"),
+        "the feeder must pin at the Iterated axis's row element: {eq}"
+    );
+    assert!(
+        !eq.contains("frac[d1·r1]"),
+        "the feeder must not pin at the same-named Reduced axis's element: {eq}"
+    );
+}
+
+/// GH #767 review: WITHOUT a live slice, an AMBIGUOUS dim name (repeated
+/// among the row's axes) bails to the delta-ratio fallback rather than
+/// first-matching -- the pre-GH #767 behavior for every mismatched dep.
+#[test]
+fn test_body_aware_ambiguous_dim_name_without_slice_falls_back() {
+    let elements = vec!["d1·r1,d1·r2".to_string(), "d1·r2,d1·r2".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "matrix[*, d1] * frac[d1]",
+        "matrix",
+        &[("matrix", 2), ("frac", 1)],
+        &[],
+        &["d1", "d1"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "matrix",
+        "growth",
+        "d1·r1,d1·r2",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
+    assert!(
+        eq.contains("SAFEDIV((growth - PREVIOUS(growth))"),
+        "an ambiguous dim name must bail to the delta-ratio form: {eq}"
+    );
+    assert!(!eq.contains("frac["), "equation: {eq}");
 }
 
 /// A genuinely un-pinnable mismatched-axis-count dep -- one whose index is
