@@ -447,6 +447,13 @@ impl AggNode {
     /// whose decision is about the *reducer's* shape rather than one
     /// source's rows (the [`variable_backed_partial_reduce_agg`] gate) key
     /// on it.
+    ///
+    /// T5 MUST redefine this: "first non-empty" is only correct while
+    /// acceptance is identical-only. Once projection feeders carry their
+    /// own (non-empty, Iterated-only) slices, the alphabetically-first
+    /// source could be a feeder, and a feeder slice passes the gate's axis
+    /// checks for the wrong shape -- the canonical slice must become "the
+    /// first slice with a `Reduced` axis" (the design's co-source notion).
     pub fn canonical_read_slice(&self) -> &[AxisRead] {
         self.sources
             .iter()
