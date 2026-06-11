@@ -3288,16 +3288,17 @@ fn nonlinear_bare_body_equations_unchanged() {
 }
 
 // ---------------------------------------------------------------------------
-// GH #743: un-hoisted multi-source iterated-dim-feeder reducer
+// GH #743 / GH #767: the iterated-dim-feeder reducer (now hoisted, T5)
 // ---------------------------------------------------------------------------
 
-/// The GH #743 fixture: an apply-to-all equation over `D1` whose RHS embeds
+/// The GH #743/#767 fixture: an apply-to-all equation over `D1` whose RHS is
 /// a multi-source reducer whose per-row feeder is arrayed over the ITERATED
-/// dimension -- `growth[D1] = SUM(matrix[D1,*] * frac[D1])`.
-/// `combined_read_slice` declines to hoist it (the multi-source
-/// slice-disagreement carve-out: `matrix[D1,*]` reads `[Iterated, Reduced]`
-/// while `frac[D1]` reads `[Iterated]`), so the references stay on the
-/// conservative path. The feedback loop closes through `frac`:
+/// dimension -- `growth[D1] = SUM(matrix[D1,*] * frac[D1])`. Since T5 of the
+/// shape-expressiveness design the I1 feeder clause ACCEPTS this combination
+/// (`matrix` the co-source with the canonical `[Iterated, Reduced]` slice,
+/// `frac` a projection feeder with its own `[Iterated]` slice); the whole-RHS
+/// form is VARIABLE-BACKED (growth IS the agg, no synthetic minted). The
+/// feedback loop closes through `frac`:
 /// `pop[r] -> frac[r] -> growth[r] -> pop[r]`, trivially reinforcing.
 fn gh743_feeder_closure_fixture() -> datamodel::Project {
     TestProject::new("gh743_feeder")
@@ -3311,27 +3312,29 @@ fn gh743_feeder_closure_fixture() -> datamodel::Project {
         .build_datamodel()
 }
 
-/// GH #743 (the silent-garbage half): the feeder-closure loop must be
-/// CORRECTLY scored on the conservative (un-hoisted) path.
+/// GH #767 (T5, the feeder half): the feeder edge of the hoisted shape gets
+/// per-`(row, slot)` changed-last scores (`frac[r1]→growth[r1]`, 1:1 rows --
+/// the feeder's own `[Iterated]` slice through `read_slice_rows`), replacing
+/// the GH #743 Bare changed-last conservative score for THIS shape (the
+/// changed-last chooser machinery itself stays, serving the still-declined
+/// non-projection shapes -- see
+/// `non_projection_feeder_co_source_closure_stays_loud`).
 ///
-/// Before the fix, the Bare `frac→growth` link score's changed-first
-/// ceteris-paribus partial froze the wildcard-sliced co-source as
-/// `PREVIOUS(matrix[PREVIOUS(d1), *])`. `PREVIOUS` of an array slice has no
-/// codegen path: as a *user* equation it is a hard compile error, but as an
-/// LTM implicit helper (`$⁚$⁚ltm⁚link_score⁚frac→growth⁚0⁚arg0`) it failed
-/// fragment-compile SILENTLY -- keeping a layout slot with no bytecode, so
-/// it read a constant 0. The partial then evaluated to
-/// `sum(0 * frac) = 0` and the score degenerated to
-/// `-PREVIOUS(growth)/|Δgrowth| = -1/g` (g = the per-step growth rate):
-/// constant `-20` on this fixture, the issue's `-250` at 0.4%/step --
-/// plausible-looking garbage with NO diagnostic.
+/// Hand-derived per-slot equation (changed-last: only the feeder frozen,
+/// the co-source slice verbatim -- the changed-FIRST partial would freeze
+/// the wildcard slice as an uncompilable lagged whole-array read):
 ///
-/// After the fix the partial uses the changed-last attribution (only the
-/// feeder frozen: `sum(matrix[d1, *] * PREVIOUS(frac))`, which compiles),
-/// and the trivially-reinforcing isolated loop scores exactly +1 per
-/// element -- the LTM isolated-loop invariant.
+/// ```text
+/// numerator = growth[r1] - sum(matrix[r1,*] * PREVIOUS(frac[r1]))
+///           = Σ_c matrix[r1,c] * Δfrac[r1]
+/// ```
+///
+/// With `matrix` constant the numerator equals `Δgrowth[r1]` exactly, so the
+/// score is +1 from step 1, and each per-circuit loop (the feeder hop routes
+/// circuits to the per-circuit scalar path -- its only scores are the
+/// per-row scalars) is +1 past startup: the isolated-loop invariant.
 #[test]
-fn un_hoisted_iterated_dim_feeder_loop_scores_correct() {
+fn iterated_dim_feeder_closure_scores_via_hoist() {
     let project = gh743_feeder_closure_fixture();
 
     let mut db = SimlinDb::default();
@@ -3343,21 +3346,16 @@ fn un_hoisted_iterated_dim_feeder_loop_scores_correct() {
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("LTM-enabled compilation should succeed");
 
-    // The reducer must STAY un-hoisted (no synthetic agg node): this test
-    // pins the conservative-path fix, not a hoisting change. (GH #743's
-    // direction-1 follow-up -- extending the hoist to feeder-sub-slice
-    // combinations -- would relax this.)
+    // The whole-RHS form is VARIABLE-BACKED: no synthetic agg node.
     assert!(
         ltm_vars
             .iter()
             .all(|v| !v.name.contains("$\u{205A}ltm\u{205A}agg\u{205A}")),
-        "the slice-disagreeing multi-source reducer must not be hoisted; got: {:?}",
+        "the whole-RHS feeder reducer is variable-backed, not synthetic; got: {:?}",
         ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
 
-    // The conservative path must be CORRECT here, so there must be no
-    // degradation warnings (a warned skip would mean the loud floor fired
-    // where the changed-last form should have produced a real score).
+    // Everything compiles cleanly: zero assembly warnings.
     let diags = collect_all_diagnostics(&db, sync.project);
     let assembly: Vec<_> = diags
         .iter()
@@ -3368,80 +3366,105 @@ fn un_hoisted_iterated_dim_feeder_loop_scores_correct() {
         "the feeder-closure fixture must compile every LTM fragment cleanly; got: {assembly:?}"
     );
 
+    // The Bare A2A frac→growth score is RETIRED for this shape, replaced by
+    // the per-(row, slot) scalars.
+    let bare = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
+    assert!(
+        !ltm_vars.iter().any(|v| v.name == bare),
+        "the Bare conservative feeder score must be replaced by per-row scores"
+    );
+
+    // The per-row feeder equation, hand-derived (changed-last, slot-pinned).
+    let feeder_r1 = format!("{LINK_SCORE_PREFIX}frac[r1]\u{2192}growth[r1]");
+    let var = ltm_var(&ltm_vars, &feeder_r1);
+    assert_eq!(
+        var.equation.source_text(),
+        "if (TIME = INITIAL_TIME) then 0 else if ((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1])) = 0) OR ((frac[d1\u{B7}r1] - \
+         PREVIOUS(frac[d1\u{B7}r1])) = 0) then 0 else \
+         SAFEDIV((growth[d1\u{B7}r1] - (sum(matrix[d1\u{B7}r1, *] * \
+         PREVIOUS(frac[d1\u{B7}r1])))), ABS((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1]))), 0) * SIGN((frac[d1\u{B7}r1] - \
+         PREVIOUS(frac[d1\u{B7}r1])))",
+        "the per-row feeder changed-last equation must match the hand-derived form"
+    );
+
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end()
         .expect("VM simulation should run to completion");
     let results = vm.into_results();
 
-    // Exactly one loop: pop -> frac -> growth -> pop, A2A over D1.
+    const TOL: f64 = 1e-9;
+
+    // Per-row feeder scores: +1 at every step past the first (matrix is
+    // constant, so the changed-last numerator IS Δgrowth).
+    for row in ["r1", "r2"] {
+        let name = format!("{LINK_SCORE_PREFIX}frac[{row}]\u{2192}growth[{row}]");
+        let series = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() <= TOL,
+                "{name} at step {step}: got {v}, expected +1. A constant negative \
+                 value here (-1/growth-rate) is the GH #743 silent-garbage \
+                 signature."
+            );
+        }
+    }
+
+    // The feeder hop routes circuits to the per-circuit scalar path: one
+    // scalar loop per D1 element, each +1 past startup.
     let loop_names: Vec<String> = ltm_score_var_names(&results)
         .into_iter()
         .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
         .collect();
     assert_eq!(
         loop_names.len(),
-        1,
-        "expected exactly one loop score; got {loop_names:?}"
+        2,
+        "expected one scalar loop per D1 element; got {loop_names:?}"
     );
-    let loop_var = ltm_var(&ltm_vars, &loop_names[0]);
-    assert_eq!(
-        loop_var.dimensions,
-        vec!["D1".to_string()],
-        "the feeder-closure loop must be A2A over D1"
-    );
-
-    const TOL: f64 = 1e-9;
-
-    // The Bare frac→growth link score: +1 at every step past the first
-    // (the changed-last numerator `growth - sum(matrix[d1,*]*PREVIOUS(frac))`
-    // equals Δgrowth exactly while matrix is constant).
-    let frac_growth = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
-    let var = ltm_var(&ltm_vars, &frac_growth);
-    let n_slots = slot_count(var, &project.dimensions);
-    let base = offset_of(&results, &frac_growth);
-    for slot in 0..n_slots {
-        let series = series_at(&results, base + slot);
-        for (step, &v) in series.iter().enumerate().skip(1) {
-            assert!(
-                (v - 1.0).abs() <= TOL,
-                "{frac_growth} slot {slot} at step {step}: got {v}, expected +1. \
-                 A constant negative value here (-1/growth-rate) is the GH #743 \
-                 silent-garbage signature: the partial silently lost the frozen \
-                 co-source term."
-            );
-        }
-    }
-
-    // The loop score: +1 per element at every step past startup (the
-    // trivially-reinforcing isolated-loop invariant).
-    let base = offset_of(&results, &loop_names[0]);
-    for slot in 0..2 {
-        let series = series_at(&results, base + slot);
+    for name in &loop_names {
+        let var = ltm_var(&ltm_vars, name);
+        assert!(
+            var.dimensions.is_empty(),
+            "feeder-closure loops are per-circuit scalars; {name} got dims {:?}",
+            var.dimensions
+        );
+        let series = series_at(&results, offset_of(&results, name));
         for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
             assert!(
                 (v - 1.0).abs() <= TOL,
-                "{} slot {slot} at step {step}: got {v}, expected +1 (isolated \
-                 reinforcing loop). The pre-fix garbage read -20 at every step.",
-                loop_names[0]
+                "{name} at step {step}: got {v}, expected +1 (isolated reinforcing \
+                 loop)."
             );
         }
     }
 }
 
-/// GH #743 (the loud-floor half, characterization): closing the loop through
-/// the wildcard-read co-source (`matrix`) instead of the feeder keeps the
-/// LOUD degraded behavior -- cross-element loop scores that fail fragment
-/// compile (their equations reference per-(row,slot) link-score names the
-/// emitters never produce for this un-hoisted shape), each surfacing an
-/// Assembly `Warning` and reading a constant 0.
+/// GH #767 (T5, the co-source half -- THE FLIP of
+/// `un_hoisted_iterated_dim_feeder_co_source_closure_stays_loud`): closing
+/// the loop through the wildcard-read co-source (`matrix`) is now genuinely
+/// scoreable. Pre-T5 the hoist declined, the element graph emitted the
+/// conservative cross-product, and every cross-row loop score failed
+/// fragment compile (warned zero-stubs -- the loud floor GH #767's body
+/// names). Post-T5 the gate admits both edges, the element edges shrink to
+/// the read rows (no cross-row circuits exist to warn about), and each
+/// per-circuit loop composes real per-`(row, slot)` scores.
 ///
-/// This is the warned sibling of the #758/#764 zero-stub class, NOT silent
-/// garbage; making these loops genuinely scoreable requires hoisting the
-/// feeder-sub-slice combination (GH #743's direction-1 follow-up). This test
-/// pins that the degradation stays visible: if the warnings disappear, the
-/// scores must be real (a silent zero here would be a regression).
+/// Hand-derived: `matrix = pop[D1]*0.05`, `frac = 0.5` constant. Per slot
+/// `r`, `growth[r] = Σ_c matrix[r,c]*0.5 = 0.05·pop[r]·Σ_c 0.5·... `; the
+/// changed-first per-row partial holds the feeder frozen AT THE ROW
+/// (`PREVIOUS(frac[d1·r])` -- the GH #744 body machinery extended to the
+/// mismatched-arity feeder dep), so
+///
+/// ```text
+/// score(matrix[r,c] → growth[r]) = PREVIOUS(frac[r]) · Δmatrix[r,c] / |Δgrowth[r]|
+///                                = 0.5·Δm / (0.5·(Δm + Δm)) = 0.5
+/// ```
+///
+/// and each of the 4 per-circuit loops scores 0.5 sustained (the two
+/// loops through a slot's c1/c2 cells sum to the slot's full +1).
 #[test]
-fn un_hoisted_iterated_dim_feeder_co_source_closure_stays_loud() {
+fn iterated_dim_feeder_co_source_closure_scores_real_values() {
     let project = TestProject::new("gh743_co_source")
         .with_sim_time(0.0, 8.0, 1.0)
         .named_dimension("D1", &["r1", "r2"])
@@ -3460,11 +3483,332 @@ fn un_hoisted_iterated_dim_feeder_co_source_closure_stays_loud() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("LTM-enabled compilation should succeed");
 
-    // Every loop score through the un-hoisted matrix→growth edge fails
-    // fragment compile and is WARNED -- the loud conservative floor.
+    // The warned zero-stubs are GONE: every LTM fragment compiles.
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .collect();
+    assert!(
+        assembly.is_empty(),
+        "the co-source closure must compile every LTM fragment cleanly; got: {assembly:?}"
+    );
+
+    // The read-slice element edges admit no cross-row circuits: only the
+    // 4 diagonal per-(row, slot) score names exist (no
+    // `matrix[r1,..]→growth[r2]`-style names anywhere).
+    for v in &ltm_vars {
+        assert!(
+            !(v.name.contains("matrix[r1") && v.name.contains("growth[r2]")),
+            "no cross-row score may exist; got {}",
+            v.name
+        );
+        assert!(
+            !(v.name.contains("matrix[r2") && v.name.contains("growth[r1]")),
+            "no cross-row score may exist; got {}",
+            v.name
+        );
+    }
+
+    // The per-row co-source equation, hand-derived: the changed-first
+    // body partial with the FEEDER pinned to the row and frozen
+    // (`PREVIOUS(frac[d1·r1])`) -- the GH #744 machinery's
+    // mismatched-arity by-dim-name pin.
+    let m_r1c1 = format!("{LINK_SCORE_PREFIX}matrix[r1,c1]\u{2192}growth[r1]");
+    let var = ltm_var(&ltm_vars, &m_r1c1);
+    assert_eq!(
+        var.equation.source_text(),
+        "if (TIME = INITIAL_TIME) then 0 else if ((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1])) = 0) OR ((matrix[d1\u{B7}r1,d2\u{B7}c1] - \
+         PREVIOUS(matrix[d1\u{B7}r1,d2\u{B7}c1])) = 0) then 0 else \
+         SAFEDIV((PREVIOUS(growth[d1\u{B7}r1]) + ((matrix[d1\u{B7}r1, d2\u{B7}c1] * \
+         PREVIOUS(frac[d1\u{B7}r1])) - (PREVIOUS(matrix[d1\u{B7}r1, d2\u{B7}c1]) * \
+         PREVIOUS(frac[d1\u{B7}r1]))) - PREVIOUS(growth[d1\u{B7}r1])), \
+         ABS((growth[d1\u{B7}r1] - PREVIOUS(growth[d1\u{B7}r1]))), 0) * \
+         SIGN((matrix[d1\u{B7}r1,d2\u{B7}c1] - PREVIOUS(matrix[d1\u{B7}r1,d2\u{B7}c1])))",
+        "the per-row co-source changed-first equation must hold the feeder frozen at the row"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    const TOL: f64 = 1e-9;
+
+    // Per-row co-source scores: 0.5 at every step past the first.
+    for (row, cell) in [("r1", "c1"), ("r1", "c2"), ("r2", "c1"), ("r2", "c2")] {
+        let name = format!("{LINK_SCORE_PREFIX}matrix[{row},{cell}]\u{2192}growth[{row}]");
+        let series = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() <= TOL,
+                "{name} at step {step}: got {v}, expected 0.5 (the row's share of \
+                 the two-cell slot)."
+            );
+        }
+    }
+
+    // 4 per-circuit scalar loops, each 0.5 sustained past startup -- real
+    // values where the pre-T5 path emitted warned zero-stubs.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        4,
+        "expected one scalar loop per (row, cell) circuit; got {loop_names:?}"
+    );
+    for name in &loop_names {
+        let series = series_at(&results, offset_of(&results, name));
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 0.5).abs() <= TOL,
+                "{name} at step {step}: got {v}, expected a sustained 0.5 (the \
+                 pre-T5 loud floor stubbed these to 0)."
+            );
+        }
+    }
+}
+
+/// GH #767 (T5, bilinear additivity -- the GH #744 (iv) property extended
+/// to BOTH halves being sources of the same variable-backed agg): with
+/// `matrix` AND `frac` both varying, the co-source rows' changed-FIRST
+/// numerators (`PREVIOUS(frac[r])·Δmatrix[r,c]`) plus the feeder's
+/// changed-LAST numerator (`Σ_c matrix[r,c]·Δfrac[r]`) telescope exactly
+/// to `Δgrowth[r]` per slot:
+///
+/// ```text
+/// Δgrowth[r] = Σ_c (m_c·f - m'_c·f') = Σ_c m_c·(f - f') + Σ_c f'·(m_c - m'_c)
+/// ```
+///
+/// Numerators are reconstructed from the emitted scores
+/// (`numerator = score · |Δgrowth| · SIGN(Δsource)`), so this pins the
+/// additivity of what LTM actually reports.
+#[test]
+fn feeder_plus_co_source_row_scores_are_additive() {
+    let project = TestProject::new("gh767_additive")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1] * 0.05",
+            None,
+        )
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("growth[D1]", "SUM(matrix[D1, *] * frac[D1])", None)
+        .build_datamodel();
+
+    let (results, _) = run_ltm(&project);
+
+    for row in ["r1", "r2"] {
+        let growth = series_at(&results, offset_of(&results, &format!("growth[{row}]")));
+        let frac = series_at(&results, offset_of(&results, &format!("frac[{row}]")));
+        let feeder_score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}frac[{row}]\u{2192}growth[{row}]"),
+            ),
+        );
+        let cells: Vec<(Vec<f64>, Vec<f64>)> = ["c1", "c2"]
+            .iter()
+            .map(|cell| {
+                let score = series_at(
+                    &results,
+                    offset_of(
+                        &results,
+                        &format!("{LINK_SCORE_PREFIX}matrix[{row},{cell}]\u{2192}growth[{row}]"),
+                    ),
+                );
+                let m = series_at(
+                    &results,
+                    offset_of(&results, &format!("matrix[{row},{cell}]")),
+                );
+                (score, m)
+            })
+            .collect();
+
+        let mut contributing = 0usize;
+        for t in 1..growth.len() {
+            let d_growth = growth[t] - growth[t - 1];
+            let d_frac = frac[t] - frac[t - 1];
+            if d_growth == 0.0 || d_frac == 0.0 {
+                continue;
+            }
+            let mut sum = feeder_score[t] * d_growth.abs() * d_frac.signum();
+            let mut all_scored = true;
+            for (score, m) in &cells {
+                let d_m = m[t] - m[t - 1];
+                if d_m == 0.0 {
+                    all_scored = false;
+                    break;
+                }
+                sum += score[t] * d_growth.abs() * d_m.signum();
+            }
+            if !all_scored {
+                continue;
+            }
+            assert!(
+                (sum - d_growth).abs() <= 1e-9,
+                "slot {row} step {t}: feeder + co-source numerators {sum} != Δgrowth {d_growth}"
+            );
+            contributing += 1;
+        }
+        assert!(
+            contributing >= 3,
+            "slot {row}: expected at least 3 steps where every source scored, got {contributing}"
+        );
+    }
+}
+
+/// GH #767 (T5, the SYNTHETIC half): the INLINE form of the feeder shape
+/// (`growth[D1] = 1 + SUM(matrix[D1,*] * frac[D1])`) mints a synthetic agg
+/// whose feeder half rides the same per-`(row, slot)` changed-last emission
+/// (`frac[r1]→$⁚ltm⁚agg⁚0[r1]`), and the closure through the feeder is
+/// genuinely scored: zero warnings, +1 sustained per-circuit loops
+/// (`pop[r] → frac[r] → agg[r] → growth[r] → pop[r]`, with the agg trimmed
+/// from the reported loop and the agg→growth partial of `1 + agg` = +1).
+#[test]
+fn inline_feeder_reducer_synthetic_agg_closure_scores() {
+    let project = TestProject::new("gh767_inline")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow("growth[D1]", "1 + SUM(matrix[D1, *] * frac[D1])", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The inline form mints the synthetic agg, with the feeder half's
+    // per-(row, slot) names.
+    let agg_aux = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    assert!(
+        ltm_vars.iter().any(|v| v.name == agg_aux),
+        "the inline feeder reducer must mint a synthetic agg; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    for row in ["r1", "r2"] {
+        let name = format!("{LINK_SCORE_PREFIX}frac[{row}]\u{2192}{agg_aux}[{row}]");
+        assert!(
+            ltm_vars.iter().any(|v| v.name == name),
+            "missing per-row feeder score {name}; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .collect();
+    assert!(
+        assembly.is_empty(),
+        "the inline feeder fixture must compile every LTM fragment cleanly; got: {assembly:?}"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    const TOL: f64 = 1e-9;
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        2,
+        "expected one per-circuit loop per D1 element; got {loop_names:?}"
+    );
+    for name in &loop_names {
+        let series = series_at(&results, offset_of(&results, name));
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 1.0).abs() <= TOL,
+                "{name} at step {step}: got {v}, expected +1 (isolated reinforcing \
+                 loop through the synthetic agg)."
+            );
+        }
+    }
+}
+
+/// The design's conservative boundary (the "feeders that are not
+/// projections" clause): a no-`Reduced` source whose slice is NOT the pure
+/// iterated projection -- here a PINNED axis, `w[D1, c1]` -- still declines
+/// the hoist, and the co-source closure keeps the LOUD degraded behavior:
+/// cross-element loop scores that fail fragment compile (their equations
+/// reference per-(row,slot) names the cartesian emitters never produce for
+/// the off-diagonal hops), each surfacing an Assembly `Warning` and reading
+/// a constant 0.
+///
+/// This is the loud sibling of the #758/#764 zero-stub class, NOT silent
+/// garbage. It pins that the T5 feeder clause widened acceptance ONLY for
+/// the all-`Iterated` projection: if the warnings here disappear, the
+/// scores must be real (a silent zero would be a regression). (The design
+/// doc's named non-projection example, `SUM(matrix[D1,*] * other[D2])`
+/// with a free reduced-axis index, is not expressible -- the engine
+/// rejects the equation outright -- so the Pinned-axis mix is the nearest
+/// compiling shape on the boundary.)
+#[test]
+fn non_projection_feeder_co_source_closure_stays_loud() {
+    let project = TestProject::new("gh767_non_projection")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1] * 0.05",
+            None,
+        )
+        .array_aux_direct("w", vec!["D1".into(), "D2".into()], "0.5", None)
+        .array_flow("growth[D1]", "SUM(matrix[D1, *] * w[D1, c1])", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The Pinned-axis mix must NOT be hoisted: no agg, so growth is not an
+    // agg target and the per-row feeder names don't exist.
+    assert!(
+        ltm_vars
+            .iter()
+            .all(|v| !v.name.contains("$\u{205A}ltm\u{205A}agg\u{205A}")),
+        "the Pinned-axis feeder mix must stay un-hoisted; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // Every cross-row loop score through the un-hoisted matrix→growth edge
+    // fails fragment compile and is WARNED -- the loud conservative floor.
     let diags = collect_all_diagnostics(&db, sync.project);
     let warned_loop_scores: Vec<&str> = diags
         .iter()
@@ -3477,8 +3821,8 @@ fn un_hoisted_iterated_dim_feeder_co_source_closure_stays_loud() {
         .collect();
     assert!(
         !warned_loop_scores.is_empty(),
-        "the co-source closure's unscoreable loops must surface Assembly warnings \
-         (silent zero would be a regression); diagnostics: {diags:?}"
+        "the non-projection closure's unscoreable loops must surface Assembly \
+         warnings (silent zero would be a regression); diagnostics: {diags:?}"
     );
 
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");

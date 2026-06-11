@@ -224,11 +224,18 @@ pub(super) fn link_score_dimensions(
 /// is the true read count and unread rows get NO score, matching the
 /// element edges `emit_agg_routed_edges` derives from the same slice. For
 /// an all-`Iterated`/full-extent slice the read rows ARE the cartesian
-/// rows (byte-identical to the pre-T3 derivation). The full `from_dims`
-/// cartesian product below remains only for edges with NO variable-backed
-/// agg at all: the not-hoisted conservative family (dynamic-index
-/// reducers, declined mappings, GH #743 slice disagreements),
-/// byte-identical to pre-T3. (The GH #764 broadcast/permuted result shapes
+/// rows (byte-identical to the pre-T3 derivation). An ITERATED-DIM
+/// PROJECTION FEEDER edge into a variable-backed reduce (GH #767 / T5:
+/// `frac -> growth` for `growth[D1] = SUM(matrix[D1,*] * frac[D1])`,
+/// whose dims EQUAL the owner's so the partial-reduce shape check below
+/// would decline it) is routed FIRST, by the feeder's own slice, to
+/// per-`(row, slot)` changed-last scores ([`iterated_feeder_row_scores`]).
+/// The full `from_dims` cartesian product below remains only for edges
+/// with NO variable-backed agg at all: the not-hoisted conservative family
+/// (dynamic-index reducers, declined mappings, and the slice combinations
+/// the I1 acceptance declines -- differing co-sources, non-projection
+/// feeders like the GH #743 family's Pinned-axis residue), byte-identical
+/// to pre-T3. (The GH #764 broadcast/permuted result shapes
 /// used to ride it too; since T4 they mint SYNTHETIC aggs at enumeration,
 /// so their edges route through the two-half agg emitters and never reach
 /// this function.)
@@ -282,6 +289,29 @@ pub(super) fn try_cross_dimensional_link_scores(
         return None;
     }
     let to_dims = variable_dimensions(db, *to_sv, project);
+
+    // T5 (GH #767): an ITERATED-DIM PROJECTION FEEDER edge into a
+    // variable-backed reduce -- `frac → growth` for
+    // `growth[D1] = SUM(matrix[D1,*] * frac[D1])`. The feeder's dims EQUAL
+    // the owner's, so the partial-reduce shape derivation below would
+    // decline the edge before the agg branch is reached; route it by its
+    // own read slice first (per-row changed-last scores, 1:1
+    // rows-to-slots), replacing the pre-T5 Bare changed-last conservative
+    // score for this shape. Gated on the SAME `variable_backed_reduce_agg`
+    // decision the element graph and the loop builder consult, so the
+    // emitted per-`(row, slot)` names are exactly the hops the per-circuit
+    // loops reference. A `None` from the row derivation (stale slice
+    // invariant) falls through to the pre-T5 paths.
+    if let Some(vb_agg) = agg_nodes
+        .aggs_in_var(to)
+        .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))
+        && vb_agg.source_is_projection_feeder(from)
+        && crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from, to, to_dims).is_some()
+        && let Some(feeder_vars) =
+            iterated_feeder_row_scores(db, model, project, from, from_dims, vb_agg)
+    {
+        return Some(feeder_vars);
+    }
 
     // Determine whether this edge is a full reduce (scalar target) or a
     // partial reduce (arrayed result over a strict subset of the
@@ -1287,6 +1317,88 @@ fn reducer_body_ctx_parts(
     (arrayed_dep_dims, model_deps)
 }
 
+/// Emit the per-`(row, slot)` link scores for an ITERATED-DIM PROJECTION
+/// FEEDER `from` of a hoisted reducer (GH #767 / T5 of the
+/// shape-expressiveness design): `frac` in
+/// `growth[D1] = SUM(matrix[D1,*] * frac[D1])`. The rows come from
+/// `read_slice_rows` over the FEEDER'S OWN all-`Iterated` slice -- 1:1
+/// with the agg's result slots by the I1 acceptance -- and each row's
+/// equation is the per-slot changed-last partial
+/// ([`crate::ltm_augment::generate_iterated_feeder_to_agg_equation`]).
+/// Names follow the existing per-`(row, slot)` grammar
+/// (`$⁚ltm⁚link_score⁚{from}[{row}]→{agg}[{slot}]`), which
+/// `loop_link_score_ref` and discovery's `parse_link_offsets` already
+/// resolve.
+///
+/// Shared by the synthetic half (`emit_source_to_agg_link_scores`, where
+/// `agg` is a `$⁚ltm⁚agg⁚{n}` aux) and the variable-backed branch of
+/// `try_cross_dimensional_link_scores` (where `agg.name == to`). `None`
+/// when `read_slice_rows` declines (a stale slice invariant) -- the caller
+/// keeps its conservative fallback rather than emitting mis-slotted
+/// scores. A per-row generator failure is loud
+/// ([`emit_ltm_partial_equation_warning`]) and skips only that row.
+fn iterated_feeder_row_scores(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    from: &str,
+    from_dims: &[crate::dimensions::Dimension],
+    agg: &crate::ltm_agg::AggNode,
+) -> Option<Vec<LtmSyntheticVar>> {
+    let slice = agg.source_read_slice(from);
+    let dim_element_lists: Vec<Vec<String>> = from_dims
+        .iter()
+        .map(crate::ltm_augment::dimension_element_names)
+        .collect();
+    let rows = read_slice_rows(
+        slice,
+        &dim_element_lists,
+        project_dimensions_context(db, project),
+    )?;
+    // The slot axes' canonical dim names, in order -- the feeder's own axis
+    // dims (acceptance guarantees they equal the canonical Iterated target
+    // dims, unmapped).
+    let iterated_dims: Vec<String> = slice
+        .iter()
+        .filter_map(|ax| match ax {
+            crate::ltm_agg::AxisRead::Iterated { dim, .. } => Some(dim.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut vars = Vec::with_capacity(rows.len());
+    for ReadSliceRow { row, slot, .. } in &rows {
+        // Names keep the bare element form (the user-facing / discovery-
+        // parsed identity); equation text uses the qualified `dim·element`
+        // form (direct LoadPrev, no helper auxes) -- exactly as the other
+        // per-row emitters.
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}[{}]",
+            from, row, agg.name, slot
+        );
+        // The feeder's axes ARE the slot axes, so qualification against
+        // `from_dims` is the slot's own qualification too.
+        let qualified_slot = crate::ltm_augment::qualify_element_csv(slot, from_dims);
+        let slot_parts: Vec<String> = qualified_slot.split(',').map(str::to_string).collect();
+        match crate::ltm_augment::generate_iterated_feeder_to_agg_equation(
+            from,
+            &agg.name,
+            &agg.equation_text,
+            &iterated_dims,
+            &slot_parts,
+        ) {
+            Ok(equation) => vars.push(LtmSyntheticVar {
+                name,
+                equation: datamodel::Equation::Scalar(equation),
+                dimensions: vec![], // scalar -- one variable per read row
+                // bracketed name -> routed direct by `assemble_module`.
+                compile_directly: false,
+            }),
+            Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+        }
+    }
+    Some(vars)
+}
+
 /// Emit the `source[<read row>] → agg` link-score half: one scalar
 /// `$⁚ltm⁚link_score⁚{from}[<row>]→{agg}` (when the agg is scalar) or
 /// `$⁚ltm⁚link_score⁚{from}[<row>]→{agg}[<slot>]` (when the agg is arrayed
@@ -1367,6 +1479,22 @@ pub(super) fn emit_source_to_agg_link_scores(
             }
             Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
         }
+        return;
+    }
+    // GH #767 (T5): an arrayed ITERATED-DIM projection feeder of the
+    // hoisted reducer (`frac` in `1 + SUM(matrix[D1,*] * frac[D1])`). The
+    // per-read-row changed-FIRST machinery below builds the body partial
+    // around the LIVE source's co-reduced rows, which is the co-source's
+    // attribution -- a feeder's per-slot delta spans the whole co-reduced
+    // slice, so its half uses the per-row changed-last equations instead
+    // (the arrayed generalization of the scalar-feeder convention above).
+    // A `None` from the row derivation (stale slice invariant) falls
+    // through to the per-read-row machinery's own conservative fallback.
+    if agg.source_is_projection_feeder(from)
+        && let Some(feeder_vars) =
+            iterated_feeder_row_scores(db, model, project, from, from_dims, agg)
+    {
+        vars.extend(feeder_vars);
         return;
     }
     // Reconstruct a transient (parsed + lowered) `Variable` from the

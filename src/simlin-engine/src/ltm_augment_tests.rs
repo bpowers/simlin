@@ -1086,11 +1086,14 @@ fn test_body_aware_mean_divides_by_n() {
     assert!(eq.contains(" / 3"), "equation: {eq}");
 }
 
-/// An un-pinnable body (an arrayed reference whose axis count doesn't match
-/// the row -- the GH #743 iterated-dim-feeder shape) must degrade to the
-/// delta-ratio fallback, not a mis-pinned equation.
+/// GH #767 (T5 flip of the old un-pinnable bail): a mismatched-axis-count
+/// dep indexed SOLELY by the row's dimension names (the iterated-dim
+/// projection feeder `frac[d1]` inside the 2-D co-source row partial) is
+/// pinned BY NAME to the row's element and FROZEN -- the changed-first
+/// partial holds `PREVIOUS(frac[d1·a])` at the scored row instead of
+/// bailing to the delta-ratio form (which scored a wrong-magnitude ±1).
 #[test]
-fn test_body_aware_unpinnable_falls_back_to_delta_ratio() {
+fn test_body_aware_projection_feeder_dep_pins_by_dim_name() {
     let elements = vec!["d1·a,d2·x".to_string(), "d1·a,d2·y".to_string()];
     let fixture = BodyCtxFixture::new(
         "matrix[d1, *] * frac[d1]",
@@ -1109,13 +1112,46 @@ fn test_body_aware_unpinnable_falls_back_to_delta_ratio() {
         true,
         Some(&fixture.ctx()),
     );
+    let live = "matrix[d1·a, d2·x] * PREVIOUS(frac[d1·a])";
+    let frozen = "PREVIOUS(matrix[d1·a, d2·x]) * PREVIOUS(frac[d1·a])";
+    assert!(
+        eq.contains(&format!("PREVIOUS(growth) + (({live}) - ({frozen}))")),
+        "the changed-first partial must pin the feeder by dim name and freeze it: {eq}"
+    );
+}
+
+/// A genuinely un-pinnable mismatched-axis-count dep -- one whose index is
+/// NOT a row dimension name (`q[d9]`, `d9` outside the row's axes) -- still
+/// degrades to the delta-ratio fallback, not a mis-pinned equation. (The
+/// GH #767 by-name pin applies only when every index resolves to a row
+/// axis.)
+#[test]
+fn test_body_aware_unpinnable_falls_back_to_delta_ratio() {
+    let elements = vec!["d1·a,d2·x".to_string(), "d1·a,d2·y".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "matrix[d1, *] * q[d9]",
+        "matrix",
+        &[("matrix", 2), ("q", 1)],
+        &[],
+        &["d1", "d2"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "matrix",
+        "growth",
+        "d1·a,d2·x",
+        &elements,
+        &ReducerKind::Linear,
+        "SUM",
+        true,
+        Some(&fixture.ctx()),
+    );
     // Delta-ratio form: the partial IS the target, so the numerator is
-    // (growth - PREVIOUS(growth)) and frac/matrix bodies never appear.
+    // (growth - PREVIOUS(growth)) and q/matrix bodies never appear.
     assert!(
         eq.contains("SAFEDIV((growth - PREVIOUS(growth))"),
         "equation: {eq}"
     );
-    assert!(!eq.contains("frac"), "equation: {eq}");
+    assert!(!eq.contains("q["), "equation: {eq}");
 }
 
 /// A nested array reducer inside the body (`pop[*] * MIN(q[*])`) cannot be
@@ -3652,6 +3688,51 @@ fn test_generate_scalar_feeder_to_agg_equation_freezes_only_feeder() {
     assert!(eq.contains("SIGN((scale - PREVIOUS(scale)))"), "got: {eq}");
 }
 
+/// GH #767 (T5): the iterated-dim projection-feeder per-`(row, slot)`
+/// equation pins the reducer text's iterated-dim indices to the slot
+/// (every reference, co-source and feeder alike), freezes ONLY the
+/// feeder's slot-pinned reference (changed-last -- the co-source's
+/// wildcard slice stays verbatim, exactly like the scalar feeder), and
+/// carries the slot subscript on the agg/target and feeder guard
+/// references.
+#[test]
+fn test_generate_iterated_feeder_to_agg_equation_pins_slot_and_freezes_feeder() {
+    let eq = generate_iterated_feeder_to_agg_equation(
+        "frac",
+        "growth",
+        "sum(matrix[d1, *] * frac[d1])",
+        &["d1".to_string()],
+        &["d1\u{B7}r1".to_string()],
+    )
+    .expect("the agg equation text must parse");
+    assert_eq!(
+        eq,
+        "if (TIME = INITIAL_TIME) then 0 else if ((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1])) = 0) OR ((frac[d1\u{B7}r1] - \
+         PREVIOUS(frac[d1\u{B7}r1])) = 0) then 0 else \
+         SAFEDIV((growth[d1\u{B7}r1] - (sum(matrix[d1\u{B7}r1, *] * \
+         PREVIOUS(frac[d1\u{B7}r1])))), ABS((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1]))), 0) * SIGN((frac[d1\u{B7}r1] - \
+         PREVIOUS(frac[d1\u{B7}r1])))"
+    );
+}
+
+/// GH #767 (T5): a feeder absent from the reducer text (no occurrence to
+/// freeze) is the unfreezable loud-failure contract -- the score would be
+/// a silent constant 0 otherwise.
+#[test]
+fn test_generate_iterated_feeder_to_agg_equation_unfreezable_without_occurrence() {
+    let err = generate_iterated_feeder_to_agg_equation(
+        "absent",
+        "growth",
+        "sum(matrix[d1, *] * frac[d1])",
+        &["d1".to_string()],
+        &["d1\u{B7}r1".to_string()],
+    )
+    .expect_err("a feeder with no occurrence must be unfreezable");
+    assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
+}
+
 /// `wrap_matching_in_previous` must not double-lag references that are
 /// already inside a `PREVIOUS(...)`/`INIT(...)` call, and must wrap every
 /// other occurrence of the target (including inside nested calls and
@@ -3873,10 +3954,12 @@ fn test_body_aware_stddev_coefficient_terms() {
     assert!(eq.contains(" / 2)"), "divisor must stay N (GH #483): {eq}");
 }
 
-/// An un-pinnable nonlinear body (axis-count mismatch) must degrade to
-/// the delta-ratio fallback, the same contract as the linear arm.
+/// GH #767 (T5 flip, nonlinear sibling): the projection-feeder dep pins by
+/// dim name in the nonlinear per-term expansion too -- each MIN term is the
+/// row-pinned body with `PREVIOUS(frac[d1·…])` frozen, live at the scored
+/// row only.
 #[test]
-fn test_body_aware_nonlinear_unpinnable_falls_back() {
+fn test_body_aware_nonlinear_projection_feeder_dep_pins_by_dim_name() {
     let elements = vec!["d1·a,d2·x".to_string(), "d1·a,d2·y".to_string()];
     let fixture = BodyCtxFixture::new(
         "matrix[d1, *] * frac[d1]",
@@ -3895,11 +3978,42 @@ fn test_body_aware_nonlinear_unpinnable_falls_back() {
         true,
         Some(&fixture.ctx()),
     );
+    let live = "(matrix[d1·a, d2·x] * PREVIOUS(frac[d1·a]))";
+    let frozen = "(PREVIOUS(matrix[d1·a, d2·y]) * PREVIOUS(frac[d1·a]))";
+    assert!(
+        eq.contains(&format!("MIN({live}, {frozen})")),
+        "the nonlinear terms must pin the feeder by dim name: {eq}"
+    );
+}
+
+/// A genuinely un-pinnable nonlinear body (a mismatched-axis dep indexed
+/// outside the row's axes) must degrade to the delta-ratio fallback, the
+/// same contract as the linear arm.
+#[test]
+fn test_body_aware_nonlinear_unpinnable_falls_back() {
+    let elements = vec!["d1·a,d2·x".to_string(), "d1·a,d2·y".to_string()];
+    let fixture = BodyCtxFixture::new(
+        "matrix[d1, *] * q[d9]",
+        "matrix",
+        &[("matrix", 2), ("q", 1)],
+        &[],
+        &["d1", "d2"],
+    );
+    let eq = generate_element_to_scalar_equation(
+        "matrix",
+        "agg",
+        "d1·a,d2·x",
+        &elements,
+        &ReducerKind::Nonlinear,
+        "MIN",
+        true,
+        Some(&fixture.ctx()),
+    );
     assert!(
         eq.contains("SAFEDIV((agg - PREVIOUS(agg))"),
         "equation: {eq}"
     );
-    assert!(!eq.contains("frac"), "equation: {eq}");
+    assert!(!eq.contains("q["), "equation: {eq}");
 }
 
 /// RANK keeps its documented delta-ratio stand-in regardless of the body

@@ -62,17 +62,28 @@
 //! the `Iterated` axis carries the (target, source) dim pair and the agg is
 //! arrayed over the TARGET dim, and a StarRange over a PROPER subdimension
 //! (`SUM(arr[*:Sub])`, GH #766), where the `Reduced` axis carries the
-//! subdimension's element subset. The carve-outs: a reducer over a *dynamic
-//! index* (`SUM(pop[idx,*])`, `idx` non-literal) is not statically
-//! describable, a mapped iterated axis whose mapping is element-mapped
-//! (GH #756), reverse-declared (GH #757), or non-positional is declined, and
-//! a StarRange naming a NON-subdimension (a mid-edit inconsistency that must
-//! not silently widen to the full extent) is declined --
-//! `compute_read_slice` returns `None`, the reducer is not hoisted, and its
-//! reference stays on the conservative path. `RANK` is recognized as a
-//! reducer but never hoisted (GH #771): it is ARRAY-valued, so an agg node
-//! -- "a scalar value per result slot" -- has no value to hold for it; see
-//! [`reducer_is_hoistable`].
+//! subdimension's element subset. A MULTI-SOURCE reducer is accepted per
+//! invariant I1 of the shape-expressiveness design ([`accept_source_slices`],
+//! GH #767 / T5): all CO-SOURCES (`Reduced`-bearing slices) must carry the
+//! identical canonical slice, and an ITERATED-DIM PROJECTION FEEDER --
+//! a source whose slice is all-`Iterated` over exactly the canonical
+//! slice's iterated target dims, in order, unmapped (`frac[D1]` in
+//! `SUM(matrix[D1,*] * frac[D1])`) -- is accepted with ITS OWN slice (it
+//! is per-result-slot constant, the arrayed generalization of the GH #737
+//! scalar feeder). The carve-outs: a reducer over a *dynamic index*
+//! (`SUM(pop[idx,*])`, `idx` non-literal) is not statically describable, a
+//! mapped iterated axis whose mapping is element-mapped (GH #756),
+//! reverse-declared (GH #757), or non-positional is declined, a StarRange
+//! naming a NON-subdimension (a mid-edit inconsistency that must not
+//! silently widen to the full extent) is declined -- `compute_read_slice`
+//! returns `None`, the reducer is not hoisted, and its reference stays on
+//! the conservative path -- and so are co-sources with differing slices,
+//! one variable read with two different slices (I3b), and a no-`Reduced`
+//! source outside the projection rule (a Pinned-bearing, dim-subset,
+//! permuted, or mapped mix; see [`accept_source_slices`]). `RANK` is
+//! recognized as a reducer but never hoisted (GH #771): it is ARRAY-valued,
+//! so an agg node -- "a scalar value per result slot" -- has no value to
+//! hold for it; see [`reducer_is_hoistable`].
 //!
 //! Whole-RHS reduces with a non-trivial slice *are* recognized -- the
 //! variable is the agg, `result_dims` carries the `Iterated` axes' dims, and
@@ -377,11 +388,12 @@ pub(crate) fn iterated_axis_slot_elements(
 ///
 /// `read_slice` has one [`AxisRead`] per THIS source's declared axes
 /// (invariant I2), so a SCALAR source -- a feeder like `scale` in
-/// `SUM(pop[*] * scale)`, GH #737 -- carries an empty slice. Under the T2
-/// acceptance rule (all arrayed slices identical, enforced by
-/// `combined_read_slice`) every ARRAYED source carries the identical
-/// *canonical* slice; T5 of the design widens acceptance to feeder
-/// sub-slices, at which point arrayed sources' slices may genuinely differ.
+/// `SUM(pop[*] * scale)`, GH #737 -- carries an empty slice. Under the I1
+/// acceptance ([`accept_source_slices`], T5 of the design / GH #767) every
+/// arrayed CO-SOURCE carries the identical *canonical* slice, while an
+/// ITERATED-DIM PROJECTION FEEDER (`frac` in
+/// `SUM(matrix[D1,*] * frac[D1])`) carries its own all-`Iterated`
+/// projection slice -- see [`AggNode::source_is_projection_feeder`].
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct AggSource {
     /// Canonical model-variable name.
@@ -452,26 +464,57 @@ impl AggNode {
     }
 
     /// The *canonical* slice (invariant I1 of the shape-expressiveness
-    /// design): the shared slice every arrayed source carries under the T2
-    /// identical-slices acceptance. Scalar feeders carry empty slices, so
-    /// this is the first non-empty source slice (or empty for a -- by
-    /// construction impossible -- agg with no arrayed source). Consumers
-    /// whose decision is about the *reducer's* shape rather than one
-    /// source's rows (the [`variable_backed_reduce_agg`] gate) key
-    /// on it.
+    /// design): the shared slice of the agg's CO-SOURCES -- the first
+    /// source slice carrying a [`AxisRead::Reduced`] axis (all co-sources
+    /// carry identical slices by the I1 acceptance, so "first" is
+    /// order-independent). Consumers whose decision is about the
+    /// *reducer's* shape rather than one source's rows (the
+    /// [`variable_backed_reduce_agg`] gate) key on it.
     ///
-    /// T5 MUST redefine this: "first non-empty" is only correct while
-    /// acceptance is identical-only. Once projection feeders carry their
-    /// own (non-empty, Iterated-only) slices, the alphabetically-first
-    /// source could be a feeder, and a feeder slice passes the gate's axis
-    /// checks for the wrong shape -- the canonical slice must become "the
-    /// first slice with a `Reduced` axis" (the design's co-source notion).
+    /// The "first slice with a Reduced axis" definition is the T5 contract
+    /// fix: under projection-feeder acceptance (GH #767) an arrayed source
+    /// may carry an all-`Iterated` feeder slice, and "first non-empty"
+    /// would let an alphabetically-first feeder (e.g. `frac` in
+    /// `SUM(matrix[D1,*] * frac[D1])`) satisfy the gate's axis checks for
+    /// the wrong shape. The fallback to the first non-empty slice covers
+    /// the degenerate no-co-source agg (every arrayed source all-`Iterated`,
+    /// e.g. a scalar-valued `SUM(frac[D1])` arg) -- accepted under the
+    /// identical-slices rule exactly as before T5, so the gate keeps
+    /// reading the shared slice for it. Empty for a -- by construction
+    /// impossible -- agg with no arrayed source (scalar feeders carry
+    /// empty slices).
     pub fn canonical_read_slice(&self) -> &[AxisRead] {
-        self.sources
-            .iter()
-            .map(|s| s.read_slice.as_slice())
-            .find(|rs| !rs.is_empty())
+        let slices = || self.sources.iter().map(|s| s.read_slice.as_slice());
+        slices()
+            .find(|rs| rs.iter().any(|ax| matches!(ax, AxisRead::Reduced { .. })))
+            .or_else(|| slices().find(|rs| !rs.is_empty()))
             .unwrap_or(&[])
+    }
+
+    /// `true` when `var` is an accepted ITERATED-DIM PROJECTION FEEDER of
+    /// this agg (the I1 feeder clause, GH #767 / T5 of the
+    /// shape-expressiveness design): its own slice is non-empty and
+    /// all-`Iterated` (a projection of the canonical slice onto the shared
+    /// iterated axes -- per-result-slot constant), while the canonical
+    /// slice carries a `Reduced` axis (a genuine reduction exists for the
+    /// feeder to feed). The acceptance in `combined_read_slice` guarantees
+    /// an accepted feeder's Iterated target dims equal the canonical
+    /// slice's, in order, and are unmapped -- so a feeder's
+    /// `read_slice_rows` rows are 1:1 with the agg's result slots.
+    ///
+    /// The canonical-`Reduced` requirement keeps the degenerate
+    /// no-co-source agg (`SUM(frac[D1])`, all sources all-`Iterated`) OFF
+    /// the feeder emitters: it rides the pre-T5 paths byte-identically.
+    pub fn source_is_projection_feeder(&self, var: &str) -> bool {
+        let slice = self.source_read_slice(var);
+        !slice.is_empty()
+            && slice
+                .iter()
+                .all(|ax| matches!(ax, AxisRead::Iterated { .. }))
+            && self
+                .canonical_read_slice()
+                .iter()
+                .any(|ax| matches!(ax, AxisRead::Reduced { .. }))
     }
 }
 
@@ -679,7 +722,7 @@ fn walk_var_equation(
 ) {
     if let Expr2::App(builtin, _, _) = expr
         && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
-        && let Some(read_slice) = combined_read_slice(builtin, ctx)
+        && let Some(slices) = combined_read_slice(builtin, ctx)
         // A whole-RHS reducer whose slice/result shape the variable-backed
         // machinery cannot express is NOT variable-backed: it falls through
         // to `walk_subexpr_for_aggs`, which mints a *synthetic* agg for the
@@ -689,8 +732,11 @@ fn walk_var_equation(
         // [`variable_backed_shape_is_expressible`] for the one minting
         // condition (the GH #534 mapped carve-out, generalized to the
         // GH #764 broadcast/permuted result shapes by T4 of the
-        // shape-expressiveness design).
-        && variable_backed_shape_is_expressible(&read_slice, ctx.target_iterated_dims)
+        // shape-expressiveness design). The expressibility check keys on
+        // the CANONICAL (co-source) slice -- a projection feeder's
+        // all-`Iterated` slice (GH #767) says nothing about the reducer's
+        // result shape.
+        && variable_backed_shape_is_expressible(&slices.canonical, ctx.target_iterated_dims)
     {
         // Whole-RHS reducer: the variable IS the aggregate node. The agg
         // node's result shape is the *reducer's* result shape (the `Iterated`
@@ -700,8 +746,8 @@ fn walk_var_equation(
         // value); a partial reduce keyed by the active A2A dimension
         // (`rowsum[D1] = SUM(matrix[D1, *])`) keeps `[D1]` as its result dims.
         let key = crate::patch::expr2_to_string(expr);
-        let result_dims = result_dims_from_read_slice(&read_slice, ctx.dm_dims);
-        let sources = agg_sources(source_vars, &read_slice, ctx);
+        let result_dims = result_dims_from_read_slice(&slices.canonical, ctx.dm_dims);
+        let sources = agg_sources(source_vars, &slices, ctx);
         register_agg(
             result,
             next_synthetic_n,
@@ -866,7 +912,9 @@ fn walk_subexpr_for_aggs(
             // A maximal reducer subexpression is hoisted into a synthetic agg
             // iff every one of its arrayed source references reads a
             // *statically describable* slice -- `compute_read_slice` is `Some`
-            // for each (and they all agree). That covers the whole-extent case
+            // for each -- and the slices pass the I1 acceptance
+            // (`accept_source_slices`: identical co-source slices plus
+            // projection feeders, GH #767). That covers the whole-extent case
             // (`SUM(pop[*])` ⇒ all-`Reduced`), the slice cases
             // (`SUM(pop[NYC,*])` ⇒ `[Pinned(nyc), Reduced]`,
             // `SUM(matrix[D1,*])` over an A2A-`D1` body ⇒
@@ -877,11 +925,11 @@ fn walk_subexpr_for_aggs(
             // as a variable-backed agg via `walk_var_equation`, not here.
             if !in_reducer
                 && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
-                && let Some(read_slice) = combined_read_slice(builtin, ctx)
+                && let Some(slices) = combined_read_slice(builtin, ctx)
             {
                 let key = crate::patch::expr2_to_string(expr);
-                let result_dims = result_dims_from_read_slice(&read_slice, ctx.dm_dims);
-                let sources = agg_sources(source_vars, &read_slice, ctx);
+                let result_dims = result_dims_from_read_slice(&slices.canonical, ctx.dm_dims);
+                let sources = agg_sources(source_vars, &slices, ctx);
                 register_agg(
                     result,
                     next_synthetic_n,
@@ -943,14 +991,14 @@ enum AggKind {
 /// Build the per-source [`AggSource`] list for a hoisted reducer: one entry
 /// per distinct source variable, SORTED by canonical name (invariant I3b --
 /// deterministic salsa cache equality and emission order regardless of AST
-/// occurrence order). Each ARRAYED source carries `canonical_slice` -- under
-/// the T2 identical-slices acceptance ([`combined_read_slice`]) every arrayed
-/// reference folded into that slice agreed on it, so it IS each arrayed
-/// source's own slice; each SCALAR source (a feeder, GH #737) carries an
-/// empty slice (it has no axes -- invariant I2).
+/// occurrence order). Each ARRAYED source carries its OWN accepted slice
+/// from [`CombinedReadSlices::per_var`] -- the canonical co-source slice
+/// for a co-source, the all-`Iterated` projection slice for a feeder
+/// (GH #767); each SCALAR source (a feeder, GH #737) carries an empty
+/// slice (it has no axes -- invariant I2).
 fn agg_sources(
     source_vars: Vec<String>,
-    canonical_slice: &[AxisRead],
+    slices: &CombinedReadSlices,
     ctx: &AggWalkCtx<'_>,
 ) -> Vec<AggSource> {
     // `reducer_source_vars` already sorts + dedups; re-establishing the
@@ -968,7 +1016,19 @@ fn agg_sources(
                 .map(|d| !d.is_empty())
                 .unwrap_or(false);
             let read_slice = if arrayed {
-                canonical_slice.to_vec()
+                // Every arrayed source has a per-var entry by construction
+                // (`reducer_source_vars` and `collect_arrayed_source_slices`
+                // walk the same references); the canonical fallback is
+                // defensive only.
+                debug_assert!(
+                    slices.per_var.contains_key(&var),
+                    "arrayed reducer source {var:?} has no accepted slice"
+                );
+                slices
+                    .per_var
+                    .get(&var)
+                    .cloned()
+                    .unwrap_or_else(|| slices.canonical.clone())
             } else {
                 Vec::new()
             };
@@ -1318,38 +1378,152 @@ fn resolve_literal_axis_index(
     }
 }
 
-/// Compute the *combined* read slice of a reducer `builtin`'s arrayed source
-/// references: walk its argument expressions, collect every reference to an
-/// arrayed model variable, [`compute_read_slice`] each, and return the common
-/// slice if (a) at least one such reference exists, (b) `compute_read_slice`
-/// is `Some` for every one, and (c) they all agree. `None` otherwise -- the
-/// reducer is not hoisted (the dynamic-index carve-out, or a multi-source
-/// reducer whose references read incompatible slices).
-fn combined_read_slice(builtin: &BuiltinFn<Expr2>, ctx: &AggWalkCtx<'_>) -> Option<Vec<AxisRead>> {
-    let mut common: Option<Vec<AxisRead>> = None;
-    let mut any_arrayed = false;
+/// The accepted per-source read slices of a hoisted reducer (invariant I1
+/// of the shape-expressiveness design): the CANONICAL slice -- the shared
+/// co-source slice, or (for a degenerate agg with no `Reduced`-bearing
+/// source) the shared all-source slice -- plus each arrayed source
+/// variable's own slice. Built by [`combined_read_slice`]; the walkers
+/// derive the agg's result shape from `canonical` and its [`AggSource`]s
+/// from `per_var`.
+struct CombinedReadSlices {
+    canonical: Vec<AxisRead>,
+    per_var: HashMap<String, Vec<AxisRead>>,
+}
+
+/// Compute the per-source read slices of a reducer `builtin`'s arrayed
+/// source references: walk its argument expressions, collect every
+/// reference to an arrayed model variable, [`compute_read_slice`] each,
+/// and apply the I1 acceptance ([`accept_source_slices`]). `None` -- the
+/// reducer is not hoisted -- when no arrayed reference exists, when any
+/// reference is not statically describable (the dynamic-index carve-out),
+/// or when the references' slices fall outside the acceptance rule.
+fn combined_read_slice(
+    builtin: &BuiltinFn<Expr2>,
+    ctx: &AggWalkCtx<'_>,
+) -> Option<CombinedReadSlices> {
+    let mut refs: Vec<(String, Vec<AxisRead>)> = Vec::new();
     let mut ok = true;
     builtin.for_each_expr_ref(|arg| {
         if ok {
-            collect_arrayed_source_slices(arg, ctx, &mut common, &mut any_arrayed, &mut ok);
+            collect_arrayed_source_slices(arg, ctx, &mut refs, &mut ok);
         }
     });
-    if !ok || !any_arrayed {
+    if !ok || refs.is_empty() {
         return None;
     }
-    common
+    accept_source_slices(refs)
+}
+
+/// The I1 acceptance rule over a reducer's arrayed-reference slices (T5 of
+/// the shape-expressiveness design, GH #767). Sources split into
+/// *co-sources* (>= 1 [`AxisRead::Reduced`] axis) and *feeders* (none):
+///
+/// - **I3b (one slice per var)**: a variable referenced with two different
+///   slices declines (downstream consumers key `sources` by name).
+/// - **Co-sources** must all carry the IDENTICAL slice -- the *canonical
+///   slice* (same `Pinned` elements, same `Iterated` pairs in axis order,
+///   same `Reduced` subsets; two co-sources with different subsets would
+///   disagree on the co-reduced rows per slot).
+/// - **Feeders** are accepted iff the slice consists ONLY of UNMAPPED
+///   `Iterated` axes whose target dims equal the canonical slice's
+///   `Iterated` target dims, in order -- the projection of the canonical
+///   slice onto its iterated axes, so [`crate::db`]'s `read_slice_rows`
+///   derives 1:1 feeder rows-to-slots and the per-row changed-last feeder
+///   equation can pin the slot element into the reducer text. The ordered
+///   EQUALITY (not the design's looser "drawn from the set" subset
+///   wording) is deliberate: a proper-subset feeder's rows would each
+///   feed every slot they project from -- a broadcast the per-`(row,
+///   slot)` machinery cannot name -- and a permuted feeder's
+///   `read_slice_rows` slots (derived in the source's axis order) would
+///   mis-name the `result_dims`-ordered agg slots. Both decline
+///   (conservative + loud, today's behavior). A MAPPED `Iterated` axis
+///   (GH #534) anywhere in the combination declines too: the feeder
+///   equation pins the TARGET-dim slot element into the reducer text,
+///   which is not the source row a mapped reference reads.
+/// - **No co-source at all** (every arrayed source all-`Iterated`, e.g. a
+///   scalar-valued `SUM(frac[D1])` argument): the pre-T5 identical-slices
+///   rule applies byte-identically, with the shared slice as the
+///   canonical one.
+fn accept_source_slices(refs: Vec<(String, Vec<AxisRead>)>) -> Option<CombinedReadSlices> {
+    use std::collections::hash_map::Entry;
+    // I3b: one slice per variable.
+    let mut per_var: HashMap<String, Vec<AxisRead>> = HashMap::new();
+    for (var, slice) in refs {
+        match per_var.entry(var) {
+            Entry::Occupied(e) => {
+                if *e.get() != slice {
+                    return None;
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(slice);
+            }
+        }
+    }
+    let has_reduced = |s: &[AxisRead]| s.iter().any(|ax| matches!(ax, AxisRead::Reduced { .. }));
+    // All co-sources must agree on one canonical slice. (Order-independent:
+    // pairwise equality is what is checked.)
+    let mut canonical: Option<&[AxisRead]> = None;
+    for slice in per_var.values().filter(|s| has_reduced(s)) {
+        match canonical {
+            None => canonical = Some(slice),
+            Some(c) if c == slice.as_slice() => {}
+            Some(_) => return None,
+        }
+    }
+    let Some(canonical) = canonical else {
+        // No co-source: keep the pre-T5 identical-slices rule.
+        let mut slices = per_var.values();
+        let first = slices.next().expect("refs is non-empty").clone();
+        if slices.any(|s| *s != first) {
+            return None;
+        }
+        return Some(CombinedReadSlices {
+            canonical: first,
+            per_var,
+        });
+    };
+    let canonical = canonical.to_vec();
+    // The feeder clause (see the rustdoc).
+    fn unmapped_iterated_dims(s: &[AxisRead]) -> Option<Vec<&str>> {
+        s.iter()
+            .filter_map(|ax| match ax {
+                AxisRead::Iterated { dim, source_dim } => {
+                    Some((dim == source_dim).then_some(dim.as_str()))
+                }
+                AxisRead::Pinned(_) | AxisRead::Reduced { .. } => None,
+            })
+            .collect()
+    }
+    let feeders: Vec<&Vec<AxisRead>> = per_var.values().filter(|s| !has_reduced(s)).collect();
+    if !feeders.is_empty() {
+        // `None` here means a mapped Iterated axis is present.
+        let canonical_dims = unmapped_iterated_dims(&canonical)?;
+        for feeder in feeders {
+            if feeder.len() != canonical_dims.len()
+                || feeder
+                    .iter()
+                    .any(|ax| !matches!(ax, AxisRead::Iterated { .. }))
+                || unmapped_iterated_dims(feeder).as_deref() != Some(&canonical_dims)
+            {
+                return None;
+            }
+        }
+    }
+    Some(CombinedReadSlices { canonical, per_var })
 }
 
 /// Recursive helper for [`combined_read_slice`]: descend `expr` (and any
-/// nested subscript index expressions), folding each arrayed-source-variable
-/// reference's [`compute_read_slice`] into `common` (and clearing `ok` on a
-/// `None` or a disagreement). Scalar-variable references are ignored (a scalar
-/// argument to a reducer is not a reducer source).
+/// nested subscript index expressions), pushing each arrayed-source-variable
+/// reference's `(var, compute_read_slice)` pair into `refs` (and clearing
+/// `ok` on a not-statically-describable `None`). Acceptance over the
+/// collected pairs is [`accept_source_slices`]'s job. Scalar-variable
+/// references are ignored (a scalar argument to a reducer is not a per-row
+/// reducer source; it joins `sources` later with an empty slice).
 fn collect_arrayed_source_slices(
     expr: &Expr2,
     ctx: &AggWalkCtx<'_>,
-    common: &mut Option<Vec<AxisRead>>,
-    any_arrayed: &mut bool,
+    refs: &mut Vec<(String, Vec<AxisRead>)>,
     ok: &mut bool,
 ) {
     if !*ok {
@@ -1362,38 +1536,35 @@ fn collect_arrayed_source_slices(
             .map(|d| !d.is_empty())
             .unwrap_or(false)
     };
-    let fold = |slice: Option<Vec<AxisRead>>, common: &mut Option<Vec<AxisRead>>, ok: &mut bool| {
+    fn push(
+        ident: &Ident<Canonical>,
+        slice: Option<Vec<AxisRead>>,
+        refs: &mut Vec<(String, Vec<AxisRead>)>,
+        ok: &mut bool,
+    ) {
         match slice {
             None => *ok = false,
-            Some(s) => match common {
-                None => *common = Some(s),
-                Some(existing) if *existing == s => {}
-                Some(_) => *ok = false,
-            },
+            Some(s) => refs.push((ident.as_str().to_string(), s)),
         }
-    };
+    }
     match expr {
         Expr2::Const(..) => {}
         Expr2::Var(ident, _, _) => {
             if ctx.variables.contains_key(ident) && is_arrayed(ident) {
-                *any_arrayed = true;
-                fold(compute_read_slice(expr, ctx), common, ok);
+                push(ident, compute_read_slice(expr, ctx), refs, ok);
             }
         }
         Expr2::Subscript(ident, indices, _, _) => {
             if ctx.variables.contains_key(ident) && is_arrayed(ident) {
-                *any_arrayed = true;
-                fold(compute_read_slice(expr, ctx), common, ok);
+                push(ident, compute_read_slice(expr, ctx), refs, ok);
             }
             // Also descend into index expressions (a nested source ref).
             for idx in indices {
                 match idx {
-                    IndexExpr2::Expr(e) => {
-                        collect_arrayed_source_slices(e, ctx, common, any_arrayed, ok)
-                    }
+                    IndexExpr2::Expr(e) => collect_arrayed_source_slices(e, ctx, refs, ok),
                     IndexExpr2::Range(l, r, _) => {
-                        collect_arrayed_source_slices(l, ctx, common, any_arrayed, ok);
-                        collect_arrayed_source_slices(r, ctx, common, any_arrayed, ok);
+                        collect_arrayed_source_slices(l, ctx, refs, ok);
+                        collect_arrayed_source_slices(r, ctx, refs, ok);
                     }
                     IndexExpr2::Wildcard(_)
                     | IndexExpr2::StarRange(_, _)
@@ -1402,21 +1573,17 @@ fn collect_arrayed_source_slices(
             }
         }
         Expr2::App(builtin, _, _) => {
-            builtin.for_each_expr_ref(|sub| {
-                collect_arrayed_source_slices(sub, ctx, common, any_arrayed, ok)
-            });
+            builtin.for_each_expr_ref(|sub| collect_arrayed_source_slices(sub, ctx, refs, ok));
         }
-        Expr2::Op1(_, operand, _, _) => {
-            collect_arrayed_source_slices(operand, ctx, common, any_arrayed, ok)
-        }
+        Expr2::Op1(_, operand, _, _) => collect_arrayed_source_slices(operand, ctx, refs, ok),
         Expr2::Op2(_, left, right, _, _) => {
-            collect_arrayed_source_slices(left, ctx, common, any_arrayed, ok);
-            collect_arrayed_source_slices(right, ctx, common, any_arrayed, ok);
+            collect_arrayed_source_slices(left, ctx, refs, ok);
+            collect_arrayed_source_slices(right, ctx, refs, ok);
         }
         Expr2::If(cond, then_e, else_e, _, _) => {
-            collect_arrayed_source_slices(cond, ctx, common, any_arrayed, ok);
-            collect_arrayed_source_slices(then_e, ctx, common, any_arrayed, ok);
-            collect_arrayed_source_slices(else_e, ctx, common, any_arrayed, ok);
+            collect_arrayed_source_slices(cond, ctx, refs, ok);
+            collect_arrayed_source_slices(then_e, ctx, refs, ok);
+            collect_arrayed_source_slices(else_e, ctx, refs, ok);
         }
     }
 }
@@ -1476,6 +1643,15 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
 ///   the slot is the bare `to` node, so `emit_agg_routed_edges` emits
 ///   exactly the read rows into `to`, matching the per-read-row scores.
 ///
+/// Because the axis checks key on the CANONICAL (co-source) slice, the
+/// gate also admits a FEEDER edge of an aligned partial reduce (GH #767 /
+/// T5: `frac → growth` for `growth[D1] = SUM(matrix[D1,*] * frac[D1])`,
+/// where `from`'s own slice is the all-`Iterated` projection) -- the
+/// consumers route THAT edge by `from`'s own slice
+/// ([`AggNode::source_is_projection_feeder`] is the discriminator), so the
+/// feeder's element edges, per-circuit loop routing, and per-`(row, slot)`
+/// changed-last scores cover the same 1:1 rows.
+///
 /// This is the single gate shared by the element-graph reroute
 /// (`model_element_causal_edges`' `Direct` `Wildcard`/`DynamicIndex`
 /// dispatch), the loop builder (`build_element_level_loops`' per-circuit
@@ -1517,11 +1693,12 @@ pub(crate) fn variable_backed_reduce_agg<'a>(
         if a.is_synthetic || a.name != to || !a.reads_var(from) {
             return false;
         }
-        // The axis checks key on the CANONICAL slice (the shared arrayed
-        // slice, invariant I1) rather than `from`'s own slice: the gate
-        // decides the *reducer's* shape, and `from` may be a scalar
-        // feeder of the reduce (`out[D1] = SUM(matrix[D1,*] * scale)`)
-        // whose own (empty) slice says nothing about the axis split.
+        // The axis checks key on the CANONICAL (co-source) slice,
+        // invariant I1, rather than `from`'s own slice: the gate decides
+        // the *reducer's* shape, and `from` may be a scalar feeder
+        // (`out[D1] = SUM(matrix[D1,*] * scale)`, empty slice) or an
+        // iterated-dim projection feeder (GH #767, all-`Iterated` slice)
+        // whose own slice says nothing about the reduction's axis split.
         let slice = a.canonical_read_slice();
         // Non-trivial: a pure full-extent slice (all `Reduced{subset:
         // None}`, which also covers the impossible empty slice) is the
@@ -3422,5 +3599,274 @@ mod tests {
         assert!(synthetic[0].source_read_slice("absent").is_empty());
         assert!(synthetic[0].reads_var("scale"));
         assert!(!synthetic[0].reads_var("absent"));
+    }
+
+    // -- T5 / GH #767: the I1 FEEDER clause -------------------------------
+    //
+    // These pins were deliberately deferred from T2 (pinning them before the
+    // acceptance widened would have been vacuous -- the GH #739 trap). They
+    // land with T5's RED fixtures: an iterated-dim projection feeder is
+    // accepted as an `AggSource` with ITS OWN slice, the canonical slice is
+    // the co-source (Reduced-bearing) slice regardless of source sort order,
+    // and everything outside the projection rule still declines.
+
+    /// T5 / I1 feeder clause (GH #767): the iterated-dim-feeder reducer
+    /// `1 + SUM(matrix[D1,*] * frac[D1])` (inline => synthetic) IS hoisted:
+    /// `matrix` is the co-source carrying the canonical
+    /// `[Iterated, Reduced]` slice, `frac` is a projection feeder carrying
+    /// its OWN `[Iterated]` slice. `frac` sorts BEFORE `matrix`, so this
+    /// also pins the `canonical_read_slice` contract fix: the canonical
+    /// slice is the first slice WITH a `Reduced` axis, never an
+    /// alphabetically-first feeder slice.
+    #[test]
+    fn iterated_dim_feeder_projection_hoists_with_per_source_slices() {
+        let project = TestProject::new("feeder_projection")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .array_aux("frac[D1]", "0.5")
+            .array_aux("growth[D1]", "1 + SUM(matrix[D1, *] * frac[D1])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "the projection-feeder reducer must be hoisted (GH #767); got: {:?}",
+            result.aggs
+        );
+        let agg = synthetic[0];
+        assert_eq!(source_names(agg), vec!["frac", "matrix"]);
+        assert_eq!(
+            agg.source_read_slice("frac"),
+            vec![AxisRead::Iterated {
+                dim: "d1".to_string(),
+                source_dim: "d1".to_string()
+            }],
+            "the feeder carries its OWN projection slice"
+        );
+        assert_eq!(
+            agg.source_read_slice("matrix"),
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Reduced { subset: None }
+            ],
+            "the co-source carries the canonical slice"
+        );
+        // The contract fix: even though `frac` sorts first, the canonical
+        // slice is the Reduced-bearing co-source slice.
+        assert_eq!(agg.canonical_read_slice(), agg.source_read_slice("matrix"));
+        assert_eq!(agg.result_dims, vec!["D1".to_string()]);
+    }
+
+    /// T5 / I1: the WHOLE-RHS form of the feeder shape
+    /// (`growth[D1] = SUM(matrix[D1,*] * frac[D1])`, the GH #743/#767
+    /// fixture) is VARIABLE-BACKED -- the canonical (co-source) slice is
+    /// aligned with the owner's dims, so the variable IS the agg and no
+    /// synthetic is minted.
+    #[test]
+    fn iterated_dim_feeder_whole_rhs_is_variable_backed() {
+        let project = TestProject::new("feeder_whole_rhs")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .array_aux("frac[D1]", "0.5")
+            .array_aux("growth[D1]", "SUM(matrix[D1, *] * frac[D1])");
+
+        let result = agg_nodes(&project);
+        assert!(result.synthetic_by_key.is_empty(), "got: {:?}", result.aggs);
+        let vb: Vec<&AggNode> = result.aggs.iter().filter(|a| !a.is_synthetic).collect();
+        assert_eq!(vb.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(vb[0].name, "growth");
+        assert_eq!(source_names(vb[0]), vec!["frac", "matrix"]);
+        assert_eq!(vb[0].result_dims, vec!["D1".to_string()]);
+        assert!(vb[0].source_is_projection_feeder("frac"));
+        assert!(!vb[0].source_is_projection_feeder("matrix"));
+    }
+
+    /// T5 / I1: a feeder combined with a SCALAR feeder still hoists --
+    /// `SUM(matrix[D1,*] * frac[D1] * scale)` has three sources, the scalar
+    /// one with an empty slice (it is NOT a projection feeder: the
+    /// changed-last machinery for scalar feeders is `generate_scalar_feeder_
+    /// to_agg_equation`, not the per-row form).
+    #[test]
+    fn projection_feeder_and_scalar_feeder_combo_hoists() {
+        let project = TestProject::new("feeder_combo")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .array_aux("frac[D1]", "0.5")
+            .scalar_aux("scale", "2")
+            .array_aux("growth[D1]", "1 + SUM(matrix[D1, *] * frac[D1] * scale)");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        let agg = synthetic[0];
+        assert_eq!(source_names(agg), vec!["frac", "matrix", "scale"]);
+        assert!(agg.source_read_slice("scale").is_empty());
+        assert!(agg.source_is_projection_feeder("frac"));
+        assert!(!agg.source_is_projection_feeder("scale"));
+    }
+
+    /// T5 / I1 decline: a no-`Reduced` source with a PINNED axis is NOT a
+    /// projection feeder (the design's clause: a feeder slice consists ONLY
+    /// of `Iterated` axes) -- the hoist declines.
+    #[test]
+    fn feeder_with_pinned_axis_declines_hoist() {
+        let project = TestProject::new("feeder_pinned")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .array_aux_direct("w", vec!["D1".into(), "D2".into()], "0.5", None)
+            .array_aux("growth[D1]", "1 + SUM(matrix[D1, *] * w[D1, c1])");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| !a.reads_var("matrix")),
+            "a Pinned-axis no-Reduced source must decline the hoist; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// T5 / I1 decline: a feeder whose Iterated dims are a PROPER SUBSET of
+    /// the canonical slice's Iterated dims declines -- its rows are not 1:1
+    /// with the agg result slots (one feeder row would feed every slot it
+    /// projects from, a broadcast the per-`(row, slot)` machinery cannot
+    /// name). Documented residual: the design's I1 wording ("drawn from the
+    /// canonical Iterated target-dim set") is implemented as ordered
+    /// EQUALITY for exactly this reason.
+    #[test]
+    fn feeder_with_subset_iterated_dims_declines_hoist() {
+        let project = TestProject::new("feeder_subset")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .named_dimension("D3", &["x", "y"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "D2".into(), "D3".into()],
+                "5",
+                None,
+            )
+            .array_aux("w[D1]", "0.5")
+            .array_aux_direct(
+                "growth",
+                vec!["D1".into(), "D2".into()],
+                "1 + SUM(cube[D1, D2, *] * w[D1])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| !a.reads_var("cube")),
+            "a proper-subset feeder must decline the hoist; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// T5 / I1 decline: a feeder whose Iterated dims are a PERMUTATION of
+    /// the canonical order declines -- `read_slice_rows` derives slot
+    /// coordinates in the source's axis order, so a permuted feeder's slots
+    /// would mis-name the agg's `result_dims`-ordered slots.
+    #[test]
+    fn feeder_with_permuted_iterated_dims_declines_hoist() {
+        let project = TestProject::new("feeder_permuted")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .named_dimension("D3", &["x", "y"])
+            .array_aux_direct(
+                "cube",
+                vec!["D1".into(), "D2".into(), "D3".into()],
+                "5",
+                None,
+            )
+            .array_aux_direct("w", vec!["D2".into(), "D1".into()], "0.5", None)
+            .array_aux_direct(
+                "growth",
+                vec!["D1".into(), "D2".into()],
+                "1 + SUM(cube[D1, D2, *] * w[D2, D1])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| !a.reads_var("cube")),
+            "a permuted feeder must decline the hoist; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// T5 / I1 decline: a MAPPED Iterated axis (GH #534) anywhere in the
+    /// combination declines the feeder clause -- pinning the slot element
+    /// into the equation text reads the TARGET-dim element, which is not
+    /// the source row a mapped reference reads, so the changed-last feeder
+    /// equation would mis-pin. The mapped sliced reducer WITHOUT a feeder
+    /// stays hoisted (the GH #534 path is unchanged).
+    #[test]
+    fn mapped_iterated_axis_with_feeder_declines_hoist() {
+        let project = TestProject::new("feeder_mapped")
+            .named_dimension("Region", &["r1", "r2"])
+            .named_dimension("D2", &["x", "y"])
+            .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+            .array_aux_direct("matrix", vec!["Region".into(), "D2".into()], "1", None)
+            .array_aux_direct("frac", vec!["State".into()], "0.5", None)
+            .array_aux_direct(
+                "out",
+                vec!["State".into()],
+                "1 + SUM(matrix[State, *] * frac[State])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| !a.reads_var("matrix")),
+            "a mapped iterated axis with a feeder must decline the hoist; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// T5 / I3b decline: the same variable appearing as both a co-source
+    /// and a feeder-shaped reference (`SUM(matrix[D1,*] * matrix[D1,c1])`)
+    /// declines -- one variable, two different slices.
+    #[test]
+    fn duplicate_var_as_co_source_and_feeder_declines_hoist() {
+        let project = TestProject::new("dup_co_source_feeder")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .array_aux("growth[D1]", "1 + SUM(matrix[D1, *] * matrix[D1, c1])");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.iter().all(|a| !a.reads_var("matrix")),
+            "one variable with co-source AND feeder slices must decline; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// T5 / I1 decline: two CO-SOURCES (both Reduced-bearing) with
+    /// differing slices still decline, exactly as before the feeder clause
+    /// -- the clause widens acceptance only for no-`Reduced` projections.
+    #[test]
+    fn co_sources_with_differing_slices_still_decline() {
+        let project = TestProject::new("co_source_differ")
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux_direct("a", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct("b", vec!["D2".into(), "D1".into()], "2", None)
+            .array_aux("growth[D1]", "1 + SUM(a[D1, *] + b[*, D1])");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result
+                .aggs
+                .iter()
+                .all(|ag| !ag.reads_var("a") && !ag.reads_var("b")),
+            "co-sources with differing slices must still decline; got: {:?}",
+            result.aggs
+        );
     }
 }

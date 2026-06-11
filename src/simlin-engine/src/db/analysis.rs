@@ -1454,16 +1454,20 @@ pub struct EdgeShapesResult {
     /// `model_causal_edges`.
     pub edge_shapes: HashMap<(String, String), BTreeSet<RefShape>>,
     /// The variable-level edges with at least one `ThroughAgg`-routed
-    /// reference site: the element graph routes (part of) this edge
+    /// reference site -- the element graph routes (part of) this edge
     /// through a synthetic `$⁚ltm⁚agg⁚{n}` node instead of emitting a
-    /// direct `from → to` element edge. A cycle traversing such an edge
-    /// can never be scored from the variable-level circuit alone (the
-    /// direct link has no usable link-score variable -- GH #737), so
-    /// `classify_cycle` must send it to the element-level slow path
-    /// regardless of the edge's `RefShape`s. The distinction matters
-    /// exactly when the routed site's shape is `Bare` (a scalar feeder
-    /// of a hoisted reducer); an arrayed reducer argument is `Wildcard`
-    /// and already classifies as cross-element on shape alone.
+    /// direct `from → to` element edge -- PLUS the variable-backed
+    /// ITERATED-DIM PROJECTION-FEEDER edges (GH #767 / T5: `frac → growth`
+    /// for `growth[D1] = SUM(matrix[D1,*] * frac[D1])`, whose only emitted
+    /// scores are the per-`(row, slot)` changed-last scalars). A cycle
+    /// traversing either kind can never be scored from the variable-level
+    /// circuit alone (the direct link has no usable Bare link-score
+    /// variable -- GH #737), so `classify_cycle` must send it to the
+    /// element-level slow path regardless of the edge's `RefShape`s. The
+    /// distinction matters exactly when the routed site's shape is `Bare`
+    /// (a scalar feeder of a hoisted reducer, or the same-dims projection
+    /// feeder); an arrayed reducer argument is `Wildcard` and already
+    /// classifies as cross-element on shape alone.
     pub agg_routed_edges: BTreeSet<(String, String)>,
 }
 
@@ -1512,6 +1516,7 @@ pub fn model_edge_shapes(
 
     let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
     let mut agg_routed_edges: BTreeSet<(String, String)> = BTreeSet::new();
+    let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
     for (from_name, to_set) in &variable_edges.edges {
         for to_name in to_set {
             // Module edges and structural flow->stock edges short-circuit
@@ -1557,6 +1562,26 @@ pub fn model_edge_shapes(
                     .iter()
                     .any(|s| matches!(s.routing, crate::db::ltm_ir::SiteRouting::ThroughAgg { .. }))
             }) {
+                agg_routed_edges.insert((from_name.clone(), to_name.clone()));
+            }
+            // A variable-backed ITERATED-DIM PROJECTION-FEEDER edge (GH
+            // #767 / T5) is flagged for the same reason: its sites are
+            // Direct `Bare` (the agg IS the target, never synthetic), but
+            // the only emitted scores are the per-`(row, slot)` changed-last
+            // scalars, so a fast-path A2A loop would reference a Bare name
+            // that no longer exists. Gated on the SAME
+            // `variable_backed_reduce_agg` decision the element graph, the
+            // score derivation, and the slow-path loop routing consult.
+            // Inert pre-T5: the identical-slices acceptance could never
+            // produce a projection-feeder source.
+            let to_dims = source_vars
+                .get(to_name)
+                .filter(|sv| sv.kind(db) != super::SourceVariableKind::Module)
+                .map(|sv| super::variable_dimensions(db, *sv, project).as_slice())
+                .unwrap_or(&[]);
+            if crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from_name, to_name, to_dims)
+                .is_some_and(|a| a.source_is_projection_feeder(from_name))
+            {
                 agg_routed_edges.insert((from_name.clone(), to_name.clone()));
             }
         }
@@ -1627,15 +1652,18 @@ pub enum CycleClass {
 ///    a single A2A loop. A Wildcard reducer pulls in cross-element
 ///    contributions, so the cycle is structurally cross-element.
 ///    DynamicIndex is conservatively treated like Wildcard.
-/// 2. If any edge is `ThroughAgg`-routed
-///    (`EdgeShapesResult::agg_routed_edges`), `CrossElementOrMixed` --
-///    even when every site shape is Bare. The element graph routes such
-///    an edge through a synthetic `$⁚ltm⁚agg⁚{n}` node, so the loop must
-///    be built from the element-level circuit that traverses the agg; a
-///    fast-path loop built from the variable-level circuit would compose
-///    the direct `from → to` link, which has no usable link-score
-///    variable (GH #737). The Bare-shaped case is a *scalar feeder* of a
-///    hoisted reducer (`scale` in `SUM(pop[*] * scale)`); arrayed
+/// 2. If any edge is in `EdgeShapesResult::agg_routed_edges` (a
+///    `ThroughAgg`-routed site, or a variable-backed projection-feeder
+///    edge -- GH #767), `CrossElementOrMixed` -- even when every site
+///    shape is Bare. The element graph routes a `ThroughAgg` edge through
+///    a synthetic `$⁚ltm⁚agg⁚{n}` node, and a feeder edge's only scores
+///    are per-`(row, slot)` scalars, so the loop must be built from the
+///    element-level circuit; a fast-path loop built from the
+///    variable-level circuit would compose the direct `from → to` link,
+///    which has no usable Bare link-score variable (GH #737). The
+///    Bare-shaped cases are a *scalar feeder* of a hoisted reducer
+///    (`scale` in `SUM(pop[*] * scale)`) and the same-dims projection
+///    feeder (`frac[D1]` in `SUM(matrix[D1,*] * frac[D1])`); arrayed
 ///    reducer arguments are `Wildcard` and already caught by rule 1.
 /// 3. If every variable has an empty dimension list (all scalar),
 ///    `PureScalar`.

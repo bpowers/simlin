@@ -1368,12 +1368,15 @@ fn wrap_live_shaped_in_previous(
 ///    [`generate_scalar_feeder_to_agg_equation`] convention -- a
 ///    first-order-equal discrete attribution of `Δz` to `Δx` (see that
 ///    function's rustdoc and the convention note in
-///    `docs/reference/ltm--loops-that-matter.md`) -- and is what makes the
-///    un-hoisted iterated-dim-feeder reducer class
-///    (`growth[D1] = SUM(matrix[D1,*] * frac[D1])`, the GH #743 fixture)
-///    genuinely scoreable: the wildcard co-source slice stays verbatim
-///    (compiling exactly like the target's own equation) and only the
-///    feeder is lagged.
+///    `docs/reference/ltm--loops-that-matter.md`) -- and is what makes an
+///    UN-HOISTED feeder-bearing reducer genuinely scoreable: the wildcard
+///    co-source slice stays verbatim (compiling exactly like the target's
+///    own equation) and only the feeder is lagged. (The original GH #743
+///    fixture, `growth[D1] = SUM(matrix[D1,*] * frac[D1])`, is HOISTED
+///    since the GH #767 / T5 feeder clause and takes the per-`(row, slot)`
+///    [`generate_iterated_feeder_to_agg_equation`] form instead; this
+///    chooser still serves the shapes the I1 acceptance declines, e.g. the
+///    Pinned-axis mix `SUM(matrix[D1,*] * w[D1, c1])`.)
 /// 3. `Err(UnfreezablePartial)` when both conventions are doomed (or
 ///    changed-last has no matching occurrence to freeze, which would
 ///    silently score a constant 0): the caller skips the score variable
@@ -1585,6 +1588,131 @@ pub(crate) fn generate_scalar_feeder_to_agg_equation(
     Ok(link_score_guard_form_with_numerator(
         &numerator, &agg_q, &feeder_q,
     ))
+}
+
+/// Generate the per-`(row, slot)` link-score equation for an ITERATED-DIM
+/// PROJECTION FEEDER of a hoisted reducer (GH #767 / T5 of the
+/// shape-expressiveness design): `frac` in
+/// `growth[D1] = SUM(matrix[D1,*] * frac[D1])`, whose accepted slice is
+/// the all-`Iterated` projection of the canonical slice, read 1:1 per agg
+/// result slot.
+///
+/// Like the scalar feeder ([`generate_scalar_feeder_to_agg_equation`]),
+/// the changed-FIRST partial is uncompilable for a feeder: it would freeze
+/// the co-source's wildcard slice as a lagged whole-array read
+/// (`SUM(PREVIOUS(matrix[d1·r1, *]) * frac[d1·r1])`, the GH #541 class).
+/// So the per-slot equation uses the changed-LAST attribution -- evaluate
+/// the reducer's equation pinned to the slot with ONLY the feeder frozen
+/// (`SUM(matrix[d1·r1, *] * PREVIOUS(frac[d1·r1]))`, which compiles: the
+/// co-source slice stays verbatim, the frozen feeder is a scalar
+/// fixed-element `LoadPrev`) and subtract it from the agg slot's current
+/// value. For a bilinear body the feeder's changed-last numerator is
+/// exactly complementary to the co-source rows' changed-first numerators
+/// per slot (`Σ_c Δ_matrix[r,c] + Δ_frac[r] = Δgrowth[r]` identically) --
+/// the same complementarity documented on the scalar feeder, now per row.
+///
+/// `iterated_dims` are the canonical slot axes' dimension names (the
+/// feeder's own axis dims -- acceptance guarantees they equal the
+/// canonical `Iterated` target dims, in order, unmapped), and
+/// `slot_parts_qualified` the slot's qualified elements, parallel to it.
+/// Every subscript index in `agg_equation_text` naming one of
+/// `iterated_dims` is pinned to the slot's element (the executed A2A
+/// resolution for that slot), then the feeder's references are frozen.
+///
+/// Returns `Err` when the text does not parse (the GH #311 loud-failure
+/// contract) or when no feeder occurrence was frozen (the numerator would
+/// be a silent constant 0 -- the GH #743 unfreezable contract).
+pub(crate) fn generate_iterated_feeder_to_agg_equation(
+    feeder: &str,
+    agg_name: &str,
+    agg_equation_text: &str,
+    iterated_dims: &[String],
+    slot_parts_qualified: &[String],
+) -> Result<String, PartialEquationError> {
+    let Ok(Some(ast)) = Expr0::new(agg_equation_text, LexerType::Equation) else {
+        return Err(PartialEquationError::new(agg_equation_text));
+    };
+    let pinned = pin_iterated_dim_indices(ast, iterated_dims, slot_parts_qualified);
+    let feeder_ident = Ident::<Canonical>::new(feeder);
+    let frozen = print_eqn(&wrap_matching_in_previous(pinned.clone(), &feeder_ident));
+    if frozen == print_eqn(&pinned) {
+        // No feeder occurrence was frozen: the "frozen" evaluation would
+        // equal the agg slot itself and the score a silent constant 0.
+        return Err(PartialEquationError::unfreezable(agg_equation_text));
+    }
+    let slot = slot_parts_qualified.join(",");
+    let agg_ref = format!("{}[{}]", quote_ident(agg_name), slot);
+    // The feeder's row equals the slot 1:1 (unmapped projection acceptance),
+    // and its axes ARE the slot's dimensions, so the slot subscript is also
+    // the feeder's own qualified row reference.
+    let feeder_ref = format!("{}[{}]", quote_ident(feeder), slot);
+    let numerator = format!("({agg_ref} - ({frozen}))");
+    Ok(link_score_guard_form_with_numerator(
+        &numerator,
+        &agg_ref,
+        &feeder_ref,
+    ))
+}
+
+/// Pin every subscript index of `expr` that is a bare `Var` naming one of
+/// `dims` (canonical dimension names) to the parallel element of `parts`
+/// -- the slot-resolution step of
+/// [`generate_iterated_feeder_to_agg_equation`]. Wildcards, StarRanges,
+/// literals, and indices naming other dimensions are left untouched (a
+/// co-source's `Reduced` wildcard must stay a whole-slice read), and
+/// expression indices are recursed into.
+fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> Expr0 {
+    match expr {
+        Expr0::Const(..) | Expr0::Var(..) => expr,
+        Expr0::Subscript(ident, indices, loc) => {
+            let indices = indices
+                .into_iter()
+                .map(|idx| match idx {
+                    IndexExpr0::Expr(Expr0::Var(name, vloc)) => {
+                        let n = canonicalize(name.as_str());
+                        match dims.iter().position(|d| d.as_str() == n.as_ref()) {
+                            Some(pos) => IndexExpr0::Expr(Expr0::Var(
+                                RawIdent::new_from_str(&parts[pos]),
+                                vloc,
+                            )),
+                            None => IndexExpr0::Expr(Expr0::Var(name, vloc)),
+                        }
+                    }
+                    IndexExpr0::Expr(e) => {
+                        IndexExpr0::Expr(pin_iterated_dim_indices(e, dims, parts))
+                    }
+                    other => other,
+                })
+                .collect();
+            Expr0::Subscript(ident, indices, loc)
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => Expr0::App(
+            UntypedBuiltinFn(
+                name,
+                args.into_iter()
+                    .map(|a| pin_iterated_dim_indices(a, dims, parts))
+                    .collect(),
+            ),
+            loc,
+        ),
+        Expr0::Op1(op, arg, loc) => Expr0::Op1(
+            op,
+            Box::new(pin_iterated_dim_indices(*arg, dims, parts)),
+            loc,
+        ),
+        Expr0::Op2(op, l, r, loc) => Expr0::Op2(
+            op,
+            Box::new(pin_iterated_dim_indices(*l, dims, parts)),
+            Box::new(pin_iterated_dim_indices(*r, dims, parts)),
+            loc,
+        ),
+        Expr0::If(c, t, f, loc) => Expr0::If(
+            Box::new(pin_iterated_dim_indices(*c, dims, parts)),
+            Box::new(pin_iterated_dim_indices(*t, dims, parts)),
+            Box::new(pin_iterated_dim_indices(*f, dims, parts)),
+            loc,
+        ),
+    }
 }
 
 /// Replace every bare `Var(id)` reference in `equation_text` where `id`
@@ -3822,9 +3950,12 @@ fn pin_body_index(
 /// Rewrite a reducer body so every arrayed reference reads exactly the
 /// given source row: wildcard / iterated-dim / literal indices are replaced
 /// by the row's (qualified) elements, and a bare arrayed-variable reference
-/// gains the full row subscript. `None` when the body cannot be safely
-/// pinned (an index that doesn't correspond to the row's axes, an arrayed
-/// reference with a different axis count, a nested array reducer, or a
+/// gains the full row subscript. An arrayed reference with a DIFFERENT
+/// axis count than the row (a GH #767 projection feeder, `frac[d1]` in the
+/// 2-D `matrix` row partial) is pinned BY DIM NAME when every index names
+/// one of the row's axes. `None` when the body cannot be safely pinned (an
+/// index that doesn't correspond to the row's axes, a mismatched-axis
+/// reference with a non-dim-name index, a nested array reducer, or a
 /// FIXED-literal reference to the live source -- see below) -- the caller
 /// bails to the delta-ratio fallback.
 ///
@@ -3868,8 +3999,46 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
                 .arrayed_dep_dims
                 .get(canonicalize(ident.as_str()).as_ref())
             {
-                if n_dims != row_parts.len() || indices.len() != row_parts.len() {
+                if indices.len() != n_dims {
                     return None;
+                }
+                if n_dims != row_parts.len() {
+                    // An arrayed dep with a DIFFERENT axis count than the
+                    // live source's row (the GH #767 projection-feeder
+                    // shape: `frac[d1]` inside the row partial of the 2-D
+                    // co-source `matrix[d1,*]`). Positional substitution is
+                    // meaningless, but a reference indexed SOLELY by
+                    // dimension names that appear among the row's axes is
+                    // pinnable BY NAME: for the executed slot every
+                    // co-reduced row shares the iterated coordinates, and a
+                    // reduced-axis-named index reads exactly the row's
+                    // element at that axis -- in both cases the pinned
+                    // (frozen) reference is the value the executed equation
+                    // reads, so the single-row cancellation invariant
+                    // holds. Anything else (a wildcard, a literal, a dim
+                    // outside the row's axes) bails to the delta-ratio
+                    // fallback as before. Such a dep can never be the live
+                    // source (the live source's axis count equals the
+                    // row's by construction), so the `any_moving` live-bail
+                    // below is not relevant here.
+                    let pinned: Vec<IndexExpr0> = indices
+                        .iter()
+                        .map(|idx| match idx {
+                            IndexExpr0::Expr(Expr0::Var(name, _)) => {
+                                let n = canonicalize(name.as_str());
+                                let pos = ctx
+                                    .row_dim_names
+                                    .iter()
+                                    .position(|d| d.as_str() == n.as_ref())?;
+                                Some(IndexExpr0::Expr(Expr0::Var(
+                                    RawIdent::new_from_str(&row_parts[pos]),
+                                    crate::ast::Loc::default(),
+                                )))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    return Some(Expr0::Subscript(ident, pinned, loc));
                 }
                 let mut any_moving = false;
                 let pinned: Vec<IndexExpr0> = indices

@@ -150,6 +150,40 @@ pub(crate) fn sub_model_output_ports(
     find_model_output_ports(db, model, project)
 }
 
+/// Whether `from -> to` is an accepted ITERATED-DIM PROJECTION-FEEDER edge
+/// into a variable-backed reduce (GH #767 / T5 of the shape-expressiveness
+/// design): `to` IS a variable-backed agg the shared
+/// [`crate::ltm_agg::variable_backed_reduce_agg`] gate admits, and `from`'s
+/// own slice is the all-`Iterated` projection (`frac` in
+/// `growth[D1] = SUM(matrix[D1,*] * frac[D1])`). The hop's only emitted
+/// scores are the per-`(row, slot)` scalars `{from}[d1]→{to}[d1]`, so the
+/// mixed-branch link builder must keep BOTH subscripts -- the same reason
+/// [`is_partial_reduce_edge`] exists, which this shape FAILS (the feeder's
+/// dims EQUAL the owner's, so the shape-only strictly-fewer-dims test says
+/// "same-element A2A"). Inert for every pre-T5 shape: a projection feeder
+/// requires a Reduced-bearing canonical slice alongside an all-`Iterated`
+/// per-source slice, which the identical-slices acceptance could never
+/// produce.
+fn is_projection_feeder_edge(
+    db: &dyn Db,
+    source_vars: &HashMap<String, SourceVariable>,
+    from: &str,
+    to: &str,
+    model: SourceModel,
+    project: SourceProject,
+) -> bool {
+    let Some(to_sv) = source_vars.get(to) else {
+        return false;
+    };
+    if to_sv.kind(db) == SourceVariableKind::Module {
+        return false;
+    }
+    let to_dims = variable_dimensions(db, *to_sv, project);
+    let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
+    crate::ltm_agg::variable_backed_reduce_agg(aggs, from, to, to_dims)
+        .is_some_and(|a| a.source_is_projection_feeder(from))
+}
+
 /// Whether the edge `from -> to` is a *partial reduce*: `from` is arrayed,
 /// `to` is arrayed with strictly fewer dimensions, and every `to` dimension
 /// is one of `from`'s (matched by name). That is exactly the shape
@@ -718,7 +752,11 @@ pub(crate) fn build_element_level_loops(
         // `variable_backed_reduce_agg` decision the element graph's
         // read-slice reroute and the score derivation use, so a group is
         // rerouted here exactly when its element edges (and the
-        // per-`(row, slot)` scores) are the read-row family. Only the
+        // per-`(row, slot)` scores) are the read-row family. A
+        // PROJECTION-FEEDER hop (`frac[d1] → growth[d1]`, GH #767 / T5)
+        // is admitted by the same gate, so feeder-closure circuits route
+        // here too -- their only emitted scores are the per-`(row, slot)`
+        // changed-last scalars. Only the
         // arrayed-owner (Iterated-armed) acceptance is reachable here -- a
         // scalar-owner reduce hop has an unsubscripted `to` node, so its
         // circuits take the mixed branch (whose link builder keeps the
@@ -1062,20 +1100,28 @@ pub(crate) fn build_element_level_loops(
                         (from_raw, to_raw)
                     } else if from_subscripted
                         && to_subscripted
-                        && is_partial_reduce_edge(
+                        && (is_partial_reduce_edge(
                             db,
                             source_vars,
                             from_var_level,
                             to_var_level,
                             project,
-                        )
+                        ) || is_projection_feeder_edge(
+                            db,
+                            source_vars,
+                            from_var_level,
+                            to_var_level,
+                            model,
+                            project,
+                        ))
                     {
-                        // Partial reduce (`matrix[d1,d2] → row_sum[d1]`): the
-                        // link score is the per-`(reduced-elem, result-elem)`
-                        // scalar var `$⁚ltm⁚link_score⁚{from}[d1,d2]→{to}[d1]`
-                        // from `try_cross_dimensional_link_scores`, so keep
-                        // BOTH subscripts -- the source carries the collapsed
-                        // axis too.
+                        // Partial reduce (`matrix[d1,d2] → row_sum[d1]`) or a
+                        // projection-feeder hop (`frac[d1] → growth[d1]`,
+                        // GH #767): the link score is the per-`(row, slot)`
+                        // scalar var (`$⁚ltm⁚link_score⁚{from}[d1,d2]→{to}[d1]`
+                        // / `{from}[d1]→{to}[d1]`) from
+                        // `try_cross_dimensional_link_scores`, so keep BOTH
+                        // subscripts.
                         (from_raw, to_raw)
                     } else if to_subscripted && to_is_arrayed {
                         // Scalar->arrayed or same-element A2A: keep `to[e]`,
