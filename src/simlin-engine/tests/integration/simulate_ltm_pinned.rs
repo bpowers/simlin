@@ -1517,11 +1517,97 @@ fn pinned_loop_through_module_internal_stock_scored() {
     // The pin registers a partition entry; its only stock is module-internal,
     // which the parent-level partition map deliberately does not key (see
     // `CyclePartitions::partition_for_loop`), so the single slot resolves to
-    // `None` rather than being dropped.
+    // `None` rather than being dropped. (Post GH #750 a `None` partition
+    // normalizes as its own singleton group -- see
+    // `unrelated_module_internal_pins_do_not_cross_normalize` -- so `None`
+    // here means "compared with nothing", not "pooled in a default bucket".)
     assert_eq!(
         loop_partitions.get("pin1"),
         Some(&vec![None]),
         "module-internal-stock pin registers a single unresolved partition slot"
+    );
+}
+
+/// GH #750: two UNRELATED feedback loops whose only state lives inside
+/// different module instances both resolve a `None` cycle partition. Their
+/// relative loop scores must NOT normalize against each other (the GH
+/// #487-class cross-pollution): a `None` partition means "no provable
+/// stock-to-stock coupling", so each loop normalizes alone (the documented
+/// lone-pin degeneracy, sign-preserving +/-1 or SAFEDIV-0).
+///
+/// Pre-#750, the two pins shared the default `None` bucket and each loop's
+/// share-of-activity was diluted by the other's: |rel1| + |rel2| == 1 with
+/// neither at 1 once both loops were active.
+#[test]
+fn unrelated_module_internal_pins_do_not_cross_normalize() {
+    use simlin_engine::ltm_post;
+
+    // Two disjoint copies of the module_pin_project shape: driver{i} ->
+    // sub{i}(internal stock) -> reader{i} -> driver{i}, no coupling between
+    // the two loops, zero parent-level stocks.
+    let mut p = TestProject::new("two_module_pins")
+        .with_sim_time(0.0, 12.0, 0.25)
+        .aux("driver1", "100 + reader1 * 0.5", None)
+        .aux("reader1", "sub1.output", None)
+        .aux("driver2", "50 + reader2 * 0.25", None)
+        .aux("reader2", "sub2.output", None)
+        .build_datamodel();
+    for i in ["1", "2"] {
+        p.models[0]
+            .variables
+            .push(datamodel::Variable::Module(datamodel::Module {
+                ident: format!("sub{i}"),
+                model_name: "sub".to_string(),
+                documentation: String::new(),
+                units: None,
+                references: vec![datamodel::ModuleReference {
+                    src: format!("driver{i}"),
+                    dst: format!("sub{i}.input"),
+                }],
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }));
+    }
+    p.models.push(datamodel::Model {
+        name: "sub".to_string(),
+        sim_specs: None,
+        variables: smooth_sub_vars(),
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+    assign_uids(&mut p);
+    pin_loop(&mut p, "main", "loop one", &["driver1", "sub1", "reader1"]);
+    pin_loop(&mut p, "main", "loop two", &["driver2", "sub2", "reader2"]);
+
+    let (results, loop_partitions, _ltm_vars) = run_ltm_discovery(&p);
+
+    // Both pins score, both with the unresolved (`None`) partition.
+    assert_eq!(loop_partitions.get("pin1"), Some(&vec![None]));
+    assert_eq!(loop_partitions.get("pin2"), Some(&vec![None]));
+
+    let rel = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
+    let rel1 = rel.get("pin1").expect("pin1 rel score");
+    let rel2 = rel.get("pin2").expect("pin2 rel score");
+    let mut saw_active = false;
+    for t in 0..results.step_count {
+        for (id, series) in [("pin1", rel1), ("pin2", rel2)] {
+            let v = series[t];
+            assert!(
+                v == 0.0 || (v.abs() - 1.0).abs() < 1e-12,
+                "an unpartitioned loop normalizes alone, so its relative score \
+                 is 0 or +/-1; {id}[{t}] = {v}"
+            );
+            if v != 0.0 {
+                saw_active = true;
+            }
+        }
+    }
+    assert!(
+        saw_active,
+        "the loops genuinely transfer signal, so the scores must activate"
     );
 }
 

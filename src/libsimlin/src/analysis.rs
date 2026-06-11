@@ -1356,6 +1356,14 @@ fn slot_partition_at(pv: &[Option<usize>], k: usize) -> Option<usize> {
 /// reproduces `ltm_post::compute_rel_loop_scores_per_element`'s bucket sums
 /// exactly via the streaming `compute_partition_denominator_for_element`
 /// helper, just amortized across repeated FFI queries on the same bucket.
+///
+/// GH #750: an unresolved (`None`) partition is a PER-LOOP singleton group
+/// (the engine's `NormGroup::Solo` -- unrelated module-internal-stock /
+/// lagged-stockless loops must not cross-normalize), so when `partition_key`
+/// is `None` the only member is `querying_loop_id` itself.  That bucket
+/// bypasses the shared cache: its `(None, element_k)` key would collide
+/// across distinct solo loops, and the single-member denominator is cheap to
+/// recompute anyway.
 fn ensure_denom_for_element(
     cache: &mut HashMap<(Option<usize>, usize), Vec<f64>>,
     results: &engine::Results,
@@ -1363,7 +1371,22 @@ fn ensure_denom_for_element(
     element_index_map: &HashMap<String, engine::ltm_post::LoopElementIndex>,
     partition_key: Option<usize>,
     element_k: usize,
+    querying_loop_id: &str,
 ) -> Vec<f64> {
+    let loop_n_slots = |id: &str| -> usize {
+        element_index_map
+            .get(id)
+            .map(|m| m.n_slots)
+            .unwrap_or(1)
+            .max(1)
+    };
+    if partition_key.is_none() {
+        return engine::ltm_post::compute_partition_denominator_for_element(
+            results,
+            std::iter::once((querying_loop_id, loop_n_slots(querying_loop_id))),
+            element_k,
+        );
+    }
     if let Some(cached) = cache.get(&(partition_key, element_k)) {
         return cached.clone();
     }
@@ -1371,12 +1394,7 @@ fn ensure_denom_for_element(
         .iter()
         .filter_map(|(id, pv)| {
             if slot_partition_at(pv, element_k) == partition_key {
-                let n = element_index_map
-                    .get(id)
-                    .map(|m| m.n_slots)
-                    .unwrap_or(1)
-                    .max(1);
-                Some((id.as_str(), n))
+                Some((id.as_str(), loop_n_slots(id)))
             } else {
                 None
             }
@@ -1448,6 +1466,7 @@ pub(crate) fn rel_loop_score_series(
                 loop_element_index,
                 partition_key,
                 k,
+                loop_id,
             );
             engine::ltm_post::compute_rel_loop_score_for_element(
                 results, loop_id, n_slots, k, &denom,
@@ -1467,6 +1486,7 @@ pub(crate) fn rel_loop_score_series(
                     loop_element_index,
                     partition_key,
                     k,
+                    loop_id,
                 );
                 denoms.push(denom);
             }
