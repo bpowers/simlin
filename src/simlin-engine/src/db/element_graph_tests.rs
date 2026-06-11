@@ -1836,3 +1836,30 @@ fn element_graph_mapped_sliced_reducer_with_scalar_cofeeder() {
     assert_edge(&result, "scale", &format!("{agg}[s1]"));
     assert_edge(&result, "scale", &format!("{agg}[s2]"));
 }
+
+/// GH #766 (element graph): an inline reducer over a *proper subdimension*
+/// StarRange (`x = 1 + MEAN(arr[*:Core])`, `Core = {a, b}` a proper
+/// subdimension of `Region = {a, b, c}`) is hoisted with a SUBSET-bearing
+/// `Reduced` axis, so only the subdimension's rows feed the agg --
+/// `arr[c]` (outside the subset) gets no edge. Pre-fix the slice claimed
+/// the full parent extent and `arr[c] → agg` was a spurious edge (loop
+/// enumeration could discover loops through a row the reducer never reads).
+#[test]
+fn element_graph_subset_star_range_reads_only_subdimension_rows() {
+    let project = TestProject::new("gh766_subset_elem_graph")
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_aux("arr[Region]", "10")
+        .scalar_aux("x", "1 + MEAN(arr[*:Core])");
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    assert_edge(&result, "arr[a]", agg);
+    assert_edge(&result, "arr[b]", agg);
+    assert_no_edge(&result, "arr[c]", agg);
+    assert_edge(&result, agg, "x");
+    // No direct reducer-side edges bypassing the agg.
+    assert_no_edge(&result, "arr[a]", "x");
+    assert_no_edge(&result, "arr[c]", "x");
+}

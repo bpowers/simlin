@@ -234,8 +234,12 @@ pub(super) struct ReadSliceRow {
 /// Enumerate the source rows a hoisted reducer reads, given the agg's
 /// `read_slice` (one [`crate::ltm_agg::AxisRead`] per `from`'s axis -- which
 /// holds because `from` is one of `agg`'s `source_vars`) and `from`'s
-/// dimension element lists. A `Pinned` axis is fixed to its single element; an
-/// `Iterated` or `Reduced` axis ranges over every element of that axis. The
+/// dimension element lists. A `Pinned` axis is fixed to its single element;
+/// an `Iterated` axis ranges over every element of that axis; a `Reduced`
+/// axis ranges over every element, or -- for a subset-bearing `Reduced`
+/// (a proper-subdimension StarRange, GH #766) -- over only the subset's
+/// elements, so unread rows get no per-row score and divisor-bearing
+/// reducers (MEAN, STDDEV) divide by the subset size via `coreduced`. The
 /// agg result slot for a row is its `Iterated` coordinates in order --
 /// remapped to the corresponding TARGET-dim element via
 /// [`crate::ltm_agg::iterated_axis_slot_elements`] when the axis is a
@@ -271,7 +275,9 @@ pub(super) fn read_slice_rows(
                     crate::ltm_agg::iterated_axis_slot_elements(dim, source_dim, elems, dim_ctx)?;
                 Some((elems.clone(), Some(slots)))
             }
-            AxisRead::Reduced => Some((elems.clone(), None)),
+            AxisRead::Reduced { subset } => {
+                Some((subset.clone().unwrap_or_else(|| elems.clone()), None))
+            }
         })
         .collect::<Option<Vec<_>>>()?;
     // Cartesian product, tracking each row's full element tuple and its slot

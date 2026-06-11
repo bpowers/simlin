@@ -56,6 +56,13 @@ use crate::test_common::TestProject;
 /// One reference pattern in a generated equation. `var_idx` is the index
 /// of the source variable to reference (always strictly less than the
 /// referencing variable's own index, to keep the dependency DAG acyclic).
+///
+/// The reducer patterns are deliberately SUM-only: every reducer here is
+/// hoisted, so the per-reducer agg-hop expectations assume `ThroughAgg`
+/// routing. If a later task adds RANK patterns to the strategy, their
+/// expectations must encode the DE-HOISTED `Direct` routing instead --
+/// RANK is array-valued and never hoisted (GH #771,
+/// `ltm_agg::reducer_is_hoistable`).
 #[derive(Debug, Clone)]
 enum RefPattern {
     /// `vN` -- bare same-element reference.

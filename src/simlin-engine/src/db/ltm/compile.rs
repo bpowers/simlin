@@ -230,10 +230,11 @@ struct LoweredLtmVariable {
 /// This is [`lower_ltm_variable`]'s gate for the scoped re-lower, and it
 /// must be sound against `ast::expr3`'s Pass-1 decomposition set -- NOT
 /// the agg-hoistable reducer set (`ltm_agg::reducer_kind_from_name`),
-/// which differs in both directions: `SIZE` is never hoisted into an agg
-/// (its link score is constant 0) yet Pass-1 decomposes its argument
-/// exactly like `SUM`'s, while `RANK` is agg-hoistable yet Pass-1 never
-/// decomposes its arguments. Deriving the original (text-scan) gate from
+/// which differs: `SIZE` is never hoisted into an agg (its link score is
+/// constant 0) yet Pass-1 decomposes its argument exactly like `SUM`'s
+/// (and `RANK` -- recognized as a reducer, never hoisted post-GH #771 --
+/// is never Pass-1-decomposed either). Deriving the original (text-scan)
+/// gate from
 /// the wrong set silently stubbed any fragment embedding
 /// `SIZE(<array expression>)` -- the demonstrated GH #738 round-2
 /// regression, pinned by

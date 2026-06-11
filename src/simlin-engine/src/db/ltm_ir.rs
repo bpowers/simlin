@@ -47,9 +47,10 @@ use crate::db::{Db, RefShape, SourceModel, SourceProject, reconstruct_model_vari
 /// according to the shape's normal broadcast/diagonal rules).
 ///
 /// `in_reducer` is true iff the reference site occurs syntactically inside
-/// an array-reducing builtin call (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/`RANK`
-/// -- the `crate::ltm_agg::reducer_is_hoistable` set; `SIZE` and the 2-arg
-/// `MIN`/`MAX` are *not* hoisted reducers). It is the precise signal for
+/// an array-reducing builtin call (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`
+/// -- the `crate::ltm_agg::reducer_is_hoistable` set; `SIZE`, the
+/// array-valued `RANK` (GH #771), and the 2-arg `MIN`/`MAX` are *not*
+/// hoisted reducers). It is the precise signal for
 /// "should this reference be rerouted through a hoisted aggregate node",
 /// which the access `shape` alone cannot answer: a target with *both*
 /// `SUM(pop[*])` and a direct `pop[idx]` produces a `DynamicIndex` site for
@@ -156,8 +157,12 @@ fn resolve_literal_index(
 /// 4. Any other index pattern (a *partial* `StarRange` mixed with literal
 ///    indices, a `DimPosition`, a `Range`, an unrecognized literal) ⇒
 ///    `DynamicIndex`. (A partial-`StarRange` slice like `SUM(matrix[D1,
-///    *:Dim])` stays conservatively `DynamicIndex` -- the slice-reduce is
-///    not hoisted yet; tracked as tech debt.)
+///    *:Dim])` keeps the coarse `DynamicIndex` shape HERE, but the reducer
+///    *is* hoisted -- `compute_read_slice` carries the per-axis truth,
+///    including a proper-subdimension subset since GH #766 -- and a
+///    `ThroughAgg`-routed site's shape is ignored, so the coarse classifier
+///    shape is routing-irrelevant: a documented residual, not a behavior
+///    gap.)
 fn classify_subscript_shape(
     indices: &[crate::ast::IndexExpr2],
     source_dims: &[crate::dimensions::Dimension],

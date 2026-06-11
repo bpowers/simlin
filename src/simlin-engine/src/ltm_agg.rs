@@ -56,12 +56,19 @@
 //! positionally-MAPPED iterated axis (`SUM(matrix[State,*])` over a
 //! `matrix[Region,..]` source with a `State→Region` mapping, GH #534), where
 //! the `Iterated` axis carries the (target, source) dim pair and the agg is
-//! arrayed over the TARGET dim. The carve-outs: a reducer over a *dynamic
+//! arrayed over the TARGET dim, and a StarRange over a PROPER subdimension
+//! (`SUM(arr[*:Sub])`, GH #766), where the `Reduced` axis carries the
+//! subdimension's element subset. The carve-outs: a reducer over a *dynamic
 //! index* (`SUM(pop[idx,*])`, `idx` non-literal) is not statically
-//! describable, and a mapped iterated axis whose mapping is element-mapped
-//! (GH #756), reverse-declared (GH #757), or non-positional is declined --
+//! describable, a mapped iterated axis whose mapping is element-mapped
+//! (GH #756), reverse-declared (GH #757), or non-positional is declined, and
+//! a StarRange naming a NON-subdimension (a mid-edit inconsistency that must
+//! not silently widen to the full extent) is declined --
 //! `compute_read_slice` returns `None`, the reducer is not hoisted, and its
-//! reference stays on the conservative path.
+//! reference stays on the conservative path. `RANK` is recognized as a
+//! reducer but never hoisted (GH #771): it is ARRAY-valued, so an agg node
+//! -- "a scalar value per result slot" -- has no value to hold for it; see
+//! [`reducer_is_hoistable`].
 //!
 //! Whole-RHS partial reduces (`row_sum[D1] = SUM(matrix[D1,*])`) *are*
 //! recognized -- the variable is the agg, `result_dims` carries its dims, and
@@ -76,7 +83,7 @@
 //! keep the normal reference walker's reduction/broadcast edges, which are
 //! already the true reads for those shapes; the gate's other exclusions
 //! (partial reduce broadcast over extra target dims / permuted axes --
-//! GH #764 -- and Pinned-bearing mixed slices, see
+//! GH #764 -- and Pinned-bearing or subset-bearing mixed slices, see
 //! [`variable_backed_partial_reduce_agg`]) keep the conservative
 //! cross-product, a SUPERSET of the true reads on the loud warned path.
 
@@ -158,17 +165,29 @@ pub(crate) fn reducer_kind_from_name(name: &str, arity: usize) -> Option<Reducer
 /// lowercases function-call identifiers, and LTM-generated uppercase
 /// reducer text is re-parsed before any of these predicates see it).
 ///
-/// `RANK` is recognized as a reducer by [`reducer_kind_from_name`] (the agg
-/// machinery enumerates and scores it like one), but `RANK(arr, dir)` is
-/// ARRAY-valued -- the rank of each element, Vensim's VECTOR RANK -- so any
-/// consumer deciding "does this subtree collapse to a scalar" must exclude
-/// it (GH #742): treating a frozen `PREVIOUS(RANK(arr, dir))` subtree as
-/// scalar routes the capture into a per-element *scalar* helper whose
-/// equation is ill-typed (array-valued in scalar context), the helper
-/// fragment fails, and the consuming score silently corrupts. The two
-/// consumers are `builtins_visitor::arg_has_bare_var_ref` (the GH #541
-/// arrayed-capture gate) and `ltm_augment::expr_is_array_slice_valued` (the
-/// GH #743 unfreezable-`PREVIOUS` detector).
+/// `RANK` is recognized as a reducer by [`reducer_kind_from_name`], but
+/// `RANK(arr, dir)` is ARRAY-valued -- the rank of each element, Vensim's
+/// VECTOR RANK -- so any consumer deciding "does this subtree collapse to a
+/// scalar" must exclude it (GH #742): treating a frozen
+/// `PREVIOUS(RANK(arr, dir))` subtree as scalar routes the capture into a
+/// per-element *scalar* helper whose equation is ill-typed (array-valued in
+/// scalar context), the helper fragment fails, and the consuming score
+/// silently corrupts. The three consumers are
+/// `builtins_visitor::arg_has_bare_var_ref` (the GH #541 arrayed-capture
+/// gate), `ltm_augment::expr_is_array_slice_valued` (the GH #743
+/// unfreezable-`PREVIOUS` detector), and [`reducer_is_hoistable`] (the agg
+/// hoisting gate, GH #771): an agg node *is* "a scalar value per result
+/// slot", and RANK has no such value to name.
+///
+/// Residual of the GH #771 de-hoist: a `RANK(pop, dir)` reference
+/// classifies by its syntactic shape (a bare `pop` is `Bare` -> diagonal
+/// edges), so loops through the rank ORDERING -- element r's rank changing
+/// because element s moved past it -- are not enumerated. This replaces the
+/// strictly-worse pre-#771 state (cross-element loops enumerated through an
+/// ill-shaped scalar agg whose every score was warned-zero); the
+/// alternative -- reclassifying value-shaped reducer args as `DynamicIndex`
+/// -- would recreate the GH #525 phantom pathology (cross-product edges
+/// reading diagonal scores) and was rejected.
 pub(crate) fn reducer_collapses_to_scalar(name: &str, arity: usize) -> bool {
     reducer_kind_from_name(name, arity).is_some() && name != "rank"
 }
@@ -180,31 +199,43 @@ pub(crate) fn reducer_collapses_to_scalar(name: &str, arity: usize) -> bool {
 /// `BuiltinFn<Expr2>` (the element-graph walker, `classify_reducer`) and any
 /// future `BuiltinFn<Expr0>` caller share one implementation.
 pub(crate) fn reducer_kind<E>(builtin: &BuiltinFn<E>) -> Option<ReducerKind> {
-    // Only `MEAN`/`MIN`/`MAX` are arity-sensitive; for everything else
-    // `reducer_kind_from_name` ignores the arity argument.
-    let arity = match builtin {
+    reducer_kind_from_name(builtin.name(), builtin_reducer_arity(builtin))
+}
+
+/// The arity [`reducer_kind_from_name`] / [`reducer_collapses_to_scalar`]
+/// key on. Only `MEAN`/`MIN`/`MAX` are arity-sensitive; for everything else
+/// the deciders ignore the arity argument.
+fn builtin_reducer_arity<E>(builtin: &BuiltinFn<E>) -> usize {
+    match builtin {
         BuiltinFn::Mean(args) => args.len(),
         BuiltinFn::Min(_, opt) | BuiltinFn::Max(_, opt) => 1 + opt.is_some() as usize,
         _ => 1,
-    };
-    reducer_kind_from_name(builtin.name(), arity)
+    }
 }
 
 /// `true` when `builtin` is a recognized array reducer that is *hoisted* into
-/// an aggregate node -- i.e. recognized AND not [`ReducerKind::Constant`].
+/// an aggregate node -- i.e. recognized AND not [`ReducerKind::Constant`] AND
+/// scalar-valued ([`reducer_collapses_to_scalar`], invariant I5 of the
+/// shape-expressiveness design).
 ///
 /// `SIZE` is recognized as a reducer but never hoisted (its link score is
 /// always 0), and it never sets the element-graph walker's `in_reducer`
-/// marker. This is the predicate the reference-site IR's AST walk
-/// (`db::ltm_ir::walk_all_in_expr`) uses to flip `child_in_reducer`, and that
-/// [`reducer_source_vars`] uses to gate which subexpressions become aggregate
-/// nodes, so the agg enumerator, the element graph, and the link-score
-/// generator all agree on the hoisted set.
+/// marker. `RANK` is recognized but never hoisted either (GH #771): it is
+/// ARRAY-valued, so a scalar agg node for it has an ill-typed equation that
+/// cannot compile -- an agg node exists to give a scalar reduction a name,
+/// and RANK has no scalar reduction to name. Its references stay `Direct`
+/// (a bare arg classifies `Bare` -> diagonal edges, scored by the GH #742
+/// arrayed-capture machinery). This is the predicate the reference-site
+/// IR's AST walk (`db::ltm_ir::walk_all_in_expr`) uses to flip
+/// `child_in_reducer`, and that [`reducer_source_vars`] uses to gate which
+/// subexpressions become aggregate nodes, so the agg enumerator, the
+/// element graph, and the link-score generator all agree on the hoisted set.
 pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
+    let arity = builtin_reducer_arity(builtin);
     matches!(
-        reducer_kind(builtin),
+        reducer_kind_from_name(builtin.name(), arity),
         Some(ReducerKind::Linear | ReducerKind::Nonlinear)
-    )
+    ) && reducer_collapses_to_scalar(builtin.name(), arity)
 }
 
 /// How one *source axis* of a hoisted reducer is consumed.
@@ -224,9 +255,11 @@ pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
 ///   for the literal case, different for a positionally-MAPPED sliced
 ///   reducer (GH #534) -- and the target dim appears in
 ///   [`AggNode::result_dims`] (datamodel-cased).
-/// - [`AxisRead::Reduced`] -- the whole axis is reduced away (`SUM(pop[*])`,
-///   the `*` in `SUM(pop[NYC, *])`). Every element of that axis feeds the
-///   single agg result slot.
+/// - [`AxisRead::Reduced`] -- the axis is reduced away (`SUM(pop[*])`, the
+///   `*` in `SUM(pop[NYC, *])`, `SUM(arr[*:Sub])`). With `subset: None`
+///   every element of that axis feeds the agg result slot; with
+///   `subset: Some(elems)` (a StarRange over a PROPER subdimension,
+///   GH #766) only the subdimension's elements do.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub enum AxisRead {
     /// A single literal element of this source axis is read (`pop[NYC, *]`).
@@ -247,9 +280,18 @@ pub enum AxisRead {
         /// [`iterated_axis_slot_elements`]).
         source_dim: String,
     },
-    /// The whole axis is reduced away (`SUM(pop[*])`); every element of it
-    /// feeds the single agg result slot.
-    Reduced,
+    /// The axis is reduced away by the reducer. `subset: None` = the full
+    /// extent (`SUM(pop[*])`, `SUM(arr[*:D])` where `D` is the axis's own
+    /// dimension): every element of the axis feeds the agg result slot.
+    /// `subset: Some(elems)` = a StarRange over a PROPER subdimension of
+    /// the axis's dimension (`SUM(arr[*:Sub])`, GH #766): only the
+    /// subdimension's elements (canonical names, in subdimension-declared
+    /// order, resolved at enumeration time via
+    /// [`crate::dimensions::SubdimensionRelation`]) feed the slot.
+    /// Invariant I3: a `Some` subset is non-empty and a proper subset of
+    /// the axis's elements -- a subdimension covering the whole axis
+    /// normalizes to `None` so the full-extent representation is unique.
+    Reduced { subset: Option<Vec<String>> },
 }
 
 /// The agg result-slot coordinate (an element of the `Iterated` axis's
@@ -872,21 +914,77 @@ fn reducer_source_vars(
 /// a non-literal index (`pop[idx, *]`, a `Range`, a `@N` position), so the
 /// enclosing reducer is not hoisted (the dynamic-index carve-out).
 ///
-/// Per source axis `i`:
-/// - `IndexExpr2::Wildcard(_)` ⇒ [`AxisRead::Reduced`].
-/// - `IndexExpr2::StarRange(_, _)` ⇒ [`AxisRead::Reduced`]. (Conservative
-///   even when the named subdimension is a *proper* subset of the axis's own
-///   dimension -- matching `classify_subscript_shape`'s AC1.4 treatment of an
-///   all-`StarRange` subscript as `Wildcard`. The element-graph reroute then
-///   over-approximates the unread rows, exactly as before; tightening this is
-///   tracked as GH #766.)
+/// Per source axis `i`, the access is decided by [`classify_axis_access`]
+/// (one shared per-axis classifier; see its rustdoc for the per-index
+/// rules).
+///
+/// A bare `Expr2::Var(source, ..)` arg (no subscript) on an arrayed source ⇒
+/// all-`Reduced` (`[Reduced{subset: None}; source.dims.len()]`). A reference
+/// to a *scalar* model variable ⇒ `None` (it's not a reducer source). A
+/// `Subscript` whose index count doesn't match the source's dimension count
+/// ⇒ `None` (conservative -- a partial subscript is not the case Phase 4
+/// hoists).
+fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<AxisRead>> {
+    let variables = ctx.variables;
+    let source_dims = |ident: &Ident<Canonical>| -> Option<&[crate::dimensions::Dimension]> {
+        let dims = variables.get(ident).and_then(|v| v.get_dimensions())?;
+        if dims.is_empty() { None } else { Some(dims) }
+    };
+
+    match arg_expr {
+        Expr2::Var(ident, _, _) => {
+            // A bare arrayed-variable arg reads the whole array.
+            let dims = source_dims(ident)?;
+            Some(vec![AxisRead::Reduced { subset: None }; dims.len()])
+        }
+        Expr2::Subscript(ident, indices, _, _) => {
+            let dims = source_dims(ident)?;
+            // A partial subscript (fewer/more indices than the source has
+            // dimensions) is not the case Phase 4 hoists -- stay conservative.
+            if indices.len() != dims.len() {
+                return None;
+            }
+            indices
+                .iter()
+                .zip(dims)
+                .map(|(idx, axis_dim)| {
+                    classify_axis_access(idx, axis_dim, ctx.target_iterated_dims, ctx.dim_ctx)
+                })
+                .collect()
+        }
+        _ => None,
+    }
+}
+
+/// Classify ONE subscript index against one source axis -- the single
+/// per-axis access classifier (shape-expressiveness design, T1). Shared by
+/// [`compute_read_slice`] (reducer args); the direct-reference classifier
+/// (`db::ltm_ir::classify_iterated_dim_shape`) is rewired onto it in a later
+/// task of the same design, so the reducer path and the reference path can
+/// never disagree about an axis.
+///
+/// Returns `None` for anything not statically describable (a dynamic
+/// expression, a `@N` position, a `Range`, a declined mapping, a StarRange
+/// naming a non-subdimension) -- the enclosing reducer is then not hoisted
+/// and its reference stays on the conservative path. Per index:
+///
+/// - `IndexExpr2::Wildcard(_)` ⇒ `Reduced{subset: None}` (full extent).
+/// - `IndexExpr2::StarRange(D, _)` (GH #766): `D` the axis's own dimension
+///   ⇒ `Reduced{subset: None}` (full extent, byte-identical to `*`); `D` a
+///   PROPER subdimension of the axis's dimension ⇒ `Reduced{subset:
+///   Some(elems)}`, the subdimension's elements resolved via
+///   [`crate::dimensions::DimensionsContext::get_subdimension_relation`]
+///   (a subdimension that covers the whole axis normalizes back to
+///   `subset: None`, invariant I3); `D` neither ⇒ **decline** -- such a
+///   subscript is at best a mid-edit inconsistency and must not silently
+///   widen to the full extent.
 /// - `IndexExpr2::Expr(Expr2::Var(d, ..))` where `d` (canonical) is one of
 ///   the *target equation's* iterated dimensions AND matches the source's
-///   `i`-th declared dimension either *by name* or via a positional
-///   dimension MAPPING declared on `d` toward it (`has_mapping_to(d, src)`
-///   -- the same declared direction `classify_iterated_dim_shape`'s mapped
-///   arm accepts -- with a usable [`iterated_axis_slot_elements`] remap,
-///   which inherits `mapped_element_correspondence`'s positional-only gate)
+///   axis dimension either *by name* or via a positional dimension MAPPING
+///   declared on `d` toward it (`has_mapping_to(d, src)` -- the same
+///   declared direction `classify_iterated_dim_shape`'s mapped arm accepts
+///   -- with a usable [`iterated_axis_slot_elements`] remap, which inherits
+///   `mapped_element_correspondence`'s positional-only gate)
 ///   ⇒ [`AxisRead::Iterated`] carrying the `(d, src)` pair (GH #534). The
 ///   three `Iterated`-axis consumers (`emit_agg_routed_edges`,
 ///   `read_slice_rows` behind `emit_source_to_agg_link_scores`, and
@@ -902,116 +1000,102 @@ fn reducer_source_vars(
 ///   *whole*-equation-iterated subscript, not a sliced reducer argument --
 ///   is a separate code path and is unaffected.)
 /// - `IndexExpr2::Expr(Expr2::Var(elem, ..))` or `Expr2::Const` resolving to
-///   a literal element / 1-based index of the source's `i`-th dimension ⇒
+///   a literal element / 1-based index of the axis's dimension ⇒
 ///   [`AxisRead::Pinned`] carrying that element's canonical name.
 /// - anything else (`DimPosition`, `Range`, a non-literal `Expr`, a
 ///   `Var`/`Const` that resolves to neither an iterated dim nor a literal
 ///   element) ⇒ `None`.
-///
-/// A bare `Expr2::Var(source, ..)` arg (no subscript) on an arrayed source ⇒
-/// all-`Reduced` (`[Reduced; source.dims.len()]`). A reference to a *scalar*
-/// model variable ⇒ `None` (it's not a reducer source). A `Subscript` whose
-/// index count doesn't match the source's dimension count ⇒ `None`
-/// (conservative -- a partial subscript is not the case Phase 4 hoists).
-fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<AxisRead>> {
-    let target_iterated_dims = ctx.target_iterated_dims;
-    let variables = ctx.variables;
-    let source_dims = |ident: &Ident<Canonical>| -> Option<&[crate::dimensions::Dimension]> {
-        let dims = variables.get(ident).and_then(|v| v.get_dimensions())?;
-        if dims.is_empty() { None } else { Some(dims) }
-    };
-
-    match arg_expr {
-        Expr2::Var(ident, _, _) => {
-            // A bare arrayed-variable arg reads the whole array.
-            let dims = source_dims(ident)?;
-            Some(vec![AxisRead::Reduced; dims.len()])
-        }
-        Expr2::Subscript(ident, indices, _, _) => {
-            let dims = source_dims(ident)?;
-            // A partial subscript (fewer/more indices than the source has
-            // dimensions) is not the case Phase 4 hoists -- stay conservative.
-            if indices.len() != dims.len() {
-                return None;
+fn classify_axis_access(
+    idx: &IndexExpr2,
+    axis_dim: &crate::dimensions::Dimension,
+    target_iterated_dims: &[String],
+    dim_ctx: &crate::dimensions::DimensionsContext,
+) -> Option<AxisRead> {
+    use crate::common::CanonicalDimensionName;
+    match idx {
+        IndexExpr2::Wildcard(_) => Some(AxisRead::Reduced { subset: None }),
+        IndexExpr2::StarRange(named, _) => {
+            let axis_canon = axis_dim.canonical_name();
+            if named == axis_canon {
+                // `*:D` over the axis's own dimension: the full extent.
+                return Some(AxisRead::Reduced { subset: None });
             }
-            let mut slice: Vec<AxisRead> = Vec::with_capacity(indices.len());
-            for (i, idx) in indices.iter().enumerate() {
-                let axis = match idx {
-                    IndexExpr2::Wildcard(_) | IndexExpr2::StarRange(_, _) => AxisRead::Reduced,
-                    IndexExpr2::Range(_, _, _) | IndexExpr2::DimPosition(_, _) => return None,
-                    IndexExpr2::Expr(Expr2::Var(name, _, _)) => {
-                        let name_str = name.as_str();
-                        let src_dim_name = dims[i].name();
-                        // An iterated-dimension index: the axis is iterated
-                        // over the target's dimension space (and the agg
-                        // result varies per element of it) iff `name` is one
-                        // of the target's iterated dims AND it lines up with
-                        // the source's i-th dim by name or by a positional
-                        // mapping (GH #534).
-                        if target_iterated_dims.iter().any(|t| t == name_str) {
-                            if name_str == src_dim_name {
-                                AxisRead::Iterated {
-                                    dim: name_str.to_string(),
-                                    source_dim: src_dim_name.to_string(),
-                                }
-                            } else {
-                                // The iterated dim names a *different* source
-                                // axis: a positional remap (`State→Region`,
-                                // GH #534) is accepted -- carrying the
-                                // (target, source) pair so the emitters remap
-                                // each row to its slot -- when (a) the mapping
-                                // is declared on the iterated dim toward the
-                                // source's dim (the same direction
-                                // `classify_iterated_dim_shape`'s mapped arm
-                                // accepts; the reverse-declared direction is
-                                // GH #757 and stays conservative) and (b) the
-                                // slot remap exists (positional mappings
-                                // only: explicit element maps decline via
-                                // `mapped_element_correspondence`'s GH #756
-                                // gate). Everything else -- a plain position
-                                // mismatch, an element-mapped or
-                                // reverse-declared pair -- declines, keeping
-                                // the reference on the conservative path.
-                                use crate::common::CanonicalDimensionName;
-                                let d_canon = CanonicalDimensionName::from_raw(name_str);
-                                let src_canon = CanonicalDimensionName::from_raw(src_dim_name);
-                                let elems = crate::ltm_augment::dimension_element_names(&dims[i]);
-                                if ctx.dim_ctx.has_mapping_to(&d_canon, &src_canon)
-                                    && iterated_axis_slot_elements(
-                                        name_str,
-                                        src_dim_name,
-                                        &elems,
-                                        ctx.dim_ctx,
-                                    )
-                                    .is_some()
-                                {
-                                    AxisRead::Iterated {
-                                        dim: name_str.to_string(),
-                                        source_dim: src_dim_name.to_string(),
-                                    }
-                                } else {
-                                    return None;
-                                }
-                            }
-                        } else if let Some(elem) = resolve_literal_axis_index(idx, &dims[i]) {
-                            AxisRead::Pinned(elem)
-                        } else {
-                            return None;
-                        }
-                    }
-                    IndexExpr2::Expr(Expr2::Const(..)) => {
-                        match resolve_literal_axis_index(idx, &dims[i]) {
-                            Some(elem) => AxisRead::Pinned(elem),
-                            None => return None,
-                        }
-                    }
-                    IndexExpr2::Expr(_) => return None,
+            let rel = dim_ctx.get_subdimension_relation(named, axis_canon)?;
+            let elems = crate::ltm_augment::dimension_element_names(axis_dim);
+            if rel.parent_offsets.is_empty() || rel.parent_offsets.len() >= elems.len() {
+                // Empty subdimensions don't exist in well-formed models
+                // (decline defensively); a same-cardinality "sub" is the
+                // same element SET as the axis (containment + equal size),
+                // so it normalizes to the full extent -- keeping the
+                // full-extent representation unique (invariant I3).
+                return if rel.parent_offsets.len() == elems.len() {
+                    Some(AxisRead::Reduced { subset: None })
+                } else {
+                    None
                 };
-                slice.push(axis);
             }
-            Some(slice)
+            let subset: Vec<String> = rel
+                .parent_offsets
+                .iter()
+                .map(|&o| elems.get(o).cloned())
+                .collect::<Option<_>>()?;
+            Some(AxisRead::Reduced {
+                subset: Some(subset),
+            })
         }
-        _ => None,
+        IndexExpr2::Range(_, _, _) | IndexExpr2::DimPosition(_, _) => None,
+        IndexExpr2::Expr(Expr2::Var(name, _, _)) => {
+            let name_str = name.as_str();
+            let src_dim_name = axis_dim.name();
+            // An iterated-dimension index: the axis is iterated over the
+            // target's dimension space (and the agg result varies per
+            // element of it) iff `name` is one of the target's iterated
+            // dims AND it lines up with the source's axis dim by name or by
+            // a positional mapping (GH #534).
+            if target_iterated_dims.iter().any(|t| t == name_str) {
+                if name_str == src_dim_name {
+                    Some(AxisRead::Iterated {
+                        dim: name_str.to_string(),
+                        source_dim: src_dim_name.to_string(),
+                    })
+                } else {
+                    // The iterated dim names a *different* source axis: a
+                    // positional remap (`State→Region`, GH #534) is accepted
+                    // -- carrying the (target, source) pair so the emitters
+                    // remap each row to its slot -- when (a) the mapping is
+                    // declared on the iterated dim toward the source's dim
+                    // (the same direction `classify_iterated_dim_shape`'s
+                    // mapped arm accepts; the reverse-declared direction is
+                    // GH #757 and stays conservative) and (b) the slot remap
+                    // exists (positional mappings only: explicit element
+                    // maps decline via `mapped_element_correspondence`'s
+                    // GH #756 gate). Everything else -- a plain position
+                    // mismatch, an element-mapped or reverse-declared pair
+                    // -- declines, keeping the reference on the
+                    // conservative path.
+                    let d_canon = CanonicalDimensionName::from_raw(name_str);
+                    let src_canon = CanonicalDimensionName::from_raw(src_dim_name);
+                    let elems = crate::ltm_augment::dimension_element_names(axis_dim);
+                    if dim_ctx.has_mapping_to(&d_canon, &src_canon)
+                        && iterated_axis_slot_elements(name_str, src_dim_name, &elems, dim_ctx)
+                            .is_some()
+                    {
+                        Some(AxisRead::Iterated {
+                            dim: name_str.to_string(),
+                            source_dim: src_dim_name.to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                resolve_literal_axis_index(idx, axis_dim).map(AxisRead::Pinned)
+            }
+        }
+        IndexExpr2::Expr(Expr2::Const(..)) => {
+            resolve_literal_axis_index(idx, axis_dim).map(AxisRead::Pinned)
+        }
+        IndexExpr2::Expr(_) => None,
     }
 }
 
@@ -1175,7 +1259,7 @@ fn result_dims_from_read_slice(
             // equation, the agg→target projection (GH #528), and the
             // element-graph slot naming all key on.
             AxisRead::Iterated { dim, .. } => Some(canonical_dim_to_datamodel(dim, dm_dims)),
-            AxisRead::Pinned(_) | AxisRead::Reduced => None,
+            AxisRead::Pinned(_) | AxisRead::Reduced { .. } => None,
         })
         .collect()
 }
@@ -1219,6 +1303,13 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
 ///   edges whose loop scores fail fragment compile with `Warning`s) for
 ///   silently wrong numbers; the exclusion goes when that derivation
 ///   respects the read slice.
+/// - a subset-bearing `Reduced` slice (`out[D1] = MEAN(matrix[D1,*:Sub])`,
+///   GH #766): the same hazard as the Pinned exclusion -- the
+///   `try_cross_dimensional_link_scores` derivation enumerates the full
+///   cartesian, so a subset slice's MEAN divisor would count the unread
+///   rows. Excluded onto the same loud conservative regime until that
+///   derivation consumes the read slice (T3 of the shape-expressiveness
+///   design, where this gate generalizes and both exclusions go together).
 pub(crate) fn variable_backed_partial_reduce_agg<'a>(
     aggs: &'a AggNodesResult,
     from: &str,
@@ -1235,11 +1326,13 @@ pub(crate) fn variable_backed_partial_reduce_agg<'a>(
             && a.read_slice
                 .iter()
                 .any(|ax| matches!(ax, AxisRead::Iterated { .. }))
-            // Every axis Iterated or Reduced: a Pinned-bearing slice is
-            // excluded (see the rustdoc's last bullet).
+            // Every axis Iterated or full-extent Reduced: a Pinned-bearing
+            // or subset-bearing slice is excluded (see the rustdoc's last
+            // two bullets -- both go when try_cross_dimensional_link_scores
+            // derives its rows from the read slice, T3).
             && a.read_slice
                 .iter()
-                .all(|ax| matches!(ax, AxisRead::Iterated { .. } | AxisRead::Reduced))
+                .all(|ax| matches!(ax, AxisRead::Iterated { .. } | AxisRead::Reduced { subset: None }))
             && a.result_dims.len() == to_dims.len()
             && a.result_dims
                 .iter()
@@ -1377,7 +1470,7 @@ mod tests {
                     dim: "d1".to_string(),
                     source_dim: "d1".to_string()
                 },
-                AxisRead::Reduced
+                AxisRead::Reduced { subset: None }
             ]
         );
     }
@@ -1853,7 +1946,10 @@ mod tests {
         assert_eq!(synthetic[0].source_vars, vec!["pop".to_string()]);
         assert_eq!(
             synthetic[0].read_slice,
-            vec![AxisRead::Pinned("nyc".to_string()), AxisRead::Reduced]
+            vec![
+                AxisRead::Pinned("nyc".to_string()),
+                AxisRead::Reduced { subset: None }
+            ]
         );
         assert!(
             synthetic[0].result_dims.is_empty(),
@@ -1900,7 +1996,7 @@ mod tests {
                     dim: "d1".to_string(),
                     source_dim: "d1".to_string()
                 },
-                AxisRead::Reduced
+                AxisRead::Reduced { subset: None }
             ]
         );
         assert_eq!(synthetic[0].result_dims, vec!["D1".to_string()]);
@@ -1951,7 +2047,7 @@ mod tests {
                     source_dim: "d1".to_string()
                 },
                 AxisRead::Pinned("nyc".to_string()),
-                AxisRead::Reduced
+                AxisRead::Reduced { subset: None }
             ]
         );
         assert_eq!(synthetic[0].result_dims, vec!["D1".to_string()]);
@@ -1981,7 +2077,10 @@ mod tests {
             "a multi-source reducer with agreeing slices must mint one synthetic agg; got: {:?}",
             result.aggs
         );
-        assert_eq!(synthetic[0].read_slice, vec![AxisRead::Reduced]);
+        assert_eq!(
+            synthetic[0].read_slice,
+            vec![AxisRead::Reduced { subset: None }]
+        );
         assert!(synthetic[0].result_dims.is_empty());
         // `source_vars` lists every arrayed model variable in the argument.
         let mut srcs = synthetic[0].source_vars.clone();
@@ -2062,7 +2161,7 @@ mod tests {
                     dim: "state".to_string(),
                     source_dim: "region".to_string()
                 },
-                AxisRead::Reduced
+                AxisRead::Reduced { subset: None }
             ]
         );
         assert_eq!(
@@ -2179,7 +2278,7 @@ mod tests {
                     dim: "state".to_string(),
                     source_dim: "region".to_string()
                 },
-                AxisRead::Reduced
+                AxisRead::Reduced { subset: None }
             ]
         );
         assert_eq!(agg.result_dims, vec!["State".to_string()]);
@@ -2306,7 +2405,10 @@ mod tests {
         assert_eq!(synthetic[0].source_vars, vec!["matrix".to_string()]);
         assert_eq!(
             synthetic[0].read_slice,
-            vec![AxisRead::Reduced, AxisRead::Reduced]
+            vec![
+                AxisRead::Reduced { subset: None },
+                AxisRead::Reduced { subset: None }
+            ]
         );
         assert!(synthetic[0].result_dims.is_empty());
     }
@@ -2346,16 +2448,18 @@ mod tests {
         assert_eq!(reducer_kind(&size), Some(ReducerKind::Constant));
         assert_eq!(reducer_kind(&abs), None);
 
-        // Hoistable: recognized AND not Constant -- SUM / 1-arg MEAN /
-        // 1-arg MIN / 1-arg MAX / STDDEV / RANK. SIZE is recognized but never
-        // hoisted (its link score is always 0); 2-arg MIN/MAX are not
-        // recognized at all.
+        // Hoistable: recognized AND not Constant AND scalar-valued (I5) --
+        // SUM / 1-arg MEAN / 1-arg MIN / 1-arg MAX / STDDEV. SIZE is
+        // recognized but never hoisted (its link score is always 0); RANK is
+        // recognized but never hoisted (array-valued -- a scalar agg node
+        // for it cannot compile, GH #771); 2-arg MIN/MAX are not recognized
+        // at all.
         assert!(reducer_is_hoistable(&sum));
         assert!(reducer_is_hoistable(&mean_1));
         assert!(reducer_is_hoistable(&min_1));
         assert!(reducer_is_hoistable(&max_1));
         assert!(reducer_is_hoistable(&stddev));
-        assert!(reducer_is_hoistable(&rank));
+        assert!(!reducer_is_hoistable(&rank));
         assert!(!reducer_is_hoistable(&size));
         assert!(!reducer_is_hoistable(&mean_2));
         assert!(!reducer_is_hoistable(&min_2));
@@ -2386,5 +2490,190 @@ mod tests {
             Some(ReducerKind::Constant)
         );
         assert_eq!(reducer_kind_from_name("abs", 1), None);
+    }
+
+    /// GH #771: a RANK subexpression is NOT hoisted -- RANK is array-valued
+    /// (Vensim VECTOR RANK), so a scalar agg node for it has an ill-typed
+    /// equation. `reducer_is_hoistable` requires
+    /// `reducer_collapses_to_scalar` (invariant I5), keeping the `pop`
+    /// reference on the Direct path (`Bare` -> diagonal edges, scored by
+    /// the GH #742 arrayed-capture machinery).
+    #[test]
+    fn rank_subexpression_is_not_hoisted() {
+        let project = TestProject::new("rank_not_hoisted")
+            .named_dimension("Region", &["north", "south"])
+            .array_aux("pop[Region]", "100")
+            .array_aux("scale[Region]", "pop[Region] * 0.01")
+            .array_aux("grow[Region]", "scale[Region] * RANK(pop, 1)");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.is_empty(),
+            "RANK must not mint an aggregate node; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// GH #771 (whole-RHS form): `r[Region] = RANK(pop, 1)` is not a
+    /// variable-backed aggregate node either -- the de-hoist applies to
+    /// both agg kinds (the gate is `reducer_source_vars`'
+    /// `reducer_is_hoistable`, shared by both walks).
+    #[test]
+    fn rank_whole_rhs_is_not_variable_backed() {
+        let project = TestProject::new("rank_whole_rhs")
+            .named_dimension("Region", &["north", "south"])
+            .array_aux("pop[Region]", "100")
+            .array_aux("r[Region]", "RANK(pop, 1)");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.is_empty(),
+            "whole-RHS RANK must not become a variable-backed agg; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// GH #766: a StarRange naming a dimension that is NEITHER the axis's
+    /// own dimension NOR a proper subdimension of it (at best a mid-edit
+    /// inconsistency) DECLINES the hoist -- it must not silently widen to
+    /// the full extent. The reducer stays on the conservative path.
+    #[test]
+    fn star_range_non_subdimension_declines_hoist() {
+        let project = TestProject::new("star_range_decline")
+            .named_dimension("Region", &["a", "b", "c"])
+            .named_dimension("Other", &["p", "q"])
+            .array_aux("arr[Region]", "10")
+            .scalar_aux("x", "1 + MEAN(arr[*:Other])");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.is_empty(),
+            "a non-subdimension StarRange must decline the hoist; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// GH #766: a StarRange over the axis's OWN dimension (`SUM(arr[*:Region])`
+    /// where `arr` is declared over `Region`) is the full extent --
+    /// `Reduced{subset: None}`, byte-identical to a plain `*`.
+    #[test]
+    fn star_range_own_dimension_is_full_extent() {
+        let project = TestProject::new("star_range_own_dim")
+            .named_dimension("Region", &["a", "b", "c"])
+            .array_aux("arr[Region]", "10")
+            .scalar_aux("x", "1 + SUM(arr[*:Region])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            synthetic[0].read_slice,
+            vec![AxisRead::Reduced { subset: None }]
+        );
+    }
+
+    /// GH #766: a StarRange over a PROPER subdimension carries the
+    /// subdimension's elements as the `Reduced` subset (canonical names, in
+    /// subdimension-declared order, resolved via `SubdimensionRelation`).
+    #[test]
+    fn star_range_proper_subdimension_carries_subset() {
+        let project = TestProject::new("star_range_subset")
+            .named_dimension("Region", &["a", "b", "c"])
+            .named_dimension("Core", &["a", "b"])
+            .array_aux("arr[Region]", "10")
+            .scalar_aux("x", "1 + MEAN(arr[*:Core])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            synthetic[0].read_slice,
+            vec![AxisRead::Reduced {
+                subset: Some(vec!["a".to_string(), "b".to_string()])
+            }]
+        );
+        assert!(synthetic[0].result_dims.is_empty());
+    }
+
+    /// GH #766 (composition): a subset StarRange composes with an iterated
+    /// axis -- `out[D1] = 1 + SUM(matrix[D1, *:SubD2])` hoists a synthetic
+    /// agg whose slice is `[Iterated(d1), Reduced{subset}]` and whose
+    /// `result_dims` carry `D1`.
+    #[test]
+    fn star_range_subset_composes_with_iterated_axis() {
+        let project = TestProject::new("star_range_iterated_subset")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y", "z"])
+            .named_dimension("SubD2", &["x", "y"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct(
+                "out",
+                vec!["D1".into()],
+                "1 + SUM(matrix[D1, *:SubD2])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            synthetic[0].read_slice,
+            vec![
+                AxisRead::Iterated {
+                    dim: "d1".to_string(),
+                    source_dim: "d1".to_string()
+                },
+                AxisRead::Reduced {
+                    subset: Some(vec!["x".to_string(), "y".to_string()])
+                }
+            ]
+        );
+        assert_eq!(synthetic[0].result_dims, vec!["D1".to_string()]);
+    }
+
+    /// GH #766 / T3 boundary: a VARIABLE-BACKED partial reduce whose slice
+    /// carries a SUBSET (`out[D1] = SUM(matrix[D1,*:SubD2])` as the whole
+    /// RHS) is excluded from `variable_backed_partial_reduce_agg` exactly
+    /// like the Pinned-bearing slice: `try_cross_dimensional_link_scores`
+    /// still derives co-reduced rows from the full cartesian, so admitting
+    /// the subset slice would pair subset edges with full-extent divisors
+    /// (silently wrong numbers). The exclusion goes in T3 with the
+    /// derivation swap.
+    #[test]
+    fn variable_backed_subset_slice_is_excluded_from_partial_reduce_gate() {
+        let project = TestProject::new("vb_subset_excluded")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y", "z"])
+            .named_dimension("SubD2", &["x", "y"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct("out", vec!["D1".into()], "SUM(matrix[D1, *:SubD2])", None);
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
+
+        // The variable-backed agg exists and carries the subset...
+        let agg = result
+            .aggs_in_var("out")
+            .find(|a| a.name == "out")
+            .expect("expected a variable-backed agg owned by `out`");
+        assert!(matches!(
+            &agg.read_slice[1],
+            AxisRead::Reduced { subset: Some(s) } if s == &["x".to_string(), "y".to_string()]
+        ));
+
+        // ...but the #752 gate declines it (the loud conservative regime).
+        let dim_ctx = crate::db::project_dimensions_context(&db, sync.project);
+        let to_dims = vec![
+            dim_ctx
+                .get(&crate::common::CanonicalDimensionName::from_raw("d1"))
+                .expect("D1 resolves")
+                .clone(),
+        ];
+        assert!(
+            variable_backed_partial_reduce_agg(result, "matrix", "out", &to_dims).is_none(),
+            "subset-bearing variable-backed slices must stay on the conservative path until T3"
+        );
     }
 }

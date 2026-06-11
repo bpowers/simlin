@@ -576,26 +576,38 @@ fn test_get_errors_no_ltm_diagnostics_when_ltm_never_requested() {
 /// accumulator, so `simlin_project_get_errors` surfaces it after an
 /// LTM-enabled sim was created.
 ///
-/// The fixture is the GH #742 RANK shape (`grow[Region] = scale[Region] *
-/// RANK(pop, 1)` in a feedback loop): the array-valued RANK is hoisted into
-/// a scalar `$⁚ltm⁚agg⁚0` aggregate whose own fragment is ill-typed and
-/// genuinely fails to compile today (a real, non-injected failure). The
-/// previous fixture here was the GH #759 pinned-index repro, retired when
-/// #759's fix made its helpers compile; the assertion matches the shared
-/// "failed to compile" wording rather than one diagnostic sub-class, so the
-/// test keeps covering the FFI harvest channel as individual shapes get
-/// fixed (the engine-side guard-injected
+/// The fixture is the Pinned-bearing variable-backed mixed reduce
+/// (`outf[D1] = MEAN(cube[D1,x,*])` in a feedback loop, the GH #765
+/// family): `variable_backed_partial_reduce_agg` excludes Pinned-bearing
+/// slices onto the loud conservative cross-product, whose off-diagonal
+/// circuits' loop scores reference per-`(row, slot)` link-score names that
+/// are never emitted, so those fragments genuinely fail to compile today
+/// (a real, non-injected failure). The previous fixtures here were the
+/// GH #759 pinned-index repro (retired when #759's fix made its helpers
+/// compile) and the GH #742 RANK-hoisted agg (retired when the GH #771
+/// de-hoist stopped minting the ill-shaped agg); the assertion matches the
+/// shared "failed to compile" wording rather than one diagnostic sub-class,
+/// so the test keeps covering the FFI harvest channel as individual shapes
+/// get fixed -- this shape's fix is T3 of the shape-expressiveness design,
+/// which must rotate the fixture again (the engine-side guard-injected
 /// `test_model_ltm_fragment_diagnostics_covers_implicit_helpers` covers the
 /// implicit-helper diagnostic leg independently of any real-shape lifetime).
 #[test]
 fn test_get_errors_surfaces_ltm_fragment_failure_after_ltm_sim() {
     let datamodel = TestProject::new("get_errors_fragment_fail")
         .with_sim_time(0.0, 8.0, 1.0)
-        .named_dimension("Region", &["north", "south"])
-        .array_aux("scale[Region]", "pop[Region] * 0.01")
-        .array_aux("grow[Region]", "scale[Region] * RANK(pop, 1)")
-        .array_flow("inflow[Region]", "grow[Region]", None)
-        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .array_aux_direct(
+            "cube",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_aux_direct("outf", vec!["D1".into()], "MEAN(cube[D1, x, *])", None)
+        .array_flow("inflow[D1]", "outf[D1]", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
         .build_datamodel();
     let proj = open_project_from_datamodel(&datamodel);
 

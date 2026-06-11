@@ -4054,13 +4054,18 @@ fn previous_of_rank_compiles_per_element() {
 /// element from the first post-initial step (pre-fix it read a constant
 /// -100-class value off the 0-stubbed scalar helpers).
 ///
-/// The one remaining degradation in this fixture is OUT of #742's scope:
-/// `enumerate_agg_nodes` hoists the whole-extent `RANK(pop, 1)` into a
-/// scalar `$⁚ltm⁚agg⁚0` whose own (array-valued) equation cannot compile --
-/// the "RANK as the scored reducer itself" path (docs/tech-debt.md entry
-/// 27's family), tracked as GH #771. That failure is loud (one
-/// synthetic-variable Warning, pinned here) and zeroes only the agg-routed
-/// loop scores.
+/// GH #771 (shape-expressiveness T1): `RANK` is no longer hoisted into an
+/// aggregate node -- hoisting requires `reducer_collapses_to_scalar`
+/// (invariant I5), and RANK is array-valued, so the scalar `$⁚ltm⁚agg⁚0`
+/// whose own equation could not compile (and whose agg-routed loop scores
+/// were stubbed to 0 behind one pinned Warning) is never minted. The `pop`
+/// reference inside `RANK(pop, 1)` classifies by its syntactic shape
+/// (`Bare` -> diagonal edges), so this fixture now compiles with ZERO
+/// warnings and the direct `pop → grow` loop is genuinely enumerated.
+/// Residual (documented on `reducer_collapses_to_scalar`): loops through
+/// the rank *ordering* (element r's rank changing because element s moved
+/// past it) are not enumerated; the diagonal `pop → grow` loop scores ~0
+/// here because the ranks are constant in this regime -- pinned below.
 #[test]
 fn rank_frozen_subtree_link_score_scores_correctly() {
     let project = TestProject::new("gh742_rank")
@@ -4079,18 +4084,12 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("LTM-enabled compilation should succeed");
 
-    // The capture helpers compile: the ONLY degradation left is the
-    // out-of-scope RANK-hoisted scalar agg (see the doc comment).
+    // GH #771: RANK is de-hoisted, so no ill-shaped scalar agg exists and
+    // NOTHING warns -- the capture helpers and every link/loop score compile.
     let warnings = assembly_warnings(&db, sync.project);
-    assert_eq!(
-        warnings.len(),
-        1,
-        "only the RANK-hoisted agg may warn; got: {warnings:?}"
-    );
-    assert_eq!(
-        warnings[0].variable.as_deref(),
-        Some("$\u{205A}ltm\u{205A}agg\u{205A}0"),
-        "the remaining warning must be the RANK-hoisted synthetic agg; got: {warnings:?}"
+    assert!(
+        warnings.is_empty(),
+        "RANK de-hoist must leave zero warnings; got: {warnings:?}"
     );
 
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
@@ -4131,22 +4130,69 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
         }
     }
 
-    // The direct (non-agg-routed) per-element loop -- the A2A loop over
-    // Region (pop -> scale -> grow -> inflow -> pop) -- scores +1 once the
-    // flow-to-stock startup guard clears.
-    let loop_var = ltm
+    // Post-#771 the model has TWO Region-dimensioned loops: the
+    // scale-mediated one (pop -> scale -> grow -> inflow -> pop) and the
+    // direct rank-mediated one (pop -> grow -> inflow -> pop), which only
+    // exists now that the de-hoisted `pop` reference inside `RANK(pop, 1)`
+    // emits diagonal Bare edges. Tell them apart by the link-score names
+    // their loop-score equations reference.
+    fn eqn_text(v: &LtmSyntheticVar) -> &str {
+        match &v.equation {
+            datamodel::Equation::Scalar(t) => t,
+            datamodel::Equation::ApplyToAll(_, t) => t,
+            datamodel::Equation::Arrayed(..) => panic!("unexpected Arrayed loop score"),
+        }
+    }
+    let region_loops: Vec<&LtmSyntheticVar> = ltm
         .vars
         .iter()
         .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
-        .find(|v| v.dimensions == vec!["Region".to_string()])
+        .filter(|v| v.dimensions == vec!["Region".to_string()])
+        .collect();
+    assert_eq!(
+        region_loops.len(),
+        2,
+        "expected the scale-mediated and rank-mediated Region loops; got: {:?}",
+        region_loops
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // The scale-mediated loop scores +1 once the flow-to-stock startup
+    // guard clears (grow is linear in scale with a constant rank coefficient).
+    let scale_loop = region_loops
+        .iter()
+        .find(|v| eqn_text(v).contains("scale\u{2192}grow"))
         .expect("the per-element pop/scale/grow/inflow loop must be scored");
-    let base = offset_of(&results, &loop_var.name);
-    for slot in 0..slot_count(loop_var, &project.dimensions) {
+    let base = offset_of(&results, &scale_loop.name);
+    for slot in 0..slot_count(scale_loop, &project.dimensions) {
         let series = series_at(&results, base + slot);
         for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
             assert!(
                 (v - 1.0).abs() < 1e-6,
-                "loop score slot {slot} step {step} must be +1; got {series:?}"
+                "scale-loop score slot {slot} step {step} must be +1; got {series:?}"
+            );
+        }
+    }
+
+    // The rank-mediated loop (pop -> grow direct) scores ~0: the ranks are
+    // constant in this regime, so `grow`'s changed-first partial w.r.t.
+    // `pop` is flat. This pins the documented #771 residual -- the diagonal
+    // pop->grow coupling is enumerated but carries no score here, and
+    // cross-element rank-ordering loops are not enumerated at all.
+    let rank_loop = region_loops
+        .iter()
+        .find(|v| eqn_text(v).contains("pop\u{2192}grow"))
+        .expect("the direct pop/grow/inflow loop must be scored");
+    let base = offset_of(&results, &rank_loop.name);
+    for slot in 0..slot_count(rank_loop, &project.dimensions) {
+        let series = series_at(&results, base + slot);
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
+            assert!(
+                v.abs() < 1e-9,
+                "rank-loop score slot {slot} step {step} must be ~0 (constant ranks); \
+                 got {series:?}"
             );
         }
     }
@@ -4442,5 +4488,148 @@ fn gh746_arrayed_cycle_detected_and_scored_ids_biject() {
             l.variables,
             l.polarity
         );
+    }
+}
+
+/// GH #766 (shape-expressiveness T1): an INLINE reducer over a *proper
+/// subdimension* StarRange (`x = 1 + MEAN(arr[*:Core])`, `Core = {a, b}` a
+/// proper subdimension of `arr`'s `Region = {a, b, c}`) hoists into a
+/// synthetic agg whose read slice carries the SUBSET, so:
+///
+/// - only the subset rows get `arr[<row>] → agg` link scores -- no
+///   `arr[c] → agg` score variable exists (pre-fix the full parent extent
+///   was enumerated, minting a spurious `arr[c]` score);
+/// - the MEAN divisor is the SUBSET size (2), not the parent extent (3):
+///   the two subset rows grow by identical per-step deltas, so each row's
+///   changed-first linear partial reads exactly `(Δrow/2) / Δagg = 0.5`
+///   (the pre-fix full-extent divisor read 1/3);
+/// - no feedback loop is enumerated through the unread `arr[c]` row
+///   (pre-fix the element graph routed `arr[c] → agg`, so the enumerator
+///   discovered a loop the reducer never closes).
+///
+/// The `c` row grows 5x faster than the subset rows, so the agg-value
+/// assertion also pins that the SIMULATION reduces over the subset only
+/// (the agg aux keeps the original `mean(arr[*:core])` equation text --
+/// the compiled simulation already evaluates the subset; only LTM's row
+/// enumeration was coarse).
+#[test]
+fn inline_subset_reducer_mean_divisor_and_scores() {
+    let project = TestProject::new("gh766_inline_subset")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_with_ranges("factor[Region]", vec![("a", "1"), ("b", "1"), ("c", "5")])
+        .scalar_aux("x", "1 + MEAN(arr[*:Core])")
+        .array_flow("inflow[Region]", "x * 0.1 * factor[Region]", None)
+        .array_stock("arr[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "subset reducer must compile with zero warnings; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Only the subset rows are scored into the agg.
+    for row in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}{agg}");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected subset-row link score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    let phantom = format!("{LINK_SCORE_PREFIX}arr[c]\u{2192}{agg}");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != phantom),
+        "the unread `arr[c]` row must get NO link score into the agg; got {phantom:?}"
+    );
+
+    // No enumerated loop traverses the unread `arr[c]` row.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v == "arr[c]"),
+            "no loop may run through the unread arr[c] row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // The agg value is the mean over the SUBSET only; `c` diverges from the
+    // subset rows after the first step, so a full-extent mean would differ.
+    let agg_series = series_at(&results, offset_of(&results, agg));
+    let arr_a = series_at(&results, offset_of(&results, "arr[a]"));
+    let arr_b = series_at(&results, offset_of(&results, "arr[b]"));
+    let arr_c = series_at(&results, offset_of(&results, "arr[c]"));
+    for step in 0..agg_series.len() {
+        let subset_mean = (arr_a[step] + arr_b[step]) / 2.0;
+        assert!(
+            (agg_series[step] - subset_mean).abs() < 1e-9,
+            "agg at step {step} must be the subset mean {subset_mean}; got {}",
+            agg_series[step]
+        );
+    }
+    assert!(
+        arr_c.last().unwrap() > arr_a.last().unwrap(),
+        "fixture sanity: the out-of-subset row must diverge from the subset rows"
+    );
+
+    // The MEAN divisor is the subset size: with Δarr[a] == Δarr[b] each
+    // subset row's link score is exactly (Δrow/2)/Δagg = 0.5 once PREVIOUS
+    // has one step of history. (The buggy full-extent divisor read 1/3.)
+    for row in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}{agg}");
+        let series = series_at(&results, offset_of(&results, &name));
+        assert_eq!(
+            series[0], 0.0,
+            "initial-step guard pins arr[{row}]→agg to 0"
+        );
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 0.5).abs() < 1e-9,
+                "arr[{row}]→agg at step {step} must score 0.5 (subset divisor); got {series:?}"
+            );
+        }
+    }
+
+    // The subset loops (arr[a]/arr[b] → agg → x → inflow → arr) carry real,
+    // finite, non-zero scores once the flow-to-stock startup guard clears.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(
+        !loop_vars.is_empty(),
+        "the subset feedback loops must be scored"
+    );
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
+                assert!(
+                    v.is_finite() && v != 0.0,
+                    "loop score {} slot {slot} step {step} must be finite and non-zero; \
+                     got {series:?}",
+                    lv.name
+                );
+            }
+        }
     }
 }

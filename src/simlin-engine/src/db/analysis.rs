@@ -635,10 +635,14 @@ fn expand_same_element(
 ///   TARGET-dim element via `iterated_axis_slot_elements` when the axis is a
 ///   positionally-mapped pair (GH #534; identity in the literal case).
 /// - A [`AxisRead::Reduced`] axis ranges over *every* element (each one feeds
-///   the same agg result slot). For the *element graph* a representative
-///   element would suffice for reachability, but emitting one edge per element
-///   matches `cross_element_loop_through_sum_reducer`'s whole-extent
-///   expectation and the per-element link scores need them all anyway.
+///   the same agg result slot) -- or, for a subset-bearing `Reduced` (a
+///   proper-subdimension StarRange, GH #766), over only the subset's
+///   elements, so an unread row gets no edge into the agg and loop
+///   enumeration cannot discover loops through it. For the *element graph* a
+///   representative element would suffice for reachability, but emitting one
+///   edge per element matches `cross_element_loop_through_sum_reducer`'s
+///   whole-extent expectation and the per-element link scores need them all
+///   anyway.
 ///
 /// When `read_slice` is all-`Reduced` (`result_dims` empty) the agg is scalar:
 /// every source element feeds `agg`, and `agg` broadcasts to every `to`
@@ -800,8 +804,8 @@ fn emit_agg_routed_edges(
                             iterated_pos: Some(pos),
                         })
                     }
-                    AxisRead::Reduced => Some(AxisPlan {
-                        elems: dimension_element_names(d),
+                    AxisRead::Reduced { subset } => Some(AxisPlan {
+                        elems: subset.clone().unwrap_or_else(|| dimension_element_names(d)),
                         slot_elems: None,
                         iterated_pos: None,
                     }),
