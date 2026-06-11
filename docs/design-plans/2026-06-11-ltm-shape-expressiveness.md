@@ -258,8 +258,9 @@ The four consumers, all reading the one `axes` vector:
   (`Iterated` dims a strict subset of `to`'s dims, e.g.
   `aux[D1,D2] = arr[D1,lit] * ...`) one row feeds every `e` it projects
   from, mirroring `agg_name_for_target`'s projection
-  (`link_scores.rs:1434-1439`). For a scalar `to` the `[{e}]` side is
-  omitted (the full-reduce form). This is the **existing** name grammar from
+  (`link_scores.rs:1434-1439`). (A scalar `to` cannot occur for
+  `PerElement` -- the shape requires at least one `Iterated` axis, which
+  requires an iterated target equation.) This is the **existing** name grammar from
   `try_cross_dimensional_link_scores` (`link_scores.rs:386-389`), which
   `loop_link_score_ref` and discovery's `parse_link_offsets` already resolve.
   The equation is the per-target-element partial: the target body pinned to
@@ -344,8 +345,21 @@ generalizes from `variable_backed_partial_reduce_agg` to
 `variable_backed_reduce_agg`, accepting ANY variable-backed agg whose slice
 is statically describable and non-trivial -- at least one `Pinned`,
 subset-`Reduced`, or `Iterated` axis. For a Pinned/`Reduced`-only slice the
-result is scalar and the slot is the bare `to` node: `emit_agg_routed_edges`
-emits exactly the read rows into `to`, matching the per-read-row scores. A
+result is scalar; the slot is the bare `to` node, and this admission is
+scoped to `to_dims.is_empty()` (a SCALAR owner): `emit_agg_routed_edges`
+emits exactly the read rows into `to`, matching the per-read-row scores.
+The ARRAYED-owner Pinned/subset broadcast slice
+(`share[Region] = SUM(pop[nyc,*])` -- no `Iterated` axis, arrayed `to`) is
+DECLINED by the gate AND newly declined by
+`try_cross_dimensional_link_scores`' partial-reduce branch (which today
+emits full-cartesian per-`(row, slot)` garbage for it -- an unfiled #765
+sibling): both route to the #758 loud skip, a documented conservative
+boundary. T3 pins it with a `share[Region] = SUM(pop[nyc,*])`-in-a-loop
+RED fixture (loud skip, no garbage, no phantom names) and files the
+residual as a follow-up issue if it survives the phase (the full
+broadcast fan-out is the §3 `PerElement` rule applied to variable-backed
+owners -- specifiable later, but it is T6 machinery and does not belong
+in T3). A
 pure full-extent slice (all `Reduced{subset: None}`) keeps the existing
 reference-walker reduction/broadcast edges byte-identically -- they already
 ARE the read rows, so routing it through the gate would change nothing and
@@ -519,11 +533,13 @@ FixedIndex-only target-gate widening in `try_disjoint_dim_arrayed_link_scores`.
   `(Region, Age)` circuit) whose equations reference the per-(row, element)
   names and carry real non-zero post-startup values;
   (c) the phantom block (`:4241-4283`, `:4308-4316`) is deleted and replaced
-  by a precise absence assertion: no loop-score equation references the
-  BARE-name substring `pop→row_sum` (i.e. `pop\u{2192}row_sum` not followed
-  by an element subscript on the from side) -- "zero scalar pop→row_sum loop
-  scores" is only correct as that bare-name substring check, since the
-  per-circuit scalar loops legitimately reference `pop[r,a]→row_sum[r]`.
+  by a precise absence assertion: no loop-score equation contains the
+  plain substring `pop\u{2192}row_sum` -- exact as-is, because the
+  per-(row, element) names interpose the from-side `]` before the arrow
+  (`pop[r,a]\u{2192}row_sum[r]`), so the bare-name substring matches only
+  the retired Bare A2A form. "Zero scalar pop→row_sum loop scores" is only
+  correct as that substring check, since the per-circuit scalar loops
+  legitimately reference `pop[r,a]→row_sum[r]`.
   Also flips: `element_graph_mapped_reverse_declared_subscripted_stays_cross_product`
   (`src/db/element_graph_tests.rs:1502`) -> diagonal, mirroring `:1478`.
 - Risk: four surfaces + naming; mitigated by the no-new-grammar choice and the
