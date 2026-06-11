@@ -629,9 +629,10 @@ fn expand_same_element(
 
 /// Emit the element edges for a reference routed through a hoisted aggregate
 /// node: `source[<read slice>] → agg[<iterated>]` then `agg[<iterated>] →
-/// to[e]`, where `agg.read_slice` (one [`AxisRead`] per source axis) decides
-/// which source rows feed each agg result slot and `agg.result_dims` (the
-/// `Iterated` axes' dims) decides how the agg fans out into `to`.
+/// to[e]`, where `from`'s read slice (`agg.source_read_slice(from)`, one
+/// [`AxisRead`] per source axis) decides which source rows feed each agg
+/// result slot and `agg.result_dims` (the `Iterated` axes' dims) decides how
+/// the agg fans out into `to`.
 ///
 /// - A [`AxisRead::Pinned`] axis fixes one element of the source on that axis.
 /// - An [`AxisRead::Iterated`] axis ranges; its element selects the agg result
@@ -660,10 +661,11 @@ fn expand_same_element(
 /// `to`'s element nodes, and an agg→to half would emit degenerate
 /// `to[e] → to[e]` self-edges.
 ///
-/// Defensive: if `read_slice` doesn't have one entry per source axis (it
-/// always should for a hoisted agg whose `source_vars` includes `from`), fall
-/// back to the conservative "every source element → agg" form so a stale
-/// invariant can't drop edges.
+/// Defensive: if `from`'s read slice doesn't have one entry per source axis
+/// (it always should for a hoisted agg whose `sources` include `from` --
+/// `source_read_slice` returns the empty slice for a non-source, which
+/// trips the same guard), fall back to the conservative "every source
+/// element → agg" form so a stale invariant can't drop edges.
 #[allow(clippy::too_many_arguments)]
 fn emit_agg_routed_edges(
     from_name: &str,
@@ -690,8 +692,11 @@ fn emit_agg_routed_edges(
     // result dim is the target's iterated dim, absent from the source's
     // declared dims). `read_slice_ok` keys the source-row layout
     // machinery below off the well-formed slice; it is independent of where the
-    // `Iterated` `Dimension`s come from.
-    let read_slice_ok = !from_dims.is_empty() && agg.read_slice.len() == from_dims.len();
+    // `Iterated` `Dimension`s come from. The slice is `from`'s OWN
+    // (per-source) slice -- empty for a non-source, which fails the arity
+    // check and degrades to the conservative fallback.
+    let read_slice = agg.source_read_slice(from_name);
+    let read_slice_ok = !from_dims.is_empty() && read_slice.len() == from_dims.len();
     let resolve_result_dim = |name: &str| -> Option<crate::dimensions::Dimension> {
         let canon = canonicalize(name);
         from_dims
@@ -786,7 +791,7 @@ fn emit_agg_routed_edges(
         // conservative fallback as a malformed `read_slice` rather than
         // emitting mis-slotted edges.
         let planned: Option<Vec<AxisPlan>> = if read_slice_ok {
-            agg.read_slice
+            read_slice
                 .iter()
                 .zip(from_dims)
                 .map(|(a, d)| match a {

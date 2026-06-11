@@ -557,7 +557,7 @@ pub(crate) struct LtmReferenceSitesResult {
 /// so the `sites` values are in a stable order. The synthetic agg an
 /// `in_reducer` reference routes through is found via the same `by_var`
 /// indexing `enumerate_agg_nodes` exposes (a synthetic agg of `to` whose
-/// `source_vars` contains `from`), and the routing decision is the
+/// `sources` include `from`), and the routing decision is the
 /// byte-identical `route_through_agg = !routed_aggs.is_empty() && in_reducer`
 /// the old element-graph / link-score walkers each restated.
 #[salsa::tracked(returns(ref))]
@@ -635,12 +635,7 @@ pub(crate) fn model_ltm_reference_sites(
             let routed_aggs: Vec<usize> = synthetic_aggs_in_to
                 .iter()
                 .copied()
-                .filter(|&i| {
-                    agg_nodes.aggs[i]
-                        .source_vars
-                        .iter()
-                        .any(|s| s == &from_name)
-                })
+                .filter(|&i| agg_nodes.aggs[i].reads_var(&from_name))
                 .collect();
 
             // Whether `to` is a *variable-backed* aggregate node whose source
@@ -659,9 +654,7 @@ pub(crate) fn model_ltm_reference_sites(
                 .map(|idxs| {
                     idxs.iter().any(|&i| {
                         let a = &agg_nodes.aggs[i];
-                        !a.is_synthetic
-                            && a.name == to_name_str
-                            && a.source_vars.iter().any(|s| s == &from_name)
+                        !a.is_synthetic && a.name == to_name_str && a.reads_var(&from_name)
                     })
                 })
                 .unwrap_or(false);

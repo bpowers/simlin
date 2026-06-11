@@ -709,9 +709,7 @@ mod model_ltm_reference_sites_tests {
 
         with_ir(&project, |_db, ir, aggs| {
             assert!(
-                aggs.aggs
-                    .iter()
-                    .all(|a| !a.source_vars.contains(&"pop".to_string())),
+                aggs.aggs.iter().all(|a| !a.reads_var("pop")),
                 "the dynamic-index reducer must not be hoisted; got: {:?}",
                 aggs.aggs
             );

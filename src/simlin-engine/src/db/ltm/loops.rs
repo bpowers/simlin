@@ -231,9 +231,10 @@ pub(super) struct ReadSliceRow {
     pub(super) coreduced: Vec<String>,
 }
 
-/// Enumerate the source rows a hoisted reducer reads, given the agg's
-/// `read_slice` (one [`crate::ltm_agg::AxisRead`] per `from`'s axis -- which
-/// holds because `from` is one of `agg`'s `source_vars`) and `from`'s
+/// Enumerate the source rows a hoisted reducer reads, given `from`'s
+/// per-source `read_slice` (`AggNode::source_read_slice(from)` -- one
+/// [`crate::ltm_agg::AxisRead`] per `from`'s axis, which holds because
+/// `from` is one of the agg's `sources`) and `from`'s
 /// dimension element lists. A `Pinned` axis is fixed to its single element;
 /// an `Iterated` axis ranges over every element of that axis; a `Reduced`
 /// axis ranges over every element, or -- for a subset-bearing `Reduced`
@@ -248,7 +249,7 @@ pub(super) struct ReadSliceRow {
 /// remapped agg-slot nodes.
 ///
 /// `None` when `read_slice` doesn't have one entry per `from` axis (it always
-/// should for a hoisted agg whose `source_vars` contains `from`), or when a
+/// should for a hoisted agg whose `sources` include `from`), or when a
 /// mapped `Iterated` axis has no usable slot remap (cannot happen for a slice
 /// `compute_read_slice` accepted -- both gate on the same helper over the
 /// same salsa dimension context -- but a stale invariant degrades to the

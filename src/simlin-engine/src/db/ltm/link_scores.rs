@@ -1229,13 +1229,14 @@ pub(super) fn emit_source_to_agg_link_scores(
         .iter()
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
-    // The read rows: only the slice the reducer reads, each row paired with
-    // its (possibly mapping-remapped, GH #534) agg slot. If `read_slice`
-    // doesn't line up with `from`'s axes (shouldn't happen for a hoisted
-    // agg whose `source_vars` contains `from`), fall back to all elements
-    // / scalar agg.
+    // The read rows: only the slice the reducer reads -- `from`'s OWN
+    // (per-source) slice -- each row paired with its (possibly
+    // mapping-remapped, GH #534) agg slot. If the slice doesn't line up
+    // with `from`'s axes (shouldn't happen for a hoisted agg whose
+    // `sources` include `from`; a non-source's empty slice trips the same
+    // arity guard), fall back to all elements / scalar agg.
     let rows: Vec<ReadSliceRow> = read_slice_rows(
-        &agg.read_slice,
+        agg.source_read_slice(from),
         &dim_element_lists,
         project_dimensions_context(db, project),
     )
