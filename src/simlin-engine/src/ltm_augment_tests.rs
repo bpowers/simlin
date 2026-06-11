@@ -1620,6 +1620,7 @@ fn test_partial_equation_iterated_dim_source_normalized_to_bare() {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated_dims,
         dim_ctx: None,
+        dep_dims: None,
     };
 
     // `row_sum` is the live source (Bare): `row_sum[D1]` -> bare
@@ -2855,6 +2856,7 @@ fn generate_link_score_equation_for_link_empty_target_is_err() {
         &to_var,
         &all_vars,
         None,
+        None,
     );
     assert!(
         result.is_err(),
@@ -2886,6 +2888,7 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
         &[],
         &to_var,
         &all_vars,
+        None,
         None,
     )
     .expect("a normal scalar target must produce a valid link-score equation");
@@ -2937,6 +2940,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_nyc() {
         &source_dim_elements,
         &[],
         &to_var,
+        None,
         None,
     )
     .unwrap();
@@ -3015,6 +3019,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_boston() {
         &[],
         &to_var,
         None,
+        None,
     )
     .unwrap();
 
@@ -3079,6 +3084,7 @@ fn test_arrayed_link_score_stock_to_flow_per_element_partials() {
         &[],
         &births,
         None,
+        None,
     )
     .unwrap();
 
@@ -3129,6 +3135,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         &[],
         &scalar_to,
         None,
+        None,
     )
     .unwrap();
     assert!(
@@ -3173,6 +3180,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         &[],
         &[],
         &a2a_to,
+        None,
         None,
     )
     .unwrap();
@@ -4156,6 +4164,7 @@ fn shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source() {
         source_dim_names: &source_dim_names,
         target_iterated_dims: &target_iterated,
         dim_ctx: None,
+        dep_dims: None,
     };
     let text = shaped_guard_form_text(
         "SUM(matrix[D1, *] * frac[D1])",
@@ -4308,4 +4317,120 @@ fn shaped_guard_form_errs_when_no_live_occurrence_to_freeze() {
     )
     .unwrap_err();
     assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
+}
+
+/// GH #526: a TRANSPOSED non-live array dep (`arr[D2,D1]` for `arr`
+/// declared `[D1,D2]` -- a genuine positional transposition in the
+/// executed simulation) with its declared dims THREADED must not be
+/// collapsed to a bare `PREVIOUS(arr)` (which freezes the WRONG element,
+/// a silent magnitude error). The changed-first-only builder fails with
+/// the loud `UnfreezablePartial`; `shaped_guard_form_text` callers fall
+/// back to the changed-last convention instead (pinned end-to-end by
+/// `ltm_array_agg::gh526_transposed_dep_partial_takes_changed_last`).
+#[test]
+fn gh526_transposed_other_dep_with_threaded_dims_is_unfreezable() {
+    let equation = "pop[d1, d2] * 0.1 + arr[d2, d1] * 0.001";
+    let deps = deps_set(&["pop", "arr"]);
+    let live = Ident::<Canonical>::new("pop");
+    let target_iterated_dims = vec!["d1".to_string(), "d2".to_string()];
+    let source_dim_names = vec!["d1".to_string(), "d2".to_string()];
+    let dep_dims: HashMap<String, Vec<Dimension>> = std::iter::once((
+        "arr".to_string(),
+        vec![
+            make_named_dimension("d1", &["a", "b"]),
+            make_named_dimension("d2", &["x", "y"]),
+        ],
+    ))
+    .collect();
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dim_ctx: None,
+        dep_dims: Some(&dep_dims),
+    };
+    let result = build_partial_equation_shaped(
+        equation,
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &[],
+        Some(&iter_ctx),
+        None,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PartialEquationError {
+                kind: PartialEquationErrorKind::UnfreezablePartial,
+                ..
+            })
+        ),
+        "a known-transposed other-dep must doom the changed-first partial loudly; got: {result:?}"
+    );
+}
+
+/// GH #526 control: the NATURAL-position dep (`arr[D1,D2]` matching its
+/// declared order) keeps the historical collapse to `PREVIOUS(arr)` even
+/// with dims threaded -- the bare freeze reads the same element, so the
+/// collapse is exact. And with dims UN-threadable (the dep absent from the
+/// map), the transposed spelling keeps the permissive legacy collapse, as
+/// the design's GH #526 fallback clause requires.
+#[test]
+fn gh526_natural_and_unthreadable_other_deps_keep_collapse() {
+    let deps = deps_set(&["pop", "arr"]);
+    let live = Ident::<Canonical>::new("pop");
+    let target_iterated_dims = vec!["d1".to_string(), "d2".to_string()];
+    let source_dim_names = vec!["d1".to_string(), "d2".to_string()];
+    let dep_dims: HashMap<String, Vec<Dimension>> = std::iter::once((
+        "arr".to_string(),
+        vec![
+            make_named_dimension("d1", &["a", "b"]),
+            make_named_dimension("d2", &["x", "y"]),
+        ],
+    ))
+    .collect();
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dim_ctx: None,
+        dep_dims: Some(&dep_dims),
+    };
+    let partial = build_partial_equation_shaped(
+        "pop[d1, d2] * 0.1 + arr[d1, d2] * 0.001",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &[],
+        Some(&iter_ctx),
+        None,
+    )
+    .unwrap();
+    assert!(
+        partial.contains("PREVIOUS(arr)") && !partial.contains("PREVIOUS(arr["),
+        "the natural-position dep keeps the exact bare-PREVIOUS collapse; got: {partial}"
+    );
+
+    // Un-threadable dims (dep absent from the map): permissive legacy
+    // collapse even for the transposed spelling.
+    let empty_dep_dims: HashMap<String, Vec<Dimension>> = HashMap::new();
+    let iter_ctx_unthreaded = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dim_ctx: None,
+        dep_dims: Some(&empty_dep_dims),
+    };
+    let partial = build_partial_equation_shaped(
+        "pop[d1, d2] * 0.1 + arr[d2, d1] * 0.001",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &[],
+        Some(&iter_ctx_unthreaded),
+        None,
+    )
+    .unwrap();
+    assert!(
+        partial.contains("PREVIOUS(arr)") && !partial.contains("PREVIOUS(arr["),
+        "un-threadable dep dims keep the permissive legacy collapse; got: {partial}"
+    );
 }

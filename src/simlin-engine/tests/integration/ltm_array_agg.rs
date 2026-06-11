@@ -7986,3 +7986,176 @@ fn gh751_scalar_co_aggs_keep_bare_previous_freeze() {
         }
     }
 }
+
+/// GH #526: a TRANSPOSED non-live array dep in a loop's target equation.
+/// `growth[d1,d2] = pop[d1,d2] * 0.1 + arr[d2,d1] * 0.001` -- `arr[d2,d1]`
+/// is a genuine positional transposition (slot `(i,j)` reads element
+/// `(j,i)`), so the pre-fix collapse to a bare `PREVIOUS(arr)` froze the
+/// WRONG element: with the asymmetric constant `arr` here, the off-diagonal
+/// `pop→growth` slots scored 0.9940/1.0059 instead of exactly 1.0 (a
+/// silent magnitude error -- zero warnings; the recorded pre-fix
+/// signature). Post-fix the threaded dep dims flag the mismatch and the
+/// partial falls to the CHANGED-LAST convention, which keeps `arr[d2,d1]`
+/// live and verbatim: the numerator is `(growth - frozen)` = exactly
+/// `0.1·Δpop`, so every slot scores exactly 1.0, still with zero warnings.
+#[test]
+fn gh526_transposed_dep_partial_takes_changed_last() {
+    let project = TestProject::new("gh526")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["a", "b"])
+        .named_dimension("d2", &["x", "y"])
+        .array_with_ranges("base1[d1]", vec![("a", "1"), ("b", "2")])
+        .array_with_ranges("base2[d2]", vec![("x", "3"), ("y", "7")])
+        .array_aux("arr[d1,d2]", "base1[d1] * 10 + base2[d2]")
+        .array_stock("pop[d1,d2]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[d1,d2]",
+            "pop[d1,d2] * 0.1 + arr[d2,d1] * 0.001",
+            None,
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the changed-last fallback compiles; no warnings expected, got: {warnings:?}"
+    );
+
+    let v = ltm_var(
+        &ltm.vars,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth",
+    );
+    let eqn = v.equation.source_text();
+    assert!(
+        !eqn.contains("PREVIOUS(arr)"),
+        "the transposed dep must NOT be collapsed to the wrong-element bare freeze; got: {eqn}"
+    );
+    assert!(
+        eqn.contains("arr[d2, d1]"),
+        "changed-last keeps the transposed dep live and verbatim; got: {eqn}"
+    );
+    assert!(
+        eqn.contains("(growth - (PREVIOUS(pop) * 0.1 + arr[d2, d1] * 0.001))"),
+        "the numerator is the changed-last `(target - frozen)` form; got: {eqn}"
+    );
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    let base = offset_of(
+        &results,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth",
+    );
+    for slot in 0..4 {
+        let s = series_at(&results, base + slot);
+        for (step, &val) in s.iter().enumerate().skip(1) {
+            assert!(
+                (val - 1.0).abs() < 1e-9,
+                "pop→growth slot {slot} step {step}: arr is constant, so the score is \
+                 exactly 1.0 (pre-fix the off-diagonal slots read 0.9940/1.0059 -- the \
+                 wrong-element freeze); got {s:?}"
+            );
+        }
+    }
+    // The isolated loop's score is exactly 1 per slot past startup.
+    let loop_base = offset_of(&results, "$\u{205A}ltm\u{205A}loop_score\u{205A}r1");
+    for slot in 0..4 {
+        let s = series_at(&results, loop_base + slot);
+        for (step, &val) in s.iter().enumerate().skip(STARTUP_STEPS) {
+            assert!(
+                (val - 1.0).abs() < 1e-6,
+                "loop score slot {slot} step {step}: expected 1.0; got {s:?}"
+            );
+        }
+    }
+}
+
+/// GH #526 byte-identity controls: the NATURAL-position dep keeps the
+/// historical changed-first collapse (`PREVIOUS(arr)` -- exact, the bare
+/// freeze reads the same element), and a POSITIONALLY-MAPPED dep
+/// (`cost[State]` for `cost` declared over `Region`, `State→Region`) keeps
+/// it too via the shared `iterated_axis_slot_elements` gate. Both shapes
+/// collapsed before the fix and must keep collapsing -- the strict verdict
+/// only changes provably-mismatched references.
+#[test]
+fn gh526_natural_and_mapped_deps_keep_changed_first_collapse() {
+    // Natural position: arr[d1,d2] matching declared order.
+    let natural = TestProject::new("gh526_natural")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["a", "b"])
+        .named_dimension("d2", &["x", "y"])
+        .array_with_ranges("base1[d1]", vec![("a", "1"), ("b", "2")])
+        .array_with_ranges("base2[d2]", vec![("x", "3"), ("y", "7")])
+        .array_aux("arr[d1,d2]", "base1[d1] * 10 + base2[d2]")
+        .array_stock("pop[d1,d2]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[d1,d2]",
+            "pop[d1,d2] * 0.1 + arr[d1,d2] * 0.001",
+            None,
+        )
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &natural, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "natural-position fixture stays warning-free"
+    );
+    let eqn = ltm_var(
+        &ltm.vars,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth",
+    )
+    .equation
+    .source_text()
+    .to_string();
+    assert!(
+        eqn.contains("(pop * 0.1 + PREVIOUS(arr) * 0.001)"),
+        "the natural-position dep keeps the changed-first bare-PREVIOUS collapse; got: {eqn}"
+    );
+
+    // Positionally mapped: cost declared over region, referenced cost[state]
+    // inside an A2A-over-state equation with a positional state→region
+    // mapping -- the executed read resolves positionally, matching the bare
+    // broadcast, so the collapse is exact and retained.
+    let mapped = TestProject::new("gh526_mapped")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["west", "east"])
+        .named_dimension_with_mapping("state", &["ca", "ny"], "region")
+        .array_with_ranges("cost[region]", vec![("west", "3"), ("east", "7")])
+        .array_stock("pop[state]", "100", &["growth"], &[], None)
+        .array_flow(
+            "growth[state]",
+            "pop[state] * 0.1 + cost[state] * 0.001",
+            None,
+        )
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &mapped, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "mapped fixture stays warning-free"
+    );
+    let eqn = ltm_var(
+        &ltm.vars,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth",
+    )
+    .equation
+    .source_text()
+    .to_string();
+    assert!(
+        eqn.contains("PREVIOUS(cost)") && !eqn.contains("PREVIOUS(cost["),
+        "the positionally-mapped dep keeps the changed-first collapse; got: {eqn}"
+    );
+}

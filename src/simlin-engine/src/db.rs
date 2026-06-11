@@ -737,6 +737,9 @@ pub(crate) fn module_link_score_equation(
                     to_var,
                     &all_vars,
                     Some(dim_ctx),
+                    // Module-link partials are scalar-context; the GH #526
+                    // other-dep check keeps its permissive legacy collapse.
+                    None,
                 ) {
                     Ok(eqn) => return Some(ltm::scalarize_ltm_equation(eqn)),
                     // The target's equation couldn't be parsed for the
@@ -823,6 +826,10 @@ pub fn link_score_equation_text<'db>(
         &[],
         &to_var,
         &all_vars,
+        None,
+        // Legacy (from, to)-keyed path: no dims context is threaded at
+        // all, so the GH #526 other-dep check keeps the permissive
+        // collapse here too.
         None,
     ) {
         Ok(eqn) => eqn,
