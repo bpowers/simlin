@@ -67,7 +67,7 @@ use simlin_engine::db::{
     DetectedLoopPolarity, DiagnosticError, DiagnosticSeverity, LtmSyntheticVar, SimlinDb,
     collect_all_diagnostics, compile_project_incremental, model_detected_loops,
     model_element_causal_edges, model_ltm_variables, reclassify_loops_from_results,
-    set_project_ltm_enabled, sync_from_datamodel_incremental,
+    set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
 use simlin_engine::test_common::TestProject;
@@ -5591,6 +5591,298 @@ fn gh525_discovery_twin_parses_per_element_names() {
     // (`pop[a]`, an invented node for the 2-D `pop`), so T6 strictly
     // extends the discoverable prefix; the residual is the
     // partial-collapse expansion itself (the GH #716 family).
+}
+
+/// GH #525 (T6 review boundary pin, the ALIASED ThroughAgg routing): the
+/// same `(pop, out)` edge carries a HOISTED `SUM(pop[R,*])` site and a
+/// mixed-subscript site inside a DECLINED `MEAN(w[R,*] * pop[R,young])`
+/// (differing co-source slices, so the MEAN is not hoisted). Routing is
+/// per-edge (`in_reducer && routed_aggs`), so BOTH in_reducer sites route
+/// `ThroughAgg` through the SUM's agg -- the mixed site's `PerElement`
+/// shape has NO `Direct` site and must emit nothing of its own.
+///
+/// Exhaustive mode is BYTE-IDENTICAL to the T5 parent `ad6bdeb8` (probe
+/// evidence: identical var/diag dumps): the loop-link caller emits the
+/// agg-routed hop's scores via its agg branches and never reaches the
+/// per-shape pass for the edge, so no Bare-named `pop→out` score existed
+/// pre-T6 either -- the shape's arrival changes nothing here. DISCOVERY
+/// mode (causal-edge iteration, which DOES reach the per-shape pass) is
+/// the one real flip: pre-T6 the site's `DynamicIndex` spelling minted an
+/// extra Bare-named `pop→out` score alongside the agg halves -- a
+/// duplicate direct pathway for a hop the halves already carry; post-T6
+/// it is gone.
+#[test]
+fn aliased_through_agg_per_element_site_emits_only_agg_halves() {
+    let fixture = || {
+        TestProject::new("aliased_through_agg")
+            .with_sim_time(0.0, 8.0, 1.0)
+            .named_dimension("R", &["r1", "r2"])
+            .named_dimension("Age", &["young", "old"])
+            .array_stock("pop[R,Age]", "100", &["growth"], &[], None)
+            .array_aux_direct("w", vec!["R".into(), "Age".into()], "0.5", None)
+            .array_aux_direct(
+                "out",
+                vec!["R".into()],
+                "SUM(pop[R,*]) + MEAN(w[R,*] * pop[R,young])",
+                None,
+            )
+            .array_flow("growth[R,Age]", "out[R] * 0.0001", None)
+            .build_datamodel()
+    };
+
+    // Exhaustive surface: agg halves only, no Bare and no per-element
+    // pop→out names, zero warnings (byte-identical to the parent).
+    let project = fixture();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("the aliased-routing fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile; got: {warnings:?}"
+    );
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+    for r in ["r1", "r2"] {
+        for age in ["young", "old"] {
+            let half = format!(
+                "{LINK_SCORE_PREFIX}pop[{r},{age}]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0[{r}]"
+            );
+            assert!(
+                names.contains(&half.as_str()),
+                "the SUM agg's source half {half} must exist; got: {names:?}"
+            );
+        }
+    }
+    let assert_no_pop_out_scores = |names: &[&str], mode: &str| {
+        assert!(
+            !names
+                .iter()
+                .any(|n| *n == format!("{LINK_SCORE_PREFIX}pop\u{2192}out")),
+            "{mode}: no Bare-named pop\u{2192}out score may exist for the \
+             ThroughAgg-routed edge; got: {names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.starts_with(&format!("{LINK_SCORE_PREFIX}pop["))
+                    && n.contains("\u{2192}out")),
+            "{mode}: the ThroughAgg-routed PerElement site must not emit \
+             per-(row, element) scalars (only a Direct site does); got: {names:?}"
+        );
+    };
+    assert_no_pop_out_scores(&names, "exhaustive");
+
+    // Discovery surface: the agg halves still carry the hop and the
+    // pre-T6 duplicate Bare-named `pop→out` (which the parent emitted in
+    // this mode) is retired.
+    let project = fixture();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+    assert_no_pop_out_scores(&names, "discovery");
+    assert!(
+        names
+            .iter()
+            .any(|n| n.contains("\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0")),
+        "discovery still emits the agg source halves; got: {names:?}"
+    );
+}
+
+/// GH #525 (T6 review corner pin): a `PerElement` target body that also
+/// references ANOTHER arrayed dep by iterated subscript --
+/// `row_sum[Region] = pop[Region, young] * other[Region]`. The per-(row,
+/// element) equation must pin `other[Region]` to the target element
+/// (`subscript_idents_at_element`'s dimension-name pinning), and with the
+/// constant `other = 2` the score is exact: the live `pop[r,young]` term
+/// reproduces delta-row_sum, so every scalar reads +1.
+///
+/// Parent (`ad6bdeb8`) evidence: this fixture emitted the merged Bare
+/// `pop→row_sum` score and a phantom-bearing u1..u5 loop set; the names
+/// asserted here did not exist (the test fails there).
+#[test]
+fn per_element_body_with_iterated_other_dep_scores() {
+    let project = TestProject::new("per_element_other_dep")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_stock("pop[Region,Age]", "100", &["growth"], &[], None)
+        .array_aux_direct("other", vec!["Region".into()], "2", None)
+        .array_aux_direct(
+            "row_sum",
+            vec!["Region".into()],
+            "pop[Region, young] * other[Region]",
+            None,
+        )
+        .array_flow("growth[Region,Age]", "row_sum[Region] * 0.0001", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the other-dep fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "every LTM fragment must compile; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name == format!("{LINK_SCORE_PREFIX}pop\u{2192}row_sum")),
+        "the merged Bare score must not exist; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    for r in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}pop[{r},young]\u{2192}row_sum[{r}]");
+        // The other dep is pinned to the element (qualified, so the frozen
+        // PREVIOUS compiles to a direct LoadPrev), not left as an
+        // unresolvable bare dimension index.
+        let var = ltm_var(&ltm.vars, &name);
+        let eqn = match &var.equation {
+            datamodel::Equation::Scalar(t) => t.clone(),
+            other => format!("{other:?}"),
+        };
+        assert!(
+            eqn.contains(&format!("other[region\u{B7}{r}]")),
+            "{name} must pin other[Region] to the target element; eqn: {eqn}"
+        );
+        let series = series_at(&results, offset_of(&results, &name));
+        assert_eq!(series[0], 0.0, "initial-step guard pins {name} to 0");
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "{name} step {step} must score +1 (other is constant, the \
+                 live pop term reproduces delta-row_sum); got {series:?}"
+            );
+        }
+    }
+    // The unread `old` rows have no scores.
+    let score_names = ltm_score_var_names(&results);
+    assert!(
+        !score_names
+            .iter()
+            .any(|n| n.contains("old]\u{2192}row_sum")),
+        "unread rows must carry no pop\u{2192}row_sum scores; got: {score_names:?}"
+    );
+    // Loops through the hop are scored with real values.
+    let mut saw_nonzero = false;
+    for lv in ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+    {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(series.iter().all(|v| v.is_finite()));
+            saw_nonzero |= series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0);
+        }
+    }
+    assert!(saw_nonzero, "loops through the per-element hop must score");
+}
+
+/// GH #525 (T6 review corner pin): a MAPPED `PerElement` reference --
+/// `mid[State] = pop[State, young] * 0.05` over `pop[Region, Age]` with a
+/// positional `State→Region` mapping -- exercises
+/// `per_element_row_for_target`'s `mapped_element_correspondence` arm: the
+/// row's Region element is the positional preimage of the target's State
+/// element (s1↔r1, s2↔r2), so the emitted names carry the SOURCE-dim row
+/// and the diagonal only.
+///
+/// Parent (`ad6bdeb8`) evidence: this fixture classified `DynamicIndex`
+/// and took the GH #758 loud skip -- NO `pop→mid` score of any form plus
+/// exactly one unscoreable-edge Warning -- so both the zero-warnings and
+/// the name assertions here fail there (verified in a temp worktree).
+#[test]
+fn mapped_per_element_subscript_scores_positional_diagonal() {
+    let project = TestProject::new("mapped_per_element")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension("Age", &["young", "old"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_stock("pop[Region,Age]", "100", &["inflow"], &[], None)
+        .array_aux_direct(
+            "mid",
+            vec!["State".into()],
+            "pop[State, young] * 0.05",
+            None,
+        )
+        .scalar_aux("total", "SUM(mid[*])")
+        .array_flow("inflow[Region,Age]", "total * 0.0001", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the mapped PerElement fixture must compile with LTM enabled");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the mapped PerElement edge is scoreable; no warning may fire \
+         (pre-T6 it took the GH #758 loud skip): {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // The positional diagonal, with the row carrying the SOURCE (Region)
+    // element: exactly these two names, scoring exactly +1 (pop[r,young]
+    // is each mid slot's only moving input).
+    for (s, r) in [("s1", "r1"), ("s2", "r2")] {
+        let name = format!("{LINK_SCORE_PREFIX}pop[{r},young]\u{2192}mid[{s}]");
+        let series = series_at(&results, offset_of(&results, &name));
+        assert_eq!(series[0], 0.0, "initial-step guard pins {name} to 0");
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "{name} step {step} must score +1; got {series:?}"
+            );
+        }
+    }
+    let score_names = ltm_score_var_names(&results);
+    assert!(
+        !score_names
+            .iter()
+            .any(|n| n.contains("pop[r1,young]\u{2192}mid[s2]")
+                || n.contains("pop[r2,young]\u{2192}mid[s1]")
+                || n.contains("old]\u{2192}mid")
+                || *n == format!("{LINK_SCORE_PREFIX}pop\u{2192}mid")),
+        "only the positional diagonal's young rows may carry scores; got: {score_names:?}"
+    );
+
+    // The loop through the mapped hop is scored with real values.
+    let mut saw_nonzero = false;
+    for lv in ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+    {
+        let series = series_at(&results, offset_of(&results, &lv.name));
+        assert!(series.iter().all(|v| v.is_finite()));
+        saw_nonzero |= series.iter().skip(STARTUP_STEPS).any(|&v| v != 0.0);
+    }
+    assert!(
+        saw_nonzero,
+        "loops through the mapped PerElement hop must carry real values"
+    );
 }
 
 /// GH #746: for a feedback cycle through an ARRAYED variable the detected

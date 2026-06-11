@@ -1229,12 +1229,22 @@ pub(super) fn emit_per_shape_link_scores(
     // per-(row, full-target-element) emitter -- their names carry BOTH a
     // from-side row and a to-side element subscript, which the shaped
     // per-(from, to, shape) path cannot express. They are removed from the
-    // per-shape list below; a `ThroughAgg`-routed `PerElement` site (a
-    // hoisted reducer argument's syntactic shape) emits nothing here -- the
-    // agg halves carry that hop's scores. (Pre-T6 such a site classified
-    // `DynamicIndex` and minted an extra Bare-named conservative score
-    // alongside the agg halves; that double-attribution retires with the
-    // shape, part of the changed-classification flip family.)
+    // per-shape list below; a `ThroughAgg`-routed `PerElement` site (the
+    // ALIASED routing family: routing is per-edge `in_reducer &&
+    // routed_aggs`, so a mixed subscript inside a DECLINED reducer routes
+    // through a sibling hoisted agg) emits nothing here -- the agg halves
+    // carry that hop's scores. In EXHAUSTIVE mode this is byte-identical to
+    // pre-T6: the loop-link caller emits an agg-routed hop's scores via its
+    // agg branches and never reaches this per-shape pass for the edge, so
+    // no Bare-named score existed for the shape's pre-T6 `DynamicIndex`
+    // spelling either (pinned by
+    // `aliased_through_agg_per_element_site_emits_only_agg_halves`). In
+    // DISCOVERY mode (which iterates causal edges and DOES reach this pass)
+    // the pre-T6 `DynamicIndex` shape minted an extra Bare-named
+    // conservative score alongside the agg halves -- a duplicate direct
+    // pathway in the search graph for a hop the agg halves already carry;
+    // that double-attribution retires with the shape (same pin, discovery
+    // half).
     let mut per_element_sites: Vec<(Vec<crate::ltm_agg::AxisRead>, Option<String>)> = Vec::new();
     if let Some(sites) = ir.sites.get(&(from.to_string(), to.to_string())) {
         for s in sites {
