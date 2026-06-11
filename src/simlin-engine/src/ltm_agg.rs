@@ -2676,4 +2676,56 @@ mod tests {
             "subset-bearing variable-backed slices must stay on the conservative path until T3"
         );
     }
+
+    /// GH #766 / invariant I3 (uniqueness of the full-extent form): a
+    /// StarRange naming a SAME-CARDINALITY "subdimension" -- including a
+    /// permuted alias of the axis's element set (`Alias = [c, a, b]` over
+    /// `Region = [a, b, c]`: containment + equal size means the same element
+    /// SET) -- normalizes to `Reduced{subset: None}`, never a `Some` subset
+    /// covering the whole axis. Reduction order is irrelevant (the reduced
+    /// rows are a set), and keeping the full-extent representation unique
+    /// means downstream byte-identity does not depend on which spelling the
+    /// modeler used.
+    #[test]
+    fn star_range_same_cardinality_alias_normalizes_to_full_extent() {
+        let project = TestProject::new("star_range_alias")
+            .named_dimension("Region", &["a", "b", "c"])
+            .named_dimension("Alias", &["c", "a", "b"])
+            .array_aux("arr[Region]", "10")
+            .scalar_aux("x", "1 + SUM(arr[*:Alias])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            synthetic[0].read_slice,
+            vec![AxisRead::Reduced { subset: None }],
+            "a whole-axis alias must normalize to the unique full-extent form"
+        );
+    }
+
+    /// GH #766 (indexed dimensions): a StarRange over an INDEXED
+    /// subdimension (`SubIndex(3)` with declared `parent = Index(5)`, which
+    /// maps to the parent's first 3 elements) resolves the subset through
+    /// the same `SubdimensionRelation` path as named dimensions -- the
+    /// subset elements are the canonical indexed names `"1".."3"`, matching
+    /// `dimension_element_names`'s output.
+    #[test]
+    fn star_range_indexed_subdimension_carries_subset() {
+        let project = TestProject::new("star_range_indexed_subdim")
+            .indexed_dimension("Index", 5)
+            .indexed_subdimension("SubIndex", 3, "Index")
+            .array_aux("arr[Index]", "10")
+            .scalar_aux("x", "1 + MEAN(arr[*:SubIndex])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(synthetic.len(), 1, "got: {:?}", result.aggs);
+        assert_eq!(
+            synthetic[0].read_slice,
+            vec![AxisRead::Reduced {
+                subset: Some(vec!["1".to_string(), "2".to_string(), "3".to_string()])
+            }]
+        );
+    }
 }

@@ -4633,3 +4633,130 @@ fn inline_subset_reducer_mean_divisor_and_scores() {
         }
     }
 }
+
+/// GH #766 (composition, end-to-end): a subset StarRange composed with an
+/// iterated axis -- `out[D1] = 1 + SUM(matrix[D1, *:SubD2])` closed in a
+/// feedback loop -- compiles with zero warnings and scores. The synthetic
+/// agg is ARRAYED over `D1` (`read_slice = [Iterated(d1), Reduced{subset}]`,
+/// pinned by `star_range_subset_composes_with_iterated_axis`); this fixture
+/// pins the emission side:
+///
+/// - per-(row, slot) link scores exist ONLY for the subset rows of each
+///   slot (`matrix[a,x]→agg[a]`, never `matrix[a,z]→agg[a]`);
+/// - with the two subset rows of a slot changing by identical deltas, each
+///   row's SUM partial reads exactly (Δrow/Δslot) = 0.5;
+/// - no loop is enumerated through the unread `z` rows, and every emitted
+///   loop score is finite and non-zero once the startup guard clears.
+#[test]
+fn iterated_subset_reducer_loop_scores_end_to_end() {
+    let project = TestProject::new("gh766_iterated_subset")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y", "z"])
+        .named_dimension("SubD2", &["x", "y"])
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_aux_direct(
+            "out",
+            vec!["D1".into()],
+            "1 + SUM(matrix[D1, *:SubD2])",
+            None,
+        )
+        .array_flow("inflow[D1]", "out[D1]", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "iterated+subset reducer must compile with zero warnings; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Per-(row, slot) scores for the subset rows of each slot only.
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}{agg}[{d1}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected subset-row link score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+        let phantom = format!("{LINK_SCORE_PREFIX}matrix[{d1},z]\u{2192}{agg}[{d1}]");
+        assert!(
+            ltm.vars.iter().all(|v| v.name != phantom),
+            "the unread z row must get NO link score into the agg slot; got {phantom:?}"
+        );
+    }
+
+    // No enumerated loop traverses the unread z rows.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the subset loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v.contains(",z]")),
+            "no loop may run through an unread z row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // SUM over the 2-row subset with equal per-step deltas: each subset
+    // row's changed-first partial is exactly half the slot's change.
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}{agg}[{d1}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            assert_eq!(
+                series[0], 0.0,
+                "initial-step guard pins matrix[{d1},{d2}]→agg[{d1}] to 0"
+            );
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "matrix[{d1},{d2}]→agg[{d1}] at step {step} must score 0.5; got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Every emitted loop score is finite and non-zero post-startup.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the subset loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
+                assert!(
+                    v.is_finite() && v != 0.0,
+                    "loop score {} slot {slot} step {step} must be finite and non-zero; \
+                     got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}

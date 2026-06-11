@@ -687,13 +687,23 @@ pub(crate) fn model_ltm_reference_sites(
                     // isn't itself a variable-backed agg) is the not-hoistable
                     // reducer carve-out -- a reducer over a dynamic index
                     // (`SUM(pop[idx,*])`) whose read slice isn't statically
-                    // describable. Reclassify it as `DynamicIndex` so the
-                    // `Wildcard` *variant* only ever means "a hoisted reducer's
-                    // (ignored) syntactic shape" or "a whole-RHS variable-
-                    // backed reducer's argument" and never reaches
+                    // describable. Reclassify it as `DynamicIndex` so a
+                    // `Direct` `Wildcard` site only ever means "a hoisted
+                    // reducer's (ignored) syntactic shape", "a whole-RHS
+                    // variable-backed reducer's argument", or -- post-GH #771
+                    // -- a DE-HOISTED array-valued reducer's wildcard arg
+                    // (`RANK(pop[*], 1)`: RANK is not `reducer_is_hoistable`,
+                    // so `in_reducer` is never set for its args and this
+                    // reclassification deliberately does NOT fire; the site
+                    // keeps `Wildcard` and takes
                     // `emit_edges_for_reference`'s conservative cross-product
-                    // arm via a `Direct` site (#514 AC4.5: the conservative
-                    // cross-product is `DynamicIndex`-only there).
+                    // arm, the same coarse-but-sound treatment a Direct
+                    // `DynamicIndex` gets). The original #514 AC4.5 invariant
+                    // -- the conservative cross-product is `DynamicIndex`-only
+                    // from `Direct` sites -- therefore narrowed in T1 of the
+                    // shape-expressiveness design: it still holds for every
+                    // HOISTABLE reducer's argument, which is what keeps a
+                    // hoist-eligible `Wildcard` from leaking past its agg.
                     let shape = if raw.in_reducer
                         && matches!(raw.shape, RefShape::Wildcard)
                         && !to_is_variable_backed_agg

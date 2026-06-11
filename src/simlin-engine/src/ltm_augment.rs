@@ -2021,8 +2021,13 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 ///   shapes that reach `emit_per_shape_link_scores` are a *whole-RHS*
 ///   variable-backed reducer's argument (`total = SUM(population[*])`), a
 ///   bare dynamic index (`arr[i+1]`), the dynamic-index reducer carve-out
-///   (`SUM(pop[idx, *])`), or a mapped sliced reducer the correspondence
-///   declines (element-mapped -- GH #756 -- or reverse-declared -- GH #757).
+///   (`SUM(pop[idx, *])`), a mapped sliced reducer the correspondence
+///   declines (element-mapped -- GH #756 -- or reverse-declared -- GH #757),
+///   or a DE-HOISTED array-valued reducer's wildcard arg
+///   (`RANK(pop[*], 1)` -- GH #771: RANK is not `reducer_is_hoistable`, so
+///   its wildcard-subscripted argument stays a `Direct` `Wildcard` site and
+///   collapses onto the canonical Bare name here; the bare-arg spelling
+///   `RANK(pop, 1)` classifies `Bare` directly).
 ///   A coarse conservative score is the intended semantics where the
 ///   endpoint dimensions correspond; when both endpoints are arrayed and
 ///   they do NOT (the declined mapped-reducer cases above), no compilable

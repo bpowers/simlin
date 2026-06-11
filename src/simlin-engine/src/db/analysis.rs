@@ -334,14 +334,18 @@ fn emit_edges_for_reference(
             // inside an arrayed per-element expression. `DynamicIndex`
             // here is `arr[i+1]`, a range, or the not-hoistable-reducer
             // carve-out (`SUM(pop[idx,*])`, reclassified from `Wildcard` by
-            // the IR); `Wildcard` here is only a variable-backed
-            // WHOLE-EXTENT reducer's whole-RHS argument (a full reduction
-            // feeding every target element) or a rare non-reducer
-            // whole-array reference -- a hoisted *synthetic*-agg reducer
-            // reference is routed through the agg (`emit_agg_routed_edges`)
-            // and a variable-backed PARTIAL reducer's argument is routed by
-            // its read slice through the same helper (GH #752), so neither
-            // lands on this arm.
+            // the IR); `Wildcard` here is a variable-backed WHOLE-EXTENT
+            // reducer's whole-RHS argument (a full reduction feeding every
+            // target element), a DE-HOISTED array-valued reducer's wildcard
+            // arg (`RANK(pop[*], 1)` -- GH #771: RANK never sets
+            // `in_reducer`, so the IR's #514 reclassification doesn't fire
+            // and the site keeps its syntactic shape; the cross-product is
+            // the intended coarse-but-sound treatment), or a rare
+            // non-reducer whole-array reference -- a hoisted
+            // *synthetic*-agg reducer reference is routed through the agg
+            // (`emit_agg_routed_edges`) and a variable-backed PARTIAL
+            // reducer's argument is routed by its read slice through the
+            // same helper (GH #752), so neither lands on this arm.
             let from_elements = cartesian_element_names(from_name, from_dims);
             for from_elem in &from_elements {
                 let entry = element_edges.entry(from_elem.clone()).or_default();
