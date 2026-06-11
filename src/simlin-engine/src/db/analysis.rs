@@ -1891,18 +1891,30 @@ pub fn model_element_causal_edges(
                         // Shape condition: a hoistable whole-RHS reducer
                         // arg classifies `Wildcard` (any `*` index, or
                         // all-`StarRange` per AC1.4) or `DynamicIndex` (the
-                        // coarse classifier shape of a mixed
-                        // iterated+StarRange subscript like
-                        // `SUM(matrix[D1,*:Sub])` -- the documented partial-
-                        // StarRange classifier residual). Both route here;
-                        // the gate (which requires a statically-describable
-                        // hoisted slice) is the real decider, and a TRUE
-                        // dynamic index (`SUM(matrix[idx,*])`) is never
-                        // hoisted, so the gate is `None` for it. Pre-T3 no
-                        // `DynamicIndex` site could pass the gate (an
-                        // all-Iterated/Reduced{None} slice always has a bare
-                        // `*`), so admitting the shape here is exactly the
-                        // T3 widening, not a behavior change for old shapes.
+                        // coarse classifier shape of ANY mixed
+                        // iterated+StarRange subscript -- both the
+                        // proper-subdimension `SUM(matrix[D1,*:Sub])` and
+                        // the own-dimension `SUM(matrix[D1,*:D2])`, the
+                        // documented partial-StarRange classifier
+                        // residual). Both shapes route here; the gate
+                        // (which requires a statically-describable hoisted
+                        // slice) is the real decider, and a TRUE dynamic
+                        // index (`SUM(matrix[idx,*])`) is never hoisted, so
+                        // the gate is `None` for it. NOTE the own-dimension
+                        // StarRange family already PASSED the pre-T3 gate
+                        // (`*:D2` over the axis's own dim resolves to
+                        // `Reduced{subset: None}` with no bare `*`, an
+                        // all-Iterated/Reduced slice) while this dispatch's
+                        // old `Wildcard`-only condition refused to route it
+                        // -- and the loop builder's routing consults ONLY
+                        // the gate -- so that family got internally
+                        // inconsistent treatment: conservative
+                        // cross-product element edges but per-circuit loop
+                        // routing, i.e. warned phantom loops. Widening the
+                        // condition makes the dispatch consistent with the
+                        // gate, and the family now gets first-class
+                        // read-slice treatment (pinned by
+                        // `own_dim_star_range_mixed_reduce_scores_read_slice`).
                         if matches!(site.shape, RefShape::Wildcard | RefShape::DynamicIndex)
                             && let Some(vb_agg) = crate::ltm_agg::variable_backed_reduce_agg(
                                 agg_nodes, from_name, to_name, &to_dims,

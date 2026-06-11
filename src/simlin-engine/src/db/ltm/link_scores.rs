@@ -231,16 +231,22 @@ pub(super) fn link_score_dimensions(
 /// GH #764 broadcast/permuted result shapes, all byte-identical to pre-T3.
 ///
 /// The one newly-LOUD decline: an ARRAYED-owner scalar-result Pinned/subset
-/// slice (`share[Region] = SUM(pop[nyc,*])` -- a variable-backed agg with
-/// no `Iterated` axis broadcast over `to`'s dims). Pre-T3 the cartesian
-/// derivation emitted full-cartesian per-`(row, slot)` garbage for it
-/// (delta-ratio +/-1 scores for rows the reducer never reads -- the
-/// unfiled GH #765 sibling); the per-`(row, slot)` machinery cannot
-/// express the broadcast, so the edge now takes the GH #758 treatment: one
-/// Warning ([`emit_unscoreable_broadcast_reduce_edge_warning`]), no
-/// link-score variable, the edge recorded in `unscoreable_edges` (loop
-/// scores through it dropped), and `Some(vec![])` returned so the caller
-/// does NOT fall through to `emit_per_shape_link_scores`.
+/// slice whose owner dims are a SUBSET of the source's
+/// (`share[Region] = SUM(pop[nyc,*])` -- a variable-backed agg with no
+/// `Iterated` axis broadcast over `to`'s dims, reaching the partial-reduce
+/// branch below). Pre-T3 the cartesian derivation emitted full-cartesian
+/// per-`(row, slot)` garbage for it (delta-ratio +/-1 scores for rows the
+/// reducer never reads -- GH #777, the GH #765 sibling); the
+/// per-`(row, slot)` machinery cannot express the broadcast, so the edge
+/// now takes the GH #758 treatment: one Warning
+/// ([`emit_unscoreable_broadcast_reduce_edge_warning`]), no link-score
+/// variable, the edge recorded in `unscoreable_edges` (loop scores through
+/// it dropped), and `Some(vec![])` returned so the caller does NOT fall
+/// through to `emit_per_shape_link_scores`. The DISJOINT-dims sibling
+/// (`share[D9] = SUM(pop[nyc,*])`, `D9` not a source dim) never reaches
+/// this branch -- the `result_axis_names` check above early-returns `None`
+/// for it -- and keeps its pre-existing loud degradation through
+/// `emit_per_shape_link_scores`' GH #758 gate, unchanged.
 ///
 /// Returns `None` for scalar-to-scalar, same-dimension A2A, broadcast
 /// (`from_dims ⊆ to_dims`), mismatched dimensions, module-involved

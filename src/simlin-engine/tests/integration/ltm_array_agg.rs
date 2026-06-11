@@ -66,8 +66,8 @@ use simlin_engine::datamodel::{self, Dimension};
 use simlin_engine::db::{
     DetectedLoopPolarity, DiagnosticError, DiagnosticSeverity, LtmSyntheticVar, SimlinDb,
     collect_all_diagnostics, compile_project_incremental, model_detected_loops,
-    model_ltm_variables, reclassify_loops_from_results, set_project_ltm_enabled,
-    sync_from_datamodel_incremental,
+    model_element_causal_edges, model_ltm_variables, reclassify_loops_from_results,
+    set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
 use simlin_engine::test_common::TestProject;
@@ -5316,5 +5316,287 @@ fn aligned_partial_reduce_emissions_stay_byte_identical() {
             "the aligned per-(row, slot) equation text must stay byte-identical"
         ),
         other => panic!("aligned per-(row, slot) score must be scalar; got {other:?}"),
+    }
+}
+
+/// T3 review follow-up pin (the corrected dispatch-widening justification):
+/// the OWN-dimension mixed StarRange family -- `out[D1] = SUM(matrix[D1,
+/// *:D2])` where `*:D2` names the axis's own (full) dimension, closed in a
+/// feedback loop. `classify_axis_access` resolves `*:D2` to
+/// `Reduced{subset: None}` (full extent, no bare `*`), so the slice is
+/// `[Iterated(d1), Reduced{None}]` and the variable-backed gate accepted it
+/// even PRE-T3 -- but `classify_subscript_shape` says `DynamicIndex` (a
+/// mixed iterated+StarRange subscript, the documented partial-StarRange
+/// classifier residual), and the element-graph dispatch's old
+/// `Wildcard`-only shape condition refused to route it while the loop
+/// builder's routing consults only the gate. Pre-T3 that family was
+/// therefore internally inconsistent: conservative CROSS-PRODUCT element
+/// edges feeding per-circuit loop routing -- 4 phantom warned 0-stub loops
+/// alongside the 4 real ones. The T3 `Wildcard | DynamicIndex` widening
+/// makes the dispatch consistent with the gate, so the family now gets
+/// first-class read-slice treatment:
+///
+/// - diagonal element edges only (`matrix[a,*] → out[a]`, never
+///   `matrix[a,*] → out[b]`);
+/// - per-(row, slot) scores for the diagonal only, each (Δrow/Δslot) = 0.5
+///   with the two rows of a slot changing by identical deltas;
+/// - exactly the 4 real loops, no phantoms, ZERO assembly warnings.
+#[test]
+fn own_dim_star_range_mixed_reduce_scores_read_slice() {
+    let project = TestProject::new("t3_own_dim_star_range")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "stock[D1] * 0.1",
+            None,
+        )
+        .array_aux_direct("out", vec!["D1".into()], "SUM(matrix[D1, *:D2])", None)
+        .array_flow("inflow[D1]", "out[D1]", None)
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the own-dim StarRange mixed reduce must compile with zero warnings \
+         (pre-T3: phantom cross-product loop scores fail-warned); got: {warnings:?}"
+    );
+
+    // Diagonal element edges only.
+    let edges = model_element_causal_edges(&db, sync.models["main"].source_model, sync.project);
+    let has_edge = |f: &str, t: &str| edges.edges.get(f).is_some_and(|ts| ts.contains(t));
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            assert!(
+                has_edge(&format!("matrix[{d1},{d2}]"), &format!("out[{d1}]")),
+                "expected diagonal edge matrix[{d1},{d2}] -> out[{d1}]; edges: {:?}",
+                edges.edges
+            );
+        }
+    }
+    assert!(
+        !has_edge("matrix[a,x]", "out[b]") && !has_edge("matrix[b,x]", "out[a]"),
+        "no cross-product edges may survive the read-slice routing; edges: {:?}",
+        edges.edges
+    );
+
+    // Per-(row, slot) scores for the diagonal only.
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}out[{d1}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected read-row link score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+        let other = if d1 == "a" { "b" } else { "a" };
+        for d2 in ["x", "y"] {
+            let phantom = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}out[{other}]");
+            assert!(
+                ltm.vars.iter().all(|v| v.name != phantom),
+                "no off-diagonal score may be emitted; got {phantom:?}"
+            );
+        }
+    }
+
+    // Exactly the 4 real same-element circuits, no phantoms.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert_eq!(
+        detected.loops.len(),
+        4,
+        "exactly the 4 read-row circuits (pre-T3: 4 real + 4 phantom); got: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
+    );
+    for l in &detected.loops {
+        let elems: Vec<&str> = l
+            .variables
+            .iter()
+            .filter_map(|v| {
+                let start = v.find('[')?;
+                Some(&v[start + 1..start + 2])
+            })
+            .collect();
+        assert!(
+            elems.windows(2).all(|w| w[0] == w[1]),
+            "every loop must stay on one D1 element; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // SUM over the 2-row full extent with equal per-step deltas: 0.5/row.
+    for d1 in ["a", "b"] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{d1},{d2}]\u{2192}out[{d1}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step} must score 0.5; got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Each per-circuit loop score reads 1 * 0.5 * 1 * 1 = 0.5 post-startup.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the read-row loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "loop score {} slot {slot} step {step} must read 0.5; got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// T3 review follow-up pin (intended in-scope churn, previously unfixtured):
+/// the ALL-Pinned scalar-owner slice -- `total = SUM(pop[nyc,p])` in a
+/// feedback loop. The slice `[Pinned(nyc), Pinned(p)]` is non-trivial with
+/// no `Iterated` axis on a scalar owner, so the gate admits it and the
+/// read-slice derivation enumerates exactly ONE read row:
+///
+/// - only the true `pop[nyc,p]→total` link score is emitted, reading +1
+///   (`total` IS `pop[nyc,p]`, so the changed-first partial is exact);
+///   pre-T3 the full-cartesian derivation emitted 4 scores -- the 3 unread
+///   rows' constant delta-ratio +1.0 garbage alongside the true one;
+/// - the single real loop (through `pop[nyc,p]`) scores +1 post-startup,
+///   and no loop traverses an unread row;
+/// - zero assembly warnings.
+///
+/// (The element edges were already correct pre-T3 -- the reference site
+/// classifies `FixedIndex`, whose routing emits only the pinned row -- so
+/// this flip is purely the score side catching up to the edges.)
+#[test]
+fn scalar_owner_all_pinned_slice_reduce_scores_single_row() {
+    let project = TestProject::new("t3_all_pinned_scalar_owner")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .scalar_aux("total", "SUM(pop[nyc, p])")
+        .array_flow("inflow[Region]", "total * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the all-Pinned scalar-owner slice must compile with zero warnings; \
+         got: {warnings:?}"
+    );
+
+    // Only the single true score; none of the pre-T3 garbage names.
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let true_score = format!("{LINK_SCORE_PREFIX}pop[nyc,p]\u{2192}total");
+    assert!(
+        ltm.vars.iter().any(|v| v.name == true_score),
+        "expected the single read-row link score {true_score:?}; have: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    for unread in ["nyc,q", "boston,p", "boston,q"] {
+        let phantom = format!("{LINK_SCORE_PREFIX}pop[{unread}]\u{2192}total");
+        assert!(
+            ltm.vars.iter().all(|v| v.name != phantom),
+            "the unread pop[{unread}] row must get NO link score (pre-T3 it \
+             read constant +1.0 garbage); got {phantom:?}"
+        );
+    }
+
+    // The single real loop; nothing through unread rows.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert_eq!(
+        detected.loops.len(),
+        1,
+        "exactly one circuit (stock[nyc] -> pop[nyc,p] -> total -> \
+         inflow[nyc] -> stock[nyc]); got: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.variables))
+            .collect::<Vec<_>>()
+    );
+    for l in &detected.loops {
+        assert!(
+            !l.variables
+                .iter()
+                .any(|v| v.contains("boston") || v.contains(",q")),
+            "no loop may run through an unread row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // `total` IS `pop[nyc,p]`: the changed-first partial reads exactly +1.
+    let series = series_at(&results, offset_of(&results, &true_score));
+    assert_eq!(series[0], 0.0, "initial-step guard pins {true_score} to 0");
+    for (step, &v) in series.iter().enumerate().skip(1) {
+        assert!(
+            (v - 1.0).abs() < 1e-9,
+            "{true_score} at step {step} must score +1; got {series:?}"
+        );
+    }
+
+    // The lone loop score is the product 1 * 1 * 1 * 1 = +1 post-startup.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(loop_vars.len(), 1, "exactly one loop score variable");
+    let base = offset_of(&results, &loop_vars[0].name);
+    let series = series_at(&results, base);
+    for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+        assert!(
+            (v - 1.0).abs() < 1e-9,
+            "loop score {} step {step} must read +1; got {series:?}",
+            loop_vars[0].name
+        );
     }
 }
