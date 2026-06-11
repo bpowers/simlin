@@ -395,7 +395,7 @@ RED fixture (loud skip, no garbage, no phantom names) and files the
 residual as a follow-up issue if it survives the phase (the full
 broadcast fan-out is the §3 `PerElement` rule applied to variable-backed
 owners -- specifiable later, but it is T6 machinery and does not belong
-in T3). A
+in T3; it survived, filed as GH #777). A
 pure full-extent slice (all `Reduced{subset: None}`) keeps the existing
 reference-walker reduction/broadcast edges byte-identically -- they already
 ARE the read rows, so routing it through the gate would change nothing and
@@ -441,7 +441,7 @@ predicate. This lands IN T3, atomically with the score-side change.
   alternative -- reclassifying value-shaped reducer args as `DynamicIndex` --
   recreates the #525 phantom pathology (cross-product edges reading diagonal
   scores) and is rejected. Residual documented in `reducer_collapses_to_scalar`
-  rustdoc + a follow-up issue filed at landing time.
+  rustdoc + a follow-up issue filed at landing time (GH #776).
 - **Feeders that are not projections**: `combined_read_slice` /
   `accept_source_slices` still decline; the edge keeps the #743
   changed-last conservative score and the loud co-source degradation.
@@ -638,7 +638,7 @@ with a loud `PartialEquationError` fallback.
   assertions plus `model_ltm_fragment_diagnostics` (which makes any
   non-compiling fragment loud at runtime). File the harness as its own issue at
   landing time so it is tracked, with a release-mode/`#[ignore]` lane as the
-  likely shape.
+  likely shape. (Filed as GH #782.)
 
 ## Perf guardrails
 
