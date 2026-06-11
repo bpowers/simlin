@@ -340,6 +340,16 @@ of the target element onto that agg's result axes -- the exact
 other-agg freeze at `link_scores.rs:1368-1375` then produces
 `PREVIOUS(B[<projected slot>])` instead of the ill-typed bare `PREVIOUS(B)`.
 
+*(As-landed amendments, commit `3779f381`.)* The pin map landed as a sorted
+slice `source_pins: &[(Ident<Canonical>, String)]` rather than a `HashMap`
+(deterministic iteration; the per-target set is tiny). And #751 turned out to
+be LIVE, not latent: the pre-existing
+`opposing_arrayed_multi_agg_loops_keep_agg_identity` fixture had
+silently-stubbed agg halves (4 fragment-failure warnings, all-zero agg link
+and loop scores) since T2 -- its assertions only checked loop-ID prefixes.
+The commit fixes that fixture's scoring as a side effect, verified RED at the
+parent and GREEN at the commit.
+
 ### 5. Non-aligned variable-backed reduces mint synthetic aggs (#764)
 
 `walk_var_equation` already declines to treat a whole-RHS reducer as
@@ -408,7 +418,7 @@ predicate. This lands IN T3, atomically with the score-side change.
 | #757 | Classification's mapped arm consumes `mapped_element_correspondence` -- the same predicate expansion and `link_score_dimensions` already consume -- so the subscripted reverse-declared reference classifies `Bare` and gets the diagonal the bare form already gets. `compute_read_slice`'s mapped gate widens with it (same helper), un-declining reverse-declared sliced reducers as a bonus. |
 | #525 | The per-axis vocabulary applied to direct references: iterated+literal mixes become `PerElement{axes}`; rows come from the same `read_slice_rows`; expansion emits only the pinned diagonal (phantom loops die at enumeration); emission/naming reuse the existing element-in-name grammar with per-(row, full-target-element) scores. |
 | #769 | **Adjunct gate widening, not a classifier change**: all-`Pinned` canonicalizes to `FixedIndex` (per the `PerElement` invariant), so the implementor must NOT touch the classifier. `try_disjoint_dim_arrayed_link_scores`' `Ast::Arrayed`-only target gate (`link_scores.rs:842`) widens to ApplyToAll targets (one shared slot body) for edges whose sites are ALL `FixedIndex`; any other site shape returns `None`/the loud skip exactly as today, so `share[R] = SUM(pop[*])`-class shapes keep their current degradation byte-identically. The widening shrinks the #758 sweep. |
-| #526 | **Does not fall out** -- it is an Expr0-side recognizer in the partial builder (`is_other_dep_iterated_dim_subscript`, `ltm_augment.rs:138-155`) with no dep dims in scope. Small adjunct, justified because it applies the same positional-correspondence *rule* as `classify_axis_access`: thread the dep's declared dim names into `IteratedDimCtx`, collapse only on exact position-and-mapping correspondence, and degrade a KNOWN mismatch to the loud `PartialEquationError` skip (#743 pattern) instead of silently freezing the wrong element. A dep whose dims cannot be resolved at all (an implicit/synthetic name absent from `source_vars`) keeps today's permissive collapse -- documented, not loud -- since declaring it a mismatch would loud-skip edges that are correct today. Descoping #526 from Phase 1 entirely is acceptable if review judges the threading too invasive; the silent imprecision is then at least documented and unreachable by current fixtures. |
+| #526 | **Does not fall out** -- it is an Expr0-side recognizer in the partial builder (`is_other_dep_iterated_dim_subscript`, `ltm_augment.rs:138-155`) with no dep dims in scope. Small adjunct, justified because it applies the same positional-correspondence *rule* as `classify_axis_access`: thread the dep's declared dim names into `IteratedDimCtx`, collapse only on exact position-and-mapping correspondence, and degrade a KNOWN mismatch to the loud `PartialEquationError` skip (#743 pattern) instead of silently freezing the wrong element. A dep whose dims cannot be resolved at all (an implicit/synthetic name absent from `source_vars`) keeps today's permissive collapse -- documented, not loud -- since declaring it a mismatch would loud-skip edges that are correct today. Descoping #526 from Phase 1 entirely is acceptable if review judges the threading too invasive; the silent imprecision is then at least documented and unreachable by current fixtures. *(As-landed amendment, commit `fa8fa774`: a KNOWN mismatch degrades one step less than specified here -- it dooms only the changed-first leg (`WrapOutcome::other_dep_mismatch`), so `shaped_guard_form_text` SCORES the link via the changed-last form (which leaves the dep live and needs no collapse; verified exactly correct against a time-varying transposed dep), and the loud `PartialEquationError` skip fires only when both legs are doomed. Strictly better than the skip: a correct score instead of a dropped one, same #743 pattern.)* |
 
 ## What stays conservative (the explicit boundary)
 
@@ -595,6 +605,11 @@ with a loud `PartialEquationError` fallback.
   transposed-dep fixture asserting the loud skip (not a silent wrong-element
   freeze).
 - Risk: low; both changes are localized to the augment/emission layer.
+- *(As-landed amendment: the transposed-dep fixture asserts the changed-last
+  form scoring exactly 1.0 with zero warnings, not the loud skip -- see the
+  #526 table-row amendment; the skip remains the both-legs-doomed terminal.
+  The #751 fixture's RED was 4 fragment-failure warnings + all-zero scores,
+  GREEN exact 2/3 and 1/3 link scores, 1/3 and 1/6 loop scores.)*
 
 ## Test strategy
 
