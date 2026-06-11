@@ -510,12 +510,12 @@ class TestModelPartitions:
     def test_exhaustive_and_discovery_partitions_agree_on_stock_sets(
         self, two_partition_model: Model
     ) -> None:
-        """For a SCALAR model the partition's stock SET is a cross-surface key:
+        """The partition's stock SET is a cross-surface key:
         Model.loop_partitions and Model.analyze().partitions must agree on the
-        stock sets (indices are result-scoped and may differ). This holds only
-        for scalar models -- the exhaustive surface is variable-level and
-        discovery element-level, so arrayed models' sets differ in granularity
-        (this fixture is scalar)."""
+        stock sets (indices are result-scoped and may differ). Since GH #746
+        both surfaces partition at element granularity, so this holds for
+        scalar and arrayed models alike (this fixture is scalar; the arrayed
+        twin is pinned engine-side)."""
         exhaustive_sets = {frozenset(part.stocks) for part in two_partition_model.loop_partitions}
         analysis = two_partition_model.analyze()
         discovery_sets = {frozenset(part.stocks) for part in analysis.partitions}

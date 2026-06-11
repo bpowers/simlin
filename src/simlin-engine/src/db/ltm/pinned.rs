@@ -170,12 +170,16 @@ pub(crate) fn model_pinned_loops(
         // "Stock" here counts state INSIDE any module instance the cycle
         // traverses (GH #673): a SMOOTH/DELAY instance or user sub-model whose
         // internal stock is the loop's only state is a genuine feedback loop.
-        // The loop-detection surface (`find_loops_with_limit`, behind
-        // `detect_loops` / `model_detected_loops`) attaches module-internal
-        // stocks via the same `enrich_with_module_stocks` enrichment instead
-        // of filtering, as does the PureScalar pin arm's
-        // `build_loop_from_cycle` below -- so validation and the loops both
-        // surfaces construct can never disagree about module-internal state.
+        // The standalone `detect_loops` surface (`find_loops_with_limit`)
+        // attaches module-internal stocks via this same
+        // `enrich_with_module_stocks` enrichment instead of filtering, as
+        // does the PureScalar pin arm's `build_loop_from_cycle` below.
+        // (`model_detected_loops` itself now builds loops with the scored
+        // surface's `build_loops_from_tiered` -- GH #746 -- whose fast path
+        // uses bare `find_stocks_in_loop` without enrichment; that is
+        // behaviorally equivalent here because `DetectedLoop` does not
+        // expose stocks and module-internal stocks never resolve in the
+        // parent partition map either way.)
         // A cycle through a stockless *passthrough* module enriches to
         // nothing and is still rejected -- it is instantaneous end to end.
         let parent_stocks = graph.find_stocks_in_loop(&cycle);
