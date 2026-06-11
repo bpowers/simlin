@@ -758,7 +758,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 // denominator is correct, and there is no source subscript
                 // to pin in the partial body.
                 None,
-                None,
+                &[],
                 Some(project_dimensions_context(db, project)),
             ) {
                 Ok(eqn) => eqn,
@@ -2037,27 +2037,30 @@ pub(super) fn emit_agg_to_target_link_scores(
     // An arrayed agg (`result_dims` non-empty) is element-pinned in the
     // per-target-element equation too: `$⁚ltm⁚agg⁚0` → `$⁚ltm⁚agg⁚0[<slot>]`.
     // But NOT via `deps_to_subscript`: that set pins to `to`'s FULL element
-    // tuple, which is the agg's correct subscript only in the diagonal case
+    // tuple, which is an agg's correct subscript only in the diagonal case
     // (`result_dims` == `to`'s dims) and over-subscripts the agg in the
     // broadcast case (`agg[D1]` feeding `to[D1,D2]` -- the fragment then
     // fails to compile and the score is stubbed to a constant 0, zeroing
-    // every loop through the agg; GH #528). Instead the agg is pinned to the
-    // target element's PROJECTION onto `result_dims`'s axes -- the same slot
-    // the link-score name and the `Δsource` denominator carry -- via
-    // `generate_scalar_to_element_equation`'s `source_pin_element`, computed
-    // by `agg_pin_for_target` below.
+    // every loop through the agg; GH #528). Instead EACH arrayed agg --
+    // the live one AND every frozen co-agg (GH #751) -- is pinned to the
+    // target element's PROJECTION onto its own `result_dims` axes (for the
+    // live agg, the same slot the link-score name and the `Δsource`
+    // denominator carry) via `generate_scalar_to_element_equation`'s
+    // per-ident `source_pins`, computed by `source_pins_for_target` below.
 
-    // Positions of the agg's `result_dims` within `to`'s dimensions, so a
-    // target element tuple can be projected onto the agg-slot subscript
-    // for the link-score name's agg side.
-    let result_dim_positions: Vec<usize> = agg
-        .result_dims
-        .iter()
-        .filter_map(|rd| {
-            let canon = crate::common::canonicalize(rd);
-            to_dims.iter().position(|td| td.name() == canon.as_ref())
-        })
-        .collect();
+    // Positions of an agg's `result_dims` within `to`'s dimensions, so a
+    // target element tuple can be projected onto that agg's slot subscript
+    // (for the link-score name's agg side, and for the per-ident body pins).
+    let positions_in_to_dims = |result_dims: &[String]| -> Vec<usize> {
+        result_dims
+            .iter()
+            .filter_map(|rd| {
+                let canon = crate::common::canonicalize(rd);
+                to_dims.iter().position(|td| td.name() == canon.as_ref())
+            })
+            .collect()
+    };
+    let result_dim_positions: Vec<usize> = positions_in_to_dims(&agg.result_dims);
     // The target element projected onto the agg's `result_dims` (the
     // agg-slot subscript), or `None` when the agg is scalar / the
     // projection is empty.
@@ -2095,23 +2098,55 @@ pub(super) fn emit_agg_to_target_link_scores(
             Some(slot) => format!("{agg_q}[{slot}]"),
         }
     };
-    // The QUALIFIED (`d1·a`) projection of a target element onto the agg's
-    // `result_dims` axes -- the subscript the agg ident is pinned to in the
-    // per-target-element equation BODY (`generate_scalar_to_element_equation`'s
-    // `source_pin_element`). Qualified like the other pinned deps so
+    // The QUALIFIED (`d1·a`) projection of a target element onto an agg's
+    // `result_dims` axes (given their precomputed positions in `to`'s dims)
+    // -- the subscript that agg's ident is pinned to in the
+    // per-target-element equation BODY (one `generate_scalar_to_element_equation`
+    // `source_pins` entry). Qualified like the other pinned deps so
     // `PREVIOUS(agg[...])` references compile to direct LoadPrevs. `None`
-    // when the agg is scalar (referenced bare; nothing to pin).
-    let agg_pin_for_target = |element: &str| -> Option<String> {
-        if !agg_is_arrayed {
-            return None;
-        }
+    // when the projection is empty (a scalar agg; referenced bare, nothing
+    // to pin).
+    let qualified_pin_for_target = |positions: &[usize], element: &str| -> Option<String> {
         let qualified = crate::ltm_augment::qualify_element_csv(element, &to_dims);
         let parts: Vec<&str> = qualified.split(',').collect();
-        let slot: Vec<&str> = result_dim_positions
+        let slot: Vec<&str> = positions
             .iter()
             .filter_map(|&p| parts.get(p).copied())
             .collect();
         (!slot.is_empty()).then(|| slot.join(","))
+    };
+    // Every ARRAYED agg referenced by the substituted equation needs a body
+    // pin (GH #751): the LIVE agg (held live; the GH #528 projection) and
+    // every frozen CO-AGG -- another hoisted reducer of the same target,
+    // whose `PREVIOUS(B)` freeze is otherwise a bare multi-slot reference in
+    // a scalar equation (fragment-compile failure, silently stubbed to 0).
+    // Each ident is projected onto ITS OWN `result_dims` positions.
+    // `aggs_in_var` yields first-encounter order, so the pin list -- and the
+    // emitted equation text -- is deterministic.
+    let arrayed_agg_pin_positions: Vec<(Ident<Canonical>, Vec<usize>)> = {
+        let mut pins: Vec<(Ident<Canonical>, Vec<usize>)> = Vec::new();
+        if agg_is_arrayed {
+            pins.push((agg_canonical.clone(), result_dim_positions.clone()));
+        }
+        for other in agg_nodes.aggs_in_var(to) {
+            if other.is_synthetic && other.name != agg.name && !other.result_dims.is_empty() {
+                pins.push((
+                    Ident::<Canonical>::new(&other.name),
+                    positions_in_to_dims(&other.result_dims),
+                ));
+            }
+        }
+        pins
+    };
+    // The per-ident pin map for one target element: each arrayed agg pinned
+    // to the target element's projection onto its own result axes.
+    let source_pins_for_target = |element: &str| -> Vec<(Ident<Canonical>, String)> {
+        arrayed_agg_pin_positions
+            .iter()
+            .filter_map(|(ident, positions)| {
+                qualified_pin_for_target(positions, element).map(|slot| (ident.clone(), slot))
+            })
+            .collect()
     };
 
     // Helper: substitute the reducers in a slot expr's canonical text, to
@@ -2187,13 +2222,15 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .map(crate::ltm_augment::dimension_element_names)
                 .collect();
             for element in &cartesian_subscripts(&dim_element_lists) {
-                // The partial is built around the *bare* agg name (which is
-                // what `substituted` holds); `agg_pin_for_target` then pins
-                // it to the projected `agg[<slot>]` when the agg is arrayed,
-                // matching `agg_name_for_target` (the full element tuple
-                // would over-subscript the agg in the broadcast case; GH
-                // #528). The `Δsource` denominator carries the same slot
-                // via the explicit override.
+                // The partial is built around the *bare* agg names (which is
+                // what `substituted` holds); `source_pins_for_target` then
+                // pins each arrayed agg -- the live one AND any frozen
+                // co-agg -- to its projected `agg[<slot>]`, matching
+                // `agg_name_for_target` for the live agg (the full element
+                // tuple would over-subscript an agg in the broadcast case;
+                // GH #528, and the frozen-co-agg sibling GH #751). The
+                // `Δsource` denominator carries the live agg's slot via the
+                // explicit override.
                 let name = format!(
                     "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
                     agg_name_for_target(element),
@@ -2209,7 +2246,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                     &all_deps,
                     &deps_to_subscript,
                     Some(&agg_source_ref_for_target(element)),
-                    agg_pin_for_target(element).as_deref(),
+                    &source_pins_for_target(element),
                     Some(project_dimensions_context(db, project)),
                 ) {
                     Ok(equation) => vars.push(LtmSyntheticVar {
@@ -2267,7 +2304,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             &slot_deps,
                             &deps_to_subscript,
                             Some(&agg_source_ref_for_target(element)),
-                            agg_pin_for_target(element).as_deref(),
+                            &source_pins_for_target(element),
                             Some(project_dimensions_context(db, project)),
                         )
                     }),

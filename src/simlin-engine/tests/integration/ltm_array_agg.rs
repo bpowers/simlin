@@ -7808,3 +7808,181 @@ fn whole_rhs_mapped_broadcast_intersection_scores_cleanly() {
         }
     }
 }
+
+/// GH #751: a target equation hoisting TWO distinct ARRAYED sliced reducers
+/// (`two_sums[d1] = SUM(m1[d1,*]) + SUM(m2[d1,*])`) must pin the FROZEN
+/// co-agg's reference in each agg→target partial to the co-agg's own
+/// projected slot. Pre-fix, agg A's per-target-element partial froze co-agg
+/// B as the bare `previous("$⁚ltm⁚agg⁚1")` -- a multi-slot reference in a
+/// scalar equation -- so all four `agg[{r}]→two_sums[{r}]` fragments failed
+/// to compile (4 Assembly warnings), stubbing every agg→target link score
+/// AND all 8 loop scores through `two_sums` to constant 0.
+///
+/// Score derivation (`two_sums = A + B`, `A = SUM(m1[d1,*]) = 0.1·rowsum`,
+/// `B = 0.05·rowsum`): the changed-first numerator for A is
+/// `(A_t + B_{t-1}) - two_sums_{t-1} = ΔA`, so
+/// `score_A = |ΔA/Δtwo_sums| = 0.1/0.15 = 2/3` and `score_B = 1/3`.
+/// Each m1-family loop multiplies `score_A` by the row link (`0.5` -- each
+/// of the 2 co-reduced cells carries half the row's change) and three
+/// unit links, giving `1/3`; the m2 family gives `1/6`.
+#[test]
+fn gh751_two_arrayed_co_aggs_pin_frozen_agg_to_slot() {
+    let project = TestProject::new("gh751")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["r1", "r2"])
+        .named_dimension("d2", &["c1", "c2"])
+        .array_stock("pop[d1,d2]", "100", &["growth"], &[], None)
+        .array_flow("growth[d1,d2]", "two_sums[d1] * 0.01", None)
+        .array_aux("m1[d1,d2]", "pop[d1,d2] * 0.1")
+        .array_aux("m2[d1,d2]", "pop[d1,d2] * 0.05")
+        .array_aux("two_sums[d1]", "SUM(m1[d1,*]) + SUM(m2[d1,*])")
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // Every fragment compiles: no Assembly warnings at all (pre-fix: 4,
+    // one per failed agg[{r}]→two_sums[{r}] fragment).
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "two distinct arrayed co-aggs must compile warning-free; got: {warnings:?}"
+    );
+
+    // The frozen co-agg is pinned to ITS projected slot, never bare.
+    // (agg⁚0 = SUM(m1[d1,*]), agg⁚1 = SUM(m2[d1,*]) -- left-to-right
+    // minting order.)
+    let a0_to_r1 = ltm_var(
+        &ltm.vars,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0[r1]\u{2192}two_sums[r1]",
+    );
+    let eqn = a0_to_r1.equation.source_text();
+    assert!(
+        eqn.contains("previous(\"$\u{205A}ltm\u{205A}agg\u{205A}1\"[d1\u{B7}r1])"),
+        "the frozen co-agg must be PREVIOUS-pinned to its own projected slot; got: {eqn}"
+    );
+    assert!(
+        !eqn.contains("previous(\"$\u{205A}ltm\u{205A}agg\u{205A}1\")"),
+        "the frozen co-agg must not be referenced bare (a multi-slot reference in a \
+         scalar equation cannot compile); got: {eqn}"
+    );
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // Both aggs' agg→target halves score their analytic share.
+    for (agg_idx, expected) in [(0usize, 2.0 / 3.0), (1usize, 1.0 / 3.0)] {
+        for r in ["r1", "r2"] {
+            let name = format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}{agg_idx}[{r}]\u{2192}two_sums[{r}]"
+            );
+            let s = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in s.iter().enumerate().skip(1) {
+                assert!(
+                    (v - expected).abs() < 1e-9,
+                    "{name} at step {step}: expected {expected}; got {s:?}"
+                );
+            }
+        }
+    }
+
+    // Every loop score is finite and sustained at its analytic value:
+    // 1/3 for the m1-family loops, 1/6 for the m2 family. Classify each
+    // loop by which agg its equation references.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_vars.len(),
+        8,
+        "one loop per (agg, d1 row, co-reduced d2 cell); got: {:?}",
+        loop_vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    for v in loop_vars {
+        let expected = if v.equation.source_text().contains("agg\u{205A}0") {
+            1.0 / 3.0
+        } else {
+            1.0 / 6.0
+        };
+        let s = series_at(&results, offset_of(&results, &v.name));
+        for (step, &val) in s.iter().enumerate().skip(STARTUP_STEPS) {
+            assert!(
+                (val - expected).abs() < 1e-6,
+                "loop score {} at step {step}: expected {expected}; got {s:?}",
+                v.name
+            );
+        }
+    }
+}
+
+/// GH #751's SCALAR-co-agg twin (the GH #737-era family): two distinct
+/// WHOLE-EXTENT reducers in one scalar target (`tot = SUM(m1[*]) +
+/// SUM(m2[*])`) mint two SCALAR aggs, and a scalar co-agg's bare
+/// `PREVIOUS("$⁚ltm⁚agg⁚1")` freeze compiles as-is -- this shape already
+/// worked and must stay byte-identical under the per-ident pin map (a
+/// scalar agg has empty `result_dims`, so it gets no pin entry by
+/// construction). Pins the bare-PREVIOUS equation text, zero warnings, and
+/// the same 2/3 / 1/3 analytic shares as the arrayed twin.
+#[test]
+fn gh751_scalar_co_aggs_keep_bare_previous_freeze() {
+    let project = TestProject::new("gh751_scalar_twin")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["r1", "r2"])
+        .array_stock("pop[d1]", "100", &["growth"], &[], None)
+        .array_flow("growth[d1]", "tot * 0.01", None)
+        .array_aux("m1[d1]", "pop[d1] * 0.1")
+        .array_aux("m2[d1]", "pop[d1] * 0.05")
+        .scalar_aux("tot", "SUM(m1[*]) + SUM(m2[*])")
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "scalar co-aggs must compile warning-free; got: {warnings:?}"
+    );
+
+    // The scalar co-agg keeps its bare PREVIOUS freeze (byte-identity pin:
+    // no slot subscript exists to pin a scalar agg to).
+    let a0_to_tot = ltm_var(
+        &ltm.vars,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}tot",
+    );
+    let eqn = a0_to_tot.equation.source_text();
+    assert!(
+        eqn.contains("PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}1\")"),
+        "a scalar co-agg's freeze stays the bare PREVIOUS reference; got: {eqn}"
+    );
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    for (agg_idx, expected) in [(0usize, 2.0 / 3.0), (1usize, 1.0 / 3.0)] {
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}{agg_idx}\u{2192}tot"
+        );
+        let s = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - expected).abs() < 1e-9,
+                "{name} at step {step}: expected {expected}; got {s:?}"
+            );
+        }
+    }
+}

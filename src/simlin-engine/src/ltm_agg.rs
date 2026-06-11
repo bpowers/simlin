@@ -817,8 +817,9 @@ fn walk_var_equation(
 ///   per-`(row, slot)` slot must name a complete `to` element in declared
 ///   order, which neither shape's slots do; the synthetic agg's slots are
 ///   keyed by `result_dims` order and the GH #528 projection
-///   (`agg_pin_for_target` / `expand_same_element`'s name-matched
-///   projection) handles the broadcast fan-out and the reordering.
+///   (`emit_agg_to_target_link_scores`' per-ident pins /
+///   `expand_same_element`'s name-matched projection) handles the
+///   broadcast fan-out and the reordering.
 ///
 /// Expressible (⇒ the variable IS the agg, byte-identical to pre-T4):
 /// - an ALIGNED partial reduce (`Iterated` dims == the owner's dims, in

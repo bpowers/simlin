@@ -2013,7 +2013,7 @@ fn subscript_idents_in_expr0(
 /// dimension (the target self-reference is pinned implicitly via the
 /// already-subscripted `to[element]` reference the guard form is built
 /// around). The source itself is never in this set: an arrayed-agg source is
-/// pinned via `source_pin_element` instead, since the full target tuple
+/// pinned via its `source_pins` entry instead, since the full target tuple
 /// over-subscripts it in the broadcast case (GH #528).
 ///
 /// `source_ref_override`: the pre-rendered (quoted, possibly element-pinned)
@@ -2024,16 +2024,24 @@ fn subscript_idents_in_expr0(
 /// partial) numerator do; a bare agg reference in a scalar equation would not
 /// compile and the link score would stub to zero.
 ///
-/// `source_pin_element`: the (qualified) element tuple to pin `from`'s
-/// references to in the partial BODY, or `None` for a true scalar source
-/// (no pinning). The arrayed-agg caller passes the target element's
-/// projection onto the agg's `result_dims` axes -- the same slot the
-/// link-score name and `source_ref_override` carry. Pinning the agg through
-/// `to_deps_to_subscript` instead would use the target's FULL element tuple,
-/// which over-subscripts the agg in the broadcast case (`agg[D1]` feeding
-/// `to[D1,D2]`): the fragment fails to compile and the score is stubbed to a
-/// constant 0 (GH #528). For the diagonal case (`result_dims` == `to`'s
-/// dims) the projection IS the full tuple, so the equation is unchanged.
+/// `source_pins`: the per-ident pin map (GH #751) -- for each `(ident,
+/// slot)` entry, that ident's references in the partial BODY are pinned to
+/// the (qualified) `slot` element tuple. Empty for a true scalar source
+/// (no pinning). The arrayed-agg caller passes one entry per ARRAYED agg
+/// referenced by the substituted equation: the LIVE agg's entry carries the
+/// target element's projection onto its `result_dims` axes -- the same slot
+/// the link-score name and `source_ref_override` carry (GH #528) -- and
+/// each frozen co-agg (a second hoisted reducer in the same target
+/// equation) carries the projection onto ITS OWN `result_dims`, so its
+/// `PREVIOUS(...)` freeze reads one slot instead of the ill-typed bare
+/// multi-slot reference that failed fragment compile and stubbed the score
+/// to 0 (GH #751). Pinning these idents through `to_deps_to_subscript`
+/// instead would use the target's FULL element tuple, which over-subscripts
+/// an agg in the broadcast case (`agg[D1]` feeding `to[D1,D2]`): the
+/// fragment fails to compile and the score is stubbed to a constant 0
+/// (GH #528). For the diagonal case (`result_dims` == `to`'s dims) the
+/// projection IS the full tuple, so the equation is unchanged. A SCALAR
+/// co-agg needs no entry: its bare `PREVIOUS(name)` freeze compiles as-is.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_scalar_to_element_equation(
     from: &str,
@@ -2043,7 +2051,7 @@ pub(crate) fn generate_scalar_to_element_equation(
     to_deps: &HashSet<Ident<Canonical>>,
     to_deps_to_subscript: &HashSet<Ident<Canonical>>,
     source_ref_override: Option<&str>,
-    source_pin_element: Option<&str>,
+    source_pins: &[(Ident<Canonical>, String)],
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Result<String, PartialEquationError> {
     let from_canonical = Ident::new(from);
@@ -2064,18 +2072,17 @@ pub(crate) fn generate_scalar_to_element_equation(
         None,
         dims_ctx,
     )?;
-    let partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element)?;
-    // Pin the source's own references (live numerator occurrence and any
-    // PREVIOUS-wrapped ones alike) to its projected slot -- a separate pass
-    // from the full-tuple `to_deps_to_subscript` pinning above.
-    let partial = match source_pin_element {
-        Some(slot) => {
-            let source_only: HashSet<Ident<Canonical>> =
-                std::iter::once(from_canonical.clone()).collect();
-            subscript_idents_at_element(&partial, &source_only, slot)?
-        }
-        None => partial,
-    };
+    let mut partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element)?;
+    // Pin each mapped ident's references (the live source's numerator
+    // occurrence and any PREVIOUS-wrapped co-agg freezes alike) to its own
+    // projected slot -- separate passes from the full-tuple
+    // `to_deps_to_subscript` pinning above, because each agg's slot is the
+    // projection onto ITS `result_dims`, not the target's full tuple. The
+    // passes touch disjoint idents, so application order is irrelevant.
+    for (ident, slot) in source_pins {
+        let one: HashSet<Ident<Canonical>> = std::iter::once(ident.clone()).collect();
+        partial = subscript_idents_at_element(&partial, &one, slot)?;
+    }
     let source_ref = source_ref_override.unwrap_or(&from_q);
     Ok(link_score_guard_form(&partial, &to_elem, source_ref))
 }
