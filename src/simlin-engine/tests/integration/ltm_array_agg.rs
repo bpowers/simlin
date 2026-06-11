@@ -5997,16 +5997,26 @@ fn whole_rhs_broadcast_pinned_mix_scores_read_rows_only() {
         }
     }
 
-    // Loops through the agg exist (the per-(d1,d2) diagonals plus the
-    // cross-D2 petal recoveries within each D1 row), every one finite and
-    // sustained.
+    // Exact loop census -- all causally real, no phantoms. Per D1 row the
+    // element graph is stock[d1,d2] -> cube[d1,nyc,d2] -> agg[d1] ->
+    // out[d1,d2'] -> inflow[d1,d2'] -> stock[d1,d2']:
+    // - 4 elementary DIAGONAL circuits (d2' == d2, one per (d1, d2));
+    // - 2 petal-stitched CROSS-D2 loops (one per d1): the two petals
+    //   agg[d1] -> out[d1,x] -> ... -> cube[d1,nyc,x] -> agg[d1] and the
+    //   y-twin revisit agg[d1], so Johnson cannot emit their combination
+    //   directly; `recover_cross_agg_loops` stitches each pairwise-disjoint
+    //   petal pair into ONE canonical loop. These are causally real
+    //   (out[d1,y] genuinely depends on stock[d1,x] through the agg).
+    // Total: exactly 6. Any drift means phantom loops were reintroduced
+    // (or real ones dropped).
     let loop_names: Vec<String> = ltm_score_var_names(&results)
         .into_iter()
         .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
         .collect();
-    assert!(
-        loop_names.len() >= 4,
-        "expected at least the four per-(d1,d2) diagonal loops; got: {loop_names:?}"
+    assert_eq!(
+        loop_names.len(),
+        6,
+        "expected 4 diagonal + 2 cross-D2 petal-stitched loops; got: {loop_names:?}"
     );
     for name in &loop_names {
         let var = ltm_var(&ltm.vars, name);
@@ -6110,4 +6120,168 @@ d2\u{B7}x])))";
         golden,
         "the mapped whole-RHS source-half equation text must stay byte-identical"
     );
+}
+
+/// The mapped ∩ non-aligned INTERSECTION (T4 review finding 1):
+/// `growth[State,D3] = SUM(matrix[State,*])` over a positional
+/// `State→Region` mapping is mapped AND broadcast (`result_dims = [State]`,
+/// a strict subset of the owner's `[State,D3]`) -- mapped does NOT imply
+/// aligned. The mapped clause of `variable_backed_shape_is_expressible`
+/// fires first, and the synthetic machinery composes both halves cleanly:
+/// the source half remaps each Region row to its positionally-corresponding
+/// State slot, and the GH #528 projection broadcasts the [State]-arrayed
+/// agg over the owner's extra D3 dim. This pins the intersection the
+/// minting predicate's rustdoc documents, guarding against a future
+/// "simplification" that reorders/merges the clauses on an assumed
+/// mapped ⇒ aligned.
+#[test]
+fn whole_rhs_mapped_broadcast_intersection_scores_cleanly() {
+    let project = TestProject::new("t4_mapped_broadcast")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["west", "east"])
+        .named_dimension("D2", &["x", "y"])
+        .named_dimension("D3", &["p", "q"])
+        .named_dimension_with_mapping("State", &["CA", "NY"], "Region")
+        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["Region".into(), "D2".into()],
+            "pop[Region] * 0.05",
+            None,
+        )
+        // Mapped (State→Region) AND broadcast (owner [State,D3], result
+        // dims [State]).
+        .array_aux_direct(
+            "growth",
+            vec!["State".into(), "D3".into()],
+            "SUM(matrix[State, *])",
+            None,
+        )
+        .array_flow("inflow[Region]", "SUM(growth[*, *]) * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the mapped+broadcast intersection must compile every LTM fragment cleanly; \
+         got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    // Canonical-sorted variable walk: `growth` < `inflow`, so growth's
+    // reducer is agg 0 (arrayed over the TARGET dim State) and inflow's
+    // whole-extent `SUM(growth[*,*])` sub-reducer is agg 1 (scalar).
+    let agg0 = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm_var(&ltm.vars, agg0);
+    assert_eq!(
+        agg_var.dimensions,
+        vec!["State".to_string()],
+        "the synthetic agg is arrayed over the reducer's TARGET result dim"
+    );
+
+    // Source half: REMAPPED rows -- each Region row feeds the slot of its
+    // positionally-corresponding State element.
+    for (region, state) in [("west", "ca"), ("east", "ny")] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{region},{d2}]\u{2192}{agg0}[{state}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected the remapped source-half score {name:?}; have: {:?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+    // Agg half: the GH #528 projection BROADCASTS the [State] slot over the
+    // owner's extra D3 dim.
+    for (state, d3) in [("ca", "p"), ("ca", "q"), ("ny", "p"), ("ny", "q")] {
+        let name = format!("{LINK_SCORE_PREFIX}{agg0}[{state}]\u{2192}growth[{state},{d3}]");
+        assert!(
+            ltm.vars.iter().any(|v| v.name == name),
+            "expected the broadcast agg-half score {name:?}; have: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(results.step_count > STARTUP_STEPS);
+
+    // Per-row attribution: the two co-reduced D2 rows of each State slot
+    // change by identical deltas (`matrix[Region,*] = pop[Region] * 0.05`,
+    // equal initial stocks), so each remapped source half reads 0.5...
+    for (region, state) in [("west", "ca"), ("east", "ny")] {
+        for d2 in ["x", "y"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{region},{d2}]\u{2192}{agg0}[{state}]");
+            let s = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in s.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step}: expected 0.5 (two equal-delta co-reduced \
+                     rows); got {s:?}"
+                );
+            }
+        }
+    }
+    // ... and `growth` IS the agg's value, so every broadcast agg half
+    // reads exactly 1.
+    for (state, d3) in [("ca", "p"), ("ca", "q"), ("ny", "p"), ("ny", "q")] {
+        let name = format!("{LINK_SCORE_PREFIX}{agg0}[{state}]\u{2192}growth[{state},{d3}]");
+        let s = series_at(&results, offset_of(&results, &name));
+        for (step, &v) in s.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "{name} at step {step}: expected exactly 1 (growth IS the agg); got {s:?}"
+            );
+        }
+    }
+
+    // Exactly the 8 real elementary loops -- one per (region, d2, d3):
+    // pop[region] -> matrix[region,d2] -> agg0[state] -> growth[state,d3]
+    // -> agg1 -> inflow[region] -> pop[region]. Each loop's score is the
+    // link product 0.5 (matrix row, two co-reduced D2 rows) * 1.0
+    // (agg0 -> growth) * 0.25 (growth -> agg1: four equal-delta growth
+    // elements feed the whole-extent SUM) * 1.0 (agg1 -> inflow) * 1.0
+    // (flow-to-stock, single-inflow stock) * 1.0 (pop -> matrix) = 0.125.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        8,
+        "expected one loop per (region, d2, d3) combination; got: {loop_names:?}"
+    );
+    for name in &loop_names {
+        let var = ltm_var(&ltm.vars, name);
+        assert!(
+            var.equation.source_text().contains(agg0),
+            "every loop routes through the mapped+broadcast agg; {name} does not: {}",
+            var.equation.source_text()
+        );
+        let base = offset_of(&results, name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let s = series_at(&results, base + slot);
+            for (step, &v) in s.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "loop score {name} slot {slot} at step {step} is not finite: {v}"
+                );
+            }
+            for (step, &v) in s.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    (v - 0.125).abs() < 1e-9,
+                    "loop score {name} slot {slot} at step {step}: expected exactly \
+                     0.125 (see the link-product derivation above); got {s:?}"
+                );
+            }
+        }
+    }
 }

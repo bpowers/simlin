@@ -742,11 +742,20 @@ fn walk_var_equation(
 ///   remapped pair falls off it onto `emit_per_shape_link_scores`'
 ///   `Wildcard` partial -- whose PREVIOUS-wrapping mangles the iterated
 ///   index into the non-compiling `matrix[PREVIOUS(state),*]` (a
-///   silently-stubbed constant-0 score). Note the mapped case is NOT
-///   subsumed by the alignment clause below: the `Iterated` axis carries
-///   the TARGET dim, so its result dims equal the owner's dims -- which is
-///   exactly why the remap, not the shape, is what the name-keyed path
-///   cannot express.
+///   silently-stubbed constant-0 score). The mapped clause is NOT subsumed
+///   by the alignment clause below: in the CANONICAL GH #534 shape
+///   (`out[State] = SUM(matrix[State,*])`, the owner's only dim is
+///   `State`) the result dims ARE aligned -- the `Iterated` axis carries
+///   the TARGET dim -- so the alignment comparison alone would wrongly
+///   call it expressible; there the remap, not the shape, is what the
+///   name-keyed path cannot express. But mapped does NOT imply aligned:
+///   the two conditions co-occur (`out[State,D3] = SUM(matrix[State,*])`
+///   is mapped AND broadcast). The mapped check simply fires first, and
+///   the synthetic machinery handles the intersection cleanly -- the
+///   source half remaps rows to slots and the GH #528 projection
+///   broadcasts the agg over the extra owner dims (pinned end-to-end by
+///   `whole_rhs_mapped_broadcast_intersection_scores_cleanly`). Do not
+///   reorder or merge the clauses on an assumed mapped ⇒ aligned.
 /// - **Non-aligned result dims** (GH #764): the `Iterated` axes' target
 ///   dims, in slice order, differ from the owner's declared dims -- a
 ///   BROADCAST (`out[D1,D3] = SUM(matrix[D1,*])`, strict subset) or a

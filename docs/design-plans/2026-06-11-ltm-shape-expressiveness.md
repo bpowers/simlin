@@ -482,6 +482,12 @@ Extend `walk_var_equation`'s carve-out to broadcast/permuted `result_dims`;
   closed in a loop: zero warnings, non-zero correct loop scores.
 - Blast radius: aligned shape byte-identical; the new synthetic aux appears in
   layout (slot-count guard on C-LEARN, see perf).
+- The perf section's emitted-LTM-var-count guardrail ("T4 and T6") is
+  deferred WHOLLY to T6: T4's only new emissions are one synthetic aux plus
+  its two score halves per non-aligned whole-RHS reduce (a shape C-LEARN
+  does not contain), and the T6 `PerElement` family is the only remaining
+  emission-count-relevant change -- the T6 implementor inherits the C-LEARN
+  <1% var-count assertion.
 
 ### Task 5: feeder sub-slice acceptance (#767) -- **riskiest**
 Widen `combined_read_slice` to invariant I1; route feeder element edges
