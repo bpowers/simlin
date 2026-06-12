@@ -4393,6 +4393,82 @@ fn bare_arrayed_reducer_arg_in_a2a_target_declines_loudly() {
     }
 }
 
+/// GH #788/#795 review regression: a bare arrayed reducer in an A2A target
+/// does not make every incoming edge unscoreable. Independent additive sources
+/// still have sound ceteris-paribus partials because changing them does not
+/// freeze or perturb the unsafe reducer value.
+#[test]
+fn bare_arrayed_reducer_decline_keeps_independent_additive_source() {
+    let project = TestProject::new("gh795_bare_arrayed_reducer_scope")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux("local[D1]", "pop * 0.01")
+        .array_flow("growth[D1]", "local + SUM(pop)", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let local_growth = format!("{LINK_SCORE_PREFIX}local\u{2192}growth");
+    assert!(
+        ltm_vars.iter().any(|v| v.name == local_growth),
+        "independent additive edge {local_growth:?} must remain scoreable; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    let pop_growth = format!("{LINK_SCORE_PREFIX}pop\u{2192}growth");
+    assert!(
+        !ltm_vars.iter().any(|v| v.name == pop_growth),
+        "edge reading the bare reducer arg must be declined; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.iter().any(|d| match &d.error {
+            DiagnosticError::Assembly(msg) => {
+                let lower = msg.to_ascii_lowercase();
+                msg.contains("pop -> growth")
+                    && msg.contains("bare arrayed reducer argument")
+                    && lower.contains("sum(pop)")
+            }
+            _ => false,
+        }),
+        "expected warning for declined pop -> growth; got: {warnings:?}"
+    );
+    assert!(
+        !warnings.iter().any(|d| match &d.error {
+            DiagnosticError::Assembly(msg) => {
+                msg.contains("local -> growth") && msg.contains("bare arrayed reducer argument")
+            }
+            _ => false,
+        }),
+        "local -> growth is independent of the bare reducer and must not warn; got: {warnings:?}"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    let local_base = offset_of(&results, &local_growth);
+    for (slot, elem) in ["a", "b"].into_iter().enumerate() {
+        let score = series_at(&results, local_base + slot);
+        for (step, &value) in score.iter().enumerate() {
+            assert!(
+                value.is_finite(),
+                "local -> growth score for {elem} at step {step} must stay finite; got {score:?}"
+            );
+        }
+    }
+}
+
 /// GH #779 precision pin: the WHOLE-RHS bare reducer (`total = SUM(pop)`)
 /// is NOT the declined feeder shape -- it is variable-backed and its
 /// `pop -> total` edge is scored per read row by

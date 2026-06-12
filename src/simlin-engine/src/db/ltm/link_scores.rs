@@ -1509,8 +1509,13 @@ fn decline_bare_arrayed_reducer_target(
     to: &str,
     unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> bool {
-    let reducer =
-        crate::ltm_agg::unhoisted_bare_arrayed_reducer_arg(db, to.to_string(), model, project);
+    let reducer = crate::ltm_agg::unhoisted_bare_arrayed_reducer_arg(
+        db,
+        from.to_string(),
+        to.to_string(),
+        model,
+        project,
+    );
     let Some(reducer) = reducer.as_ref() else {
         return false;
     };

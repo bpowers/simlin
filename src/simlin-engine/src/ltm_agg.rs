@@ -115,7 +115,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Ast, Expr2, IndexExpr2};
+use crate::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
 use crate::builtins::BuiltinFn;
 use crate::common::{Canonical, Ident, canonicalize};
 use crate::db::{
@@ -2015,17 +2015,20 @@ pub(crate) fn render_read_slice_for_diagnostic(slice: &[AxisRead]) -> String {
 }
 
 /// Return the first maximal reducer text in `to` whose bare arrayed argument
-/// overlaps an Apply-To-All target dimension. That spelling is unsafe for LTM
-/// today: hoisting would evaluate the reducer outside the target's active
-/// element context, while ordinary feeder partials would freeze that same
-/// wrong whole-array reducer value.
+/// overlaps an Apply-To-All target dimension and participates in `from`'s
+/// partial-equation term. That spelling is unsafe for LTM today: hoisting
+/// would evaluate the reducer outside the target's active element context,
+/// while ordinary feeder partials in the same non-additive term would freeze
+/// that same wrong whole-array reducer value.
 #[salsa::tracked(returns(ref))]
 pub(crate) fn unhoisted_bare_arrayed_reducer_arg<'db>(
     db: &'db dyn Db,
+    from: String,
     to: String,
     model: SourceModel,
     project: SourceProject,
 ) -> Option<String> {
+    let from_canon = canonicalize(&from).into_owned();
     let variables = reconstruct_model_variables(db, model, project);
     let dm_dims = project_datamodel_dims(db, project);
     let dim_ctx = project_dimensions_context(db, project);
@@ -2041,7 +2044,43 @@ pub(crate) fn unhoisted_bare_arrayed_reducer_arg<'db>(
         dm_dims: dm_dims.as_slice(),
         dim_ctx,
     };
-    first_active_bare_arrayed_reducer(expr, &ctx, false)
+    first_active_bare_arrayed_reducer_affecting_source(expr, &ctx, &from_canon)
+}
+
+fn first_active_bare_arrayed_reducer_affecting_source(
+    expr: &Expr2,
+    ctx: &AggWalkCtx<'_>,
+    from_canon: &str,
+) -> Option<String> {
+    // Only + and - preserve an independent ceteris-paribus partial for each
+    // branch. Products, divisions, functions, and conditionals couple the
+    // changed source to any unsafe reducer in the same enclosing term.
+    match expr {
+        Expr2::Op2(BinaryOp::Add | BinaryOp::Sub, left, right, _, _) => {
+            let left_found = if expr_references_source(left, from_canon) {
+                first_active_bare_arrayed_reducer_affecting_source(left, ctx, from_canon)
+            } else {
+                None
+            };
+            left_found.or_else(|| {
+                if expr_references_source(right, from_canon) {
+                    first_active_bare_arrayed_reducer_affecting_source(right, ctx, from_canon)
+                } else {
+                    None
+                }
+            })
+        }
+        _ if expr_references_source(expr, from_canon) => {
+            first_active_bare_arrayed_reducer(expr, ctx, false)
+        }
+        _ => None,
+    }
+}
+
+fn expr_references_source(expr: &Expr2, from_canon: &str) -> bool {
+    let mut names = Vec::new();
+    collect_var_refs(expr, &mut names);
+    names.iter().any(|n| canonicalize(n).as_ref() == from_canon)
 }
 
 fn first_active_bare_arrayed_reducer(
