@@ -3129,6 +3129,38 @@ pub(super) fn emit_link_scores_for_edge(
         vars.extend(disjoint_vars);
         return;
     }
+    // GH #792: the PER-ELEMENT-EQUATION (`Ast::Arrayed`) owner with an
+    // I1-declined STRICT-SLICE multi-source reducer in its slots
+    // (`share[nyc] = SUM(pop[nyc,*] * w[*])`, `share[boston] = SUM(pop[boston,*]
+    // * w[*])`). Such an owner never reaches the cartesian arm of
+    // `try_cross_dimensional_link_scores` (where GH #791's twin decline lives),
+    // so before this it fell to `emit_per_shape_link_scores` shape Bare, which
+    // minted ONE arrayed `link_score:pop->share` simulating to ~-0.0 with no
+    // per-edge warning -- other enumerated loops then consumed that silent
+    // near-zero. We consult the SAME verdict the cartesian arm does
+    // (`unhoisted_reducer_source_read`, salsa-cached on the interned
+    // `LtmLinkId`, so this is a cache hit when the cartesian arm or a re-visit
+    // already derived it): a `StrictSlice` here means a NON-hoisted strict-slice
+    // reducer read of `from` in `to`'s slots. We can reach this gate only with
+    // `routed_aggs` empty (else we returned at the agg branch above), so no
+    // reducer reading `from` in `to` was hoisted -- the strict read is genuinely
+    // un-hoisted and the Bare stand-in is genuinely wrong. Take the GH #758/#780
+    // loud skip (one warning naming the edge + its actual slice, no link-score
+    // variable, the edge recorded so loops through it drop). A `FullExtent` /
+    // `NotDescribable` verdict keeps the existing per-shape path byte-identical
+    // -- the disjoint-dim FixedIndex family (already handled above), bare
+    // out-of-reducer refs, and the GH #525 PerElement family all classify
+    // non-`StrictSlice` (a bare `from[m]` outside any reducer is collected by
+    // neither slice walk), so none are touched.
+    let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
+    if let crate::ltm_agg::UnhoistedSourceRead::StrictSlice(slice) =
+        crate::ltm_agg::unhoisted_reducer_source_read(db, link_id, model, project)
+    {
+        if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+            emit_unscoreable_strict_slice_reduce_warning(db, model, from, to, slice);
+        }
+        return;
+    }
     emit_per_shape_link_scores(
         db,
         source_vars,

@@ -9312,6 +9312,241 @@ fn gh791_full_extent_multisource_read_stays_scored() {
     }
 }
 
+/// GH #792: the PER-ELEMENT-EQUATION (`Ast::Arrayed`) sibling of the GH #791
+/// shape. Each `share` slot holds an I1-declined strict-slice multi-source
+/// reducer (`share[nyc] = SUM(pop[nyc,*] * w[*])`, `share[boston] =
+/// SUM(pop[boston,*] * w[*])`). Such an owner never reaches the cartesian arm,
+/// so BEFORE the fix the edge fell to `emit_per_shape_link_scores` shape Bare
+/// and minted a single arrayed `link_score:pop->share` simulating to ~-0.0 at
+/// every step with NO per-edge warning (only `loop_score:u5` warned -- the
+/// other loops consumed the silent near-zero). The MDL importer expands a
+/// single apply-to-all Vensim equation into N per-element equations (GH #651),
+/// so this spelling is exactly what real imports produce.
+///
+/// The fix routes it to the same GH #758/#780 loud skip the A2A spelling takes:
+/// one warning naming the edge + its actual slice, no link-score variable, the
+/// edge recorded in `unscoreable_edges`, dependent loops dropped.
+#[test]
+fn gh792_per_element_owner_strict_slice_skips_loudly() {
+    let project = gh792_per_element_strict_slice_fixture();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The silent Bare stand-in (`$⁚ltm⁚link_score⁚pop→share`, arrayed over
+    // Region, ~-0.0 every step) must be GONE -- in EITHER its bare-edge or any
+    // cartesian-row spelling.
+    let bare = format!("{LINK_SCORE_PREFIX}pop\u{2192}share");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != bare),
+        "the declined strict-slice per-element edge must emit NO Bare stand-in \
+         link score; found {bare:?}"
+    );
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            for row_region in ["nyc", "boston"] {
+                let name = format!("{LINK_SCORE_PREFIX}pop[{row_region},{d2}]\u{2192}share[{e}]");
+                assert!(
+                    ltm.vars.iter().all(|v| v.name != name),
+                    "the declined per-element edge must emit no cartesian link score; \
+                     found {name:?}"
+                );
+            }
+        }
+    }
+
+    // Exactly ONE Assembly warning: the unscoreable `pop -> share` edge, naming
+    // the strict-slice reason and the ACTUAL slice the slots read (rendered
+    // from the computed AxisRead vector, never a canned example). Before the
+    // fix: exactly one warning too -- but the WRONG one (a `loop_score:u5`
+    // fragment-compile failure), while the link surface carried the silent ~0.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable pop -> share edge); \
+         got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("pop -> share") && msg.contains("strict slice"),
+        "the warning must name the unscoreable edge and the strict-slice reason; got: {msg}"
+    );
+    // The rendered slice is whichever slot the deterministic sorted-key walk
+    // hits first (boston < nyc), but EITHER pinned spelling is acceptable.
+    assert!(
+        msg.contains("pop[boston,*]") || msg.contains("pop[nyc,*]"),
+        "the warning must render the ACTUAL strict slice the slots read; got: {msg}"
+    );
+
+    // No loop scores survive: every enumerated loop runs through the doomed
+    // `pop -> share` edge, so none are scored (no silent near-zero loop scores).
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the unscoreable edge must not emit loop scores; got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // Unrelated edges keep their scores, and every emitted score stays finite.
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name == format!("{LINK_SCORE_PREFIX}inflow\u{2192}stock")),
+        "the unrelated inflow -> stock edge must keep its link score"
+    );
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for name in ltm_score_var_names(&results) {
+        let var = ltm_var(&ltm.vars, &name);
+        let base = offset_of(&results, &name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "emitted score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+/// GH #792 discovery-mode twin: the strict-slice decline records the edge in
+/// `unscoreable_edges`, which the pinned-loop pass consumes in discovery mode
+/// too, so the same `pop -> share` edge is declined there -- no Bare stand-in
+/// minted, exhaustive and discovery agree.
+#[test]
+fn gh792_per_element_owner_strict_slice_holds_in_discovery_mode() {
+    let project = gh792_per_element_strict_slice_fixture();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let bare = format!("{LINK_SCORE_PREFIX}pop\u{2192}share");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != bare),
+        "discovery mode must also decline the strict-slice per-element edge; found {bare:?}"
+    );
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("discovery-mode LTM compilation should succeed");
+}
+
+/// GH #792, the MIXED-SLOT decision (any-strict => decline whole edge): ONLY
+/// ONE slot reads `pop`, and it reads it STRICTLY (the `nyc` slot is
+/// `SUM(pop[nyc,*] * w[*])`); the other slot does not read `pop` at all
+/// (`share[boston] = 0`). The edge's one arrayed Bare stand-in conflates both
+/// slots, so the single strict slot proves it wrong for `nyc` -- we decline the
+/// WHOLE edge loudly. This is the "only SOME slots contain the reducer" mixed
+/// case; the verdict combines per-slot with any-strict precedence (a strict slot
+/// dominates a `from`-free / `NotDescribable` slot). A slot reading `pop` at full
+/// extent via a multi-source reducer would instead mint a variable-backed agg and
+/// route the edge through the agg halves, never reaching this gate, so the
+/// full-extent mixed sub-case is exercised by the agg-routing tests, not here.
+#[test]
+fn gh792_mixed_slot_any_strict_declines_whole_edge() {
+    let project = TestProject::new("gh792_mixed")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_with_ranges_direct(
+            "share",
+            vec!["Region".into()],
+            vec![("nyc", "SUM(pop[nyc, *] * w[*])"), ("boston", "0")],
+            None,
+        )
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let bare = format!("{LINK_SCORE_PREFIX}pop\u{2192}share");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != bare),
+        "a mixed-slot owner with ANY strict slot must decline the whole edge; found {bare:?}"
+    );
+    // The strict slot (`nyc`) drives the decline, so the rendered slice names
+    // the pinned read.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning for the mixed-slot decline; got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("pop -> share") && msg.contains("strict slice") && msg.contains("pop[nyc,*]"),
+        "the mixed-slot warning must name the edge, the reason, and the STRICT slot's \
+         slice (pop[nyc,*]); got: {msg}"
+    );
+}
+
+// GH #792 no-regression: the working disjoint-dim FixedIndex per-element family
+// (`try_disjoint_dim_arrayed_link_scores`, GH #510) reads `from` via LITERAL
+// element subscripts OUTSIDE any reducer, so the strict-slice verdict (which
+// only collects reads INSIDE reducers) classifies it `NotDescribable` and the
+// edge is byte-identically unaffected. That family is pinned by
+// `simulate_ltm.rs::test_disjoint_dim_arrayed_target_per_source_element_link_scores`
+// (AC3.3) and the GH #510 element-graph guards, which the full suite re-runs.
+
+/// The GH #792 fixture: a per-element-equation (`Ast::Arrayed`) `share` whose
+/// every slot holds an I1-declined strict-slice multi-source reducer, closed in
+/// a feedback loop pop -> share -> inflow -> stock -> pop.
+fn gh792_per_element_strict_slice_fixture() -> datamodel::Project {
+    TestProject::new("gh792_per_element")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_with_ranges_direct(
+            "share",
+            vec!["Region".into()],
+            vec![
+                ("nyc", "SUM(pop[nyc, *] * w[*])"),
+                ("boston", "SUM(pop[boston, *] * w[*])"),
+            ],
+            None,
+        )
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel()
+}
+
 // ---------------------------------------------------------------------------
 // GH #790: scalar feeder of a whole-RHS variable-backed reduce
 // ---------------------------------------------------------------------------
