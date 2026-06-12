@@ -2009,3 +2009,115 @@ fn element_graph_subset_star_range_reads_only_subdimension_rows() {
     assert_no_edge(&result, "arr[a]", "x");
     assert_no_edge(&result, "arr[c]", "x");
 }
+
+/// Golden pin for the I4 single-derivation refactor (GH #783): a SQUARE
+/// source whose iterated axes carry the SAME target dim twice -- `out[D1] =
+/// base[D1] + SUM(cube[D1, D1, *])` over `cube[D1, D1, D2]`. The synthetic
+/// agg is arrayed over `result_dims = [D1, D1]`, and the source→agg half (the
+/// row enumeration the #783 refactor unifies) routes each `cube[ri, rj, *]`
+/// row to the literal `[ri, rj]` slot -- the FULL `[D1, D1]` cartesian,
+/// including the OFF-diagonal slots (`cube[r1, r2, *] → agg[r1, r2]`). These
+/// source→slot edges are genuinely correct: the reducer text really does read
+/// row `[r1, r2, *]` into slot `[r1, r2]`.
+///
+/// The PHANTOM behavior tracked by GH #778 lives in the OTHER half -- the
+/// `agg → out` `expand_same_element` fan-out -- which emits the off-diagonal
+/// `agg[r1, r2] → out[r2]` while the link-score projection keeps only the
+/// diagonal, minting warned 0-stub loops. That half is NOT touched by the
+/// #783 source-row-derivation unification; this test deliberately PINS its
+/// current (off-diagonal-emitting) shape so the eventual #778 fix flips a
+/// recorded expectation rather than landing in silence. When #778 is fixed,
+/// the `agg[r1, r2] → out[r2]` assertion below must be inverted (and the
+/// agg's `result_dims` may collapse to `[D1]` under fix-direction 1).
+#[test]
+fn element_graph_square_source_duplicated_dim_routes_full_cartesian() {
+    let project = TestProject::new("square_source_elem_graph")
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux("cube[D1,D1,D2]", "1")
+        .array_aux("base[D1]", "0")
+        .array_aux("out[D1]", "base[D1] + SUM(cube[D1, D1, *])");
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The agg is arrayed over the duplicated result dim: every slot is a
+    // `[D1, D1]` pair.
+    assert!(
+        !result.edges.contains_key(agg) && !result.edges.values().any(|ts| ts.contains(agg)),
+        "the square-source agg must always be subscripted with a [D1,D1] pair, never bare {agg}"
+    );
+
+    // Source→agg: each `cube[ri, rj, *]` row routes to slot `[ri, rj]` -- the
+    // FULL `[D1, D1]` cartesian (both Age/D2 elems reduced into the slot),
+    // including the off-diagonal slots. These edges are causally real.
+    for ri in ["r1", "r2"] {
+        for rj in ["r1", "r2"] {
+            for ck in ["c1", "c2"] {
+                assert_edge(
+                    &result,
+                    &format!("cube[{ri},{rj},{ck}]"),
+                    &format!("{agg}[{ri},{rj}]"),
+                );
+            }
+        }
+    }
+    // A `cube` row never feeds a slot whose first two coords it does not name.
+    assert_no_edge(&result, "cube[r1,r1,c1]", &format!("{agg}[r1,r2]"));
+    assert_no_edge(&result, "cube[r1,r2,c1]", &format!("{agg}[r2,r1]"));
+
+    // Agg→out (the GH #778 surface, PINNED at its current off-diagonal-
+    // emitting shape -- NOT fixed by #783): the diagonal slot fans into its
+    // own target...
+    assert_edge(&result, &format!("{agg}[r1,r1]"), "out[r1]");
+    assert_edge(&result, &format!("{agg}[r2,r2]"), "out[r2]");
+    // ...and the off-diagonal slot phantoms into BOTH targets sharing either
+    // D1 occurrence. When GH #778 is fixed these become assert_no_edge.
+    assert_edge(&result, &format!("{agg}[r1,r2]"), "out[r1]");
+    assert_edge(&result, &format!("{agg}[r1,r2]"), "out[r2]"); // GH #778 phantom
+    assert_edge(&result, &format!("{agg}[r2,r1]"), "out[r1]"); // GH #778 phantom
+    assert_edge(&result, &format!("{agg}[r2,r1]"), "out[r2]");
+}
+
+/// Golden pin for the I4 single-derivation refactor (GH #783): an
+/// ITERATED-DIM PROJECTION FEEDER (`frac[D1]` in `out[D1] = base[D1] +
+/// SUM(matrix[D1, *] * frac[D1])`) carries its OWN all-`Iterated` projection
+/// slice (one axis, `Iterated(D1)`), distinct from the canonical reduced
+/// source `matrix[D1, *]` whose slice is `[Iterated(D1), Reduced]`. The
+/// source→agg row enumeration the #783 refactor unifies must route the feeder
+/// by its own slice (1:1 row→slot, `frac[ri] → agg[ri]`) -- never the
+/// canonical source's slice -- so this exercises the per-source-slice path of
+/// the shared derivation.
+#[test]
+fn element_graph_projection_feeder_routes_by_own_slice() {
+    let project = TestProject::new("projection_feeder_elem_graph")
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux("matrix[D1,D2]", "1")
+        .array_aux("frac[D1]", "2")
+        .array_aux("base[D1]", "0")
+        .array_aux("out[D1]", "base[D1] + SUM(matrix[D1, *] * frac[D1])");
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The canonical reduced source: `matrix[ri, *]` row routes to slot `[ri]`.
+    assert_edge(&result, "matrix[r1,c1]", &format!("{agg}[r1]"));
+    assert_edge(&result, "matrix[r1,c2]", &format!("{agg}[r1]"));
+    assert_edge(&result, "matrix[r2,c1]", &format!("{agg}[r2]"));
+    assert_edge(&result, "matrix[r2,c2]", &format!("{agg}[r2]"));
+    assert_no_edge(&result, "matrix[r1,c1]", &format!("{agg}[r2]"));
+
+    // The projection feeder: routed by its OWN all-Iterated slice, 1:1
+    // row→slot. `frac[ri]` feeds ONLY `agg[ri]` -- never every slot (that
+    // would be the scalar-feeder broadcast) and never the cross slot.
+    assert_edge(&result, "frac[r1]", &format!("{agg}[r1]"));
+    assert_edge(&result, "frac[r2]", &format!("{agg}[r2]"));
+    assert_no_edge(&result, "frac[r1]", &format!("{agg}[r2]"));
+    assert_no_edge(&result, "frac[r2]", &format!("{agg}[r1]"));
+
+    // The agg fans diagonally into `out`.
+    assert_edge(&result, &format!("{agg}[r1]"), "out[r1]");
+    assert_edge(&result, &format!("{agg}[r2]"), "out[r2]");
+    assert_no_edge(&result, &format!("{agg}[r1]"), "out[r2]");
+}
