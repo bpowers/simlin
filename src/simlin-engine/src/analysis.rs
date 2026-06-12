@@ -222,6 +222,41 @@ pub fn build_sub_model_output_ports(
         .collect()
 }
 
+/// Build the `LinkExpansionContext` the discovery A2A expansion needs to spell
+/// each Bare link score's per-element from-node in lockstep with the element
+/// graph (GH #754).
+///
+/// `declared_dims` maps every variable in `model` (by canonical name) to its
+/// declared dimensions via the salsa-cached `variable_dimensions` -- the SAME
+/// query `model_element_causal_edges` reads, so the from-side projection and
+/// the element graph derive dims identically. `dim_ctx` is the project's
+/// dimension-mapping correspondence (the GH #527 positional-mapping diagonal).
+///
+/// Public so the engine's LTM discovery tests can drive
+/// `discover_loops_with_graph` through the exact production decision rather
+/// than reconstructing it.
+pub fn build_link_expansion_context(
+    db: &dyn crate::db::Db,
+    source_model: crate::db::SourceModel,
+    source_project: SourceProject,
+) -> crate::ltm_finding::LinkExpansionContext {
+    let declared_dims = source_model
+        .variables(db)
+        .iter()
+        .map(|(name, var)| {
+            (
+                crate::common::Ident::new(name.as_str()),
+                crate::db::variable_dimensions(db, *var, source_project).clone(),
+            )
+        })
+        .collect();
+    let dim_ctx = crate::db::project_dimensions_context(db, source_project).clone();
+    crate::ltm_finding::LinkExpansionContext {
+        declared_dims,
+        dim_ctx,
+    }
+}
+
 /// The loop-bearing half of a successful `run_ltm_pipeline` run: the time
 /// array, the discovered loop summaries, the dominant-period intervals, and
 /// whether discovery was truncated by the time budget. Named (rather than a
@@ -331,6 +366,13 @@ fn run_ltm_pipeline(
     let ltm_vars = crate::db::model_ltm_variables(db, source_model, source_project);
     let dm_dims = crate::db::project_datamodel_dims(db, source_project);
 
+    // Per-variable declared dims + the dimension-mapping context let the A2A
+    // expansion project each Bare score's from-node onto the source's OWN
+    // dims (bare for a scalar feeder, the diagonal/broadcast/mapped form for
+    // an arrayed one) so the discovery search graph's node names match the
+    // element graph the discovery runs on (GH #754).
+    let expansion = build_link_expansion_context(db, source_model, source_project);
+
     let sub_model_output_ports = build_sub_model_output_ports(db, source_project);
 
     let discovery = crate::ltm_finding::discover_loops_with_graph(
@@ -339,6 +381,7 @@ fn run_ltm_pipeline(
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        &expansion,
         &sub_model_output_ports,
         budget,
     );

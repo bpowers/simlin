@@ -4044,15 +4044,14 @@ fn inline_feeder_reducer_synthetic_agg_closure_scores() {
 /// projections" clause): a no-`Reduced` source whose slice is NOT the pure
 /// iterated projection -- here a PINNED axis, `w[D1, c1]` -- still declines
 /// the hoist, and the co-source closure keeps the LOUD degraded behavior:
-/// cross-element loop scores that fail fragment compile (their equations
-/// reference per-(row,slot) names the cartesian emitters never produce for
-/// the off-diagonal hops), each surfacing an Assembly `Warning` and reading
-/// a constant 0.
+/// cross-element loop scores whose equations would reference per-(row,slot)
+/// names the cartesian emitters never produce for the off-diagonal hops are
+/// warned and dropped before fragment compilation can stub them to 0.
 ///
 /// This is the loud sibling of the #758/#764 zero-stub class, NOT silent
 /// garbage. It pins that the T5 feeder clause widened acceptance ONLY for
 /// the all-`Iterated` projection: if the warnings here disappear, the
-/// scores must be real (a silent zero would be a regression). (The design
+/// scores must be real (a silent drop would be a regression). (The design
 /// doc's named non-projection example, `SUM(matrix[D1,*] * other[D2])`
 /// with a free reduced-axis index, is not expressible -- the engine
 /// rejects the equation outright -- so the Pinned-axis mix is the nearest
@@ -4094,7 +4093,7 @@ fn non_projection_feeder_co_source_closure_stays_loud() {
     );
 
     // Every cross-row loop score through the un-hoisted matrix→growth edge
-    // fails fragment compile and is WARNED -- the loud conservative floor.
+    // is WARNED and not emitted -- the loud conservative floor.
     let diags = collect_all_diagnostics(&db, sync.project);
     let warned_loop_scores: Vec<&str> = diags
         .iter()
@@ -4108,22 +4107,427 @@ fn non_projection_feeder_co_source_closure_stays_loud() {
     assert!(
         !warned_loop_scores.is_empty(),
         "the non-projection closure's unscoreable loops must surface Assembly \
-         warnings (silent zero would be a regression); diagnostics: {diags:?}"
+         warnings (silent drop would be a regression); diagnostics: {diags:?}"
+    );
+    for name in &warned_loop_scores {
+        assert!(
+            ltm_vars.iter().all(|v| v.name != *name),
+            "warned missing-name loop score {name} must be dropped before it can compile \
+             through a zero stub"
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+}
+
+// ---------------------------------------------------------------------------
+// GH #779: bare-spelled feeder of an un-hoisted multi-source reducer
+// ---------------------------------------------------------------------------
+
+/// Build the GH #779 fixture: an A2A flow `growth[D1]` whose RHS is a
+/// multi-source reducer over `matrix[D1,*]` with the per-row coefficient
+/// `frac` (arrayed over `D1`) referenced BARE -- unsubscripted. Feedback
+/// loops close through `matrix` (`pop -> matrix -> growth -> pop`) and
+/// through `frac` (`pop -> frac -> growth -> pop`).
+///
+/// `reducer` selects the array-reducing builtin (`SUM`, `MEAN`, `MAX`, ...)
+/// so the decline can be exercised across the whole reducer class, not just
+/// `SUM`.
+fn gh779_bare_feeder_fixture(reducer: &str) -> datamodel::Project {
+    TestProject::new("gh779_bare_feeder")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["c", "d"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1] * 0.05",
+            None,
+        )
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow(
+            "growth[D1]",
+            &format!("{reducer}(matrix[D1, *] * frac)"),
+            None,
+        )
+        .build_datamodel()
+}
+
+/// GH #779: the BARE-spelled feeder of an un-hoisted multi-source reducer
+/// must be DECLINED LOUDLY, not given a silent wrong changed-last score.
+///
+/// In `growth[D1] = SUM(matrix[D1, *] * frac)` the bare `frac` reference is
+/// not expressible by the read-slice vocabulary (`compute_read_slice` maps
+/// `Expr2::Var` to all-`Reduced`, the slices disagree), so the reducer is
+/// not hoisted. The bare spelling's EXECUTION semantics are themselves
+/// anomalous (GH #789: an asymmetric probe shows the engine computes
+/// `growth[r] = |D1| * Σ_d2 matrix[r,d2] * frac[r]`, a spurious `|D1|`
+/// factor). Pre-fix, the `frac -> growth` edge classified `Bare` and the
+/// GH #743 changed-last chooser emitted the per-element partial
+/// `sum(matrix[d1,*] * PREVIOUS(frac))`, which provably disagrees with
+/// whatever execution computes for the bare spelling -- a sustained,
+/// unwarned link score of ~2.92 (~3x wrong) and an identically-wrong
+/// frac-closure loop score. That is the silent-wrong-number this test
+/// guards against (the worst kind).
+///
+/// The fix declines the bare-feeder shape via the GH #780 machinery: the
+/// shaped query returns `Unscoreable`, the edge is recorded, ONE warning
+/// names the edge, no `frac -> growth` link-score variable is emitted, and
+/// the frac-closure loop is DROPPED. The matrix-closure loops are untouched
+/// (they ride the pre-existing loud degraded path, out of scope for #779).
+/// The subscripted spelling `frac[D1]` stays fully hoisted and correct
+/// (`iterated_dim_feeder_closure_scores_via_hoist`) -- users hitting this
+/// have that easy workaround.
+#[test]
+fn bare_feeder_of_unhoisted_reducer_declines_loudly() {
+    let project = gh779_bare_feeder_fixture("SUM");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // No `frac -> growth` link-score variable: the edge is declined, not
+    // given the silently-wrong changed-last per-element partial.
+    let frac_growth = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
+    assert!(
+        !ltm_vars.iter().any(|v| v.name == frac_growth),
+        "the bare-feeder edge must be DECLINED -- no {frac_growth:?} link score; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // Exactly ONE warning names the declined `frac -> growth` edge (the
+    // matrix-closure loops surface their own separate warnings -- those are
+    // the pre-existing loud degraded path, out of scope here).
+    let all_warnings = assembly_warnings(&db, sync.project);
+    let frac_edge_warnings = all_warnings
+        .iter()
+        .filter(|d| {
+            d.variable
+                .as_deref()
+                .is_some_and(|v| v == frac_growth.as_str())
+        })
+        .count();
+    assert_eq!(
+        frac_edge_warnings, 1,
+        "the declined bare-feeder edge must surface EXACTLY ONE warning naming it; got: {all_warnings:?}"
+    );
+
+    // No frac-closure loop survives: every loop score that references the
+    // (now non-existent) `frac -> growth` link must be dropped, not stubbed.
+    for v in &ltm_vars {
+        if v.name.starts_with(LOOP_SCORE_PREFIX) {
+            assert!(
+                !v.equation.source_text().contains("frac\u{2192}growth"),
+                "the frac-closure loop must be DROPPED, not retained referencing the \
+                 declined edge; loop {} has equation {}",
+                v.name,
+                v.equation.source_text()
+            );
+        }
+    }
+
+    // The model still simulates; no frac-closure loop reads the silent
+    // wrong ~2.92.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(
+        !results
+            .offsets
+            .keys()
+            .any(|k| k.as_str() == frac_growth.as_str()),
+        "the declined edge must not appear in the simulated results either"
+    );
+
+    // DISCOVERY mode reaches the same shaped query and consumes
+    // `unscoreable_edges` in its pinned-loop pass, so the decline holds there
+    // too: no `frac -> growth` link score is minted.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let disc_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    assert!(
+        !disc_vars.iter().any(|v| v.name == frac_growth),
+        "discovery mode must also decline the bare-feeder edge; got: {:?}",
+        disc_vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// GH #779, the whole reducer class: MEAN/MIN/MAX/STDDEV bare-feeder shapes
+/// decline identically to SUM. A bare arrayed reference inside ANY
+/// array-reducer argument carries the same execution-vs-partial
+/// disagreement (and the same anomalous execution semantics, GH #789), so
+/// the decline must cover the class.
+#[test]
+fn bare_feeder_decline_covers_reducer_class() {
+    for reducer in ["MEAN", "MIN", "MAX", "STDDEV"] {
+        let project = gh779_bare_feeder_fixture(reducer);
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+            .vars
+            .clone();
+        compile_project_incremental(&db, sync.project, "main")
+            .unwrap_or_else(|e| panic!("{reducer}: LTM-enabled compilation should succeed: {e:?}"));
+
+        let frac_growth = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
+        assert!(
+            !ltm_vars.iter().any(|v| v.name == frac_growth),
+            "{reducer}: the bare-feeder edge must be declined -- no {frac_growth:?}; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+        for v in &ltm_vars {
+            if v.name.starts_with(LOOP_SCORE_PREFIX) {
+                assert!(
+                    !v.equation.source_text().contains("frac\u{2192}growth"),
+                    "{reducer}: frac-closure loop must drop, not retain the declined edge; {}",
+                    v.name
+                );
+            }
+        }
+    }
+}
+
+/// GH #788: a bare arrayed reducer arg inside an A2A equation is currently
+/// outside LTM's scoreable vocabulary. Execution does not use the scalar
+/// synthetic-agg value LTM would get from hoisting `SUM(other)`, and a feeder
+/// partial such as `frac -> growth` would freeze that same wrong reducer
+/// value. Until LTM can model the bare spelling's active-slot semantics, the
+/// whole target edge surface must decline loudly.
+#[test]
+fn bare_arrayed_reducer_arg_in_a2a_target_declines_loudly() {
+    let project = TestProject::new("gh788_bare_arrayed_reducer_arg")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux("other[D1]", "pop * 0.01")
+        .array_aux("frac[D1]", "pop * 0.005")
+        .array_flow("growth[D1]", "SUM(other) * frac", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    for edge in ["other\u{2192}growth", "frac\u{2192}growth"] {
+        let link_name = format!("{LINK_SCORE_PREFIX}{edge}");
+        assert!(
+            !ltm_vars.iter().any(|v| v.name == link_name),
+            "edge {edge} must be declined, not scored; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        !ltm_vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the declined bare-arrayed reducer target must be dropped; got: {:?}",
+        ltm_vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !ltm_vars
+            .iter()
+            .any(|v| v.name.contains("$\u{205A}ltm\u{205A}agg")),
+        "SUM(other) must not be hoisted into a whole-array scalar agg; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    let warnings = assembly_warnings(&db, sync.project);
+    for edge in ["other -> growth", "frac -> growth"] {
+        assert!(
+            warnings.iter().any(|d| match &d.error {
+                DiagnosticError::Assembly(msg) => {
+                    let lower = msg.to_ascii_lowercase();
+                    msg.contains(edge)
+                        && msg.contains("bare arrayed reducer argument")
+                        && lower.contains("sum(other)")
+                }
+                _ => false,
+            }),
+            "expected warning for declined {edge}; got: {warnings:?}"
+        );
+    }
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let disc_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    for edge in ["other\u{2192}growth", "frac\u{2192}growth"] {
+        let link_name = format!("{LINK_SCORE_PREFIX}{edge}");
+        assert!(
+            !disc_vars.iter().any(|v| v.name == link_name),
+            "discovery mode must also decline {edge}; got: {:?}",
+            disc_vars
+                .iter()
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// GH #788/#795 review regression: a bare arrayed reducer in an A2A target
+/// does not make every incoming edge unscoreable. Independent additive sources
+/// still have sound ceteris-paribus partials because changing them does not
+/// freeze or perturb the unsafe reducer value.
+#[test]
+fn bare_arrayed_reducer_decline_keeps_independent_additive_source() {
+    let project = TestProject::new("gh795_bare_arrayed_reducer_scope")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux("local[D1]", "pop * 0.01")
+        .array_flow("growth[D1]", "local + SUM(pop)", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let local_growth = format!("{LINK_SCORE_PREFIX}local\u{2192}growth");
+    assert!(
+        ltm_vars.iter().any(|v| v.name == local_growth),
+        "independent additive edge {local_growth:?} must remain scoreable; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    let pop_growth = format!("{LINK_SCORE_PREFIX}pop\u{2192}growth");
+    assert!(
+        !ltm_vars.iter().any(|v| v.name == pop_growth),
+        "edge reading the bare reducer arg must be declined; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.iter().any(|d| match &d.error {
+            DiagnosticError::Assembly(msg) => {
+                let lower = msg.to_ascii_lowercase();
+                msg.contains("pop -> growth")
+                    && msg.contains("bare arrayed reducer argument")
+                    && lower.contains("sum(pop)")
+            }
+            _ => false,
+        }),
+        "expected warning for declined pop -> growth; got: {warnings:?}"
+    );
+    assert!(
+        !warnings.iter().any(|d| match &d.error {
+            DiagnosticError::Assembly(msg) => {
+                msg.contains("local -> growth") && msg.contains("bare arrayed reducer argument")
+            }
+            _ => false,
+        }),
+        "local -> growth is independent of the bare reducer and must not warn; got: {warnings:?}"
     );
 
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end()
         .expect("VM simulation should run to completion");
     let results = vm.into_results();
+    let local_base = offset_of(&results, &local_growth);
+    for (slot, elem) in ["a", "b"].into_iter().enumerate() {
+        let score = series_at(&results, local_base + slot);
+        for (step, &value) in score.iter().enumerate() {
+            assert!(
+                value.is_finite(),
+                "local -> growth score for {elem} at step {step} must stay finite; got {score:?}"
+            );
+        }
+    }
+}
 
-    // Each warned loop score is a stub: constant 0 at every step.
-    for name in &warned_loop_scores {
-        let base = offset_of(&results, name);
-        let series = series_at(&results, base);
+/// GH #779 precision pin: the WHOLE-RHS bare reducer (`total = SUM(pop)`)
+/// is NOT the declined feeder shape -- it is variable-backed and its
+/// `pop -> total` edge is scored per read row by
+/// `try_cross_dimensional_link_scores`, never reaching the changed-last
+/// chooser the #779 gate lives in. With `growth[D1] = total * 0.01` closing
+/// the loop, the two per-circuit loops each score 0.5 (the per-row link
+/// scores split the +1 across |D1| = 2 rows) with zero warnings.
+#[test]
+fn whole_rhs_bare_reducer_stays_scored() {
+    let project = TestProject::new("gh779_whole_rhs_bare")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .scalar_aux("total", "SUM(pop)")
+        .array_flow("growth[D1]", "total * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "the whole-RHS bare reducer must stay warning-free"
+    );
+    for row in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}pop[{row}]\u{2192}total");
         assert!(
-            series.iter().all(|&v| v == 0.0),
-            "warned loop score {name} must read the documented 0 stub; got {series:?}"
+            ltm_vars.iter().any(|v| v.name == name),
+            "the per-row {name:?} score must exist; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
         );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        2,
+        "one loop per D1 row; got {loop_names:?}"
+    );
+    for name in &loop_names {
+        let series = series_at(&results, offset_of(&results, name));
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 0.5).abs() <= 1e-9,
+                "{name} at step {step}: got {v}, expected 0.5"
+            );
+        }
     }
 }
 
@@ -5519,42 +5923,72 @@ fn gh525_discovery_twin_parses_per_element_names() {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        &inputs.expansion,
         &inputs.sub_model_output_ports,
         None,
     )
     .expect("discovery must succeed on the GH #525 repro")
     .loops;
 
-    // The four REAL same-element direct loops are found, with parseable
-    // (finite) scores -- the new per-(row, element) names did not corrupt
-    // the search graph.
+    // Eight REAL loops are found, with parseable (finite) scores -- the new
+    // per-(row, element) names did not corrupt the search graph. FOUR are the
+    // direct same-element diagonals (`pop[r,a] -> growth[r,a] -> pop[r,a]`);
+    // FOUR run through the `row_sum[r]` reducer node
+    // (`pop[r,a] -> row_sum[r] -> growth[r,a] -> pop[r,a]`). The latter four
+    // are now discoverable since GH #754: `row_sum[Region]` is BOTH the
+    // partial-collapse target of `pop[Region,Age]` (from has MORE dims) and
+    // the lower-dim broadcast source of `growth[Region,Age]` (from has FEWER
+    // dims), and both projections now spell `row_sum[r]` (1-D) instead of the
+    // phantom `row_sum[r,a]`, matching the element graph. Before GH #754 the
+    // `row_sum` hop dangled and only the four direct loops surfaced.
     assert_eq!(
         found.len(),
-        4,
-        "discovery must find exactly the four real same-element loops; got: {:?}",
+        8,
+        "discovery must find the four direct + four row_sum-routed loops; got: {:?}",
         found
             .iter()
             .map(|fl| (&fl.loop_info.id, &fl.loop_info.links))
             .collect::<Vec<_>>()
     );
+    let mut row_sum_loops = 0usize;
     for fl in &found {
-        // No phantom: a loop visiting row_sum[r] (or any node) must read it
-        // from the SAME region element -- the per-element link scores parse
-        // into the pinned diagonal, never a cross-element pathway.
+        // No phantom: a loop visiting row_sum[r] must read it from the SAME
+        // region -- the per-element link scores parse into the pinned diagonal
+        // / region-projection, never a cross-region pathway.
+        let mut visits_row_sum = false;
         for (i, link) in fl.loop_info.links.iter().enumerate() {
             let to = link.to.as_str();
             if let Some(r) = to
                 .strip_prefix("row_sum[")
                 .and_then(|rest| rest.strip_suffix("]"))
             {
+                visits_row_sum = true;
                 let from = link.from.as_str();
                 assert!(
                     from.starts_with(&format!("pop[{r},")),
                     "link {i} of {:?} reads row_sum[{r}] from {from} -- a \
-                     phantom cross-element hop",
+                     phantom cross-region hop",
                     fl.loop_info.id
                 );
             }
+            // A `row_sum[r] -> growth[...]` hop must broadcast within region r.
+            if let Some(r) = link
+                .from
+                .as_str()
+                .strip_prefix("row_sum[")
+                .and_then(|rest| rest.strip_suffix("]"))
+            {
+                assert!(
+                    link.to.as_str().starts_with(&format!("growth[{r},")),
+                    "link {i} of {:?} broadcasts row_sum[{r}] to {} -- a \
+                     phantom cross-region hop",
+                    fl.loop_info.id,
+                    link.to.as_str()
+                );
+            }
+        }
+        if visits_row_sum {
+            row_sum_loops += 1;
         }
         // The per-timestep scores parse and stay finite.
         assert!(
@@ -5562,57 +5996,46 @@ fn gh525_discovery_twin_parses_per_element_names() {
             "discovered loop {} scores must stay finite",
             fl.loop_info.id
         );
-        // Same-element: every node in the loop carries one (region, age)
-        // pair (the direct pop/growth diagonals).
-        let elems: std::collections::BTreeSet<&str> = fl
+        // Same-REGION: every node's region coordinate is consistent (the
+        // direct loops are fully same-element; the row_sum loops mix the 1-D
+        // `row_sum[r]` with 2-D `pop[r,a]`/`growth[r,a]`, but never two
+        // regions).
+        let regions: std::collections::BTreeSet<&str> = fl
             .loop_info
             .links
             .iter()
             .flat_map(|l| [l.from.as_str(), l.to.as_str()])
             .filter_map(|n| n.split_once('[').map(|(_, rest)| rest))
+            .map(|rest| rest.split([',', ']']).next().unwrap_or(rest))
             .collect();
         assert_eq!(
-            elems.len(),
+            regions.len(),
             1,
-            "discovered loop {} must be same-element (no phantom mixing); \
+            "discovered loop {} must be same-region (no phantom mixing); \
              nodes: {:?}",
             fl.loop_info.id,
             fl.loop_info.links
         );
     }
-    // KNOWN discovery residual (pre-existing, NOT a T6 regression): the
-    // row_sum circuits themselves are not discoverable because the
-    // partial-collapse hop's A2A score (`row_sum→growth`, dimensioned over
-    // the TARGET's [Region, Age]) is expanded by `parse_link_offsets`'s
-    // `expand_a2a_link_offsets` into edges whose FROM node is subscripted
-    // over the score's dims (`row_sum[a,young]`) -- a node that does not
-    // exist for the 1-D `row_sum` -- so the search path dead-ends at
-    // `row_sum[r]`. Pre-T6 the same fixture dead-ended one hop earlier
-    // (`pop[a]`, an invented node for the 2-D `pop`), so T6 strictly
-    // extends the discoverable prefix; the residual is the
-    // partial-collapse expansion itself (the GH #716 family).
+    assert_eq!(
+        row_sum_loops, 4,
+        "exactly the four region-paired row_sum circuits must be discovered"
+    );
 }
 
-/// GH #525 (T6 review boundary pin, the ALIASED ThroughAgg routing): the
-/// same `(pop, out)` edge carries a HOISTED `SUM(pop[R,*])` site and a
+/// GH #525/GH #793 (aliased ThroughAgg routing boundary): the same
+/// `(pop, out)` edge carries a HOISTED `SUM(pop[R,*])` site and a
 /// mixed-subscript site inside a DECLINED `MEAN(w[R,*] * pop[R,young])`
-/// (differing co-source slices, so the MEAN is not hoisted). Routing is
-/// per-edge (`in_reducer && routed_aggs`), so BOTH in_reducer sites route
-/// `ThroughAgg` through the SUM's agg -- the mixed site's `PerElement`
-/// shape has NO `Direct` site and must emit nothing of its own.
+/// (differing co-source slices, so the MEAN is not hoisted).
 ///
-/// Exhaustive mode is BYTE-IDENTICAL to the T5 parent `ad6bdeb8` (probe
-/// evidence: identical var/diag dumps): the loop-link caller emits the
-/// agg-routed hop's scores via its agg branches and never reaches the
-/// per-shape pass for the edge, so no Bare-named `pop→out` score existed
-/// pre-T6 either -- the shape's arrival changes nothing here. DISCOVERY
-/// mode (causal-edge iteration, which DOES reach the per-shape pass) is
-/// the one real flip: pre-T6 the site's `DynamicIndex` spelling minted an
-/// extra Bare-named `pop→out` score alongside the agg halves -- a
-/// duplicate direct pathway for a hop the halves already carry; post-T6
-/// it is gone.
+/// Before GH #793, routing was per-edge (`in_reducer && routed_aggs`), so
+/// the declined MEAN site was absorbed by the SUM agg and the edge looked
+/// fully attributed. The correct contract is louder: once a residual
+/// unhoisted reducer read remains on the same edge, the edge is declined as
+/// a unit. Emitting only the SUM agg halves would publish incomplete
+/// attribution for `pop -> out` with no warning.
 #[test]
-fn aliased_through_agg_per_element_site_emits_only_agg_halves() {
+fn aliased_through_agg_residual_strict_site_declines_edge() {
     let fixture = || {
         TestProject::new("aliased_through_agg")
             .with_sim_time(0.0, 8.0, 1.0)
@@ -5630,8 +6053,46 @@ fn aliased_through_agg_per_element_site_emits_only_agg_halves() {
             .build_datamodel()
     };
 
-    // Exhaustive surface: agg halves only, no Bare and no per-element
-    // pop→out names, zero warnings (byte-identical to the parent).
+    let assert_declined =
+        |ltm: &[LtmSyntheticVar], warnings: &[simlin_engine::db::Diagnostic], mode: &str| {
+            assert_eq!(
+                warnings.len(),
+                1,
+                "{mode}: expected one warning for the residual strict pop -> out \
+             read; got: {warnings:?}"
+            );
+            let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+                unreachable!("filtered to Assembly above");
+            };
+            assert!(
+                msg.contains("pop -> out") && msg.contains("pop[r,young]"),
+                "{mode}: warning must name the declined edge and strict residual \
+             slice; got: {msg}"
+            );
+            assert!(
+                !ltm.iter().any(|v| {
+                    v.name.starts_with(LINK_SCORE_PREFIX)
+                        && (v.name == format!("{LINK_SCORE_PREFIX}pop\u{2192}out")
+                            || (v.name.starts_with(&format!("{LINK_SCORE_PREFIX}pop["))
+                                && v.name.contains("\u{2192}out")))
+                }),
+                "{mode}: the partially-unscoreable pop -> out edge must emit no \
+             original-edge pop -> out score; got: {:?}",
+                ltm.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+            assert!(
+                !ltm.iter().any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+                "{mode}: loops through the declined pop -> out edge must be \
+             dropped, not scored from partial agg attribution; got: {:?}",
+                ltm.iter()
+                    .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+        };
+
+    // Exhaustive surface: the residual strict read declines the edge before
+    // the SUM agg halves are emitted.
     let project = fixture();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
@@ -5639,59 +6100,22 @@ fn aliased_through_agg_per_element_site_emits_only_agg_halves() {
     compile_project_incremental(&db, sync.project, "main")
         .expect("the aliased-routing fixture must compile with LTM enabled");
     let warnings = assembly_warnings(&db, sync.project);
-    assert!(
-        warnings.is_empty(),
-        "every LTM fragment must compile; got: {warnings:?}"
-    );
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
-    for r in ["r1", "r2"] {
-        for age in ["young", "old"] {
-            let half = format!(
-                "{LINK_SCORE_PREFIX}pop[{r},{age}]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0[{r}]"
-            );
-            assert!(
-                names.contains(&half.as_str()),
-                "the SUM agg's source half {half} must exist; got: {names:?}"
-            );
-        }
-    }
-    let assert_no_pop_out_scores = |names: &[&str], mode: &str| {
-        assert!(
-            !names
-                .iter()
-                .any(|n| *n == format!("{LINK_SCORE_PREFIX}pop\u{2192}out")),
-            "{mode}: no Bare-named pop\u{2192}out score may exist for the \
-             ThroughAgg-routed edge; got: {names:?}"
-        );
-        assert!(
-            !names
-                .iter()
-                .any(|n| n.starts_with(&format!("{LINK_SCORE_PREFIX}pop["))
-                    && n.contains("\u{2192}out")),
-            "{mode}: the ThroughAgg-routed PerElement site must not emit \
-             per-(row, element) scalars (only a Direct site does); got: {names:?}"
-        );
-    };
-    assert_no_pop_out_scores(&names, "exhaustive");
+    assert_declined(&ltm.vars, &warnings, "exhaustive");
 
-    // Discovery surface: the agg halves still carry the hop and the
-    // pre-T6 duplicate Bare-named `pop→out` (which the parent emitted in
-    // this mode) is retired.
+    // Discovery surface: same drop contract. The pinned-loop pass consumes
+    // `unscoreable_edges`, so no loop survives by multiplying the sibling agg
+    // halves.
     let project = fixture();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("the aliased-routing fixture must compile in discovery mode");
+    let warnings = assembly_warnings(&db, sync.project);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
-    assert_no_pop_out_scores(&names, "discovery");
-    assert!(
-        names
-            .iter()
-            .any(|n| n.contains("\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0")),
-        "discovery still emits the agg source halves; got: {names:?}"
-    );
+    assert_declined(&ltm.vars, &warnings, "discovery");
 }
 
 /// GH #525 (T6 review corner pin): a `PerElement` target body that also
@@ -6684,24 +7108,30 @@ fn scalar_owner_subset_slice_reduce_scores_read_rows_only() {
     }
 }
 
-/// Shape-expressiveness section 6 (the DECLINED residual): an ARRAYED-owner
-/// Pinned/subset broadcast slice -- `share[Region] = SUM(pop[nyc,*])`, a
-/// scalar-result slice broadcast over the owner's dims -- degrades to the
-/// GH #758 loud skip: exactly one Warning naming the `pop -> share` edge,
-/// NO `pop→share` link-score variable of any shape, and NO loop scores
-/// (every feedback loop here traverses the declined edge).
+/// GH #777 (shape-expressiveness section-6 deferred completion): an
+/// ARRAYED-owner Pinned broadcast slice -- `share[Region] = SUM(pop[nyc,*])`,
+/// a scalar-result slice broadcast over the owner's dims -- is now SCORED via
+/// the per-(read-row, full-target-element) broadcast rule (the design's
+/// section-3 `PerElement` rule applied to a variable-backed reducer owner),
+/// not loud-skipped.
 ///
-/// Pre-T3 this shape was SILENTLY WRONG (the unfiled GH #765 sibling),
-/// emitting full-cartesian per-(row, slot) garbage: `pop[boston,*]→
-/// share[boston]` scores read a constant delta-ratio +1.0 even though
-/// `share[boston] = SUM(pop[nyc,*])` does not read `pop[boston,*]` at all,
-/// the true `pop[nyc,*]→share[boston]` dependency had no score, and the
-/// `pop[nyc,*]→share[nyc]` partials (0.5) fed loop scores alongside 5
-/// warned 0-stub loops. (The full broadcast fan-out is T6's PerElement rule
-/// applied to variable-backed owners -- a tracked follow-up, not T3.)
+/// `share[e] = SUM(pop[nyc,p] + pop[nyc,q])` for EVERY `e`, with both rows
+/// changing equally (`pop[nyc,d2] = stock[nyc]*0.1`). So each link score
+/// `pop[nyc,d2]→share[e]` is the SUM contribution share -- one row's delta
+/// over the sum of both equal deltas = 0.5 -- for all four (row, element)
+/// pairs (`{nyc,p},{nyc,q}` x `{nyc,boston}`), including the broadcast row
+/// `share[boston]` (which reads `pop[nyc,*]`, not `pop[boston,*]`). No
+/// `pop[boston,*]→share[*]` score exists (the unread rows). Loops close only
+/// through `share[nyc]` (only `pop[nyc,*]` is read, and only `stock[nyc]`
+/// drives it -- `stock[boston] → pop[boston,*]` is a dead end), so the two
+/// per-circuit loops (one per D2 element) score 1*1*0.5*1 = 0.5.
+///
+/// Pre-fix this shape took a loud GH #758 skip; pre-T3 it was SILENTLY WRONG
+/// (full-cartesian per-(row, slot) garbage: `pop[boston,*]→share[boston]`
+/// scored a constant +1.0 although the reducer never reads those rows).
 #[test]
-fn arrayed_owner_broadcast_pinned_slice_reduce_skips_loudly() {
-    let project = TestProject::new("t3_broadcast_decline")
+fn arrayed_owner_broadcast_pinned_slice_reduce_scores_read_rows_broadcast() {
+    let project = TestProject::new("gh777_broadcast_pinned")
         .with_sim_time(0.0, 8.0, 1.0)
         .named_dimension("Region", &["nyc", "boston"])
         .named_dimension("D2", &["p", "q"])
@@ -6722,56 +7152,414 @@ fn arrayed_owner_broadcast_pinned_slice_reduce_skips_loudly() {
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("LTM-enabled compilation should succeed");
 
-    // Exactly one Warning, naming the declined edge.
+    // Zero warnings: the broadcast is fully scored, no loud skip.
     let warnings = assembly_warnings(&db, sync.project);
-    assert_eq!(
-        warnings.len(),
-        1,
-        "the declined broadcast slice must surface exactly one Warning; got: {warnings:?}"
-    );
-    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
-        panic!("expected an Assembly warning; got: {:?}", warnings[0]);
-    };
     assert!(
-        msg.contains("pop") && msg.contains("share"),
-        "the Warning must name the declined edge; got: {msg}"
+        warnings.is_empty(),
+        "the broadcast slice must compile with zero warnings; got: {warnings:?}"
     );
 
-    // No pop→share link-score variable of any shape, and no loop scores at
-    // all (every loop traverses the declined edge).
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let garbage: Vec<&str> = ltm
-        .vars
-        .iter()
-        .filter(|v| {
-            v.name.starts_with(LINK_SCORE_PREFIX)
-                && v.name.contains("pop")
-                && v.name.contains("share")
-        })
-        .map(|v| v.name.as_str())
-        .collect();
-    assert!(
-        garbage.is_empty(),
-        "the declined edge must emit NO link-score variable (pre-T3 it \
-         emitted full-cartesian garbage); got: {garbage:?}"
-    );
-    let loop_scores: Vec<&str> = ltm
-        .vars
-        .iter()
-        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
-        .map(|v| v.name.as_str())
-        .collect();
-    assert!(
-        loop_scores.is_empty(),
-        "every loop traverses the declined edge, so no loop score may be \
-         emitted; got: {loop_scores:?}"
-    );
 
-    // The model itself still simulates fine -- the decline is an LTM
-    // analysis degradation, not a model error.
+    // Exactly the (read-row x full-target-element) link scores: the two read
+    // rows `pop[nyc,p]`, `pop[nyc,q]` fanned across the FULL target element
+    // set `share[nyc]`, `share[boston]`. The unread `pop[boston,*]` rows get
+    // NO score.
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[nyc,{d2}]\u{2192}share[{e}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected broadcast link score {name:?}; have: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.starts_with(LINK_SCORE_PREFIX)
+                        && v.name.contains("pop")
+                        && v.name.contains("share"))
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+            let phantom = format!("{LINK_SCORE_PREFIX}pop[boston,{d2}]\u{2192}share[{e}]");
+            assert!(
+                ltm.vars.iter().all(|v| v.name != phantom),
+                "the unread boston row must get NO link score; got {phantom:?}"
+            );
+        }
+    }
+
+    // No loop traverses boston at all: only `pop[nyc,*]` is read, and only
+    // `stock[nyc]` drives it, so the only circuits close through `share[nyc]`.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the read-row loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v.contains("boston")),
+            "no loop may run through boston; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+        // Detected and scored surfaces agree: every detected loop has a
+        // scored loop-score variable.
+        let score_name = format!("{LOOP_SCORE_PREFIX}{}", l.id);
+        assert!(
+            ltm.vars.iter().any(|v| v.name == score_name),
+            "detected loop {} must have a scored loop-score variable {score_name:?}",
+            l.id
+        );
+    }
+
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end()
         .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Each of the four (row, element) link scores reads 0.5 (the SUM
+    // contribution share: one of two equal deltas).
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[nyc,{d2}]\u{2192}share[{e}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step} must score 0.5; got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Per-circuit loop scores: 1 * 1 * 0.5 * 1 = 0.5 post-startup, finite.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the read-row loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    v.is_finite() && (v - 0.5).abs() < 1e-9,
+                    "loop score {} slot {slot} step {step} must read 0.5; got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// GH #777, the DISJOINT-dim spelling: `share[D9] = SUM(arr[*:Core])`, where
+/// `D9 = {m, n}` is DISJOINT from `arr`'s dim `Region`. The broadcast rule
+/// expresses this IDENTICALLY to the related-dim spelling -- every `share[e]`
+/// reads the same `arr[*:Core]` slice -- so the per-(read-row,
+/// full-target-element) scores `arr[{row}]→share[{e}]` are emitted for the
+/// subset rows x the full `D9` element set, the model compiles with zero
+/// warnings, and the loop (closed through a scalar `total = SUM(share[*])`
+/// so no dim-mismatch edge is needed) is scored and finite. This pins the
+/// loud-skip-vs-broadcast scope decision: the disjoint spelling fires the
+/// broadcast branch BEFORE `try_cross_dimensional_link_scores`'
+/// `result_axis_names` containment check (which would early-return `None`),
+/// and the disjoint hop keeps both subscripts via `is_broadcast_reduce_edge`
+/// (where `is_partial_reduce_edge`'s containment check fails). No spelling is
+/// silent-wrong.
+#[test]
+fn arrayed_owner_broadcast_disjoint_dim_slice_reduce_scores_read_rows() {
+    let project = TestProject::new("gh777_broadcast_disjoint")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .named_dimension("D9", &["m", "n"])
+        .array_with_ranges("factor[Region]", vec![("a", "1"), ("b", "1"), ("c", "5")])
+        .array_aux_direct("share", vec!["D9".into()], "SUM(arr[*:Core])", None)
+        .scalar_aux("total", "SUM(share[*])")
+        .array_flow("inflow[Region]", "total * 0.0005 * factor[Region]", None)
+        .array_stock("arr[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the disjoint-dim broadcast slice must compile with zero warnings; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    // Subset rows (arr[a], arr[b]) x the FULL D9 target element set ({m, n}).
+    for row in ["a", "b"] {
+        for e in ["m", "n"] {
+            let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}share[{e}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected disjoint broadcast link score {name:?}; have: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.starts_with(LINK_SCORE_PREFIX)
+                        && v.name.contains("arr")
+                        && v.name.contains("share"))
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+        // The unread arr[c] row never scores.
+        for e in ["m", "n"] {
+            let phantom = format!("{LINK_SCORE_PREFIX}arr[c]\u{2192}share[{e}]");
+            assert!(
+                ltm.vars.iter().all(|v| v.name != phantom),
+                "the unread arr[c] row must get NO link score; got {phantom:?}"
+            );
+        }
+    }
+
+    // Loops are scored and finite (the loop hops resolve the per-(row, e)
+    // names; no silent constant-0 stubs).
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the broadcast loops must exist");
+    for l in &detected.loops {
+        let score_name = format!("{LOOP_SCORE_PREFIX}{}", l.id);
+        assert!(
+            ltm.vars.iter().any(|v| v.name == score_name),
+            "detected loop {} must have a scored loop-score variable",
+            l.id
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the broadcast loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    v.is_finite(),
+                    "loop score {} slot {slot} step {step} must be finite (no stub); \
+                     got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// GH #777, the subset twin: an ARRAYED-owner subset broadcast slice --
+/// `share[Region] = SUM(arr[*:Core])`, `Core = {a, b}` a proper
+/// subdimension of `Region = {a, b, c}` -- is scored by the same broadcast
+/// rule. The reducer reads only the subset rows `arr[a]`, `arr[b]`, and its
+/// single scalar value broadcasts over every `share[e]`, so each link score
+/// `arr[{row}]→share[{e}]` exists for `row in {a,b}` x `e in {a,b,c}` (the
+/// MEAN/SUM divisor is the SUBSET size, not the full extent), `arr[c]` gets
+/// no score, and the model compiles with zero warnings. The two subset rows
+/// change equally (`factor[a]=factor[b]=1`), so each SUM contribution share
+/// is 0.5. Loops close only through the read subset rows (`arr[c]` never
+/// feeds `share`); they are scored, finite, and the detected/scored surfaces
+/// agree.
+#[test]
+fn arrayed_owner_broadcast_subset_slice_reduce_scores_read_rows_broadcast() {
+    let project = TestProject::new("gh777_broadcast_subset")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_with_ranges("factor[Region]", vec![("a", "1"), ("b", "1"), ("c", "5")])
+        .array_aux_direct("share", vec!["Region".into()], "SUM(arr[*:Core])", None)
+        .array_flow(
+            "inflow[Region]",
+            "share[Region] * 0.001 * factor[Region]",
+            None,
+        )
+        .array_stock("arr[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the subset broadcast slice must compile with zero warnings; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    // Subset rows x full target element set; the unread `arr[c]` row never
+    // scores.
+    for row in ["a", "b"] {
+        for e in ["a", "b", "c"] {
+            let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}share[{e}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected subset broadcast link score {name:?}; have: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.starts_with(LINK_SCORE_PREFIX)
+                        && v.name.contains("arr")
+                        && v.name.contains("share"))
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    for e in ["a", "b", "c"] {
+        let phantom = format!("{LINK_SCORE_PREFIX}arr[c]\u{2192}share[{e}]");
+        assert!(
+            ltm.vars.iter().all(|v| v.name != phantom),
+            "the unread arr[c] row must get NO link score; got {phantom:?}"
+        );
+    }
+
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the subset loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v == "arr[c]"),
+            "no loop may run through the unread arr[c] row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+        let score_name = format!("{LOOP_SCORE_PREFIX}{}", l.id);
+        assert!(
+            ltm.vars.iter().any(|v| v.name == score_name),
+            "detected loop {} must have a scored loop-score variable {score_name:?}",
+            l.id
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Each subset-row link score reads 0.5 (subset divisor, equal deltas).
+    for row in ["a", "b"] {
+        for e in ["a", "b", "c"] {
+            let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}share[{e}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step} must score 0.5 (subset divisor); got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Loop scores are finite and non-zero post-startup.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the subset loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    v.is_finite(),
+                    "loop score {} slot {slot} step {step} must be finite; got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// GH #777 (risk 4: the forced-DISCOVERY twin). The broadcast reduce's
+/// per-(read-row, full-target-element) names (`arr[a]→share[b]`) are a new
+/// producer of the element-in-name grammar on a REDUCER edge, so discovery's
+/// `parse_link_offsets` must resolve them symmetrically with the exhaustive
+/// surface (the #748/#698 lesson). With every variable 1-D over `Region`
+/// (the subset reducer reads `arr[*:Core]`, broadcasting over `Region`), the
+/// broadcast loops are fully traceable: discovery finds the two same-element
+/// circuits (`arr[r]→share[r]→inflow[r]→arr[r]`, score 0.5) AND the genuine
+/// cross-element circuit the broadcast creates (`arr[a]→share[b]→...→
+/// arr[b]→share[a]→...→arr[a]`, score 0.25 = 0.5*0.5). Every link reads
+/// `share` from a Core member (`arr[a]`/`arr[b]`) -- never the unread
+/// `arr[c]` -- so the new names produce no phantom pathway.
+#[test]
+fn gh777_broadcast_discovery_twin_parses_per_element_names() {
+    let project = TestProject::new("gh777_broadcast_discovery")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_with_ranges("factor[Region]", vec![("a", "1"), ("b", "1"), ("c", "5")])
+        .array_aux_direct("share", vec!["Region".into()], "SUM(arr[*:Core])", None)
+        .array_flow(
+            "inflow[Region]",
+            "share[Region] * 0.001 * factor[Region]",
+            None,
+        )
+        .array_stock("arr[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the broadcast repro")
+    .loops;
+
+    // The broadcast loops trace: the two same-element circuits plus the one
+    // cross-element circuit the broadcast couples (arr[a]<->arr[b] via share).
+    assert!(
+        !found.is_empty(),
+        "discovery must find the broadcast loops; got none"
+    );
+    for fl in &found {
+        // No phantom: every hop reading `share[e]` must come from a Core
+        // member (`arr[a]` or `arr[b]`) -- the broadcast reducer never reads
+        // the out-of-subset `arr[c]`, so a discovered hop from it would be a
+        // parse-corruption phantom.
+        for link in &fl.loop_info.links {
+            let to = link.to.as_str();
+            if to.starts_with("share[") {
+                let from = link.from.as_str();
+                assert!(
+                    from == "arr[a]" || from == "arr[b]",
+                    "discovered hop {from}->{to} reads share from a non-Core \
+                     row -- a phantom; loop {}: {:?}",
+                    fl.loop_info.id,
+                    fl.loop_info.links
+                );
+            }
+            assert!(
+                !link.from.as_str().contains("arr[c]") && !link.to.as_str().contains("arr[c]"),
+                "no loop may run through the unread arr[c]; loop {}: {:?}",
+                fl.loop_info.id,
+                fl.loop_info.links
+            );
+        }
+        // Scores parse and stay finite.
+        assert!(
+            fl.scores.iter().all(|(_, v)| v.is_finite()),
+            "discovered loop {} scores must stay finite",
+            fl.loop_info.id
+        );
+    }
 }
 
 /// T3 golden pin (the design's "explicit golden assertion"): the ALIGNED
@@ -8158,4 +8946,2191 @@ fn gh526_natural_and_mapped_deps_keep_changed_first_collapse() {
         eqn.contains("PREVIOUS(cost)") && !eqn.contains("PREVIOUS(cost["),
         "the positionally-mapped dep keeps the changed-first collapse; got: {eqn}"
     );
+}
+
+// ── GH #778/#785: degenerate square-source reducers decline + loud skip ──
+//
+// A reducer whose Iterated axes repeat a target dim mints (pre-fix) a
+// synthetic agg arrayed over `result_dims == [D1, D1]`. The executed A2A
+// simulation reads only the DIAGONAL (`cube[e,e,*]` per target slot `e`), but
+// the LTM machinery enumerated the full square -- so the source→agg co-source
+// half emitted CONFIDENT per-`(row, slot)` link scores on the off-diagonal
+// rows the simulation never reads (`cube[r1,r2,*]→agg[r1,r2]`), reaching the
+// results slab UNWARNED (#785's live silent-wrong-number), while the
+// agg→target element edges fanned out off-diagonal too (#778). PR #787
+// defended only the feeder half.
+//
+// The fix declines the whole shape at agg minting
+// (`result_dims_has_repeated_dim`) and closes the remaining un-hoisted
+// cartesian-branch landing with the GH #758 loud skip. The contract per
+// spelling, in BOTH exhaustive and discovery modes:
+//   - NO per-element co-source link score reaches the slab on a phantom row;
+//   - the edge is loudly skipped (one Warning naming it), warn-once;
+//   - every loop through the shape is dropped (no loop-score cascade);
+//   - the model still simulates and every emitted score series is finite.
+
+/// Assert the post-fix square-source contract for `project` in the given
+/// `discovery` mode. The duplicated-dim sources `expected_skipped` (the
+/// canonical co-source `cube`, plus the feeder `frac` when present) must each
+/// surface exactly one loud edge-level Warning, emit NO per-element link
+/// score, and drag NO loop score into existence.
+fn assert_square_source_loudly_skipped(
+    project: &datamodel::Project,
+    discovery: bool,
+    expected_skipped: &[&str],
+) {
+    let mode = if discovery { "discovery" } else { "exhaustive" };
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    if discovery {
+        set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    }
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    // No synthetic agg is minted for the declined shape.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}agg\u{205A}")),
+        "{mode}: the declined square-source reducer must mint no agg variable; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // No per-element link score for any duplicated-dim source: the phantom
+    // off-diagonal scores must never reach the slab.
+    for src in expected_skipped {
+        let prefix = format!("{LINK_SCORE_PREFIX}{src}[");
+        let leaked: Vec<&str> = ltm
+            .vars
+            .iter()
+            .filter(|v| v.name.starts_with(&prefix))
+            .map(|v| v.name.as_str())
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "{mode}: no per-element link score may reach the slab for the \
+             duplicated-dim source {src}; got: {leaked:?}"
+        );
+    }
+
+    // Every loop through the unscoreable edges is dropped.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "{mode}: loops through the unscoreable square-source edges must be \
+         dropped, not emitted as warned 0-stubs; got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the declined-square model must still compile with LTM enabled");
+
+    // The skip is loud and warn-once: exactly one Assembly warning per
+    // duplicated-dim source edge, each naming the square-source decline.
+    let warnings = assembly_warnings(&db, sync.project);
+    let square: Vec<&str> = warnings
+        .iter()
+        .filter_map(|w| match &w.error {
+            DiagnosticError::Assembly(m) if m.contains("square-source") => Some(m.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        square.len(),
+        expected_skipped.len(),
+        "{mode}: expected exactly {} square-source skip warnings (warn-once per \
+         edge); got: {square:?}",
+        expected_skipped.len()
+    );
+    for src in expected_skipped {
+        assert!(
+            square.iter().any(|m| m.contains(&format!("{src} -> x"))),
+            "{mode}: the {src} -> x edge must surface a square-source skip warning; \
+             got: {square:?}"
+        );
+    }
+    // No OTHER Assembly warning (no fragment-failure cascade).
+    assert_eq!(
+        warnings.len(),
+        expected_skipped.len(),
+        "{mode}: the only Assembly warnings are the loud square-source skips; \
+         got: {:?}",
+        warnings.iter().map(|w| &w.error).collect::<Vec<_>>()
+    );
+
+    // The model simulates and every emitted score series stays finite.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for name in ltm_score_var_names(&results) {
+        let var = ltm_var(&ltm.vars, &name);
+        let base = offset_of(&results, &name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "{mode}: emitted score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+fn square_source_whole_rhs_fixture() -> datamodel::Project {
+    TestProject::new("square_whole_rhs")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux("cube[D1,D1,D2]", "0.0001 * pop[D1]")
+        .array_stock("pop[D1]", "100", &["x"], &[], None)
+        .array_flow("x[D1]", "SUM(cube[D1, D1, *])", None)
+        .build_datamodel()
+}
+
+fn square_source_inline_fixture() -> datamodel::Project {
+    TestProject::new("square_inline")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux("cube[D1,D1,D2]", "0.0001 * pop[D1]")
+        .array_aux("base[D1]", "0")
+        .array_stock("pop[D1]", "100", &["x"], &[], None)
+        .array_flow("x[D1]", "base[D1] + SUM(cube[D1, D1, *])", None)
+        .build_datamodel()
+}
+
+fn square_source_with_feeder_fixture() -> datamodel::Project {
+    TestProject::new("square_feeder")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux("cube[D1,D1,D2]", "0.0001 * pop[D1]")
+        .array_aux("frac[D1,D1]", "0.0001 * pop[D1]")
+        .array_stock("pop[D1]", "100", &["x"], &[], None)
+        .array_flow("x[D1]", "1 + SUM(cube[D1, D1, *] * frac[D1, D1])", None)
+        .build_datamodel()
+}
+
+/// Whole-RHS spelling (`x[D1] = SUM(cube[D1,D1,*])`): the co-source half's
+/// phantom off-diagonal scores are gone, the `cube -> x` edge is loudly
+/// skipped, and loops through it drop -- in both modes.
+#[test]
+fn square_source_whole_rhs_declines_and_skips_loudly() {
+    assert_square_source_loudly_skipped(&square_source_whole_rhs_fixture(), false, &["cube"]);
+    assert_square_source_loudly_skipped(&square_source_whole_rhs_fixture(), true, &["cube"]);
+}
+
+/// Inline spelling (`x[D1] = base[D1] + SUM(cube[D1,D1,*])`): identical
+/// contract to the whole-RHS form (this spelling predates the
+/// shape-expressiveness phase and was reachable on `main`).
+#[test]
+fn square_source_inline_declines_and_skips_loudly() {
+    assert_square_source_loudly_skipped(&square_source_inline_fixture(), false, &["cube"]);
+    assert_square_source_loudly_skipped(&square_source_inline_fixture(), true, &["cube"]);
+}
+
+/// With-feeder spelling (`x[D1] = 1 + SUM(cube[D1,D1,*] * frac[D1,D1])`):
+/// BOTH duplicated-dim sources -- the co-source `cube` AND the square feeder
+/// `frac` -- are loudly skipped (PR #787 defended only the feeder; now both
+/// halves share one decision).
+#[test]
+fn square_source_with_feeder_declines_and_skips_loudly() {
+    assert_square_source_loudly_skipped(
+        &square_source_with_feeder_fixture(),
+        false,
+        &["cube", "frac"],
+    );
+    assert_square_source_loudly_skipped(
+        &square_source_with_feeder_fixture(),
+        true,
+        &["cube", "frac"],
+    );
+}
+
+/// Repeated-dim OWNER spelling (`x[D1,D1] = SUM(cube[D1,D1,*])`): an owner
+/// genuinely declared over the same dim twice compiles and simulates (each
+/// slot reads its own full row -- no diagonal restriction), and reaches
+/// `walk_var_equation`'s mint gate with ALIGNED iterated dims
+/// (`variable_backed_shape_is_expressible` returns true) -- so it is the
+/// `result_dims_has_repeated_dim` check itself, live and load-bearing, that
+/// declines the mint there. The per-element projection is still ambiguous
+/// between the two `D1` occurrences, so the edge gets the same loud skip as
+/// the diagonal spellings.
+#[test]
+fn square_owner_whole_rhs_declines_and_skips_loudly() {
+    fn fixture() -> datamodel::Project {
+        TestProject::new("square_owner")
+            .with_sim_time(0.0, 8.0, 1.0)
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux("cube[D1,D1,D2]", "0.0001 * pop[D1,D1]")
+            .array_stock("pop[D1,D1]", "100", &["x"], &[], None)
+            .array_flow("x[D1,D1]", "SUM(cube[D1, D1, *])", None)
+            .build_datamodel()
+    }
+    assert_square_source_loudly_skipped(&fixture(), false, &["cube"]);
+    assert_square_source_loudly_skipped(&fixture(), true, &["cube"]);
+}
+
+// ---------------------------------------------------------------------------
+// GH #791: I1-declined multi-source STRICT-SLICE reducer -> loud unscoreable
+// edge (was: silent +1.0 cartesian garbage on unread rows)
+// ---------------------------------------------------------------------------
+
+/// GH #791: an I1-DECLINED multi-source whole-RHS reducer whose co-source
+/// slices MISMATCH (`share[Region] = SUM(pop[nyc,*] * w[*])`: `pop`'s slice
+/// `[Pinned(nyc), Reduced]` vs `w`'s `[Reduced]`) mints NO variable-backed
+/// agg, so the `pop -> share` edge fell through `try_cross_dimensional_link_scores`
+/// to the legacy CARTESIAN partial-reduce derivation, which emitted silent
+/// confident link scores INCLUDING for source rows the equation NEVER reads.
+///
+/// Pre-fix, empirically (commit `0fcfba58`): `pop[boston,p]→share[boston]`
+/// existed and read a constant +1.0 although `share` reads only `pop[nyc,*]`;
+/// the read rows were ALSO wrong (`pop[nyc,p]→share[nyc] = 1.0` where the true
+/// SUM contribution share is 0.5). Zero warnings on the link surface; only the
+/// loop surface degraded loudly (5 warned 0-stubs). A silent-wrong-number on
+/// the link surface, violating epic #488's standing invariant.
+///
+/// Post-fix the edge takes the GH #758/#780 loud skip: exactly ONE warning
+/// naming the `pop -> share` edge, NO `pop[*]→share[*]` link-score variable,
+/// loops through it dropped, and the OTHER edges' scores untouched. The decline
+/// re-derives `pop`'s read slice via the same per-axis classifier the hoisting
+/// path uses (`pop[nyc,*]` is a strict slice -> decline), so a full-extent read
+/// would NOT be declined.
+#[test]
+fn gh791_arrayed_owner_mismatched_cosource_strict_slice_skips_loudly() {
+    let project = TestProject::new("gh791_arrayed")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_aux_direct(
+            "share",
+            vec!["Region".into()],
+            "SUM(pop[nyc, *] * w[*])",
+            None,
+        )
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // No `pop[*]→share[*]` link score of ANY row (read or unread) is emitted:
+    // the cartesian-garbage rows are gone.
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            for row_region in ["nyc", "boston"] {
+                let name = format!("{LINK_SCORE_PREFIX}pop[{row_region},{d2}]\u{2192}share[{e}]");
+                assert!(
+                    ltm.vars.iter().all(|v| v.name != name),
+                    "the declined strict-slice edge must emit NO cartesian link score; \
+                     found {name:?}"
+                );
+            }
+        }
+    }
+
+    // Exactly ONE Assembly warning: the unscoreable `pop -> share` edge. (Before
+    // the fix: 5 -- one per loop score that failed fragment compile, while the
+    // link surface carried unwarned wrong +1.0s.)
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable pop -> share edge); \
+         got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("share") && msg.contains("strict slice") && msg.contains("pop[nyc,*]"),
+        "the warning must name the unscoreable edge, the strict-slice reason, and the \
+         ACTUAL slice the equation reads (rendered from the computed AxisRead vector, \
+         never a canned example); got: {msg}"
+    );
+
+    // No loop scores through the declined edge survive: the only enumerated
+    // loops run pop -> share -> inflow -> stock -> pop, all through the doomed
+    // edge, so none are scored.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the unscoreable edge must not emit loop scores; got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // OTHER edges are untouched: the flow-to-stock / aux edges keep their
+    // scores, and every emitted score series stays finite (no garbage).
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name == format!("{LINK_SCORE_PREFIX}inflow\u{2192}stock")),
+        "the unrelated inflow -> stock edge must keep its link score"
+    );
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for name in ltm_score_var_names(&results) {
+        let var = ltm_var(&ltm.vars, &name);
+        let base = offset_of(&results, &name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "emitted score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+/// GH #791, the SCALAR-owner full-reduce arm: `total = SUM(pop[nyc,*] * w[*])`
+/// is the EVEN-MORE-SILENT variant -- the scalar target means the cartesian
+/// full-reduce arm emits `pop[boston,p]→total = 1.0` (unread) and
+/// `pop[nyc,p]→total = 1.0` (true share 0.5) with ZERO warnings on ANY surface
+/// (no loop fails because the scalar target has no off-diagonal naming issue).
+/// The same strict-slice decline closes both arms: ONE warning, no `pop→total`
+/// link scores, loop dropped.
+#[test]
+fn gh791_scalar_owner_mismatched_cosource_strict_slice_skips_loudly() {
+    let project = TestProject::new("gh791_scalar")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .aux("total", "SUM(pop[nyc, *] * w[*])", None)
+        .array_flow("inflow[Region]", "total * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    for region in ["nyc", "boston"] {
+        for d2 in ["p", "q"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[{region},{d2}]\u{2192}total");
+            assert!(
+                ltm.vars.iter().all(|v| v.name != name),
+                "the declined scalar-target strict-slice edge must emit NO cartesian \
+                 link score; found {name:?}"
+            );
+        }
+    }
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable pop -> total edge); \
+         got: {warnings:?}"
+    );
+
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "the loop through the unscoreable pop -> total edge must be dropped"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for name in ltm_score_var_names(&results) {
+        let var = ltm_var(&ltm.vars, &name);
+        let base = offset_of(&results, &name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "emitted score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+/// GH #791 discovery-mode twin: the strict-slice decline records the edge in
+/// `unscoreable_edges`, which the pinned-loop pass consumes in discovery mode
+/// too, so the same `pop -> share` edge is declined there (no cartesian
+/// garbage link score minted) -- exhaustive and discovery agree.
+#[test]
+fn gh791_strict_slice_decline_holds_in_discovery_mode() {
+    let project = TestProject::new("gh791_discovery")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_aux_direct(
+            "share",
+            vec!["Region".into()],
+            "SUM(pop[nyc, *] * w[*])",
+            None,
+        )
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            for row_region in ["nyc", "boston"] {
+                let name = format!("{LINK_SCORE_PREFIX}pop[{row_region},{d2}]\u{2192}share[{e}]");
+                assert!(
+                    ltm.vars.iter().all(|v| v.name != name),
+                    "discovery mode must also decline the strict-slice edge; found {name:?}"
+                );
+            }
+        }
+    }
+    // The model still compiles cleanly in discovery mode.
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("discovery-mode LTM compilation should succeed");
+}
+
+/// GH #791 regression pin (the blast-radius boundary): a multi-source reducer
+/// whose source read is the FULL EXTENT must keep its cartesian diagonal scores
+/// -- the strict-slice decline fires ONLY for Pinned/subset reads. Here
+/// `growth[D1] = SUM(matrix[D1,*] * frac)` declines the I1 acceptance (the bare
+/// `frac` feeder, GH #779), so `matrix -> growth` lands on the cartesian
+/// derivation, but `matrix[D1,*]`'s slice is `[Iterated(d1), Reduced]` -- a
+/// full-extent read -- so its four correct diagonal scores
+/// (`matrix[a,c]→growth[a]`, ...) are preserved, NOT loud-skipped. (The bare
+/// `frac -> growth` edge keeps its own separate GH #779 decline.)
+#[test]
+fn gh791_full_extent_multisource_read_stays_scored() {
+    let project = gh779_bare_feeder_fixture("SUM");
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    for row in ["a", "b"] {
+        for col in ["c", "d"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{row},{col}]\u{2192}growth[{row}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "the full-extent matrix read must keep its cartesian diagonal score \
+                 {name:?} (NOT be strict-slice-declined); got: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.contains("matrix") && v.name.contains("growth"))
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// GH #792: the PER-ELEMENT-EQUATION (`Ast::Arrayed`) sibling of the GH #791
+/// shape. Each `share` slot holds an I1-declined strict-slice multi-source
+/// reducer (`share[nyc] = SUM(pop[nyc,*] * w[*])`, `share[boston] =
+/// SUM(pop[boston,*] * w[*])`). Such an owner never reaches the cartesian arm,
+/// so BEFORE the fix the edge fell to `emit_per_shape_link_scores` shape Bare
+/// and minted a single arrayed `link_score:pop->share` simulating to ~-0.0 at
+/// every step with NO per-edge warning (only `loop_score:u5` warned -- the
+/// other loops consumed the silent near-zero). The MDL importer expands a
+/// single apply-to-all Vensim equation into N per-element equations (GH #651),
+/// so this spelling is exactly what real imports produce.
+///
+/// The fix routes it to the same GH #758/#780 loud skip the A2A spelling takes:
+/// one warning naming the edge + its actual slice, no link-score variable, the
+/// edge recorded in `unscoreable_edges`, dependent loops dropped.
+#[test]
+fn gh792_per_element_owner_strict_slice_skips_loudly() {
+    let project = gh792_per_element_strict_slice_fixture();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The silent Bare stand-in (`$⁚ltm⁚link_score⁚pop→share`, arrayed over
+    // Region, ~-0.0 every step) must be GONE -- in EITHER its bare-edge or any
+    // cartesian-row spelling.
+    let bare = format!("{LINK_SCORE_PREFIX}pop\u{2192}share");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != bare),
+        "the declined strict-slice per-element edge must emit NO Bare stand-in \
+         link score; found {bare:?}"
+    );
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            for row_region in ["nyc", "boston"] {
+                let name = format!("{LINK_SCORE_PREFIX}pop[{row_region},{d2}]\u{2192}share[{e}]");
+                assert!(
+                    ltm.vars.iter().all(|v| v.name != name),
+                    "the declined per-element edge must emit no cartesian link score; \
+                     found {name:?}"
+                );
+            }
+        }
+    }
+
+    // Exactly ONE Assembly warning: the unscoreable `pop -> share` edge, naming
+    // the strict-slice reason and the ACTUAL slice the slots read (rendered
+    // from the computed AxisRead vector, never a canned example). Before the
+    // fix: exactly one warning too -- but the WRONG one (a `loop_score:u5`
+    // fragment-compile failure), while the link surface carried the silent ~0.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable pop -> share edge); \
+         got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("pop -> share")
+            && msg.contains("per-element equations")
+            && msg.contains("inside a reducer"),
+        "the warning must name the unscoreable edge and the per-element reducer-read \
+         reason; got: {msg}"
+    );
+    // The rendered slice is whichever slot the deterministic sorted-key walk
+    // hits first (boston < nyc), but EITHER pinned spelling is acceptable.
+    assert!(
+        msg.contains("pop[boston,*]") || msg.contains("pop[nyc,*]"),
+        "the warning must render the ACTUAL slice the slots read; got: {msg}"
+    );
+
+    // No loop scores survive: every enumerated loop runs through the doomed
+    // `pop -> share` edge, so none are scored (no silent near-zero loop scores).
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the unscoreable edge must not emit loop scores; got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // Unrelated edges keep their scores, and every emitted score stays finite.
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name == format!("{LINK_SCORE_PREFIX}inflow\u{2192}stock")),
+        "the unrelated inflow -> stock edge must keep its link score"
+    );
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for name in ltm_score_var_names(&results) {
+        let var = ltm_var(&ltm.vars, &name);
+        let base = offset_of(&results, &name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "emitted score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+/// GH #792 discovery-mode twin: the strict-slice decline records the edge in
+/// `unscoreable_edges`, which the pinned-loop pass consumes in discovery mode
+/// too, so the same `pop -> share` edge is declined there -- no Bare stand-in
+/// minted, exhaustive and discovery agree.
+#[test]
+fn gh792_per_element_owner_strict_slice_holds_in_discovery_mode() {
+    let project = gh792_per_element_strict_slice_fixture();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    let bare = format!("{LINK_SCORE_PREFIX}pop\u{2192}share");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != bare),
+        "discovery mode must also decline the strict-slice per-element edge; found {bare:?}"
+    );
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("discovery-mode LTM compilation should succeed");
+}
+
+/// GH #792, the MIXED-SLOT decision (any reducer-reading slot => decline whole
+/// edge): ONLY ONE slot reads `pop`, inside a strict-slice reducer (the `nyc`
+/// slot is `SUM(pop[nyc,*] * w[*])`); the other slot does not read `pop` at all
+/// (`share[boston] = 0`). The edge's one arrayed Bare stand-in conflates both
+/// slots, so the single reducer-reading slot proves it wrong for `nyc` -- we
+/// decline the WHOLE edge loudly. This is the "only SOME slots contain the
+/// reducer" mixed case of the unified per-element rule (ANY slot's un-hoisted
+/// reducer read of `from` declines, regardless of strict/full/dynamic).
+#[test]
+fn gh792_mixed_slot_reducer_read_declines_whole_edge() {
+    let project = TestProject::new("gh792_mixed")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_with_ranges_direct(
+            "share",
+            vec!["Region".into()],
+            vec![("nyc", "SUM(pop[nyc, *] * w[*])"), ("boston", "0")],
+            None,
+        )
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let bare = format!("{LINK_SCORE_PREFIX}pop\u{2192}share");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != bare),
+        "a mixed-slot owner with ANY reducer-reading slot must decline the whole edge; \
+         found {bare:?}"
+    );
+    // The reducer-reading slot (`nyc`) drives the decline, so the rendered
+    // slice names its pinned read.
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning for the mixed-slot decline; got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("pop -> share")
+            && msg.contains("per-element equations")
+            && msg.contains("pop[nyc,*]"),
+        "the mixed-slot warning must name the edge, the per-element reason, and the \
+         reducer-reading slot's slice (pop[nyc,*]); got: {msg}"
+    );
+}
+
+// GH #792 no-regression: the working disjoint-dim FixedIndex per-element family
+// (`try_disjoint_dim_arrayed_link_scores`, GH #510) reads `from` via LITERAL
+// element subscripts OUTSIDE any reducer, so the unified per-element verdict
+// (which declines only reducer reads) classifies it `NotDescribable` and the
+// edge is byte-identically unaffected (unit pin:
+// `ltm_agg::unhoisted_source_read_not_describable_for_per_element_non_reducer_refs`).
+// The family's end-to-end behavior is pinned by
+// `simulate_ltm.rs::test_disjoint_dim_arrayed_target_per_source_element_link_scores`
+// (AC3.3) and the GH #510 element-graph guards, which the full suite re-runs.
+
+/// Shared body for the GH #792 review-batch spellings: build the per-element
+/// `share` fixture with the given slot equations, assert the loud-skip
+/// contract (no `pop->share` link score of any spelling, exactly one
+/// per-element decline warning, all loops through the edge dropped, unrelated
+/// edges intact), and assert the EXECUTED `share[nyc]` value at t=0 -- the
+/// empirical strictness pin (`pop = stock*0.1 = 10` per cell, `w = 0.5`:
+/// a row-only read sums to 10.0, a whole-`pop` read to 20.0).
+fn assert_gh792_per_element_decline(slots: Vec<(&str, &str)>, expected_share_nyc_t0: f64) {
+    let project = TestProject::new("gh792_spelling")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_with_ranges_direct("share", vec!["Region".into()], slots, None)
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let bare = format!("{LINK_SCORE_PREFIX}pop\u{2192}share");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != bare),
+        "the declined per-element edge must emit NO Bare stand-in link score; \
+         found {bare:?}"
+    );
+    assert!(
+        ltm.vars
+            .iter()
+            .all(|v| !(v.name.starts_with(LINK_SCORE_PREFIX)
+                && v.name.contains("pop")
+                && v.name.contains("share"))),
+        "the declined per-element edge must emit no pop->share link score of ANY \
+         spelling; got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.contains("pop") && v.name.contains("share"))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable pop -> share edge); \
+         got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("pop -> share") && msg.contains("per-element equations"),
+        "the warning must name the edge and the per-element reducer-read reason; \
+         got: {msg}"
+    );
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the unscoreable edge must not emit loop scores"
+    );
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name == format!("{LINK_SCORE_PREFIX}inflow\u{2192}stock")),
+        "the unrelated inflow -> stock edge must keep its link score"
+    );
+
+    // The executed-semantics pin: verify what the simulation ACTUALLY computes
+    // for the slot equation, so the strict-vs-full claim is empirical.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    let nyc_off = offset_of(&results, "share[nyc]");
+    let share_nyc_t0 = results.iter().next().map(|row| row[nyc_off]).unwrap();
+    assert!(
+        (share_nyc_t0 - expected_share_nyc_t0).abs() < 1e-9,
+        "executed share[nyc] at t=0 must be {expected_share_nyc_t0} \
+         (10.0 = strict row-only read, 20.0 = whole-pop read); got {share_nyc_t0}"
+    );
+}
+
+/// GH #792 review finding 1, the DIM-NAME spelling: `share[nyc] =
+/// SUM(pop[Region,*] * w[*])` per slot. EXECUTION resolves `Region` inside the
+/// `nyc` slot to `nyc` -- the executed `share[nyc]` is 10.0 (the strict
+/// row-only value, pinned below), NOT 20.0 -- so the read is semantically
+/// PINNED at the slot's element even though it is spelled with the dim name.
+/// The first fix classified this axis `Iterated` (full extent) by passing the
+/// owner's declared dims as iterated dims -- `enumerate_agg_nodes`' Arrayed arm
+/// deliberately uses EMPTY iterated dims -- so the silent ~-0.0 Bare stand-in
+/// and confident 0.0 loops returned byte-for-byte. The unified rule (any
+/// un-hoisted reducer read in any slot declines) closes it.
+#[test]
+fn gh792_per_element_dim_named_slice_skips_loudly() {
+    assert_gh792_per_element_decline(
+        vec![
+            ("nyc", "SUM(pop[Region, *] * w[*])"),
+            ("boston", "SUM(pop[Region, *] * w[*])"),
+        ],
+        10.0,
+    );
+}
+
+/// GH #792 review finding 2, the FULL-EXTENT multi-source spelling:
+/// `share[nyc] = SUM(pop[*,*] * w[*])` per slot (executed share[nyc] = 20.0,
+/// the genuine whole-`pop` read, pinned below). The reducer is I1-declined
+/// (mismatched co-source arity: `pop`'s `[Reduced,Reduced]` vs `w`'s
+/// `[Reduced]`), so no agg is minted and the edge previously fell to the
+/// silent ~-0.0 Bare stand-in. A `FullExtent` verdict is safe for scalar/A2A
+/// owners ONLY because the cartesian arm scores them; a per-element owner has
+/// no cartesian arm, so full-extent does NOT validate the stand-in and the
+/// unified rule declines this spelling too.
+#[test]
+fn gh792_per_element_full_extent_multisource_skips_loudly() {
+    assert_gh792_per_element_decline(
+        vec![
+            ("nyc", "SUM(pop[*, *] * w[*])"),
+            ("boston", "SUM(pop[*, *] * w[*])"),
+        ],
+        20.0,
+    );
+}
+
+/// The GH #792 fixture: a per-element-equation (`Ast::Arrayed`) `share` whose
+/// every slot holds an I1-declined strict-slice multi-source reducer, closed in
+/// a feedback loop pop -> share -> inflow -> stock -> pop.
+fn gh792_per_element_strict_slice_fixture() -> datamodel::Project {
+    TestProject::new("gh792_per_element")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_with_ranges_direct(
+            "share",
+            vec!["Region".into()],
+            vec![
+                ("nyc", "SUM(pop[nyc, *] * w[*])"),
+                ("boston", "SUM(pop[boston, *] * w[*])"),
+            ],
+            None,
+        )
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel()
+}
+
+// ---------------------------------------------------------------------------
+// GH #793: hoisted reducer sibling must not hide a declined strict-slice read
+// ---------------------------------------------------------------------------
+
+fn gh793_routing_alias_fixture(strict_read: &str, strict_first: bool) -> datamodel::Project {
+    let share_eqn = if strict_first {
+        format!("SUM({strict_read} * w[*]) + SUM(pop[*, *])")
+    } else {
+        format!("SUM(pop[*, *]) + SUM({strict_read} * w[*])")
+    };
+    TestProject::new("gh793_routing_alias")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_aux_direct("share", vec!["Region".into()], &share_eqn, None)
+        .array_flow("inflow[Region]", "share * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel()
+}
+
+fn assert_gh793_strict_sibling_declines(strict_first: bool) {
+    let project = gh793_routing_alias_fixture("pop[nyc, *]", strict_first);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    assert!(
+        ltm.vars
+            .iter()
+            .all(|v| !(v.name.starts_with(LINK_SCORE_PREFIX)
+                && v.name.contains("pop")
+                && v.name.contains("share"))),
+        "the mixed hoisted+declined pop -> share edge must emit no partial \
+         pop->share score; got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.contains("pop") && v.name.contains("share"))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning for the unscoreable pop -> share \
+         strict-slice sibling; got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("pop -> share") && msg.contains("pop[nyc,*]"),
+        "the warning must name the edge and the strict sibling slice \
+         pop[nyc,*]; got: {msg}"
+    );
+
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the partially-unscoreable pop -> share edge must be dropped; \
+         got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // The core simulation remains valid; only the incomplete LTM attribution
+    // is declined.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for name in ltm_score_var_names(&results) {
+        let var = ltm_var(&ltm.vars, &name);
+        let base = offset_of(&results, &name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "emitted score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn gh793_hoisted_sibling_does_not_absorb_strict_slice_first() {
+    assert_gh793_strict_sibling_declines(true);
+}
+
+#[test]
+fn gh793_hoisted_sibling_does_not_absorb_strict_slice_second() {
+    assert_gh793_strict_sibling_declines(false);
+}
+
+// ---------------------------------------------------------------------------
+// GH #790: scalar feeder of a whole-RHS variable-backed reduce
+// ---------------------------------------------------------------------------
+
+/// The GH #790 fixture: a scalar feeder (`scale`) of a WHOLE-RHS
+/// variable-backed reduce (`growth[D1] = SUM(matrix[D1,*] * scale)` -- growth
+/// IS the agg, no synthetic minted), closed in a feedback loop through `pop`:
+/// `pop -> scale -> growth -> pop`. The `scale -> growth` hop is the scalar
+/// feeder hop. `matrix_eqn` lets the spelling-agreement test swap the
+/// constant matrix for a TIME-VARYING one.
+fn gh790_whole_rhs_fixture_with(reducer: &str, matrix_eqn: &str) -> datamodel::Project {
+    TestProject::new("gh790_whole_rhs")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["c", "d"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], matrix_eqn, None)
+        .scalar_aux("scale", "SUM(pop[*]) * 0.005")
+        .array_flow(
+            "growth[D1]",
+            &format!("{reducer}(matrix[D1, *] * scale)"),
+            None,
+        )
+        .build_datamodel()
+}
+
+fn gh790_whole_rhs_fixture(reducer: &str) -> datamodel::Project {
+    gh790_whole_rhs_fixture_with(reducer, "5")
+}
+
+/// The SUBEXPRESSION spelling of the SAME dataflow: a constant `prefix`
+/// (`"0.1 + "` or `"0 + "`) added to the reducer makes `growth` a non-bare
+/// reducer, so LTM hoists the `SUM(matrix[D1,*] * scale)` into a SYNTHETIC
+/// `$⁚ltm⁚agg⁚N` node and the `scale -> agg` hop rides
+/// `emit_source_to_agg_link_scores`' (already correct) scalar-feeder arm. The
+/// two spellings must score the feeder hop -- and the loop -- identically
+/// (the strongest test in this task). The `"0 + "` prefix keeps the
+/// SIMULATED DYNAMICS byte-identical to the whole-RHS spelling, which the
+/// time-varying agreement case relies on.
+fn gh790_subexpr_fixture_with(prefix: &str, matrix_eqn: &str) -> datamodel::Project {
+    TestProject::new("gh790_subexpr")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["c", "d"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], matrix_eqn, None)
+        .scalar_aux("scale", "SUM(pop[*]) * 0.005")
+        .array_flow(
+            "growth[D1]",
+            &format!("{prefix}SUM(matrix[D1, *] * scale)"),
+            None,
+        )
+        .build_datamodel()
+}
+
+/// GH #790: the scalar feeder of a whole-RHS variable-backed reduce gets ONE
+/// Bare A2A changed-last score (dimensioned over the agg's `result_dims`),
+/// NOT the per-target-element `scale -> growth[a]` / `[b]` partials that fail
+/// fragment compile and degrade every loop through the feeder to a warned
+/// constant-0 stub.
+///
+/// Hand-derived (changed-last, only the scalar feeder frozen, the co-source
+/// slice verbatim -- the changed-FIRST partial would freeze the wildcard
+/// `matrix[d1,*]` slice as an uncompilable lagged whole-array read):
+///
+/// ```text
+/// numerator(scale -> growth)[r] = growth[r] - sum(matrix[r,*] * PREVIOUS(scale))
+///                               = (Σ_c matrix[r,c]) * Δscale
+/// ```
+///
+/// With `matrix` constant the numerator equals `Δgrowth[r]` exactly, so the
+/// A2A feeder score is +1 from step 1. The loop
+/// `$agg(=SUM(pop[*])) -> scale -> growth[r] -> pop[r] -> $agg` has two
+/// per-element circuits sharing the scalar `scale` hop, so each loop score
+/// settles at ~0.5 (the scalar's sensitivity splits across the two source
+/// elements feeding `$agg`).
+#[test]
+fn scalar_feeder_of_whole_rhs_reduce_scores_via_agg_arm() {
+    let project = gh790_whole_rhs_fixture("SUM");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The `growth` reduce is VARIABLE-BACKED: growth IS the agg, so the feeder
+    // edge targets `growth` directly, not a synthetic `$⁚ltm⁚agg⁚N` minted for
+    // growth. (A `$⁚ltm⁚agg⁚0` DOES exist here, but for `scale`'s own
+    // `SUM(pop[*])` reducer -- the `pop -> scale` chain -- not for growth.)
+    assert!(
+        !ltm_vars.iter().any(|v| v
+            .name
+            .starts_with(&format!("{LINK_SCORE_PREFIX}scale\u{2192}$"))),
+        "the scalar-feeder edge into growth must be variable-backed (target growth, \
+         not a synthetic agg); got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // The broken per-target-element scores must NOT be emitted.
+    for elem in ["a", "b"] {
+        let broken = format!("{LINK_SCORE_PREFIX}scale\u{2192}growth[{elem}]");
+        assert!(
+            !ltm_vars.iter().any(|v| v.name == broken),
+            "the broken per-element feeder score {broken:?} must NOT be emitted; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    // The single Bare A2A feeder score is emitted, dimensioned over the agg's
+    // result dims (`[D1]`), with the hand-derived changed-last equation.
+    let feeder_name = format!("{LINK_SCORE_PREFIX}scale\u{2192}growth");
+    let feeder = ltm_var(&ltm_vars, &feeder_name);
+    assert_eq!(
+        feeder.dimensions,
+        vec!["D1".to_string()],
+        "the scalar-feeder score must be A2A over the agg's result dims"
+    );
+    assert_eq!(
+        feeder.equation.source_text(),
+        "if (TIME = INITIAL_TIME) then 0 else if ((growth - PREVIOUS(growth)) = 0) OR \
+         ((scale - PREVIOUS(scale)) = 0) then 0 else SAFEDIV((growth - (sum(matrix[d1, *] * \
+         PREVIOUS(scale)))), ABS((growth - PREVIOUS(growth))), 0) * SIGN((scale - PREVIOUS(scale)))",
+        "the scalar-feeder changed-last equation must match the hand-derived form"
+    );
+
+    // Zero assembly warnings: every emitted fragment compiles.
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "the whole-RHS scalar-feeder fixture must compile every LTM fragment cleanly; got: {:?}",
+        assembly_warnings(&db, sync.project)
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    const TOL: f64 = 1e-9;
+
+    // The A2A feeder score is +1 per slot at every step past the first.
+    let base = offset_of(&results, &feeder_name);
+    for slot in 0..2 {
+        let series = series_at(&results, base + slot);
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() <= TOL,
+                "feeder score slot {slot} at step {step}: got {v}, expected +1. A \
+                 constant 0 here is the GH #790 fragment-failure-stub signature."
+            );
+        }
+    }
+
+    // Two per-element loops, each sustained at ~0.5 (the shared scalar hop).
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        2,
+        "expected one per-element loop through the scalar feeder; got {loop_names:?}"
+    );
+    for name in &loop_names {
+        let series = series_at(&results, offset_of(&results, name));
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 0.5).abs() <= 1e-6,
+                "{name} at step {step}: got {v}, expected ~0.5 (shared-scalar loop). A \
+                 constant 0 is the GH #790 silently-degraded signature."
+            );
+        }
+    }
+}
+
+/// GH #790, the whole reducer class: MEAN/MIN/MAX scalar-feeder shapes are
+/// scored identically to SUM. The changed-last convention freezes only the
+/// scalar feeder; the reducer body is the agg's own text, so the score arm is
+/// reducer-agnostic. Each must end CORRECT (one A2A feeder score, zero
+/// warnings), never silent-wrong, never an unwarned 0-stub.
+#[test]
+fn scalar_feeder_of_whole_rhs_reduce_covers_reducer_class() {
+    for reducer in ["MEAN", "MIN", "MAX"] {
+        let project = gh790_whole_rhs_fixture(reducer);
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+            .vars
+            .clone();
+        compile_project_incremental(&db, sync.project, "main")
+            .unwrap_or_else(|e| panic!("{reducer}: LTM-enabled compilation should succeed: {e:?}"));
+
+        let feeder_name = format!("{LINK_SCORE_PREFIX}scale\u{2192}growth");
+        let feeder = ltm_var(&ltm_vars, &feeder_name);
+        assert_eq!(
+            feeder.dimensions,
+            vec!["D1".to_string()],
+            "{reducer}: the scalar-feeder score must be A2A over the agg's result dims"
+        );
+        for elem in ["a", "b"] {
+            let broken = format!("{LINK_SCORE_PREFIX}scale\u{2192}growth[{elem}]");
+            assert!(
+                !ltm_vars.iter().any(|v| v.name == broken),
+                "{reducer}: the broken per-element feeder score {broken:?} must NOT be emitted"
+            );
+        }
+        assert!(
+            assembly_warnings(&db, sync.project).is_empty(),
+            "{reducer}: every LTM fragment must compile cleanly; got: {:?}",
+            assembly_warnings(&db, sync.project)
+        );
+    }
+}
+
+/// GH #790, the SPELLING-AGREEMENT test (the strongest in this task): the
+/// whole-RHS spelling (`growth = SUM(matrix[D1,*] * scale)`, variable-backed)
+/// and the subexpression spelling (`growth = <const> + SUM(matrix[D1,*] *
+/// scale)`, synthetic-agg-backed) are two spellings of the SAME dataflow. The
+/// scalar feeder's link score AND the loop scores must AGREE
+/// element-for-element, step-for-step -- the whole-RHS path is now routed to
+/// the same changed-last convention the subexpression path always used.
+///
+/// Two cases:
+///  - CONSTANT matrix (`0.1 +` prefix): every score is the analytic constant
+///    (feeder +1, loops 0.5), so agreement is exact but trivial.
+///  - TIME-VARYING matrix (`matrix = pop[D1] * 0.05`, `0 +` prefix so the
+///    simulated dynamics are byte-identical between spellings): the
+///    changed-last feeder score is genuinely time-varying (the numerator
+///    `Σ_c matrix_t[r,c]·Δscale` no longer equals `Δgrowth[r]`, which also
+///    carries the `Δmatrix` terms), so pointwise agreement here pins the
+///    CONVENTION, not just the constants. A vacuity guard asserts the score
+///    actually departs from +/-1.
+#[test]
+fn scalar_feeder_whole_rhs_and_subexpr_spellings_agree() {
+    struct Case {
+        label: &'static str,
+        matrix_eqn: &'static str,
+        subexpr_prefix: &'static str,
+        require_time_varying: bool,
+        /// Loops in EACH spelling: the 2 per-element feeder circuits, plus --
+        /// when `matrix` depends on `pop` -- the 4 per-(row, col) co-source
+        /// circuits (`pop[r] -> matrix[r,c] -> growth[r] -> pop[r]`).
+        expected_loops: usize,
+    }
+    let cases = [
+        Case {
+            label: "constant-matrix",
+            matrix_eqn: "5",
+            subexpr_prefix: "0.1 + ",
+            require_time_varying: false,
+            expected_loops: 2,
+        },
+        Case {
+            label: "time-varying-matrix",
+            matrix_eqn: "pop[D1] * 0.05",
+            subexpr_prefix: "0 + ",
+            require_time_varying: true,
+            expected_loops: 6,
+        },
+    ];
+
+    const TOL: f64 = 1e-9;
+
+    for case in &cases {
+        let (whole_results, _) = run_ltm(&gh790_whole_rhs_fixture_with("SUM", case.matrix_eqn));
+        let (subexpr_results, _) = run_ltm(&gh790_subexpr_fixture_with(
+            case.subexpr_prefix,
+            case.matrix_eqn,
+        ));
+
+        // The feeder link score: A2A `scale->growth` (whole-RHS) vs A2A
+        // `scale->$agg0` (subexpr). Both are dimensioned over `[D1]` --
+        // compare per slot.
+        let whole_feeder = offset_of(
+            &whole_results,
+            &format!("{LINK_SCORE_PREFIX}scale\u{2192}growth"),
+        );
+        let sub_feeder = offset_of(
+            &subexpr_results,
+            &format!("{LINK_SCORE_PREFIX}scale\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0"),
+        );
+        let mut saw_non_unit = false;
+        for slot in 0..2 {
+            let w = series_at(&whole_results, whole_feeder + slot);
+            let s = series_at(&subexpr_results, sub_feeder + slot);
+            assert_eq!(
+                w.len(),
+                s.len(),
+                "[{}] spellings must run the same step count",
+                case.label
+            );
+            for (step, (&wv, &sv)) in w.iter().zip(&s).enumerate() {
+                assert!(
+                    (wv - sv).abs() <= TOL,
+                    "[{}] feeder score slot {slot} step {step}: whole-RHS {wv} != subexpr {sv}",
+                    case.label
+                );
+                if step > 0 && (wv.abs() - 1.0).abs() > 0.01 {
+                    saw_non_unit = true;
+                }
+            }
+        }
+        // Vacuity guard for the time-varying case: a feeder score pinned at
+        // +/-1 would mean the dynamics degenerated back to the trivial
+        // constant-matrix agreement.
+        if case.require_time_varying {
+            assert!(
+                saw_non_unit,
+                "[{}] the time-varying feeder score must depart from +/-1 at \
+                 some step (otherwise this case is as weak as the constant one)",
+                case.label
+            );
+        }
+
+        // The loop scores: two per-element circuits in each spelling. Their
+        // sorted step-by-step series must match (the loop products through
+        // the shared scalar feeder are identical).
+        let collect_loops = |results: &Results| -> Vec<Vec<f64>> {
+            let mut series: Vec<Vec<f64>> = ltm_score_var_names(results)
+                .into_iter()
+                .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+                .map(|n| series_at(results, offset_of(results, &n)))
+                .collect();
+            // Deterministic comparison order: sort by the series content.
+            series.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            series
+        };
+        let whole_loops = collect_loops(&whole_results);
+        let sub_loops = collect_loops(&subexpr_results);
+        assert_eq!(
+            whole_loops.len(),
+            sub_loops.len(),
+            "[{}] both spellings must enumerate the same number of loops",
+            case.label
+        );
+        assert_eq!(
+            whole_loops.len(),
+            case.expected_loops,
+            "[{}] unexpected loop count",
+            case.label
+        );
+        for (wl, sl) in whole_loops.iter().zip(&sub_loops) {
+            for (step, (&wv, &sv)) in wl.iter().zip(sl).enumerate() {
+                assert!(
+                    (wv - sv).abs() <= TOL,
+                    "[{}] loop score step {step}: whole-RHS {wv} != subexpr {sv}",
+                    case.label
+                );
+            }
+        }
+    }
+}
+
+/// GH #790, DISCOVERY-mode twin (the #748/#698 symmetric-exercise lesson):
+/// discovery mode reaches the same `try_scalar_to_arrayed_link_scores`
+/// routing, so the scalar-feeder edge of a whole-RHS variable-backed reduce
+/// must EMIT there too -- ONE A2A `scale->growth` score, no broken
+/// per-element scores, zero warnings.
+///
+/// SCOPE: this test asserts the emitted vars and warnings only. The
+/// companion `gh754_scalar_feeder_loop_discoverable_in_discovery_mode` drives
+/// the SAME fixture through the discovery SEARCH and proves the loop through
+/// the scalar feeder is now found, and
+/// `gh754_scalar_feeder_discovery_matches_exhaustive_scores` pins per-step
+/// parity with the exhaustive surface. Before GH #754 the emitted scalar-from
+/// Bare A2A name was structurally undiscoverable: `expand_a2a_link_offsets`
+/// subscripted BOTH endpoints over the score's dims, inventing a `scale[elem]`
+/// from-node that matched no real node, so the edge dangled and every loop
+/// through the feeder was silently absent. It now projects the from-node onto
+/// the source's OWN dims (bare for a scalar feeder), in lockstep with the
+/// element graph.
+#[test]
+fn scalar_feeder_of_whole_rhs_reduce_emits_cleanly_in_discovery_mode() {
+    let project = gh790_whole_rhs_fixture("SUM");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("discovery-mode LTM compilation should succeed");
+
+    let feeder_name = format!("{LINK_SCORE_PREFIX}scale\u{2192}growth");
+    let feeder = ltm_var(&ltm_vars, &feeder_name);
+    assert_eq!(
+        feeder.dimensions,
+        vec!["D1".to_string()],
+        "discovery mode must also emit the A2A scalar-feeder score; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    for elem in ["a", "b"] {
+        let broken = format!("{LINK_SCORE_PREFIX}scale\u{2192}growth[{elem}]");
+        assert!(
+            !ltm_vars.iter().any(|v| v.name == broken),
+            "discovery mode must not emit the broken per-element feeder score {broken:?}"
+        );
+    }
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "discovery mode must compile every LTM fragment cleanly; got: {:?}",
+        assembly_warnings(&db, sync.project)
+    );
+}
+
+/// GH #754 (scalar-source leg), the must-fix the #790 review surfaced: the
+/// scalar-feeder Bare A2A score (`scale->growth`) must be DISCOVERABLE in
+/// discovery mode, not merely emitted cleanly. Drives the gh790 fixture
+/// through the ACTUAL discovery search (`discover_loops_with_graph`, the
+/// `analysis::run_ltm_pipeline` recipe) and asserts the feedback loop
+/// `pop -> scale -> growth -> pop` is found, with `scale` (the bare scalar
+/// from-node) appearing in the discovered loop's links.
+///
+/// Pre-fix `expand_a2a_link_offsets` subscripts BOTH endpoints over the
+/// score's `[D1]` dims, inventing `scale[a]`/`scale[b]` from-nodes that
+/// match no real node (the scalar source's node is bare `scale`); the edge
+/// dangles, the loop is structurally unreachable, and the search returns
+/// ZERO loops. This is the silent completeness gap the #790 trade widened
+/// (pre-#790 the broken per-element scores at least warned via 0-stubs).
+#[test]
+fn gh754_scalar_feeder_loop_discoverable_in_discovery_mode() {
+    let project = gh790_whole_rhs_fixture("SUM");
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the gh790 scalar-feeder repro")
+    .loops;
+
+    // The per-element circuit `pop[e] -> scale -> growth[e] -> pop[e]` must be
+    // discovered for each element. The scalar `scale` hop is the one the
+    // phantom `scale[e]` from-node broke.
+    assert!(
+        !found.is_empty(),
+        "discovery must find the loop through the scalar feeder `scale`; got \
+         none (the phantom scale[elem] from-node dangled the edge)"
+    );
+    let mut saw_scale_hop = false;
+    for fl in &found {
+        for link in &fl.loop_info.links {
+            // The bare scalar `scale` node must appear verbatim -- never a
+            // subscripted `scale[a]`/`scale[b]` phantom.
+            assert!(
+                !link.from.as_str().starts_with("scale["),
+                "discovered loop {} runs through a phantom subscripted scale node: {:?}",
+                fl.loop_info.id,
+                fl.loop_info.links
+            );
+            assert!(
+                !link.to.as_str().starts_with("scale["),
+                "discovered loop {} targets a phantom subscripted scale node: {:?}",
+                fl.loop_info.id,
+                fl.loop_info.links
+            );
+            if link.from.as_str() == "scale" || link.to.as_str() == "scale" {
+                saw_scale_hop = true;
+            }
+        }
+        // The discovered loop's per-step scores parse and stay finite.
+        assert!(
+            fl.scores.iter().all(|(_, v)| v.is_finite()),
+            "discovered loop {} scores must stay finite",
+            fl.loop_info.id
+        );
+    }
+    assert!(
+        saw_scale_hop,
+        "no discovered loop hops through the bare scalar `scale` node; loops: {:?}",
+        found
+            .iter()
+            .map(|fl| &fl.loop_info.links)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// GH #754 (scalar-source leg), the strongest parity assertion (the
+/// #748/#698 symmetric-exercise lesson): the loop discovered through the
+/// scalar feeder must score POINTWISE-identically to the same loop's
+/// exhaustive-mode `loop_score` series on the same model and VM run. The
+/// gh790 fixture's variable-level SCC is tiny (pop, scale, growth), so it
+/// runs exhaustively by default; discovery is force-flipped by the harness.
+/// Both modes share the VM oracle and the link-score values, so the
+/// discovered per-element loop score must equal the exhaustive per-element
+/// `loop_score` series the compiler emits.
+#[test]
+fn gh754_scalar_feeder_discovery_matches_exhaustive_scores() {
+    let project = gh790_whole_rhs_fixture("SUM");
+
+    // Discovery surface: the per-element loops the search finds.
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let discovered = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed")
+    .loops;
+    assert!(
+        !discovered.is_empty(),
+        "discovery must find the scalar-feeder loop for the parity check"
+    );
+
+    // Exhaustive surface: the compiler's per-element loop_score series.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("exhaustive LTM compilation should succeed");
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end().expect("VM run should complete");
+    let exhaustive_results = vm.into_results();
+    let exhaustive_loop_series: Vec<Vec<f64>> = ltm_score_var_names(&exhaustive_results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .map(|n| series_at(&exhaustive_results, offset_of(&exhaustive_results, &n)))
+        .collect();
+    assert!(
+        !exhaustive_loop_series.is_empty(),
+        "the exhaustive surface must emit at least one loop_score for the parity check"
+    );
+
+    // Every discovered loop's |score| series must match some exhaustive
+    // loop_score series pointwise (sign conventions differ across surfaces;
+    // the magnitudes -- the dominance-bearing quantity -- must agree). The VM
+    // run and link-score values are shared, so an exact match (modulo the
+    // STARTUP_STEPS guard) is the right bar.
+    const TOL: f64 = 1e-9;
+    for fl in &discovered {
+        let disc: Vec<f64> = fl.scores.iter().map(|(_, v)| v.abs()).collect();
+        let matched = exhaustive_loop_series.iter().any(|ex| {
+            ex.len() == disc.len()
+                && disc
+                    .iter()
+                    .zip(ex.iter())
+                    .skip(STARTUP_STEPS)
+                    .all(|(d, e)| (d - e.abs()).abs() <= TOL)
+        });
+        assert!(
+            matched,
+            "discovered loop {} score series has no pointwise match among the \
+             exhaustive loop_score series; discovered |scores|: {:?}; exhaustive: {:?}",
+            fl.loop_info.id, disc, exhaustive_loop_series
+        );
+    }
+}
+
+/// GH #754 (lower-dim arrayed-source leg): a Bare A2A score whose source has
+/// FEWER dims than the score (`stock[Region] -> pop[Region,Age]`, score dims
+/// `[Region,Age]`) must project the from-node onto the source's OWN dims
+/// (`stock[nyc]`, broadcast over the unshared `Age`), never the phantom
+/// `stock[nyc,young]` the both-sides expansion mints. Driven through the
+/// real discovery search; the same-element circuits must be found and every
+/// `stock` hop must read its own region element.
+#[test]
+fn gh754_lower_dim_feeder_loop_discoverable_in_discovery_mode() {
+    // `pop[Region,Age]` integrates `growth`, which broadcasts the lower-dim
+    // arrayed `boost[Region]` over `Age` -- a Bare A2A edge
+    // `boost[Region] -> growth[Region,Age]` whose score is over the target's
+    // `[Region,Age]` dims while `boost`'s own declared dims are `[Region]`.
+    let project = TestProject::new("gh754_lower_dim_feeder")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Age", &["young", "old"])
+        .array_aux("boost[Region]", "pop[Region, young] * 0.0001")
+        .array_flow(
+            "growth[Region, Age]",
+            "boost[Region] * pop[Region, Age]",
+            None,
+        )
+        .array_stock("pop[Region, Age]", "100", &["growth"], &[], None)
+        .build_datamodel();
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the lower-dim feeder repro")
+    .loops;
+
+    assert!(
+        !found.is_empty(),
+        "discovery must find the loop through the lower-dim feeder `boost`; \
+         got none (the phantom boost[region,age] from-node dangled the edge)"
+    );
+    let mut saw_boost_hop = false;
+    for fl in &found {
+        for link in &fl.loop_info.links {
+            // The `boost` from-node must carry exactly ONE element (its own
+            // `Region`), never a phantom `[region,age]` pair.
+            if let Some(sub) = link
+                .from
+                .as_str()
+                .strip_prefix("boost[")
+                .and_then(|r| r.strip_suffix("]"))
+            {
+                saw_boost_hop = true;
+                assert!(
+                    !sub.contains(','),
+                    "discovered loop {} runs through a phantom multi-dim boost \
+                     node `boost[{sub}]`; boost is declared over Region only: {:?}",
+                    fl.loop_info.id,
+                    fl.loop_info.links
+                );
+            }
+        }
+        assert!(
+            fl.scores.iter().all(|(_, v)| v.is_finite()),
+            "discovered loop {} scores must stay finite",
+            fl.loop_info.id
+        );
+    }
+    assert!(
+        saw_boost_hop,
+        "no discovered loop hops through the lower-dim `boost` node; loops: {:?}",
+        found
+            .iter()
+            .map(|fl| &fl.loop_info.links)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// GH #754 (the ORIGINAL mapped-dimension leg, positional #527): a Bare A2A
+/// edge between POSITIONALLY-MAPPED dimensions (`pop[Region] -> mid[State]`
+/// with a `State->Region` mapping) is scored over the target's `[State]`
+/// dims, so before this fix `expand_a2a_link_offsets` minted `pop[s1]`/`pop[s2]`
+/// -- elements of the WRONG dimension, naming no real node. The projection now
+/// runs through `expand_same_element`'s mapped diagonal, spelling the from-node
+/// `pop[<mapped source elem>]` (e.g. `pop[r1]`) in lockstep with the element
+/// graph, so the mapped loop is discoverable.
+///
+/// (Only POSITIONAL mappings reach here: an element-mapped pair is declined
+/// upstream by `link_score_dimensions` -- no Bare A2A score is emitted, the
+/// GH #756 positional-only gate -- so no phantom can be minted for it.)
+#[test]
+fn gh754_mapped_feeder_loop_discoverable_in_discovery_mode() {
+    let project = TestProject::new("gh754_mapped_feeder")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        // Bare reference to the `[Region]` `pop` from a `[State]`-iterated
+        // equation: the positional `State->Region` mapping resolves it to the
+        // diagonal, so `pop -> mid` is a mapped Bare A2A edge over `[State]`.
+        .array_aux("mid[State]", "pop[State] * 0.0001")
+        .array_flow("inflow[Region]", "mid[Region] * pop[Region]", None)
+        .build_datamodel();
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the mapped feeder repro")
+    .loops;
+
+    // The mapped diagonal loops `pop[r] -> mid[s] -> inflow[r] -> pop[r]` (with
+    // s the positional image of r) must be found, and every `pop -> mid` hop
+    // must read pop from the positionally-mapped region -- never a phantom
+    // `pop[s]` (an element of the wrong dimension).
+    assert!(
+        !found.is_empty(),
+        "discovery must find the mapped feeder loop; got none (the phantom \
+         pop[state] from-node dangled the edge)"
+    );
+    let positional = [("s1", "r1"), ("s2", "r2")];
+    let mut saw_mapped_hop = false;
+    for fl in &found {
+        for link in &fl.loop_info.links {
+            // A `pop -> mid[s]` hop must come from the mapped region pop[r].
+            if let Some(s) = link
+                .to
+                .as_str()
+                .strip_prefix("mid[")
+                .and_then(|r| r.strip_suffix("]"))
+            {
+                saw_mapped_hop = true;
+                let expected_region = positional
+                    .iter()
+                    .find(|(state, _)| *state == s)
+                    .map(|(_, r)| *r)
+                    .unwrap_or_else(|| panic!("unexpected mid state {s}"));
+                assert_eq!(
+                    link.from.as_str(),
+                    format!("pop[{expected_region}]"),
+                    "mapped hop into mid[{s}] must read pop[{expected_region}] \
+                     (the positional image), not {} -- a phantom wrong-dimension node",
+                    link.from.as_str()
+                );
+            }
+            // No phantom: a `pop[...]` node must never carry a STATE element.
+            if let Some(e) = link
+                .from
+                .as_str()
+                .strip_prefix("pop[")
+                .and_then(|r| r.strip_suffix("]"))
+            {
+                assert!(
+                    e == "r1" || e == "r2",
+                    "phantom pop node `pop[{e}]` (not a Region element)"
+                );
+            }
+        }
+        assert!(
+            fl.scores.iter().all(|(_, v)| v.is_finite()),
+            "discovered loop {} scores must stay finite",
+            fl.loop_info.id
+        );
+    }
+    assert!(
+        saw_mapped_hop,
+        "no discovered loop hops through the mapped `mid` node; loops: {:?}",
+        found
+            .iter()
+            .map(|fl| &fl.loop_info.links)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// GH #754 slot-attribution oracle (review hardening): the gh790-family
+/// integration fixtures are SLOT-SYMMETRIC -- constant co-sources make the
+/// feeder score identically +1 in every slot -- so a mutation that rotates
+/// each expanded edge's result slot by one passes them all (only the
+/// `parse_link_offsets` unit tests catch it). This test is the
+/// defense-in-depth layer: an ASYMMETRIC fixture whose Bare A2A scores are
+/// per-slot DISTINCT on BOTH projection arms, plus a per-loop oracle
+/// asserting each discovered loop's score series equals the product of
+/// INDEPENDENTLY slot-resolved link-score series pointwise.
+///
+/// Fixture: `growth[D1,D2] = SUM(m3[D1,D2,*] * scale * pop[D1,D2])` with
+/// per-element-distinct `m3` overrides and `scale = SUM(pop[*,*])` (whole-RHS
+/// reduces only -- NO synthetic agg nodes, so the reported loop links ARE the
+/// scored links). The distinct m3 rows make the pop slots diverge, so:
+///
+///  - `scale -> growth` (the SCALAR projection arm) scores per-slot
+///    distinctly (scale's share of each slot's growth change differs), and
+///  - `growth -> inflow` / `pop -> inflow` (the `expand_same_element`
+///    equal-dim arm, via `inflow[e] = growth[e] + pop[e]*0.001`) score
+///    per-slot distinctly (the growth-vs-pop contribution ratio differs).
+///
+/// A slot-rotation mutation in EITHER arm makes the engine's loop product
+/// read a neighboring slot's series while the oracle reads the right one --
+/// they diverge at the first step where the slots differ. (Mutation-validated
+/// before commit: rotating each arm's offsets by one fails this test.)
+#[test]
+fn gh754_asymmetric_loop_scores_match_slot_resolved_link_products() {
+    let project = TestProject::new("gh754_slot_oracle")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["c", "d"])
+        .named_dimension("D3", &["p", "q"])
+        .array_with_ranges_direct(
+            "m3",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            vec![
+                ("a,c,p", "0.00001"),
+                ("a,c,q", "0.00002"),
+                ("a,d,p", "0.00003"),
+                ("a,d,q", "0.00004"),
+                ("b,c,p", "0.00005"),
+                ("b,c,q", "0.00006"),
+                ("b,d,p", "0.00007"),
+                ("b,d,q", "0.00008"),
+            ],
+            None,
+        )
+        .array_stock("pop[D1,D2]", "100", &["inflow"], &[], None)
+        .scalar_aux("scale", "SUM(pop[*, *])")
+        .array_aux("growth[D1,D2]", "SUM(m3[D1, D2, *] * scale * pop[D1, D2])")
+        .array_flow(
+            "inflow[D1,D2]",
+            "growth[D1, D2] + pop[D1, D2] * 0.001",
+            None,
+        )
+        .build_datamodel();
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the asymmetric oracle fixture")
+    .loops;
+    let results = &inputs.vm_results;
+
+    // Per-dim canonical element lists, for independent row-major slot
+    // resolution of Bare A2A scores.
+    let dim_elements: std::collections::HashMap<String, Vec<String>> = inputs
+        .dims
+        .iter()
+        .map(|d| {
+            let elems = match &d.elements {
+                datamodel::DimensionElements::Named(names) => names
+                    .iter()
+                    .map(|n| n.to_lowercase())
+                    .collect::<Vec<String>>(),
+                datamodel::DimensionElements::Indexed(size) => {
+                    (1..=*size).map(|i| i.to_string()).collect()
+                }
+            };
+            (d.name().to_lowercase(), elems)
+        })
+        .collect();
+
+    // Independently resolve a loop link's result-slot offset: an exact
+    // element-level score name (the passthrough families) wins; otherwise the
+    // Bare A2A name's base offset plus the TARGET element's row-major slot
+    // over the score's own dims -- the layout rule the runtime wrote the
+    // score with, derived here from the datamodel rather than via
+    // `parse_link_offsets`, so a slot-misattribution there cannot fool the
+    // oracle into agreeing with itself.
+    let resolve = |from: &str, to: &str| -> usize {
+        let exact = format!("{LINK_SCORE_PREFIX}{from}\u{2192}{to}");
+        if let Some((_, off)) = results.offsets.iter().find(|(k, _)| k.as_str() == exact) {
+            return *off;
+        }
+        let from_base = from.split('[').next().unwrap();
+        let (to_base, to_elem) = match to.split_once('[') {
+            Some((b, rest)) => (b, rest.strip_suffix(']').unwrap()),
+            None => (to, ""),
+        };
+        let bare = format!("{LINK_SCORE_PREFIX}{from_base}\u{2192}{to_base}");
+        let base = offset_of(results, &bare);
+        if to_elem.is_empty() {
+            return base;
+        }
+        let score_var = inputs
+            .ltm_vars
+            .iter()
+            .find(|v| v.name == bare)
+            .unwrap_or_else(|| panic!("no LtmSyntheticVar for {bare}"));
+        let parts: Vec<&str> = to_elem.split(',').collect();
+        assert_eq!(
+            parts.len(),
+            score_var.dimensions.len(),
+            "target element {to_elem} arity must match {bare}'s score dims {:?}",
+            score_var.dimensions
+        );
+        let mut slot = 0usize;
+        for (part, dim_name) in parts.iter().zip(&score_var.dimensions) {
+            let elems = &dim_elements[&dim_name.to_lowercase()];
+            let idx = elems
+                .iter()
+                .position(|e| e == part)
+                .unwrap_or_else(|| panic!("element {part} not in dim {dim_name}: {elems:?}"));
+            slot = slot * elems.len() + idx;
+        }
+        base + slot
+    };
+
+    // Fixture-asymmetry guard: the two arm-exercising Bare A2A scores must be
+    // per-slot pairwise DISTINCT at the final step, otherwise a rotation
+    // mutation is invisible and this oracle proves nothing.
+    let last = results.step_count - 1;
+    for bare in ["scale\u{2192}growth", "growth\u{2192}inflow"] {
+        let base = offset_of(results, &format!("{LINK_SCORE_PREFIX}{bare}"));
+        let vals: Vec<f64> = (0..4)
+            .map(|slot| results.data[last * results.step_size + base + slot])
+            .collect();
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                assert!(
+                    (vals[i] - vals[j]).abs() > 1e-9,
+                    "{bare} slots {i} and {j} coincide at the final step ({vals:?}); \
+                     the fixture degenerated to slot-symmetric and cannot catch \
+                     slot misattribution"
+                );
+            }
+        }
+    }
+
+    // Both projection arms must appear in the discovered loop set, with the
+    // bare scalar `scale` node and the equal-dim diagonal hops.
+    let mut saw_scalar_arm_hop = false;
+    let mut saw_equal_dim_arm_hop = false;
+
+    // THE ORACLE: each discovered loop's per-step score equals the product of
+    // its links' independently slot-resolved score series, pointwise (the
+    // engine multiplies in link order; mirror it exactly).
+    assert!(!found.is_empty(), "discovery must find the fixture's loops");
+    let mut compared_finite = 0usize;
+    for fl in &found {
+        let offsets: Vec<usize> = fl
+            .loop_info
+            .links
+            .iter()
+            .map(|l| {
+                if l.from.as_str() == "scale" {
+                    saw_scalar_arm_hop = true;
+                }
+                if l.from.as_str().starts_with("growth[") && l.to.as_str().starts_with("inflow[") {
+                    saw_equal_dim_arm_hop = true;
+                }
+                resolve(l.from.as_str(), l.to.as_str())
+            })
+            .collect();
+        for (step, (_, engine_score)) in fl.scores.iter().enumerate() {
+            let mut oracle = 1.0_f64;
+            let mut has_nan = false;
+            for &off in &offsets {
+                let v = results.data[step * results.step_size + off];
+                if v.is_nan() {
+                    has_nan = true;
+                    break;
+                }
+                oracle *= v;
+            }
+            if has_nan {
+                assert!(
+                    engine_score.is_nan(),
+                    "loop {} step {step}: oracle product is NaN but the engine \
+                     scored {engine_score} -- the engine read different slots",
+                    fl.loop_info.id
+                );
+                continue;
+            }
+            assert!(
+                (oracle - engine_score).abs() <= 1e-9 * oracle.abs().max(1.0),
+                "loop {} step {step}: engine score {engine_score} != slot-resolved \
+                 oracle product {oracle}; links: {:?} -- a result-slot \
+                 misattribution in the discovery A2A expansion",
+                fl.loop_info.id,
+                fl.loop_info.links
+            );
+            if engine_score.is_finite() && *engine_score != 0.0 {
+                compared_finite += 1;
+            }
+        }
+    }
+    assert!(
+        compared_finite > 0,
+        "the oracle never compared a finite non-zero step -- the fixture carries no signal"
+    );
+    assert!(
+        saw_scalar_arm_hop,
+        "no discovered loop hops through the scalar `scale` feeder; the scalar \
+         projection arm is unexercised"
+    );
+    assert!(
+        saw_equal_dim_arm_hop,
+        "no discovered loop traverses growth[e] -> inflow[e]; the equal-dim \
+         projection arm is unexercised"
+    );
+}
+
+/// GH #790, sibling audit: a scalar feeder ALONGSIDE an iterated-dim
+/// projection feeder (`growth[D1] = SUM(matrix[D1,*] * frac[D1] * scale)`).
+/// The scalar `scale` rides the new A2A feeder arm; the arrayed `frac[D1]`
+/// rides the GH #767 per-`(row, slot)` projection-feeder arm. Both must end
+/// correct, zero warnings -- the two feeder kinds coexist on one reducer.
+#[test]
+fn scalar_and_iterated_feeders_coexist_cleanly() {
+    let project = TestProject::new("gh790_mixed_feeders")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["c", "d"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+        .array_aux("frac[D1]", "pop[D1] * 0.001")
+        .scalar_aux("scale", "SUM(pop[*]) * 0.005")
+        .array_flow("growth[D1]", "SUM(matrix[D1, *] * frac[D1] * scale)", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The scalar feeder gets the A2A score.
+    let scale_feeder = ltm_var(
+        &ltm_vars,
+        &format!("{LINK_SCORE_PREFIX}scale\u{2192}growth"),
+    );
+    assert_eq!(
+        scale_feeder.dimensions,
+        vec!["D1".to_string()],
+        "the scalar feeder must get the A2A score even alongside an iterated feeder"
+    );
+    // The iterated feeder gets the per-(row, slot) projection scores.
+    for row in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}frac[{row}]\u{2192}growth[{row}]");
+        assert!(
+            ltm_vars.iter().any(|v| v.name == name),
+            "missing the iterated feeder's per-row score {name}; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "the mixed-feeder fixture must compile every LTM fragment cleanly; got: {:?}",
+        assembly_warnings(&db, sync.project)
+    );
+}
+
+/// GH #790 review follow-up (the GH #777 broadcast sub-shape): a scalar
+/// feeder of an ARRAYED-owner scalar-result BROADCAST reduce --
+/// `growth[D9] = SUM(matrix[a,*] * scale)` (Pinned slice, NO Iterated axis,
+/// `result_dims` empty, owner arrayed over a dim disjoint from the
+/// source's). `variable_backed_reduce_agg`'s broadcast arm admits it, so the
+/// scalar-feeder routing fires with EMPTY `result_dims`; the initial GH #790
+/// commit emitted `Equation::Scalar` for it, whose bare multi-slot `growth`
+/// reference failed assembly (1 fragment warning + 2 stubbed-loop warnings,
+/// constant-0 series, edge NOT in `unscoreable_edges`) -- the exact
+/// #758/#780 middle state #790 was filed to eliminate, one shape over.
+///
+/// The fix emits `Equation::ApplyToAll` over the OWNER's dims: the single
+/// scalar reducer value feeds every `growth[e]` identically, the bare
+/// `growth` reference element-resolves inside its own A2A context, and the
+/// frozen reducer body (`sum(matrix[a,*] * PREVIOUS(scale))`) is
+/// scalar-valued so it broadcasts cleanly.
+///
+/// Hand-derived per slot `e` (matrix constant = 5, |D2| = 2):
+///
+/// ```text
+/// numerator = growth[e] - sum(matrix[a,*] * PREVIOUS(scale))
+///           = (Σ_c matrix[a,c]) * Δscale = 10·Δscale = Δgrowth[e]
+/// ```
+///
+/// so the A2A feeder score is +1 per slot from step 1, and each of the two
+/// per-element circuits through the shared scalar `scale` scores ~0.5 -- and
+/// must agree pointwise with the SUBEXPRESSION spelling
+/// (`0 + SUM(matrix[a,*] * scale)`, synthetic SCALAR agg) of the same
+/// dataflow.
+#[test]
+fn scalar_feeder_of_broadcast_reduce_scores_via_agg_arm() {
+    let broadcast_fixture = |rhs: &str| -> datamodel::Project {
+        TestProject::new("gh790_broadcast")
+            .with_sim_time(0.0, 8.0, 1.0)
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["c", "d"])
+            .named_dimension("D9", &["p", "q"])
+            .array_stock("pop[D9]", "100", &["growth"], &[], None)
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .scalar_aux("scale", "SUM(pop[*]) * 0.005")
+            .array_flow("growth[D9]", rhs, None)
+            .build_datamodel()
+    };
+
+    let project = broadcast_fixture("SUM(matrix[a, *] * scale)");
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The feeder score is A2A over the OWNER's dims (result_dims is empty
+    // for the broadcast slice), with the changed-last equation.
+    let feeder_name = format!("{LINK_SCORE_PREFIX}scale\u{2192}growth");
+    let feeder = ltm_var(&ltm_vars, &feeder_name);
+    assert_eq!(
+        feeder.dimensions,
+        vec!["D9".to_string()],
+        "the broadcast scalar-feeder score must be A2A over the OWNER's dims"
+    );
+    assert_eq!(
+        feeder.equation.source_text(),
+        "if (TIME = INITIAL_TIME) then 0 else if ((growth - PREVIOUS(growth)) = 0) OR \
+         ((scale - PREVIOUS(scale)) = 0) then 0 else SAFEDIV((growth - (sum(matrix[a, *] * \
+         PREVIOUS(scale)))), ABS((growth - PREVIOUS(growth))), 0) * SIGN((scale - PREVIOUS(scale)))",
+        "the broadcast scalar-feeder changed-last equation must match the hand-derived form"
+    );
+
+    // Zero assembly warnings: the Scalar-emission regression produced 3
+    // (the fragment failure + two stubbed loops).
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "the broadcast scalar-feeder fixture must compile every LTM fragment cleanly; got: {:?}",
+        assembly_warnings(&db, sync.project)
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    const TOL: f64 = 1e-9;
+
+    // +1 per slot at every step past the first.
+    let base = offset_of(&results, &feeder_name);
+    for slot in 0..2 {
+        let series = series_at(&results, base + slot);
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() <= TOL,
+                "broadcast feeder score slot {slot} at step {step}: got {v}, expected +1. \
+                 A constant 0 is the Scalar-emission fragment-failure-stub signature."
+            );
+        }
+    }
+
+    // Two per-element circuits, each ~0.5 sustained.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        2,
+        "expected one per-element loop through the broadcast feeder; got {loop_names:?}"
+    );
+    for name in &loop_names {
+        let series = series_at(&results, offset_of(&results, name));
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 0.5).abs() <= 1e-6,
+                "{name} at step {step}: got {v}, expected ~0.5 (shared-scalar loop)."
+            );
+        }
+    }
+
+    // Spelling agreement: the SUBEXPRESSION spelling of the same dataflow
+    // (`0 +` keeps the dynamics identical) routes the feeder through the
+    // synthetic SCALAR agg's feeder arm; its scalar score must equal every
+    // whole-RHS A2A slot pointwise.
+    let (sub_results, sub_vars) = run_ltm(&broadcast_fixture("0 + SUM(matrix[a, *] * scale)"));
+    let sub_feeder_name = &sub_vars
+        .iter()
+        .find(|v| {
+            v.name
+                .starts_with(&format!("{LINK_SCORE_PREFIX}scale\u{2192}$"))
+        })
+        .expect("the subexpr spelling must emit a scale -> synthetic-agg feeder score")
+        .name;
+    let sub_series = series_at(&sub_results, offset_of(&sub_results, sub_feeder_name));
+    for slot in 0..2 {
+        let w = series_at(&results, base + slot);
+        assert_eq!(
+            w.len(),
+            sub_series.len(),
+            "spellings must run the same step count"
+        );
+        for (step, (&wv, &sv)) in w.iter().zip(&sub_series).enumerate() {
+            assert!(
+                (wv - sv).abs() <= TOL,
+                "broadcast feeder slot {slot} step {step}: whole-RHS {wv} != subexpr {sv}"
+            );
+        }
+    }
 }

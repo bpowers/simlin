@@ -22,7 +22,7 @@ use crate::db::{
     project_dimensions_context, reconstruct_single_variable, variable_dimensions,
 };
 
-use super::compile::link_score_equation_text_shaped;
+use super::compile::{ShapedLinkScore, link_score_equation_text_shaped};
 use super::loops::{ReadSliceRow, cartesian_subscripts, read_slice_rows};
 use super::parse::{
     ltm_equation_dimensions, reconstruct_ltm_var_lowered, retarget_ltm_equation_dims,
@@ -225,7 +225,11 @@ pub(super) fn link_score_dimensions(
 /// `from`'s read slice -- `Pinned` axes fixed to their literal element,
 /// subset-`Reduced` axes enumerated over the subset only -- so the divisor
 /// is the true read count and unread rows get NO score, matching the
-/// element edges `emit_agg_routed_edges` derives from the same slice. For
+/// element edges `emit_agg_routed_edges` derives from the same slice.
+/// Since GH #783 that match is structural, not coincidental: both surfaces
+/// walk the ONE `read_slice_row_parts` derivation (`read_slice_rows` is its
+/// comma-joined + co-reduced projection), so a change to the slice vocabulary
+/// updates both in lockstep (invariant I4). For
 /// an all-`Iterated`/full-extent slice the read rows ARE the cartesian
 /// rows (byte-identical to the pre-T3 derivation). An ITERATED-DIM
 /// PROJECTION FEEDER edge into a variable-backed reduce (GH #767 / T5:
@@ -243,29 +247,28 @@ pub(super) fn link_score_dimensions(
 /// so their edges route through the two-half agg emitters and never reach
 /// this function.)
 ///
-/// The one newly-LOUD decline: an ARRAYED-owner scalar-result Pinned/subset
-/// slice whose owner dims are a SUBSET of the source's
-/// (`share[Region] = SUM(pop[nyc,*])` -- a variable-backed agg with no
-/// `Iterated` axis broadcast over `to`'s dims, reaching the partial-reduce
-/// branch below). Pre-T3 the cartesian derivation emitted full-cartesian
-/// per-`(row, slot)` garbage for it (delta-ratio +/-1 scores for rows the
-/// reducer never reads -- GH #777, the GH #765 sibling); the
-/// per-`(row, slot)` machinery cannot express the broadcast, so the edge
-/// now takes the GH #758 treatment: one Warning
-/// ([`emit_unscoreable_broadcast_reduce_edge_warning`]), no link-score
-/// variable, the edge recorded in `unscoreable_edges` (loop scores through
-/// it dropped), and `Some(vec![])` returned so the caller does NOT fall
-/// through to `emit_per_shape_link_scores`. The DISJOINT-dims sibling
-/// (`share[D9] = SUM(pop[nyc,*])`, `D9` not a source dim) never reaches
-/// this branch -- the `result_axis_names` check above early-returns `None`
-/// for it -- and keeps its pre-existing loud degradation through
-/// `emit_per_shape_link_scores`' GH #758 gate, unchanged.
+/// The BROADCAST-REDUCE shape (GH #777): an ARRAYED-owner scalar-result
+/// Pinned/subset slice (`share[Region] = SUM(pop[nyc,*])` -- a
+/// variable-backed agg with no `Iterated` axis whose single scalar value
+/// broadcasts over `to`'s dims). The dedicated branch near the top of this
+/// function ([`emit_broadcast_reduce_link_scores`]) emits the
+/// per-(read-row, full-target-element) scalar scores
+/// (`pop[nyc,p]→share[nyc]`, `pop[nyc,p]→share[boston]`, ...): each read
+/// row feeds every target slot with the same value, so the row is fixed by
+/// the slice and the slot ranges over `to`'s entire element set, in
+/// lockstep with `emit_agg_routed_edges`' broadcast fan-out. It fires
+/// BEFORE the partial-reduce `result_axis_names` containment check, so the
+/// RELATED-dim spelling (`share[Region]`) and the DISJOINT-dim spelling
+/// (`share[D9]`, `D9` not a source dim) are scored identically. (Pre-T3
+/// this shape emitted full-cartesian per-`(row, slot)` garbage; pre-fix it
+/// took a loud GH #758 skip -- both are retired.)
 ///
 /// Returns `None` for scalar-to-scalar, same-dimension A2A, broadcast
 /// (`from_dims ⊆ to_dims`), mismatched dimensions, module-involved
 /// edges, and any edge where the reducer cannot be classified. Returns
 /// `Some(vec![])` for SIZE edges (constant reducer, no scores) and the
-/// loud decline above.
+/// remaining loud declines (the GH #780 projection-feeder doom and the
+/// GH #778/#785 duplicated-dim skip).
 #[allow(clippy::too_many_arguments)] // threads salsa keys + emission context
 pub(super) fn try_cross_dimensional_link_scores(
     db: &dyn Db,
@@ -310,10 +313,62 @@ pub(super) fn try_cross_dimensional_link_scores(
         .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))
         && vb_agg.source_is_projection_feeder(from)
         && crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from, to, to_dims).is_some()
-        && let Some(feeder_vars) =
-            iterated_feeder_row_scores(db, model, project, from, from_dims, vb_agg)
+        && let Some(feeder_vars) = iterated_feeder_row_scores(
+            db,
+            model,
+            project,
+            from,
+            from_dims,
+            vb_agg,
+            unscoreable_edges,
+        )
     {
+        // `Some(vec![])` can be the GH #780 loud doom: the edge was
+        // recorded in `unscoreable_edges` (here `vb_agg.name == to`) and
+        // returning it keeps the dispatcher from minting a wrong-shaped
+        // stand-in -- same contract as the other loud declines below.
         return Some(feeder_vars);
+    }
+
+    // BROADCAST REDUCE (GH #777): a VARIABLE-BACKED agg whose slice has NO
+    // `Iterated` axis (Pinned and/or subset-`Reduced` only) but whose owner
+    // `to` is ARRAYED -- `share[Region] = SUM(pop[nyc,*])`. The reducer
+    // collapses to ONE scalar value that broadcasts over every `to[e]`, so
+    // each read row (`pop[nyc,p]`, `pop[nyc,q]`) feeds every target element:
+    // emit `{from}[{row}]→{to}[{e}]` for the cartesian product of read rows
+    // and the FULL target element set, each scored by the per-row reducer
+    // partial with the target reference pinned to `e` (the same builder the
+    // aligned partial-reduce arm uses, with `result_element = e` and the
+    // co-reduced slice the ALL read rows -- every row contributes to every
+    // slot). The read rows are independent of `to`'s dims, so the RELATED-dim
+    // spelling (`share[Region]`, `Region` a source dim) and the DISJOINT-dim
+    // spelling (`share[D9]`, `D9` not a source dim) are handled identically
+    // -- this branch fires BEFORE the partial-reduce `result_axis_names`
+    // containment check that would early-return `None` for the disjoint
+    // spelling. Gated on the SAME `variable_backed_reduce_agg` decision the
+    // element graph's broadcast fan-out (`emit_agg_routed_edges`) and the
+    // loop builder consult, so the emitted per-(row, e) names are exactly the
+    // hops the per-circuit loops reference. This replaces the pre-fix GH #758
+    // loud skip (its `emit_unscoreable_broadcast_reduce_edge_warning` is
+    // deleted), which itself replaced the pre-T3 full-cartesian garbage.
+    if !to_dims.is_empty()
+        && let Some(vb_agg) = agg_nodes
+            .aggs_in_var(to)
+            .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))
+        && vb_agg.result_dims.is_empty()
+        && crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from, to, to_dims).is_some()
+    {
+        return emit_broadcast_reduce_link_scores(
+            db,
+            source_vars,
+            from,
+            to,
+            from_dims,
+            to_dims,
+            vb_agg,
+            model,
+            project,
+        );
     }
 
     // Determine whether this edge is a full reduce (scalar target) or a
@@ -359,9 +414,14 @@ pub(super) fn try_cross_dimensional_link_scores(
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     // The live source's accepted slice, when `to` IS a variable-backed agg
     // reading `from`: lets the body partial resolve a mismatched-arity
-    // feeder dep's index at the slice's ITERATED axis position -- sound
-    // for a repeated-dim co-source like `matrix[D1,D1]`, where a by-name
-    // lookup is ambiguous (see `resolve_mismatched_index_position`). The
+    // feeder dep's index at the slice's ITERATED axis position -- sound and
+    // LOAD-BEARING for a repeated-dim co-source like `matrix[D1,D1]` read as
+    // `SUM(matrix[*, D1] * frac[D1])` (slice `[Reduced, Iterated]`,
+    // `result_dims = [D1]`: still minted, the GH #767 live shape), where a
+    // by-name lookup is ambiguous (see `resolve_mismatched_index_position`).
+    // Only the DOUBLY-Iterated case (two Iterated axes over the same dim,
+    // result_dims repeated) is declined at agg minting (GH #778/#785,
+    // `result_dims_has_repeated_dim`) and so never reaches here. The
     // un-hoisted cartesian family has no agg and keeps `None` (unique
     // by-name resolution with the ambiguity bail).
     let live_read_slice = agg_nodes
@@ -387,114 +447,170 @@ pub(super) fn try_cross_dimensional_link_scores(
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
 
-    // The T3 read-slice derivation (see the rustdoc). The raw finder runs
-    // first so the gate's decline reasons can be told apart: an accepted agg
-    // takes the `read_slice_rows` path; an agg the gate declines because its
-    // slice is non-trivial but scalar-result on an ARRAYED owner is the loud
-    // skip; the remaining decline (the trivial full-extent slice) falls
-    // through to the pre-T3 cartesian derivation byte-identically. (The
-    // GH #764 non-aligned shapes no longer appear here: since T4 they mint
-    // synthetic aggs, so no variable-backed agg exists for them.)
+    // The T3 read-slice derivation (see the rustdoc). The
+    // ARRAYED-owner broadcast slice (scalar `result_dims`, arrayed `to`) is
+    // already handled by the broadcast-reduce branch near the top of this
+    // function, so the agg reaching here is either an aligned partial reduce
+    // (Iterated-armed `read_slice_rows` path) or, on a SCALAR owner, the
+    // scalar-result slice admission. A `vb_agg` whose gate decision declines
+    // (the trivial full-extent slice) falls through to the pre-T3 cartesian
+    // derivation byte-identically. (The GH #764 non-aligned shapes no longer
+    // appear here: since T4 they mint synthetic aggs, so no variable-backed
+    // agg exists for them.)
+    // The ARRAYED-owner scalar-result Pinned/subset broadcast slice
+    // (`share[Region] = SUM(pop[nyc,*])`) does NOT reach here: it is handled
+    // by the broadcast-reduce branch near the top of this function (which
+    // returns before the `result_axis_names` derivation). A `vb_agg` the gate
+    // declines (the trivial full-extent slice), or one whose `read_slice_rows`
+    // declines (a stale arity/remap invariant, or a source whose declared
+    // dims repeat a result axis -- the live GH #767 `matrix[D1,D1]` shape),
+    // falls through to the conservative cartesian landing below rather than
+    // emitting mis-slotted scores (the GH #778/#785 loud skip is strictly
+    // safer there than a cartesian whose projection is ambiguous). Mirrors
+    // `emit_source_to_agg_link_scores`' fallback.
     if let Some(vb_agg) = agg_nodes
         .aggs_in_var(to)
         .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))
+        && crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from, to, to_dims).is_some()
+        && let Some(rows) = read_slice_rows(
+            vb_agg.source_read_slice(from),
+            &dim_element_lists,
+            project_dimensions_context(db, project),
+        )
     {
-        if crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from, to, to_dims).is_some() {
-            let rows = read_slice_rows(
-                vb_agg.source_read_slice(from),
-                &dim_element_lists,
-                project_dimensions_context(db, project),
-            );
-            // `rows` is `Some` for every slice the gate admits (both gate
-            // on the same per-axis data over the same salsa dimension
-            // context); a `None` here would mean a stale arity/remap
-            // invariant, and falls through to the conservative cartesian
-            // derivation below rather than emitting mis-slotted scores --
-            // mirroring `emit_source_to_agg_link_scores`' fallback.
-            if let Some(rows) = rows {
-                let mut cross_vars = Vec::with_capacity(rows.len());
-                for ReadSliceRow {
-                    row,
-                    slot,
-                    coreduced,
-                } in &rows
-                {
-                    // Equation text uses qualified `dim·element` references
-                    // (direct LoadPrev, no helper auxes); names keep the
-                    // bare element form (the user-facing / discovery-parsed
-                    // identity) -- both exactly as the cartesian branches
-                    // below.
-                    let qualified_row = crate::ltm_augment::qualify_element_csv(row, from_dims);
-                    let qualified_coreduced: Vec<String> = coreduced
-                        .iter()
-                        .map(|e| crate::ltm_augment::qualify_element_csv(e, from_dims))
-                        .collect();
-                    let (var_name, equation) = if slot.is_empty() {
-                        // Scalar result slot: the scalar-owner admission
-                        // (`total = SUM(pop[nyc,*])`) -- the bare `to` name
-                        // IS the slot.
-                        (
-                            format!(
-                                "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
-                                from, row, to
-                            ),
-                            crate::ltm_augment::generate_element_to_scalar_equation(
-                                from,
-                                to,
-                                &qualified_row,
-                                &qualified_coreduced,
-                                &classified.kind,
-                                classified.name,
-                                classified.is_bare,
-                                Some(&body_ctx),
-                            ),
-                        )
-                    } else {
-                        // Aligned partial reduce: the slot names a complete
-                        // `to` element (gate invariant), in `to`-dim order.
-                        (
-                            format!(
-                                "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}[{}]",
-                                from, row, to, slot
-                            ),
-                            crate::ltm_augment::generate_element_to_reduced_equation(
-                                from,
-                                to,
-                                &qualified_row,
-                                &crate::ltm_augment::qualify_element_csv(slot, to_dims),
-                                &qualified_coreduced,
-                                &classified.kind,
-                                classified.name,
-                                classified.is_bare,
-                                Some(&body_ctx),
-                            ),
-                        )
-                    };
-                    cross_vars.push(LtmSyntheticVar {
-                        name: var_name,
-                        equation: datamodel::Equation::Scalar(equation),
-                        dimensions: vec![], // scalar -- one variable per read row
-                        // bracketed name -> routed direct by `assemble_module`.
-                        compile_directly: false,
-                    });
-                }
-                return Some(cross_vars);
-            }
-        } else if !to_dims.is_empty()
-            && vb_agg.result_dims.is_empty()
-            && vb_agg
-                .canonical_read_slice()
-                .iter()
-                .any(|ax| !matches!(ax, crate::ltm_agg::AxisRead::Reduced { subset: None }))
+        let mut cross_vars = Vec::with_capacity(rows.len());
+        for ReadSliceRow {
+            row,
+            slot,
+            coreduced,
+        } in &rows
         {
-            // The declined ARRAYED-owner scalar-result Pinned/subset slice:
-            // loud skip (see the rustdoc). The insert dedups the warning
-            // when the pinned-loop pass re-visits the edge.
+            // Equation text uses qualified `dim·element` references
+            // (direct LoadPrev, no helper auxes); names keep the
+            // bare element form (the user-facing / discovery-parsed
+            // identity) -- both exactly as the cartesian branches
+            // below.
+            let qualified_row = crate::ltm_augment::qualify_element_csv(row, from_dims);
+            let qualified_coreduced: Vec<String> = coreduced
+                .iter()
+                .map(|e| crate::ltm_augment::qualify_element_csv(e, from_dims))
+                .collect();
+            let (var_name, equation) = if slot.is_empty() {
+                // Scalar result slot: the scalar-owner admission
+                // (`total = SUM(pop[nyc,*])`) -- the bare `to` name
+                // IS the slot.
+                (
+                    format!(
+                        "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
+                        from, row, to
+                    ),
+                    crate::ltm_augment::generate_element_to_scalar_equation(
+                        from,
+                        to,
+                        &qualified_row,
+                        &qualified_coreduced,
+                        &classified.kind,
+                        classified.name,
+                        classified.is_bare,
+                        Some(&body_ctx),
+                    ),
+                )
+            } else {
+                // Aligned partial reduce: the slot names a complete
+                // `to` element (gate invariant), in `to`-dim order.
+                (
+                    format!(
+                        "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}[{}]",
+                        from, row, to, slot
+                    ),
+                    crate::ltm_augment::generate_element_to_reduced_equation(
+                        from,
+                        to,
+                        &qualified_row,
+                        &crate::ltm_augment::qualify_element_csv(slot, to_dims),
+                        &qualified_coreduced,
+                        &classified.kind,
+                        classified.name,
+                        classified.is_bare,
+                        Some(&body_ctx),
+                    ),
+                )
+            };
+            cross_vars.push(LtmSyntheticVar {
+                name: var_name,
+                equation: datamodel::Equation::Scalar(equation),
+                dimensions: vec![], // scalar -- one variable per read row
+                // bracketed name -> routed direct by `assemble_module`.
+                compile_directly: false,
+            });
+        }
+        return Some(cross_vars);
+    }
+
+    // GH #778/#785: a DEGENERATE SQUARE-SOURCE reducer (`from`'s dims repeat a
+    // dimension that survives as a result axis -- `cube[D1,D1,*] -> x[D1]`)
+    // reaches HERE post-decline: its agg is no longer minted
+    // (`result_dims_has_repeated_dim`), so the agg branch above did not handle
+    // it, and it falls into the conservative cartesian partial-reduce branch
+    // below. That branch projects each source tuple onto the result axes
+    // through a `from_pos` name->position map, which collapses the duplicated
+    // dim to ONE position (last-match) -- an ambiguous projection: for the
+    // iterated-diagonal spelling (`x[D1] = SUM(cube[D1,D1,*])`) it would
+    // additionally emit confident per-`(row, result)` scores for OFF-DIAGONAL
+    // source rows the executed A2A simulation never reads, and for the
+    // repeated-dim-owner (`x[D1,D1] = ...`) and whole-extent-broadcast
+    // (`SUM(cube[*,*,*])`) spellings the per-element attribution is equally
+    // undisambiguable even though the simulation reads every row. The element
+    // graph routes this same edge as the conservative full cross-product (a
+    // sound superset), so closing the score side with the GH #758 loud skip
+    // keeps edges and scores in lockstep: no link-score variable, the edge
+    // recorded unscoreable so loops through it are dropped, one clear
+    // diagnostic instead of plausible-looking wrong numbers.
+    //
+    // Placed AFTER the agg branch deliberately: a repeated-dim SOURCE whose
+    // result is NOT a duplicated dim (`growth[D1] = SUM(matrix[*, D1] * ...)`
+    // over `matrix[D1,D1]`, slice `[Reduced, Iterated]`, `result_dims = [D1]`)
+    // IS hoisted and correctly scored by the agg branch (GH #767) -- it returns
+    // before reaching here, so this skip fires ONLY for the genuinely
+    // un-hoisted square shape whose duplicated dim survives as a result axis.
+    if !result_axis_names.is_empty() {
+        let from_names: Vec<&str> = from_dims.iter().map(|d| d.name()).collect();
+        let result_axis_is_duplicated = result_axis_names
+            .iter()
+            .any(|n| from_names.iter().filter(|fn_| **fn_ == n.as_str()).count() > 1);
+        if result_axis_is_duplicated {
             if unscoreable_edges.insert((from.to_string(), to.to_string())) {
-                emit_unscoreable_broadcast_reduce_edge_warning(db, model, from, to);
+                emit_unscoreable_duplicated_dim_source_warning(db, model, from, to);
             }
             return Some(vec![]);
         }
+    }
+
+    // GH #791: the I1-DECLINED STRICT-SLICE family. We are at the legacy
+    // cartesian derivation because no usable variable-backed agg was minted for
+    // this edge (the agg branch above did not fire). The cartesian projection
+    // ranges over the FULL `from` extent by declared dimension positions, which
+    // is sound ONLY when the reducer reads the full extent of `from`. When
+    // `to`'s reducer reads a STRICT slice of `from` -- a `Pinned` element or a
+    // subset-`Reduced` axis, as in the multi-source mismatched-co-source shape
+    // `share[Region] = SUM(pop[nyc,*] * w[*])` (`pop`'s slice
+    // `[Pinned(nyc), Reduced]` declines the I1 acceptance, so no agg is minted)
+    // -- the projection invents scores for `from`'s UNREAD rows
+    // (`pop[boston,*]`) and mis-divides the read rows. Closed with the GH
+    // #758/#780 loud skip: no link-score variable, the edge recorded so loops
+    // through it drop. The verdict re-derives `from`'s read slice via the SAME
+    // per-axis classifier the hoisting path uses for Scalar/A2A owners (so the
+    // two agree axis-for-axis there). The shared helper ALSO declines the
+    // GH #792 per-element-owner family, which can only reach this cartesian
+    // arm through an EXCEPT default expression (`classify_reducer` needs a
+    // single expression); declining it here keeps that spelling consistent
+    // with the per-shape fallthrough below. A NOT-DESCRIBABLE read (the
+    // dynamic-index `SUM(pop[idx,*])` carve-out and declined mappings) keeps
+    // the conservative cartesian -- its documented intended behavior -- as
+    // does a genuine full-extent read on a Scalar/A2A owner (the aligned
+    // `SUM(matrix[D1,*])` diagonal a feeder decline can strand here).
+    if decline_unhoisted_reducer_edge(db, model, project, from, to, unscoreable_edges) {
+        return Some(vec![]);
     }
 
     let source_elements = cartesian_subscripts(&dim_element_lists);
@@ -611,6 +727,130 @@ pub(super) fn try_cross_dimensional_link_scores(
     Some(cross_vars)
 }
 
+/// Emit the per-(read-row, full-target-element) link scores for an
+/// ARRAYED-owner scalar-result BROADCAST reduce (GH #777):
+/// `share[Region] = SUM(pop[nyc,*])`. The reducer reads a Pinned/subset
+/// slice (`pop[nyc,*]`) with NO `Iterated` axis, collapsing it to ONE scalar
+/// value that broadcasts over every `share[e]`. Every target slot reads the
+/// SAME slice, so for each read row (`pop[nyc,p]`, `pop[nyc,q]`) and each
+/// FULL target element `e` we emit the scalar variable
+/// `$⁚ltm⁚link_score⁚{from}[{row}]→{to}[{e}]` -- the EXISTING per-(row, slot)
+/// grammar `loop_link_score_ref` and discovery's `parse_link_offsets`
+/// already resolve.
+///
+/// The equation is the per-row reducer partial with the target reference
+/// pinned to `e`: [`crate::ltm_augment::generate_element_to_reduced_equation`]
+/// with `result_element = e` and the co-reduced slice the FULL set of read
+/// rows (every read row contributes to every target slot, so the divisor /
+/// nonlinear expansion is over the whole slice). For an A2A target the body
+/// is identical per slot; only the target reference (`share[e]`) and the
+/// per-row source reference differ -- the same builder the aligned
+/// partial-reduce arm uses, just with `e` ranging over `to`'s entire element
+/// set rather than the source's projection.
+///
+/// The read rows are independent of `to`'s dims, so the RELATED-dim spelling
+/// (`share[Region]`, `Region` a source dim) and the DISJOINT-dim spelling
+/// (`share[D9]`, `D9` not a source dim) emit identically. SIZE (constant
+/// reducer) skips with `Some(vec![])`. A `read_slice_rows` decline returns
+/// `None` (the `?`), propagating out of `try_cross_dimensional_link_scores`'
+/// broadcast branch so the dispatcher's later landings apply -- defense only:
+/// the decline is unreachable for a slice the gate admits here (a
+/// Pinned/Reduced-only slice has no `Iterated` remap to fail, and arity is
+/// invariant I2), so the broadcast edges and scores cannot actually diverge.
+#[allow(clippy::too_many_arguments)] // threads salsa keys + emission context
+fn emit_broadcast_reduce_link_scores(
+    db: &dyn Db,
+    source_vars: &HashMap<String, SourceVariable>,
+    from: &str,
+    to: &str,
+    from_dims: &[crate::dimensions::Dimension],
+    to_dims: &[crate::dimensions::Dimension],
+    vb_agg: &crate::ltm_agg::AggNode,
+    model: SourceModel,
+    project: SourceProject,
+) -> Option<Vec<LtmSyntheticVar>> {
+    let to_var = reconstruct_single_variable(db, model, project, to)?;
+    let classified = crate::ltm_augment::classify_reducer(&to_var, from)?;
+    if classified.kind == crate::ltm_augment::ReducerKind::Constant {
+        // SIZE is constant; link score is always 0. Skip entirely.
+        return Some(vec![]);
+    }
+
+    // The body-aware partial context (GH #744): the reducer body may apply a
+    // coefficient to the source (`SUM(pop[nyc,*] * w[nyc,*])`), which the
+    // changed-first partial must account for. Mirrors
+    // `try_cross_dimensional_link_scores`' setup.
+    let (arrayed_dep_dims, model_deps) =
+        reducer_body_ctx_parts(db, source_vars, project, &classified.body_text);
+    let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
+    let body_ctx = crate::ltm_augment::ReducerBodyCtx {
+        body_text: &classified.body_text,
+        live_source: from,
+        arrayed_dep_dims: &arrayed_dep_dims,
+        model_deps: &model_deps,
+        row_dim_names: &row_dim_names,
+        dims_ctx: Some(project_dimensions_context(db, project)),
+        live_read_slice: Some(vb_agg.source_read_slice(from)),
+    };
+
+    // The read rows the slice covers (`pop[nyc,p]`, `pop[nyc,q]`). With no
+    // `Iterated` axis every row's `slot` is empty; the co-reduced set is the
+    // whole row list. Derive them from the SAME `read_slice_rows` the element
+    // graph uses, so the per-(row, e) names match the broadcast edges exactly.
+    let dim_element_lists: Vec<Vec<String>> = from_dims
+        .iter()
+        .map(crate::ltm_augment::dimension_element_names)
+        .collect();
+    let rows = read_slice_rows(
+        vb_agg.source_read_slice(from),
+        &dim_element_lists,
+        project_dimensions_context(db, project),
+    )?;
+    // Every read row contributes to every target slot -- the co-reduced slice
+    // is the full row list (qualified once).
+    let all_rows: Vec<String> = rows.iter().map(|r| r.row.clone()).collect();
+    let qualified_all_rows: Vec<String> = all_rows
+        .iter()
+        .map(|r| crate::ltm_augment::qualify_element_csv(r, from_dims))
+        .collect();
+
+    let to_dim_element_lists: Vec<Vec<String>> = to_dims
+        .iter()
+        .map(crate::ltm_augment::dimension_element_names)
+        .collect();
+    let target_elements = cartesian_subscripts(&to_dim_element_lists);
+
+    let mut cross_vars = Vec::with_capacity(rows.len() * target_elements.len());
+    for ReadSliceRow { row, .. } in &rows {
+        let qualified_row = crate::ltm_augment::qualify_element_csv(row, from_dims);
+        for element in &target_elements {
+            let var_name = format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}[{}]",
+                from, row, to, element
+            );
+            let equation = crate::ltm_augment::generate_element_to_reduced_equation(
+                from,
+                to,
+                &qualified_row,
+                &crate::ltm_augment::qualify_element_csv(element, to_dims),
+                &qualified_all_rows,
+                &classified.kind,
+                classified.name,
+                classified.is_bare,
+                Some(&body_ctx),
+            );
+            cross_vars.push(LtmSyntheticVar {
+                name: var_name,
+                equation: datamodel::Equation::Scalar(equation),
+                dimensions: vec![], // scalar -- one variable per (read-row, target-element)
+                // bracketed name -> routed direct by `assemble_module`.
+                compile_directly: false,
+            });
+        }
+    }
+    Some(cross_vars)
+}
+
 /// Generate per-target-element link score variables for a
 /// scalar-source -> arrayed-target edge, or return `None` if the edge
 /// is not of that shape.
@@ -648,13 +888,39 @@ pub(super) fn try_cross_dimensional_link_scores(
 /// arrayed-to-scalar, module-involved, and any edge where the target
 /// has no usable AST (so per-element equations can't be derived) -- in
 /// those cases the caller falls back to its existing emission path.
+/// Returns `Some(vec![])` (GH #780) when a per-element partial dooms with a
+/// `PartialEquationError`: the warning is accumulated and the edge recorded
+/// in `unscoreable_edges` so dependent loop scores drop, and the caller must
+/// NOT fall back to `emit_per_shape_link_scores`.
+///
+/// **Scalar-feeder-of-a-variable-backed-reduce (GH #790)**: when `to` IS a
+/// variable-backed reduce reading `from` as a SCALAR FEEDER
+/// (`growth[D1] = SUM(matrix[D1,*] * scale)`), the per-target-element
+/// derivation below would emit `scale → growth[a]` / `[b]` partials that
+/// reference the lagged wildcard slice (`SUM(PREVIOUS(matrix[d1·a,*]) *
+/// scale)`, a GH #541-class uncompilable fragment) and degrade every loop
+/// through the feeder to a warned constant-0 stub. Such an edge is routed
+/// FIRST to the SAME changed-last scalar-feeder convention the synthetic-agg
+/// arm uses for the SUBEXPRESSION spelling -- ONE Bare A2A score
+/// `$⁚ltm⁚link_score⁚scale→growth` over the agg's `result_dims` (or over the
+/// OWNER's dims for the GH #777 broadcast slice, whose `result_dims` are
+/// empty -- `share[D9] = SUM(matrix[a,*] * scale)` -- since the single
+/// scalar reducer value feeds every `to[e]` identically),
+/// [`crate::ltm_augment::generate_scalar_feeder_to_agg_equation`] -- so the
+/// two spellings of the same dataflow score identically. Gated on the shared
+/// [`crate::ltm_agg::scalar_feeder_of_variable_backed_agg`] decision, so the
+/// emitted name is exactly the hop the per-slot loops reference.
+#[allow(clippy::too_many_arguments)] // threads salsa keys + agg nodes + emission context
 pub(super) fn try_scalar_to_arrayed_link_scores(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
+    agg_nodes: &crate::ltm_agg::AggNodesResult,
     from: &str,
     to: &str,
     model: SourceModel,
     project: SourceProject,
+    dm_dims: &[crate::datamodel::Dimension],
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> Option<Vec<LtmSyntheticVar>> {
     // Source must be a scalar, non-module variable.
     let from_sv = source_vars.get(from)?;
@@ -673,6 +939,102 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     let to_dims = variable_dimensions(db, *to_sv, project).clone();
     if to_dims.is_empty() {
         return None;
+    }
+
+    // GH #790: a scalar feeder of a variable-backed whole-RHS reduce. The
+    // per-target-element machinery below cannot express this shape (its
+    // partial freezes the reducer's wildcard slice as a lagged whole-array
+    // read that fails fragment compile). Route it to the changed-last
+    // scalar-feeder convention -- ONE Bare A2A score dimensioned over the
+    // agg's `result_dims` -- identical to the synthetic-agg arm's handling of
+    // the subexpression spelling.
+    if let Some(agg) =
+        crate::ltm_agg::scalar_feeder_of_variable_backed_agg(agg_nodes, from, to, &to_dims)
+    {
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
+            from, agg.name
+        );
+        match crate::ltm_augment::generate_scalar_feeder_to_agg_equation(
+            from,
+            &agg.name,
+            &agg.equation_text,
+        ) {
+            Ok(text) => {
+                // The score is ALWAYS arrayed here (`to_dims` is non-empty in
+                // this function). Two sub-shapes:
+                //  - ALIGNED reduce (`result_dims` == the owner's dims): the
+                //    score is A2A over `result_dims`.
+                //  - BROADCAST reduce (GH #777: `result_dims` empty, owner
+                //    arrayed -- `share[D9] = SUM(matrix[a,*] * scale)`): the
+                //    single scalar reducer value feeds every `to[e]`
+                //    identically, so the score is A2A over the OWNER's dims.
+                //    Emitting `Equation::Scalar` here would reference the
+                //    bare multi-slot owner in a scalar fragment -- an
+                //    assembly failure whose loops stub to warned constant 0
+                //    (the exact GH #790 defect, one shape over).
+                // The changed-last text is ApplyToAll-compatible in both:
+                // the bare owner reference element-resolves inside its own
+                // A2A context, and the frozen reducer body is either
+                // iterated over `result_dims` (aligned) or scalar-valued
+                // (broadcast -- a Pinned/subset slice broadcasts cleanly).
+                let equation_dims: Vec<String> = if agg.result_dims.is_empty() {
+                    // Map the owner's canonical dim names back to their
+                    // datamodel casing for correct equation parsing (the
+                    // same mapping `link_score_dimensions` applies).
+                    to_dims
+                        .iter()
+                        .map(|d| {
+                            let canonical = d.name();
+                            dm_dims
+                                .iter()
+                                .find(|dm| {
+                                    crate::common::canonicalize(dm.name()).as_ref() == canonical
+                                })
+                                .map(|dm| dm.name().to_string())
+                                .unwrap_or_else(|| canonical.to_string())
+                        })
+                        .collect()
+                } else {
+                    agg.result_dims.clone()
+                };
+                return Some(vec![LtmSyntheticVar {
+                    name,
+                    equation: datamodel::Equation::ApplyToAll(equation_dims.clone(), text),
+                    dimensions: equation_dims,
+                    // The non-empty `dimensions` route this through the A2A
+                    // arm of `compile_ltm_synthetic_fragment`, which compiles
+                    // `equation` verbatim -- but set the direct flag anyway:
+                    // the (from, to)-keyed salsa path would re-derive a
+                    // DIFFERENT (changed-first, Bare-shaped) equation than
+                    // this var carries, so falling into it under any future
+                    // dims-handling change would be a silent divergence.
+                    compile_directly: true,
+                }]);
+            }
+            Err(err) => {
+                // GH #780 contract: the scalar feeder's single score IS this
+                // edge's entire emission; a doom leaves every loop hop through
+                // `(from, to)` referencing a missing name. Record + warn on
+                // first insert only so dependent loop scores drop instead of
+                // stubbing, and a pinned-pass re-visit does not duplicate the
+                // warning.
+                if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                }
+                return Some(vec![]);
+            }
+        }
+    }
+
+    // A re-visit of an already-recorded doomed edge (the pinned pass dedups
+    // only edges that EMITTED a var, so a doomed edge is re-visited): the
+    // per-element generator would re-doom deterministically and duplicate
+    // the warning (it fires inside `build_var`, before the recording).
+    // Early-return the loud-decline shape instead -- the #758
+    // warn-once-per-edge convention.
+    if unscoreable_edges.contains(&(from.to_string(), to.to_string())) {
+        return Some(vec![]);
     }
 
     let to_var = reconstruct_single_variable(db, model, project, to)?;
@@ -742,6 +1104,17 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
             from, to, element
         );
+        // Test-only seam (GH #780): honour a forced-`PartialEquationError`
+        // edge here too, so the direct (non-salsa) per-element generator
+        // call site is covered by the same override the shaped query uses.
+        #[cfg(test)]
+        if super::compile::force_partial_equation_error(from, to) {
+            let err = crate::ltm_augment::PartialEquationError::new(
+                "<test-forced per-element partial-equation failure (GH #780)>",
+            );
+            emit_ltm_partial_equation_warning(db, model, &name, &err);
+            return None;
+        }
         let equation = if elem_text.is_empty() {
             "0".to_string()
         } else {
@@ -777,6 +1150,16 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         })
     };
 
+    // GH #780: `build_var` returns `None` only on a true per-element
+    // `PartialEquationError` (the empty-slot case returns `Some("0")`). One
+    // doomed element dooms the whole edge -- a loop hop through it resolves
+    // (`loop_link_score_ref`) to that element's name, which was never
+    // emitted, so the loop would otherwise stub to a warned constant 0.
+    // Record the edge in `unscoreable_edges` (the per-element `Warning`
+    // already fired in `build_var`) and return `Some(vec![])` so dependent
+    // loop scores are DROPPED and the dispatcher does NOT fall through to a
+    // wrong-shaped per-shape stand-in -- the same loud-skip contract the
+    // disjoint and dim-incompatible classes follow.
     let mut cross_vars = Vec::with_capacity(elements.len());
     match ast {
         // ApplyToAll: one shared body for every element, so its text, its
@@ -787,7 +1170,13 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             let elem_deps = crate::variable::identifier_set(ast, target_ast_dims, None);
             let deps_to_sub = deps_to_subscript(&elem_deps);
             for element in &elements {
-                cross_vars.extend(build_var(element, &elem_text, &elem_deps, &deps_to_sub));
+                match build_var(element, &elem_text, &elem_deps, &deps_to_sub) {
+                    Some(v) => cross_vars.push(v),
+                    None => {
+                        unscoreable_edges.insert((from.to_string(), to.to_string()));
+                        return Some(vec![]);
+                    }
+                }
             }
         }
         // Arrayed: each element has its own slot expression (or the default
@@ -814,7 +1203,13 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                     None => (String::new(), HashSet::new()),
                 };
                 let deps_to_sub = deps_to_subscript(&elem_deps);
-                cross_vars.extend(build_var(element, &elem_text, &elem_deps, &deps_to_sub));
+                match build_var(element, &elem_text, &elem_deps, &deps_to_sub) {
+                    Some(v) => cross_vars.push(v),
+                    None => {
+                        unscoreable_edges.insert((from.to_string(), to.to_string()));
+                        return Some(vec![]);
+                    }
+                }
             }
         }
         Ast::Scalar(_) => unreachable!("target is arrayed"),
@@ -823,16 +1218,21 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
 }
 
 /// Accumulate the AC3.4 `Warning` for a disjoint-dim arrayed -> arrayed
-/// edge that is not statically scoreable (the target's per-element
-/// equations reference the source via a dynamic index, so which target
+/// edge that has no scoreable per-element derivation: the target's
+/// per-element equations reference the source via something other than
+/// literal element subscripts -- a genuinely dynamic index (which target
 /// slots depend on which source elements can't be decided at compile
-/// time). The edge gets *no* link-score variable, and -- like the GH #758
-/// dim-incompatible class -- the caller records it in `unscoreable_edges`
-/// so loop scores traversing it are dropped (their product could only be
-/// a guaranteed-zero stub). Sub-model *pathway* scores referencing the
-/// missing name still get the fragment compiler's zero-contribution
-/// stub-dep fallback. Both are far less misleading than the scalarized
-/// stand-in the pre-#510 path produced.
+/// time), or an un-hoisted reducer read (a statically-describable slice
+/// for which no disjoint-dim emitter exists; note the GH #514
+/// reclassification labels both site shapes `DynamicIndex`, so they are
+/// indistinguishable here and the message names both). The edge gets *no*
+/// link-score variable, and -- like the GH #758 dim-incompatible class --
+/// the caller records it in `unscoreable_edges` so loop scores traversing
+/// it are dropped (their product could only be a guaranteed-zero stub).
+/// Sub-model *pathway* scores referencing the missing name still get the
+/// fragment compiler's zero-contribution stub-dep fallback. Both are far
+/// less misleading than the scalarized stand-in the pre-#510 path
+/// produced.
 pub(super) fn emit_unscoreable_disjoint_edge_warning(
     db: &dyn Db,
     model: SourceModel,
@@ -843,8 +1243,9 @@ pub(super) fn emit_unscoreable_disjoint_edge_warning(
     let msg = format!(
         "LTM link score for edge {from} -> {to} could not be computed: {to} is a \
          per-element-equation arrayed variable whose equations reference {from} via a \
-         dynamic index, which is not statically scoreable; this edge will have no \
-         link-score variable and feedback loops through it will not be scored"
+         dynamic index or an un-hoisted reducer read, neither of which has a \
+         per-element derivation here; this edge will have no link-score variable and \
+         feedback loops through it will not be scored"
     );
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
@@ -892,18 +1293,23 @@ pub(super) fn emit_unscoreable_conservative_edge_warning(
     .accumulate(db);
 }
 
-/// Accumulate the GH #758-style `Warning` for a declined ARRAYED-owner
-/// variable-backed reduce whose slice is Pinned/subset-bearing with NO
-/// `Iterated` axis (`share[Region] = SUM(pop[nyc,*])` -- the
-/// shape-expressiveness section-6 residual). The reducer's value is a
-/// single scalar broadcast over the owner's dims, which the
-/// per-`(row, slot)` score family cannot name (a slot must name a complete
-/// `to` element), and the pre-T3 cartesian derivation emitted silently
-/// wrong full-cartesian scores for it. Like the other unscoreable classes,
-/// the edge gets *no* link-score variable and the caller records it in
-/// `unscoreable_edges` so loop scores traversing it are dropped -- one
-/// clear diagnostic instead of plausible-looking garbage.
-pub(super) fn emit_unscoreable_broadcast_reduce_edge_warning(
+/// Accumulate the GH #778/#785 `Warning` for a declined DEGENERATE
+/// SQUARE-SOURCE reducer edge: `from`'s declared dims repeat a dimension
+/// that survives as a result axis, so the cartesian partial-reduce
+/// projection cannot tell the two occurrences apart -- a result coordinate
+/// is ambiguous between them. The skip covers every spelling of the
+/// predicate: the iterated-diagonal read (`x[D1] = SUM(cube[D1,D1,*])`,
+/// where the projection would additionally score off-diagonal rows the
+/// executed simulation never reads), the repeated-dim OWNER
+/// (`x[D1,D1] = SUM(cube[D1,D1,*])`, where the simulation reads the full
+/// square but the projection is still ambiguous), and the whole-extent
+/// broadcast (`x[D1] = SUM(cube[*,*,*])` over `cube[D1,D1,D2]`). The
+/// hoistable spellings' minting is declined upstream
+/// (`result_dims_has_repeated_dim`); this is the remaining cartesian-branch
+/// landing, closed with the same loud-skip discipline as the other
+/// unscoreable classes (no link-score variable, the edge recorded in
+/// `unscoreable_edges` so loops through it are dropped).
+pub(super) fn emit_unscoreable_duplicated_dim_source_warning(
     db: &dyn Db,
     model: SourceModel,
     from: &str,
@@ -911,11 +1317,13 @@ pub(super) fn emit_unscoreable_broadcast_reduce_edge_warning(
 ) {
     use salsa::Accumulator;
     let msg = format!(
-        "LTM link score for edge {from} -> {to} could not be computed: {to}'s whole \
-         equation is a reducer that pins or subsets {from}'s axes while producing a \
-         single scalar value broadcast over {to}'s dimensions, which the per-element \
-         score machinery cannot express; this edge will have no link-score variable \
-         and feedback loops through it will not be scored"
+        "LTM link score for edge {from} -> {to} could not be computed: {from}'s \
+         declared dimensions repeat a dimension that also survives as a result \
+         axis of the reducer reading it (a square-source shape like \
+         {from}[D,D,...]), so a per-element score cannot disambiguate which \
+         occurrence of the repeated dimension a result coordinate refers to; \
+         this edge will have no link-score variable and feedback loops through \
+         it will not be scored"
     );
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
@@ -924,6 +1332,197 @@ pub(super) fn emit_unscoreable_broadcast_reduce_edge_warning(
         severity: DiagnosticSeverity::Warning,
     })
     .accumulate(db);
+}
+
+/// Accumulate the GH #791 `Warning` for an I1-declined NOT-hoisted reducer
+/// whose read of `from` is a STRICT slice (a `Pinned` element or a
+/// subset-`Reduced` axis), reached at the legacy cartesian partial-/full-reduce
+/// derivation. The cartesian projection ranges over EVERY `from` element by its
+/// declared dimension positions, so for a strict slice it both invents scores
+/// for UNREAD rows (`pop[boston,*]` though the reducer reads only `pop[nyc,*]`)
+/// and mis-divides the read rows (the un-pinnable mismatched-arity body dooms
+/// the changed-first partial to the |dz/dz| = 1 fallback) -- a SILENT wrong
+/// number on the link surface. Closed with the same loud-skip discipline as the
+/// other unscoreable classes (no link-score variable, the edge recorded in
+/// `unscoreable_edges` so loops through it are dropped). The drop is at EDGE
+/// granularity, a deliberate conservatism: a per-site derivation exists in
+/// principle for the mixed FixedIndex-site + strict-reducer-read shape, but
+/// no current emitter implements it for the no-agg leg.
+///
+/// `slice` is the representative strict read carried by
+/// [`crate::ltm_agg::UnhoistedSourceRead::StrictSlice`]; the message renders
+/// it (`pop[nyc,*]`) so the user sees THEIR slice, not a canned example.
+pub(super) fn emit_unscoreable_strict_slice_reduce_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    from: &str,
+    to: &str,
+    slice: &[crate::ltm_agg::AxisRead],
+) {
+    use salsa::Accumulator;
+    let rendered = crate::ltm_agg::render_read_slice_for_diagnostic(slice);
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: the reducer in \
+         {to}'s equation reads only the strict slice {from}[{rendered}] (a pinned \
+         element or a subdimension subset), but no variable-backed aggregate could be \
+         minted for it (a multi-source reducer whose co-source slices disagree), and \
+         the whole-edge cartesian derivation that remains here would score {from}'s \
+         unread rows and mis-divide the read rows -- so the edge is declined instead: \
+         it will have no link-score variable and feedback loops through it will not \
+         be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
+/// Accumulate the GH #792 `Warning` for a PER-ELEMENT-EQUATION
+/// (`Ast::Arrayed`) owner whose slot bodies read `from` inside a reducer that
+/// was not hoisted into an aggregate. A per-element owner has no whole-edge
+/// derivation that can represent per-slot reducer reads: the cartesian arm
+/// needs a single dt-expression, and the Bare per-shape stand-in conflates
+/// all slots (it simulated to a silent ~-0.0 for strict, dim-named, and
+/// full-extent slot reads alike, with downstream loops consuming the silent
+/// near-zero). Closed with the same loud-skip discipline as the other
+/// unscoreable classes (no link-score variable, the edge recorded in
+/// `unscoreable_edges` so loops through it are dropped).
+///
+/// `slice` is the first statically-describable read carried by
+/// [`crate::ltm_agg::UnhoistedSourceRead::PerElementReducerRead`]; when
+/// present the message renders it (`pop[nyc,*]`) so the user sees their own
+/// slice; a dim-named or dynamic read has no describable slice to show.
+pub(super) fn emit_unscoreable_per_element_reducer_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    from: &str,
+    to: &str,
+    slice: Option<&[crate::ltm_agg::AxisRead]>,
+) {
+    use salsa::Accumulator;
+    let example = slice
+        .map(|s| {
+            format!(
+                " (e.g. the slice {from}[{}])",
+                crate::ltm_agg::render_read_slice_for_diagnostic(s)
+            )
+        })
+        .unwrap_or_default();
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: {to} is defined \
+         with per-element equations whose bodies read {from} inside a reducer{example} \
+         that could not be hoisted into an aggregate, and no remaining derivation can \
+         represent the per-slot reads (a single whole-edge stand-in score would \
+         misattribute them) -- so the edge is declined instead: it will have no \
+         link-score variable and feedback loops through it will not be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
+/// Accumulate the GH #788 `Warning` for an Apply-To-All target whose equation
+/// contains a maximal reducer with a bare arrayed argument that overlaps the
+/// target's active dimensions. LTM cannot yet represent that bare spelling:
+/// a synthetic aggregate would evaluate the reducer as a whole-array scalar,
+/// while ordinary feeder partials would freeze that wrong reducer value.
+pub(super) fn emit_unscoreable_bare_arrayed_reducer_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    from: &str,
+    to: &str,
+    reducer_text: &str,
+) {
+    use salsa::Accumulator;
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: {to}'s \
+         equation contains the bare arrayed reducer argument {reducer_text}, and \
+         LTM cannot yet score that spelling in an Apply-To-All target without \
+         treating the reducer as a whole-array aggregate value -- so the edge is \
+         declined instead: it will have no link-score variable and feedback loops \
+         through it will not be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
+/// Consult the GH #791/#792 verdict (`unhoisted_reducer_source_read`,
+/// salsa-cached on the interned `LtmLinkId`) for `(from, to)` and -- when it
+/// is a declining verdict -- record the edge in `unscoreable_edges` and warn
+/// once (the insert dedups pinned-pass / discovery re-visits). Returns `true`
+/// iff the edge was declined, in which case the caller must emit NO link-score
+/// variable for it.
+///
+/// One helper used by every dispatch point that might otherwise emit a
+/// whole-edge score: the cartesian arm of `try_cross_dimensional_link_scores`,
+/// the routed-agg branch of `emit_link_scores_for_edge` (GH #793), and its
+/// final per-shape fallthrough. The shared verdicts are `StrictSlice` (the GH
+/// #791 scalar/A2A strict family) and `PerElementReducerRead` (the GH #792
+/// per-element-owner family, any reducer read). The classifier ignores reducer
+/// reads already represented by a synthetic agg, so a declining verdict always
+/// describes a genuinely un-hoisted residual read even when the edge also has
+/// agg halves.
+fn decline_unhoisted_reducer_edge(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    from: &str,
+    to: &str,
+    unscoreable_edges: &mut HashSet<(String, String)>,
+) -> bool {
+    let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
+    match crate::ltm_agg::unhoisted_reducer_source_read(db, link_id, model, project) {
+        crate::ltm_agg::UnhoistedSourceRead::StrictSlice(slice) => {
+            if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                emit_unscoreable_strict_slice_reduce_warning(db, model, from, to, slice);
+            }
+            true
+        }
+        crate::ltm_agg::UnhoistedSourceRead::PerElementReducerRead(slice) => {
+            if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                emit_unscoreable_per_element_reducer_warning(db, model, from, to, slice.as_deref());
+            }
+            true
+        }
+        crate::ltm_agg::UnhoistedSourceRead::FullExtent
+        | crate::ltm_agg::UnhoistedSourceRead::NotDescribable => false,
+    }
+}
+
+fn decline_bare_arrayed_reducer_target(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    from: &str,
+    to: &str,
+    unscoreable_edges: &mut HashSet<(String, String)>,
+) -> bool {
+    let reducer = crate::ltm_agg::unhoisted_bare_arrayed_reducer_arg(
+        db,
+        from.to_string(),
+        to.to_string(),
+        model,
+        project,
+    );
+    let Some(reducer) = reducer.as_ref() else {
+        return false;
+    };
+    if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+        emit_unscoreable_bare_arrayed_reducer_warning(db, model, from, to, reducer);
+    }
+    true
 }
 
 /// Surface a `Warning` for a ceteris-paribus partial-equation parse failure
@@ -957,8 +1556,10 @@ pub(crate) fn emit_ltm_partial_equation_warning(
 }
 
 /// The human-readable message body for a partial-equation failure -- a
-/// GH #311 parse failure, or a GH #743 unfreezable partial (neither
-/// ceteris-paribus convention can be rendered as a compilable equation).
+/// GH #311 parse failure, a GH #743 unfreezable partial (neither
+/// ceteris-paribus convention can be rendered as a compilable equation), or
+/// a GH #779 bare reducer feeder (a bare arrayed reference inside a reducer
+/// argument, whose message names the subscripted-spelling workaround).
 /// Pure (functional core) so the diagnostic's wording -- which names the
 /// offending variable and equation text and explains the silent-garbage
 /// hazard the loud skip prevents -- is testable without driving a salsa
@@ -986,6 +1587,16 @@ pub(crate) fn ltm_partial_equation_warning_message(
              variable is skipped rather than emitted with a silently-stubbed helper \
              (which would poison the score with a plausible-looking wrong constant \
              -- GH #743)."
+        ),
+        PartialEquationErrorKind::BareReducerFeeder => format!(
+            "LTM link-score variable '{variable_name}' could not be generated: \
+             '{equation_text}' references the arrayed source variable BARE \
+             (without a subscript) inside an array-reducer argument, which cannot \
+             be scored -- the per-element ceteris-paribus partial disagrees with \
+             how the simulation evaluates the bare reference (GH #779/#789). The \
+             variable is skipped (and dependent loop scores dropped) rather than \
+             emitted with a silently wrong value; subscripting the reference \
+             (e.g. 'frac[D1]') restores scoring."
         ),
     }
 }
@@ -1148,16 +1759,30 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
     for key in &elem_keys {
         let shape = RefShape::FixedIndex(key.split(',').map(|s| s.to_string()).collect());
         let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
-        if let Some(mut lsv) =
-            link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone()
-        {
-            // `lsv.name` is already `link_score_var_name(from, to, &shape)`
-            // from the shaped path -- no need to re-derive it here.
-            let dims = ltm_equation_dimensions(&lsv.equation).to_vec();
-            lsv.dimensions = dims.clone();
-            lsv.equation = retarget_ltm_equation_dims(lsv.equation, &dims);
-            lsv.compile_directly = false;
-            vars.push(lsv);
+        match link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone() {
+            ShapedLinkScore::Unscoreable => {
+                // GH #780: a `PartialEquationError` for one element of this
+                // disjoint-dim edge dooms the whole edge -- the partial that
+                // failed is shared structure, and a loop hop through the
+                // edge resolves to one element-named score. Record it (the
+                // query already warned) so dependent loop scores drop, and
+                // return `Some(vec![])` so the dispatcher does NOT fall
+                // through to `emit_per_shape_link_scores` and mint a
+                // wrong-shaped stand-in (mirroring the dynamic-index
+                // disjoint skip at the top of this fn).
+                unscoreable_edges.insert((from.to_string(), to.to_string()));
+                return Some(vec![]);
+            }
+            ShapedLinkScore::NoVariable => continue,
+            ShapedLinkScore::Scored(mut lsv) => {
+                // `lsv.name` is already `link_score_var_name(from, to, &shape)`
+                // from the shaped path -- no need to re-derive it here.
+                let dims = ltm_equation_dimensions(&lsv.equation).to_vec();
+                lsv.dimensions = dims.clone();
+                lsv.equation = retarget_ltm_equation_dims(lsv.equation, &dims);
+                lsv.compile_directly = false;
+                vars.push(lsv);
+            }
         }
     }
     Some(vars)
@@ -1258,8 +1883,15 @@ pub(super) fn emit_per_shape_link_scores(
             }
         }
     }
-    if !per_element_sites.is_empty() {
-        emit_per_element_link_scores(
+    // Everything this call pushes belongs to the one `(from, to)` edge, so
+    // a GH #780 doom anywhere below discards back to this snapshot -- no
+    // already-emitted sibling-shape var may survive for an edge whose loops
+    // are dropped (it would be an orphan score for hops the drop machinery
+    // hides; the disjoint/scalar-to-arrayed siblings discard everything,
+    // and this pass must match).
+    let vars_start = vars.len();
+    if !per_element_sites.is_empty()
+        && emit_per_element_link_scores(
             db,
             source_vars,
             from,
@@ -1268,7 +1900,14 @@ pub(super) fn emit_per_shape_link_scores(
             model,
             project,
             vars,
-        );
+            unscoreable_edges,
+        )
+    {
+        // The per-element emitter doomed (and recorded) the edge: skip the
+        // shaped loop too -- its Bare/FixedIndex siblings would be orphan
+        // scores on a dropped edge.
+        vars.truncate(vars_start);
+        return;
     }
     // The distinct `shape` fields of `(from, to)`'s classified sites,
     // in AST-walk order of first occurrence (equivalent to the per-edge
@@ -1340,47 +1979,85 @@ pub(super) fn emit_per_shape_link_scores(
         if unscoreable_edges.insert((from.to_string(), to.to_string())) {
             emit_unscoreable_conservative_edge_warning(db, model, from, to);
         }
+        // Discard any per-element vars pushed above for this now-unscoreable
+        // edge (the same no-orphan-scores rule as the doom arms below; a
+        // PerElement-bearing edge landing in this gate is likely
+        // unreachable, but the invariant is cheap to keep).
+        vars.truncate(vars_start);
         return;
     }
 
     for shape in shapes {
         let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
-        if let Some(mut lsv) =
-            link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone()
-        {
-            // Set the canonical name and dimensions per Phase 3 Task 4/5.
-            lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
-            // Every shape takes the target's dimensions: for FixedIndex
-            // each per-element link score is scalar when the target is
-            // scalar and arrayed when the target is arrayed; Bare (and
-            // the rare conservative-slice Wildcard/DynamicIndex) inherit
-            // the target's dims via the same compatibility rule.
-            // link_score_dimensions already implements this for every
-            // case, so one assignment suffices.
-            lsv.dimensions = target_dims.clone();
-            // Keep the equation's dimensionality in lockstep with the
-            // `dimensions` field that layout sizing keys off of. The
-            // shaped fn returns a `Scalar`/`ApplyToAll` equation tagged
-            // with the *target's own* dimension names, which equal
-            // `target_dims` for every compatible-dimension edge; for the
-            // (rare) incompatible-dimension arrayed-target edge,
-            // link_score_dimensions returns empty, so we collapse the
-            // equation to scalar here -- matching the pre-existing
-            // behavior where such edges produced a scalar link score.
-            lsv.equation = retarget_ltm_equation_dims(lsv.equation, &target_dims);
-            // A non-`Bare` shape carries a partial that the (from, to)-
-            // keyed salsa compilation path (`link_score_equation_text`,
-            // always `RefShape::Bare`) cannot reproduce: a
-            // `Wildcard`/`DynamicIndex` reference into a scalar target
-            // would have its whole subscript wrapped in `PREVIOUS()` and
-            // the ceteris-paribus numerator zeroed. Force `assemble_module`
-            // to compile this var's equation verbatim. (For `Bare`, the
-            // salsa-cached path is correct and keeps incrementality;
-            // `FixedIndex` carries an element subscript on the name and is
-            // already routed directly by the bracket check, but flagging
-            // it too is harmless.)
-            lsv.compile_directly = !matches!(shape, RefShape::Bare);
-            vars.push(lsv);
+        match link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone() {
+            ShapedLinkScore::Unscoreable => {
+                // GH #780: a `PartialEquationError` for this shape makes the
+                // whole `(from, to)` edge unscoreable. The query already
+                // accumulated the one loud `Warning`; record the edge so
+                // loop scores traversing it are DROPPED (the #758 contract)
+                // instead of referencing the never-emitted link-score name
+                // and degrading to warned constant-0 stubs. Recording at
+                // EDGE (not per-shape-name) granularity is the soundest
+                // implementable rule: a loop hop through this edge resolves
+                // (`loop_link_score_ref`) to ONE shape's name, and if that
+                // is the doomed shape the loop would stub; dropping the loop
+                // is conservative but never silently wrong, matching the
+                // dim-incompatible and broadcast-reduce unscoreable classes.
+                // Since any doomed shape dooms the edge, `break` once we see
+                // one (the remaining shapes' warnings would be redundant
+                // noise about the same already-recorded edge). The `Warning`
+                // fired inside the salsa query (replayed via the accumulator
+                // on every evaluation), so only the edge recording is needed
+                // here; the insert also dedups a re-visit by the pinned-loop
+                // pass. Discard any earlier shape's already-pushed var for
+                // this edge (`vars_start`): the edge's loops are dropped, so
+                // a surviving sibling-shape score would be an orphan --
+                // matching the disjoint / scalar-to-arrayed siblings, which
+                // discard everything on doom.
+                unscoreable_edges.insert((from.to_string(), to.to_string()));
+                vars.truncate(vars_start);
+                break;
+            }
+            ShapedLinkScore::NoVariable => {
+                // Benign structural skip (unreconstructible target /
+                // composite-less module link); not an unscoreable edge.
+                continue;
+            }
+            ShapedLinkScore::Scored(mut lsv) => {
+                // Set the canonical name and dimensions per Phase 3 Task 4/5.
+                lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
+                // Every shape takes the target's dimensions: for FixedIndex
+                // each per-element link score is scalar when the target is
+                // scalar and arrayed when the target is arrayed; Bare (and
+                // the rare conservative-slice Wildcard/DynamicIndex) inherit
+                // the target's dims via the same compatibility rule.
+                // link_score_dimensions already implements this for every
+                // case, so one assignment suffices.
+                lsv.dimensions = target_dims.clone();
+                // Keep the equation's dimensionality in lockstep with the
+                // `dimensions` field that layout sizing keys off of. The
+                // shaped fn returns a `Scalar`/`ApplyToAll` equation tagged
+                // with the *target's own* dimension names, which equal
+                // `target_dims` for every compatible-dimension edge; for the
+                // (rare) incompatible-dimension arrayed-target edge,
+                // link_score_dimensions returns empty, so we collapse the
+                // equation to scalar here -- matching the pre-existing
+                // behavior where such edges produced a scalar link score.
+                lsv.equation = retarget_ltm_equation_dims(lsv.equation, &target_dims);
+                // A non-`Bare` shape carries a partial that the (from, to)-
+                // keyed salsa compilation path (`link_score_equation_text`,
+                // always `RefShape::Bare`) cannot reproduce: a
+                // `Wildcard`/`DynamicIndex` reference into a scalar target
+                // would have its whole subscript wrapped in `PREVIOUS()` and
+                // the ceteris-paribus numerator zeroed. Force `assemble_module`
+                // to compile this var's equation verbatim. (For `Bare`, the
+                // salsa-cached path is correct and keeps incrementality;
+                // `FixedIndex` carries an element subscript on the name and is
+                // already routed directly by the bracket check, but flagging
+                // it too is harmless.)
+                lsv.compile_directly = !matches!(shape, RefShape::Bare);
+                vars.push(lsv);
+            }
         }
     }
 }
@@ -1412,10 +2089,18 @@ pub(super) fn emit_per_shape_link_scores(
 /// source occurrence pinned-and-frozen, other arrayed deps element-pinned.
 /// A site recorded inside an `Ast::Arrayed` slot (`target_element` is
 /// `Some`) emits only for that element; A2A sites emit for every `e`.
+///
 /// A row that fails to derive (a mid-edit mapping inconsistency) or an
-/// equation builder failure degrades LOUDLY per element
-/// ([`emit_ltm_partial_equation_warning`]) rather than emitting a wrong
-/// partial.
+/// equation builder failure degrades LOUDLY (GH #780): one
+/// [`emit_ltm_partial_equation_warning`] naming the first doomed
+/// `(row, e)`, the `(from, to)` edge recorded in `unscoreable_edges`
+/// (dropping dependent loop scores), NO per-(row, e) variable emitted for
+/// the edge (the collect-local vars are discarded), and `true` returned so
+/// the caller skips/discards its own emission for the edge. Edge-level
+/// recording for the same reason as `iterated_feeder_row_scores`: the drop
+/// machinery matches stripped `(from, to)` pairs, so per-(row, e)
+/// granularity is not implementable, and a partial emission would leave
+/// the doomed instances' loops as warned constant-0 stubs.
 #[allow(clippy::too_many_arguments)] // threads salsa keys + emission context
 fn emit_per_element_link_scores(
     db: &dyn Db,
@@ -1426,7 +2111,8 @@ fn emit_per_element_link_scores(
     model: SourceModel,
     project: SourceProject,
     vars: &mut Vec<LtmSyntheticVar>,
-) {
+    unscoreable_edges: &mut HashSet<(String, String)>,
+) -> bool {
     use crate::ast::Ast;
     use crate::common::{Canonical, Ident};
 
@@ -1435,29 +2121,29 @@ fn emit_per_element_link_scores(
     type ElemEqnParts = (String, HashSet<Ident<Canonical>>, HashSet<Ident<Canonical>>);
 
     let Some(from_sv) = source_vars.get(from) else {
-        return;
+        return false;
     };
     if from_sv.kind(db) == SourceVariableKind::Module {
-        return;
+        return false;
     }
     let from_dims = variable_dimensions(db, *from_sv, project);
     let Some(to_sv) = source_vars.get(to) else {
-        return;
+        return false;
     };
     if to_sv.kind(db) == SourceVariableKind::Module {
-        return;
+        return false;
     }
     let to_dims = variable_dimensions(db, *to_sv, project).clone();
     if from_dims.is_empty() || to_dims.is_empty() {
         // A `PerElement` site requires an arrayed source and an iterated
         // target equation; scalar endpoints mean a stale classification.
-        return;
+        return false;
     }
     let Some(to_var) = reconstruct_single_variable(db, model, project, to) else {
-        return;
+        return false;
     };
     let Some(ast) = to_var.ast() else {
-        return;
+        return false;
     };
     let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
         Ast::Scalar(_) => &[],
@@ -1512,8 +2198,10 @@ fn emit_per_element_link_scores(
 
     // Name-level dedup: two sites can in principle derive the same
     // (row, e) name; first emission wins (matching the per-shape pass's
-    // name-dedup convention).
+    // name-dedup convention). Vars collect locally and commit only if no
+    // (row, e) dooms (GH #780; see the fn doc).
     let mut emitted: HashSet<String> = HashSet::new();
+    let mut edge_vars: Vec<LtmSyntheticVar> = Vec::new();
 
     for element in &elements {
         // The projection data `e` supplies: target dim (canonical) ->
@@ -1570,17 +2258,23 @@ fn emit_per_element_link_scores(
                 crate::ltm_augment::per_element_row_for_target(axes, &target_elem_by_dim, dim_ctx)
             else {
                 // A mid-edit mapping inconsistency: the classified site's
-                // row is underivable for this element. Loud skip.
+                // row is underivable for this element. Loud edge doom
+                // (GH #780; see the fn doc).
                 let name = format!(
                     "$\u{205A}ltm\u{205A}link_score\u{205A}{from}[?]\u{2192}{to}[{element}]"
                 );
-                emit_ltm_partial_equation_warning(
-                    db,
-                    model,
-                    &name,
-                    &crate::ltm_augment::PartialEquationError::new(body_text),
-                );
-                continue;
+                // Warn only on first recording (#758 convention): a
+                // pinned-pass re-visit re-dooms deterministically and must
+                // stay silent.
+                if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                    emit_ltm_partial_equation_warning(
+                        db,
+                        model,
+                        &name,
+                        &crate::ltm_augment::PartialEquationError::new(body_text),
+                    );
+                }
+                return true;
             };
             let row = row_parts.join(",");
             let name = format!(
@@ -1603,17 +2297,26 @@ fn emit_per_element_link_scores(
                 &target_iterated_dims,
                 dim_ctx,
             ) {
-                Ok(equation) => vars.push(LtmSyntheticVar {
+                Ok(equation) => edge_vars.push(LtmSyntheticVar {
                     name,
                     equation: datamodel::Equation::Scalar(equation),
                     dimensions: vec![], // scalar -- one variable per (row, element)
                     // bracketed name -> routed direct by `assemble_module`.
                     compile_directly: false,
                 }),
-                Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+                Err(err) => {
+                    // One doomed (row, e) dooms the edge (GH #780; fn doc);
+                    // warn only on first recording (#758 convention).
+                    if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                        emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    }
+                    return true;
+                }
             }
         }
     }
+    vars.extend(edge_vars);
+    false
 }
 
 /// Build the owned inputs for a [`crate::ltm_augment::ReducerBodyCtx`]:
@@ -1661,8 +2364,22 @@ fn reducer_body_ctx_parts(
 /// `try_cross_dimensional_link_scores` (where `agg.name == to`). `None`
 /// when `read_slice_rows` declines (a stale slice invariant) -- the caller
 /// keeps its conservative fallback rather than emitting mis-slotted
-/// scores. A per-row generator failure is loud
-/// ([`emit_ltm_partial_equation_warning`]) and skips only that row.
+/// scores.
+///
+/// A per-row generator failure (the GH #743 `UnfreezablePartial` machinery,
+/// e.g. a feeder occurrence that cannot be frozen) dooms
+/// the WHOLE `(from, agg)` edge (GH #780): one loud warning naming the
+/// first doomed row, the edge recorded in `unscoreable_edges` (keyed
+/// `(from, agg.name)` -- exactly how a loop's links spell the hop, which
+/// `traverses_unscoreable` strips to), and `Some(vec![])` returned so NO
+/// per-row score is emitted. Edge-level (not per-row) recording is forced
+/// by the drop machinery's granularity: `traverses_unscoreable` matches
+/// stripped `(from, to)` pairs, so loops through still-derivable rows
+/// cannot be kept once any row's name is missing -- and a partial emission
+/// would leave the doomed rows' loops as warned constant-0 stubs, the
+/// exact #758-contract violation. Conservative, never silently wrong --
+/// the same reasoning as the per-shape edge-granularity decision in
+/// `emit_per_shape_link_scores`.
 fn iterated_feeder_row_scores(
     db: &dyn Db,
     model: SourceModel,
@@ -1670,6 +2387,7 @@ fn iterated_feeder_row_scores(
     from: &str,
     from_dims: &[crate::dimensions::Dimension],
     agg: &crate::ltm_agg::AggNode,
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> Option<Vec<LtmSyntheticVar>> {
     let slice = agg.source_read_slice(from);
     let dim_element_lists: Vec<Vec<String>> = from_dims
@@ -1719,7 +2437,15 @@ fn iterated_feeder_row_scores(
                 // bracketed name -> routed direct by `assemble_module`.
                 compile_directly: false,
             }),
-            Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+            Err(err) => {
+                // GH #780: one doomed row dooms the whole edge (see the fn
+                // doc). Record + warn-on-first-insert (#758 convention; a
+                // pinned-pass re-visit stays silent), drop every row's score.
+                if unscoreable_edges.insert((from.to_string(), agg.name.clone())) {
+                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                }
+                return Some(vec![]);
+            }
         }
     }
     Some(vars)
@@ -1753,6 +2479,7 @@ fn iterated_feeder_row_scores(
 /// equation from `generate_scalar_feeder_to_agg_equation` (the changed-first
 /// partial would need a lagged whole-array read, which doesn't compile; see
 /// that function's doc).
+#[allow(clippy::too_many_arguments)] // threads salsa keys + emission context
 pub(super) fn emit_source_to_agg_link_scores(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
@@ -1761,6 +2488,7 @@ pub(super) fn emit_source_to_agg_link_scores(
     model: SourceModel,
     project: SourceProject,
     vars: &mut Vec<LtmSyntheticVar>,
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) {
     let Some(from_sv) = source_vars.get(from) else {
         return;
@@ -1803,7 +2531,17 @@ pub(super) fn emit_source_to_agg_link_scores(
                     compile_directly: false,
                 });
             }
-            Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+            Err(err) => {
+                // GH #780: the scalar feeder's single score IS this edge's
+                // entire emission; a doom leaves every loop hop through
+                // `(from, agg)` referencing a missing name. Record + warn on
+                // first insert only (#758 convention) so dependent loop
+                // scores drop instead of stubbing and a pinned-pass re-visit
+                // does not duplicate the warning.
+                if unscoreable_edges.insert((from.to_string(), agg.name.clone())) {
+                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                }
+            }
         }
         return;
     }
@@ -1818,7 +2556,7 @@ pub(super) fn emit_source_to_agg_link_scores(
     // through to the per-read-row machinery's own conservative fallback.
     if agg.source_is_projection_feeder(from)
         && let Some(feeder_vars) =
-            iterated_feeder_row_scores(db, model, project, from, from_dims, agg)
+            iterated_feeder_row_scores(db, model, project, from, from_dims, agg, unscoreable_edges)
     {
         vars.extend(feeder_vars);
         return;
@@ -1864,8 +2602,13 @@ pub(super) fn emit_source_to_agg_link_scores(
         row_dim_names: &row_dim_names,
         dims_ctx: Some(project_dimensions_context(db, project)),
         // The live source's accepted slice: resolves a mismatched-arity
-        // feeder dep's index at the Iterated axis position (sound for
-        // repeated-dim co-sources; see `resolve_mismatched_index_position`).
+        // feeder dep's index at the Iterated axis position -- sound and
+        // LOAD-BEARING for a repeated-dim co-source like `matrix[D1,D1]`
+        // read as `SUM(matrix[*, D1] * frac[D1])` (slice `[Reduced,
+        // Iterated]`, result_dims `[D1]`: still minted, the GH #767 live
+        // shape); see `resolve_mismatched_index_position`. Only the
+        // DOUBLY-Iterated case (result_dims repeated) is declined at agg
+        // minting (GH #778/#785) and never reaches here.
         live_read_slice: Some(agg.source_read_slice(from)),
     };
     let dim_element_lists: Vec<Vec<String>> = from_dims
@@ -1975,7 +2718,18 @@ pub(super) fn emit_agg_to_target_link_scores(
     model: SourceModel,
     project: SourceProject,
     vars: &mut Vec<LtmSyntheticVar>,
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) {
+    // GH #780: a `PartialEquationError` from any of this half's generators
+    // dooms the whole `(agg, to)` edge -- a loop hop through it spells
+    // `(agg.name, to)` (the form `traverses_unscoreable` strips to), so a
+    // missing per-element name would stub the loop to a warned constant 0.
+    // Each doom site below warns, inserts the edge, and returns WITHOUT
+    // committing any of the edge's already-built per-element vars (the
+    // collect-local `edge_vars` pattern), keeping the #758 contract: one
+    // loud warning, no link-score variable for the edge, dependent loops
+    // dropped. See `iterated_feeder_row_scores`' doc for why recording is
+    // edge-level, not per-element.
     let Some(to_var) = reconstruct_single_variable(db, model, project, to) else {
         return;
     };
@@ -2176,7 +2930,9 @@ pub(super) fn emit_agg_to_target_link_scores(
             let substituted = match slot_text(expr) {
                 Ok(substituted) => substituted,
                 Err(err) => {
-                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                        emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    }
                     return;
                 }
             };
@@ -2194,7 +2950,11 @@ pub(super) fn emit_agg_to_target_link_scores(
                     // synthetic agg on the `from` side -> routed direct already.
                     compile_directly: false,
                 }),
-                Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+                Err(err) => {
+                    if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                        emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    }
+                }
             }
         }
         Ast::ApplyToAll(_, expr) => {
@@ -2210,7 +2970,9 @@ pub(super) fn emit_agg_to_target_link_scores(
                         "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
                         agg.name, to
                     );
-                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                        emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    }
                     return;
                 }
             };
@@ -2221,6 +2983,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .iter()
                 .map(crate::ltm_augment::dimension_element_names)
                 .collect();
+            let mut edge_vars: Vec<LtmSyntheticVar> = Vec::new();
             for element in &cartesian_subscripts(&dim_element_lists) {
                 // The partial is built around the *bare* agg names (which is
                 // what `substituted` holds); `source_pins_for_target` then
@@ -2249,16 +3012,26 @@ pub(super) fn emit_agg_to_target_link_scores(
                     &source_pins_for_target(element),
                     Some(project_dimensions_context(db, project)),
                 ) {
-                    Ok(equation) => vars.push(LtmSyntheticVar {
+                    Ok(equation) => edge_vars.push(LtmSyntheticVar {
                         name,
                         equation: datamodel::Equation::Scalar(equation),
                         dimensions: vec![],
                         // synthetic agg on `from` + bracketed `to` -> routed direct.
                         compile_directly: false,
                     }),
-                    Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+                    Err(err) => {
+                        // One doomed element dooms the edge; drop the
+                        // already-built per-element vars (`edge_vars` never
+                        // commits) and warn only on first recording (#758
+                        // convention) -- see the GH #780 note at the top.
+                        if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                            emit_ltm_partial_equation_warning(db, model, &name, &err);
+                        }
+                        return;
+                    }
                 }
             }
+            vars.extend(edge_vars);
         }
         Ast::Arrayed(_, per_elem, default_expr, _) => {
             if to_dims.is_empty() {
@@ -2268,6 +3041,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .iter()
                 .map(crate::ltm_augment::dimension_element_names)
                 .collect();
+            let mut edge_vars: Vec<LtmSyntheticVar> = Vec::new();
             for element in &cartesian_subscripts(&dim_element_lists) {
                 let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
                 // Thread the slot expression through directly rather than
@@ -2316,16 +3090,26 @@ pub(super) fn emit_agg_to_target_link_scores(
                     element
                 );
                 match equation {
-                    Ok(equation) => vars.push(LtmSyntheticVar {
+                    Ok(equation) => edge_vars.push(LtmSyntheticVar {
                         name,
                         equation: datamodel::Equation::Scalar(equation),
                         dimensions: vec![],
                         // synthetic agg on `from` + bracketed `to` -> routed direct.
                         compile_directly: false,
                     }),
-                    Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+                    Err(err) => {
+                        // One doomed element dooms the edge; drop the
+                        // already-built per-element vars (`edge_vars` never
+                        // commits) and warn only on first recording (#758
+                        // convention) -- see the GH #780 note at the top.
+                        if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                            emit_ltm_partial_equation_warning(db, model, &name, &err);
+                        }
+                        return;
+                    }
                 }
             }
+            vars.extend(edge_vars);
         }
     }
 }
@@ -2364,6 +3148,10 @@ pub(super) fn emit_link_scores_for_edge(
     vars: &mut Vec<LtmSyntheticVar>,
     unscoreable_edges: &mut HashSet<(String, String)>,
 ) {
+    if decline_bare_arrayed_reducer_target(db, model, project, from, to, unscoreable_edges) {
+        return;
+    }
+
     // The set of synthetic aggs `(from, to)` routes through, read off
     // the reference-site IR (the unique `ThroughAgg` `AggRef`s of this
     // edge's classified sites, in first-occurrence order). This is the
@@ -2387,9 +3175,32 @@ pub(super) fn emit_link_scores_for_edge(
         idxs.iter().map(|&i| &agg_nodes.aggs[i]).collect()
     };
     if !routed_aggs.is_empty() {
+        // GH #793: a hoisted reducer sibling does not make the whole
+        // `(from, to)` edge fully scoreable. If another reducer read of
+        // `from` in `to` was not represented by one of these synthetic aggs
+        // (for example an I1-declined strict slice), scoring only the agg
+        // halves would publish incomplete attribution with no signal. Decline
+        // at edge granularity instead, using the same warning/drop contract as
+        // the no-agg strict-slice path.
+        if decline_unhoisted_reducer_edge(db, model, project, from, to, unscoreable_edges) {
+            for agg in &routed_aggs {
+                unscoreable_edges.insert((from.to_string(), agg.name.clone()));
+                unscoreable_edges.insert((agg.name.clone(), to.to_string()));
+            }
+            return;
+        }
         if !skip_agg_halves {
             for agg in &routed_aggs {
-                emit_source_to_agg_link_scores(db, source_vars, from, agg, model, project, vars);
+                emit_source_to_agg_link_scores(
+                    db,
+                    source_vars,
+                    from,
+                    agg,
+                    model,
+                    project,
+                    vars,
+                    unscoreable_edges,
+                );
                 emit_agg_to_target_link_scores(
                     db,
                     source_vars,
@@ -2399,6 +3210,7 @@ pub(super) fn emit_link_scores_for_edge(
                     model,
                     project,
                     vars,
+                    unscoreable_edges,
                 );
             }
         }
@@ -2422,14 +3234,15 @@ pub(super) fn emit_link_scores_for_edge(
         );
         return;
     }
-    // Cross-dimensional (arrayed-to-scalar / partial-reduce) edges --
-    // includes the *variable-backed* reducer aggs like `total = SUM(pop[*])`
-    // and the read-slice-derived shapes (GH #765). `Some(vec![])` can mean
-    // the GH #758-style loud decline of the arrayed-owner scalar-result
-    // slice: a Warning was accumulated and the edge recorded in
-    // `unscoreable_edges`, and we must NOT fall through to
-    // `emit_per_shape_link_scores` (which would build a wrong-shaped
-    // stand-in).
+    // Cross-dimensional (arrayed-to-scalar / partial-reduce / broadcast-
+    // reduce) edges -- includes the *variable-backed* reducer aggs like
+    // `total = SUM(pop[*])` and the read-slice-derived shapes (GH #765 /
+    // GH #777). `Some(vec![])` can mean the SIZE/Constant-reducer skip, the
+    // GH #780 loud doom of a projection-feeder edge (a Warning was
+    // accumulated and the edge recorded in `unscoreable_edges`), or the
+    // GH #778/#785 duplicated-dim loud skip -- in every case we must NOT
+    // fall through to `emit_per_shape_link_scores` (which would build a
+    // wrong-shaped stand-in for an edge whose loops were already dropped).
     if let Some(cross_vars) = try_cross_dimensional_link_scores(
         db,
         source_vars,
@@ -2444,10 +3257,21 @@ pub(super) fn emit_link_scores_for_edge(
         return;
     }
     // Scalar-source -> arrayed-target edges (one scalar link score per
-    // target element).
-    if let Some(cross_vars) =
-        try_scalar_to_arrayed_link_scores(db, source_vars, from, to, model, project)
-    {
+    // target element). `Some(vec![])` can mean the GH #780 loud decline: a
+    // per-element partial doomed, the `Warning` was accumulated, and the
+    // edge was recorded in `unscoreable_edges` (so loop scores through it
+    // drop). We must NOT fall through to `emit_per_shape_link_scores`.
+    if let Some(cross_vars) = try_scalar_to_arrayed_link_scores(
+        db,
+        source_vars,
+        agg_nodes,
+        from,
+        to,
+        model,
+        project,
+        dm_dims,
+        unscoreable_edges,
+    ) {
         vars.extend(cross_vars);
         return;
     }
@@ -2470,6 +3294,37 @@ pub(super) fn emit_link_scores_for_edge(
         unscoreable_edges,
     ) {
         vars.extend(disjoint_vars);
+        return;
+    }
+    // GH #792: the PER-ELEMENT-EQUATION (`Ast::Arrayed`) owner whose slot
+    // bodies read `from` inside a reducer (`share[nyc] = SUM(pop[nyc,*] *
+    // w[*])` per slot -- and equally the dim-named `SUM(pop[Region,*] * w[*])`
+    // and full-extent `SUM(pop[*,*] * w[*])` spellings). Such an owner cannot
+    // take the cartesian arm of `try_cross_dimensional_link_scores`
+    // (`classify_reducer` needs a single dt-expression; only an EXCEPT default
+    // gets it there, where the same shared helper declines it), so before this
+    // it fell to `emit_per_shape_link_scores` shape Bare, which minted ONE
+    // arrayed `link_score:pop->share` simulating to ~-0.0 with no per-edge
+    // warning -- other enumerated loops then consumed that silent near-zero.
+    // We consult the SAME verdict the cartesian arm does (salsa-cached on the
+    // interned `LtmLinkId`, so a re-visit is a cache hit). We can reach this
+    // gate only with `routed_aggs` empty (else we returned at the agg branch
+    // above), so no reducer reading `from` in `to` was hoisted -- ANY reducer
+    // read the verdict finds is genuinely un-hoisted, and for a per-element
+    // owner NO remaining derivation represents it: take the GH #758/#780 loud
+    // skip (one warning naming the edge, no link-score variable, the edge
+    // recorded so loops through it drop). NOTE this gate is NOT per-element-
+    // only: a Scalar/A2A owner whose strict-slice reducer edge falls past the
+    // try_* arms to this fallthrough (e.g. an equal-dims A2A owner with a
+    // reducer SUBEXPRESSION, which the cartesian arm's dim-containment check
+    // rejects) is declined here too via `StrictSlice` -- deliberate, the same
+    // edge-granularity decline GH #791 applies on the cartesian arm. A
+    // `FullExtent` / `NotDescribable` verdict keeps the existing per-shape
+    // path byte-identical -- the disjoint-dim FixedIndex family (already
+    // handled above), bare out-of-reducer refs, and the GH #525 PerElement
+    // family all classify `NotDescribable` (a reference outside any reducer
+    // is collected by neither slice walk), so none are touched.
+    if decline_unhoisted_reducer_edge(db, model, project, from, to, unscoreable_edges) {
         return;
     }
     emit_per_shape_link_scores(

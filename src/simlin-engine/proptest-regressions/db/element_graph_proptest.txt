@@ -1,0 +1,16 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# Provenance: all four seeds below were captured during the GH #783 mutation
+# experiment (widening Reduced.subset to the full extent inside the shared
+# read_slice_row_parts derivation) -- they fail instantly under that
+# I4-divergence mutation class, so they guard the shared-derivation contract,
+# not historical production bugs.
+cc fccd22302688b0453d459384a9e6860d29f6a5ad4edae0d87e9827410d8bb207 # shrinks to spec = ProjectSpec { dim_size: 2, var_specs: [ArrayedVarSpec { pattern: Constant }, ArrayedVarSpec { pattern: Constant }], include_scalar: false, scalar_reducer_target: Some(ScalarReducerTarget { var_idx: 0, with_scalar_feeder: false, with_subset: true }), subset_size: 1, mixed_ref_target: None }
+cc 19b02d0301bd3ac87854013e59d14febf49e4035d7efd5c0902c26e3931b57a0 # shrinks to spec = ProjectSpec { dim_size: 2, var_specs: [ArrayedVarSpec { pattern: Constant }, ArrayedVarSpec { pattern: InlinedSubsetReducer { var_idx: 0 } }], include_scalar: false, scalar_reducer_target: None, subset_size: 1, mixed_ref_target: None }
+cc 5ce7efc1c4db6019707f53092814935c593e1964bf0f0d05964c883ac46810bb # shrinks to spec = ProjectSpec { dim_size: 2, var_specs: [ArrayedVarSpec { pattern: Constant }, ArrayedVarSpec { pattern: Constant }, ArrayedVarSpec { pattern: InlinedSubsetReducer { var_idx: 0 } }, ArrayedVarSpec { pattern: WildcardReducer { var_idx: 1 } }], include_scalar: true, scalar_reducer_target: Some(ScalarReducerTarget { var_idx: 1, with_scalar_feeder: false, with_subset: false }), subset_size: 1, mixed_ref_target: None }
+cc 409488a2682a942f1fae2a0b8046d29e64953670e788abcfee8cd6311dfd3160 # shrinks to spec = ProjectSpec { dim_size: 2, var_specs: [ArrayedVarSpec { pattern: Constant }, ArrayedVarSpec { pattern: Constant }, ArrayedVarSpec { pattern: Constant }, ArrayedVarSpec { pattern: WildcardReducer { var_idx: 1 } }], include_scalar: true, scalar_reducer_target: Some(ScalarReducerTarget { var_idx: 1, with_scalar_feeder: true, with_subset: true }), subset_size: 1, mixed_ref_target: Some(MixedRefTarget { var_idx: 1, age_idx: 1, broadcast: true, age_first: true }) }

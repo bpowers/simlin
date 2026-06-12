@@ -106,7 +106,7 @@ pub use dep_graph::{ModelDepGraphResult, ResolvedScc, SccPhase, model_dependency
 mod ltm;
 use ltm::*;
 pub use ltm::{
-    LtmImplicitVarMeta, compile_ltm_var_fragment, link_score_equation_text_shaped,
+    LtmImplicitVarMeta, ShapedLinkScore, compile_ltm_var_fragment, link_score_equation_text_shaped,
     model_ltm_implicit_module_refs, model_ltm_implicit_var_info, model_ltm_mode,
     model_ltm_var_name_index, model_ltm_variables,
 };
@@ -128,6 +128,17 @@ pub(crate) use ltm::AggLoopBudgetGuard;
 // existing.
 #[cfg(test)]
 pub(crate) use ltm::LtmFragmentFailureGuard;
+// Test-only: the forced-`PartialEquationError` edge override (GH #780), so
+// the unscoreable-edge-recording contract can be exercised end-to-end on
+// the SHAPED-QUERY and per-element paths, whose own partial-equation
+// terminals are unreachable through any compiling model (recovered by the
+// changed-last fallback or pinned to concrete elements upstream). The
+// agg-half emitters' terminals are live-reachable (the square-source
+// duplicate-dim feeder, GH #743) and are tested with a real fixture
+// instead; the override + tiny fixture covers the rest (per
+// docs/dev/rust.md#test-time-budgets).
+#[cfg(test)]
+pub(crate) use ltm::ForcePartialEquationErrorGuard;
 
 mod analysis;
 pub use analysis::RefShape;
@@ -135,6 +146,12 @@ pub use analysis::causal_graph_from_edges;
 pub use analysis::causal_graph_from_element_edges;
 pub use analysis::causal_graph_from_element_edges_with_modules;
 pub(crate) use analysis::reconstruct_model_variables;
+// The same-element diagonal/broadcast/mapped projection the element graph
+// emits for a `Bare` A2A reference. Discovery's `expand_a2a_link_offsets`
+// consumes it (via `crate::db::expand_same_element`) so its per-element
+// from-node spelling stays in lockstep with `model_element_causal_edges`
+// rather than re-deriving it with a subtly different rule (GH #754).
+pub(crate) use analysis::expand_same_element;
 use analysis::*;
 // `model_element_loop_circuits` is `#[deprecated]` for LTM consumers (the
 // LTM pipeline uses `model_loop_circuits_tiered` instead). The re-export

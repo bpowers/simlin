@@ -973,16 +973,16 @@ fn element_graph_variable_backed_scalar_owner_subset_slice_routes_read_rows() {
     assert_no_edge(&result, "arr[c]", "total");
 }
 
-/// Shape-expressiveness section 6 (the DECLINED residual): an ARRAYED-owner
-/// scalar-result Pinned slice (`share[Region] = SUM(pop[nyc,*])` -- no
-/// `Iterated` axis, arrayed `to`) stays on the conservative cross-product:
-/// the per-`(row, slot)` machinery cannot express a scalar reduce broadcast
-/// over the owner's dims, so the gate declines it and
-/// `try_cross_dimensional_link_scores` routes the edge to the GH #758 loud
-/// skip (no link scores, dropped loop scores, one Warning). The
-/// cross-product edges are a deliberate SUPERSET of the true reads.
+/// GH #777: an ARRAYED-owner scalar-result Pinned slice
+/// (`share[Region] = SUM(pop[nyc,*])` -- no `Iterated` axis, arrayed `to`)
+/// fans the READ rows out across the FULL target element set: the single
+/// scalar reducer value broadcasts over every `share[e]`, so each read row
+/// `pop[nyc,*]` feeds every `share[e]`. The unread `pop[boston,*]` rows feed
+/// NOTHING (the reducer never reads them). The edge set is EXACTLY (read
+/// rows x all target elements) -- no unread-row edges, replacing the pre-fix
+/// conservative cross-product superset.
 #[test]
-fn element_graph_variable_backed_broadcast_pinned_slice_stays_cross_product() {
+fn element_graph_variable_backed_broadcast_pinned_slice_fans_read_rows() {
     let project = TestProject::new("vb_broadcast_pinned")
         .named_dimension("Region", &["nyc", "boston"])
         .named_dimension("D2", &["p", "q"])
@@ -991,10 +991,25 @@ fn element_graph_variable_backed_broadcast_pinned_slice_stays_cross_product() {
 
     let result = element_edges(&project);
 
-    assert_edge(&result, "pop[nyc,p]", "share[nyc]");
-    assert_edge(&result, "pop[nyc,p]", "share[boston]");
-    assert_edge(&result, "pop[boston,q]", "share[nyc]");
-    assert_edge(&result, "pop[boston,q]", "share[boston]");
+    // Read rows (pop[nyc,*]) x full target element set (share[nyc], share[boston]).
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            assert_edge(&result, &format!("pop[nyc,{d2}]"), &format!("share[{e}]"));
+        }
+    }
+    // Unread rows (pop[boston,*]) feed no target slot, and the bare-name
+    // dangling node never appears.
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            assert_no_edge(
+                &result,
+                &format!("pop[boston,{d2}]"),
+                &format!("share[{e}]"),
+            );
+        }
+        assert_no_edge(&result, &format!("pop[boston,{d2}]"), "share");
+        assert_no_edge(&result, &format!("pop[nyc,{d2}]"), "share");
+    }
 }
 
 /// AC4.1 (element graph, sliced reducer): `target[Region] = pop[NYC, Adult] +
@@ -2008,4 +2023,107 @@ fn element_graph_subset_star_range_reads_only_subdimension_rows() {
     // No direct reducer-side edges bypassing the agg.
     assert_no_edge(&result, "arr[a]", "x");
     assert_no_edge(&result, "arr[c]", "x");
+}
+
+/// GH #778/#785: a DEGENERATE SQUARE source whose iterated axes carry the
+/// SAME target dim twice -- `out[D1] = base[D1] + SUM(cube[D1, D1, *])` over
+/// `cube[D1, D1, D2]`. The hoist is now DECLINED at minting
+/// (`ltm_agg::result_dims_has_repeated_dim`), so NO `$⁚ltm⁚agg⁚{n}` node is
+/// minted and the reducer's `cube` reference stays on the conservative
+/// `DynamicIndex` cross-product (`emit_edges_for_reference`).
+///
+/// This test was previously a golden pin (`*_routes_full_cartesian`) that
+/// deliberately recorded the now-fixed phantom: the agg→out
+/// `expand_same_element` fan-out emitted the off-diagonal `agg[r1, r2] →
+/// out[r2]` while the link-score projection kept only the diagonal, minting
+/// warned 0-stub loops (#778), and the co-source row partials scored the
+/// phantom off-diagonal rows the simulation never reads (#785). Declining the
+/// hoist makes all of that disappear: the element graph keeps the sound
+/// (coarse) cross-product, and the score side loudly skips the edge
+/// (`emit_unscoreable_duplicated_dim_source_warning`) so loops through it drop
+/// rather than reference never-emitted names.
+#[test]
+fn element_graph_square_source_duplicated_dim_declines_to_cross_product() {
+    let project = TestProject::new("square_source_elem_graph")
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux("cube[D1,D1,D2]", "1")
+        .array_aux("base[D1]", "0")
+        .array_aux("out[D1]", "base[D1] + SUM(cube[D1, D1, *])");
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // No agg node is minted at all (the square-source hoist is declined), so
+    // no node name carries the agg prefix on either side of any edge --
+    // including SUBSCRIPTED slot nodes like `{agg}[r1,r2]`, which an
+    // exact-name membership check would miss.
+    assert!(
+        !result.edges.keys().any(|k| k.contains(agg))
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t.contains(agg))),
+        "the declined square-source reducer must mint NO agg node; found {agg} in the graph"
+    );
+
+    // `cube` routes as the conservative cross-product: every `cube` element
+    // feeds every `out` element (a sound superset of the true diagonal reads).
+    for ri in ["r1", "r2"] {
+        for rj in ["r1", "r2"] {
+            for ck in ["c1", "c2"] {
+                for target in ["out[r1]", "out[r2]"] {
+                    assert_edge(&result, &format!("cube[{ri},{rj},{ck}]"), target);
+                }
+            }
+        }
+    }
+
+    // `base[ri]` keeps its diagonal same-element edge into `out[ri]`.
+    assert_edge(&result, "base[r1]", "out[r1]");
+    assert_edge(&result, "base[r2]", "out[r2]");
+    assert_no_edge(&result, "base[r1]", "out[r2]");
+}
+
+/// Golden pin for the I4 single-derivation refactor (GH #783): an
+/// ITERATED-DIM PROJECTION FEEDER (`frac[D1]` in `out[D1] = base[D1] +
+/// SUM(matrix[D1, *] * frac[D1])`) carries its OWN all-`Iterated` projection
+/// slice (one axis, `Iterated(D1)`), distinct from the canonical reduced
+/// source `matrix[D1, *]` whose slice is `[Iterated(D1), Reduced]`. The
+/// source→agg row enumeration the #783 refactor unifies must route the feeder
+/// by its own slice (1:1 row→slot, `frac[ri] → agg[ri]`) -- never the
+/// canonical source's slice -- so this exercises the per-source-slice path of
+/// the shared derivation.
+#[test]
+fn element_graph_projection_feeder_routes_by_own_slice() {
+    let project = TestProject::new("projection_feeder_elem_graph")
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux("matrix[D1,D2]", "1")
+        .array_aux("frac[D1]", "2")
+        .array_aux("base[D1]", "0")
+        .array_aux("out[D1]", "base[D1] + SUM(matrix[D1, *] * frac[D1])");
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The canonical reduced source: `matrix[ri, *]` row routes to slot `[ri]`.
+    assert_edge(&result, "matrix[r1,c1]", &format!("{agg}[r1]"));
+    assert_edge(&result, "matrix[r1,c2]", &format!("{agg}[r1]"));
+    assert_edge(&result, "matrix[r2,c1]", &format!("{agg}[r2]"));
+    assert_edge(&result, "matrix[r2,c2]", &format!("{agg}[r2]"));
+    assert_no_edge(&result, "matrix[r1,c1]", &format!("{agg}[r2]"));
+
+    // The projection feeder: routed by its OWN all-Iterated slice, 1:1
+    // row→slot. `frac[ri]` feeds ONLY `agg[ri]` -- never every slot (that
+    // would be the scalar-feeder broadcast) and never the cross slot.
+    assert_edge(&result, "frac[r1]", &format!("{agg}[r1]"));
+    assert_edge(&result, "frac[r2]", &format!("{agg}[r2]"));
+    assert_no_edge(&result, "frac[r1]", &format!("{agg}[r2]"));
+    assert_no_edge(&result, "frac[r2]", &format!("{agg}[r1]"));
+
+    // The agg fans diagonally into `out`.
+    assert_edge(&result, &format!("{agg}[r1]"), "out[r1]");
+    assert_edge(&result, &format!("{agg}[r2]"), "out[r2]");
+    assert_no_edge(&result, &format!("{agg}[r1]"), "out[r2]");
 }

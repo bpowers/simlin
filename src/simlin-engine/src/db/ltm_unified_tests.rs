@@ -1331,6 +1331,32 @@ fn test_ltm_partial_equation_warning_message_contract() {
         msg.contains("array slice"),
         "the unfreezable warning must explain the unfreezable-slice cause; got: {msg}"
     );
+
+    // GH #779: the bare-reducer-feeder kind names the actual shape (a bare
+    // arrayed reference inside a reducer argument) and the
+    // subscripted-spelling workaround, instead of the generic unfreezable
+    // text.
+    let bare_feeder_err = crate::ltm_augment::PartialEquationError {
+        equation_text: eqn_text.to_string(),
+        kind: crate::ltm_augment::PartialEquationErrorKind::BareReducerFeeder,
+    };
+    let msg = super::ltm::ltm_partial_equation_warning_message(var_name, &bare_feeder_err);
+    assert!(
+        msg.contains(var_name),
+        "the bare-feeder warning must name the skipped variable; got: {msg}"
+    );
+    assert!(
+        msg.contains(eqn_text),
+        "the bare-feeder warning must include the equation text; got: {msg}"
+    );
+    assert!(
+        msg.contains("BARE") && msg.contains("reducer"),
+        "the bare-feeder warning must name the bare-reference-inside-reducer shape; got: {msg}"
+    );
+    assert!(
+        msg.contains("subscripting the reference"),
+        "the bare-feeder warning must name the subscripted-spelling workaround; got: {msg}"
+    );
 }
 
 /// Test-only salsa-tracked query that drives the production accumulating
@@ -4626,25 +4652,31 @@ fn scalar_target_reducer_variants_fragments_compile() {
     }
 }
 
-/// PR #784 review (P3): a degenerate SQUARE-source agg -- a reducer whose
-/// iterated axes carry the SAME target dim twice (`x[D1] =
-/// 1 + SUM(cube[D1,D1,*] * frac[D1,D1])`, `result_dims == ["D1","D1"]`)
-/// with a square projection feeder (`frac[D1,D1]`) -- must NOT emit the
-/// feeder's per-`(row, slot)` changed-last scores: the per-slot equation
-/// pins each reducer-text index BY DIM NAME, which is ambiguous for the
-/// duplicated dim (pre-fix, every `d1` occurrence pinned to the FIRST slot
-/// part, so the off-diagonal slot `[r1,r2]` froze `frac[r1,r1]` -- a
-/// silently wrong score). The rows are loudly skipped instead
-/// (`emit_ltm_partial_equation_warning`, the GH #743 unfreezable
-/// machinery), mirroring `resolve_mismatched_index_position`'s uniqueness
-/// defense on the co-source body path.
+/// GH #778/#785: a degenerate SQUARE-source reducer -- iterated axes carry
+/// the SAME target dim twice (`x[D1] = 1 + SUM(cube[D1,D1,*] * frac[D1,D1])`)
+/// -- is now DECLINED at agg minting (`result_dims_has_repeated_dim`), so NO
+/// synthetic agg is minted at all. The whole topology changes from PR #787's
+/// "feeder-half loud skip, co-source half silently wrong" to one coherent
+/// outcome: BOTH duplicated-dim sources (`cube` AND `frac`, each read by `x`
+/// as a `[D1,D1,...]` square) are loudly skipped by the
+/// `try_cross_dimensional_link_scores` cartesian-branch defense
+/// (`emit_unscoreable_duplicated_dim_source_warning`), no per-element link
+/// score is emitted for either, and every loop through the shape is dropped.
+///
+/// This supersedes the PR #787 fixture: pre-decline the co-source half
+/// emitted confident per-`(row, slot)` scores on the phantom off-diagonal
+/// rows the executed A2A simulation never reads -- a silent wrong number on
+/// the link surface (#785's comment). Declining the hoist removes the
+/// co-source/feeder/agg-to-target halves entirely; the ONE remaining surface
+/// (the un-hoisted cartesian partial reduce, whose own `from_pos` map has the
+/// same first-match hazard on the duplicated dim) is closed by the loud skip.
 #[test]
-fn square_source_duplicate_dim_feeder_scores_are_loudly_skipped() {
+fn square_source_duplicate_dim_reducer_is_loudly_skipped() {
     let project = TestProject::new("square_feeder")
         .with_sim_time(0.0, 5.0, 1.0)
         .named_dimension("D1", &["R1", "R2"])
         .named_dimension("D2", &["C1", "C2"])
-        .array_aux("cube[D1,D1,D2]", "1")
+        .array_aux("cube[D1,D1,D2]", "0.0001 * pop[D1]")
         .array_aux("frac[D1,D1]", "0.0001 * pop[D1]")
         .array_stock("pop[D1]", "100", &["x"], &[], None)
         .array_flow("x[D1]", "1 + SUM(cube[D1, D1, *] * frac[D1, D1])", None);
@@ -4653,48 +4685,711 @@ fn square_source_duplicate_dim_feeder_scores_are_loudly_skipped() {
     let sync = sync_from_datamodel(&db, &datamodel);
     let model = sync.models["main"].source;
 
-    // Sanity: the square feeder really is accepted as an iterated-dim
-    // projection feeder of the minted synthetic agg (the shape under test
-    // reaches the feeder emitter at all).
+    // The square-source reducer mints NO agg (the hoist is declined at the
+    // gate): every per-axis emission path that would pin the duplicated dim by
+    // name is structurally avoided.
     let aggs = crate::ltm_agg::enumerate_agg_nodes(&db, model, sync.project);
-    let agg = aggs
-        .aggs
-        .iter()
-        .find(|a| a.is_synthetic)
-        .expect("the inline square-source reducer must mint a synthetic agg");
-    assert_eq!(agg.result_dims, vec!["D1", "D1"]);
-    assert!(agg.source_is_projection_feeder("frac"));
+    assert!(
+        aggs.aggs.is_empty(),
+        "the declined square-source reducer must mint no agg node; got: {:?}",
+        aggs.aggs
+            .iter()
+            .map(|a| (&a.name, &a.result_dims))
+            .collect::<Vec<_>>()
+    );
 
     let ltm = model_ltm_variables(&db, model, sync.project);
-    let feeder_prefix = "$\u{205A}ltm\u{205A}link_score\u{205A}frac[";
-    let feeder_vars: Vec<&str> = ltm
-        .vars
+    // No per-element link score for EITHER duplicated-dim source: neither the
+    // co-source `cube` nor the feeder `frac` reaches the slab on a phantom
+    // off-diagonal row.
+    for src in ["cube", "frac"] {
+        let prefix = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{src}[");
+        let leaked: Vec<&str> = ltm
+            .vars
+            .iter()
+            .filter(|v| v.name.starts_with(&prefix))
+            .map(|v| v.name.as_str())
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "no per-element link score may reach the slab for the duplicated-dim \
+             source {src}; got: {leaked:?}"
+        );
+    }
+
+    // The skip is loud: one edge-level Warning per duplicated-dim source edge
+    // (`cube -> x` and `frac -> x`), both naming the square-source decline.
+    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+    let square_warnings: Vec<&str> = diags
         .iter()
-        .filter(|v| v.name.starts_with(feeder_prefix))
-        .map(|v| v.name.as_str())
+        .filter_map(|CompilationDiagnostic(d)| match (&d.severity, &d.error) {
+            (DiagnosticSeverity::Warning, DiagnosticError::Assembly(msg))
+                if msg.contains("square-source") =>
+            {
+                Some(msg.as_str())
+            }
+            _ => None,
+        })
         .collect();
     assert!(
-        feeder_vars.is_empty(),
-        "ambiguous duplicate-dim slot pins must be loudly skipped, not \
-         emitted with the wrong row frozen; got: {feeder_vars:?}"
+        square_warnings.iter().any(|m| m.contains("cube -> x")),
+        "the co-source cube -> x edge must surface a square-source skip Warning; \
+         got: {square_warnings:?}"
+    );
+    assert!(
+        square_warnings.iter().any(|m| m.contains("frac -> x")),
+        "the feeder frac -> x edge must surface a square-source skip Warning; \
+         got: {square_warnings:?}"
     );
 
-    // The skip is loud: one UnfreezablePartial warning per skipped row,
-    // naming the feeder link-score variable.
-    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
-    let has_feeder_warning = diags.iter().any(|CompilationDiagnostic(d)| {
-        d.severity == DiagnosticSeverity::Warning
-            && d.variable
-                .as_deref()
-                .is_some_and(|v| v.starts_with(feeder_prefix))
-            && matches!(
-                &d.error,
-                DiagnosticError::Assembly(msg) if msg.contains("could not be generated")
-            )
-    });
+    // Every loop through the shape is dropped (the edges are recorded
+    // unscoreable): no loop score is emitted at all.
     assert!(
-        has_feeder_warning,
-        "the skipped feeder rows must surface a Warning; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+        "loops through the unscoreable square-source edges must be dropped, not \
+         emitted as warned 0-stubs; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
+
+    // The model compiles with NO fragment-failure cascade: the only Assembly
+    // warnings anywhere are the two loud square-source skips themselves.
+    use salsa::Setter;
+    let mut db2 = SimlinDb::default();
+    let (sp, m2) = {
+        let sync2 = sync_from_datamodel(&db2, &datamodel);
+        (sync2.project, sync2.models["main"].source)
+    };
+    sp.set_ltm_enabled(&mut db2).to(true);
+    compile_project_incremental(&db2, sp, "main")
+        .expect("the declined-square model still compiles");
+    let all = crate::db::collect_model_diagnostics(&db2, m2, sp);
+    let unexpected: Vec<_> = all
+        .iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(&d.error, DiagnosticError::Assembly(msg) if !msg.contains("square-source"))
+        })
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "the only Assembly warnings are the loud square-source skips -- no \
+         loop-score fragment-failure cascade; got: {unexpected:?}"
+    );
+}
+
+// ── GH #780: a PartialEquationError link-score skip drops dependent loops ──
+//
+// When a link-score emitter hits a `PartialEquationError` for an edge (the
+// GH #311 parse class, the GH #526/T7 both-legs-doomed mismatched-dep
+// class, or the GH #743 UnfreezablePartial machinery), it must record the
+// edge in `unscoreable_edges` so loop scores traversing it are DROPPED --
+// ONE loud warning naming the edge, no link-score variable, dependent
+// loops absent. Pre-fix the edge was skipped but NOT recorded, so the loop
+// scores referenced the never-emitted link-score name, failed fragment
+// compile, and degraded to a cascade of warned constant-0 stubs (the
+// #758-contract violation this fixes).
+//
+// Reachability is per call site: the CARTESIAN-BRANCH unscoreable terminal
+// is LIVE-reachable through a compiling model (the degenerate square-source
+// reducer, GH #778/#785 -- tested with the real fixture
+// `square_source_duplicate_dim_reducer_is_loudly_skipped` above, which records
+// both duplicated-dim source edges in `unscoreable_edges` and drops every loop
+// through them), while the SHAPED-QUERY and per-element terminals exercised by
+// the gh780_* tests below are not (every doom on those paths is recovered by
+// `shaped_guard_form_text`'s changed-last fallback or pinned to a concrete
+// element upstream), so those tests inject the doom with the test-only
+// `ForcePartialEquationErrorGuard` (the same discipline
+// `LtmFragmentFailureGuard` / `AggLoopBudgetGuard` use: a fresh `db`, the
+// guard outliving every salsa LTM query in the test).
+
+/// A two-loop arrayed model whose `pop -> growth` edge participates in one
+/// feedback loop (`pop -> growth -> pop`) while a second, independent loop
+/// (`pop -> drain -> pop`) does not. Forcing `pop -> growth` to doom must
+/// drop ONLY the first loop's scores; the `drain` loop keeps its real
+/// scores -- the degradation is surgical, exactly like the #758 classes.
+fn gh780_two_loop_project() -> datamodel::Project {
+    crate::test_common::TestProject::new("gh780_force_partial")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["a", "b"])
+        .array_stock("pop[d1]", "100", &["growth"], &["drain"], None)
+        .array_flow("growth[d1]", "pop[d1] * 0.1", None)
+        .array_flow("drain[d1]", "pop[d1] * 0.05", None)
+        .build_datamodel()
+}
+
+/// GREEN: forcing the `pop -> growth` edge to a `PartialEquationError` must
+/// (1) emit exactly ONE Assembly warning naming the edge, (2) emit NO
+/// `pop -> growth` link-score variable, and (3) DROP every loop score whose
+/// circuit traverses the edge, while keeping the independent `drain` loop's
+/// score.
+#[test]
+fn gh780_forced_partial_equation_drops_dependent_loops_not_others() {
+    use crate::db::{
+        CompilationDiagnostic, DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard,
+    };
+    use salsa::Setter;
+
+    let project = gh780_two_loop_project();
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    // The guard must outlive every LTM query below (salsa memoizes them and
+    // the override is not a salsa input), so it is bound for the whole test.
+    let _force = ForcePartialEquationErrorGuard::new("pop", "growth");
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+
+    // (2) No `pop -> growth` link-score variable was emitted.
+    let doomed = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth";
+    assert!(
+        !ltm.vars.iter().any(|v| v.name == doomed),
+        "the doomed edge must NOT emit a link-score variable; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // The independent `pop -> drain` link score IS still emitted -- the skip
+    // is per-edge, not a blanket collapse.
+    let drain_link = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}drain";
+    assert!(
+        ltm.vars.iter().any(|v| v.name == drain_link),
+        "the unaffected `pop -> drain` edge must still emit its link score; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // (3) Loops through the doomed edge are dropped; only the `drain` loop
+    // survives. Each surviving loop_score equation must reference the
+    // `drain` link score and NOT the doomed `pop -> growth` name.
+    let loop_scores: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .collect();
+    assert!(
+        !loop_scores.is_empty(),
+        "the independent drain loop must keep a loop score; got vars: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    for ls in &loop_scores {
+        let eqn = ls.equation.source_text();
+        assert!(
+            !eqn.contains("pop\u{2192}growth"),
+            "no surviving loop score may reference the dropped `pop -> growth` \
+             link score (pre-fix these were warned constant-0 stubs); {} = {eqn}",
+            ls.name
+        );
+        assert!(
+            eqn.contains("pop\u{2192}drain"),
+            "the surviving loop must be the independent drain loop; {} = {eqn}",
+            ls.name
+        );
+    }
+
+    // (1) Exactly one Assembly warning, naming the doomed edge.
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .map(|CompilationDiagnostic(d)| d)
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(d.error, DiagnosticError::Assembly(_))
+        })
+        .collect();
+    assert_eq!(
+        assembly.len(),
+        1,
+        "expected exactly one Assembly warning (the doomed edge); got: {assembly:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &assembly[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("pop\u{2192}growth"),
+        "the warning must name the doomed link-score variable; got: {msg}"
+    );
+
+    // The model compiles and every emitted score series is finite (no
+    // warned-garbage NaN/constant-stub anywhere) -- and crucially, NO
+    // loop_score series for the dropped circuits exists at all.
+    let compiled =
+        compile_project_incremental(&db, source_project, "main").expect("LTM model compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
+    vm.run_to_end().expect("sim runs to completion");
+    let results = vm.into_results();
+    for v in ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}ltm\u{205A}"))
+    {
+        let Some(base) = results
+            .offsets
+            .iter()
+            .find(|(k, _)| k.as_str() == v.name.as_str())
+            .map(|(_, off)| *off)
+        else {
+            continue;
+        };
+        for slot in 0..slot_count_for(v, &project.dimensions) {
+            for row in results.iter() {
+                let val = row[base + slot];
+                assert!(
+                    val.is_finite(),
+                    "emitted score {} slot {slot} must stay finite; got {val}",
+                    v.name
+                );
+            }
+        }
+    }
+}
+
+/// Discovery mode (design decision 3): a forced `PartialEquationError` on a
+/// causal edge must still fire its one loud `Warning` and emit no
+/// `pop -> growth` link score. Discovery mode enumerates no loops at
+/// compile time, so for UNPINNED models the recorded edge has no consumer
+/// -- but the PINNED-loop pass (`model_ltm_variables`' Part 2 pin loop)
+/// runs in discovery mode too and consults `traverses_unscoreable`, so a
+/// doomed-edge pin is dropped there exactly like exhaustive mode (pinned
+/// by `gh780_forced_partial_equation_discovery_pinned_loop_dropped`
+/// below). The model must still compile and produce only finite series.
+#[test]
+fn gh780_forced_partial_equation_discovery_mode_still_warns() {
+    use crate::db::ForcePartialEquationErrorGuard;
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use salsa::Setter;
+
+    let project = gh780_two_loop_project();
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let _force = ForcePartialEquationErrorGuard::new("pop", "growth");
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+    assert_eq!(
+        ltm.mode,
+        crate::db::LtmMode::Discovery,
+        "the fixture must be in discovery mode"
+    );
+
+    // No `pop -> growth` link-score variable, even in discovery.
+    let doomed = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}growth";
+    assert!(
+        !ltm.vars.iter().any(|v| v.name == doomed),
+        "the doomed edge must emit no link score in discovery mode; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // The one loud Warning still fires (accumulator replays on every
+    // evaluation, cached or fresh).
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .map(|CompilationDiagnostic(d)| d)
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(d.error, DiagnosticError::Assembly(_))
+                && d.variable.as_deref() == Some(doomed)
+        })
+        .collect();
+    assert_eq!(
+        assembly.len(),
+        1,
+        "discovery mode must still fire exactly one partial-equation Warning \
+         naming the doomed variable; got: {assembly:?}"
+    );
+
+    // And the model compiles with only finite series (no NaN/garbage).
+    let compiled =
+        compile_project_incremental(&db, source_project, "main").expect("discovery model compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
+    vm.run_to_end().expect("discovery sim runs to completion");
+    let results = vm.into_results();
+    for v in ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}ltm\u{205A}"))
+    {
+        let Some(base) = results
+            .offsets
+            .iter()
+            .find(|(k, _)| k.as_str() == v.name.as_str())
+            .map(|(_, off)| *off)
+        else {
+            continue;
+        };
+        for slot in 0..slot_count_for(v, &project.dimensions) {
+            for row in results.iter() {
+                assert!(
+                    row[base + slot].is_finite(),
+                    "discovery score {} slot {slot} must stay finite",
+                    v.name
+                );
+            }
+        }
+    }
+}
+
+/// Discovery mode DOES consume `unscoreable_edges` at compile time: the
+/// pinned-loop pass runs in discovery mode (pins are the only loop scores
+/// it emits) and drops a pin whose cycle traverses a recorded edge. With
+/// `pop -> growth` doomed, the growth pin must be dropped (with the
+/// pinned-loop warning), while the independent drain pin keeps its loop
+/// score -- the discovery twin of the exhaustive surgical-drop test.
+#[test]
+fn gh780_forced_partial_equation_discovery_pinned_loop_dropped() {
+    use crate::db::ForcePartialEquationErrorGuard;
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use salsa::Setter;
+
+    let mut project = gh780_two_loop_project();
+    // Mint UIDs and pin both loops by their member variables, exactly as
+    // the `SetLoopName` patch primitive would.
+    {
+        let model = &mut project.models[0];
+        let mut uid_of = HashMap::new();
+        for (i, var) in model.variables.iter_mut().enumerate() {
+            let uid = (i as i32) + 1;
+            uid_of.insert(crate::canonicalize(var.get_ident()).into_owned(), uid);
+            match var {
+                datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                datamodel::Variable::Module(m) => m.uid = Some(uid),
+            }
+        }
+        for (name, members) in [
+            ("growth loop", vec!["pop", "growth"]),
+            ("drain loop", vec!["pop", "drain"]),
+        ] {
+            model.loop_metadata.push(datamodel::LoopMetadata {
+                uids: members.iter().map(|v| uid_of[*v]).collect(),
+                deleted: false,
+                name: name.to_string(),
+                description: String::new(),
+            });
+        }
+    }
+
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let _force = ForcePartialEquationErrorGuard::new("pop", "growth");
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+    assert_eq!(ltm.mode, crate::db::LtmMode::Discovery);
+
+    // The doomed-edge pin is dropped; the drain pin keeps its loop score.
+    let loop_scores: Vec<&str> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .map(|v| v.name.as_str())
+        .collect();
+    assert_eq!(
+        loop_scores.len(),
+        1,
+        "exactly the drain pin's loop score survives; got: {loop_scores:?}"
+    );
+    let drain_loop = ltm
+        .vars
+        .iter()
+        .find(|v| v.name.as_str() == loop_scores[0])
+        .unwrap();
+    assert!(
+        drain_loop
+            .equation
+            .source_text()
+            .contains("pop\u{2192}drain"),
+        "the surviving pin is the drain loop; got: {}",
+        drain_loop.equation.source_text()
+    );
+
+    // Diagnostics: the partial-equation warning naming the doomed edge AND
+    // the pinned-loop drop warning naming the growth pin.
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .map(|CompilationDiagnostic(d)| d)
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(d.error, DiagnosticError::Assembly(_))
+        })
+        .collect();
+    assert!(
+        assembly.iter().any(|d| {
+            matches!(&d.error, DiagnosticError::Assembly(msg)
+                if msg.contains("growth loop") && msg.contains("not scored"))
+        }),
+        "the doomed pin must surface the pinned-loop drop warning; got: {assembly:?}"
+    );
+}
+
+/// The disjoint-dim sibling (GH #780 / #769): a forced `PartialEquationError`
+/// on a `pop[a1] -> hub` FixedIndex edge routed through
+/// `try_disjoint_dim_arrayed_link_scores` must ALSO record the edge in
+/// `unscoreable_edges` (the second shaped-query call site this fix touches)
+/// and drop the loop through it, rather than fall through to a wrong-shaped
+/// per-shape stand-in.
+#[test]
+fn gh780_forced_partial_equation_disjoint_dim_edge_drops_loop() {
+    use crate::db::{
+        CompilationDiagnostic, DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard,
+    };
+    use salsa::Setter;
+
+    let project = crate::test_common::TestProject::new("gh780_disjoint")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a1", "a2"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("pop[D1]", "100", &["inflow"], &[], None)
+        .array_aux("hub[D2]", "pop[a1] * 0.05")
+        .scalar_aux("refill", "SUM(hub[*])")
+        .array_flow("inflow[D1]", "refill * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let _force = ForcePartialEquationErrorGuard::new("pop", "hub");
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+
+    // No `pop[a1] -> hub` link-score variable (the disjoint per-element form).
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("pop[a1]\u{2192}hub") || v.name.contains("pop\u{2192}hub")),
+        "the doomed disjoint edge must emit no link score; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // Every enumerated loop traverses `pop -> hub`, so all loop scores are
+    // dropped (the only cycle is pop -> hub -> refill -> inflow -> pop).
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+        "loops through the doomed disjoint edge must be dropped; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // The model still compiles -- no fragment-failure cascade.
+    compile_project_incremental(&db, source_project, "main")
+        .expect("the disjoint doomed-edge model still compiles");
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .map(|CompilationDiagnostic(d)| d)
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(d.error, DiagnosticError::Assembly(_))
+        })
+        .collect();
+    assert_eq!(
+        assembly.len(),
+        1,
+        "exactly one partial-equation Warning (the doomed disjoint edge); got: {assembly:?}"
+    );
+}
+
+/// The scalar -> arrayed sibling (GH #780): a forced `PartialEquationError`
+/// on a scalar-source -> arrayed-target edge routed through
+/// `try_scalar_to_arrayed_link_scores` (the direct
+/// `emit_ltm_partial_equation_warning` call site) must ALSO record the edge
+/// and drop the loop through it -- the third shaped/per-element call site
+/// this fix touches.
+#[test]
+fn gh780_forced_partial_equation_scalar_to_arrayed_drops_loop() {
+    use crate::db::{
+        CompilationDiagnostic, DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard,
+    };
+    use salsa::Setter;
+
+    // driver (scalar stock) -> grid[d1] (arrayed) -> feedback (scalar) -> driver.
+    let project = crate::test_common::TestProject::new("gh780_scalar_to_arrayed")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["a", "b"])
+        .stock("driver", "1", &["bump"], &[], None)
+        .flow("bump", "feedback", None)
+        .array_aux("grid[d1]", "driver * 0.1")
+        .aux("feedback", "grid[a] * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let _force = ForcePartialEquationErrorGuard::new("driver", "grid");
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+
+    // No `driver -> grid[*]` per-element link scores.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("driver\u{2192}grid")),
+        "the doomed scalar->arrayed edge must emit no link score; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    // The single loop traverses driver -> grid, so it is dropped.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+        "loops through the doomed scalar->arrayed edge must be dropped; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    compile_project_incremental(&db, source_project, "main")
+        .expect("the scalar->arrayed doomed-edge model still compiles");
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .map(|CompilationDiagnostic(d)| d)
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(d.error, DiagnosticError::Assembly(_))
+        })
+        .collect();
+    // EXACTLY one warning -- the first doomed per-element partial; the edge
+    // is recorded on that first doom (the rest of the elements never run),
+    // so the loop drops with no fragment-failure cascade and no per-element
+    // warning spam.
+    assert_eq!(
+        assembly.len(),
+        1,
+        "the doomed scalar->arrayed edge must warn exactly once (the first \
+         doomed per-element partial), NOT a cascade; got: {assembly:?}"
+    );
+    assert!(
+        assembly[0]
+            .variable
+            .as_deref()
+            .is_some_and(|v| v.contains("driver\u{2192}grid")),
+        "the one warning names the doomed per-element link score; got: {assembly:?}"
+    );
+}
+
+/// A pinned-pass RE-VISIT of a doomed edge must not warn twice (round-2
+/// review MINOR): the pinned pass dedups only edges that EMITTED a var
+/// (`emitted_edges`), so a doomed edge -- which emits none -- is re-visited
+/// and its emitter re-dooms deterministically. The new #780 doom sites must
+/// gate the warning on `unscoreable_edges.insert(..)` returning true (the
+/// pre-existing #758 convention), so the re-visit is silent. Repro:
+/// discovery mode (the causal-edge pass visits `driver -> grid` first) plus
+/// a pin through the same edge (the pinned pass re-visits it).
+#[test]
+fn gh780_doomed_edge_pinned_revisit_warns_once() {
+    use crate::db::ForcePartialEquationErrorGuard;
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use salsa::Setter;
+
+    let mut project = crate::test_common::TestProject::new("gh780_revisit")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["a", "b"])
+        .stock("driver", "1", &["bump"], &[], None)
+        .flow("bump", "feedback", None)
+        .array_aux("grid[d1]", "driver * 0.1")
+        .aux("feedback", "grid[a] * 0.01", None)
+        .build_datamodel();
+    // Pin the loop through the doomed edge (UIDs + LoopMetadata, the
+    // `SetLoopName` shape) so the pinned pass re-visits `driver -> grid`.
+    {
+        let model = &mut project.models[0];
+        let mut uid_of = HashMap::new();
+        for (i, var) in model.variables.iter_mut().enumerate() {
+            let uid = (i as i32) + 1;
+            uid_of.insert(crate::canonicalize(var.get_ident()).into_owned(), uid);
+            match var {
+                datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                datamodel::Variable::Module(m) => m.uid = Some(uid),
+            }
+        }
+        model.loop_metadata.push(datamodel::LoopMetadata {
+            uids: ["driver", "grid", "feedback", "bump"]
+                .iter()
+                .map(|v| uid_of[*v])
+                .collect(),
+            deleted: false,
+            name: "doomed loop".to_string(),
+            description: String::new(),
+        });
+    }
+
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let _force = ForcePartialEquationErrorGuard::new("driver", "grid");
+
+    let _ = model_ltm_variables(&db, model, source_project);
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let partial_warnings: Vec<_> = diags
+        .iter()
+        .map(|CompilationDiagnostic(d)| d)
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && d.variable
+                    .as_deref()
+                    .is_some_and(|v| v.contains("driver\u{2192}grid"))
+                && matches!(d.error, DiagnosticError::Assembly(_))
+        })
+        .collect();
+    assert_eq!(
+        partial_warnings.len(),
+        1,
+        "a pinned-pass re-visit of the doomed edge must NOT duplicate the \
+         partial-equation warning; got: {partial_warnings:?}"
+    );
+}
+
+/// Slot count for a synthetic var: product of its dimensions' element
+/// counts (1 for a scalar). Mirrors the integration suite's `slot_count`.
+#[cfg(test)]
+fn slot_count_for(var: &LtmSyntheticVar, dims: &[datamodel::Dimension]) -> usize {
+    if var.dimensions.is_empty() {
+        return 1;
+    }
+    var.dimensions
+        .iter()
+        .map(|dn| {
+            dims.iter()
+                .find(|d| d.name() == dn.as_str())
+                .map(|d| d.len())
+                .unwrap_or(1)
+        })
+        .product()
 }

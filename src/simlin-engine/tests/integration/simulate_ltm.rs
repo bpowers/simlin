@@ -2471,9 +2471,14 @@ fn test_scalar_to_arrayed_link_score() {
     // The scalar-source -> arrayed-target edge `capacity -> gap` is emitted
     // as one scalar link score *per target element*, named
     // `$⁚ltm⁚link_score⁚capacity→gap[{elem}]` with no dimensions -- NOT a
-    // single Bare-A2A var with three contiguous slots. (The Bare-A2A form
-    // was undiscoverable: `parse_link_offsets`'s `expand_a2a_link_offsets`
-    // would invent a phantom `capacity[nyc]` node.)
+    // single Bare-A2A var with three contiguous slots. (Historical note:
+    // before GH #754 the Bare-A2A form was undiscoverable -- `parse_link_offsets`'s
+    // `expand_a2a_link_offsets` invented a phantom `capacity[nyc]` node -- which
+    // motivated this per-target-element emission. Post-#754 a scalar-source
+    // Bare A2A score IS discoverable (the from-node projects to the bare name),
+    // so discoverability no longer forces this choice; the per-target-element
+    // emission remains the deliberate convention for plain (non-reducer)
+    // scalar->arrayed edges on its own merits, and this test pins it.)
     for elem in ["nyc", "boston", "la"] {
         let want = format!("$\u{205A}ltm\u{205A}link_score\u{205A}capacity\u{2192}gap[{elem}]");
         let off = *results
@@ -4630,6 +4635,8 @@ fn discover_loops_element_level(
     // Get LTM variable metadata and project dimensions for A2A expansion
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let dm_dims = project_datamodel_dims(&db, sync.project);
+    let expansion =
+        simlin_engine::analysis::build_link_expansion_context(&db, source_model, sync.project);
     // The emission-derived per-sub-model output-port set the per-exit-port
     // recompute needs (GH #698), built through the exact production decision.
     let sub_model_ports = simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
@@ -4640,6 +4647,7 @@ fn discover_loops_element_level(
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        &expansion,
         &sub_model_ports,
         None,
     )
@@ -8310,6 +8318,8 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
         element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let dm_dims = project_datamodel_dims(&db, sync.project);
+    let expansion =
+        simlin_engine::analysis::build_link_expansion_context(&db, source_model, sync.project);
     let sub_model_ports = simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
     let found = ltm_finding::discover_loops_with_graph(
         &results,
@@ -8317,6 +8327,7 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        &expansion,
         &sub_model_ports,
         None,
     )
@@ -9466,6 +9477,8 @@ fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
             .collect();
         let ltm = model_ltm_variables(&db2, source_model, sync.project);
         let dm_dims = project_datamodel_dims(&db2, sync.project);
+        let expansion =
+            simlin_engine::analysis::build_link_expansion_context(&db2, source_model, sync.project);
         // No modules in this model, so the per-exit-port recompute never fires;
         // an empty output-port map is correct.
         ltm_finding::discover_loops_with_graph(
@@ -9474,6 +9487,7 @@ fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
             &stocks,
             &ltm.vars,
             dm_dims,
+            &expansion,
             &ltm_finding::SubModelOutputPorts::new(),
             None,
         )
@@ -9747,6 +9761,8 @@ fn test_lookup_table_link_score_is_nonzero() {
         element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let dm_dims = project_datamodel_dims(&db, sync.project);
+    let expansion =
+        simlin_engine::analysis::build_link_expansion_context(&db, source_model, sync.project);
     let sub_model_ports = simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
     let found = ltm_finding::discover_loops_with_graph(
         &results,
@@ -9754,6 +9770,7 @@ fn test_lookup_table_link_score_is_nonzero() {
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        &expansion,
         &sub_model_ports,
         None,
     )

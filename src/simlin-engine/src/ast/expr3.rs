@@ -1044,36 +1044,40 @@ impl<'a> Pass1Context<'a> {
             return (transformed, has_a2a);
         }
 
-        // Get the array dimensions and names from the expression bounds
-        let (dims, dim_names) = match transformed.get_array_bounds() {
-            Some(bounds) => (
-                bounds.dims().to_vec(),
-                bounds.dim_names().map(|n| n.to_vec()),
-            ),
+        let view = match Self::decomposed_array_view(&transformed) {
+            Some(view) => view,
             None => {
-                // No array bounds - might be a scalar or already decomposed
-                // Check for array view
-                if let Some(view) = transformed.get_array_view() {
-                    (view.dims.clone(), Some(view.dim_names.clone()))
-                } else {
-                    // Scalar expression - no decomposition needed
+                // Fallback to the original type-checker bounds when the
+                // resolved expression shape cannot be derived locally.
+                let (dims, dim_names) = match transformed.get_array_bounds() {
+                    Some(bounds) => (
+                        bounds.dims().to_vec(),
+                        bounds.dim_names().map(|n| n.to_vec()),
+                    ),
+                    None => {
+                        if let Some(view) = transformed.get_array_view() {
+                            (view.dims.clone(), Some(view.dim_names.clone()))
+                        } else {
+                            // Scalar expression - no decomposition needed
+                            return (transformed, has_a2a);
+                        }
+                    }
+                };
+                if dims.is_empty() {
                     return (transformed, has_a2a);
+                }
+                if let Some(names) = dim_names {
+                    ArrayView::contiguous_with_names(dims, names)
+                } else {
+                    ArrayView::contiguous(dims)
                 }
             }
         };
 
-        // Edge case: empty dimensions means 0-dimensional array (scalar-like)
-        // No decomposition needed for this case
-        if dims.is_empty() {
+        // Edge case: empty dimensions means 0-dimensional array (scalar-like).
+        if view.dims.is_empty() {
             return (transformed, has_a2a);
         }
-
-        // Create the view for the temp array, preserving dimension names for broadcasting
-        let view = if let Some(names) = dim_names {
-            ArrayView::contiguous_with_names(dims, names)
-        } else {
-            ArrayView::contiguous(dims)
-        };
 
         // Allocate a temp ID and create the decomposition
         let temp_id = self.allocate_temp_id();
@@ -1114,6 +1118,172 @@ impl<'a> Pass1Context<'a> {
             Expr3::App(_, _, _) => false,
             // Already an assignment - don't re-decompose
             Expr3::AssignTemp(_, _, _) => false,
+        }
+    }
+
+    /// Derive the temp view from the already-transformed expression tree.
+    ///
+    /// Type-checker bounds are computed before Pass 1 resolves active A2A
+    /// dimension references.  For reducer bodies such as
+    /// `SUM(matrix[D1,*] * frac[D1])`, the original `Op2` bounds can still
+    /// mention `D1` even though both references have since collapsed that axis
+    /// to the active element.  Using the resolved tree prevents the temp
+    /// iterator from reintroducing active dimensions that the reducer should
+    /// not iterate.
+    fn decomposed_array_view(expr: &Expr3) -> Option<ArrayView> {
+        match expr {
+            Expr3::StaticSubscript(_, view, _, _)
+            | Expr3::TempArray(_, view, _)
+            | Expr3::TempArrayElement(_, view, _, _) => Some(view.clone()),
+            Expr3::Subscript(_, indices, bounds, _) => {
+                let bounds = bounds.as_ref()?;
+                Self::subscript_view_from_bounds(indices, bounds)
+            }
+            Expr3::Op1(_, inner, _, _) => Self::decomposed_array_view(inner),
+            Expr3::Op2(_, left, right, _, _) => {
+                let left_view = Self::decomposed_array_view(left);
+                let right_view = Self::decomposed_array_view(right);
+                Self::combine_views(left_view, right_view)
+            }
+            Expr3::If(_, then_expr, else_expr, _, _) => {
+                let then_view = Self::decomposed_array_view(then_expr);
+                let else_view = Self::decomposed_array_view(else_expr);
+                Self::combine_views(then_view, else_view)
+            }
+            Expr3::App(_, bounds, _) | Expr3::Var(_, bounds, _) => {
+                bounds.as_ref().map(Self::array_view_from_bounds)
+            }
+            Expr3::Const(_, _, _) | Expr3::AssignTemp(_, _, _) => None,
+        }
+    }
+
+    fn array_view_from_bounds(bounds: &ArrayBounds) -> ArrayView {
+        let dims = bounds.dims().to_vec();
+        if let Some(names) = bounds.dim_names() {
+            ArrayView::contiguous_with_names(dims, names.to_vec())
+        } else {
+            ArrayView::contiguous(dims)
+        }
+    }
+
+    fn subscript_view_from_bounds(
+        indices: &[IndexExpr3],
+        bounds: &ArrayBounds,
+    ) -> Option<ArrayView> {
+        let bound_dims = bounds.dims();
+        let bound_names = bounds.dim_names();
+        let mut dims = Vec::new();
+        let mut names = Vec::new();
+        let mut next_result_dim = 0usize;
+
+        for (index_pos, index) in indices.iter().enumerate() {
+            let preserve = match index {
+                IndexExpr3::StarRange(name, _) => Some(Some(name.as_str())),
+                IndexExpr3::StaticRange(start, end, _) => {
+                    let (_, name) = Self::bound_dim_for_preserved_index(
+                        bound_dims,
+                        bound_names,
+                        indices.len(),
+                        index_pos,
+                        None,
+                        &mut next_result_dim,
+                    )?;
+                    dims.push(end.saturating_sub(*start));
+                    names.push(name);
+                    continue;
+                }
+                IndexExpr3::Range(_, _, _) => Some(None),
+                IndexExpr3::DimPosition(_, _)
+                | IndexExpr3::Dimension(_, _)
+                | IndexExpr3::Expr(_) => None,
+            };
+
+            let Some(preferred_name) = preserve else {
+                continue;
+            };
+
+            let (dim, name) = Self::bound_dim_for_preserved_index(
+                bound_dims,
+                bound_names,
+                indices.len(),
+                index_pos,
+                preferred_name,
+                &mut next_result_dim,
+            )?;
+            dims.push(dim);
+            names.push(name);
+        }
+
+        Some(ArrayView::contiguous_with_names(dims, names))
+    }
+
+    fn bound_dim_for_preserved_index(
+        bound_dims: &[usize],
+        bound_names: Option<&[String]>,
+        source_index_count: usize,
+        index_pos: usize,
+        preferred_name: Option<&str>,
+        next_result_dim: &mut usize,
+    ) -> Option<(usize, String)> {
+        if let (Some(names), Some(name)) = (bound_names, preferred_name)
+            && let Some(pos) = names.iter().position(|candidate| candidate == name)
+        {
+            return Some((bound_dims[pos], names[pos].clone()));
+        }
+
+        if bound_dims.len() == source_index_count && bound_dims.len() > index_pos {
+            let name = Self::bound_name_for_index(bound_names, index_pos, preferred_name)
+                .unwrap_or_default();
+            return Some((bound_dims[index_pos], name));
+        }
+
+        if *next_result_dim < bound_dims.len() {
+            let pos = *next_result_dim;
+            *next_result_dim += 1;
+            let name =
+                Self::bound_name_for_index(bound_names, pos, preferred_name).unwrap_or_default();
+            return Some((bound_dims[pos], name));
+        }
+
+        None
+    }
+
+    fn bound_name_for_index(
+        bound_names: Option<&[String]>,
+        index_pos: usize,
+        fallback: Option<&str>,
+    ) -> Option<String> {
+        bound_names
+            .and_then(|names| names.get(index_pos))
+            .cloned()
+            .or_else(|| fallback.map(str::to_string))
+    }
+
+    fn combine_views(left: Option<ArrayView>, right: Option<ArrayView>) -> Option<ArrayView> {
+        match (left, right) {
+            (None, None) => None,
+            (Some(view), None) | (None, Some(view)) => Some(view),
+            (Some(left), Some(right)) => {
+                if left.dims == right.dims && left.dim_names == right.dim_names {
+                    return Some(left);
+                }
+
+                if left.dim_names.iter().any(|name| name.is_empty())
+                    || right.dim_names.iter().any(|name| name.is_empty())
+                {
+                    return None;
+                }
+
+                let mut dims = left.dims;
+                let mut names = left.dim_names;
+                for (dim, name) in right.dims.into_iter().zip(right.dim_names) {
+                    if !names.iter().any(|existing| existing == &name) {
+                        dims.push(dim);
+                        names.push(name);
+                    }
+                }
+                Some(ArrayView::contiguous_with_names(dims, names))
+            }
         }
     }
 }

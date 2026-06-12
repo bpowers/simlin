@@ -583,24 +583,13 @@ fn test_get_errors_no_ltm_diagnostics_when_ltm_never_requested() {
 /// projection-feeder acceptance, so the reducer is not hoisted, the element
 /// graph keeps the conservative cross-product, and the cross-row circuits'
 /// loop scores reference per-`(row, slot)` link-score names the cartesian
-/// emitters never produce -- those fragments genuinely fail to compile (a
-/// real, non-injected failure; pinned engine-side by
+/// emitters never produce. The engine catches that before fragment
+/// compilation now, warning that the loop score was not emitted rather than
+/// letting the fragment compiler create a zero stub (pinned engine-side by
 /// `non_projection_feeder_co_source_closure_stays_loud`). The previous
-/// fixtures here were the GH #759 pinned-index repro (retired when #759's
-/// fix made its helpers compile), the GH #742 RANK-hoisted agg (retired
-/// when the GH #771 de-hoist stopped minting the ill-shaped agg), the
-/// GH #765 Pinned-bearing variable-backed mixed reduce (retired when T3 of
-/// the shape-expressiveness design made its read-slice scores compile
-/// cleanly), and the GH #743 iterated-dim-feeder closure (retired when
-/// T5's I1 feeder clause hoisted it -- GH #767); the assertion matches the
-/// shared "failed to compile" wording rather than one diagnostic
-/// sub-class, so the test keeps covering the FFI harvest channel as
-/// individual shapes get fixed. (The engine-side guard-injected
-/// `test_model_ltm_fragment_diagnostics_covers_implicit_helpers` covers
-/// the implicit-helper diagnostic leg independently of any real-shape
-/// lifetime; if a future task fixes this shape too and no organic failure
-/// shape remains, the engine-`pub(crate)` `LtmFragmentFailureGuard`
-/// injection hook will need re-exporting for FFI tests.)
+/// fixtures here were organic fragment-failure shapes that have since been
+/// fixed; this one keeps covering the FFI diagnostic harvest channel for the
+/// current loud-safe degradation.
 #[test]
 fn test_get_errors_surfaces_ltm_fragment_failure_after_ltm_sim() {
     let datamodel = TestProject::new("get_errors_fragment_fail")
@@ -640,8 +629,8 @@ fn test_get_errors_surfaces_ltm_fragment_failure_after_ltm_sim() {
             "get_errors must return the fragment-failure warning"
         );
         assert!(
-            any_detail_message_contains(all_errors, "failed to compile"),
-            "the LTM fragment compile-failure warning must reach get_errors after an LTM sim"
+            any_detail_message_contains(all_errors, "was not emitted"),
+            "the LTM missing-name loop-score warning must reach get_errors after an LTM sim"
         );
 
         simlin_error_free(all_errors);

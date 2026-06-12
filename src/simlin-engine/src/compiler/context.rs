@@ -3012,3 +3012,43 @@ fn test_positional_fallback_ignores_unrelated_mapping() {
         "target element t2 should select the second source element"
     );
 }
+
+#[test]
+fn reducer_bare_cosource_uses_active_slot_once() {
+    use crate::test_common::TestProject;
+
+    let project = TestProject::new("gh789_reducer_bare_cosource")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux("matrix[D1,D2]", "D1 * D2")
+        .array_aux("frac[D1]", "10 * D1")
+        .array_aux("solo[D1]", "SUM(frac)")
+        .array_aux("growth[D1]", "SUM(matrix[D1,*] * frac)");
+
+    project.assert_vm_result_incremental("solo", &[10.0, 20.0]);
+    project.assert_vm_result_incremental("growth", &[30.0, 120.0]);
+}
+
+#[test]
+fn rank_sliced_view_inside_reducer_in_arrayed_equation_runs() {
+    use crate::test_common::TestProject;
+
+    let project = TestProject::new("gh794_rank_sliced_view")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_stock("stock[Region]", "100", &[], &[], None)
+        .array_aux("pop[Region,D2]", "stock[Region] * D2 * 0.1")
+        .array_with_ranges_direct(
+            "share",
+            vec!["Region".into()],
+            vec![
+                ("nyc", "SUM(RANK(pop[nyc, *], 1))"),
+                ("boston", "SUM(RANK(pop[boston, *], 1))"),
+            ],
+            None,
+        );
+
+    project.assert_vm_result_incremental("share", &[3.0, 3.0]);
+}

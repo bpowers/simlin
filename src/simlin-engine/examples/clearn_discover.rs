@@ -243,6 +243,10 @@ fn main() {
         .collect();
     let ltm_vars = model_ltm_variables(&db, source_model, source_project);
     let dm_dims = project_datamodel_dims(&db, source_project);
+    // Per-variable declared dims + dimension-mapping context for the A2A
+    // from-node projection (GH #754), built through the production decision.
+    let expansion =
+        simlin_engine::analysis::build_link_expansion_context(&db, source_model, source_project);
     println!(
         "  element-graph stocks: {}, ltm synthetic vars: {}",
         stocks.len(),
@@ -265,6 +269,7 @@ fn main() {
                 &stocks,
                 &ltm_vars.vars,
                 dm_dims,
+                &expansion,
                 &sample_steps,
             )
         });
@@ -361,6 +366,7 @@ fn main() {
             &stocks,
             &ltm_vars.vars,
             dm_dims,
+            &expansion,
             &sub_model_ports,
             None,
         )

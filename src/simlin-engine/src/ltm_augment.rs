@@ -1155,6 +1155,12 @@ pub(crate) enum PartialEquationErrorKind {
     /// Neither the changed-first nor the changed-last ceteris-paribus
     /// convention can be rendered as a compilable equation (GH #743).
     UnfreezablePartial,
+    /// The live source is a BARE reference to an arrayed variable inside an
+    /// array-reducer argument (GH #779): the changed-last partial cannot be
+    /// rendered faithfully for it, and the spelling's own execution
+    /// semantics carry a spurious factor (GH #789). Selects a diagnostic
+    /// that names the shape and the subscripted-spelling workaround.
+    BareReducerFeeder,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1179,6 +1185,13 @@ impl PartialEquationError {
         PartialEquationError {
             equation_text: equation_text.to_string(),
             kind: PartialEquationErrorKind::UnfreezablePartial,
+        }
+    }
+
+    fn bare_reducer_feeder(equation_text: &str) -> Self {
+        PartialEquationError {
+            equation_text: equation_text.to_string(),
+            kind: PartialEquationErrorKind::BareReducerFeeder,
         }
     }
 }
@@ -1417,6 +1430,92 @@ fn contains_unfreezable_previous(expr: &Expr0) -> bool {
             contains_unfreezable_previous(c)
                 || contains_unfreezable_previous(t)
                 || contains_unfreezable_previous(e)
+        }
+    }
+}
+
+/// Does `expr` reference `source` as a BARE `Var` (NOT subscripted) nested
+/// inside the argument of an array-reducing builtin (`SUM`, `MEAN`, `MIN`,
+/// `MAX`, `STDDEV`)? This is the GH #779 silent-wrong-number shape: a bare
+/// reference to an ARRAYED variable inside an UN-HOISTED reducer.
+///
+/// The bare spelling's EXECUTION semantics are themselves anomalous
+/// (GH #789): an asymmetric probe of `growth[D1] = SUM(matrix[D1,*] * frac)`
+/// shows the engine computes `growth[r] = |D1| * Σ_d2 matrix[r,d2] * frac[r]`
+/// -- a spurious `|D1|` factor, NOT a clean per-slot iteration of the bare
+/// `frac`. The changed-last partial the GH #743 chooser would build --
+/// `sum(matrix[d1,*] * PREVIOUS(source))`, compiled per target slot --
+/// provably disagrees with whatever execution computes for the bare
+/// spelling (a sustained ~3x link/loop-score error for SUM in the canonical
+/// symmetric repro), so the score is silently wrong. The SUBSCRIPTED feeder
+/// spelling (`source[D1]`) is hoisted into an aggregate node and scored
+/// correctly (GH #767/T5); the read-slice vocabulary cannot express a BARE
+/// reducer-feeder read, so the reducer stays un-hoisted and the changed-last
+/// fallback is reached -- where this shape must be DECLINED loudly
+/// (GH #779), not given the silent wrong number.
+///
+/// The walk is reducer-context-aware (`in_reducer`): only a bare `source`
+/// occurrence WITHIN a recognized reducer's argument matters. A bare arrayed
+/// `source` OUTSIDE any reducer (`growth[D1] = source * 2`) is the
+/// bread-and-butter `Bare` A2A case -- its changed-FIRST partial keeps the
+/// reference live and compiles, so it never reaches the changed-last leg and
+/// must not be touched. References already inside a `PREVIOUS(...)`/`INIT(...)`
+/// call are skipped (already lagged/frozen, not a live read this partial
+/// must account for). The reducer set comes from
+/// `reducer_collapses_to_scalar`, so it also includes SIZE -- harmless: an
+/// equation whose only reducer is SIZE keeps the changed-first convention
+/// (the whole reducer is freezable as `PREVIOUS(size(...))`), so it does
+/// not reach this gate. RANK is excluded by that predicate: it is
+/// array-valued and never hoisted (GH #771/#742), so its bare arg is a
+/// genuine `Bare` diagonal reference, not this feeder shape.
+fn references_bare_source_inside_reducer(
+    expr: &Expr0,
+    source: &Ident<Canonical>,
+    in_reducer: bool,
+) -> bool {
+    match expr {
+        Expr0::Const(..) => false,
+        Expr0::Var(ident, _) => in_reducer && &Ident::<Canonical>::new(ident.as_str()) == source,
+        // A subscripted reference is NOT the bare feeder shape -- it is
+        // either the hoisted feeder spelling (`source[D1]`) or an explicit
+        // per-element read, both handled by their own paths. Recurse into
+        // index expressions only to catch a bare `source` used as an index
+        // (defensive; not a reachable feeder shape today).
+        Expr0::Subscript(_, indices, _) => indices.iter().any(|idx| match idx {
+            IndexExpr0::Expr(e) => references_bare_source_inside_reducer(e, source, in_reducer),
+            IndexExpr0::Range(l, r, _) => {
+                references_bare_source_inside_reducer(l, source, in_reducer)
+                    || references_bare_source_inside_reducer(r, source, in_reducer)
+            }
+            IndexExpr0::Wildcard(_)
+            | IndexExpr0::StarRange(_, _)
+            | IndexExpr0::DimPosition(_, _) => false,
+        }),
+        Expr0::App(UntypedBuiltinFn(name, args), _) => {
+            // Contents of PREVIOUS/INIT are already lagged; a bare source
+            // there is not a live read this partial must account for.
+            if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
+                return false;
+            }
+            // A scalar-collapsing array reducer sets the in-reducer marker
+            // for its argument; nested reducers keep it set.
+            let child_in_reducer = in_reducer
+                || crate::ltm_agg::reducer_collapses_to_scalar(
+                    &name.to_ascii_lowercase(),
+                    args.len(),
+                );
+            args.iter()
+                .any(|a| references_bare_source_inside_reducer(a, source, child_in_reducer))
+        }
+        Expr0::Op1(_, inner, _) => references_bare_source_inside_reducer(inner, source, in_reducer),
+        Expr0::Op2(_, l, r, _) => {
+            references_bare_source_inside_reducer(l, source, in_reducer)
+                || references_bare_source_inside_reducer(r, source, in_reducer)
+        }
+        Expr0::If(c, t, e, _) => {
+            references_bare_source_inside_reducer(c, source, in_reducer)
+                || references_bare_source_inside_reducer(t, source, in_reducer)
+                || references_bare_source_inside_reducer(e, source, in_reducer)
         }
     }
 }
@@ -1665,6 +1764,31 @@ fn shaped_guard_form_text(
     let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
         return Err(PartialEquationError::new(equation_text));
     };
+
+    // GH #779: decline the BARE-spelled feeder of an un-hoisted multi-source
+    // reducer. When the live source is referenced BARE (unsubscripted) and is
+    // ARRAYED (it has declared dimensions), the spelling's own execution
+    // semantics are anomalous (GH #789: the engine computes a spurious
+    // iterated-dim-cardinality factor, not a clean per-slot read of the bare
+    // reference) -- and the changed-last partial below, which freezes the
+    // bare reference and compiles per target slot, provably disagrees with
+    // whatever execution computes, producing a SILENT wrong score (a
+    // sustained ~3x error for SUM in the canonical repro). The subscripted
+    // spelling `source[D1]` is hoisted and scored correctly (GH #767/T5);
+    // the bare spelling cannot be expressed by the read-slice vocabulary, so
+    // it must be declined LOUDLY (the GH #780 `Unscoreable` plumbing records
+    // the edge and drops dependent loop scores) rather than scored wrong
+    // silently. This is the only point the shape is reachable: a bare
+    // arrayed source OUTSIDE a reducer keeps the live reference in its
+    // changed-FIRST partial (which compiles), so it never reaches this
+    // fallback.
+    if matches!(shape, RefShape::Bare)
+        && !source_dim_names.is_empty()
+        && references_bare_source_inside_reducer(&ast, from, false)
+    {
+        return Err(PartialEquationError::bare_reducer_feeder(equation_text));
+    }
+
     let mut frozen_ref: Option<Expr0> = None;
     let changed_last = wrap_live_shaped_in_previous(
         ast,
@@ -1916,6 +2040,15 @@ pub(crate) fn generate_iterated_feeder_to_agg_equation(
 /// part -- silently freezing the wrong source row for any off-diagonal
 /// slot. Mirrors [`resolve_mismatched_index_position`]'s uniqueness
 /// defense; the caller converts `None` into the loud unfreezable error.
+///
+/// As of GH #778/#785 this ambiguity bail is UNREACHABLE defense-in-depth:
+/// the only caller (`iterated_feeder_row_scores`) feeds the agg's
+/// `result_dims` as `dims`, and a duplicated `result_dims` is now declined at
+/// agg minting (`ltm_agg::result_dims_has_repeated_dim`), so no square-source
+/// agg -- and hence no repeated-dim feeder slot -- ever reaches here. The bail
+/// is retained as a structural guard in case a future change re-admits the
+/// shape upstream; the live square-source landing is now the loud
+/// cartesian-branch skip (`emit_unscoreable_duplicated_dim_source_warning`).
 fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> Option<Expr0> {
     /// The unique position of `name` in `dims`: `None` for an ambiguous
     /// (repeated) dim name, `Some(None)` for a name not in `dims` (left
@@ -2877,12 +3010,14 @@ pub(crate) fn generate_loop_score_variables(
 
     for (i, loop_item) in loops.iter().enumerate() {
         let var_name = format!("$⁚ltm⁚loop_score⁚{}", loop_item.id);
-        let equation = generate_dimensioned_loop_score_equation(
+        let Some(equation) = generate_dimensioned_loop_score_equation(
             loop_item,
             emitted_link_score_names,
             dm_dims,
             overrides,
-        );
+        ) else {
+            continue;
+        };
         trace.record(i + 1, &equation);
         loop_vars.push((var_name, equation));
     }
@@ -3050,24 +3185,22 @@ fn generate_dimensioned_loop_score_equation(
     emitted: &HashSet<String>,
     dm_dims: &[datamodel::Dimension],
     overrides: &LoopLinkOverrides,
-) -> datamodel::Equation {
+) -> Option<datamodel::Equation> {
     if loop_item.dimensions.is_empty() {
-        return datamodel::Equation::Scalar(generate_loop_score_equation(
-            loop_item, emitted, overrides,
-        ));
+        return try_generate_loop_score_equation(loop_item, emitted, overrides)
+            .map(datamodel::Equation::Scalar);
     }
     // Prefer the compact ApplyToAll form whenever it is correct (every link
     // resolves through a Bare A2A name), regardless of whether per-slot
     // circuit info is available. Otherwise use the per-slot Arrayed form.
     // A dimensioned loop with per-element-only link scores AND no slot_links
     // (a builder that predates slot capture) keeps the legacy ApplyToAll
-    // emission -- the fragment-diagnostics Warning remains the backstop for
-    // the mis-resolution that produces.
+    // emission, but only when every link still resolves to an emitted
+    // link-score name. Otherwise the loop is dropped before fragment
+    // compilation can synthesize a missing-dependency zero stub.
     if loop_item.slot_links.is_empty() || all_links_resolve_bare(loop_item, emitted) {
-        return datamodel::Equation::ApplyToAll(
-            loop_item.dimensions.clone(),
-            generate_loop_score_equation(loop_item, emitted, overrides),
-        );
+        return try_generate_loop_score_equation(loop_item, emitted, overrides)
+            .map(|text| datamodel::Equation::ApplyToAll(loop_item.dimensions.clone(), text));
     }
 
     // Per-slot equations: enumerate the loop's full dimension element space
@@ -3093,17 +3226,20 @@ fn generate_dimensioned_loop_score_equation(
         .iter()
         .map(|(t, l)| (t.as_str(), l.as_slice()))
         .collect();
-    let elements = slot_keys
-        .iter()
-        .map(|tuple| {
-            let text = match by_tuple.get(tuple.as_str()) {
-                Some(links) => generate_link_product(links, emitted, None),
-                None => "0".to_string(),
-            };
-            (tuple.clone(), text, None, None)
-        })
-        .collect();
-    datamodel::Equation::Arrayed(loop_item.dimensions.clone(), elements, None, false)
+    let mut elements = Vec::with_capacity(slot_keys.len());
+    for tuple in &slot_keys {
+        let text = match by_tuple.get(tuple.as_str()) {
+            Some(links) => generate_link_product(links, emitted, None)?,
+            None => "0".to_string(),
+        };
+        elements.push((tuple.clone(), text, None, None));
+    }
+    Some(datamodel::Equation::Arrayed(
+        loop_item.dimensions.clone(),
+        elements,
+        None,
+        false,
+    ))
 }
 
 /// The live source's declared dimension names (canonical, in declaration
@@ -3984,39 +4120,58 @@ fn generate_stock_to_flow_equation(
 /// 2. `FixedIndex` -- a `{from}[...]→{to}` name; prefer the exact
 ///    `target_element` match, else the lexicographically first match.
 ///
-/// If none of the candidates is in `emitted`, return the Bare canonical
-/// name anyway and let the fragment compiler's stub-dep fallback fire.
-/// That matches the pre-resolver behavior on the unreachable branch.
-pub(crate) fn resolve_link_score_name_for_loop(
+/// Returns `None` when no emitted candidate matches. Loop-score generation
+/// treats that as a drop condition: emitting a reference to a missing
+/// synthetic link-score variable would let the fragment compiler insert a
+/// zero dependency stub and silently remove one factor from the loop score.
+fn try_resolve_link_score_name_for_loop(
     from: &str,
     to: &str,
     emitted: &HashSet<String>,
     target_element: Option<&str>,
-) -> String {
+) -> Option<String> {
     if from.contains('[') {
         // Bracketed-from edge. Try the FixedIndex-style name (bracket
         // kept) first, then the variable-level Bare name that an A2A or
         // structural flow→stock link score would carry.
         let verbatim = link_score_var_name(from, to, &RefShape::Bare);
         if emitted.contains(&verbatim) {
-            return verbatim;
+            return Some(verbatim);
         }
         let stripped = strip_subscript(from);
         let bare = link_score_var_name(stripped, to, &RefShape::Bare);
         if emitted.contains(&bare) {
-            return bare;
+            return Some(bare);
         }
-        return verbatim;
+        return None;
     }
 
     let bare = link_score_var_name(from, to, &RefShape::Bare);
     if emitted.contains(&bare) {
-        return bare;
+        return Some(bare);
     }
     if let Some(fixed) = find_fixed_index_emitted_name(from, to, emitted, target_element) {
-        return fixed;
+        return Some(fixed);
     }
-    bare
+    None
+}
+
+/// Resolve a link-score variable name for pathway/composite consumers that
+/// still intentionally rely on the fragment compiler's missing-dependency
+/// fallback for unscoreable sub-model pathway edges. Loop-score generation
+/// uses [`try_resolve_link_score_name_for_loop`] instead so missing names
+/// drop the loop before compilation.
+pub(crate) fn resolve_link_score_name_for_loop(
+    from: &str,
+    to: &str,
+    emitted: &HashSet<String>,
+    target_element: Option<&str>,
+) -> String {
+    if let Some(resolved) = try_resolve_link_score_name_for_loop(from, to, emitted, target_element)
+    {
+        return resolved;
+    }
+    link_score_var_name(from, to, &RefShape::Bare)
 }
 
 /// Scan `emitted` for a link-score variable name matching the FixedIndex
@@ -4078,11 +4233,25 @@ fn find_fixed_index_emitted_name(
 /// loop_score equation would multiply against a missing variable and the
 /// fragment compiler would silently insert a stub dep, dropping the
 /// link's contribution.
+#[cfg(test)]
 fn generate_loop_score_equation(
     loop_item: &Loop,
     emitted_link_score_names: &HashSet<String>,
     overrides: &LoopLinkOverrides,
 ) -> String {
+    try_generate_loop_score_equation(loop_item, emitted_link_score_names, overrides)
+        .unwrap_or_else(|| "0".to_string())
+}
+
+/// Checked loop-score equation generation used by synthetic-var emission.
+/// `None` means at least one link in the cycle has no emitted link-score
+/// variable, so emitting the loop score would compile through a missing-name
+/// zero stub.
+fn try_generate_loop_score_equation(
+    loop_item: &Loop,
+    emitted_link_score_names: &HashSet<String>,
+    overrides: &LoopLinkOverrides,
+) -> Option<String> {
     generate_link_product(
         &loop_item.links,
         emitted_link_score_names,
@@ -4099,28 +4268,26 @@ fn generate_link_product(
     links: &[crate::ltm::Link],
     emitted_link_score_names: &HashSet<String>,
     loop_overrides: Option<(&str, &LoopLinkOverrides)>,
-) -> String {
-    let link_score_names: Vec<String> = links
-        .iter()
-        .enumerate()
-        .map(|(i, link)| {
-            // A per-link override (PR #684: a module link's per-exit-port
-            // pathway-selection alias) takes precedence over the link's
-            // (from, to) name resolution. Only the whole-loop path supplies
-            // an override context; the per-slot path passes `None`.
-            if let Some((loop_id, overrides)) = loop_overrides
-                && let Some(reference) = overrides.get(&(loop_id.to_string(), i))
-            {
-                return reference.clone();
-            }
-            loop_link_score_ref(link, emitted_link_score_names)
-        })
-        .collect();
+) -> Option<String> {
+    let mut link_score_names = Vec::with_capacity(links.len());
+    for (i, link) in links.iter().enumerate() {
+        // A per-link override (PR #684: a module link's per-exit-port
+        // pathway-selection alias) takes precedence over the link's
+        // (from, to) name resolution. Only the whole-loop path supplies
+        // an override context; the per-slot path passes `None`.
+        if let Some((loop_id, overrides)) = loop_overrides
+            && let Some(reference) = overrides.get(&(loop_id.to_string(), i))
+        {
+            link_score_names.push(reference.clone());
+            continue;
+        }
+        link_score_names.push(loop_link_score_ref(link, emitted_link_score_names)?);
+    }
 
     if link_score_names.is_empty() {
-        "0".to_string()
+        Some("0".to_string())
     } else {
-        link_score_names.join(" * ")
+        Some(link_score_names.join(" * "))
     }
 }
 
@@ -4156,7 +4323,7 @@ fn generate_link_product(
 /// element-in-name entry in `emitted` can only be a FixedIndex /
 /// full-reduce cross-dimensional source, so it falls through to the
 /// bracketed-from resolution in `resolve_link_score_name_for_loop`.
-fn loop_link_score_ref(link: &crate::ltm::Link, emitted: &HashSet<String>) -> String {
+fn loop_link_score_ref(link: &crate::ltm::Link, emitted: &HashSet<String>) -> Option<String> {
     let (to_var_level, visited_element) = split_node_subscript(link.to.as_str());
 
     if let Some(elem) = visited_element {
@@ -4172,24 +4339,24 @@ fn loop_link_score_ref(link: &crate::ltm::Link, emitted: &HashSet<String>) -> St
             elem
         );
         if emitted.contains(&per_elem) {
-            return format!("\"{per_elem}\"");
+            return Some(format!("\"{per_elem}\""));
         }
     }
 
-    let name = resolve_link_score_name_for_loop(
+    let name = try_resolve_link_score_name_for_loop(
         link.from.as_str(),
         to_var_level,
         emitted,
         visited_element,
-    );
+    )?;
     // Double-quote the variable name so it can be parsed. Case 2: a
     // cross-element loop edge visits a single element of a dimensioned A2A
     // link score, so subscript the reference at that element. Case 3: no
     // element to pin.
-    match visited_element {
+    Some(match visited_element {
         Some(elem) => format!("\"{name}\"[{elem}]"),
         None => format!("\"{name}\""),
-    }
+    })
 }
 
 /// Classification of array-reducing builtins for cross-dimensional link score

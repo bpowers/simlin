@@ -565,6 +565,7 @@ fn assert_discovery_matches(model_rel_path: &str) {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        &inputs.expansion,
         &inputs.sub_model_output_ports,
         None,
     )
@@ -577,6 +578,7 @@ fn assert_discovery_matches(model_rel_path: &str) {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        &inputs.expansion,
         &inputs.sub_model_output_ports,
         None,
     )
@@ -717,6 +719,7 @@ fn discovery_matches_helper(project: &datamodel::Project, label: &str) {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        &inputs.expansion,
         &inputs.sub_model_output_ports,
         None,
     )
@@ -728,6 +731,7 @@ fn discovery_matches_helper(project: &datamodel::Project, label: &str) {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        &inputs.expansion,
         &inputs.sub_model_output_ports,
         None,
     )

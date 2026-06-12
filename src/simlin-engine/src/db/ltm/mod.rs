@@ -43,21 +43,25 @@ mod pinned;
 // escape it are widened here.
 // `compile_ltm_var_fragment` / `link_score_equation_text_shaped` keep the `pub`
 // surface the `db.rs` root re-exports with `pub use ltm::{...}`.
+#[cfg(test)]
+pub(crate) use compile::ForcePartialEquationErrorGuard;
+pub use compile::{ShapedLinkScore, compile_ltm_var_fragment, link_score_equation_text_shaped};
 pub(crate) use compile::{
     compile_ltm_implicit_var_fragment, compile_ltm_synthetic_fragment,
     model_ltm_fragment_diagnostics,
 };
-pub use compile::{compile_ltm_var_fragment, link_score_equation_text_shaped};
 pub(crate) use link_scores::emit_ltm_partial_equation_warning;
 #[cfg(test)]
 pub(crate) use link_scores::ltm_partial_equation_warning_message;
 pub(crate) use loops::build_loops_from_tiered;
 // The single row/slot derivation (invariant I4 of the shape-expressiveness
-// design), re-exported for `db::analysis::emit_edges_for_reference`'s
-// `PerElement` arm (GH #525) so the element graph's
-// diagonal-with-pinned-axes expansion and the link-score emitters derive
-// rows from one function.
-pub(crate) use loops::{ReadSliceRow, read_slice_rows};
+// design), re-exported so every consumer derives rows from one function:
+// `read_slice_row_parts` is the structured (per-axis parts) core that
+// `db::analysis::emit_agg_routed_edges` reads directly (GH #783); the joined
+// `read_slice_rows`/`ReadSliceRow` projection feeds
+// `db::analysis::emit_edges_for_reference`'s `PerElement` arm (GH #525) and
+// the link-score emitters.
+pub(crate) use loops::{ReadSliceRow, ReadSliceRowParts, read_slice_row_parts, read_slice_rows};
 // The cross-element-through-aggregate petal-stitching core, shared by the
 // exhaustive recovery (`recover_cross_agg_loops`) and discovery
 // (`ltm_finding`, GH #696) so both enumerate exactly the same cross-agg loops.
@@ -1551,6 +1555,7 @@ pub fn model_ltm_variables(
                         model,
                         project,
                         &mut vars,
+                        &mut unscoreable_edges,
                     );
                 } else if let Some(agg) = agg_by_name(from_var_level) {
                     emit_agg_to_target_link_scores(
@@ -1562,6 +1567,7 @@ pub fn model_ltm_variables(
                         model,
                         project,
                         &mut vars,
+                        &mut unscoreable_edges,
                     );
                 } else {
                     emit_link_scores_for_edge(
@@ -1612,6 +1618,20 @@ pub fn model_ltm_variables(
             })
         };
         link_hits(&l.links) || l.slot_links.iter().any(|(_, links)| link_hits(links))
+    }
+
+    fn emit_unresolved_loop_score_warning(db: &dyn Db, model: SourceModel, loop_id: &str) {
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(format!("$⁚ltm⁚loop_score⁚{loop_id}")),
+            error: DiagnosticError::Assembly(format!(
+                "LTM loop score {loop_id} was not emitted because its link-score product \
+                 references a link-score variable that was not emitted; the affected loop is \
+                 not scored instead of compiling through a missing-name zero stub"
+            )),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
     }
 
     if let Some(ref detected_loops) = loops {
@@ -1714,6 +1734,14 @@ pub fn model_ltm_variables(
             dm_dims,
             &module_overrides.overrides,
         );
+        let emitted_loop_score_names: HashSet<String> =
+            loop_vars.iter().map(|(name, _)| name.clone()).collect();
+        for l in detected_loops {
+            let expected = format!("$⁚ltm⁚loop_score⁚{}", l.id);
+            if !emitted_loop_score_names.contains(&expected) {
+                emit_unresolved_loop_score_warning(db, model, l.id.as_str());
+            }
+        }
         for (name, equation) in loop_vars {
             // The equation carries its own dimension shape (Scalar /
             // ApplyToAll / Arrayed); mirror it onto the layout-sizing
@@ -1848,6 +1876,7 @@ pub fn model_ltm_variables(
                             model,
                             project,
                             &mut vars,
+                            &mut unscoreable_edges,
                         );
                     } else if let Some(agg) = agg_by_name(from_var_level) {
                         emit_agg_to_target_link_scores(
@@ -1859,6 +1888,7 @@ pub fn model_ltm_variables(
                             model,
                             project,
                             &mut vars,
+                            &mut unscoreable_edges,
                         );
                     } else {
                         emit_link_scores_for_edge(
@@ -1936,6 +1966,9 @@ pub fn model_ltm_variables(
                     dm_dims,
                     &crate::ltm_augment::LoopLinkOverrides::new(),
                 );
+                if pin_loop_vars.is_empty() {
+                    emit_unresolved_loop_score_warning(db, model, pin_loop.id.as_str());
+                }
                 for (lname, equation) in pin_loop_vars {
                     let dimensions = parse::ltm_equation_dimensions(&equation).to_vec();
                     vars.push(LtmSyntheticVar {

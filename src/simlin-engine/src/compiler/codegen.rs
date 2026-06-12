@@ -278,15 +278,6 @@ impl<'module> Compiler<'module> {
 
     /// Convert an ArrayView to a StaticArrayView for a temp array
     fn array_view_to_static_temp(&mut self, temp_id: u32, view: &ArrayView) -> StaticArrayView {
-        let sparse: SmallVec<[RuntimeSparseMapping; 2]> = view
-            .sparse
-            .iter()
-            .map(|s| RuntimeSparseMapping {
-                dim_index: s.dim_index as u8,
-                parent_offsets: s.parent_offsets.iter().map(|&x| x as u16).collect(),
-            })
-            .collect();
-
         // Look up or create DimIds for each dimension using the dim_names
         let dim_ids: SmallVec<[DimId; 4]> = view
             .dim_names
@@ -302,13 +293,26 @@ impl<'module> Compiler<'module> {
             })
             .collect();
 
+        // Temp arrays are always written into compact scratch storage:
+        // `AssignTemp` writes `temp_off + current`, and array-producing
+        // builtins write `temp_off + orig_idx`. Preserve the shape and
+        // dimension IDs for broadcasting, but do not preserve source-view
+        // offset/strides/sparse metadata from the expression that produced
+        // the temp.
+        let mut strides: SmallVec<[i32; 4]> = view.dims.iter().map(|_| 1).collect();
+        let mut stride = 1i32;
+        for i in (0..view.dims.len()).rev() {
+            strides[i] = stride;
+            stride *= view.dims[i] as i32;
+        }
+
         StaticArrayView {
             base_off: temp_id,
             is_temp: true,
             dims: view.dims.iter().map(|&d| d as u16).collect(),
-            strides: view.strides.iter().map(|&s| s as i32).collect(),
-            offset: view.offset as u32,
-            sparse,
+            strides,
+            offset: 0,
+            sparse: SmallVec::new(),
             dim_ids,
         }
     }

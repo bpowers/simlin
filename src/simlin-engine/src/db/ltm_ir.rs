@@ -36,8 +36,8 @@ use crate::db::{Db, RefShape, SourceModel, SourceProject, reconstruct_model_vari
 // ── AST-walker helpers (moved from db/analysis.rs) ─────────────────────────
 
 /// One occurrence of a source variable in a target's AST -- the IR builder's
-/// internal per-variable intermediate, before `in_reducer` + the hoisting
-/// decision are folded into [`ClassifiedSite::routing`].
+/// internal per-variable intermediate, before the reducer context + the
+/// hoisting decision are folded into [`ClassifiedSite::routing`].
 ///
 /// `target_element` is set only when the reference appears inside an
 /// `Ast::Arrayed` per-element expression: the value is the canonical
@@ -46,22 +46,25 @@ use crate::db::{Db, RefShape, SourceModel, SourceProject, reconstruct_model_vari
 /// it stays `None` (the reference contributes to every target element
 /// according to the shape's normal broadcast/diagonal rules).
 ///
-/// `in_reducer` is true iff the reference site occurs syntactically inside
-/// an array-reducing builtin call (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`
-/// -- the `crate::ltm_agg::reducer_is_hoistable` set; `SIZE`, the
-/// array-valued `RANK` (GH #771), and the 2-arg `MIN`/`MAX` are *not*
-/// hoisted reducers). It is the precise signal for
-/// "should this reference be rerouted through a hoisted aggregate node",
-/// which the access `shape` alone cannot answer: a target with *both*
-/// `SUM(pop[*])` and a direct `pop[idx]` produces a `DynamicIndex` site for
-/// the *direct* `pop[idx]` reference too, and that one must keep its own
-/// conservative element edge / Bare link score rather than collapsing into
-/// the agg.
+/// `in_reducer` is true iff [`reducer_keys`] is non-empty: the reference site
+/// occurs syntactically inside an array-reducing builtin call (`SUM`/`MEAN`/
+/// `MIN`/`MAX`/`STDDEV` -- the `crate::ltm_agg::reducer_is_hoistable` set;
+/// `SIZE`, the array-valued `RANK` (GH #771), and the 2-arg `MIN`/`MAX` are
+/// *not* hoisted reducers). It is the coarse signal for "this site belongs to
+/// a reducer read".
+///
+/// `reducer_keys` carries the canonical printed text of every enclosing
+/// hoistable reducer, outermost to innermost. Routing must match a site to an
+/// aggregate node by this key, not just by `(from, to)`: GH #793 showed that a
+/// declined sibling reducer read of `from` can share an edge with a hoisted
+/// sibling reducer. The declined site's contribution must remain direct and
+/// get loudly dropped, not be absorbed into the sibling agg's halves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReferenceSite {
     pub shape: RefShape,
     pub target_element: Option<String>,
     pub in_reducer: bool,
+    pub reducer_keys: Vec<String>,
 }
 
 /// Resolve a single subscript index to a literal element name (canonical
@@ -339,7 +342,8 @@ fn collect_all_reference_sites(
     };
     match ast {
         crate::ast::Ast::Scalar(expr) | crate::ast::Ast::ApplyToAll(_, expr) => {
-            walk_all_in_expr(expr, &ctx, lookup_dims, None, false, &mut sites);
+            let mut reducer_keys = Vec::new();
+            walk_all_in_expr(expr, &ctx, lookup_dims, None, &mut reducer_keys, &mut sites);
         }
         crate::ast::Ast::Arrayed(_, subscript_map, default_expr, _) => {
             // Per-element expressions: visit slots in canonical element-key
@@ -347,17 +351,26 @@ fn collect_all_reference_sites(
             let mut elem_keys: Vec<_> = subscript_map.keys().collect();
             elem_keys.sort();
             for k in elem_keys {
+                let mut reducer_keys = Vec::new();
                 walk_all_in_expr(
                     &subscript_map[k],
                     &ctx,
                     lookup_dims,
                     Some(k.as_str()),
-                    false,
+                    &mut reducer_keys,
                     &mut sites,
                 );
             }
             if let Some(default) = default_expr {
-                walk_all_in_expr(default, &ctx, lookup_dims, None, false, &mut sites);
+                let mut reducer_keys = Vec::new();
+                walk_all_in_expr(
+                    default,
+                    &ctx,
+                    lookup_dims,
+                    None,
+                    &mut reducer_keys,
+                    &mut sites,
+                );
             }
         }
     }
@@ -375,20 +388,24 @@ fn walk_all_in_expr(
     ctx: &WalkCtx<'_>,
     lookup_dims: &mut impl FnMut(&str) -> Vec<crate::dimensions::Dimension>,
     target_element: Option<&str>,
-    in_reducer: bool,
+    reducer_keys: &mut Vec<String>,
     sites: &mut HashMap<String, Vec<ReferenceSite>>,
 ) {
     use crate::ast::{Expr2, IndexExpr2};
     use crate::builtins::{BuiltinContents, walk_builtin_expr};
 
-    let push = |from: &str, shape: RefShape, sites: &mut HashMap<String, Vec<ReferenceSite>>| {
+    let push = |from: &str,
+                shape: RefShape,
+                reducer_keys: &[String],
+                sites: &mut HashMap<String, Vec<ReferenceSite>>| {
         sites
             .entry(from.to_string())
             .or_default()
             .push(ReferenceSite {
                 shape,
                 target_element: target_element.map(|s| s.to_string()),
-                in_reducer,
+                in_reducer: !reducer_keys.is_empty(),
+                reducer_keys: reducer_keys.to_vec(),
             });
     };
 
@@ -396,7 +413,7 @@ fn walk_all_in_expr(
         Expr2::Const(..) => {}
         Expr2::Var(ident, _, _) => {
             if ctx.variables.contains_key(ident) {
-                push(ident.as_str(), RefShape::Bare, sites);
+                push(ident.as_str(), RefShape::Bare, reducer_keys, sites);
             }
         }
         Expr2::Subscript(ident, indices, _, _) => {
@@ -415,16 +432,16 @@ fn walk_all_in_expr(
                     ctx.dim_ctx,
                 )
                 .unwrap_or_else(|| classify_subscript_shape(indices, &from_dims));
-                push(ident.as_str(), shape, sites);
+                push(ident.as_str(), shape, reducer_keys, sites);
             }
             for idx in indices {
                 match idx {
                     IndexExpr2::Expr(e) => {
-                        walk_all_in_expr(e, ctx, lookup_dims, target_element, in_reducer, sites)
+                        walk_all_in_expr(e, ctx, lookup_dims, target_element, reducer_keys, sites)
                     }
                     IndexExpr2::Range(l, r, _) => {
-                        walk_all_in_expr(l, ctx, lookup_dims, target_element, in_reducer, sites);
-                        walk_all_in_expr(r, ctx, lookup_dims, target_element, in_reducer, sites);
+                        walk_all_in_expr(l, ctx, lookup_dims, target_element, reducer_keys, sites);
+                        walk_all_in_expr(r, ctx, lookup_dims, target_element, reducer_keys, sites);
                     }
                     IndexExpr2::Wildcard(_)
                     | IndexExpr2::StarRange(_, _)
@@ -433,11 +450,14 @@ fn walk_all_in_expr(
             }
         }
         Expr2::App(builtin, _, _) => {
-            let child_in_reducer = in_reducer || crate::ltm_agg::reducer_is_hoistable(builtin);
+            let pushed_reducer_key = crate::ltm_agg::reducer_is_hoistable(builtin);
+            if pushed_reducer_key {
+                reducer_keys.push(crate::patch::expr2_to_string(expr));
+            }
             walk_builtin_expr(builtin, |contents| match contents {
                 BuiltinContents::Ident(id, _) => {
                     if ctx.variables.contains_key(&Ident::<Canonical>::new(id)) {
-                        push(id, RefShape::Bare, sites);
+                        push(id, RefShape::Bare, reducer_keys, sites);
                     }
                 }
                 BuiltinContents::Expr(sub_expr) => walk_all_in_expr(
@@ -445,7 +465,7 @@ fn walk_all_in_expr(
                     ctx,
                     lookup_dims,
                     target_element,
-                    child_in_reducer,
+                    reducer_keys,
                     sites,
                 ),
                 // A graphical-function table reference is static data, not a
@@ -453,18 +473,40 @@ fn walk_all_in_expr(
                 // table itself (only the index argument carries real edges).
                 BuiltinContents::LookupTable(_) => {}
             });
+            if pushed_reducer_key {
+                reducer_keys.pop();
+            }
         }
-        Expr2::Op1(_, operand, _, _) => {
-            walk_all_in_expr(operand, ctx, lookup_dims, target_element, in_reducer, sites)
-        }
+        Expr2::Op1(_, operand, _, _) => walk_all_in_expr(
+            operand,
+            ctx,
+            lookup_dims,
+            target_element,
+            reducer_keys,
+            sites,
+        ),
         Expr2::Op2(_, left, right, _, _) => {
-            walk_all_in_expr(left, ctx, lookup_dims, target_element, in_reducer, sites);
-            walk_all_in_expr(right, ctx, lookup_dims, target_element, in_reducer, sites);
+            walk_all_in_expr(left, ctx, lookup_dims, target_element, reducer_keys, sites);
+            walk_all_in_expr(right, ctx, lookup_dims, target_element, reducer_keys, sites);
         }
         Expr2::If(cond, then_e, else_e, _, _) => {
-            walk_all_in_expr(cond, ctx, lookup_dims, target_element, in_reducer, sites);
-            walk_all_in_expr(then_e, ctx, lookup_dims, target_element, in_reducer, sites);
-            walk_all_in_expr(else_e, ctx, lookup_dims, target_element, in_reducer, sites);
+            walk_all_in_expr(cond, ctx, lookup_dims, target_element, reducer_keys, sites);
+            walk_all_in_expr(
+                then_e,
+                ctx,
+                lookup_dims,
+                target_element,
+                reducer_keys,
+                sites,
+            );
+            walk_all_in_expr(
+                else_e,
+                ctx,
+                lookup_dims,
+                target_element,
+                reducer_keys,
+                sites,
+            );
         }
     }
 }
@@ -548,9 +590,10 @@ pub(crate) struct LtmReferenceSitesResult {
 /// so the `sites` values are in a stable order. The synthetic agg an
 /// `in_reducer` reference routes through is found via the same `by_var`
 /// indexing `enumerate_agg_nodes` exposes (a synthetic agg of `to` whose
-/// `sources` include `from`), and the routing decision is the
-/// byte-identical `route_through_agg = !routed_aggs.is_empty() && in_reducer`
-/// the old element-graph / link-score walkers each restated.
+/// `sources` include `from`), then narrowed to aggs whose canonical reducer
+/// text matches one of the site's enclosing reducer keys. That site-precise
+/// key check prevents a hoisted sibling reducer from claiming a declined
+/// sibling read on the same `(from, to)` edge (GH #793).
 #[salsa::tracked(returns(ref))]
 pub(crate) fn model_ltm_reference_sites(
     db: &dyn Db,
@@ -621,8 +664,9 @@ pub(crate) fn model_ltm_reference_sites(
             .unwrap_or_default();
 
         for (from_name, raw_sites) in raw_by_source {
-            // The byte-identical `routed_aggs` filter the old walkers each
-            // restated: synthetic aggs of `to` that read `from`.
+            // Synthetic aggs of `to` that read `from`. The per-site routing
+            // below further narrows this by canonical reducer text; a sibling
+            // agg on the same edge must not absorb this site's read (GH #793).
             let routed_aggs: Vec<usize> = synthetic_aggs_in_to
                 .iter()
                 .copied()
@@ -654,11 +698,25 @@ pub(crate) fn model_ltm_reference_sites(
 
             let mut classified: Vec<ClassifiedSite> = Vec::new();
             for raw in raw_sites {
-                // `route_through_agg = !routed_aggs.is_empty() && in_reducer`.
-                if raw.in_reducer && !routed_aggs.is_empty() {
-                    // Mirror the old `for agg in &routed_aggs` loop: route
-                    // this reference through every routed agg.
-                    for &agg_idx in &routed_aggs {
+                let matching_aggs: Vec<usize> = if raw.in_reducer {
+                    routed_aggs
+                        .iter()
+                        .copied()
+                        .filter(|&agg_idx| {
+                            raw.reducer_keys
+                                .iter()
+                                .any(|key| key == &agg_nodes.aggs[agg_idx].equation_text)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                if !matching_aggs.is_empty() {
+                    // Route this reference only through aggs minted for one
+                    // of its enclosing reducers. A nested reducer can match
+                    // its own key when the outer reducer declined; when the
+                    // outer reducer hoisted, its key is the one present.
+                    for agg_idx in matching_aggs {
                         classified.push(ClassifiedSite {
                             shape: raw.shape.clone(),
                             target_element: raw.target_element.clone(),
