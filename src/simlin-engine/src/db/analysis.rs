@@ -557,6 +557,12 @@ fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]
 ///   explicit element map (declined by the positional-only gate): the
 ///   conservative broadcast (every source element feeds every target
 ///   element).
+///
+/// Besides the element graph (`emit_edges_for_reference`'s `Bare` arm), this
+/// is also consumed by discovery's `ltm_finding::expand_a2a_link_offsets`
+/// (GH #754) to spell a Bare A2A link score's per-element from-node, so a
+/// semantics change here changes which discovery search-graph edges exist --
+/// keep the two consumers in mind.
 pub(crate) fn expand_same_element(
     from_name: &str,
     to_name: &str,

@@ -10062,6 +10062,238 @@ fn gh754_mapped_feeder_loop_discoverable_in_discovery_mode() {
     );
 }
 
+/// GH #754 slot-attribution oracle (review hardening): the gh790-family
+/// integration fixtures are SLOT-SYMMETRIC -- constant co-sources make the
+/// feeder score identically +1 in every slot -- so a mutation that rotates
+/// each expanded edge's result slot by one passes them all (only the
+/// `parse_link_offsets` unit tests catch it). This test is the
+/// defense-in-depth layer: an ASYMMETRIC fixture whose Bare A2A scores are
+/// per-slot DISTINCT on BOTH projection arms, plus a per-loop oracle
+/// asserting each discovered loop's score series equals the product of
+/// INDEPENDENTLY slot-resolved link-score series pointwise.
+///
+/// Fixture: `growth[D1,D2] = SUM(m3[D1,D2,*] * scale * pop[D1,D2])` with
+/// per-element-distinct `m3` overrides and `scale = SUM(pop[*,*])` (whole-RHS
+/// reduces only -- NO synthetic agg nodes, so the reported loop links ARE the
+/// scored links). The distinct m3 rows make the pop slots diverge, so:
+///
+///  - `scale -> growth` (the SCALAR projection arm) scores per-slot
+///    distinctly (scale's share of each slot's growth change differs), and
+///  - `growth -> inflow` / `pop -> inflow` (the `expand_same_element`
+///    equal-dim arm, via `inflow[e] = growth[e] + pop[e]*0.001`) score
+///    per-slot distinctly (the growth-vs-pop contribution ratio differs).
+///
+/// A slot-rotation mutation in EITHER arm makes the engine's loop product
+/// read a neighboring slot's series while the oracle reads the right one --
+/// they diverge at the first step where the slots differ. (Mutation-validated
+/// before commit: rotating each arm's offsets by one fails this test.)
+#[test]
+fn gh754_asymmetric_loop_scores_match_slot_resolved_link_products() {
+    let project = TestProject::new("gh754_slot_oracle")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["c", "d"])
+        .named_dimension("D3", &["p", "q"])
+        .array_with_ranges_direct(
+            "m3",
+            vec!["D1".into(), "D2".into(), "D3".into()],
+            vec![
+                ("a,c,p", "0.00001"),
+                ("a,c,q", "0.00002"),
+                ("a,d,p", "0.00003"),
+                ("a,d,q", "0.00004"),
+                ("b,c,p", "0.00005"),
+                ("b,c,q", "0.00006"),
+                ("b,d,p", "0.00007"),
+                ("b,d,q", "0.00008"),
+            ],
+            None,
+        )
+        .array_stock("pop[D1,D2]", "100", &["inflow"], &[], None)
+        .scalar_aux("scale", "SUM(pop[*, *])")
+        .array_aux("growth[D1,D2]", "SUM(m3[D1, D2, *] * scale * pop[D1, D2])")
+        .array_flow(
+            "inflow[D1,D2]",
+            "growth[D1, D2] + pop[D1, D2] * 0.001",
+            None,
+        )
+        .build_datamodel();
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the asymmetric oracle fixture")
+    .loops;
+    let results = &inputs.vm_results;
+
+    // Per-dim canonical element lists, for independent row-major slot
+    // resolution of Bare A2A scores.
+    let dim_elements: std::collections::HashMap<String, Vec<String>> = inputs
+        .dims
+        .iter()
+        .map(|d| {
+            let elems = match &d.elements {
+                datamodel::DimensionElements::Named(names) => names
+                    .iter()
+                    .map(|n| n.to_lowercase())
+                    .collect::<Vec<String>>(),
+                datamodel::DimensionElements::Indexed(size) => {
+                    (1..=*size).map(|i| i.to_string()).collect()
+                }
+            };
+            (d.name().to_lowercase(), elems)
+        })
+        .collect();
+
+    // Independently resolve a loop link's result-slot offset: an exact
+    // element-level score name (the passthrough families) wins; otherwise the
+    // Bare A2A name's base offset plus the TARGET element's row-major slot
+    // over the score's own dims -- the layout rule the runtime wrote the
+    // score with, derived here from the datamodel rather than via
+    // `parse_link_offsets`, so a slot-misattribution there cannot fool the
+    // oracle into agreeing with itself.
+    let resolve = |from: &str, to: &str| -> usize {
+        let exact = format!("{LINK_SCORE_PREFIX}{from}\u{2192}{to}");
+        if let Some((_, off)) = results.offsets.iter().find(|(k, _)| k.as_str() == exact) {
+            return *off;
+        }
+        let from_base = from.split('[').next().unwrap();
+        let (to_base, to_elem) = match to.split_once('[') {
+            Some((b, rest)) => (b, rest.strip_suffix(']').unwrap()),
+            None => (to, ""),
+        };
+        let bare = format!("{LINK_SCORE_PREFIX}{from_base}\u{2192}{to_base}");
+        let base = offset_of(results, &bare);
+        if to_elem.is_empty() {
+            return base;
+        }
+        let score_var = inputs
+            .ltm_vars
+            .iter()
+            .find(|v| v.name == bare)
+            .unwrap_or_else(|| panic!("no LtmSyntheticVar for {bare}"));
+        let parts: Vec<&str> = to_elem.split(',').collect();
+        assert_eq!(
+            parts.len(),
+            score_var.dimensions.len(),
+            "target element {to_elem} arity must match {bare}'s score dims {:?}",
+            score_var.dimensions
+        );
+        let mut slot = 0usize;
+        for (part, dim_name) in parts.iter().zip(&score_var.dimensions) {
+            let elems = &dim_elements[&dim_name.to_lowercase()];
+            let idx = elems
+                .iter()
+                .position(|e| e == part)
+                .unwrap_or_else(|| panic!("element {part} not in dim {dim_name}: {elems:?}"));
+            slot = slot * elems.len() + idx;
+        }
+        base + slot
+    };
+
+    // Fixture-asymmetry guard: the two arm-exercising Bare A2A scores must be
+    // per-slot pairwise DISTINCT at the final step, otherwise a rotation
+    // mutation is invisible and this oracle proves nothing.
+    let last = results.step_count - 1;
+    for bare in ["scale\u{2192}growth", "growth\u{2192}inflow"] {
+        let base = offset_of(results, &format!("{LINK_SCORE_PREFIX}{bare}"));
+        let vals: Vec<f64> = (0..4)
+            .map(|slot| results.data[last * results.step_size + base + slot])
+            .collect();
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                assert!(
+                    (vals[i] - vals[j]).abs() > 1e-9,
+                    "{bare} slots {i} and {j} coincide at the final step ({vals:?}); \
+                     the fixture degenerated to slot-symmetric and cannot catch \
+                     slot misattribution"
+                );
+            }
+        }
+    }
+
+    // Both projection arms must appear in the discovered loop set, with the
+    // bare scalar `scale` node and the equal-dim diagonal hops.
+    let mut saw_scalar_arm_hop = false;
+    let mut saw_equal_dim_arm_hop = false;
+
+    // THE ORACLE: each discovered loop's per-step score equals the product of
+    // its links' independently slot-resolved score series, pointwise (the
+    // engine multiplies in link order; mirror it exactly).
+    assert!(!found.is_empty(), "discovery must find the fixture's loops");
+    let mut compared_finite = 0usize;
+    for fl in &found {
+        let offsets: Vec<usize> = fl
+            .loop_info
+            .links
+            .iter()
+            .map(|l| {
+                if l.from.as_str() == "scale" {
+                    saw_scalar_arm_hop = true;
+                }
+                if l.from.as_str().starts_with("growth[") && l.to.as_str().starts_with("inflow[") {
+                    saw_equal_dim_arm_hop = true;
+                }
+                resolve(l.from.as_str(), l.to.as_str())
+            })
+            .collect();
+        for (step, (_, engine_score)) in fl.scores.iter().enumerate() {
+            let mut oracle = 1.0_f64;
+            let mut has_nan = false;
+            for &off in &offsets {
+                let v = results.data[step * results.step_size + off];
+                if v.is_nan() {
+                    has_nan = true;
+                    break;
+                }
+                oracle *= v;
+            }
+            if has_nan {
+                assert!(
+                    engine_score.is_nan(),
+                    "loop {} step {step}: oracle product is NaN but the engine \
+                     scored {engine_score} -- the engine read different slots",
+                    fl.loop_info.id
+                );
+                continue;
+            }
+            assert!(
+                (oracle - engine_score).abs() <= 1e-9 * oracle.abs().max(1.0),
+                "loop {} step {step}: engine score {engine_score} != slot-resolved \
+                 oracle product {oracle}; links: {:?} -- a result-slot \
+                 misattribution in the discovery A2A expansion",
+                fl.loop_info.id,
+                fl.loop_info.links
+            );
+            if engine_score.is_finite() && *engine_score != 0.0 {
+                compared_finite += 1;
+            }
+        }
+    }
+    assert!(
+        compared_finite > 0,
+        "the oracle never compared a finite non-zero step -- the fixture carries no signal"
+    );
+    assert!(
+        saw_scalar_arm_hop,
+        "no discovered loop hops through the scalar `scale` feeder; the scalar \
+         projection arm is unexercised"
+    );
+    assert!(
+        saw_equal_dim_arm_hop,
+        "no discovered loop traverses growth[e] -> inflow[e]; the equal-dim \
+         projection arm is unexercised"
+    );
+}
+
 /// GH #790, sibling audit: a scalar feeder ALONGSIDE an iterated-dim
 /// projection feeder (`growth[D1] = SUM(matrix[D1,*] * frac[D1] * scale)`).
 /// The scalar `scale` rides the new A2A feeder arm; the arrayed `frac[D1]`

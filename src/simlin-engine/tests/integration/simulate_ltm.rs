@@ -2471,9 +2471,14 @@ fn test_scalar_to_arrayed_link_score() {
     // The scalar-source -> arrayed-target edge `capacity -> gap` is emitted
     // as one scalar link score *per target element*, named
     // `$⁚ltm⁚link_score⁚capacity→gap[{elem}]` with no dimensions -- NOT a
-    // single Bare-A2A var with three contiguous slots. (The Bare-A2A form
-    // was undiscoverable: `parse_link_offsets`'s `expand_a2a_link_offsets`
-    // would invent a phantom `capacity[nyc]` node.)
+    // single Bare-A2A var with three contiguous slots. (Historical note:
+    // before GH #754 the Bare-A2A form was undiscoverable -- `parse_link_offsets`'s
+    // `expand_a2a_link_offsets` invented a phantom `capacity[nyc]` node -- which
+    // motivated this per-target-element emission. Post-#754 a scalar-source
+    // Bare A2A score IS discoverable (the from-node projects to the bare name),
+    // so discoverability no longer forces this choice; the per-target-element
+    // emission remains the deliberate convention for plain (non-reducer)
+    // scalar->arrayed edges on its own merits, and this test pins it.)
     for elem in ["nyc", "boston", "la"] {
         let want = format!("$\u{205A}ltm\u{205A}link_score\u{205A}capacity\u{2192}gap[{elem}]");
         let off = *results
