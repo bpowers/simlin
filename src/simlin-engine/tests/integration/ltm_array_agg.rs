@@ -6928,24 +6928,30 @@ fn scalar_owner_subset_slice_reduce_scores_read_rows_only() {
     }
 }
 
-/// Shape-expressiveness section 6 (the DECLINED residual): an ARRAYED-owner
-/// Pinned/subset broadcast slice -- `share[Region] = SUM(pop[nyc,*])`, a
-/// scalar-result slice broadcast over the owner's dims -- degrades to the
-/// GH #758 loud skip: exactly one Warning naming the `pop -> share` edge,
-/// NO `pop→share` link-score variable of any shape, and NO loop scores
-/// (every feedback loop here traverses the declined edge).
+/// GH #777 (shape-expressiveness section-6 deferred completion): an
+/// ARRAYED-owner Pinned broadcast slice -- `share[Region] = SUM(pop[nyc,*])`,
+/// a scalar-result slice broadcast over the owner's dims -- is now SCORED via
+/// the per-(read-row, full-target-element) broadcast rule (the design's
+/// section-3 `PerElement` rule applied to a variable-backed reducer owner),
+/// not loud-skipped.
 ///
-/// Pre-T3 this shape was SILENTLY WRONG (the unfiled GH #765 sibling),
-/// emitting full-cartesian per-(row, slot) garbage: `pop[boston,*]→
-/// share[boston]` scores read a constant delta-ratio +1.0 even though
-/// `share[boston] = SUM(pop[nyc,*])` does not read `pop[boston,*]` at all,
-/// the true `pop[nyc,*]→share[boston]` dependency had no score, and the
-/// `pop[nyc,*]→share[nyc]` partials (0.5) fed loop scores alongside 5
-/// warned 0-stub loops. (The full broadcast fan-out is T6's PerElement rule
-/// applied to variable-backed owners -- a tracked follow-up, not T3.)
+/// `share[e] = SUM(pop[nyc,p] + pop[nyc,q])` for EVERY `e`, with both rows
+/// changing equally (`pop[nyc,d2] = stock[nyc]*0.1`). So each link score
+/// `pop[nyc,d2]→share[e]` is the SUM contribution share -- one row's delta
+/// over the sum of both equal deltas = 0.5 -- for all four (row, element)
+/// pairs (`{nyc,p},{nyc,q}` x `{nyc,boston}`), including the broadcast row
+/// `share[boston]` (which reads `pop[nyc,*]`, not `pop[boston,*]`). No
+/// `pop[boston,*]→share[*]` score exists (the unread rows). Loops close only
+/// through `share[nyc]` (only `pop[nyc,*]` is read, and only `stock[nyc]`
+/// drives it -- `stock[boston] → pop[boston,*]` is a dead end), so the two
+/// per-circuit loops (one per D2 element) score 1*1*0.5*1 = 0.5.
+///
+/// Pre-fix this shape took a loud GH #758 skip; pre-T3 it was SILENTLY WRONG
+/// (full-cartesian per-(row, slot) garbage: `pop[boston,*]→share[boston]`
+/// scored a constant +1.0 although the reducer never reads those rows).
 #[test]
-fn arrayed_owner_broadcast_pinned_slice_reduce_skips_loudly() {
-    let project = TestProject::new("t3_broadcast_decline")
+fn arrayed_owner_broadcast_pinned_slice_reduce_scores_read_rows_broadcast() {
+    let project = TestProject::new("gh777_broadcast_pinned")
         .with_sim_time(0.0, 8.0, 1.0)
         .named_dimension("Region", &["nyc", "boston"])
         .named_dimension("D2", &["p", "q"])
@@ -6966,56 +6972,413 @@ fn arrayed_owner_broadcast_pinned_slice_reduce_skips_loudly() {
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("LTM-enabled compilation should succeed");
 
-    // Exactly one Warning, naming the declined edge.
+    // Zero warnings: the broadcast is fully scored, no loud skip.
     let warnings = assembly_warnings(&db, sync.project);
-    assert_eq!(
-        warnings.len(),
-        1,
-        "the declined broadcast slice must surface exactly one Warning; got: {warnings:?}"
-    );
-    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
-        panic!("expected an Assembly warning; got: {:?}", warnings[0]);
-    };
     assert!(
-        msg.contains("pop") && msg.contains("share"),
-        "the Warning must name the declined edge; got: {msg}"
+        warnings.is_empty(),
+        "the broadcast slice must compile with zero warnings; got: {warnings:?}"
     );
 
-    // No pop→share link-score variable of any shape, and no loop scores at
-    // all (every loop traverses the declined edge).
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let garbage: Vec<&str> = ltm
-        .vars
-        .iter()
-        .filter(|v| {
-            v.name.starts_with(LINK_SCORE_PREFIX)
-                && v.name.contains("pop")
-                && v.name.contains("share")
-        })
-        .map(|v| v.name.as_str())
-        .collect();
-    assert!(
-        garbage.is_empty(),
-        "the declined edge must emit NO link-score variable (pre-T3 it \
-         emitted full-cartesian garbage); got: {garbage:?}"
-    );
-    let loop_scores: Vec<&str> = ltm
-        .vars
-        .iter()
-        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
-        .map(|v| v.name.as_str())
-        .collect();
-    assert!(
-        loop_scores.is_empty(),
-        "every loop traverses the declined edge, so no loop score may be \
-         emitted; got: {loop_scores:?}"
-    );
 
-    // The model itself still simulates fine -- the decline is an LTM
-    // analysis degradation, not a model error.
+    // Exactly the (read-row x full-target-element) link scores: the two read
+    // rows `pop[nyc,p]`, `pop[nyc,q]` fanned across the FULL target element
+    // set `share[nyc]`, `share[boston]`. The unread `pop[boston,*]` rows get
+    // NO score.
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[nyc,{d2}]\u{2192}share[{e}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected broadcast link score {name:?}; have: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.starts_with(LINK_SCORE_PREFIX)
+                        && v.name.contains("pop")
+                        && v.name.contains("share"))
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+            let phantom = format!("{LINK_SCORE_PREFIX}pop[boston,{d2}]\u{2192}share[{e}]");
+            assert!(
+                ltm.vars.iter().all(|v| v.name != phantom),
+                "the unread boston row must get NO link score; got {phantom:?}"
+            );
+        }
+    }
+
+    // No loop traverses boston at all: only `pop[nyc,*]` is read, and only
+    // `stock[nyc]` drives it, so the only circuits close through `share[nyc]`.
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the read-row loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v.contains("boston")),
+            "no loop may run through boston; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+        // Detected and scored surfaces agree: every detected loop has a
+        // scored loop-score variable.
+        let score_name = format!("{LOOP_SCORE_PREFIX}{}", l.id);
+        assert!(
+            ltm.vars.iter().any(|v| v.name == score_name),
+            "detected loop {} must have a scored loop-score variable {score_name:?}",
+            l.id
+        );
+    }
+
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end()
         .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Each of the four (row, element) link scores reads 0.5 (the SUM
+    // contribution share: one of two equal deltas).
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[nyc,{d2}]\u{2192}share[{e}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step} must score 0.5; got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Per-circuit loop scores: 1 * 1 * 0.5 * 1 = 0.5 post-startup, finite.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the read-row loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    v.is_finite() && (v - 0.5).abs() < 1e-9,
+                    "loop score {} slot {slot} step {step} must read 0.5; got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// GH #777, the DISJOINT-dim spelling: `share[D9] = SUM(arr[*:Core])`, where
+/// `D9 = {m, n}` is DISJOINT from `arr`'s dim `Region`. The broadcast rule
+/// expresses this IDENTICALLY to the related-dim spelling -- every `share[e]`
+/// reads the same `arr[*:Core]` slice -- so the per-(read-row,
+/// full-target-element) scores `arr[{row}]→share[{e}]` are emitted for the
+/// subset rows x the full `D9` element set, the model compiles with zero
+/// warnings, and the loop (closed through a scalar `total = SUM(share[*])`
+/// so no dim-mismatch edge is needed) is scored and finite. This pins the
+/// loud-skip-vs-broadcast scope decision: the disjoint spelling fires the
+/// broadcast branch BEFORE `try_cross_dimensional_link_scores`'
+/// `result_axis_names` containment check (which would early-return `None`),
+/// and the disjoint hop keeps both subscripts via `is_broadcast_reduce_edge`
+/// (where `is_partial_reduce_edge`'s containment check fails). No spelling is
+/// silent-wrong.
+#[test]
+fn arrayed_owner_broadcast_disjoint_dim_slice_reduce_scores_read_rows() {
+    let project = TestProject::new("gh777_broadcast_disjoint")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .named_dimension("D9", &["m", "n"])
+        .array_with_ranges("factor[Region]", vec![("a", "1"), ("b", "1"), ("c", "5")])
+        .array_aux_direct("share", vec!["D9".into()], "SUM(arr[*:Core])", None)
+        .scalar_aux("total", "SUM(share[*])")
+        .array_flow("inflow[Region]", "total * 0.0005 * factor[Region]", None)
+        .array_stock("arr[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the disjoint-dim broadcast slice must compile with zero warnings; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    // Subset rows (arr[a], arr[b]) x the FULL D9 target element set ({m, n}).
+    for row in ["a", "b"] {
+        for e in ["m", "n"] {
+            let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}share[{e}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected disjoint broadcast link score {name:?}; have: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.starts_with(LINK_SCORE_PREFIX)
+                        && v.name.contains("arr")
+                        && v.name.contains("share"))
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+        // The unread arr[c] row never scores.
+        for e in ["m", "n"] {
+            let phantom = format!("{LINK_SCORE_PREFIX}arr[c]\u{2192}share[{e}]");
+            assert!(
+                ltm.vars.iter().all(|v| v.name != phantom),
+                "the unread arr[c] row must get NO link score; got {phantom:?}"
+            );
+        }
+    }
+
+    // Loops are scored and finite (the loop hops resolve the per-(row, e)
+    // names; no silent constant-0 stubs).
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the broadcast loops must exist");
+    for l in &detected.loops {
+        let score_name = format!("{LOOP_SCORE_PREFIX}{}", l.id);
+        assert!(
+            ltm.vars.iter().any(|v| v.name == score_name),
+            "detected loop {} must have a scored loop-score variable",
+            l.id
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the broadcast loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    v.is_finite(),
+                    "loop score {} slot {slot} step {step} must be finite (no stub); \
+                     got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// GH #777, the subset twin: an ARRAYED-owner subset broadcast slice --
+/// `share[Region] = SUM(arr[*:Core])`, `Core = {a, b}` a proper
+/// subdimension of `Region = {a, b, c}` -- is scored by the same broadcast
+/// rule. The reducer reads only the subset rows `arr[a]`, `arr[b]`, and its
+/// single scalar value broadcasts over every `share[e]`, so each link score
+/// `arr[{row}]→share[{e}]` exists for `row in {a,b}` x `e in {a,b,c}` (the
+/// MEAN/SUM divisor is the SUBSET size, not the full extent), `arr[c]` gets
+/// no score, and the model compiles with zero warnings. The two subset rows
+/// change equally (`factor[a]=factor[b]=1`), so each SUM contribution share
+/// is 0.5. Loops close only through the read subset rows (`arr[c]` never
+/// feeds `share`); they are scored, finite, and the detected/scored surfaces
+/// agree.
+#[test]
+fn arrayed_owner_broadcast_subset_slice_reduce_scores_read_rows_broadcast() {
+    let project = TestProject::new("gh777_broadcast_subset")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_with_ranges("factor[Region]", vec![("a", "1"), ("b", "1"), ("c", "5")])
+        .array_aux_direct("share", vec!["Region".into()], "SUM(arr[*:Core])", None)
+        .array_flow(
+            "inflow[Region]",
+            "share[Region] * 0.001 * factor[Region]",
+            None,
+        )
+        .array_stock("arr[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        warnings.is_empty(),
+        "the subset broadcast slice must compile with zero warnings; got: {warnings:?}"
+    );
+
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    // Subset rows x full target element set; the unread `arr[c]` row never
+    // scores.
+    for row in ["a", "b"] {
+        for e in ["a", "b", "c"] {
+            let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}share[{e}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "expected subset broadcast link score {name:?}; have: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.starts_with(LINK_SCORE_PREFIX)
+                        && v.name.contains("arr")
+                        && v.name.contains("share"))
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    for e in ["a", "b", "c"] {
+        let phantom = format!("{LINK_SCORE_PREFIX}arr[c]\u{2192}share[{e}]");
+        assert!(
+            ltm.vars.iter().all(|v| v.name != phantom),
+            "the unread arr[c] row must get NO link score; got {phantom:?}"
+        );
+    }
+
+    let detected = model_detected_loops(&db, sync.models["main"].source_model, sync.project);
+    assert!(!detected.loops.is_empty(), "the subset loops must exist");
+    for l in &detected.loops {
+        assert!(
+            !l.variables.iter().any(|v| v == "arr[c]"),
+            "no loop may run through the unread arr[c] row; loop {}: {:?}",
+            l.id,
+            l.variables
+        );
+        let score_name = format!("{LOOP_SCORE_PREFIX}{}", l.id);
+        assert!(
+            ltm.vars.iter().any(|v| v.name == score_name),
+            "detected loop {} must have a scored loop-score variable {score_name:?}",
+            l.id
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    // Each subset-row link score reads 0.5 (subset divisor, equal deltas).
+    for row in ["a", "b"] {
+        for e in ["a", "b", "c"] {
+            let name = format!("{LINK_SCORE_PREFIX}arr[{row}]\u{2192}share[{e}]");
+            let series = series_at(&results, offset_of(&results, &name));
+            for (step, &v) in series.iter().enumerate().skip(1) {
+                assert!(
+                    (v - 0.5).abs() < 1e-9,
+                    "{name} at step {step} must score 0.5 (subset divisor); got {series:?}"
+                );
+            }
+        }
+    }
+
+    // Loop scores are finite and non-zero post-startup.
+    let loop_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert!(!loop_vars.is_empty(), "the subset loops must be scored");
+    for lv in &loop_vars {
+        let base = offset_of(&results, &lv.name);
+        for slot in 0..slot_count(lv, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    v.is_finite(),
+                    "loop score {} slot {slot} step {step} must be finite; got {series:?}",
+                    lv.name
+                );
+            }
+        }
+    }
+}
+
+/// GH #777 (risk 4: the forced-DISCOVERY twin). The broadcast reduce's
+/// per-(read-row, full-target-element) names (`arr[a]→share[b]`) are a new
+/// producer of the element-in-name grammar on a REDUCER edge, so discovery's
+/// `parse_link_offsets` must resolve them symmetrically with the exhaustive
+/// surface (the #748/#698 lesson). With every variable 1-D over `Region`
+/// (the subset reducer reads `arr[*:Core]`, broadcasting over `Region`), the
+/// broadcast loops are fully traceable: discovery finds the two same-element
+/// circuits (`arr[r]→share[r]→inflow[r]→arr[r]`, score 0.5) AND the genuine
+/// cross-element circuit the broadcast creates (`arr[a]→share[b]→...→
+/// arr[b]→share[a]→...→arr[a]`, score 0.25 = 0.5*0.5). Every link reads
+/// `share` from a Core member (`arr[a]`/`arr[b]`) -- never the unread
+/// `arr[c]` -- so the new names produce no phantom pathway.
+#[test]
+fn gh777_broadcast_discovery_twin_parses_per_element_names() {
+    let project = TestProject::new("gh777_broadcast_discovery")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Core", &["a", "b"])
+        .array_with_ranges("factor[Region]", vec![("a", "1"), ("b", "1"), ("c", "5")])
+        .array_aux_direct("share", vec!["Region".into()], "SUM(arr[*:Core])", None)
+        .array_flow(
+            "inflow[Region]",
+            "share[Region] * 0.001 * factor[Region]",
+            None,
+        )
+        .array_stock("arr[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the broadcast repro")
+    .loops;
+
+    // The broadcast loops trace: the two same-element circuits plus the one
+    // cross-element circuit the broadcast couples (arr[a]<->arr[b] via share).
+    assert!(
+        !found.is_empty(),
+        "discovery must find the broadcast loops; got none"
+    );
+    for fl in &found {
+        // No phantom: every hop reading `share[e]` must come from a Core
+        // member (`arr[a]` or `arr[b]`) -- the broadcast reducer never reads
+        // the out-of-subset `arr[c]`, so a discovered hop from it would be a
+        // parse-corruption phantom.
+        for link in &fl.loop_info.links {
+            let to = link.to.as_str();
+            if to.starts_with("share[") {
+                let from = link.from.as_str();
+                assert!(
+                    from == "arr[a]" || from == "arr[b]",
+                    "discovered hop {from}->{to} reads share from a non-Core \
+                     row -- a phantom; loop {}: {:?}",
+                    fl.loop_info.id,
+                    fl.loop_info.links
+                );
+            }
+            assert!(
+                !link.from.as_str().contains("arr[c]") && !link.to.as_str().contains("arr[c]"),
+                "no loop may run through the unread arr[c]; loop {}: {:?}",
+                fl.loop_info.id,
+                fl.loop_info.links
+            );
+        }
+        // Scores parse and stay finite.
+        assert!(
+            fl.scores.iter().all(|(_, v)| v.is_finite()),
+            "discovered loop {} scores must stay finite",
+            fl.loop_info.id
+        );
+    }
 }
 
 /// T3 golden pin (the design's "explicit golden assertion"): the ALIGNED

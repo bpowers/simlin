@@ -843,10 +843,12 @@ fn walk_var_equation(
 ///   (`total = SUM(pop[*])`, `share[R] = SUM(pop[*])` -- the inert
 ///   reference-walker family), the scalar-owner Pinned/subset slice
 ///   (`total = SUM(pop[nyc,*])`, admitted by the gate), and the
-///   ARRAYED-owner Pinned/subset slice (`share[R] = SUM(pop[nyc,*])`,
-///   GH #777 -- deliberately kept on the gate's loud-skip decline, NOT
-///   widened into here: it has no `Iterated` axis, so its broadcast needs
-///   the design's section-3 `PerElement` rule, T6 machinery).
+///   ARRAYED-owner Pinned/subset BROADCAST slice
+///   (`share[R] = SUM(pop[nyc,*])`, GH #777 -- the variable IS the agg
+///   here too, with `result_dims` empty; the gate's broadcast arm and
+///   `emit_broadcast_reduce_link_scores` fan its single value across the
+///   owner's full element set, the design's section-3 `PerElement` rule
+///   applied to a reducer owner).
 ///
 /// `target_iterated_dims` are the owner's A2A dims (canonical, declared
 /// order; empty for a scalar owner). An `Iterated` axis's `dim` is always
@@ -1744,10 +1746,25 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
 ///   exclusions were deleted atomically with that derivation swap --
 ///   deleting them first would have re-fired the 0.25-vs-0.5
 ///   silent-wrong-divisor hazard the old rustdoc documented.)
-/// - **Scalar-result slice on a SCALAR owner** (`total = SUM(pop[nyc,*])`,
-///   `total = SUM(arr[*:Sub])`; `to_dims.is_empty()`): no `Iterated` axis;
-///   the slot is the bare `to` node, so `emit_agg_routed_edges` emits
-///   exactly the read rows into `to`, matching the per-read-row scores.
+/// - **Scalar-result slice** (no `Iterated` axis -- Pinned and/or
+///   subset-`Reduced` only):
+///   - on a SCALAR owner (`total = SUM(pop[nyc,*])`,
+///     `total = SUM(arr[*:Sub])`; `to_dims.is_empty()`): the slot is the
+///     bare `to` node, so `emit_agg_routed_edges` emits exactly the read
+///     rows into `to`, matching the per-read-row scores.
+///   - on an ARRAYED owner (`share[Region] = SUM(pop[nyc,*])`; the GH #777
+///     broadcast slice): the single scalar reducer value broadcasts over
+///     `to`'s dims. `emit_agg_routed_edges` fans the read rows out across
+///     `to`'s FULL element set (`pop[nyc,d2] → share[e]` for every `e`),
+///     and `try_cross_dimensional_link_scores`' broadcast-reduce branch
+///     emits the matching per-(read-row, full-target-element) scalar
+///     scores -- the design's section-3 `PerElement` rule applied to a
+///     variable-backed reducer owner (the `to[e]` subscript on the name is
+///     the EXISTING per-(row, slot) grammar resolvers already handle). The
+///     read rows are independent of `to`'s dims (every slot reads the same
+///     slice), so the RELATED-dim spelling (`share[Region]`, `Region` a
+///     source dim) and the DISJOINT-dim spelling (`share[D9]`, `D9` not a
+///     source dim) are expressed identically.
 ///
 /// Because the axis checks key on the CANONICAL (co-source) slice, the
 /// gate also admits a FEEDER edge of an aligned partial reduce (GH #767 /
@@ -1771,16 +1788,6 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
 ///   walker's reduction/broadcast edges already ARE the read rows, so
 ///   routing it through the gate would change nothing -- skipped to keep
 ///   the surface byte-identical (inert).
-/// - an ARRAYED-owner scalar-result Pinned/subset slice
-///   (`share[Region] = SUM(pop[nyc,*])`): no `Iterated` axis but `to` is
-///   arrayed -- the reducer's scalar value broadcasts over `to`'s dims,
-///   which per-`(row, slot)` names cannot express (a slot does not name a
-///   complete `to` element). DECLINED here AND loudly skipped by
-///   `try_cross_dimensional_link_scores` (the GH #758 treatment: one
-///   Warning, no link-score variable, loop scores through the edge
-///   dropped). The full broadcast fan-out is the design's section 3
-///   `PerElement` rule applied to variable-backed owners -- T6 machinery,
-///   tracked as GH #777.
 ///
 /// The Iterated-arm alignment check below (`result_dims` == `to`'s dims,
 /// in order) is defense-in-depth since T4: a whole-RHS reduce with
@@ -1829,10 +1836,14 @@ pub(crate) fn variable_backed_reduce_agg<'a>(
                     .zip(to_dims)
                     .all(|(rd, td)| canonicalize(rd).as_ref() == td.name())
         } else {
-            // Scalar-result Pinned/subset slice: admitted only for a SCALAR
-            // owner; the arrayed-owner broadcast slice is the declined
-            // residual (GH #758 loud skip; see the rustdoc).
-            to_dims.is_empty()
+            // Scalar-result Pinned/subset slice with no `Iterated` axis. For
+            // a SCALAR owner the slot is the bare `to` node; for an ARRAYED
+            // owner the single scalar value broadcasts over `to`'s dims, and
+            // the per-(read-row, full-target-element) machinery (GH #777,
+            // shared by `emit_agg_routed_edges`' broadcast fan-out and
+            // `try_cross_dimensional_link_scores`' broadcast-reduce branch)
+            // names every slot. Both are admitted.
+            true
         }
     })
 }
@@ -3436,14 +3447,15 @@ mod tests {
         );
     }
 
-    /// Section 6 (the DECLINED residual): an ARRAYED-owner scalar-result
-    /// Pinned slice (`share[Region] = SUM(pop[nyc,*])` -- no `Iterated`
-    /// axis, arrayed `to`) is DECLINED: the per-`(row, slot)` machinery
-    /// cannot express a scalar reduce broadcast over the owner's dims.
-    /// `try_cross_dimensional_link_scores` routes the edge to the GH #758
-    /// loud skip.
+    /// GH #777: an ARRAYED-owner scalar-result Pinned slice
+    /// (`share[Region] = SUM(pop[nyc,*])` -- no `Iterated` axis, arrayed
+    /// `to`) is ADMITTED: the single scalar reducer value broadcasts over
+    /// the owner's dims, and the per-(read-row, full-target-element)
+    /// machinery (`emit_agg_routed_edges`' broadcast fan-out +
+    /// `try_cross_dimensional_link_scores`' broadcast-reduce branch) names
+    /// every slot.
     #[test]
-    fn reduce_gate_declines_arrayed_owner_scalar_result_slice() {
+    fn reduce_gate_admits_arrayed_owner_scalar_result_slice() {
         let project = TestProject::new("gate_broadcast_pinned")
             .named_dimension("Region", &["nyc", "boston"])
             .named_dimension("D2", &["p", "q"])
@@ -3456,9 +3468,13 @@ mod tests {
         let result = enumerate_agg_nodes(&db, sync.models["main"].source, sync.project);
 
         let to_dims = resolve_dims(&db, sync.project, &["region"]);
+        let accepted = variable_backed_reduce_agg(result, "pop", "share", &to_dims)
+            .expect("the arrayed-owner broadcast slice must be admitted (GH #777)");
+        assert_eq!(accepted.name, "share");
         assert!(
-            variable_backed_reduce_agg(result, "pop", "share", &to_dims).is_none(),
-            "the arrayed-owner scalar-result slice must stay declined (GH #758 loud skip)"
+            accepted.result_dims.is_empty(),
+            "the broadcast reducer's result is scalar (no Iterated axis); got: {:?}",
+            accepted.result_dims
         );
     }
 

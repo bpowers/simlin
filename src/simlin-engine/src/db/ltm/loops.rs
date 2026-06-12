@@ -259,6 +259,49 @@ fn is_per_element_edge(
         })
 }
 
+/// `true` when `from -> to` is an ARRAYED-owner scalar-result BROADCAST
+/// reduce (GH #777): `to` IS a variable-backed agg the shared
+/// [`crate::ltm_agg::variable_backed_reduce_agg`] gate admits, whose slice
+/// has NO `Iterated` axis (`result_dims` empty) but whose owner `to` is
+/// ARRAYED -- `share[Region] = SUM(pop[nyc,*])`. The single scalar reducer
+/// value broadcasts over every `to[e]`, so the hop's only emitted scores are
+/// the per-(read-row, full-target-element) scalars `{from}[{row}]→{to}[{e}]`
+/// (`emit_broadcast_reduce_link_scores`). Like [`is_partial_reduce_edge`] /
+/// [`is_per_element_edge`], the mixed-branch link builder must keep BOTH
+/// endpoint subscripts so `loop_link_score_ref`'s per-element-in-name case
+/// resolves the per-(row, e) name; without this, the disjoint-dim spelling
+/// (where `is_partial_reduce_edge` fails its containment check) would strip
+/// the `from` subscript and reference the nonexistent Bare `{from}→{to}[{e}]`
+/// name, silently stubbing the loop.
+///
+/// Gated on the SAME `variable_backed_reduce_agg` decision the element
+/// graph's broadcast fan-out and the score derivation consult -- the GH #752
+/// single-gate pattern. (The RELATED-dim spelling, `to`'s dims a subset of
+/// `from`'s, is ALSO caught by `is_partial_reduce_edge`; this predicate adds
+/// the disjoint-dim spelling and makes the gate explicit either way.)
+fn is_broadcast_reduce_edge(
+    db: &dyn Db,
+    source_vars: &HashMap<String, SourceVariable>,
+    from: &str,
+    to: &str,
+    model: SourceModel,
+    project: SourceProject,
+) -> bool {
+    let Some(to_sv) = source_vars.get(to) else {
+        return false;
+    };
+    if to_sv.kind(db) == SourceVariableKind::Module {
+        return false;
+    }
+    let to_dims = variable_dimensions(db, *to_sv, project);
+    if to_dims.is_empty() {
+        return false;
+    }
+    let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
+    crate::ltm_agg::variable_backed_reduce_agg(aggs, from, to, to_dims)
+        .is_some_and(|a| a.result_dims.is_empty())
+}
+
 /// Compute the cartesian product of element name lists as comma-joined
 /// subscript strings.
 ///
@@ -1217,17 +1260,24 @@ pub(crate) fn build_element_level_loops(
                             project,
                             from_var_level,
                             to_var_level,
+                        ) || is_broadcast_reduce_edge(
+                            db,
+                            source_vars,
+                            from_var_level,
+                            to_var_level,
+                            model,
+                            project,
                         ))
                     {
                         // Partial reduce (`matrix[d1,d2] → row_sum[d1]`), a
                         // projection-feeder hop (`frac[d1] → growth[d1]`,
-                        // GH #767), or a PerElement hop (`pop[a,young] →
-                        // row_sum[a]`, GH #525): the link score is the
-                        // per-`(row, slot/element)` scalar var
+                        // GH #767), a PerElement hop (`pop[a,young] →
+                        // row_sum[a]`, GH #525), or a BROADCAST reduce hop
+                        // (`pop[nyc,d2] → share[e]`, GH #777): the link score
+                        // is the per-`(row, slot/element)` scalar var
                         // (`$⁚ltm⁚link_score⁚{from}[d1,d2]→{to}[d1]` /
-                        // `{from}[d1]→{to}[d1]` /
-                        // `{from}[a,young]→{to}[a]`), so keep BOTH
-                        // subscripts.
+                        // `{from}[d1]→{to}[d1]` / `{from}[a,young]→{to}[a]` /
+                        // `{from}[nyc,d2]→{to}[e]`), so keep BOTH subscripts.
                         (from_raw, to_raw)
                     } else if to_subscripted && to_is_arrayed {
                         // Scalar->arrayed or same-element A2A: keep `to[e]`,

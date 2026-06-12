@@ -973,16 +973,16 @@ fn element_graph_variable_backed_scalar_owner_subset_slice_routes_read_rows() {
     assert_no_edge(&result, "arr[c]", "total");
 }
 
-/// Shape-expressiveness section 6 (the DECLINED residual): an ARRAYED-owner
-/// scalar-result Pinned slice (`share[Region] = SUM(pop[nyc,*])` -- no
-/// `Iterated` axis, arrayed `to`) stays on the conservative cross-product:
-/// the per-`(row, slot)` machinery cannot express a scalar reduce broadcast
-/// over the owner's dims, so the gate declines it and
-/// `try_cross_dimensional_link_scores` routes the edge to the GH #758 loud
-/// skip (no link scores, dropped loop scores, one Warning). The
-/// cross-product edges are a deliberate SUPERSET of the true reads.
+/// GH #777: an ARRAYED-owner scalar-result Pinned slice
+/// (`share[Region] = SUM(pop[nyc,*])` -- no `Iterated` axis, arrayed `to`)
+/// fans the READ rows out across the FULL target element set: the single
+/// scalar reducer value broadcasts over every `share[e]`, so each read row
+/// `pop[nyc,*]` feeds every `share[e]`. The unread `pop[boston,*]` rows feed
+/// NOTHING (the reducer never reads them). The edge set is EXACTLY (read
+/// rows x all target elements) -- no unread-row edges, replacing the pre-fix
+/// conservative cross-product superset.
 #[test]
-fn element_graph_variable_backed_broadcast_pinned_slice_stays_cross_product() {
+fn element_graph_variable_backed_broadcast_pinned_slice_fans_read_rows() {
     let project = TestProject::new("vb_broadcast_pinned")
         .named_dimension("Region", &["nyc", "boston"])
         .named_dimension("D2", &["p", "q"])
@@ -991,10 +991,25 @@ fn element_graph_variable_backed_broadcast_pinned_slice_stays_cross_product() {
 
     let result = element_edges(&project);
 
-    assert_edge(&result, "pop[nyc,p]", "share[nyc]");
-    assert_edge(&result, "pop[nyc,p]", "share[boston]");
-    assert_edge(&result, "pop[boston,q]", "share[nyc]");
-    assert_edge(&result, "pop[boston,q]", "share[boston]");
+    // Read rows (pop[nyc,*]) x full target element set (share[nyc], share[boston]).
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            assert_edge(&result, &format!("pop[nyc,{d2}]"), &format!("share[{e}]"));
+        }
+    }
+    // Unread rows (pop[boston,*]) feed no target slot, and the bare-name
+    // dangling node never appears.
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            assert_no_edge(
+                &result,
+                &format!("pop[boston,{d2}]"),
+                &format!("share[{e}]"),
+            );
+        }
+        assert_no_edge(&result, &format!("pop[boston,{d2}]"), "share");
+        assert_no_edge(&result, &format!("pop[nyc,{d2}]"), "share");
+    }
 }
 
 /// AC4.1 (element graph, sliced reducer): `target[Region] = pop[NYC, Adult] +

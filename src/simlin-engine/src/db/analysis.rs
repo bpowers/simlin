@@ -799,12 +799,16 @@ fn expand_same_element(
 /// `Ast::Arrayed` slot) pins the `agg → to` half to that single target.
 ///
 /// A VARIABLE-BACKED agg (`is_synthetic == false`, GH #752 -- the target's
-/// whole RHS is the reducer, so `agg.name == to_name` and the gate
-/// `ltm_agg::variable_backed_reduce_agg` guarantees `result_dims` equal
-/// `to`'s dims, or -- for a scalar-result slice -- that `to` is SCALAR, so
-/// the bare agg name IS `to`'s element node) emits only the source→slot
-/// half: the slot names ARE `to`'s element nodes, and an agg→to half would
-/// emit degenerate `to[e] → to[e]` self-edges.
+/// whole RHS is the reducer, so `agg.name == to_name`) emits only the
+/// source→slot half: the slot names ARE `to`'s element nodes, and an agg→to
+/// half would emit degenerate `to[e] → to[e]` self-edges. The gate
+/// `ltm_agg::variable_backed_reduce_agg` guarantees one of three
+/// slot/owner shapes: `result_dims` equal `to`'s dims (the aligned partial
+/// reduce -- each slot names a complete `to` element); a scalar-result
+/// slice on a SCALAR `to` (the bare agg name IS `to`'s element node); or a
+/// scalar-result slice on an ARRAYED `to` (the GH #777 broadcast -- the
+/// single value reaches every `to[e]`, so the source→slot half fans each
+/// read row out across `to`'s full element set).
 ///
 /// Defensive: when the shared derivation declines -- `read_slice_row_parts`
 /// returns `None` because `from`'s read slice doesn't have one entry per
@@ -940,6 +944,24 @@ fn emit_agg_routed_edges(
             !read_slice_ok || rows.is_some(),
             "every Iterated axis accepted by compute_read_slice must have a slot remap"
         );
+        // The BROADCAST case (GH #777): a VARIABLE-BACKED agg whose result
+        // is scalar (`iterated_dims` empty, every `slot_parts` empty) but
+        // whose owner `to` is ARRAYED -- `share[Region] = SUM(pop[nyc,*])`,
+        // a Pinned/subset slice with no `Iterated` axis. The single scalar
+        // reducer value broadcasts over every `to` element, so each read row
+        // feeds `to[e]` for EVERY `e` (the same slice value reaches every
+        // slot). Without this fan-out the row edges would land on the bare
+        // `agg_node_name(&[])` node (`share`), which does not exist for an
+        // arrayed variable (all its element nodes are subscripted), so the
+        // edges would dangle and loops through the reducer would vanish from
+        // enumeration. The full target element set is the broadcast slot
+        // set; it is independent of `from`'s rows, so the RELATED-dim
+        // (`share[Region]`) and DISJOINT-dim (`share[D9]`) spellings fan out
+        // identically. The matching per-(row, e) link scores come from
+        // `try_cross_dimensional_link_scores`' broadcast-reduce branch.
+        let broadcast_targets: Option<Vec<String>> =
+            (!agg.is_synthetic && agg.result_dims.is_empty() && !to_dims.is_empty())
+                .then(|| cartesian_element_names(to_name, to_dims));
         if let Some(rows) = rows {
             for crate::db::ltm::ReadSliceRowParts {
                 row_parts,
@@ -952,34 +974,47 @@ fn emit_agg_routed_edges(
                     let refs: Vec<&str> = row_parts.iter().map(String::as_str).collect();
                     format_multi_element_name(from_name, &refs)
                 };
-                element_edges
-                    .entry(from_node)
-                    .or_default()
-                    .insert(agg_node_name(slot_parts));
+                let entry = element_edges.entry(from_node).or_default();
+                match &broadcast_targets {
+                    Some(targets) => {
+                        for t in targets {
+                            entry.insert(t.clone());
+                        }
+                    }
+                    None => {
+                        entry.insert(agg_node_name(slot_parts));
+                    }
+                }
             }
         } else {
-            // Conservative fallback: every source element, scalar agg. NOTE:
-            // for a VARIABLE-BACKED *arrayed* agg this fallback is NOT
-            // merely imprecise -- a scalar slot makes `agg_node_name` the
-            // BARE variable name (`inflow`), a node that does not exist in
-            // the element graph (an arrayed variable's nodes are all
-            // subscripted), so the edges dangle and any loop through the
-            // reducer silently disappears from enumeration. (For a SCALAR
-            // variable-backed owner -- the section-6 scalar-result
-            // admission -- the bare name IS the element node, so the
-            // fallback is safe there.) Unreachable by construction today
+            // Conservative fallback (a stale arity/remap invariant only --
+            // `read_slice_row_parts` declined). For a VARIABLE-BACKED
+            // *arrayed* agg the bare `agg_node_name(&[])` is a node that does
+            // not exist in the element graph (an arrayed variable's nodes are
+            // all subscripted), so it would dangle and drop loops -- thus the
+            // BROADCAST owner (GH #777) fans to its full target element set
+            // here too (matching the primary arm above), and only a SCALAR
+            // variable-backed owner (the section-6 scalar-result admission,
+            // whose bare name IS its element node) keeps the bare-agg
+            // fallback. Unreachable by construction today
             // (`variable_backed_reduce_agg` only admits well-formed slices
             // whose Iterated remaps exist, and the debug_assert above pins
-            // the remap invariant), but if the gate is ever widened this
-            // fallback must be re-evaluated for the arrayed variable-backed
-            // case (e.g. fall back to the cross-product instead). The scalar
-            // slot (`&[]`) makes `agg_node_name` the bare agg name, matching
-            // the pre-#783 `n_iterated == 0` enumeration.
+            // the remap invariant); the broadcast slice (Pinned/Reduced only)
+            // always derives rows. The scalar slot (`&[]`) makes
+            // `agg_node_name` the bare agg name, matching the pre-#783
+            // `n_iterated == 0` enumeration.
             for from_node in cartesian_element_names(from_name, from_dims) {
-                element_edges
-                    .entry(from_node)
-                    .or_default()
-                    .insert(agg_node_name(&[]));
+                let entry = element_edges.entry(from_node).or_default();
+                match &broadcast_targets {
+                    Some(targets) => {
+                        for t in targets {
+                            entry.insert(t.clone());
+                        }
+                    }
+                    None => {
+                        entry.insert(agg_node_name(&[]));
+                    }
+                }
             }
         }
     }
