@@ -4128,6 +4128,185 @@ fn non_projection_feeder_co_source_closure_stays_loud() {
 }
 
 // ---------------------------------------------------------------------------
+// GH #779: bare-spelled feeder of an un-hoisted multi-source reducer
+// ---------------------------------------------------------------------------
+
+/// Build the GH #779 fixture: an A2A flow `growth[D1]` whose RHS is a
+/// multi-source reducer over `matrix[D1,*]` with the per-row coefficient
+/// `frac` (arrayed over `D1`) referenced BARE -- unsubscripted. Feedback
+/// loops close through `matrix` (`pop -> matrix -> growth -> pop`) and
+/// through `frac` (`pop -> frac -> growth -> pop`).
+///
+/// `reducer` selects the array-reducing builtin (`SUM`, `MEAN`, `MAX`, ...)
+/// so the decline can be exercised across the whole reducer class, not just
+/// `SUM`.
+fn gh779_bare_feeder_fixture(reducer: &str) -> datamodel::Project {
+    TestProject::new("gh779_bare_feeder")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["c", "d"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux_direct(
+            "matrix",
+            vec!["D1".into(), "D2".into()],
+            "pop[D1] * 0.05",
+            None,
+        )
+        .array_aux("frac[D1]", "pop[D1] * 0.005")
+        .array_flow(
+            "growth[D1]",
+            &format!("{reducer}(matrix[D1, *] * frac)"),
+            None,
+        )
+        .build_datamodel()
+}
+
+/// GH #779: the BARE-spelled feeder of an un-hoisted multi-source reducer
+/// must be DECLINED LOUDLY, not given a silent wrong changed-last score.
+///
+/// `growth[D1] = SUM(matrix[D1, *] * frac)` iterates the bare `frac` over
+/// the target's `D1` dimension in EXECUTION (slot `a` reads `frac[a]`), so
+/// the reducer cannot be hoisted (the bare reference is not expressible by
+/// the read-slice vocabulary -- `compute_read_slice` maps `Expr2::Var` to
+/// all-`Reduced`, the slices disagree). The `frac -> growth` edge then
+/// classifies `Bare` and the GH #743 changed-last chooser emits the
+/// per-element partial `sum(matrix[d1,*] * PREVIOUS(frac))`, which the
+/// engine pins per `D1` slot -- but that DISAGREES with the broadcast
+/// execution, producing a sustained, unwarned link score of ~2.92 (~3x
+/// wrong) and an identically-wrong frac-closure loop score. That is the
+/// silent-wrong-number this test guards against (the worst kind).
+///
+/// The fix declines the bare-feeder shape via the GH #780 machinery: the
+/// shaped query returns `Unscoreable`, the edge is recorded, ONE warning
+/// names the edge, no `frac -> growth` link-score variable is emitted, and
+/// the frac-closure loop is DROPPED. The matrix-closure loops are untouched
+/// (they ride the pre-existing loud degraded path, out of scope for #779).
+/// The subscripted spelling `frac[D1]` stays fully hoisted and correct
+/// (`iterated_dim_feeder_closure_scores_via_hoist`) -- users hitting this
+/// have that easy workaround.
+#[test]
+fn bare_feeder_of_unhoisted_reducer_declines_loudly() {
+    let project = gh779_bare_feeder_fixture("SUM");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // No `frac -> growth` link-score variable: the edge is declined, not
+    // given the silently-wrong changed-last per-element partial.
+    let frac_growth = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
+    assert!(
+        !ltm_vars.iter().any(|v| v.name == frac_growth),
+        "the bare-feeder edge must be DECLINED -- no {frac_growth:?} link score; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // Exactly ONE warning names the declined `frac -> growth` edge (the
+    // matrix-closure loops surface their own separate warnings -- those are
+    // the pre-existing loud degraded path, out of scope here).
+    let all_warnings = assembly_warnings(&db, sync.project);
+    let frac_edge_warnings = all_warnings
+        .iter()
+        .filter(|d| {
+            d.variable
+                .as_deref()
+                .is_some_and(|v| v == frac_growth.as_str())
+        })
+        .count();
+    assert_eq!(
+        frac_edge_warnings, 1,
+        "the declined bare-feeder edge must surface EXACTLY ONE warning naming it; got: {all_warnings:?}"
+    );
+
+    // No frac-closure loop survives: every loop score that references the
+    // (now non-existent) `frac -> growth` link must be dropped, not stubbed.
+    for v in &ltm_vars {
+        if v.name.starts_with(LOOP_SCORE_PREFIX) {
+            assert!(
+                !v.equation.source_text().contains("frac\u{2192}growth"),
+                "the frac-closure loop must be DROPPED, not retained referencing the \
+                 declined edge; loop {} has equation {}",
+                v.name,
+                v.equation.source_text()
+            );
+        }
+    }
+
+    // The model still simulates; no frac-closure loop reads the silent
+    // wrong ~2.92.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    assert!(
+        !results
+            .offsets
+            .keys()
+            .any(|k| k.as_str() == frac_growth.as_str()),
+        "the declined edge must not appear in the simulated results either"
+    );
+
+    // DISCOVERY mode reaches the same shaped query and consumes
+    // `unscoreable_edges` in its pinned-loop pass, so the decline holds there
+    // too: no `frac -> growth` link score is minted.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let disc_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    assert!(
+        !disc_vars.iter().any(|v| v.name == frac_growth),
+        "discovery mode must also decline the bare-feeder edge; got: {:?}",
+        disc_vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// GH #779, the whole reducer class: MEAN/MIN/MAX/STDDEV bare-feeder shapes
+/// decline identically to SUM. The bare arrayed reference inside ANY
+/// array-reducer argument has the same broadcast-vs-per-element
+/// disagreement, so the decline must cover the class.
+#[test]
+fn bare_feeder_decline_covers_reducer_class() {
+    for reducer in ["MEAN", "MIN", "MAX", "STDDEV"] {
+        let project = gh779_bare_feeder_fixture(reducer);
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+            .vars
+            .clone();
+        compile_project_incremental(&db, sync.project, "main")
+            .unwrap_or_else(|e| panic!("{reducer}: LTM-enabled compilation should succeed: {e:?}"));
+
+        let frac_growth = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
+        assert!(
+            !ltm_vars.iter().any(|v| v.name == frac_growth),
+            "{reducer}: the bare-feeder edge must be declined -- no {frac_growth:?}; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+        for v in &ltm_vars {
+            if v.name.starts_with(LOOP_SCORE_PREFIX) {
+                assert!(
+                    !v.equation.source_text().contains("frac\u{2192}growth"),
+                    "{reducer}: frac-closure loop must drop, not retain the declined edge; {}",
+                    v.name
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GH #758: declined element-mapped sliced reducer -> loud unscoreable edge
 // ---------------------------------------------------------------------------
 

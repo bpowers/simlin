@@ -1421,6 +1421,87 @@ fn contains_unfreezable_previous(expr: &Expr0) -> bool {
     }
 }
 
+/// Does `expr` reference `source` as a BARE `Var` (NOT subscripted) nested
+/// inside the argument of an array-reducing builtin (`SUM`, `MEAN`, `MIN`,
+/// `MAX`, `STDDEV`)? This is the GH #779 silent-wrong-number shape: a bare
+/// reference to an ARRAYED variable inside an UN-HOISTED reducer.
+///
+/// In execution, a bare arrayed `source` inside an apply-to-all-over-the-
+/// target's-dims reducer ITERATES/broadcasts `source` over the target's
+/// iterated dimension (slot `r` reads `source[r]`). But the changed-last
+/// partial the GH #743 chooser builds for such a feeder pins the reducer's
+/// equation per target slot and freezes the bare `source` at `PREVIOUS` --
+/// `sum(matrix[r,*] * PREVIOUS(source))` -- which the engine evaluates with
+/// `source` resolved DIFFERENTLY from the broadcast execution, so the score
+/// is silently wrong (a sustained ~3x error for SUM in the canonical
+/// repro). The SUBSCRIPTED feeder spelling (`source[D1]`) is hoisted into an
+/// aggregate node and scored correctly (GH #767/T5); the read-slice
+/// vocabulary cannot express a BARE iterated read, so the reducer stays
+/// un-hoisted and the changed-last fallback is reached -- where this shape
+/// must be DECLINED loudly (GH #779), not given the silent wrong number.
+///
+/// The walk is reducer-context-aware (`in_reducer`): only a bare `source`
+/// occurrence WITHIN a recognized reducer's argument matters. A bare arrayed
+/// `source` OUTSIDE any reducer (`growth[D1] = source * 2`) is the
+/// bread-and-butter `Bare` A2A case -- its changed-FIRST partial keeps the
+/// reference live and compiles, so it never reaches the changed-last leg and
+/// must not be touched. References already inside a `PREVIOUS(...)`/`INIT(...)`
+/// call are skipped (already lagged/frozen, not a live broadcast read). The
+/// reducer set is `reducer_collapses_to_scalar` (RANK excluded: it is
+/// array-valued and never hoisted, GH #771/#742, so its bare arg is a
+/// genuine `Bare` diagonal reference, not this broadcast shape).
+fn references_bare_source_inside_reducer(
+    expr: &Expr0,
+    source: &Ident<Canonical>,
+    in_reducer: bool,
+) -> bool {
+    match expr {
+        Expr0::Const(..) => false,
+        Expr0::Var(ident, _) => in_reducer && &Ident::<Canonical>::new(ident.as_str()) == source,
+        // A subscripted reference is NOT the bare broadcast shape -- it is
+        // either the hoisted feeder spelling (`source[D1]`) or an explicit
+        // per-element read, both handled by their own paths. Recurse into
+        // index expressions only to catch a bare `source` used as an index
+        // (defensive; not a reachable feeder shape today).
+        Expr0::Subscript(_, indices, _) => indices.iter().any(|idx| match idx {
+            IndexExpr0::Expr(e) => references_bare_source_inside_reducer(e, source, in_reducer),
+            IndexExpr0::Range(l, r, _) => {
+                references_bare_source_inside_reducer(l, source, in_reducer)
+                    || references_bare_source_inside_reducer(r, source, in_reducer)
+            }
+            IndexExpr0::Wildcard(_)
+            | IndexExpr0::StarRange(_, _)
+            | IndexExpr0::DimPosition(_, _) => false,
+        }),
+        Expr0::App(UntypedBuiltinFn(name, args), _) => {
+            // Contents of PREVIOUS/INIT are already lagged; a bare source
+            // there is not a live broadcast read.
+            if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
+                return false;
+            }
+            // A scalar-collapsing array reducer sets the in-reducer marker
+            // for its argument; nested reducers keep it set.
+            let child_in_reducer = in_reducer
+                || crate::ltm_agg::reducer_collapses_to_scalar(
+                    &name.to_ascii_lowercase(),
+                    args.len(),
+                );
+            args.iter()
+                .any(|a| references_bare_source_inside_reducer(a, source, child_in_reducer))
+        }
+        Expr0::Op1(_, inner, _) => references_bare_source_inside_reducer(inner, source, in_reducer),
+        Expr0::Op2(_, l, r, _) => {
+            references_bare_source_inside_reducer(l, source, in_reducer)
+                || references_bare_source_inside_reducer(r, source, in_reducer)
+        }
+        Expr0::If(c, t, e, _) => {
+            references_bare_source_inside_reducer(c, source, in_reducer)
+                || references_bare_source_inside_reducer(t, source, in_reducer)
+                || references_bare_source_inside_reducer(e, source, in_reducer)
+        }
+    }
+}
+
 /// Freeze ONLY the matching-shape occurrences of `live_source` at
 /// `PREVIOUS`, leaving every other reference current -- the "changed-last"
 /// attribution dual of [`wrap_non_matching_in_previous`] (cf.
@@ -1665,6 +1746,28 @@ fn shaped_guard_form_text(
     let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
         return Err(PartialEquationError::new(equation_text));
     };
+
+    // GH #779: decline the BARE-spelled feeder of an un-hoisted multi-source
+    // reducer. When the live source is referenced BARE (unsubscripted) and is
+    // ARRAYED (it has declared dimensions), execution ITERATES/broadcasts it
+    // over the target's dimension inside the reducer -- but the changed-last
+    // partial below freezes the bare reference per target slot, evaluating it
+    // differently from execution and producing a SILENT wrong score (a
+    // sustained ~3x error for SUM). The subscripted spelling `source[D1]` is
+    // hoisted and scored correctly (GH #767/T5); the bare spelling cannot be
+    // expressed by the read-slice vocabulary, so it must be declined LOUDLY
+    // (the GH #780 `Unscoreable` plumbing records the edge and drops dependent
+    // loop scores) rather than scored wrong silently. This is the only point
+    // the shape is reachable: a bare arrayed source OUTSIDE a reducer keeps
+    // the live reference in its changed-FIRST partial (which compiles), so it
+    // never reaches this fallback.
+    if matches!(shape, RefShape::Bare)
+        && !source_dim_names.is_empty()
+        && references_bare_source_inside_reducer(&ast, from, false)
+    {
+        return Err(PartialEquationError::unfreezable(equation_text));
+    }
+
     let mut frozen_ref: Option<Expr0> = None;
     let changed_last = wrap_live_shaped_in_previous(
         ast,

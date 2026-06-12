@@ -4390,6 +4390,143 @@ fn gh526_transposed_other_dep_with_threaded_dims_is_unfreezable() {
     );
 }
 
+// -- GH #779: bare-spelled feeder of an un-hoisted reducer declines loudly --
+
+/// The detector keys on a BARE `Var` reference to the source nested inside
+/// an array-reducer argument. It must fire for the bare reference and stay
+/// silent for the adjacent shapes (subscripted, outside-reducer, inside
+/// PREVIOUS, and other reducers) so the decline is precise.
+#[test]
+fn references_bare_source_inside_reducer_detects_only_the_dangerous_shape() {
+    let frac = Ident::<Canonical>::new("frac");
+    let parse = |eqn: &str| Expr0::new(eqn, LexerType::Equation).unwrap().unwrap();
+
+    // The GH #779 shape: bare `frac` inside SUM -> fires.
+    assert!(references_bare_source_inside_reducer(
+        &parse("SUM(matrix[D1, *] * frac)"),
+        &frac,
+        false
+    ));
+    // The whole reducer class is covered.
+    for reducer in ["MEAN", "MIN", "MAX", "STDDEV"] {
+        assert!(
+            references_bare_source_inside_reducer(
+                &parse(&format!("{reducer}(matrix[D1, *] * frac)")),
+                &frac,
+                false
+            ),
+            "{reducer}: bare feeder inside reducer must be detected"
+        );
+    }
+
+    // The SUBSCRIPTED feeder spelling is NOT the bare shape: it is hoisted
+    // and scored correctly elsewhere (GH #767/T5).
+    assert!(!references_bare_source_inside_reducer(
+        &parse("SUM(matrix[D1, *] * frac[D1])"),
+        &frac,
+        false
+    ));
+    // A bare `frac` OUTSIDE any reducer is the bread-and-butter Bare A2A
+    // case (its changed-first partial compiles), and must not fire.
+    assert!(!references_bare_source_inside_reducer(
+        &parse("frac * 2 + SUM(matrix[D1, *])"),
+        &frac,
+        false
+    ));
+    // A bare `frac` already inside PREVIOUS is lagged, not a live broadcast
+    // read.
+    assert!(!references_bare_source_inside_reducer(
+        &parse("SUM(matrix[D1, *] * PREVIOUS(frac))"),
+        &frac,
+        false
+    ));
+    // RANK is array-valued and never hoisted (GH #771/#742): its bare arg is
+    // a genuine Bare diagonal reference, not the broadcast shape.
+    assert!(!references_bare_source_inside_reducer(
+        &parse("RANK(frac, 1)"),
+        &frac,
+        false
+    ));
+    // A different variable inside the reducer is irrelevant.
+    assert!(!references_bare_source_inside_reducer(
+        &parse("SUM(matrix[D1, *] * other)"),
+        &frac,
+        false
+    ));
+}
+
+/// End-to-end through the chooser: a bare ARRAYED feeder inside an un-hoisted
+/// reducer is DECLINED loudly (`UnfreezablePartial`) instead of given the
+/// silently-wrong changed-last per-element partial -- the GH #779 fix. The
+/// SUBSCRIPTED sibling (`frac[D1]`) keeps the changed-last score (pinned by
+/// `shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source`).
+#[test]
+fn shaped_guard_form_declines_bare_arrayed_feeder_of_unhoisted_reducer() {
+    let deps = deps_set(&["matrix", "frac"]);
+    let live = Ident::<Canonical>::new("frac");
+    // `frac` arrayed over `d1` -> non-empty source dims.
+    let source_dims = vec![vec!["r1".to_string(), "r2".to_string()]];
+    let source_dim_names = vec!["d1".to_string()];
+    let target_iterated = vec!["d1".to_string()];
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated,
+        dim_ctx: None,
+        dep_dims: None,
+    };
+    let err = shaped_guard_form_text(
+        "SUM(matrix[D1, *] * frac)",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &source_dims,
+        &source_dim_names,
+        Some(&iter_ctx),
+        None,
+        "growth",
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.kind,
+        PartialEquationErrorKind::UnfreezablePartial,
+        "the bare arrayed feeder of an un-hoisted reducer must decline loudly, \
+         not score the silent wrong number"
+    );
+}
+
+/// Precision control: a bare SCALAR source inside a reducer does NOT trigger
+/// the GH #779 decline (the decline gates on the source being arrayed --
+/// `source_dim_names` non-empty). A scalar feeder is handled by its own
+/// `generate_scalar_feeder_to_agg_equation` path and broadcasts trivially.
+#[test]
+fn shaped_guard_form_scalar_feeder_inside_reducer_not_declined_by_gh779() {
+    let deps = deps_set(&["matrix", "scale"]);
+    let live = Ident::<Canonical>::new("scale");
+    // `scale` SCALAR -> empty source dims, so the GH #779 gate is inert; the
+    // changed-last fallback (or an earlier leg) governs as before.
+    let result = shaped_guard_form_text(
+        "SUM(matrix[D1, *] * scale)",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &[],
+        &[],
+        None,
+        None,
+        "growth",
+    );
+    // Whatever the chooser does here, it must NOT be the GH #779 arrayed
+    // decline: the scalar source never reaches that gate. (The changed-last
+    // form is reached because the co-source slice is unfreezable; with no
+    // matching scalar occurrence frozen... in fact the scalar `scale` IS
+    // frozen, so this scores via changed-last.)
+    assert!(
+        result.is_ok(),
+        "a scalar feeder inside a reducer is not the GH #779 arrayed shape and \
+         must keep its changed-last score; got: {result:?}"
+    );
+}
+
 /// GH #526 control: the NATURAL-position dep (`arr[D1,D2]` matching its
 /// declared order) keeps the historical collapse to `PREVIOUS(arr)` even
 /// with dims threaded -- the bare freeze reads the same element, so the
