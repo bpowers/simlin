@@ -745,6 +745,11 @@ fn walk_var_equation(
         // all-`Iterated` slice (GH #767) says nothing about the reducer's
         // result shape.
         && variable_backed_shape_is_expressible(&slices.canonical, ctx.target_iterated_dims)
+        // `None` (a structurally-impossible missing per-var slice; see
+        // `agg_sources`' rustdoc) falls through to `walk_subexpr_for_aggs`,
+        // whose own `agg_sources` call declines identically -- the
+        // reference stays on the conservative Direct path.
+        && let Some(sources) = agg_sources(source_vars, &slices, ctx)
     {
         // Whole-RHS reducer: the variable IS the aggregate node. The agg
         // node's result shape is the *reducer's* result shape (the `Iterated`
@@ -755,7 +760,6 @@ fn walk_var_equation(
         // (`rowsum[D1] = SUM(matrix[D1, *])`) keeps `[D1]` as its result dims.
         let key = crate::patch::expr2_to_string(expr);
         let result_dims = result_dims_from_read_slice(&slices.canonical, ctx.dm_dims);
-        let sources = agg_sources(source_vars, &slices, ctx);
         register_agg(
             result,
             next_synthetic_n,
@@ -935,10 +939,14 @@ fn walk_subexpr_for_aggs(
             if !in_reducer
                 && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
                 && let Some(slices) = combined_read_slice(builtin, ctx)
+                // `None` (a structurally-impossible missing per-var slice;
+                // see `agg_sources`' rustdoc) declines the hoist: the `else`
+                // arm descends with `in_reducer` unchanged, exactly like the
+                // not-statically-describable carve-outs.
+                && let Some(sources) = agg_sources(source_vars, &slices, ctx)
             {
                 let key = crate::patch::expr2_to_string(expr);
                 let result_dims = result_dims_from_read_slice(&slices.canonical, ctx.dm_dims);
-                let sources = agg_sources(source_vars, &slices, ctx);
                 register_agg(
                     result,
                     next_synthetic_n,
@@ -1005,11 +1013,22 @@ enum AggKind {
 /// for a co-source, the all-`Iterated` projection slice for a feeder
 /// (GH #767); each SCALAR source (a feeder, GH #737) carries an empty
 /// slice (it has no axes -- invariant I2).
+///
+/// Returns `None` -- the caller declines the hoist, keeping the reference
+/// on the conservative Direct path -- if an arrayed source has no
+/// `per_var` entry. That cannot happen by construction
+/// (`reducer_source_vars`/`collect_var_refs` and
+/// `collect_arrayed_source_slices` walk the identical reference surface
+/// with the same arrayed predicate), so the decline is purely defensive
+/// (PR #784 review): the previous canonical-slice fallback would have
+/// mislabelled a projection feeder -- whose slice differs from canonical
+/// BY DESIGN -- as a co-source, silently corrupting the per-`(row, slot)`
+/// link scores downstream.
 fn agg_sources(
     source_vars: Vec<String>,
     slices: &CombinedReadSlices,
     ctx: &AggWalkCtx<'_>,
-) -> Vec<AggSource> {
+) -> Option<Vec<AggSource>> {
     // `reducer_source_vars` already sorts + dedups; re-establishing the
     // invariant locally keeps it independent of the caller.
     let mut names = source_vars;
@@ -1025,23 +1044,11 @@ fn agg_sources(
                 .map(|d| !d.is_empty())
                 .unwrap_or(false);
             let read_slice = if arrayed {
-                // Every arrayed source has a per-var entry by construction
-                // (`reducer_source_vars` and `collect_arrayed_source_slices`
-                // walk the same references); the canonical fallback is
-                // defensive only.
-                debug_assert!(
-                    slices.per_var.contains_key(&var),
-                    "arrayed reducer source {var:?} has no accepted slice"
-                );
-                slices
-                    .per_var
-                    .get(&var)
-                    .cloned()
-                    .unwrap_or_else(|| slices.canonical.clone())
+                slices.per_var.get(&var).cloned()?
             } else {
                 Vec::new()
             };
-            AggSource { var, read_slice }
+            Some(AggSource { var, read_slice })
         })
         .collect()
 }
@@ -3924,6 +3931,72 @@ mod tests {
                 .all(|ag| !ag.reads_var("a") && !ag.reads_var("b")),
             "co-sources with differing slices must still decline; got: {:?}",
             result.aggs
+        );
+    }
+
+    /// PR #784 review (P3), purely defensive: every arrayed reducer source
+    /// has a `per_var` slice by construction (`collect_var_refs` and
+    /// `collect_arrayed_source_slices` walk the identical reference
+    /// surface), but if that invariant ever broke, [`agg_sources`] must
+    /// DECLINE the hoist (`None` -- the reference stays on the conservative
+    /// Direct path) rather than silently substituting the CANONICAL slice:
+    /// for a projection feeder (whose slice differs from canonical by
+    /// design, GH #767) that substitution would mislabel the feeder as a
+    /// co-source and corrupt the per-`(row, slot)` link scores downstream.
+    #[test]
+    fn agg_sources_declines_when_arrayed_source_lacks_per_var_slice() {
+        let project = TestProject::new("agg_sources_invariant")
+            .named_dimension("D1", &["r1", "r2"])
+            .array_aux("pop[D1]", "1")
+            .scalar_aux("scale", "2")
+            .scalar_aux("total", "1 + SUM(pop[*] * scale)");
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let model = sync.models["main"].source;
+        let variables = crate::db::reconstruct_model_variables(&db, model, sync.project);
+        let dm_dims = crate::db::project_datamodel_dims(&db, sync.project);
+        let dim_ctx = crate::db::project_dimensions_context(&db, sync.project);
+        let ctx = AggWalkCtx {
+            variables: &variables,
+            target_iterated_dims: &[],
+            dm_dims: dm_dims.as_slice(),
+            dim_ctx,
+        };
+        let canonical = vec![AxisRead::Reduced { subset: None }];
+
+        // The invariant broken by hand: `pop` (arrayed) absent from `per_var`.
+        let broken = CombinedReadSlices {
+            canonical: canonical.clone(),
+            per_var: HashMap::new(),
+        };
+        assert_eq!(
+            agg_sources(vec!["pop".to_string()], &broken, &ctx),
+            None,
+            "a missing per-var slice for an arrayed source must decline the \
+             hoist, never substitute the canonical slice"
+        );
+
+        // The intact invariant: each source carries its own slice; a scalar
+        // source still gets the empty slice.
+        let intact = CombinedReadSlices {
+            canonical: canonical.clone(),
+            per_var: HashMap::from([("pop".to_string(), canonical.clone())]),
+        };
+        let sources = agg_sources(vec!["scale".to_string(), "pop".to_string()], &intact, &ctx)
+            .expect("an intact per-var map must build the sources");
+        assert_eq!(
+            sources,
+            vec![
+                AggSource {
+                    var: "pop".to_string(),
+                    read_slice: canonical,
+                },
+                AggSource {
+                    var: "scale".to_string(),
+                    read_slice: vec![],
+                },
+            ]
         );
     }
 }

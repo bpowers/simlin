@@ -3827,6 +3827,27 @@ fn test_generate_iterated_feeder_to_agg_equation_unfreezable_without_occurrence(
     assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
 }
 
+/// PR #784 review (P3): a REPEATED dim name among the iterated slot axes
+/// (a degenerate square-source agg, `SUM(cube[d1,d1,*] * frac[d1,d1])`
+/// with slot dims `[d1, d1]`) makes the by-name slot pin ambiguous --
+/// pre-fix, every `d1` index pinned to the FIRST slot part, so the
+/// off-diagonal slot `[r1, r2]` froze `frac[d1·r1, d1·r1]` (the wrong
+/// source row, a silently wrong score). The generator must bail loudly
+/// instead, mirroring `resolve_mismatched_index_position`'s uniqueness
+/// defense.
+#[test]
+fn test_generate_iterated_feeder_to_agg_equation_bails_on_duplicate_dims() {
+    let err = generate_iterated_feeder_to_agg_equation(
+        "frac",
+        "growth",
+        "sum(cube[d1, d1, *] * frac[d1, d1])",
+        &["d1".to_string(), "d1".to_string()],
+        &["d1\u{B7}r1".to_string(), "d1\u{B7}r2".to_string()],
+    )
+    .expect_err("an ambiguous duplicate-dim slot pin must fail loudly");
+    assert_eq!(err.kind, PartialEquationErrorKind::UnfreezablePartial);
+}
+
 /// `wrap_matching_in_previous` must not double-lag references that are
 /// already inside a `PREVIOUS(...)`/`INIT(...)` call, and must wrap every
 /// other occurrence of the target (including inside nested calls and
