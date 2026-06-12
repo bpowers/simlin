@@ -119,7 +119,7 @@ use crate::ast::{Ast, Expr2, IndexExpr2};
 use crate::builtins::BuiltinFn;
 use crate::common::{Canonical, Ident, canonicalize};
 use crate::db::{
-    Db, SourceModel, SourceProject, project_datamodel_dims, project_dimensions_context,
+    Db, LtmLinkId, SourceModel, SourceProject, project_datamodel_dims, project_dimensions_context,
     reconstruct_model_variables,
 };
 
@@ -1865,6 +1865,7 @@ pub(crate) fn variable_backed_reduce_agg<'a>(
 /// the projection both invents scores for UNREAD rows (`pop[boston,*]`) and
 /// mis-divides the read rows (the un-pinnable mismatched-arity body dooms the
 /// changed-first partial to the |dz/dz| = 1 fallback) -- a silent wrong number.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub(crate) enum UnhoistedSourceRead {
     /// The reducer reads the full extent of every `from` axis (all `Reduced`
     /// without a subset, or `Iterated` axes that range over their dimension):
@@ -1875,13 +1876,38 @@ pub(crate) enum UnhoistedSourceRead {
     /// element or a subset-`Reduced` axis -- so the full-cartesian projection
     /// is unsound (scores unread rows / mis-divides read rows). The cartesian
     /// derivation must DECLINE this edge with the GH #758/#780 loud skip.
-    StrictSlice,
+    /// Carries the representative strict slice (the FIRST strict read of
+    /// `from` in deterministic walk order) so the diagnostic can show the
+    /// user the actual slice their equation reads
+    /// ([`render_read_slice_for_diagnostic`]) instead of a canned example.
+    StrictSlice(Vec<AxisRead>),
     /// Not statically describable (a dynamic index `pop[idx,*]`, a declined
     /// mapping, a `@N`/`Range`), OR `from` is not a direct subscript/var
     /// reducer source in `to`'s equation. The conservative cartesian
     /// cross-product is the DOCUMENTED behavior for the dynamic-index family,
     /// so the caller keeps it (no decline).
     NotDescribable,
+}
+
+/// Render a read slice as a human-readable subscript for diagnostics --
+/// `nyc,*` for `[Pinned(nyc), Reduced{None}]`. An `Iterated` axis renders as
+/// its SOURCE dim's canonical name (the index the equation spells); a
+/// subset-`Reduced` axis renders its resolved elements as `*:{a,b}` (the
+/// [`AxisRead`] vocabulary carries the subdimension's elements, not its
+/// name). Diagnostic-only: not parseable equation syntax.
+pub(crate) fn render_read_slice_for_diagnostic(slice: &[AxisRead]) -> String {
+    slice
+        .iter()
+        .map(|ax| match ax {
+            AxisRead::Pinned(e) => e.clone(),
+            AxisRead::Iterated { source_dim, .. } => source_dim.clone(),
+            AxisRead::Reduced { subset: None } => "*".to_string(),
+            AxisRead::Reduced {
+                subset: Some(elems),
+            } => format!("*:{{{}}}", elems.join(",")),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Classify how the NOT-hoisted reducer in `to`'s equation reads its arrayed
@@ -1895,13 +1921,26 @@ pub(crate) enum UnhoistedSourceRead {
 /// different slices; this returns `StrictSlice` if ANY of `from`'s reads is a
 /// strict slice and `NotDescribable` if any is not statically describable --
 /// either way the cartesian projection cannot soundly attribute that source.
-pub(crate) fn unhoisted_reducer_source_read(
-    db: &dyn Db,
+///
+/// Salsa-tracked, keyed on the interned [`LtmLinkId`] (the
+/// `link_score_equation_text` idiom): the body's `reconstruct_model_variables`
+/// is the codebase's one UN-tracked whole-model reconstruction (O(all model
+/// vars)), and this is its first per-edge caller -- tracking bounds that cost
+/// to once per `(edge, revision)` so the pinned-loop pass's and discovery
+/// mode's re-visits of the same edge are cache hits. Tracking was chosen over
+/// threading the caller's variable map because
+/// `try_cross_dimensional_link_scores` holds only `SourceVariable` handles
+/// (not reconstructed `Variable`s with ASTs), so threading would have forced a
+/// second dims-lookup vocabulary into the `AggWalkCtx` walkers.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn unhoisted_reducer_source_read<'db>(
+    db: &'db dyn Db,
+    link: LtmLinkId<'db>,
     model: SourceModel,
     project: SourceProject,
-    from: &str,
-    to: &str,
 ) -> UnhoistedSourceRead {
+    let from = link.link_from(db);
+    let to = link.link_to(db);
     let variables = reconstruct_model_variables(db, model, project);
     let dm_dims = project_datamodel_dims(db, project);
     let dim_ctx = project_dimensions_context(db, project);
@@ -1950,9 +1989,9 @@ pub(crate) fn unhoisted_reducer_source_read(
             AxisRead::Reduced { subset: None } | AxisRead::Iterated { .. }
         )
     };
-    let mut any_strict = false;
+    let mut first_strict: Option<Vec<AxisRead>> = None;
     let mut any_full_extent_read = false;
-    for slice in &slices {
+    for slice in slices {
         match slice {
             None => return UnhoistedSourceRead::NotDescribable,
             Some(axes) => {
@@ -1961,8 +2000,8 @@ pub(crate) fn unhoisted_reducer_source_read(
                     // in `SUM(pop[*] * pop[north])`): so the SAME variable's
                     // strict reads leave NO row unread.
                     any_full_extent_read = true;
-                } else {
-                    any_strict = true;
+                } else if first_strict.is_none() {
+                    first_strict = Some(axes);
                 }
             }
         }
@@ -1974,19 +2013,24 @@ pub(crate) fn unhoisted_reducer_source_read(
     // the per-row partial's multi-slice ambiguity is the deliberately
     // conservative delta-ratio fallback, NOT the unread-rows defect -- so keep
     // the cartesian derivation unchanged.
-    if any_strict && !any_full_extent_read {
-        UnhoistedSourceRead::StrictSlice
-    } else {
-        UnhoistedSourceRead::FullExtent
+    match first_strict {
+        Some(slice) if !any_full_extent_read => UnhoistedSourceRead::StrictSlice(slice),
+        _ => UnhoistedSourceRead::FullExtent,
     }
 }
 
 /// Walk `expr` for maximal array-reducer Apps and, for each that references
 /// `from_canon` as an arrayed source, push `from`'s [`compute_read_slice`] into
 /// `out` (`None` for a not-statically-describable read). Only the OUTERMOST
-/// reducer is consulted (`in_reducer` suppresses nested ones, mirroring
-/// `walk_subexpr_for_aggs`' maximal-reducer rule), since the inner reducer's
-/// reads are already covered by the outer slice computation.
+/// reducer is consulted (`in_reducer` suppresses nested ones), since the inner
+/// reducer's reads are already covered by the outer slice computation. This is
+/// STRICTER than `walk_subexpr_for_aggs`' maximal-reducer rule: the real walk
+/// descends a DECLINED outer reducer with `in_reducer` unchanged (so a nested
+/// reducer can still be hoisted), while this one suppresses nested collection
+/// under ANY hoistable-kind outer reducer. The divergence is unobservable at
+/// the GH #791 gate: in every divergent case the nested reducer IS hoisted, so
+/// `from`'s read inside it is agg-routed and the edge never reaches the
+/// cartesian fallthrough this verdict guards.
 fn collect_from_read_slices_in_reducers(
     expr: &Expr2,
     ctx: &AggWalkCtx<'_>,
@@ -2142,12 +2186,15 @@ mod tests {
         let datamodel = project.build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        unhoisted_reducer_source_read(&db, sync.models["main"].source, sync.project, from, to)
+        let link = LtmLinkId::new(&db, from.to_string(), to.to_string());
+        unhoisted_reducer_source_read(&db, link, sync.models["main"].source, sync.project).clone()
     }
 
     /// GH #791: a multi-source reducer whose source read is a STRICT slice
     /// (`pop[nyc,*]`, with no full-extent read of `pop`) is the silent-cartesian
-    /// family -- `StrictSlice` (the caller loud-skips it).
+    /// family -- `StrictSlice` (the caller loud-skips it), carrying the actual
+    /// slice so the diagnostic renders `pop[nyc,*]` rather than a canned
+    /// example.
     #[test]
     fn unhoisted_source_read_strict_slice_for_pinned_only_read() {
         let project = TestProject::new("strict_slice")
@@ -2156,10 +2203,10 @@ mod tests {
             .array_aux("pop[Region,D2]", "1")
             .array_aux("w[D2]", "0.5")
             .array_aux("share[Region]", "SUM(pop[nyc,*] * w[*])");
-        assert!(matches!(
-            source_read(&project, "pop", "share"),
-            UnhoistedSourceRead::StrictSlice
-        ));
+        let UnhoistedSourceRead::StrictSlice(slice) = source_read(&project, "pop", "share") else {
+            panic!("the pinned-only read must classify StrictSlice");
+        };
+        assert_eq!(render_read_slice_for_diagnostic(&slice), "nyc,*");
     }
 
     /// GH #791 boundary: the SAME variable read at full extent (`pop[*]`) AND

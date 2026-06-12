@@ -605,12 +605,12 @@ pub(super) fn try_cross_dimensional_link_scores(
     // and declined mappings) keeps the conservative cartesian -- its
     // documented intended behavior -- as does a genuine full-extent read (the
     // aligned `SUM(matrix[D1,*])` diagonal a feeder decline can strand here).
-    if matches!(
-        crate::ltm_agg::unhoisted_reducer_source_read(db, model, project, from, to),
-        crate::ltm_agg::UnhoistedSourceRead::StrictSlice
-    ) {
+    let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
+    if let crate::ltm_agg::UnhoistedSourceRead::StrictSlice(slice) =
+        crate::ltm_agg::unhoisted_reducer_source_read(db, link_id, model, project)
+    {
         if unscoreable_edges.insert((from.to_string(), to.to_string())) {
-            emit_unscoreable_strict_slice_reduce_warning(db, model, from, to);
+            emit_unscoreable_strict_slice_reduce_warning(db, model, from, to, slice);
         }
         return Some(vec![]);
     }
@@ -1233,22 +1233,32 @@ pub(super) fn emit_unscoreable_duplicated_dim_source_warning(
 /// the changed-first partial to the |dz/dz| = 1 fallback) -- a SILENT wrong
 /// number on the link surface. Closed with the same loud-skip discipline as the
 /// other unscoreable classes (no link-score variable, the edge recorded in
-/// `unscoreable_edges` so loops through it are dropped).
+/// `unscoreable_edges` so loops through it are dropped). The drop is at EDGE
+/// granularity, a deliberate conservatism: a per-site derivation exists in
+/// principle for the mixed FixedIndex-site + strict-reducer-read shape, but
+/// no current emitter implements it for the no-agg leg.
+///
+/// `slice` is the representative strict read carried by
+/// [`crate::ltm_agg::UnhoistedSourceRead::StrictSlice`]; the message renders
+/// it (`pop[nyc,*]`) so the user sees THEIR slice, not a canned example.
 pub(super) fn emit_unscoreable_strict_slice_reduce_warning(
     db: &dyn Db,
     model: SourceModel,
     from: &str,
     to: &str,
+    slice: &[crate::ltm_agg::AxisRead],
 ) {
     use salsa::Accumulator;
+    let rendered = crate::ltm_agg::render_read_slice_for_diagnostic(slice);
     let msg = format!(
         "LTM link score for edge {from} -> {to} could not be computed: the reducer in \
-         {to}'s equation reads only a strict slice of {from} (a pinned element or a \
-         subdimension subset, e.g. {from}[nyc,*]), but no variable-backed aggregate \
-         could be minted for it (a multi-source reducer whose co-source slices \
-         disagree), so the only remaining derivation would score {from}'s unread rows \
-         and mis-divide the read rows; this edge will have no link-score variable and \
-         feedback loops through it will not be scored"
+         {to}'s equation reads only the strict slice {from}[{rendered}] (a pinned \
+         element or a subdimension subset), but no variable-backed aggregate could be \
+         minted for it (a multi-source reducer whose co-source slices disagree), and \
+         the whole-edge cartesian derivation that remains here would score {from}'s \
+         unread rows and mis-divide the read rows -- so the edge is declined instead: \
+         it will have no link-score variable and feedback loops through it will not \
+         be scored"
     );
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),

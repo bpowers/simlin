@@ -9081,8 +9081,10 @@ fn gh791_arrayed_owner_mismatched_cosource_strict_slice_skips_loudly() {
         unreachable!("filtered to Assembly above");
     };
     assert!(
-        msg.contains("pop") && msg.contains("share") && msg.contains("strict slice"),
-        "the warning must name the unscoreable edge and the strict-slice reason; got: {msg}"
+        msg.contains("share") && msg.contains("strict slice") && msg.contains("pop[nyc,*]"),
+        "the warning must name the unscoreable edge, the strict-slice reason, and the \
+         ACTUAL slice the equation reads (rendered from the computed AxisRead vector, \
+         never a canned example); got: {msg}"
     );
 
     // No loop scores through the declined edge survive: the only enumerated
