@@ -1016,8 +1016,10 @@ pub(crate) fn emit_ltm_partial_equation_warning(
 }
 
 /// The human-readable message body for a partial-equation failure -- a
-/// GH #311 parse failure, or a GH #743 unfreezable partial (neither
-/// ceteris-paribus convention can be rendered as a compilable equation).
+/// GH #311 parse failure, a GH #743 unfreezable partial (neither
+/// ceteris-paribus convention can be rendered as a compilable equation), or
+/// a GH #779 bare reducer feeder (a bare arrayed reference inside a reducer
+/// argument, whose message names the subscripted-spelling workaround).
 /// Pure (functional core) so the diagnostic's wording -- which names the
 /// offending variable and equation text and explains the silent-garbage
 /// hazard the loud skip prevents -- is testable without driving a salsa
@@ -1045,6 +1047,16 @@ pub(crate) fn ltm_partial_equation_warning_message(
              variable is skipped rather than emitted with a silently-stubbed helper \
              (which would poison the score with a plausible-looking wrong constant \
              -- GH #743)."
+        ),
+        PartialEquationErrorKind::BareReducerFeeder => format!(
+            "LTM link-score variable '{variable_name}' could not be generated: \
+             '{equation_text}' references the arrayed source variable BARE \
+             (without a subscript) inside an array-reducer argument, which cannot \
+             be scored -- the per-element ceteris-paribus partial disagrees with \
+             how the simulation evaluates the bare reference (GH #779/#789). The \
+             variable is skipped (and dependent loop scores dropped) rather than \
+             emitted with a silently wrong value; subscripting the reference \
+             (e.g. 'frac[D1]') restores scoring."
         ),
     }
 }

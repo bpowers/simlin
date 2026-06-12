@@ -1331,6 +1331,32 @@ fn test_ltm_partial_equation_warning_message_contract() {
         msg.contains("array slice"),
         "the unfreezable warning must explain the unfreezable-slice cause; got: {msg}"
     );
+
+    // GH #779: the bare-reducer-feeder kind names the actual shape (a bare
+    // arrayed reference inside a reducer argument) and the
+    // subscripted-spelling workaround, instead of the generic unfreezable
+    // text.
+    let bare_feeder_err = crate::ltm_augment::PartialEquationError {
+        equation_text: eqn_text.to_string(),
+        kind: crate::ltm_augment::PartialEquationErrorKind::BareReducerFeeder,
+    };
+    let msg = super::ltm::ltm_partial_equation_warning_message(var_name, &bare_feeder_err);
+    assert!(
+        msg.contains(var_name),
+        "the bare-feeder warning must name the skipped variable; got: {msg}"
+    );
+    assert!(
+        msg.contains(eqn_text),
+        "the bare-feeder warning must include the equation text; got: {msg}"
+    );
+    assert!(
+        msg.contains("BARE") && msg.contains("reducer"),
+        "the bare-feeder warning must name the bare-reference-inside-reducer shape; got: {msg}"
+    );
+    assert!(
+        msg.contains("subscripting the reference"),
+        "the bare-feeder warning must name the subscripted-spelling workaround; got: {msg}"
+    );
 }
 
 /// Test-only salsa-tracked query that drives the production accumulating

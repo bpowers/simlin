@@ -4164,17 +4164,19 @@ fn gh779_bare_feeder_fixture(reducer: &str) -> datamodel::Project {
 /// GH #779: the BARE-spelled feeder of an un-hoisted multi-source reducer
 /// must be DECLINED LOUDLY, not given a silent wrong changed-last score.
 ///
-/// `growth[D1] = SUM(matrix[D1, *] * frac)` iterates the bare `frac` over
-/// the target's `D1` dimension in EXECUTION (slot `a` reads `frac[a]`), so
-/// the reducer cannot be hoisted (the bare reference is not expressible by
-/// the read-slice vocabulary -- `compute_read_slice` maps `Expr2::Var` to
-/// all-`Reduced`, the slices disagree). The `frac -> growth` edge then
-/// classifies `Bare` and the GH #743 changed-last chooser emits the
-/// per-element partial `sum(matrix[d1,*] * PREVIOUS(frac))`, which the
-/// engine pins per `D1` slot -- but that DISAGREES with the broadcast
-/// execution, producing a sustained, unwarned link score of ~2.92 (~3x
-/// wrong) and an identically-wrong frac-closure loop score. That is the
-/// silent-wrong-number this test guards against (the worst kind).
+/// In `growth[D1] = SUM(matrix[D1, *] * frac)` the bare `frac` reference is
+/// not expressible by the read-slice vocabulary (`compute_read_slice` maps
+/// `Expr2::Var` to all-`Reduced`, the slices disagree), so the reducer is
+/// not hoisted. The bare spelling's EXECUTION semantics are themselves
+/// anomalous (GH #789: an asymmetric probe shows the engine computes
+/// `growth[r] = |D1| * Σ_d2 matrix[r,d2] * frac[r]`, a spurious `|D1|`
+/// factor). Pre-fix, the `frac -> growth` edge classified `Bare` and the
+/// GH #743 changed-last chooser emitted the per-element partial
+/// `sum(matrix[d1,*] * PREVIOUS(frac))`, which provably disagrees with
+/// whatever execution computes for the bare spelling -- a sustained,
+/// unwarned link score of ~2.92 (~3x wrong) and an identically-wrong
+/// frac-closure loop score. That is the silent-wrong-number this test
+/// guards against (the worst kind).
 ///
 /// The fix declines the bare-feeder shape via the GH #780 machinery: the
 /// shaped query returns `Unscoreable`, the edge is recorded, ONE warning
@@ -4272,9 +4274,10 @@ fn bare_feeder_of_unhoisted_reducer_declines_loudly() {
 }
 
 /// GH #779, the whole reducer class: MEAN/MIN/MAX/STDDEV bare-feeder shapes
-/// decline identically to SUM. The bare arrayed reference inside ANY
-/// array-reducer argument has the same broadcast-vs-per-element
-/// disagreement, so the decline must cover the class.
+/// decline identically to SUM. A bare arrayed reference inside ANY
+/// array-reducer argument carries the same execution-vs-partial
+/// disagreement (and the same anomalous execution semantics, GH #789), so
+/// the decline must cover the class.
 #[test]
 fn bare_feeder_decline_covers_reducer_class() {
     for reducer in ["MEAN", "MIN", "MAX", "STDDEV"] {
@@ -4302,6 +4305,68 @@ fn bare_feeder_decline_covers_reducer_class() {
                     v.name
                 );
             }
+        }
+    }
+}
+
+/// GH #779 precision pin: the WHOLE-RHS bare reducer (`total = SUM(pop)`)
+/// is NOT the declined feeder shape -- it is variable-backed and its
+/// `pop -> total` edge is scored per read row by
+/// `try_cross_dimensional_link_scores`, never reaching the changed-last
+/// chooser the #779 gate lives in. With `growth[D1] = total * 0.01` closing
+/// the loop, the two per-circuit loops each score 0.5 (the per-row link
+/// scores split the +1 across |D1| = 2 rows) with zero warnings.
+#[test]
+fn whole_rhs_bare_reducer_stays_scored() {
+    let project = TestProject::new("gh779_whole_rhs_bare")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .scalar_aux("total", "SUM(pop)")
+        .array_flow("growth[D1]", "total * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "the whole-RHS bare reducer must stay warning-free"
+    );
+    for row in ["a", "b"] {
+        let name = format!("{LINK_SCORE_PREFIX}pop[{row}]\u{2192}total");
+        assert!(
+            ltm_vars.iter().any(|v| v.name == name),
+            "the per-row {name:?} score must exist; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        2,
+        "one loop per D1 row; got {loop_names:?}"
+    );
+    for name in &loop_names {
+        let series = series_at(&results, offset_of(&results, name));
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 0.5).abs() <= 1e-9,
+                "{name} at step {step}: got {v}, expected 0.5"
+            );
         }
     }
 }

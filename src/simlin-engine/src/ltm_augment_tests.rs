@@ -4433,15 +4433,15 @@ fn references_bare_source_inside_reducer_detects_only_the_dangerous_shape() {
         &frac,
         false
     ));
-    // A bare `frac` already inside PREVIOUS is lagged, not a live broadcast
-    // read.
+    // A bare `frac` already inside PREVIOUS is lagged, not a live read the
+    // partial must account for.
     assert!(!references_bare_source_inside_reducer(
         &parse("SUM(matrix[D1, *] * PREVIOUS(frac))"),
         &frac,
         false
     ));
     // RANK is array-valued and never hoisted (GH #771/#742): its bare arg is
-    // a genuine Bare diagonal reference, not the broadcast shape.
+    // a genuine Bare diagonal reference, not the feeder shape.
     assert!(!references_bare_source_inside_reducer(
         &parse("RANK(frac, 1)"),
         &frac,
@@ -4456,7 +4456,8 @@ fn references_bare_source_inside_reducer_detects_only_the_dangerous_shape() {
 }
 
 /// End-to-end through the chooser: a bare ARRAYED feeder inside an un-hoisted
-/// reducer is DECLINED loudly (`UnfreezablePartial`) instead of given the
+/// reducer is DECLINED loudly (`BareReducerFeeder`, whose diagnostic names
+/// the shape and the subscripted-spelling workaround) instead of given the
 /// silently-wrong changed-last per-element partial -- the GH #779 fix. The
 /// SUBSCRIPTED sibling (`frac[D1]`) keeps the changed-last score (pinned by
 /// `shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source`).
@@ -4488,22 +4489,27 @@ fn shaped_guard_form_declines_bare_arrayed_feeder_of_unhoisted_reducer() {
     .unwrap_err();
     assert_eq!(
         err.kind,
-        PartialEquationErrorKind::UnfreezablePartial,
-        "the bare arrayed feeder of an un-hoisted reducer must decline loudly, \
-         not score the silent wrong number"
+        PartialEquationErrorKind::BareReducerFeeder,
+        "the bare arrayed feeder of an un-hoisted reducer must decline loudly \
+         with the shape-specific diagnostic, not score the silent wrong number"
     );
 }
 
 /// Precision control: a bare SCALAR source inside a reducer does NOT trigger
-/// the GH #779 decline (the decline gates on the source being arrayed --
-/// `source_dim_names` non-empty). A scalar feeder is handled by its own
-/// `generate_scalar_feeder_to_agg_equation` path and broadcasts trivially.
+/// the GH #779 decline -- the gate requires an ARRAYED source
+/// (`source_dim_names` non-empty), so it is inert here and the changed-last
+/// convention governs as before: the changed-first leg is doomed (the
+/// co-source's wildcard slice cannot be frozen), the gate is skipped (scalar
+/// source), and the changed-last leg freezes the scalar `scale` occurrence
+/// (a plain `LoadPrev`) and scores. (Hoisted instances of this feeder are
+/// normally routed `ThroughAgg` to `generate_scalar_feeder_to_agg_equation`
+/// before this chooser is reached; the whole-RHS spelling's own emission
+/// defect is tracked separately as GH #790.)
 #[test]
 fn shaped_guard_form_scalar_feeder_inside_reducer_not_declined_by_gh779() {
     let deps = deps_set(&["matrix", "scale"]);
     let live = Ident::<Canonical>::new("scale");
-    // `scale` SCALAR -> empty source dims, so the GH #779 gate is inert; the
-    // changed-last fallback (or an earlier leg) governs as before.
+    // `scale` SCALAR -> empty source dims, so the GH #779 gate is inert.
     let result = shaped_guard_form_text(
         "SUM(matrix[D1, *] * scale)",
         &deps,
@@ -4515,11 +4521,6 @@ fn shaped_guard_form_scalar_feeder_inside_reducer_not_declined_by_gh779() {
         None,
         "growth",
     );
-    // Whatever the chooser does here, it must NOT be the GH #779 arrayed
-    // decline: the scalar source never reaches that gate. (The changed-last
-    // form is reached because the co-source slice is unfreezable; with no
-    // matching scalar occurrence frozen... in fact the scalar `scale` IS
-    // frozen, so this scores via changed-last.)
     assert!(
         result.is_ok(),
         "a scalar feeder inside a reducer is not the GH #779 arrayed shape and \

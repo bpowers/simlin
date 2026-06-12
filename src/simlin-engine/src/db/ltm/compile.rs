@@ -79,8 +79,9 @@ pub fn compile_ltm_var_fragment(
 ///   built; emit it.
 /// - [`Unscoreable`](ShapedLinkScore::Unscoreable) -- a
 ///   [`PartialEquationError`](crate::ltm_augment::PartialEquationError)
-///   (the GH #311 parse class or the GH #526/T7 both-legs-doomed
-///   mismatched-dep class) made this `(from, to)` edge unscoreable. The
+///   (the GH #311 parse class, the GH #526/T7 both-legs-doomed
+///   mismatched-dep class, or the GH #779 bare-reducer-feeder decline)
+///   made this `(from, to)` edge unscoreable. The
 ///   loud `Warning` was already accumulated by the query; the caller MUST
 ///   record the edge in `unscoreable_edges` so loop scores traversing it
 ///   are DROPPED (the #758 contract), not stubbed.
@@ -255,21 +256,24 @@ pub fn link_score_equation_text_shaped<'db>(
                 .collect()
         })
         .unwrap_or_default();
-    // Test-only seam: THIS QUERY's `PartialEquationError` terminal (below)
-    // is unreachable through any compiling model today -- every doom on the
-    // shaped path specifically is either recovered by
+    // Test-only seam. At GH #780 time this query's `PartialEquationError`
+    // terminal (below) was unreachable through any compiling model -- every
+    // doom on the shaped path was either recovered by
     // `shaped_guard_form_text`'s changed-last fallback or pinned to a
-    // concrete element upstream (the GH #780 reachability probe). That
-    // claim is scoped to this query: the AGG-HALF emitters' partial-
-    // equation sites in `link_scores.rs` ARE live-reachable (the GH #743
+    // concrete element upstream (the GH #780 reachability probe) -- so the
+    // [`force_partial_equation_error`] override was added to exercise the
+    // unscoreable-edge contract end-to-end (per
+    // docs/dev/rust.md#test-time-budgets -- a test-only override and a tiny
+    // fixture, not a contrived production input). The GH #779
+    // bare-reducer-feeder decline has since made the terminal LIVE-reachable
+    // (`bare_feeder_of_unhoisted_reducer_declines_loudly`); the seam is
+    // retained because it can doom ONE arbitrary edge of a multi-edge model
+    // independent of any equation shape, which the surgical-degradation
+    // tests still need. (The AGG-HALF emitters' partial-equation sites in
+    // `link_scores.rs` were live-reachable all along -- the GH #743
     // `UnfreezablePartial` machinery via the square-source duplicate-dim
     // feeder; see
-    // `square_source_duplicate_dim_feeder_scores_are_loudly_skipped`).
-    // Rather than build a fixture this query cannot doom on, an active
-    // [`force_partial_equation_error`] override makes a sentinel edge doom
-    // so the unscoreable-edge contract is exercised end-to-end (per
-    // docs/dev/rust.md#test-time-budgets -- a test-only override and a
-    // tiny fixture, not a contrived production input).
+    // `square_source_duplicate_dim_feeder_scores_are_loudly_skipped`.)
     #[cfg(test)]
     if force_partial_equation_error(from_name, to_name) {
         let err = crate::ltm_augment::PartialEquationError::new(
@@ -287,7 +291,8 @@ pub fn link_score_equation_text_shaped<'db>(
     // (set when `shape` is not `Bare`) with the per-shape policy result.
     // A `PartialEquationError` means the target's equation text could not
     // be rendered as a compilable ceteris-paribus partial -- the GH #311
-    // parse class or the GH #526/T7 both-legs-doomed mismatched-dep class.
+    // parse class, the GH #526/T7 both-legs-doomed mismatched-dep class, or
+    // the GH #779 bare-reducer-feeder decline.
     // Warn, and report the edge as `Unscoreable` so the emission loop
     // records it in `unscoreable_edges` and DROPS dependent loop scores
     // (GH #758/#780); emitting a silently non-ceteris-paribus link score
