@@ -22,7 +22,7 @@ use crate::db::{
     project_dimensions_context, reconstruct_single_variable, variable_dimensions,
 };
 
-use super::compile::link_score_equation_text_shaped;
+use super::compile::{ShapedLinkScore, link_score_equation_text_shaped};
 use super::loops::{ReadSliceRow, cartesian_subscripts, read_slice_rows};
 use super::parse::{
     ltm_equation_dimensions, reconstruct_ltm_var_lowered, retarget_ltm_equation_dims,
@@ -648,6 +648,10 @@ pub(super) fn try_cross_dimensional_link_scores(
 /// arrayed-to-scalar, module-involved, and any edge where the target
 /// has no usable AST (so per-element equations can't be derived) -- in
 /// those cases the caller falls back to its existing emission path.
+/// Returns `Some(vec![])` (GH #780) when a per-element partial dooms with a
+/// `PartialEquationError`: the warning is accumulated and the edge recorded
+/// in `unscoreable_edges` so dependent loop scores drop, and the caller must
+/// NOT fall back to `emit_per_shape_link_scores`.
 pub(super) fn try_scalar_to_arrayed_link_scores(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
@@ -655,6 +659,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     to: &str,
     model: SourceModel,
     project: SourceProject,
+    unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> Option<Vec<LtmSyntheticVar>> {
     // Source must be a scalar, non-module variable.
     let from_sv = source_vars.get(from)?;
@@ -742,6 +747,17 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
             from, to, element
         );
+        // Test-only seam (GH #780): honour a forced-`PartialEquationError`
+        // edge here too, so the direct (non-salsa) per-element generator
+        // call site is covered by the same override the shaped query uses.
+        #[cfg(test)]
+        if super::compile::force_partial_equation_error(from, to) {
+            let err = crate::ltm_augment::PartialEquationError::new(
+                "<test-forced per-element partial-equation failure (GH #780)>",
+            );
+            emit_ltm_partial_equation_warning(db, model, &name, &err);
+            return None;
+        }
         let equation = if elem_text.is_empty() {
             "0".to_string()
         } else {
@@ -777,6 +793,16 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         })
     };
 
+    // GH #780: `build_var` returns `None` only on a true per-element
+    // `PartialEquationError` (the empty-slot case returns `Some("0")`). One
+    // doomed element dooms the whole edge -- a loop hop through it resolves
+    // (`loop_link_score_ref`) to that element's name, which was never
+    // emitted, so the loop would otherwise stub to a warned constant 0.
+    // Record the edge in `unscoreable_edges` (the per-element `Warning`
+    // already fired in `build_var`) and return `Some(vec![])` so dependent
+    // loop scores are DROPPED and the dispatcher does NOT fall through to a
+    // wrong-shaped per-shape stand-in -- the same loud-skip contract the
+    // disjoint and dim-incompatible classes follow.
     let mut cross_vars = Vec::with_capacity(elements.len());
     match ast {
         // ApplyToAll: one shared body for every element, so its text, its
@@ -787,7 +813,13 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             let elem_deps = crate::variable::identifier_set(ast, target_ast_dims, None);
             let deps_to_sub = deps_to_subscript(&elem_deps);
             for element in &elements {
-                cross_vars.extend(build_var(element, &elem_text, &elem_deps, &deps_to_sub));
+                match build_var(element, &elem_text, &elem_deps, &deps_to_sub) {
+                    Some(v) => cross_vars.push(v),
+                    None => {
+                        unscoreable_edges.insert((from.to_string(), to.to_string()));
+                        return Some(vec![]);
+                    }
+                }
             }
         }
         // Arrayed: each element has its own slot expression (or the default
@@ -814,7 +846,13 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                     None => (String::new(), HashSet::new()),
                 };
                 let deps_to_sub = deps_to_subscript(&elem_deps);
-                cross_vars.extend(build_var(element, &elem_text, &elem_deps, &deps_to_sub));
+                match build_var(element, &elem_text, &elem_deps, &deps_to_sub) {
+                    Some(v) => cross_vars.push(v),
+                    None => {
+                        unscoreable_edges.insert((from.to_string(), to.to_string()));
+                        return Some(vec![]);
+                    }
+                }
             }
         }
         Ast::Scalar(_) => unreachable!("target is arrayed"),
@@ -1148,16 +1186,30 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
     for key in &elem_keys {
         let shape = RefShape::FixedIndex(key.split(',').map(|s| s.to_string()).collect());
         let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
-        if let Some(mut lsv) =
-            link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone()
-        {
-            // `lsv.name` is already `link_score_var_name(from, to, &shape)`
-            // from the shaped path -- no need to re-derive it here.
-            let dims = ltm_equation_dimensions(&lsv.equation).to_vec();
-            lsv.dimensions = dims.clone();
-            lsv.equation = retarget_ltm_equation_dims(lsv.equation, &dims);
-            lsv.compile_directly = false;
-            vars.push(lsv);
+        match link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone() {
+            ShapedLinkScore::Unscoreable => {
+                // GH #780: a `PartialEquationError` for one element of this
+                // disjoint-dim edge dooms the whole edge -- the partial that
+                // failed is shared structure, and a loop hop through the
+                // edge resolves to one element-named score. Record it (the
+                // query already warned) so dependent loop scores drop, and
+                // return `Some(vec![])` so the dispatcher does NOT fall
+                // through to `emit_per_shape_link_scores` and mint a
+                // wrong-shaped stand-in (mirroring the dynamic-index
+                // disjoint skip at the top of this fn).
+                unscoreable_edges.insert((from.to_string(), to.to_string()));
+                return Some(vec![]);
+            }
+            ShapedLinkScore::NoVariable => continue,
+            ShapedLinkScore::Scored(mut lsv) => {
+                // `lsv.name` is already `link_score_var_name(from, to, &shape)`
+                // from the shaped path -- no need to re-derive it here.
+                let dims = ltm_equation_dimensions(&lsv.equation).to_vec();
+                lsv.dimensions = dims.clone();
+                lsv.equation = retarget_ltm_equation_dims(lsv.equation, &dims);
+                lsv.compile_directly = false;
+                vars.push(lsv);
+            }
         }
     }
     Some(vars)
@@ -1345,42 +1397,70 @@ pub(super) fn emit_per_shape_link_scores(
 
     for shape in shapes {
         let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
-        if let Some(mut lsv) =
-            link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone()
-        {
-            // Set the canonical name and dimensions per Phase 3 Task 4/5.
-            lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
-            // Every shape takes the target's dimensions: for FixedIndex
-            // each per-element link score is scalar when the target is
-            // scalar and arrayed when the target is arrayed; Bare (and
-            // the rare conservative-slice Wildcard/DynamicIndex) inherit
-            // the target's dims via the same compatibility rule.
-            // link_score_dimensions already implements this for every
-            // case, so one assignment suffices.
-            lsv.dimensions = target_dims.clone();
-            // Keep the equation's dimensionality in lockstep with the
-            // `dimensions` field that layout sizing keys off of. The
-            // shaped fn returns a `Scalar`/`ApplyToAll` equation tagged
-            // with the *target's own* dimension names, which equal
-            // `target_dims` for every compatible-dimension edge; for the
-            // (rare) incompatible-dimension arrayed-target edge,
-            // link_score_dimensions returns empty, so we collapse the
-            // equation to scalar here -- matching the pre-existing
-            // behavior where such edges produced a scalar link score.
-            lsv.equation = retarget_ltm_equation_dims(lsv.equation, &target_dims);
-            // A non-`Bare` shape carries a partial that the (from, to)-
-            // keyed salsa compilation path (`link_score_equation_text`,
-            // always `RefShape::Bare`) cannot reproduce: a
-            // `Wildcard`/`DynamicIndex` reference into a scalar target
-            // would have its whole subscript wrapped in `PREVIOUS()` and
-            // the ceteris-paribus numerator zeroed. Force `assemble_module`
-            // to compile this var's equation verbatim. (For `Bare`, the
-            // salsa-cached path is correct and keeps incrementality;
-            // `FixedIndex` carries an element subscript on the name and is
-            // already routed directly by the bracket check, but flagging
-            // it too is harmless.)
-            lsv.compile_directly = !matches!(shape, RefShape::Bare);
-            vars.push(lsv);
+        match link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone() {
+            ShapedLinkScore::Unscoreable => {
+                // GH #780: a `PartialEquationError` for this shape makes the
+                // whole `(from, to)` edge unscoreable. The query already
+                // accumulated the one loud `Warning`; record the edge so
+                // loop scores traversing it are DROPPED (the #758 contract)
+                // instead of referencing the never-emitted link-score name
+                // and degrading to warned constant-0 stubs. Recording at
+                // EDGE (not per-shape-name) granularity is the soundest
+                // implementable rule: a loop hop through this edge resolves
+                // (`loop_link_score_ref`) to ONE shape's name, and if that
+                // is the doomed shape the loop would stub; dropping the loop
+                // is conservative but never silently wrong, matching the
+                // dim-incompatible and broadcast-reduce unscoreable classes.
+                // Since any doomed shape dooms the edge, `break` once we see
+                // one (the remaining shapes' warnings would be redundant
+                // noise about the same already-recorded edge). The `Warning`
+                // fired inside the salsa query (replayed via the accumulator
+                // on every evaluation), so only the edge recording is needed
+                // here; the insert also dedups a re-visit by the pinned-loop
+                // pass.
+                unscoreable_edges.insert((from.to_string(), to.to_string()));
+                break;
+            }
+            ShapedLinkScore::NoVariable => {
+                // Benign structural skip (unreconstructible target /
+                // composite-less module link); not an unscoreable edge.
+                continue;
+            }
+            ShapedLinkScore::Scored(mut lsv) => {
+                // Set the canonical name and dimensions per Phase 3 Task 4/5.
+                lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
+                // Every shape takes the target's dimensions: for FixedIndex
+                // each per-element link score is scalar when the target is
+                // scalar and arrayed when the target is arrayed; Bare (and
+                // the rare conservative-slice Wildcard/DynamicIndex) inherit
+                // the target's dims via the same compatibility rule.
+                // link_score_dimensions already implements this for every
+                // case, so one assignment suffices.
+                lsv.dimensions = target_dims.clone();
+                // Keep the equation's dimensionality in lockstep with the
+                // `dimensions` field that layout sizing keys off of. The
+                // shaped fn returns a `Scalar`/`ApplyToAll` equation tagged
+                // with the *target's own* dimension names, which equal
+                // `target_dims` for every compatible-dimension edge; for the
+                // (rare) incompatible-dimension arrayed-target edge,
+                // link_score_dimensions returns empty, so we collapse the
+                // equation to scalar here -- matching the pre-existing
+                // behavior where such edges produced a scalar link score.
+                lsv.equation = retarget_ltm_equation_dims(lsv.equation, &target_dims);
+                // A non-`Bare` shape carries a partial that the (from, to)-
+                // keyed salsa compilation path (`link_score_equation_text`,
+                // always `RefShape::Bare`) cannot reproduce: a
+                // `Wildcard`/`DynamicIndex` reference into a scalar target
+                // would have its whole subscript wrapped in `PREVIOUS()` and
+                // the ceteris-paribus numerator zeroed. Force `assemble_module`
+                // to compile this var's equation verbatim. (For `Bare`, the
+                // salsa-cached path is correct and keeps incrementality;
+                // `FixedIndex` carries an element subscript on the name and is
+                // already routed directly by the bracket check, but flagging
+                // it too is harmless.)
+                lsv.compile_directly = !matches!(shape, RefShape::Bare);
+                vars.push(lsv);
+            }
         }
     }
 }
@@ -2444,10 +2524,19 @@ pub(super) fn emit_link_scores_for_edge(
         return;
     }
     // Scalar-source -> arrayed-target edges (one scalar link score per
-    // target element).
-    if let Some(cross_vars) =
-        try_scalar_to_arrayed_link_scores(db, source_vars, from, to, model, project)
-    {
+    // target element). `Some(vec![])` can mean the GH #780 loud decline: a
+    // per-element partial doomed, the `Warning` was accumulated, and the
+    // edge was recorded in `unscoreable_edges` (so loop scores through it
+    // drop). We must NOT fall through to `emit_per_shape_link_scores`.
+    if let Some(cross_vars) = try_scalar_to_arrayed_link_scores(
+        db,
+        source_vars,
+        from,
+        to,
+        model,
+        project,
+        unscoreable_edges,
+    ) {
         vars.extend(cross_vars);
         return;
     }

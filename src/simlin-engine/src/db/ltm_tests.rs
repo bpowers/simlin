@@ -5,7 +5,7 @@
 use super::{compile_ltm_equation_fragment, scalarize_ltm_equation};
 use crate::datamodel;
 use crate::db::{
-    LtmLinkId, RefShape, SimlinDb, compute_layout, link_score_equation_text,
+    LtmLinkId, RefShape, ShapedLinkScore, SimlinDb, compute_layout, link_score_equation_text,
     link_score_equation_text_shaped, sync_from_datamodel,
 };
 use crate::test_common::TestProject;
@@ -469,16 +469,16 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
     // the result; use the shaped entry point so the arrayed equation
     // survives intact.
     let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
-    let lsv = link_score_equation_text_shaped(
+    let result = link_score_equation_text_shaped(
         &db,
         link_id,
         RefShape::FixedIndex(vec!["nyc".to_string()]),
         source_model,
         sync.project,
     );
-    let lsv = lsv
-        .as_ref()
-        .expect("stock-to-arrayed-flow link score should be generated");
+    let ShapedLinkScore::Scored(lsv) = result else {
+        panic!("stock-to-arrayed-flow link score should be generated, got: {result:?}");
+    };
 
     let elements = match &lsv.equation {
         datamodel::Equation::Arrayed(_, elements, _, _) => elements,

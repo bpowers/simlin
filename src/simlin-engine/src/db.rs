@@ -106,7 +106,7 @@ pub use dep_graph::{ModelDepGraphResult, ResolvedScc, SccPhase, model_dependency
 mod ltm;
 use ltm::*;
 pub use ltm::{
-    LtmImplicitVarMeta, compile_ltm_var_fragment, link_score_equation_text_shaped,
+    LtmImplicitVarMeta, ShapedLinkScore, compile_ltm_var_fragment, link_score_equation_text_shaped,
     model_ltm_implicit_module_refs, model_ltm_implicit_var_info, model_ltm_mode,
     model_ltm_var_name_index, model_ltm_variables,
 };
@@ -128,6 +128,14 @@ pub(crate) use ltm::AggLoopBudgetGuard;
 // existing.
 #[cfg(test)]
 pub(crate) use ltm::LtmFragmentFailureGuard;
+// Test-only: the forced-`PartialEquationError` edge override (GH #780), so
+// the unscoreable-edge-recording contract can be exercised end-to-end --
+// the `PartialEquationError` terminal is unreachable through any compiling
+// model (every shaped-path doom is recovered or pinned upstream), so a
+// test-only override + tiny fixture is the only way to drive it (per
+// docs/dev/rust.md#test-time-budgets).
+#[cfg(test)]
+pub(crate) use ltm::ForcePartialEquationErrorGuard;
 
 mod analysis;
 pub use analysis::RefShape;

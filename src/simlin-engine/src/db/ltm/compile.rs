@@ -65,6 +65,49 @@ pub fn compile_ltm_var_fragment(
     compile_ltm_equation_fragment(db, &lsv.name, &lsv.equation, model, project)
 }
 
+/// Outcome of [`link_score_equation_text_shaped`] for one
+/// `(from, to, shape)` tuple.
+///
+/// The shaped equation-text query has three distinct terminal states that
+/// the emission loop MUST tell apart -- collapsing them into a bare
+/// `Option` (the GH #780 defect) made a `PartialEquationError` skip
+/// indistinguishable from a benign "no variable here", so the
+/// `unscoreable_edges` recording the partial-equation class needs never
+/// fired and dependent loop scores degraded to warned constant-0 stubs:
+///
+/// - [`Scored`](ShapedLinkScore::Scored) -- the link-score variable was
+///   built; emit it.
+/// - [`Unscoreable`](ShapedLinkScore::Unscoreable) -- a
+///   [`PartialEquationError`](crate::ltm_augment::PartialEquationError)
+///   (the GH #311 parse class or the GH #526/T7 both-legs-doomed
+///   mismatched-dep class) made this `(from, to)` edge unscoreable. The
+///   loud `Warning` was already accumulated by the query; the caller MUST
+///   record the edge in `unscoreable_edges` so loop scores traversing it
+///   are DROPPED (the #758 contract), not stubbed.
+/// - [`NoVariable`](ShapedLinkScore::NoVariable) -- no variable for benign
+///   structural reasons (the target could not be reconstructed, or a
+///   module link has no composite/output to score). NOT an unscoreable
+///   edge: the caller skips it silently, exactly as the pre-fix `None`
+///   did, and loop scores through it are unaffected.
+///
+/// Surfacing the partial-equation signal through the query's RETURN value
+/// (rather than a side channel) keeps it consistent under salsa caching:
+/// the salsa accumulator already replays the `Warning` on every cache hit,
+/// and the caller re-reads this memoized value -- and so re-inserts into
+/// the freshly-rebuilt `unscoreable_edges` set -- on every
+/// `model_ltm_variables` evaluation, whether the query body re-ran or not.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, salsa::Update)]
+pub enum ShapedLinkScore {
+    /// The link-score variable was generated.
+    Scored(LtmSyntheticVar),
+    /// A `PartialEquationError` made the edge unscoreable; the warning is
+    /// accumulated and the caller records the edge in `unscoreable_edges`.
+    Unscoreable,
+    /// No variable for benign structural reasons; not an unscoreable edge.
+    NoVariable,
+}
+
 /// Compute the per-shape link score equation text for a single causal link.
 ///
 /// Sibling of [`crate::db::link_score_equation_text`]. Where the legacy
@@ -73,6 +116,10 @@ pub fn compile_ltm_var_fragment(
 /// `(from, to, shape)` tuple. `model_ltm_variables` calls this once per
 /// unique shape in the target's AST so per-shape link scores can be
 /// ceteris-paribus scored against their actual reference site.
+///
+/// Returns a [`ShapedLinkScore`] (NOT a bare `Option`) so the emission loop
+/// can distinguish a `PartialEquationError`-driven unscoreable skip from a
+/// benign missing variable -- see that type's docs and GH #780.
 ///
 /// Module-involved links delegate to the same module formulas as the
 /// legacy function (composite reference / black-box delta-ratio). Their
@@ -95,7 +142,7 @@ pub fn link_score_equation_text_shaped<'db>(
     shape: RefShape,
     model: SourceModel,
     project: SourceProject,
-) -> Option<crate::db::LtmSyntheticVar> {
+) -> ShapedLinkScore {
     use crate::common::{Canonical, Ident};
     use crate::db::LtmSyntheticVar;
     use crate::db::module_link_score_equation;
@@ -106,7 +153,13 @@ pub fn link_score_equation_text_shaped<'db>(
     let to_ident = Ident::<Canonical>::new(to_name);
 
     let from_var = reconstruct_single_variable(db, model, project, from_name);
-    let to_var = reconstruct_single_variable(db, model, project, to_name)?;
+    // A target that cannot be reconstructed is a benign structural skip
+    // (degenerate edge), NOT a partial-equation failure -- no `Warning`, no
+    // unscoreable-edge recording. Loop scores through such an edge are
+    // unaffected, exactly as the pre-GH #780 `None` behaved.
+    let Some(to_var) = reconstruct_single_variable(db, model, project, to_name) else {
+        return ShapedLinkScore::NoVariable;
+    };
 
     let var_name = crate::ltm_augment::link_score_var_name(from_name, to_name, &shape);
 
@@ -119,9 +172,11 @@ pub fn link_score_equation_text_shaped<'db>(
     // Delegate to the shared helper so this twin and the (from, to)-keyed
     // `link_score_equation_text` stay byte-identical; key the synthetic
     // variable by the shape-driven name so the emission loop's per-shape
-    // map works.
+    // map works. A `None` here (a passthrough module with no composite or
+    // output port to score -- see `module_link_score_equation`) is a benign
+    // structural skip, NOT an unscoreable edge.
     if from_is_module || to_is_module {
-        return module_link_score_equation(
+        return match module_link_score_equation(
             db,
             model,
             project,
@@ -135,7 +190,10 @@ pub fn link_score_equation_text_shaped<'db>(
             equation,
             dimensions: vec![],
             compile_directly: false,
-        });
+        }) {
+            Some(lsv) => ShapedLinkScore::Scored(lsv),
+            None => ShapedLinkScore::NoVariable,
+        };
     }
 
     // Standard ceteris-paribus formula for non-module links.
@@ -197,17 +255,39 @@ pub fn link_score_equation_text_shaped<'db>(
                 .collect()
         })
         .unwrap_or_default();
+    // Test-only seam: the `PartialEquationError` terminal is genuinely
+    // unreachable through any compiling model today (every shaped-path
+    // doom is either recovered by `shaped_guard_form_text`'s changed-last
+    // fallback or pinned to a concrete element upstream -- the GH #780
+    // reachability finding). Rather than build a fixture that cannot exist,
+    // an active [`force_partial_equation_error`] override makes a sentinel
+    // edge doom so the unscoreable-edge contract can be exercised
+    // end-to-end (per docs/dev/rust.md#test-time-budgets -- a test-only
+    // override and a tiny fixture, not a contrived production input).
+    #[cfg(test)]
+    if force_partial_equation_error(from_name, to_name) {
+        let err = crate::ltm_augment::PartialEquationError::new(
+            "<test-forced partial-equation failure (GH #780)>",
+        );
+        super::emit_ltm_partial_equation_warning(db, model, &var_name, &err);
+        return ShapedLinkScore::Unscoreable;
+    }
+
     // The generator returns the equation already tagged with the target's
     // dimensionality (`Scalar`, `ApplyToAll`, or `Arrayed`). `dimensions`
     // and `compile_directly` are left at defaults here; the emission loop
     // in `model_ltm_variables` (`emit_per_shape_link_scores`) overwrites
     // `dimensions`, the equation's dimension names, and `compile_directly`
     // (set when `shape` is not `Bare`) with the per-shape policy result.
-    // A `PartialEquationError` means the target's equation text did not parse
-    // for the ceteris-paribus partial (GH #311). Skip the variable and warn
-    // rather than emit a silently non-ceteris-paribus link score; the bad
-    // equation would compile cleanly, so `model_ltm_fragment_diagnostics`
-    // would not catch it.
+    // A `PartialEquationError` means the target's equation text could not
+    // be rendered as a compilable ceteris-paribus partial -- the GH #311
+    // parse class or the GH #526/T7 both-legs-doomed mismatched-dep class.
+    // Warn, and report the edge as `Unscoreable` so the emission loop
+    // records it in `unscoreable_edges` and DROPS dependent loop scores
+    // (GH #758/#780); emitting a silently non-ceteris-paribus link score
+    // would compile cleanly, so `model_ltm_fragment_diagnostics` would not
+    // catch it, and degrading dependent loops to warned constant-0 stubs
+    // would look like legitimate values.
     let equation = match crate::ltm_augment::generate_link_score_equation_for_link(
         &from_ident,
         &to_ident,
@@ -221,16 +301,73 @@ pub fn link_score_equation_text_shaped<'db>(
         Ok(eqn) => eqn,
         Err(err) => {
             super::emit_ltm_partial_equation_warning(db, model, &var_name, &err);
-            return None;
+            return ShapedLinkScore::Unscoreable;
         }
     };
 
-    Some(LtmSyntheticVar {
+    ShapedLinkScore::Scored(LtmSyntheticVar {
         name: var_name,
         equation,
         dimensions: vec![],
         compile_directly: false,
     })
+}
+
+// Test-only override: forces [`link_score_equation_text_shaped`] to report
+// the sentinel edge as a `PartialEquationError` (GH #780). Scoped by an
+// active `ForcePartialEquationErrorGuard`; off in production builds. The
+// forced edge is matched by `(from, to)` exactly, so a test can doom ONE
+// causal edge of a multi-edge model and assert the surgical degradation
+// (the doomed edge's loops drop; the rest keep their scores).
+#[cfg(test)]
+thread_local! {
+    static FORCE_PARTIAL_ERROR_EDGE: std::cell::RefCell<Option<(String, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Whether an active [`ForcePartialEquationErrorGuard`] marks `(from, to)`
+/// as a forced-`PartialEquationError` edge (test-only; GH #780). Shared
+/// across the LTM module so every shaped/per-element generator call site
+/// honours the same override -- the salsa query here AND the direct
+/// `generate_scalar_to_element_equation` call site in `link_scores.rs`.
+#[cfg(test)]
+pub(super) fn force_partial_equation_error(from: &str, to: &str) -> bool {
+    FORCE_PARTIAL_ERROR_EDGE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .is_some_and(|(f, t)| f == from && t == to)
+    })
+}
+
+/// RAII guard (test-only) installing a forced-`PartialEquationError` edge
+/// for the current thread, restored on drop so a panicking test does not
+/// leak it. Because `link_score_equation_text_shaped` and
+/// `model_ltm_variables` are salsa-memoized, the guard must outlive every
+/// LTM query in the test it controls, and each test must use a fresh `db`
+/// (the override is not a salsa input, so a memoized result would otherwise
+/// survive regardless of guard state) -- the same discipline
+/// [`crate::db::ltm::AggLoopBudgetGuard`] documents.
+#[cfg(test)]
+pub(crate) struct ForcePartialEquationErrorGuard {
+    prev: Option<(String, String)>,
+}
+
+#[cfg(test)]
+impl ForcePartialEquationErrorGuard {
+    pub(crate) fn new(from: &str, to: &str) -> Self {
+        let prev =
+            FORCE_PARTIAL_ERROR_EDGE.with(|c| c.replace(Some((from.to_string(), to.to_string()))));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForcePartialEquationErrorGuard {
+    fn drop(&mut self) {
+        FORCE_PARTIAL_ERROR_EDGE.with(|c| {
+            *c.borrow_mut() = self.prev.take();
+        });
+    }
 }
 
 /// Result of [`lower_ltm_variable`]: the lowered variable plus the

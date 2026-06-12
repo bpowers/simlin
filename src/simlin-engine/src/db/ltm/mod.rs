@@ -43,11 +43,13 @@ mod pinned;
 // escape it are widened here.
 // `compile_ltm_var_fragment` / `link_score_equation_text_shaped` keep the `pub`
 // surface the `db.rs` root re-exports with `pub use ltm::{...}`.
+#[cfg(test)]
+pub(crate) use compile::ForcePartialEquationErrorGuard;
+pub use compile::{ShapedLinkScore, compile_ltm_var_fragment, link_score_equation_text_shaped};
 pub(crate) use compile::{
     compile_ltm_implicit_var_fragment, compile_ltm_synthetic_fragment,
     model_ltm_fragment_diagnostics,
 };
-pub use compile::{compile_ltm_var_fragment, link_score_equation_text_shaped};
 pub(crate) use link_scores::emit_ltm_partial_equation_warning;
 #[cfg(test)]
 pub(crate) use link_scores::ltm_partial_equation_warning_message;
