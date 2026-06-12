@@ -557,7 +557,7 @@ fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]
 ///   explicit element map (declined by the positional-only gate): the
 ///   conservative broadcast (every source element feeds every target
 ///   element).
-fn expand_same_element(
+pub(crate) fn expand_same_element(
     from_name: &str,
     to_name: &str,
     from_dims: &[crate::dimensions::Dimension],

@@ -39,6 +39,39 @@ type LinkOffsetMap = HashMap<(Ident<Canonical>, Ident<Canonical>), usize>;
 /// `recompute_module_input_edge_series` and `discover_loops_with_graph`.
 pub type SubModelOutputPorts = HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>;
 
+/// Per-variable metadata `parse_link_offsets` needs to spell the per-element
+/// FROM-node of a Bare A2A link score in lockstep with the element graph.
+///
+/// A Bare A2A link score (`{from}→{to}`, both names un-subscripted in the
+/// score name) is dimensioned over the TARGET's dims (see
+/// `db::ltm::link_score_dimensions`). When `from`'s OWN declared dims are
+/// FEWER than the score's dims -- a scalar feeder (`scale→growth`, GH #790),
+/// a lower-dim arrayed feeder (`boost[Region]→growth[Region,Age]`), or a
+/// positionally-mapped pair (`x[Region]→target[State]`, GH #527) --
+/// subscripting both endpoints with the score's full element tuple invents a
+/// from-node that names no real element-graph node (`scale[a]`,
+/// `boost[nyc,young]`, `x[s1]`), so the discovery search graph's edge dangles
+/// and every loop through `from` is silently undiscoverable (GH #754).
+///
+/// `declared_dims` maps each variable's canonical name to its DECLARED
+/// dimensions (in declared order); `dim_ctx` carries the dimension-mapping
+/// element correspondence. Together they let `expand_a2a_link_offsets` project
+/// the score's element tuple onto `from`'s own dims through the SAME
+/// `db::expand_same_element` diagonal/broadcast/mapped rule the element graph
+/// uses, so the two surfaces spell the from-node identically. The
+/// db-less `discover_loops` convenience path (variable-level graph, empty
+/// `ltm_vars`) passes [`LinkExpansionContext::default`]: no A2A expansion runs
+/// there, so the empty map is never consulted.
+#[derive(Default, Clone)]
+pub struct LinkExpansionContext {
+    /// Canonical variable name -> declared dimensions, in declared order.
+    /// Holds BOTH endpoints of every Bare A2A edge (the from-side projection
+    /// reads the from-var's dims, the to-side offset map reads the to-var's).
+    pub declared_dims: HashMap<Ident<Canonical>, Vec<crate::dimensions::Dimension>>,
+    /// Dimension-mapping element correspondence for the mapped (#527) leg.
+    pub dim_ctx: crate::dimensions::DimensionsContext,
+}
+
 // --- Constants (from the paper) ---
 
 /// Maximum loops to retain after discovery (paper uses 200)
@@ -540,6 +573,7 @@ fn parse_link_offsets(
     results: &Results,
     ltm_vars: &[LtmSyntheticVar],
     dims: &[datamodel::Dimension],
+    expansion: &LinkExpansionContext,
 ) -> Vec<LinkOffset> {
     // Build a lookup from canonical link score name -> LtmSyntheticVar
     // for quick dimension lookup during expansion.
@@ -606,9 +640,21 @@ fn parse_link_offsets(
             // Scalar link score: one entry at the base offset.
             entries.push(((Ident::new(from_str), Ident::new(to_str)), offset));
         } else {
-            // Bare A2A link score: expand to N element-level edges
-            // with the source AND target both subscripted.
-            expand_a2a_link_offsets(from_str, to_str, offset, var_dims, dims, &mut entries);
+            // Bare A2A link score: expand to N element-level edges. The
+            // TARGET side is always subscripted per element; the SOURCE side
+            // is projected onto its OWN declared dims (bare for a scalar
+            // feeder, the diagonal/broadcast for a lower-dim or mapped
+            // feeder) so the from-node names match the element graph (GH
+            // #754).
+            expand_a2a_link_offsets(
+                from_str,
+                to_str,
+                offset,
+                var_dims,
+                dims,
+                expansion,
+                &mut entries,
+            );
         }
 
         for entry in entries {
@@ -665,21 +711,46 @@ fn parse_link_offsets(
     link_offsets
 }
 
-/// Expand an A2A link score into per-element `LinkOffset` entries.
+/// Expand a Bare A2A link score into per-element `LinkOffset` entries.
 ///
-/// Given a link score name like `birth_rate→births` with dimensions
-/// `["Region"]` and base offset, produces one entry per element:
-/// `(birth_rate[nyc], births[nyc])` at `base + 0`,
-/// `(birth_rate[boston], births[boston])` at `base + 1`, etc.
+/// The score's `var_dims` are the TARGET's dims (see
+/// `db::ltm::link_score_dimensions`), so each result slot `base + idx` is the
+/// score for the edge feeding the `idx`-th target element (row-major). The
+/// TARGET node is always that element (`to_var[<tuple>]`); the SOURCE node is
+/// the PROJECTION of that target element onto `from`'s OWN declared dims:
 ///
-/// The element order matches the layout allocation order: row-major
-/// cartesian product of dimension elements.
+/// - a SCALAR feeder (`scale → growth`, GH #790) emits the bare `from` node,
+///   shared by every target-element offset;
+/// - a SAME-DIM feeder (`birth_rate[Region] → births[Region]`) emits the
+///   diagonal `from[e] → to[e]` (the original behavior);
+/// - a LOWER-DIM arrayed feeder (`boost[Region] → growth[Region,Age]`) emits
+///   `boost[r] → growth[r,a]`, the bare-region from-node broadcast over the
+///   unshared `Age`;
+/// - a positionally-MAPPED feeder (`x[Region] → target[State]`, GH #527)
+///   emits the mapping's diagonal `x[mapped(s)] → target[s]`.
+///
+/// The projection runs through the SAME `db::expand_same_element` rule the
+/// element graph emits for the corresponding `Bare` reference, so the
+/// discovery search graph's from-node names match `model_element_causal_edges`
+/// node-for-node (GH #754). Before this fix the source was subscripted with
+/// the score's FULL tuple unconditionally, minting phantom from-nodes
+/// (`scale[a]`, `boost[r,a]`, `x[s]`) that named no real element node, so
+/// every loop through such a feeder dangled and was silently undiscoverable.
+///
+/// The MAPPED leg is covered only for POSITIONAL mappings: `expand_same_element`
+/// declines element-mapped pairs (the GH #756 positional-only gate). Such a
+/// pair never reaches here anyway -- `link_score_dimensions` declines to
+/// retarget it to the target's dims (no Bare A2A score is emitted; the edge
+/// takes the GH #758 loud skip instead), so there is no dimensioned score for
+/// `parse_link_offsets` to expand. If that upstream gate is ever relaxed, the
+/// projection here inherits the same positional-only correspondence in lockstep.
 fn expand_a2a_link_offsets(
     from_var: &str,
     to_var: &str,
     base_offset: usize,
     var_dims: &[String],
     dims: &[datamodel::Dimension],
+    expansion: &LinkExpansionContext,
     link_offsets: &mut Vec<LinkOffset>,
 ) {
     let Some(tuples) = resolve_dim_element_tuples(var_dims, dims) else {
@@ -692,11 +763,73 @@ fn expand_a2a_link_offsets(
         return;
     };
 
+    // The target-element node -> its result offset, by row-major position in
+    // the score's (== target's) dims. This is the layout slot the runtime
+    // wrote the score into, regardless of how the source projects onto it.
+    let mut to_node_offset: HashMap<Ident<Canonical>, usize> = HashMap::with_capacity(tuples.len());
     for (idx, elems) in tuples.iter().enumerate() {
-        let subscript = subscript_from_elements(elems);
-        let from = Ident::new(&format!("{from_var}[{subscript}]"));
-        let to = Ident::new(&format!("{to_var}[{subscript}]"));
-        link_offsets.push(((from, to), base_offset + idx));
+        let to_node = Ident::new(&format!("{to_var}[{}]", subscript_from_elements(elems)));
+        to_node_offset.insert(to_node, base_offset + idx);
+    }
+
+    let from_ident = Ident::<Canonical>::new(from_var);
+    let to_ident = Ident::<Canonical>::new(to_var);
+    let from_dims = expansion.declared_dims.get(&from_ident);
+    let to_dims = expansion.declared_dims.get(&to_ident);
+
+    match (from_dims, to_dims) {
+        // Scalar feeder: the bare `from` node feeds every target-element slot.
+        // Mirrors `emit_edges_for_reference`'s `from_is_scalar` short-circuit
+        // (a scalar source has no subscript form).
+        (Some(fd), _) if fd.is_empty() => {
+            for (to_node, offset) in &to_node_offset {
+                link_offsets.push(((from_ident.clone(), to_node.clone()), *offset));
+            }
+        }
+        // Arrayed feeder with both endpoints' declared dims known: project the
+        // source onto its OWN dims via the shared element-graph rule, then
+        // attach each emitted (from_node -> to_node) edge to the target
+        // element's offset.
+        (Some(fd), Some(td)) => {
+            let mut element_edges: HashMap<String, std::collections::BTreeSet<String>> =
+                HashMap::new();
+            crate::db::expand_same_element(
+                from_var,
+                to_var,
+                fd,
+                td,
+                &expansion.dim_ctx,
+                &mut element_edges,
+            );
+            for (from_node, to_nodes) in element_edges {
+                let from = Ident::<Canonical>::new(&from_node);
+                for to_node in to_nodes {
+                    let to = Ident::<Canonical>::new(&to_node);
+                    if let Some(&offset) = to_node_offset.get(&to) {
+                        link_offsets.push(((from.clone(), to.clone()), offset));
+                    }
+                    // A to_node with no offset can't arise: `expand_same_element`
+                    // only emits target nodes over the same (target) dims the
+                    // offset map enumerates. Dropping it (rather than minting a
+                    // dangling edge) is the conservative choice if it ever does.
+                }
+            }
+        }
+        // Declared dims unavailable for an endpoint (no production Bare A2A
+        // score has an unknown variable -- the map covers every model
+        // variable; this guards the db-less convenience path and mid-edit
+        // metadata gaps): preserve the historical both-sides diagonal so the
+        // absent-metadata case is byte-identical to the pre-#754 behavior
+        // rather than risking a node-name mismatch that would error the
+        // discovery offset lookup.
+        _ => {
+            for (idx, elems) in tuples.iter().enumerate() {
+                let subscript = subscript_from_elements(elems);
+                let from = Ident::new(&format!("{from_var}[{subscript}]"));
+                let to = Ident::new(&format!("{to_var}[{subscript}]"));
+                link_offsets.push(((from, to), base_offset + idx));
+            }
+        }
     }
 }
 
@@ -865,12 +998,15 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
     let sub_model_ports = project_sub_model_output_ports(project);
     // The convenience path is unbudgeted: it builds the graph from a `Project`
     // and is used by small-model callers that never hit the GH #647 slowness.
+    // It passes empty `ltm_vars`/`dims`, so no A2A expansion runs and the empty
+    // `LinkExpansionContext` is never consulted.
     Ok(discover_loops_with_graph(
         results,
         &causal_graph,
         &stocks,
         &[],
         &[],
+        &LinkExpansionContext::default(),
         &sub_model_ports,
         None,
     )?
@@ -1944,9 +2080,10 @@ pub fn discovery_graph_stats(
     stocks: &[Ident<Canonical>],
     ltm_vars: &[LtmSyntheticVar],
     dims: &[datamodel::Dimension],
+    expansion: &LinkExpansionContext,
     sample_steps: &[usize],
 ) -> DiscoveryGraphStats {
-    let link_offsets = parse_link_offsets(results, ltm_vars, dims);
+    let link_offsets = parse_link_offsets(results, ltm_vars, dims, expansion);
     let search = IndexedSearch::build(&link_offsets, stocks);
     let n_nodes = search.node_count();
 
@@ -2301,16 +2438,21 @@ fn recompute_module_input_edge_series(
 /// budget elapsed before the sweep finished. A `None` budget runs to
 /// completion. Note the budget covers only this discovery sweep -- the
 /// caller's compilation and simulation time are outside it.
+// Each argument is a distinct backend-independent structural input the
+// discovery sweep needs; they are not naturally groupable into one struct
+// without obscuring the call sites, so the arity lint is suppressed here.
+#[allow(clippy::too_many_arguments)]
 pub fn discover_loops_with_graph(
     results: &Results,
     causal_graph: &CausalGraph,
     stocks: &[Ident<Canonical>],
     ltm_vars: &[LtmSyntheticVar],
     dims: &[datamodel::Dimension],
+    expansion: &LinkExpansionContext,
     sub_model_output_ports: &SubModelOutputPorts,
     budget: Option<Duration>,
 ) -> Result<DiscoveryResult> {
-    let link_offsets = parse_link_offsets(results, ltm_vars, dims);
+    let link_offsets = parse_link_offsets(results, ltm_vars, dims, expansion);
     if link_offsets.is_empty() {
         return Ok(DiscoveryResult {
             loops: Vec::new(),

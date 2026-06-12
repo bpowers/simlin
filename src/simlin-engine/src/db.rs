@@ -146,6 +146,12 @@ pub use analysis::causal_graph_from_edges;
 pub use analysis::causal_graph_from_element_edges;
 pub use analysis::causal_graph_from_element_edges_with_modules;
 pub(crate) use analysis::reconstruct_model_variables;
+// The same-element diagonal/broadcast/mapped projection the element graph
+// emits for a `Bare` A2A reference. Discovery's `expand_a2a_link_offsets`
+// consumes it (via `crate::db::expand_same_element`) so its per-element
+// from-node spelling stays in lockstep with `model_element_causal_edges`
+// rather than re-deriving it with a subtly different rule (GH #754).
+pub(crate) use analysis::expand_same_element;
 use analysis::*;
 // `model_element_loop_circuits` is `#[deprecated]` for LTM consumers (the
 // LTM pipeline uses `model_loop_circuits_tiered` instead). The re-export

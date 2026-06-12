@@ -660,6 +660,10 @@ pub struct LtmDiscoveryInputs {
     pub stocks: Vec<Ident<Canonical>>,
     pub ltm_vars: Vec<LtmSyntheticVar>,
     pub dims: Vec<datamodel::Dimension>,
+    /// Per-variable declared dims + dimension-mapping context the A2A
+    /// expansion projects each Bare score's from-node through (GH #754); built
+    /// through the production decision (`analysis::build_link_expansion_context`).
+    pub expansion: simlin_engine::ltm_finding::LinkExpansionContext,
     /// Emission-derived per-sub-model output-port set the per-exit-port
     /// recompute needs (GH #698); built through the production decision.
     pub sub_model_output_ports: simlin_engine::ltm_finding::SubModelOutputPorts,
@@ -730,6 +734,8 @@ pub fn ltm_discovery_inputs(
         .vars
         .clone();
     let dims = project_datamodel_dims(&db, sync.project).clone();
+    let expansion =
+        simlin_engine::analysis::build_link_expansion_context(&db, source_model, sync.project);
     let sub_model_output_ports =
         simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
 
@@ -739,6 +745,7 @@ pub fn ltm_discovery_inputs(
         stocks,
         ltm_vars,
         dims,
+        expansion,
         sub_model_output_ports,
     }
 }

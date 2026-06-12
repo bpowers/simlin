@@ -5763,42 +5763,72 @@ fn gh525_discovery_twin_parses_per_element_names() {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        &inputs.expansion,
         &inputs.sub_model_output_ports,
         None,
     )
     .expect("discovery must succeed on the GH #525 repro")
     .loops;
 
-    // The four REAL same-element direct loops are found, with parseable
-    // (finite) scores -- the new per-(row, element) names did not corrupt
-    // the search graph.
+    // Eight REAL loops are found, with parseable (finite) scores -- the new
+    // per-(row, element) names did not corrupt the search graph. FOUR are the
+    // direct same-element diagonals (`pop[r,a] -> growth[r,a] -> pop[r,a]`);
+    // FOUR run through the `row_sum[r]` reducer node
+    // (`pop[r,a] -> row_sum[r] -> growth[r,a] -> pop[r,a]`). The latter four
+    // are now discoverable since GH #754: `row_sum[Region]` is BOTH the
+    // partial-collapse target of `pop[Region,Age]` (from has MORE dims) and
+    // the lower-dim broadcast source of `growth[Region,Age]` (from has FEWER
+    // dims), and both projections now spell `row_sum[r]` (1-D) instead of the
+    // phantom `row_sum[r,a]`, matching the element graph. Before GH #754 the
+    // `row_sum` hop dangled and only the four direct loops surfaced.
     assert_eq!(
         found.len(),
-        4,
-        "discovery must find exactly the four real same-element loops; got: {:?}",
+        8,
+        "discovery must find the four direct + four row_sum-routed loops; got: {:?}",
         found
             .iter()
             .map(|fl| (&fl.loop_info.id, &fl.loop_info.links))
             .collect::<Vec<_>>()
     );
+    let mut row_sum_loops = 0usize;
     for fl in &found {
-        // No phantom: a loop visiting row_sum[r] (or any node) must read it
-        // from the SAME region element -- the per-element link scores parse
-        // into the pinned diagonal, never a cross-element pathway.
+        // No phantom: a loop visiting row_sum[r] must read it from the SAME
+        // region -- the per-element link scores parse into the pinned diagonal
+        // / region-projection, never a cross-region pathway.
+        let mut visits_row_sum = false;
         for (i, link) in fl.loop_info.links.iter().enumerate() {
             let to = link.to.as_str();
             if let Some(r) = to
                 .strip_prefix("row_sum[")
                 .and_then(|rest| rest.strip_suffix("]"))
             {
+                visits_row_sum = true;
                 let from = link.from.as_str();
                 assert!(
                     from.starts_with(&format!("pop[{r},")),
                     "link {i} of {:?} reads row_sum[{r}] from {from} -- a \
-                     phantom cross-element hop",
+                     phantom cross-region hop",
                     fl.loop_info.id
                 );
             }
+            // A `row_sum[r] -> growth[...]` hop must broadcast within region r.
+            if let Some(r) = link
+                .from
+                .as_str()
+                .strip_prefix("row_sum[")
+                .and_then(|rest| rest.strip_suffix("]"))
+            {
+                assert!(
+                    link.to.as_str().starts_with(&format!("growth[{r},")),
+                    "link {i} of {:?} broadcasts row_sum[{r}] to {} -- a \
+                     phantom cross-region hop",
+                    fl.loop_info.id,
+                    link.to.as_str()
+                );
+            }
+        }
+        if visits_row_sum {
+            row_sum_loops += 1;
         }
         // The per-timestep scores parse and stay finite.
         assert!(
@@ -5806,35 +5836,31 @@ fn gh525_discovery_twin_parses_per_element_names() {
             "discovered loop {} scores must stay finite",
             fl.loop_info.id
         );
-        // Same-element: every node in the loop carries one (region, age)
-        // pair (the direct pop/growth diagonals).
-        let elems: std::collections::BTreeSet<&str> = fl
+        // Same-REGION: every node's region coordinate is consistent (the
+        // direct loops are fully same-element; the row_sum loops mix the 1-D
+        // `row_sum[r]` with 2-D `pop[r,a]`/`growth[r,a]`, but never two
+        // regions).
+        let regions: std::collections::BTreeSet<&str> = fl
             .loop_info
             .links
             .iter()
             .flat_map(|l| [l.from.as_str(), l.to.as_str()])
             .filter_map(|n| n.split_once('[').map(|(_, rest)| rest))
+            .map(|rest| rest.split([',', ']']).next().unwrap_or(rest))
             .collect();
         assert_eq!(
-            elems.len(),
+            regions.len(),
             1,
-            "discovered loop {} must be same-element (no phantom mixing); \
+            "discovered loop {} must be same-region (no phantom mixing); \
              nodes: {:?}",
             fl.loop_info.id,
             fl.loop_info.links
         );
     }
-    // KNOWN discovery residual (pre-existing, NOT a T6 regression): the
-    // row_sum circuits themselves are not discoverable because the
-    // partial-collapse hop's A2A score (`row_sum→growth`, dimensioned over
-    // the TARGET's [Region, Age]) is expanded by `parse_link_offsets`'s
-    // `expand_a2a_link_offsets` into edges whose FROM node is subscripted
-    // over the score's dims (`row_sum[a,young]`) -- a node that does not
-    // exist for the 1-D `row_sum` -- so the search path dead-ends at
-    // `row_sum[r]`. Pre-T6 the same fixture dead-ended one hop earlier
-    // (`pop[a]`, an invented node for the 2-D `pop`), so T6 strictly
-    // extends the discoverable prefix; the residual is the
-    // partial-collapse expansion itself (the GH #716 family).
+    assert_eq!(
+        row_sum_loops, 4,
+        "exactly the four region-paired row_sum circuits must be discovered"
+    );
 }
 
 /// GH #525 (T6 review boundary pin, the ALIASED ThroughAgg routing): the
@@ -7336,6 +7362,7 @@ fn gh777_broadcast_discovery_twin_parses_per_element_names() {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        &inputs.expansion,
         &inputs.sub_model_output_ports,
         None,
     )
@@ -9648,15 +9675,18 @@ fn scalar_feeder_whole_rhs_and_subexpr_spellings_agree() {
 /// must EMIT there too -- ONE A2A `scale->growth` score, no broken
 /// per-element scores, zero warnings.
 ///
-/// SCOPE HONESTY: this test asserts the emitted vars and warnings only -- it
-/// does NOT run the discovery SEARCH. The emitted scalar-from Bare A2A name
-/// is currently structurally undiscoverable in the search graph: the
-/// discovery parser's `expand_a2a_link_offsets` subscripts BOTH endpoints
-/// over the score's dims, inventing a `scale[elem]` from-node that never
-/// matches the scalar source's bare node (a pre-existing gap shared with
-/// every scalar-feeder A2A score, e.g. the synthetic-agg arm's; the
-/// discovery offsets fix is queued separately -- see the GH #790 review
-/// follow-up stack).
+/// SCOPE: this test asserts the emitted vars and warnings only. The
+/// companion `gh754_scalar_feeder_loop_discoverable_in_discovery_mode` drives
+/// the SAME fixture through the discovery SEARCH and proves the loop through
+/// the scalar feeder is now found, and
+/// `gh754_scalar_feeder_discovery_matches_exhaustive_scores` pins per-step
+/// parity with the exhaustive surface. Before GH #754 the emitted scalar-from
+/// Bare A2A name was structurally undiscoverable: `expand_a2a_link_offsets`
+/// subscripted BOTH endpoints over the score's dims, inventing a `scale[elem]`
+/// from-node that matched no real node, so the edge dangled and every loop
+/// through the feeder was silently absent. It now projects the from-node onto
+/// the source's OWN dims (bare for a scalar feeder), in lockstep with the
+/// element graph.
 #[test]
 fn scalar_feeder_of_whole_rhs_reduce_emits_cleanly_in_discovery_mode() {
     let project = gh790_whole_rhs_fixture("SUM");
@@ -9690,6 +9720,345 @@ fn scalar_feeder_of_whole_rhs_reduce_emits_cleanly_in_discovery_mode() {
         assembly_warnings(&db, sync.project).is_empty(),
         "discovery mode must compile every LTM fragment cleanly; got: {:?}",
         assembly_warnings(&db, sync.project)
+    );
+}
+
+/// GH #754 (scalar-source leg), the must-fix the #790 review surfaced: the
+/// scalar-feeder Bare A2A score (`scale->growth`) must be DISCOVERABLE in
+/// discovery mode, not merely emitted cleanly. Drives the gh790 fixture
+/// through the ACTUAL discovery search (`discover_loops_with_graph`, the
+/// `analysis::run_ltm_pipeline` recipe) and asserts the feedback loop
+/// `pop -> scale -> growth -> pop` is found, with `scale` (the bare scalar
+/// from-node) appearing in the discovered loop's links.
+///
+/// Pre-fix `expand_a2a_link_offsets` subscripts BOTH endpoints over the
+/// score's `[D1]` dims, inventing `scale[a]`/`scale[b]` from-nodes that
+/// match no real node (the scalar source's node is bare `scale`); the edge
+/// dangles, the loop is structurally unreachable, and the search returns
+/// ZERO loops. This is the silent completeness gap the #790 trade widened
+/// (pre-#790 the broken per-element scores at least warned via 0-stubs).
+#[test]
+fn gh754_scalar_feeder_loop_discoverable_in_discovery_mode() {
+    let project = gh790_whole_rhs_fixture("SUM");
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the gh790 scalar-feeder repro")
+    .loops;
+
+    // The per-element circuit `pop[e] -> scale -> growth[e] -> pop[e]` must be
+    // discovered for each element. The scalar `scale` hop is the one the
+    // phantom `scale[e]` from-node broke.
+    assert!(
+        !found.is_empty(),
+        "discovery must find the loop through the scalar feeder `scale`; got \
+         none (the phantom scale[elem] from-node dangled the edge)"
+    );
+    let mut saw_scale_hop = false;
+    for fl in &found {
+        for link in &fl.loop_info.links {
+            // The bare scalar `scale` node must appear verbatim -- never a
+            // subscripted `scale[a]`/`scale[b]` phantom.
+            assert!(
+                !link.from.as_str().starts_with("scale["),
+                "discovered loop {} runs through a phantom subscripted scale node: {:?}",
+                fl.loop_info.id,
+                fl.loop_info.links
+            );
+            assert!(
+                !link.to.as_str().starts_with("scale["),
+                "discovered loop {} targets a phantom subscripted scale node: {:?}",
+                fl.loop_info.id,
+                fl.loop_info.links
+            );
+            if link.from.as_str() == "scale" || link.to.as_str() == "scale" {
+                saw_scale_hop = true;
+            }
+        }
+        // The discovered loop's per-step scores parse and stay finite.
+        assert!(
+            fl.scores.iter().all(|(_, v)| v.is_finite()),
+            "discovered loop {} scores must stay finite",
+            fl.loop_info.id
+        );
+    }
+    assert!(
+        saw_scale_hop,
+        "no discovered loop hops through the bare scalar `scale` node; loops: {:?}",
+        found
+            .iter()
+            .map(|fl| &fl.loop_info.links)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// GH #754 (scalar-source leg), the strongest parity assertion (the
+/// #748/#698 symmetric-exercise lesson): the loop discovered through the
+/// scalar feeder must score POINTWISE-identically to the same loop's
+/// exhaustive-mode `loop_score` series on the same model and VM run. The
+/// gh790 fixture's variable-level SCC is tiny (pop, scale, growth), so it
+/// runs exhaustively by default; discovery is force-flipped by the harness.
+/// Both modes share the VM oracle and the link-score values, so the
+/// discovered per-element loop score must equal the exhaustive per-element
+/// `loop_score` series the compiler emits.
+#[test]
+fn gh754_scalar_feeder_discovery_matches_exhaustive_scores() {
+    let project = gh790_whole_rhs_fixture("SUM");
+
+    // Discovery surface: the per-element loops the search finds.
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let discovered = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed")
+    .loops;
+    assert!(
+        !discovered.is_empty(),
+        "discovery must find the scalar-feeder loop for the parity check"
+    );
+
+    // Exhaustive surface: the compiler's per-element loop_score series.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("exhaustive LTM compilation should succeed");
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end().expect("VM run should complete");
+    let exhaustive_results = vm.into_results();
+    let exhaustive_loop_series: Vec<Vec<f64>> = ltm_score_var_names(&exhaustive_results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .map(|n| series_at(&exhaustive_results, offset_of(&exhaustive_results, &n)))
+        .collect();
+    assert!(
+        !exhaustive_loop_series.is_empty(),
+        "the exhaustive surface must emit at least one loop_score for the parity check"
+    );
+
+    // Every discovered loop's |score| series must match some exhaustive
+    // loop_score series pointwise (sign conventions differ across surfaces;
+    // the magnitudes -- the dominance-bearing quantity -- must agree). The VM
+    // run and link-score values are shared, so an exact match (modulo the
+    // STARTUP_STEPS guard) is the right bar.
+    const TOL: f64 = 1e-9;
+    for fl in &discovered {
+        let disc: Vec<f64> = fl.scores.iter().map(|(_, v)| v.abs()).collect();
+        let matched = exhaustive_loop_series.iter().any(|ex| {
+            ex.len() == disc.len()
+                && disc
+                    .iter()
+                    .zip(ex.iter())
+                    .skip(STARTUP_STEPS)
+                    .all(|(d, e)| (d - e.abs()).abs() <= TOL)
+        });
+        assert!(
+            matched,
+            "discovered loop {} score series has no pointwise match among the \
+             exhaustive loop_score series; discovered |scores|: {:?}; exhaustive: {:?}",
+            fl.loop_info.id, disc, exhaustive_loop_series
+        );
+    }
+}
+
+/// GH #754 (lower-dim arrayed-source leg): a Bare A2A score whose source has
+/// FEWER dims than the score (`stock[Region] -> pop[Region,Age]`, score dims
+/// `[Region,Age]`) must project the from-node onto the source's OWN dims
+/// (`stock[nyc]`, broadcast over the unshared `Age`), never the phantom
+/// `stock[nyc,young]` the both-sides expansion mints. Driven through the
+/// real discovery search; the same-element circuits must be found and every
+/// `stock` hop must read its own region element.
+#[test]
+fn gh754_lower_dim_feeder_loop_discoverable_in_discovery_mode() {
+    // `pop[Region,Age]` integrates `growth`, which broadcasts the lower-dim
+    // arrayed `boost[Region]` over `Age` -- a Bare A2A edge
+    // `boost[Region] -> growth[Region,Age]` whose score is over the target's
+    // `[Region,Age]` dims while `boost`'s own declared dims are `[Region]`.
+    let project = TestProject::new("gh754_lower_dim_feeder")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("Age", &["young", "old"])
+        .array_aux("boost[Region]", "pop[Region, young] * 0.0001")
+        .array_flow(
+            "growth[Region, Age]",
+            "boost[Region] * pop[Region, Age]",
+            None,
+        )
+        .array_stock("pop[Region, Age]", "100", &["growth"], &[], None)
+        .build_datamodel();
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the lower-dim feeder repro")
+    .loops;
+
+    assert!(
+        !found.is_empty(),
+        "discovery must find the loop through the lower-dim feeder `boost`; \
+         got none (the phantom boost[region,age] from-node dangled the edge)"
+    );
+    let mut saw_boost_hop = false;
+    for fl in &found {
+        for link in &fl.loop_info.links {
+            // The `boost` from-node must carry exactly ONE element (its own
+            // `Region`), never a phantom `[region,age]` pair.
+            if let Some(sub) = link
+                .from
+                .as_str()
+                .strip_prefix("boost[")
+                .and_then(|r| r.strip_suffix("]"))
+            {
+                saw_boost_hop = true;
+                assert!(
+                    !sub.contains(','),
+                    "discovered loop {} runs through a phantom multi-dim boost \
+                     node `boost[{sub}]`; boost is declared over Region only: {:?}",
+                    fl.loop_info.id,
+                    fl.loop_info.links
+                );
+            }
+        }
+        assert!(
+            fl.scores.iter().all(|(_, v)| v.is_finite()),
+            "discovered loop {} scores must stay finite",
+            fl.loop_info.id
+        );
+    }
+    assert!(
+        saw_boost_hop,
+        "no discovered loop hops through the lower-dim `boost` node; loops: {:?}",
+        found
+            .iter()
+            .map(|fl| &fl.loop_info.links)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// GH #754 (the ORIGINAL mapped-dimension leg, positional #527): a Bare A2A
+/// edge between POSITIONALLY-MAPPED dimensions (`pop[Region] -> mid[State]`
+/// with a `State->Region` mapping) is scored over the target's `[State]`
+/// dims, so before this fix `expand_a2a_link_offsets` minted `pop[s1]`/`pop[s2]`
+/// -- elements of the WRONG dimension, naming no real node. The projection now
+/// runs through `expand_same_element`'s mapped diagonal, spelling the from-node
+/// `pop[<mapped source elem>]` (e.g. `pop[r1]`) in lockstep with the element
+/// graph, so the mapped loop is discoverable.
+///
+/// (Only POSITIONAL mappings reach here: an element-mapped pair is declined
+/// upstream by `link_score_dimensions` -- no Bare A2A score is emitted, the
+/// GH #756 positional-only gate -- so no phantom can be minted for it.)
+#[test]
+fn gh754_mapped_feeder_loop_discoverable_in_discovery_mode() {
+    let project = TestProject::new("gh754_mapped_feeder")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        // Bare reference to the `[Region]` `pop` from a `[State]`-iterated
+        // equation: the positional `State->Region` mapping resolves it to the
+        // diagonal, so `pop -> mid` is a mapped Bare A2A edge over `[State]`.
+        .array_aux("mid[State]", "pop[State] * 0.0001")
+        .array_flow("inflow[Region]", "mid[Region] * pop[Region]", None)
+        .build_datamodel();
+
+    let inputs = crate::test_helpers::ltm_discovery_inputs(&project, "main");
+    let found = simlin_engine::ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.sub_model_output_ports,
+        None,
+    )
+    .expect("discovery must succeed on the mapped feeder repro")
+    .loops;
+
+    // The mapped diagonal loops `pop[r] -> mid[s] -> inflow[r] -> pop[r]` (with
+    // s the positional image of r) must be found, and every `pop -> mid` hop
+    // must read pop from the positionally-mapped region -- never a phantom
+    // `pop[s]` (an element of the wrong dimension).
+    assert!(
+        !found.is_empty(),
+        "discovery must find the mapped feeder loop; got none (the phantom \
+         pop[state] from-node dangled the edge)"
+    );
+    let positional = [("s1", "r1"), ("s2", "r2")];
+    let mut saw_mapped_hop = false;
+    for fl in &found {
+        for link in &fl.loop_info.links {
+            // A `pop -> mid[s]` hop must come from the mapped region pop[r].
+            if let Some(s) = link
+                .to
+                .as_str()
+                .strip_prefix("mid[")
+                .and_then(|r| r.strip_suffix("]"))
+            {
+                saw_mapped_hop = true;
+                let expected_region = positional
+                    .iter()
+                    .find(|(state, _)| *state == s)
+                    .map(|(_, r)| *r)
+                    .unwrap_or_else(|| panic!("unexpected mid state {s}"));
+                assert_eq!(
+                    link.from.as_str(),
+                    format!("pop[{expected_region}]"),
+                    "mapped hop into mid[{s}] must read pop[{expected_region}] \
+                     (the positional image), not {} -- a phantom wrong-dimension node",
+                    link.from.as_str()
+                );
+            }
+            // No phantom: a `pop[...]` node must never carry a STATE element.
+            if let Some(e) = link
+                .from
+                .as_str()
+                .strip_prefix("pop[")
+                .and_then(|r| r.strip_suffix("]"))
+            {
+                assert!(
+                    e == "r1" || e == "r2",
+                    "phantom pop node `pop[{e}]` (not a Region element)"
+                );
+            }
+        }
+        assert!(
+            fl.scores.iter().all(|(_, v)| v.is_finite()),
+            "discovered loop {} scores must stay finite",
+            fl.loop_info.id
+        );
+    }
+    assert!(
+        saw_mapped_hop,
+        "no discovered loop hops through the mapped `mid` node; loops: {:?}",
+        found
+            .iter()
+            .map(|fl| &fl.loop_info.links)
+            .collect::<Vec<_>>()
     );
 }
 

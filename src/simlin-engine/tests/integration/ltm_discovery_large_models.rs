@@ -160,6 +160,7 @@ struct DiscoveryInputs {
     stocks: Vec<Ident<Canonical>>,
     ltm_vars: Vec<LtmSyntheticVar>,
     dims: Vec<datamodel::Dimension>,
+    expansion: simlin_engine::ltm_finding::LinkExpansionContext,
     sub_model_output_ports: simlin_engine::ltm_finding::SubModelOutputPorts,
 }
 
@@ -184,6 +185,7 @@ fn discovery_inputs(datamodel_project: &datamodel::Project) -> DiscoveryInputs {
         stocks: shared.stocks,
         ltm_vars: shared.ltm_vars,
         dims: shared.dims,
+        expansion: shared.expansion,
         sub_model_output_ports: shared.sub_model_output_ports,
     }
 }
@@ -347,6 +349,7 @@ fn world3_discovery_single_timestep() {
         stocks,
         ltm_vars,
         dims,
+        expansion,
         sub_model_output_ports,
     } = inputs;
 
@@ -364,6 +367,7 @@ fn world3_discovery_single_timestep() {
         &stocks,
         &ltm_vars,
         &dims,
+        &expansion,
         &sub_model_output_ports,
         None,
     )
@@ -461,6 +465,7 @@ fn discovery_contract_holds_on_tractable_arrayed_model() {
         stocks,
         ltm_vars,
         dims,
+        expansion,
         sub_model_output_ports,
     } = inputs;
 
@@ -470,6 +475,7 @@ fn discovery_contract_holds_on_tractable_arrayed_model() {
         &stocks,
         &ltm_vars,
         &dims,
+        &expansion,
         &sub_model_output_ports,
         None,
     )

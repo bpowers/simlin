@@ -458,7 +458,7 @@ fn test_inactive_loop_found_at_active_step() {
         },
         is_vensim: false,
     };
-    let link_offsets = parse_link_offsets(&results, &[], &[]);
+    let link_offsets = parse_link_offsets(&results, &[], &[], &LinkExpansionContext::default());
     let stocks = stock_list(&["a"]);
     let paths = indexed_all_paths(&results, &link_offsets, &stocks);
     assert_eq!(
@@ -654,7 +654,7 @@ fn test_parse_link_offsets() {
         is_vensim: false,
     };
 
-    let parsed = parse_link_offsets(&results, &[], &[]);
+    let parsed = parse_link_offsets(&results, &[], &[], &LinkExpansionContext::default());
     assert_eq!(parsed.len(), 2, "Should find 2 link score variables");
 
     // Verify the parsed entries
@@ -717,7 +717,21 @@ fn test_parse_link_offsets_a2a_expansion() {
         ],
     )];
 
-    let parsed = parse_link_offsets(&results, &ltm_vars, &dims);
+    // Both A2A endpoints are declared over `[Region]`: the same-dim diagonal
+    // projection must reproduce the historical `birth_rate[e] -> births[e]`
+    // pairs (the new projection path, not the metadata-absent fallback).
+    let region_dim: crate::dimensions::Dimension = (&dims[0]).into();
+    let expansion = LinkExpansionContext {
+        declared_dims: [
+            (Ident::new("birth_rate"), vec![region_dim.clone()]),
+            (Ident::new("births"), vec![region_dim]),
+        ]
+        .into_iter()
+        .collect(),
+        dim_ctx: crate::dimensions::DimensionsContext::default(),
+    };
+
+    let parsed = parse_link_offsets(&results, &ltm_vars, &dims, &expansion);
 
     // Should have 3 element-level entries for A2A + 1 scalar = 4 total
     assert_eq!(parsed.len(), 4, "3 A2A elements + 1 scalar = 4 total");
@@ -782,7 +796,7 @@ fn test_parse_link_offsets_cross_dim_passthrough() {
     };
 
     // Even with ltm_vars and dims, cross-dim scores pass through directly
-    let parsed = parse_link_offsets(&results, &[], &[]);
+    let parsed = parse_link_offsets(&results, &[], &[], &LinkExpansionContext::default());
     assert_eq!(parsed.len(), 1);
     let ((from, to), offset) = &parsed[0];
     assert_eq!(from.as_str(), "population[nyc]");
@@ -815,6 +829,146 @@ fn make_results_with_offsets(
     }
 }
 
+/// GH #754 (scalar-source leg, unit): a Bare A2A score whose SOURCE is
+/// scalar (`scale→growth` over `[D1]`, the GH #790 feeder) must project the
+/// from-node to the BARE `scale` -- one edge per target element, all sharing
+/// the bare from-node -- never the phantom `scale[a]`/`scale[b]` the
+/// both-sides expansion mints. The bare from-node is the one the element
+/// graph spells, so loops through the scalar feeder become discoverable.
+#[test]
+fn test_parse_link_offsets_scalar_source_projects_to_bare() {
+    let mut offsets = HashMap::new();
+    offsets.insert(
+        Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}growth"),
+        10usize,
+    );
+    let results = make_results_with_offsets(offsets, 20);
+
+    let ltm_vars = vec![crate::db::LtmSyntheticVar {
+        name: "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}growth".to_string(),
+        equation: datamodel::Equation::Scalar(String::new()),
+        dimensions: vec!["D1".to_string()],
+        compile_directly: false,
+    }];
+    let dims = vec![datamodel::Dimension::named(
+        "D1".to_string(),
+        vec!["a".to_string(), "b".to_string()],
+    )];
+    let d1_dim: crate::dimensions::Dimension = (&dims[0]).into();
+    // `scale` scalar, `growth` over `[D1]`.
+    let expansion = LinkExpansionContext {
+        declared_dims: [
+            (Ident::new("scale"), Vec::new()),
+            (Ident::new("growth"), vec![d1_dim]),
+        ]
+        .into_iter()
+        .collect(),
+        dim_ctx: crate::dimensions::DimensionsContext::default(),
+    };
+
+    let parsed = parse_link_offsets(&results, &ltm_vars, &dims, &expansion);
+
+    assert_eq!(parsed.len(), 2, "one edge per target element");
+    // The bare scalar from-node feeds growth[a] at offset 10 and growth[b]
+    // at offset 11; never a subscripted scale[a]/scale[b].
+    let a = parsed
+        .iter()
+        .find(|((f, t), _)| f.as_str() == "scale" && t.as_str() == "growth[a]")
+        .expect("scale -> growth[a] at the base offset");
+    assert_eq!(a.1, 10);
+    let b = parsed
+        .iter()
+        .find(|((f, t), _)| f.as_str() == "scale" && t.as_str() == "growth[b]")
+        .expect("scale -> growth[b] at base+1");
+    assert_eq!(b.1, 11);
+    assert!(
+        !parsed
+            .iter()
+            .any(|((f, _), _)| f.as_str().starts_with("scale[")),
+        "no phantom subscripted scale node may be minted; got: {:?}",
+        parsed
+            .iter()
+            .map(|((f, t), o)| (f.as_str(), t.as_str(), *o))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// GH #754 (lower-dim arrayed-source leg, unit): a Bare A2A score whose
+/// SOURCE has FEWER dims than the score (`boost[Region]→growth[Region,Age]`,
+/// score dims `[Region,Age]`) must project the from-node onto `boost`'s OWN
+/// `[Region]` dim and BROADCAST over the unshared `Age`, producing
+/// `boost[r] -> growth[r,a]` -- never the phantom `boost[r,a]`. The to-side
+/// offset stays keyed on the target element's row-major position.
+#[test]
+fn test_parse_link_offsets_lower_dim_source_projects_and_broadcasts() {
+    let mut offsets = HashMap::new();
+    offsets.insert(
+        Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}boost\u{2192}growth"),
+        100usize,
+    );
+    let results = make_results_with_offsets(offsets, 120);
+
+    let ltm_vars = vec![crate::db::LtmSyntheticVar {
+        name: "$\u{205A}ltm\u{205A}link_score\u{205A}boost\u{2192}growth".to_string(),
+        equation: datamodel::Equation::Scalar(String::new()),
+        dimensions: vec!["Region".to_string(), "Age".to_string()],
+        compile_directly: false,
+    }];
+    let dims = vec![
+        datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["nyc".to_string(), "boston".to_string()],
+        ),
+        datamodel::Dimension::named(
+            "Age".to_string(),
+            vec!["young".to_string(), "old".to_string()],
+        ),
+    ];
+    let region_dim: crate::dimensions::Dimension = (&dims[0]).into();
+    let age_dim: crate::dimensions::Dimension = (&dims[1]).into();
+    let expansion = LinkExpansionContext {
+        declared_dims: [
+            (Ident::new("boost"), vec![region_dim.clone()]),
+            (Ident::new("growth"), vec![region_dim, age_dim]),
+        ]
+        .into_iter()
+        .collect(),
+        dim_ctx: crate::dimensions::DimensionsContext::default(),
+    };
+
+    let parsed = parse_link_offsets(&results, &ltm_vars, &dims, &expansion);
+
+    // Four target-element slots, row-major over [Region,Age]:
+    // growth[nyc,young]=100, growth[nyc,old]=101, growth[boston,young]=102,
+    // growth[boston,old]=103. Each `boost[r]` feeds the two Age slots of its
+    // own region.
+    assert_eq!(parsed.len(), 4, "one edge per target element (broadcast)");
+    let expect = [
+        ("boost[nyc]", "growth[nyc,young]", 100usize),
+        ("boost[nyc]", "growth[nyc,old]", 101),
+        ("boost[boston]", "growth[boston,young]", 102),
+        ("boost[boston]", "growth[boston,old]", 103),
+    ];
+    for (f, t, off) in expect {
+        assert!(
+            parsed
+                .iter()
+                .any(|((pf, pt), po)| pf.as_str() == f && pt.as_str() == t && *po == off),
+            "missing projected edge {f} -> {t} @ {off}; got: {:?}",
+            parsed
+                .iter()
+                .map(|((pf, pt), po)| (pf.as_str(), pt.as_str(), *po))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        !parsed
+            .iter()
+            .any(|((f, _), _)| f.as_str().starts_with("boost[") && f.as_str().contains(',')),
+        "no phantom multi-dim boost node may be minted"
+    );
+}
+
 /// Test 4: A FixedIndex A2A link score (`pop[nyc]→rel_pop` with
 /// non-empty dimensions). The `from_str` already carries the source
 /// element subscript; the per-slot expansion runs over the *target*
@@ -845,7 +999,10 @@ fn test_parse_link_offsets_fixed_index_from_a2a_expansion() {
         ],
     )];
 
-    let parsed = parse_link_offsets(&results, &ltm_vars, &dims);
+    // FixedIndex-from (`pop[nyc]→rel_pop`) routes through
+    // `expand_fixed_from_a2a_link_offsets`, not the projected Bare arm, so the
+    // default (empty) context is correct: only the to-side expands.
+    let parsed = parse_link_offsets(&results, &ltm_vars, &dims, &LinkExpansionContext::default());
 
     assert_eq!(
         parsed.len(),
@@ -903,7 +1060,7 @@ fn test_parse_link_offsets_fixed_index_from_scalar() {
         compile_directly: false,
     }];
 
-    let parsed = parse_link_offsets(&results, &ltm_vars, &[]);
+    let parsed = parse_link_offsets(&results, &ltm_vars, &[], &LinkExpansionContext::default());
 
     assert_eq!(
         parsed.len(),
@@ -943,7 +1100,7 @@ fn test_parse_link_offsets_scalar_to_arrayed() {
 
     // No `ltm_vars` entry needed: with empty `var_dims`, the `[`-in-`to`
     // passthrough branch fires regardless of the lookup result.
-    let parsed = parse_link_offsets(&results, &[], &[]);
+    let parsed = parse_link_offsets(&results, &[], &[], &LinkExpansionContext::default());
 
     assert_eq!(
         parsed.len(),
@@ -984,7 +1141,7 @@ fn test_parse_link_offsets_partial_reduce_passthrough() {
 
     // No `ltm_vars` entry needed: with empty `var_dims`, the
     // element-level passthrough branch fires regardless of the lookup.
-    let parsed = parse_link_offsets(&results, &[], &[]);
+    let parsed = parse_link_offsets(&results, &[], &[], &LinkExpansionContext::default());
 
     assert_eq!(
         parsed.len(),
@@ -1046,7 +1203,20 @@ fn test_parse_link_offsets_dedupes_a2a_bare_over_fixed_index() {
         vec!["NYC".to_string(), "Boston".to_string()],
     )];
 
-    let parsed = parse_link_offsets(&results, &ltm_vars, &dims);
+    // `pop` and `share` are both declared over `[Region]`, so the Bare A2A
+    // expansion projects the same-dim diagonal (`pop[e] -> share[e]`).
+    let region_dim: crate::dimensions::Dimension = (&dims[0]).into();
+    let expansion = LinkExpansionContext {
+        declared_dims: [
+            (Ident::new("pop"), vec![region_dim.clone()]),
+            (Ident::new("share"), vec![region_dim]),
+        ]
+        .into_iter()
+        .collect(),
+        dim_ctx: crate::dimensions::DimensionsContext::default(),
+    };
+
+    let parsed = parse_link_offsets(&results, &ltm_vars, &dims, &expansion);
 
     // The aliased per-element key (pop[nyc], share[nyc]) appears
     // in both Bare A2A and FixedIndex A2A expansions; dedup must
@@ -2477,7 +2647,14 @@ fn discovery_graph_stats_reports_structure_and_scores() {
     };
 
     let stocks = stock_list(&["a"]);
-    let stats = discovery_graph_stats(&results, &stocks, &[], &[], &[1, 2]);
+    let stats = discovery_graph_stats(
+        &results,
+        &stocks,
+        &[],
+        &[],
+        &LinkExpansionContext::default(),
+        &[1, 2],
+    );
 
     assert_eq!(stats.n_edges, 3);
     // Nodes: a, b, c.
@@ -2700,6 +2877,7 @@ fn discover_reducer_feedback(elems: &[&str]) -> DiscoveryResult {
         .collect();
     let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
     let dm_dims = crate::db::project_datamodel_dims(&db, sp);
+    let expansion = crate::analysis::build_link_expansion_context(&db, source_model, sp);
 
     // These fixtures contain no modules, so the per-exit-port recompute
     // never fires; an empty output-port map is correct.
@@ -2709,6 +2887,7 @@ fn discover_reducer_feedback(elems: &[&str]) -> DiscoveryResult {
         &stocks,
         &ltm.vars,
         dm_dims,
+        &expansion,
         &SubModelOutputPorts::new(),
         None,
     )
@@ -2860,6 +3039,7 @@ fn discovery_no_agg_model_unaffected_by_stitching() {
         .collect();
     let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
     let dm_dims = crate::db::project_datamodel_dims(&db, sp);
+    let expansion = crate::analysis::build_link_expansion_context(&db, source_model, sp);
     // These fixtures contain no modules; an empty output-port map is correct.
     let result = discover_loops_with_graph(
         &results,
@@ -2867,6 +3047,7 @@ fn discovery_no_agg_model_unaffected_by_stitching() {
         &stocks,
         &ltm.vars,
         dm_dims,
+        &expansion,
         &SubModelOutputPorts::new(),
         None,
     )
