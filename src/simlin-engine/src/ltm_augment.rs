@@ -3010,12 +3010,14 @@ pub(crate) fn generate_loop_score_variables(
 
     for (i, loop_item) in loops.iter().enumerate() {
         let var_name = format!("$⁚ltm⁚loop_score⁚{}", loop_item.id);
-        let equation = generate_dimensioned_loop_score_equation(
+        let Some(equation) = generate_dimensioned_loop_score_equation(
             loop_item,
             emitted_link_score_names,
             dm_dims,
             overrides,
-        );
+        ) else {
+            continue;
+        };
         trace.record(i + 1, &equation);
         loop_vars.push((var_name, equation));
     }
@@ -3183,24 +3185,22 @@ fn generate_dimensioned_loop_score_equation(
     emitted: &HashSet<String>,
     dm_dims: &[datamodel::Dimension],
     overrides: &LoopLinkOverrides,
-) -> datamodel::Equation {
+) -> Option<datamodel::Equation> {
     if loop_item.dimensions.is_empty() {
-        return datamodel::Equation::Scalar(generate_loop_score_equation(
-            loop_item, emitted, overrides,
-        ));
+        return try_generate_loop_score_equation(loop_item, emitted, overrides)
+            .map(datamodel::Equation::Scalar);
     }
     // Prefer the compact ApplyToAll form whenever it is correct (every link
     // resolves through a Bare A2A name), regardless of whether per-slot
     // circuit info is available. Otherwise use the per-slot Arrayed form.
     // A dimensioned loop with per-element-only link scores AND no slot_links
     // (a builder that predates slot capture) keeps the legacy ApplyToAll
-    // emission -- the fragment-diagnostics Warning remains the backstop for
-    // the mis-resolution that produces.
+    // emission, but only when every link still resolves to an emitted
+    // link-score name. Otherwise the loop is dropped before fragment
+    // compilation can synthesize a missing-dependency zero stub.
     if loop_item.slot_links.is_empty() || all_links_resolve_bare(loop_item, emitted) {
-        return datamodel::Equation::ApplyToAll(
-            loop_item.dimensions.clone(),
-            generate_loop_score_equation(loop_item, emitted, overrides),
-        );
+        return try_generate_loop_score_equation(loop_item, emitted, overrides)
+            .map(|text| datamodel::Equation::ApplyToAll(loop_item.dimensions.clone(), text));
     }
 
     // Per-slot equations: enumerate the loop's full dimension element space
@@ -3226,17 +3226,20 @@ fn generate_dimensioned_loop_score_equation(
         .iter()
         .map(|(t, l)| (t.as_str(), l.as_slice()))
         .collect();
-    let elements = slot_keys
-        .iter()
-        .map(|tuple| {
-            let text = match by_tuple.get(tuple.as_str()) {
-                Some(links) => generate_link_product(links, emitted, None),
-                None => "0".to_string(),
-            };
-            (tuple.clone(), text, None, None)
-        })
-        .collect();
-    datamodel::Equation::Arrayed(loop_item.dimensions.clone(), elements, None, false)
+    let mut elements = Vec::with_capacity(slot_keys.len());
+    for tuple in &slot_keys {
+        let text = match by_tuple.get(tuple.as_str()) {
+            Some(links) => generate_link_product(links, emitted, None)?,
+            None => "0".to_string(),
+        };
+        elements.push((tuple.clone(), text, None, None));
+    }
+    Some(datamodel::Equation::Arrayed(
+        loop_item.dimensions.clone(),
+        elements,
+        None,
+        false,
+    ))
 }
 
 /// The live source's declared dimension names (canonical, in declaration
@@ -4117,39 +4120,58 @@ fn generate_stock_to_flow_equation(
 /// 2. `FixedIndex` -- a `{from}[...]→{to}` name; prefer the exact
 ///    `target_element` match, else the lexicographically first match.
 ///
-/// If none of the candidates is in `emitted`, return the Bare canonical
-/// name anyway and let the fragment compiler's stub-dep fallback fire.
-/// That matches the pre-resolver behavior on the unreachable branch.
-pub(crate) fn resolve_link_score_name_for_loop(
+/// Returns `None` when no emitted candidate matches. Loop-score generation
+/// treats that as a drop condition: emitting a reference to a missing
+/// synthetic link-score variable would let the fragment compiler insert a
+/// zero dependency stub and silently remove one factor from the loop score.
+fn try_resolve_link_score_name_for_loop(
     from: &str,
     to: &str,
     emitted: &HashSet<String>,
     target_element: Option<&str>,
-) -> String {
+) -> Option<String> {
     if from.contains('[') {
         // Bracketed-from edge. Try the FixedIndex-style name (bracket
         // kept) first, then the variable-level Bare name that an A2A or
         // structural flow→stock link score would carry.
         let verbatim = link_score_var_name(from, to, &RefShape::Bare);
         if emitted.contains(&verbatim) {
-            return verbatim;
+            return Some(verbatim);
         }
         let stripped = strip_subscript(from);
         let bare = link_score_var_name(stripped, to, &RefShape::Bare);
         if emitted.contains(&bare) {
-            return bare;
+            return Some(bare);
         }
-        return verbatim;
+        return None;
     }
 
     let bare = link_score_var_name(from, to, &RefShape::Bare);
     if emitted.contains(&bare) {
-        return bare;
+        return Some(bare);
     }
     if let Some(fixed) = find_fixed_index_emitted_name(from, to, emitted, target_element) {
-        return fixed;
+        return Some(fixed);
     }
-    bare
+    None
+}
+
+/// Resolve a link-score variable name for pathway/composite consumers that
+/// still intentionally rely on the fragment compiler's missing-dependency
+/// fallback for unscoreable sub-model pathway edges. Loop-score generation
+/// uses [`try_resolve_link_score_name_for_loop`] instead so missing names
+/// drop the loop before compilation.
+pub(crate) fn resolve_link_score_name_for_loop(
+    from: &str,
+    to: &str,
+    emitted: &HashSet<String>,
+    target_element: Option<&str>,
+) -> String {
+    if let Some(resolved) = try_resolve_link_score_name_for_loop(from, to, emitted, target_element)
+    {
+        return resolved;
+    }
+    link_score_var_name(from, to, &RefShape::Bare)
 }
 
 /// Scan `emitted` for a link-score variable name matching the FixedIndex
@@ -4211,11 +4233,25 @@ fn find_fixed_index_emitted_name(
 /// loop_score equation would multiply against a missing variable and the
 /// fragment compiler would silently insert a stub dep, dropping the
 /// link's contribution.
+#[cfg(test)]
 fn generate_loop_score_equation(
     loop_item: &Loop,
     emitted_link_score_names: &HashSet<String>,
     overrides: &LoopLinkOverrides,
 ) -> String {
+    try_generate_loop_score_equation(loop_item, emitted_link_score_names, overrides)
+        .unwrap_or_else(|| "0".to_string())
+}
+
+/// Checked loop-score equation generation used by synthetic-var emission.
+/// `None` means at least one link in the cycle has no emitted link-score
+/// variable, so emitting the loop score would compile through a missing-name
+/// zero stub.
+fn try_generate_loop_score_equation(
+    loop_item: &Loop,
+    emitted_link_score_names: &HashSet<String>,
+    overrides: &LoopLinkOverrides,
+) -> Option<String> {
     generate_link_product(
         &loop_item.links,
         emitted_link_score_names,
@@ -4232,28 +4268,26 @@ fn generate_link_product(
     links: &[crate::ltm::Link],
     emitted_link_score_names: &HashSet<String>,
     loop_overrides: Option<(&str, &LoopLinkOverrides)>,
-) -> String {
-    let link_score_names: Vec<String> = links
-        .iter()
-        .enumerate()
-        .map(|(i, link)| {
-            // A per-link override (PR #684: a module link's per-exit-port
-            // pathway-selection alias) takes precedence over the link's
-            // (from, to) name resolution. Only the whole-loop path supplies
-            // an override context; the per-slot path passes `None`.
-            if let Some((loop_id, overrides)) = loop_overrides
-                && let Some(reference) = overrides.get(&(loop_id.to_string(), i))
-            {
-                return reference.clone();
-            }
-            loop_link_score_ref(link, emitted_link_score_names)
-        })
-        .collect();
+) -> Option<String> {
+    let mut link_score_names = Vec::with_capacity(links.len());
+    for (i, link) in links.iter().enumerate() {
+        // A per-link override (PR #684: a module link's per-exit-port
+        // pathway-selection alias) takes precedence over the link's
+        // (from, to) name resolution. Only the whole-loop path supplies
+        // an override context; the per-slot path passes `None`.
+        if let Some((loop_id, overrides)) = loop_overrides
+            && let Some(reference) = overrides.get(&(loop_id.to_string(), i))
+        {
+            link_score_names.push(reference.clone());
+            continue;
+        }
+        link_score_names.push(loop_link_score_ref(link, emitted_link_score_names)?);
+    }
 
     if link_score_names.is_empty() {
-        "0".to_string()
+        Some("0".to_string())
     } else {
-        link_score_names.join(" * ")
+        Some(link_score_names.join(" * "))
     }
 }
 
@@ -4289,7 +4323,7 @@ fn generate_link_product(
 /// element-in-name entry in `emitted` can only be a FixedIndex /
 /// full-reduce cross-dimensional source, so it falls through to the
 /// bracketed-from resolution in `resolve_link_score_name_for_loop`.
-fn loop_link_score_ref(link: &crate::ltm::Link, emitted: &HashSet<String>) -> String {
+fn loop_link_score_ref(link: &crate::ltm::Link, emitted: &HashSet<String>) -> Option<String> {
     let (to_var_level, visited_element) = split_node_subscript(link.to.as_str());
 
     if let Some(elem) = visited_element {
@@ -4305,24 +4339,24 @@ fn loop_link_score_ref(link: &crate::ltm::Link, emitted: &HashSet<String>) -> St
             elem
         );
         if emitted.contains(&per_elem) {
-            return format!("\"{per_elem}\"");
+            return Some(format!("\"{per_elem}\""));
         }
     }
 
-    let name = resolve_link_score_name_for_loop(
+    let name = try_resolve_link_score_name_for_loop(
         link.from.as_str(),
         to_var_level,
         emitted,
         visited_element,
-    );
+    )?;
     // Double-quote the variable name so it can be parsed. Case 2: a
     // cross-element loop edge visits a single element of a dimensioned A2A
     // link score, so subscript the reference at that element. Case 3: no
     // element to pin.
-    match visited_element {
+    Some(match visited_element {
         Some(elem) => format!("\"{name}\"[{elem}]"),
         None => format!("\"{name}\""),
-    }
+    })
 }
 
 /// Classification of array-reducing builtins for cross-dimensional link score

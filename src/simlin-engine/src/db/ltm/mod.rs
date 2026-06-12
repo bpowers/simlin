@@ -1620,6 +1620,20 @@ pub fn model_ltm_variables(
         link_hits(&l.links) || l.slot_links.iter().any(|(_, links)| link_hits(links))
     }
 
+    fn emit_unresolved_loop_score_warning(db: &dyn Db, model: SourceModel, loop_id: &str) {
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(format!("$⁚ltm⁚loop_score⁚{loop_id}")),
+            error: DiagnosticError::Assembly(format!(
+                "LTM loop score {loop_id} was not emitted because its link-score product \
+                 references a link-score variable that was not emitted; the affected loop is \
+                 not scored instead of compiling through a missing-name zero stub"
+            )),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    }
+
     if let Some(ref detected_loops) = loops {
         // GH #758: drop loops through unscoreable edges. The common case
         // (no unscoreable edge) borrows `detected_loops` unfiltered so the
@@ -1720,6 +1734,14 @@ pub fn model_ltm_variables(
             dm_dims,
             &module_overrides.overrides,
         );
+        let emitted_loop_score_names: HashSet<String> =
+            loop_vars.iter().map(|(name, _)| name.clone()).collect();
+        for l in detected_loops {
+            let expected = format!("$⁚ltm⁚loop_score⁚{}", l.id);
+            if !emitted_loop_score_names.contains(&expected) {
+                emit_unresolved_loop_score_warning(db, model, l.id.as_str());
+            }
+        }
         for (name, equation) in loop_vars {
             // The equation carries its own dimension shape (Scalar /
             // ApplyToAll / Arrayed); mirror it onto the layout-sizing
@@ -1944,6 +1966,9 @@ pub fn model_ltm_variables(
                     dm_dims,
                     &crate::ltm_augment::LoopLinkOverrides::new(),
                 );
+                if pin_loop_vars.is_empty() {
+                    emit_unresolved_loop_score_warning(db, model, pin_loop.id.as_str());
+                }
                 for (lname, equation) in pin_loop_vars {
                     let dimensions = parse::ltm_equation_dimensions(&equation).to_vec();
                     vars.push(LtmSyntheticVar {

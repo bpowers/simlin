@@ -4044,15 +4044,14 @@ fn inline_feeder_reducer_synthetic_agg_closure_scores() {
 /// projections" clause): a no-`Reduced` source whose slice is NOT the pure
 /// iterated projection -- here a PINNED axis, `w[D1, c1]` -- still declines
 /// the hoist, and the co-source closure keeps the LOUD degraded behavior:
-/// cross-element loop scores that fail fragment compile (their equations
-/// reference per-(row,slot) names the cartesian emitters never produce for
-/// the off-diagonal hops), each surfacing an Assembly `Warning` and reading
-/// a constant 0.
+/// cross-element loop scores whose equations would reference per-(row,slot)
+/// names the cartesian emitters never produce for the off-diagonal hops are
+/// warned and dropped before fragment compilation can stub them to 0.
 ///
 /// This is the loud sibling of the #758/#764 zero-stub class, NOT silent
 /// garbage. It pins that the T5 feeder clause widened acceptance ONLY for
 /// the all-`Iterated` projection: if the warnings here disappear, the
-/// scores must be real (a silent zero would be a regression). (The design
+/// scores must be real (a silent drop would be a regression). (The design
 /// doc's named non-projection example, `SUM(matrix[D1,*] * other[D2])`
 /// with a free reduced-axis index, is not expressible -- the engine
 /// rejects the equation outright -- so the Pinned-axis mix is the nearest
@@ -4094,7 +4093,7 @@ fn non_projection_feeder_co_source_closure_stays_loud() {
     );
 
     // Every cross-row loop score through the un-hoisted matrix→growth edge
-    // fails fragment compile and is WARNED -- the loud conservative floor.
+    // is WARNED and not emitted -- the loud conservative floor.
     let diags = collect_all_diagnostics(&db, sync.project);
     let warned_loop_scores: Vec<&str> = diags
         .iter()
@@ -4108,23 +4107,19 @@ fn non_projection_feeder_co_source_closure_stays_loud() {
     assert!(
         !warned_loop_scores.is_empty(),
         "the non-projection closure's unscoreable loops must surface Assembly \
-         warnings (silent zero would be a regression); diagnostics: {diags:?}"
+         warnings (silent drop would be a regression); diagnostics: {diags:?}"
     );
+    for name in &warned_loop_scores {
+        assert!(
+            ltm_vars.iter().all(|v| v.name != *name),
+            "warned missing-name loop score {name} must be dropped before it can compile \
+             through a zero stub"
+        );
+    }
 
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end()
         .expect("VM simulation should run to completion");
-    let results = vm.into_results();
-
-    // Each warned loop score is a stub: constant 0 at every step.
-    for name in &warned_loop_scores {
-        let base = offset_of(&results, name);
-        let series = series_at(&results, base);
-        assert!(
-            series.iter().all(|&v| v == 0.0),
-            "warned loop score {name} must read the documented 0 stub; got {series:?}"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4306,6 +4301,95 @@ fn bare_feeder_decline_covers_reducer_class() {
                 );
             }
         }
+    }
+}
+
+/// GH #788: a bare arrayed reducer arg inside an A2A equation is currently
+/// outside LTM's scoreable vocabulary. Execution does not use the scalar
+/// synthetic-agg value LTM would get from hoisting `SUM(other)`, and a feeder
+/// partial such as `frac -> growth` would freeze that same wrong reducer
+/// value. Until LTM can model the bare spelling's active-slot semantics, the
+/// whole target edge surface must decline loudly.
+#[test]
+fn bare_arrayed_reducer_arg_in_a2a_target_declines_loudly() {
+    let project = TestProject::new("gh788_bare_arrayed_reducer_arg")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_aux("other[D1]", "pop * 0.01")
+        .array_aux("frac[D1]", "pop * 0.005")
+        .array_flow("growth[D1]", "SUM(other) * frac", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    for edge in ["other\u{2192}growth", "frac\u{2192}growth"] {
+        let link_name = format!("{LINK_SCORE_PREFIX}{edge}");
+        assert!(
+            !ltm_vars.iter().any(|v| v.name == link_name),
+            "edge {edge} must be declined, not scored; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        !ltm_vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the declined bare-arrayed reducer target must be dropped; got: {:?}",
+        ltm_vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !ltm_vars
+            .iter()
+            .any(|v| v.name.contains("$\u{205A}ltm\u{205A}agg")),
+        "SUM(other) must not be hoisted into a whole-array scalar agg; got: {:?}",
+        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    let warnings = assembly_warnings(&db, sync.project);
+    for edge in ["other -> growth", "frac -> growth"] {
+        assert!(
+            warnings.iter().any(|d| match &d.error {
+                DiagnosticError::Assembly(msg) => {
+                    let lower = msg.to_ascii_lowercase();
+                    msg.contains(edge)
+                        && msg.contains("bare arrayed reducer argument")
+                        && lower.contains("sum(other)")
+                }
+                _ => false,
+            }),
+            "expected warning for declined {edge}; got: {warnings:?}"
+        );
+    }
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let disc_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    for edge in ["other\u{2192}growth", "frac\u{2192}growth"] {
+        let link_name = format!("{LINK_SCORE_PREFIX}{edge}");
+        assert!(
+            !disc_vars.iter().any(|v| v.name == link_name),
+            "discovery mode must also decline {edge}; got: {:?}",
+            disc_vars
+                .iter()
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 }
 
@@ -5863,26 +5947,19 @@ fn gh525_discovery_twin_parses_per_element_names() {
     );
 }
 
-/// GH #525 (T6 review boundary pin, the ALIASED ThroughAgg routing): the
-/// same `(pop, out)` edge carries a HOISTED `SUM(pop[R,*])` site and a
+/// GH #525/GH #793 (aliased ThroughAgg routing boundary): the same
+/// `(pop, out)` edge carries a HOISTED `SUM(pop[R,*])` site and a
 /// mixed-subscript site inside a DECLINED `MEAN(w[R,*] * pop[R,young])`
-/// (differing co-source slices, so the MEAN is not hoisted). Routing is
-/// per-edge (`in_reducer && routed_aggs`), so BOTH in_reducer sites route
-/// `ThroughAgg` through the SUM's agg -- the mixed site's `PerElement`
-/// shape has NO `Direct` site and must emit nothing of its own.
+/// (differing co-source slices, so the MEAN is not hoisted).
 ///
-/// Exhaustive mode is BYTE-IDENTICAL to the T5 parent `ad6bdeb8` (probe
-/// evidence: identical var/diag dumps): the loop-link caller emits the
-/// agg-routed hop's scores via its agg branches and never reaches the
-/// per-shape pass for the edge, so no Bare-named `pop→out` score existed
-/// pre-T6 either -- the shape's arrival changes nothing here. DISCOVERY
-/// mode (causal-edge iteration, which DOES reach the per-shape pass) is
-/// the one real flip: pre-T6 the site's `DynamicIndex` spelling minted an
-/// extra Bare-named `pop→out` score alongside the agg halves -- a
-/// duplicate direct pathway for a hop the halves already carry; post-T6
-/// it is gone.
+/// Before GH #793, routing was per-edge (`in_reducer && routed_aggs`), so
+/// the declined MEAN site was absorbed by the SUM agg and the edge looked
+/// fully attributed. The correct contract is louder: once a residual
+/// unhoisted reducer read remains on the same edge, the edge is declined as
+/// a unit. Emitting only the SUM agg halves would publish incomplete
+/// attribution for `pop -> out` with no warning.
 #[test]
-fn aliased_through_agg_per_element_site_emits_only_agg_halves() {
+fn aliased_through_agg_residual_strict_site_declines_edge() {
     let fixture = || {
         TestProject::new("aliased_through_agg")
             .with_sim_time(0.0, 8.0, 1.0)
@@ -5900,8 +5977,46 @@ fn aliased_through_agg_per_element_site_emits_only_agg_halves() {
             .build_datamodel()
     };
 
-    // Exhaustive surface: agg halves only, no Bare and no per-element
-    // pop→out names, zero warnings (byte-identical to the parent).
+    let assert_declined =
+        |ltm: &[LtmSyntheticVar], warnings: &[simlin_engine::db::Diagnostic], mode: &str| {
+            assert_eq!(
+                warnings.len(),
+                1,
+                "{mode}: expected one warning for the residual strict pop -> out \
+             read; got: {warnings:?}"
+            );
+            let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+                unreachable!("filtered to Assembly above");
+            };
+            assert!(
+                msg.contains("pop -> out") && msg.contains("pop[r,young]"),
+                "{mode}: warning must name the declined edge and strict residual \
+             slice; got: {msg}"
+            );
+            assert!(
+                !ltm.iter().any(|v| {
+                    v.name.starts_with(LINK_SCORE_PREFIX)
+                        && (v.name == format!("{LINK_SCORE_PREFIX}pop\u{2192}out")
+                            || (v.name.starts_with(&format!("{LINK_SCORE_PREFIX}pop["))
+                                && v.name.contains("\u{2192}out")))
+                }),
+                "{mode}: the partially-unscoreable pop -> out edge must emit no \
+             original-edge pop -> out score; got: {:?}",
+                ltm.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            );
+            assert!(
+                !ltm.iter().any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+                "{mode}: loops through the declined pop -> out edge must be \
+             dropped, not scored from partial agg attribution; got: {:?}",
+                ltm.iter()
+                    .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+        };
+
+    // Exhaustive surface: the residual strict read declines the edge before
+    // the SUM agg halves are emitted.
     let project = fixture();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
@@ -5909,59 +6024,22 @@ fn aliased_through_agg_per_element_site_emits_only_agg_halves() {
     compile_project_incremental(&db, sync.project, "main")
         .expect("the aliased-routing fixture must compile with LTM enabled");
     let warnings = assembly_warnings(&db, sync.project);
-    assert!(
-        warnings.is_empty(),
-        "every LTM fragment must compile; got: {warnings:?}"
-    );
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
-    for r in ["r1", "r2"] {
-        for age in ["young", "old"] {
-            let half = format!(
-                "{LINK_SCORE_PREFIX}pop[{r},{age}]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0[{r}]"
-            );
-            assert!(
-                names.contains(&half.as_str()),
-                "the SUM agg's source half {half} must exist; got: {names:?}"
-            );
-        }
-    }
-    let assert_no_pop_out_scores = |names: &[&str], mode: &str| {
-        assert!(
-            !names
-                .iter()
-                .any(|n| *n == format!("{LINK_SCORE_PREFIX}pop\u{2192}out")),
-            "{mode}: no Bare-named pop\u{2192}out score may exist for the \
-             ThroughAgg-routed edge; got: {names:?}"
-        );
-        assert!(
-            !names
-                .iter()
-                .any(|n| n.starts_with(&format!("{LINK_SCORE_PREFIX}pop["))
-                    && n.contains("\u{2192}out")),
-            "{mode}: the ThroughAgg-routed PerElement site must not emit \
-             per-(row, element) scalars (only a Direct site does); got: {names:?}"
-        );
-    };
-    assert_no_pop_out_scores(&names, "exhaustive");
+    assert_declined(&ltm.vars, &warnings, "exhaustive");
 
-    // Discovery surface: the agg halves still carry the hop and the
-    // pre-T6 duplicate Bare-named `pop→out` (which the parent emitted in
-    // this mode) is retired.
+    // Discovery surface: same drop contract. The pinned-loop pass consumes
+    // `unscoreable_edges`, so no loop survives by multiplying the sibling agg
+    // halves.
     let project = fixture();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("the aliased-routing fixture must compile in discovery mode");
+    let warnings = assembly_warnings(&db, sync.project);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
-    assert_no_pop_out_scores(&names, "discovery");
-    assert!(
-        names
-            .iter()
-            .any(|n| n.contains("\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0")),
-        "discovery still emits the agg source halves; got: {names:?}"
-    );
+    assert_declined(&ltm.vars, &warnings, "discovery");
 }
 
 /// GH #525 (T6 review corner pin): a `PerElement` target body that also
@@ -9685,6 +9763,116 @@ fn gh792_per_element_strict_slice_fixture() -> datamodel::Project {
         .array_flow("inflow[Region]", "share[Region] * 0.05", None)
         .array_stock("stock[Region]", "100", &["inflow"], &[], None)
         .build_datamodel()
+}
+
+// ---------------------------------------------------------------------------
+// GH #793: hoisted reducer sibling must not hide a declined strict-slice read
+// ---------------------------------------------------------------------------
+
+fn gh793_routing_alias_fixture(strict_read: &str, strict_first: bool) -> datamodel::Project {
+    let share_eqn = if strict_first {
+        format!("SUM({strict_read} * w[*]) + SUM(pop[*, *])")
+    } else {
+        format!("SUM(pop[*, *]) + SUM({strict_read} * w[*])")
+    };
+    TestProject::new("gh793_routing_alias")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_aux_direct("share", vec!["Region".into()], &share_eqn, None)
+        .array_flow("inflow[Region]", "share * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel()
+}
+
+fn assert_gh793_strict_sibling_declines(strict_first: bool) {
+    let project = gh793_routing_alias_fixture("pop[nyc, *]", strict_first);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    assert!(
+        ltm.vars
+            .iter()
+            .all(|v| !(v.name.starts_with(LINK_SCORE_PREFIX)
+                && v.name.contains("pop")
+                && v.name.contains("share"))),
+        "the mixed hoisted+declined pop -> share edge must emit no partial \
+         pop->share score; got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.contains("pop") && v.name.contains("share"))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning for the unscoreable pop -> share \
+         strict-slice sibling; got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("pop -> share") && msg.contains("pop[nyc,*]"),
+        "the warning must name the edge and the strict sibling slice \
+         pop[nyc,*]; got: {msg}"
+    );
+
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the partially-unscoreable pop -> share edge must be dropped; \
+         got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // The core simulation remains valid; only the incomplete LTM attribution
+    // is declined.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for name in ltm_score_var_names(&results) {
+        let var = ltm_var(&ltm.vars, &name);
+        let base = offset_of(&results, &name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "emitted score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn gh793_hoisted_sibling_does_not_absorb_strict_slice_first() {
+    assert_gh793_strict_sibling_declines(true);
+}
+
+#[test]
+fn gh793_hoisted_sibling_does_not_absorb_strict_slice_second() {
+    assert_gh793_strict_sibling_declines(false);
 }
 
 // ---------------------------------------------------------------------------

@@ -1428,6 +1428,36 @@ pub(super) fn emit_unscoreable_per_element_reducer_warning(
     .accumulate(db);
 }
 
+/// Accumulate the GH #788 `Warning` for an Apply-To-All target whose equation
+/// contains a maximal reducer with a bare arrayed argument that overlaps the
+/// target's active dimensions. LTM cannot yet represent that bare spelling:
+/// a synthetic aggregate would evaluate the reducer as a whole-array scalar,
+/// while ordinary feeder partials would freeze that wrong reducer value.
+pub(super) fn emit_unscoreable_bare_arrayed_reducer_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    from: &str,
+    to: &str,
+    reducer_text: &str,
+) {
+    use salsa::Accumulator;
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: {to}'s \
+         equation contains the bare arrayed reducer argument {reducer_text}, and \
+         LTM cannot yet score that spelling in an Apply-To-All target without \
+         treating the reducer as a whole-array aggregate value -- so the edge is \
+         declined instead: it will have no link-score variable and feedback loops \
+         through it will not be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
 /// Consult the GH #791/#792 verdict (`unhoisted_reducer_source_read`,
 /// salsa-cached on the interned `LtmLinkId`) for `(from, to)` and -- when it
 /// is a declining verdict -- record the edge in `unscoreable_edges` and warn
@@ -1435,13 +1465,15 @@ pub(super) fn emit_unscoreable_per_element_reducer_warning(
 /// iff the edge was declined, in which case the caller must emit NO link-score
 /// variable for it.
 ///
-/// One helper used by BOTH consultation sites (the cartesian arm of
-/// `try_cross_dimensional_link_scores` and `emit_link_scores_for_edge`'s final
-/// per-shape fallthrough) so they can never disagree about which verdicts
-/// decline: `StrictSlice` (the GH #791 scalar/A2A strict family) and
-/// `PerElementReducerRead` (the GH #792 per-element-owner family, any reducer
-/// read). Both sites are reached only with the edge's routed-agg set empty,
-/// so a declining verdict always describes a genuinely un-hoisted read.
+/// One helper used by every dispatch point that might otherwise emit a
+/// whole-edge score: the cartesian arm of `try_cross_dimensional_link_scores`,
+/// the routed-agg branch of `emit_link_scores_for_edge` (GH #793), and its
+/// final per-shape fallthrough. The shared verdicts are `StrictSlice` (the GH
+/// #791 scalar/A2A strict family) and `PerElementReducerRead` (the GH #792
+/// per-element-owner family, any reducer read). The classifier ignores reducer
+/// reads already represented by a synthetic agg, so a declining verdict always
+/// describes a genuinely un-hoisted residual read even when the edge also has
+/// agg halves.
 fn decline_unhoisted_reducer_edge(
     db: &dyn Db,
     model: SourceModel,
@@ -1467,6 +1499,25 @@ fn decline_unhoisted_reducer_edge(
         crate::ltm_agg::UnhoistedSourceRead::FullExtent
         | crate::ltm_agg::UnhoistedSourceRead::NotDescribable => false,
     }
+}
+
+fn decline_bare_arrayed_reducer_target(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    from: &str,
+    to: &str,
+    unscoreable_edges: &mut HashSet<(String, String)>,
+) -> bool {
+    let reducer =
+        crate::ltm_agg::unhoisted_bare_arrayed_reducer_arg(db, to.to_string(), model, project);
+    let Some(reducer) = reducer.as_ref() else {
+        return false;
+    };
+    if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+        emit_unscoreable_bare_arrayed_reducer_warning(db, model, from, to, reducer);
+    }
+    true
 }
 
 /// Surface a `Warning` for a ceteris-paribus partial-equation parse failure
@@ -3092,6 +3143,10 @@ pub(super) fn emit_link_scores_for_edge(
     vars: &mut Vec<LtmSyntheticVar>,
     unscoreable_edges: &mut HashSet<(String, String)>,
 ) {
+    if decline_bare_arrayed_reducer_target(db, model, project, from, to, unscoreable_edges) {
+        return;
+    }
+
     // The set of synthetic aggs `(from, to)` routes through, read off
     // the reference-site IR (the unique `ThroughAgg` `AggRef`s of this
     // edge's classified sites, in first-occurrence order). This is the
@@ -3115,6 +3170,20 @@ pub(super) fn emit_link_scores_for_edge(
         idxs.iter().map(|&i| &agg_nodes.aggs[i]).collect()
     };
     if !routed_aggs.is_empty() {
+        // GH #793: a hoisted reducer sibling does not make the whole
+        // `(from, to)` edge fully scoreable. If another reducer read of
+        // `from` in `to` was not represented by one of these synthetic aggs
+        // (for example an I1-declined strict slice), scoring only the agg
+        // halves would publish incomplete attribution with no signal. Decline
+        // at edge granularity instead, using the same warning/drop contract as
+        // the no-agg strict-slice path.
+        if decline_unhoisted_reducer_edge(db, model, project, from, to, unscoreable_edges) {
+            for agg in &routed_aggs {
+                unscoreable_edges.insert((from.to_string(), agg.name.clone()));
+                unscoreable_edges.insert((agg.name.clone(), to.to_string()));
+            }
+            return;
+        }
         if !skip_agg_halves {
             for agg in &routed_aggs {
                 emit_source_to_agg_link_scores(

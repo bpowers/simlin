@@ -113,7 +113,7 @@
 //! true reads, with its scores loudly skipped (the GH #758 treatment)
 //! rather than silently wrong (see [`variable_backed_reduce_agg`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Ast, Expr2, IndexExpr2};
 use crate::builtins::BuiltinFn;
@@ -1458,6 +1458,9 @@ fn combined_read_slice(
     builtin: &BuiltinFn<Expr2>,
     ctx: &AggWalkCtx<'_>,
 ) -> Option<CombinedReadSlices> {
+    if reducer_has_active_bare_arrayed_arg(builtin, ctx) {
+        return None;
+    }
     let mut refs: Vec<(String, Vec<AxisRead>)> = Vec::new();
     let mut ok = true;
     builtin.for_each_expr_ref(|arg| {
@@ -1469,6 +1472,39 @@ fn combined_read_slice(
         return None;
     }
     accept_source_slices(refs)
+}
+
+fn reducer_has_active_bare_arrayed_arg(builtin: &BuiltinFn<Expr2>, ctx: &AggWalkCtx<'_>) -> bool {
+    if ctx.target_iterated_dims.is_empty() {
+        return false;
+    }
+    let mut found = false;
+    builtin.for_each_expr_ref(|arg| {
+        if !found && let Expr2::Var(ident, _, _) = arg {
+            found = bare_arrayed_var_overlaps_target(ident, ctx);
+        }
+    });
+    found
+}
+
+fn bare_arrayed_var_overlaps_target(ident: &Ident<Canonical>, ctx: &AggWalkCtx<'_>) -> bool {
+    let Some(dims) = ctx.variables.get(ident).and_then(|v| v.get_dimensions()) else {
+        return false;
+    };
+    if dims.is_empty() {
+        return false;
+    }
+    dims.iter().any(|dim| {
+        let source = dim.canonical_name();
+        ctx.target_iterated_dims.iter().any(|target| {
+            let target = crate::common::CanonicalDimensionName::from_raw(target);
+            source == &target
+                || ctx.dim_ctx.has_mapping_to(source, &target)
+                || ctx.dim_ctx.has_mapping_to(&target, source)
+                || ctx.dim_ctx.has_mapping_to_parent_of(source, &target)
+                || ctx.dim_ctx.has_mapping_to_parent_of(&target, source)
+        })
+    })
 }
 
 /// The I1 acceptance rule over a reducer's arrayed-reference slices (T5 of
@@ -1978,6 +2014,95 @@ pub(crate) fn render_read_slice_for_diagnostic(slice: &[AxisRead]) -> String {
         .join(",")
 }
 
+/// Return the first maximal reducer text in `to` whose bare arrayed argument
+/// overlaps an Apply-To-All target dimension. That spelling is unsafe for LTM
+/// today: hoisting would evaluate the reducer outside the target's active
+/// element context, while ordinary feeder partials would freeze that same
+/// wrong whole-array reducer value.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn unhoisted_bare_arrayed_reducer_arg<'db>(
+    db: &'db dyn Db,
+    to: String,
+    model: SourceModel,
+    project: SourceProject,
+) -> Option<String> {
+    let variables = reconstruct_model_variables(db, model, project);
+    let dm_dims = project_datamodel_dims(db, project);
+    let dim_ctx = project_dimensions_context(db, project);
+    let to_var = variables.get(&Ident::<Canonical>::new(&to))?;
+    let ast = to_var.ast()?;
+    let Ast::ApplyToAll(dims, expr) = ast else {
+        return None;
+    };
+    let target_iterated_dims: Vec<String> = dims.iter().map(|d| d.name().to_string()).collect();
+    let ctx = AggWalkCtx {
+        variables: &variables,
+        target_iterated_dims: &target_iterated_dims,
+        dm_dims: dm_dims.as_slice(),
+        dim_ctx,
+    };
+    first_active_bare_arrayed_reducer(expr, &ctx, false)
+}
+
+fn first_active_bare_arrayed_reducer(
+    expr: &Expr2,
+    ctx: &AggWalkCtx<'_>,
+    in_reducer: bool,
+) -> Option<String> {
+    match expr {
+        Expr2::App(builtin, _, _) if !in_reducer && reducer_is_hoistable(builtin) => {
+            if reducer_has_active_bare_arrayed_arg(builtin, ctx) {
+                return Some(crate::patch::expr2_to_string(expr));
+            }
+            let mut found = None;
+            builtin.for_each_expr_ref(|sub| {
+                if found.is_none() {
+                    found = first_active_bare_arrayed_reducer(sub, ctx, true);
+                }
+            });
+            found
+        }
+        Expr2::App(builtin, _, _) => {
+            let mut found = None;
+            builtin.for_each_expr_ref(|sub| {
+                if found.is_none() {
+                    found = first_active_bare_arrayed_reducer(sub, ctx, in_reducer);
+                }
+            });
+            found
+        }
+        Expr2::Subscript(_, indices, _, _) => {
+            for idx in indices {
+                let found = match idx {
+                    IndexExpr2::Expr(e) => first_active_bare_arrayed_reducer(e, ctx, in_reducer),
+                    IndexExpr2::Range(l, r, _) => {
+                        first_active_bare_arrayed_reducer(l, ctx, in_reducer)
+                            .or_else(|| first_active_bare_arrayed_reducer(r, ctx, in_reducer))
+                    }
+                    IndexExpr2::Wildcard(_)
+                    | IndexExpr2::StarRange(_, _)
+                    | IndexExpr2::DimPosition(_, _) => None,
+                };
+                if found.is_some() {
+                    return found;
+                }
+            }
+            None
+        }
+        Expr2::Op1(_, inner, _, _) => first_active_bare_arrayed_reducer(inner, ctx, in_reducer),
+        Expr2::Op2(_, left, right, _, _) => {
+            first_active_bare_arrayed_reducer(left, ctx, in_reducer)
+                .or_else(|| first_active_bare_arrayed_reducer(right, ctx, in_reducer))
+        }
+        Expr2::If(cond, then_e, else_e, _, _) => {
+            first_active_bare_arrayed_reducer(cond, ctx, in_reducer)
+                .or_else(|| first_active_bare_arrayed_reducer(then_e, ctx, in_reducer))
+                .or_else(|| first_active_bare_arrayed_reducer(else_e, ctx, in_reducer))
+        }
+        Expr2::Const(..) | Expr2::Var(..) => None,
+    }
+}
+
 /// Classify how the NOT-hoisted reducer in `to`'s equation reads its arrayed
 /// source `from`, for the GH #791 cartesian-derivation decline (whole-RHS
 /// scalar/A2A owner) AND the GH #792 per-element-owner decline.
@@ -2029,6 +2154,7 @@ pub(crate) fn unhoisted_reducer_source_read<'db>(
     let variables = reconstruct_model_variables(db, model, project);
     let dm_dims = project_datamodel_dims(db, project);
     let dim_ctx = project_dimensions_context(db, project);
+    let agg_nodes = enumerate_agg_nodes(db, model, project);
 
     let Some(to_var) = variables.get(&Ident::<Canonical>::new(to)) else {
         return UnhoistedSourceRead::NotDescribable;
@@ -2045,6 +2171,14 @@ pub(crate) fn unhoisted_reducer_source_read<'db>(
     // here would call the read full-extent while execution pins the dim to the
     // slot's element, the GH #792 dim-name finding).
     let from_canon = canonicalize(from).into_owned();
+    let hoisted_synthetic_keys: HashSet<String> = agg_nodes
+        .by_var
+        .get(to)
+        .into_iter()
+        .flat_map(|idxs| idxs.iter().map(|&i| &agg_nodes.aggs[i]))
+        .filter(|agg| agg.is_synthetic && agg.reads_var(&from_canon))
+        .map(|agg| agg.equation_text.clone())
+        .collect();
 
     match ast {
         Ast::Scalar(expr) => {
@@ -2054,7 +2188,7 @@ pub(crate) fn unhoisted_reducer_source_read<'db>(
                 dm_dims: dm_dims.as_slice(),
                 dim_ctx,
             };
-            classify_expr_source_read(expr, &ctx, &from_canon)
+            classify_expr_source_read(expr, &ctx, &from_canon, &hoisted_synthetic_keys)
         }
         Ast::ApplyToAll(dims, expr) => {
             let target_iterated_dims: Vec<String> =
@@ -2065,7 +2199,7 @@ pub(crate) fn unhoisted_reducer_source_read<'db>(
                 dm_dims: dm_dims.as_slice(),
                 dim_ctx,
             };
-            classify_expr_source_read(expr, &ctx, &from_canon)
+            classify_expr_source_read(expr, &ctx, &from_canon, &hoisted_synthetic_keys)
         }
         // GH #792: a PER-ELEMENT-EQUATION owner (`share[nyc] = SUM(pop[nyc,*] *
         // w[*])` per slot) has no single dt-expression -- un-hoisted reducer
@@ -2104,7 +2238,14 @@ pub(crate) fn unhoisted_reducer_source_read<'db>(
             let mut representative: Option<Vec<AxisRead>> = None;
             for expr in slot_exprs {
                 let mut slices: Vec<Option<Vec<AxisRead>>> = Vec::new();
-                collect_from_read_slices_in_reducers(expr, &ctx, &from_canon, false, &mut slices);
+                collect_from_read_slices_in_reducers(
+                    expr,
+                    &ctx,
+                    &from_canon,
+                    &hoisted_synthetic_keys,
+                    false,
+                    &mut slices,
+                );
                 if !slices.is_empty() {
                     any_reducer_read = true;
                     if representative.is_none() {
@@ -2123,8 +2264,10 @@ pub(crate) fn unhoisted_reducer_source_read<'db>(
 
 /// Classify how a SINGLE Scalar/A2A owner expression `expr` reads its arrayed
 /// source `from_canon` for the GH #791 cartesian decline: collect every read
-/// slice of `from` inside `expr`'s maximal reducers and reduce them to one
-/// [`UnhoistedSourceRead`] (strict-and-never-full-extent => `StrictSlice`).
+/// slice of `from` inside `expr`'s maximal reducers that is not already
+/// represented by a synthetic aggregate node, then reduce those residual reads
+/// to one [`UnhoistedSourceRead`] (strict-and-never-full-extent =>
+/// `StrictSlice`).
 /// The per-element (`Ast::Arrayed`) owner deliberately does NOT use this
 /// reduction -- its arm in [`unhoisted_reducer_source_read`] declines on ANY
 /// reducer read of `from`, because the strict-vs-full distinction this
@@ -2134,10 +2277,18 @@ fn classify_expr_source_read(
     expr: &Expr2,
     ctx: &AggWalkCtx<'_>,
     from_canon: &str,
+    hoisted_synthetic_keys: &HashSet<String>,
 ) -> UnhoistedSourceRead {
     // Collect every read slice of `from` inside `expr`'s maximal reducers.
     let mut slices: Vec<Option<Vec<AxisRead>>> = Vec::new();
-    collect_from_read_slices_in_reducers(expr, ctx, from_canon, false, &mut slices);
+    collect_from_read_slices_in_reducers(
+        expr,
+        ctx,
+        from_canon,
+        hoisted_synthetic_keys,
+        false,
+        &mut slices,
+    );
     if slices.is_empty() {
         // `from` is not a direct reducer source we can describe (e.g. a bare
         // dynamic index `pop[idx]` outside any reducer, or a nested-expression
@@ -2184,75 +2335,111 @@ fn classify_expr_source_read(
     }
 }
 
-/// Walk `expr` for maximal array-reducer Apps and, for each that references
-/// `from_canon` as an arrayed source, push `from`'s [`compute_read_slice`] into
-/// `out` (`None` for a not-statically-describable read). Only the OUTERMOST
+/// Walk `expr` for maximal array-reducer Apps and, for each residual reducer
+/// that references `from_canon` as an arrayed source, push `from`'s
+/// [`compute_read_slice`] into `out` (`None` for a not-statically-describable
+/// read). Reducers whose canonical text appears in `hoisted_synthetic_keys`
+/// are skipped: their contribution is already carried by the synthetic
+/// `source -> agg -> target` halves, and GH #793 requires the strict-slice
+/// verdict to consider only un-hoisted sibling reads. Only the OUTERMOST
 /// reducer is consulted (`in_reducer` suppresses nested ones), since the inner
-/// reducer's reads are already covered by the outer slice computation. This is
-/// STRICTER than `walk_subexpr_for_aggs`' maximal-reducer rule: the real walk
-/// descends a DECLINED outer reducer with `in_reducer` unchanged (so a nested
-/// reducer can still be hoisted), while this one suppresses nested collection
-/// under ANY hoistable-kind outer reducer. The divergence is unobservable at
-/// the GH #791 gate: in every divergent case the nested reducer IS hoisted, so
-/// `from`'s read inside it is agg-routed and the edge never reaches the
-/// cartesian fallthrough this verdict guards.
+/// reducer's reads are already covered by the outer slice computation.
 fn collect_from_read_slices_in_reducers(
     expr: &Expr2,
     ctx: &AggWalkCtx<'_>,
     from_canon: &str,
+    hoisted_synthetic_keys: &HashSet<String>,
     in_reducer: bool,
     out: &mut Vec<Option<Vec<AxisRead>>>,
 ) {
     match expr {
         Expr2::App(builtin, _, _) if !in_reducer && reducer_is_hoistable(builtin) => {
-            // A maximal reducer: collect every read of `from` among its args.
-            let mut refs: Vec<(String, Vec<AxisRead>)> = Vec::new();
-            let mut ok = true;
-            builtin.for_each_expr_ref(|arg| {
+            let key = crate::patch::expr2_to_string(expr);
+            let reducer_is_synthetic_hoisted = hoisted_synthetic_keys.contains(&key);
+            // A maximal residual reducer: collect every read of `from` among
+            // its args unless a synthetic agg already represents this reducer.
+            if !reducer_is_synthetic_hoisted {
+                let mut refs: Vec<(String, Vec<AxisRead>)> = Vec::new();
+                let mut ok = true;
+                builtin.for_each_expr_ref(|arg| {
+                    if ok {
+                        collect_arrayed_source_slices(arg, ctx, &mut refs, &mut ok);
+                    }
+                });
+                let mut saw_from = false;
                 if ok {
-                    collect_arrayed_source_slices(arg, ctx, &mut refs, &mut ok);
-                }
-            });
-            let mut saw_from = false;
-            if ok {
-                for (var, slice) in refs {
-                    if canonicalize(&var).as_ref() == from_canon {
-                        saw_from = true;
-                        out.push(Some(slice));
+                    for (var, slice) in refs {
+                        if canonicalize(&var).as_ref() == from_canon {
+                            saw_from = true;
+                            out.push(Some(slice));
+                        }
                     }
                 }
-            }
-            if !saw_from {
-                // Either a not-describable arg cleared `ok`, or `from` is read
-                // through a shape `compute_read_slice` declines. Record the
-                // not-describable verdict ONLY when `from` actually appears in
-                // the reducer (otherwise this reducer is irrelevant to `from`).
-                let mut names: Vec<String> = Vec::new();
-                builtin.for_each_expr_ref(|arg| collect_var_refs(arg, &mut names));
-                if names.iter().any(|n| canonicalize(n).as_ref() == from_canon) {
-                    out.push(None);
+                if !saw_from {
+                    // Either a not-describable arg cleared `ok`, or `from` is read
+                    // through a shape `compute_read_slice` declines. Record the
+                    // not-describable verdict ONLY when `from` actually appears in
+                    // the reducer (otherwise this reducer is irrelevant to `from`).
+                    let mut names: Vec<String> = Vec::new();
+                    builtin.for_each_expr_ref(|arg| collect_var_refs(arg, &mut names));
+                    if names.iter().any(|n| canonicalize(n).as_ref() == from_canon) {
+                        out.push(None);
+                    }
                 }
             }
             // Descend with `in_reducer = true` so nested reducers are not
             // re-collected, but index subexpressions are still traversed.
             builtin.for_each_expr_ref(|sub| {
-                collect_from_read_slices_in_reducers(sub, ctx, from_canon, true, out)
+                collect_from_read_slices_in_reducers(
+                    sub,
+                    ctx,
+                    from_canon,
+                    hoisted_synthetic_keys,
+                    true,
+                    out,
+                )
             });
         }
         Expr2::App(builtin, _, _) => {
             builtin.for_each_expr_ref(|sub| {
-                collect_from_read_slices_in_reducers(sub, ctx, from_canon, in_reducer, out)
+                collect_from_read_slices_in_reducers(
+                    sub,
+                    ctx,
+                    from_canon,
+                    hoisted_synthetic_keys,
+                    in_reducer,
+                    out,
+                )
             });
         }
         Expr2::Subscript(_, indices, _, _) => {
             for idx in indices {
                 match idx {
-                    IndexExpr2::Expr(e) => {
-                        collect_from_read_slices_in_reducers(e, ctx, from_canon, in_reducer, out)
-                    }
+                    IndexExpr2::Expr(e) => collect_from_read_slices_in_reducers(
+                        e,
+                        ctx,
+                        from_canon,
+                        hoisted_synthetic_keys,
+                        in_reducer,
+                        out,
+                    ),
                     IndexExpr2::Range(l, r, _) => {
-                        collect_from_read_slices_in_reducers(l, ctx, from_canon, in_reducer, out);
-                        collect_from_read_slices_in_reducers(r, ctx, from_canon, in_reducer, out);
+                        collect_from_read_slices_in_reducers(
+                            l,
+                            ctx,
+                            from_canon,
+                            hoisted_synthetic_keys,
+                            in_reducer,
+                            out,
+                        );
+                        collect_from_read_slices_in_reducers(
+                            r,
+                            ctx,
+                            from_canon,
+                            hoisted_synthetic_keys,
+                            in_reducer,
+                            out,
+                        );
                     }
                     IndexExpr2::Wildcard(_)
                     | IndexExpr2::StarRange(_, _)
@@ -2260,17 +2447,57 @@ fn collect_from_read_slices_in_reducers(
                 }
             }
         }
-        Expr2::Op1(_, operand, _, _) => {
-            collect_from_read_slices_in_reducers(operand, ctx, from_canon, in_reducer, out)
-        }
+        Expr2::Op1(_, operand, _, _) => collect_from_read_slices_in_reducers(
+            operand,
+            ctx,
+            from_canon,
+            hoisted_synthetic_keys,
+            in_reducer,
+            out,
+        ),
         Expr2::Op2(_, left, right, _, _) => {
-            collect_from_read_slices_in_reducers(left, ctx, from_canon, in_reducer, out);
-            collect_from_read_slices_in_reducers(right, ctx, from_canon, in_reducer, out);
+            collect_from_read_slices_in_reducers(
+                left,
+                ctx,
+                from_canon,
+                hoisted_synthetic_keys,
+                in_reducer,
+                out,
+            );
+            collect_from_read_slices_in_reducers(
+                right,
+                ctx,
+                from_canon,
+                hoisted_synthetic_keys,
+                in_reducer,
+                out,
+            );
         }
         Expr2::If(cond, then_e, else_e, _, _) => {
-            collect_from_read_slices_in_reducers(cond, ctx, from_canon, in_reducer, out);
-            collect_from_read_slices_in_reducers(then_e, ctx, from_canon, in_reducer, out);
-            collect_from_read_slices_in_reducers(else_e, ctx, from_canon, in_reducer, out);
+            collect_from_read_slices_in_reducers(
+                cond,
+                ctx,
+                from_canon,
+                hoisted_synthetic_keys,
+                in_reducer,
+                out,
+            );
+            collect_from_read_slices_in_reducers(
+                then_e,
+                ctx,
+                from_canon,
+                hoisted_synthetic_keys,
+                in_reducer,
+                out,
+            );
+            collect_from_read_slices_in_reducers(
+                else_e,
+                ctx,
+                from_canon,
+                hoisted_synthetic_keys,
+                in_reducer,
+                out,
+            );
         }
         Expr2::Const(..) | Expr2::Var(..) => {}
     }
@@ -2370,6 +2597,29 @@ mod tests {
             .array_aux("share[Region]", "SUM(pop[nyc,*] * w[*])");
         let UnhoistedSourceRead::StrictSlice(slice) = source_read(&project, "pop", "share") else {
             panic!("the pinned-only read must classify StrictSlice");
+        };
+        assert_eq!(render_read_slice_for_diagnostic(&slice), "nyc,*");
+    }
+
+    /// GH #793: a hoisted full-extent sibling reducer must not mask an
+    /// un-hoisted strict-slice sibling on the same `pop -> share` edge. The
+    /// full-extent read is already represented by synthetic agg halves, so the
+    /// residual un-hoisted verdict remains `StrictSlice`.
+    #[test]
+    fn unhoisted_source_read_ignores_hoisted_sibling_full_read() {
+        let project = TestProject::new("strict_with_hoisted_sibling")
+            .named_dimension("Region", &["nyc", "boston"])
+            .named_dimension("D2", &["p", "q"])
+            .array_aux("pop[Region,D2]", "1")
+            .array_aux("w[D2]", "0.5")
+            .array_aux_direct(
+                "share",
+                vec!["Region".into()],
+                "SUM(pop[nyc, *] * w[*]) + SUM(pop[*, *])",
+                None,
+            );
+        let UnhoistedSourceRead::StrictSlice(slice) = source_read(&project, "pop", "share") else {
+            panic!("the un-hoisted strict sibling must not be masked by the hoisted full read");
         };
         assert_eq!(render_read_slice_for_diagnostic(&slice), "nyc,*");
     }

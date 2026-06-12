@@ -404,6 +404,50 @@ mod model_ltm_reference_sites_tests {
         });
     }
 
+    /// GH #793: routing is per reducer site, not per `(from, to)` edge. The
+    /// full-extent sibling reducer mints a synthetic agg, but the strict-slice
+    /// sibling is I1-declined and must stay Direct so the link-score layer can
+    /// loudly drop the incomplete edge instead of treating the sibling agg
+    /// halves as complete attribution.
+    #[test]
+    fn ir_hoisted_sibling_does_not_claim_declined_strict_slice_site() {
+        let project = TestProject::new("gh793_ir")
+            .named_dimension("Region", &["nyc", "boston"])
+            .named_dimension("D2", &["p", "q"])
+            .array_aux("pop[Region,D2]", "1")
+            .array_aux("w[D2]", "0.5")
+            .array_aux_direct(
+                "share",
+                vec!["Region".into()],
+                "SUM(pop[nyc, *] * w[*]) + SUM(pop[*, *])",
+                None,
+            );
+
+        with_ir(&project, |_db, ir, aggs| {
+            let agg_idx = aggs.synthetic_by_key["sum(pop[*, *])"];
+            let sites = sites_for(ir, "pop", "share");
+            assert_eq!(sites.len(), 2, "sites: {sites:?}");
+            assert!(
+                sites.iter().any(|s| {
+                    s.shape == RefShape::Wildcard
+                        && matches!(
+                            s.routing,
+                            SiteRouting::ThroughAgg { agg } if agg == AggRef(agg_idx)
+                        )
+                }),
+                "the full-extent sibling must route through its own synthetic agg; \
+                 sites: {sites:?}"
+            );
+            assert!(
+                sites
+                    .iter()
+                    .any(|s| s.shape == RefShape::DynamicIndex && s.routing == SiteRouting::Direct),
+                "the declined strict-slice sibling must stay Direct, not route \
+                 through the full-extent sibling agg; sites: {sites:?}"
+            );
+        });
+    }
+
     /// `total = SUM(population[*])` is the *whole* RHS of a scalar var, so
     /// `enumerate_agg_nodes` makes `total` itself a *variable-backed* agg
     /// (no synthetic minted). `routed_aggs` for `(population, total)` filters

@@ -3420,6 +3420,38 @@ fn loop_score_variables_scalar_loop_yields_scalar_equation() {
     }
 }
 
+/// A scalar loop whose cycle references a link-score name that was never
+/// emitted must not emit a loop-score var at all. Otherwise the fragment
+/// compiler would synthesize a zero stub for the missing dependency, making
+/// the loop look scored while silently dropping one factor.
+#[test]
+fn loop_score_variables_missing_link_score_drops_loop() {
+    use crate::ltm::{Loop, LoopPolarity};
+
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![make_link("pop", "births"), make_link("births", "pop")],
+        stocks: vec![Ident::<Canonical>::new("pop")],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec![],
+        slot_links: vec![],
+    };
+    let mut emitted = HashSet::new();
+    emitted.insert(ls_name("births", "pop"));
+
+    let vars = generate_loop_score_variables(
+        std::slice::from_ref(&loop_item),
+        &emitted,
+        &[],
+        &Default::default(),
+    );
+
+    assert!(
+        vars.is_empty(),
+        "missing link-score names must be a drop backstop, not a warned/stubbed zero"
+    );
+}
+
 /// A dimensioned loop with no `slot_links` (the Bare-A2A fast path)
 /// produces the compact `Equation::ApplyToAll` form -- byte-identical
 /// reference text to the scalar case, tagged with the loop's dimensions.
