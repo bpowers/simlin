@@ -267,7 +267,8 @@ pub(super) fn link_score_dimensions(
 /// (`from_dims ⊆ to_dims`), mismatched dimensions, module-involved
 /// edges, and any edge where the reducer cannot be classified. Returns
 /// `Some(vec![])` for SIZE edges (constant reducer, no scores) and the
-/// loud decline above.
+/// remaining loud declines (the GH #780 projection-feeder doom and the
+/// GH #778/#785 duplicated-dim skip).
 #[allow(clippy::too_many_arguments)] // threads salsa keys + emission context
 pub(super) fn try_cross_dimensional_link_scores(
     db: &dyn Db,
@@ -723,10 +724,12 @@ pub(super) fn try_cross_dimensional_link_scores(
 /// The read rows are independent of `to`'s dims, so the RELATED-dim spelling
 /// (`share[Region]`, `Region` a source dim) and the DISJOINT-dim spelling
 /// (`share[D9]`, `D9` not a source dim) emit identically. SIZE (constant
-/// reducer) skips with `Some(vec![])`. A `read_slice_rows` decline (a stale
-/// slice invariant) returns `Some(vec![])` too -- the element graph emitted
-/// the broadcast edges, so the caller must NOT fall through to
-/// `emit_per_shape_link_scores` and mint a wrong-shaped stand-in.
+/// reducer) skips with `Some(vec![])`. A `read_slice_rows` decline returns
+/// `None` (the `?`), propagating out of `try_cross_dimensional_link_scores`'
+/// broadcast branch so the dispatcher's later landings apply -- defense only:
+/// the decline is unreachable for a slice the gate admits here (a
+/// Pinned/Reduced-only slice has no `Iterated` remap to fail, and arity is
+/// invariant I2), so the broadcast edges and scores cannot actually diverge.
 #[allow(clippy::too_many_arguments)] // threads salsa keys + emission context
 fn emit_broadcast_reduce_link_scores(
     db: &dyn Db,
@@ -2882,14 +2885,15 @@ pub(super) fn emit_link_scores_for_edge(
         );
         return;
     }
-    // Cross-dimensional (arrayed-to-scalar / partial-reduce) edges --
-    // includes the *variable-backed* reducer aggs like `total = SUM(pop[*])`
-    // and the read-slice-derived shapes (GH #765). `Some(vec![])` can mean
-    // the GH #758-style loud decline of the arrayed-owner scalar-result
-    // slice: a Warning was accumulated and the edge recorded in
-    // `unscoreable_edges`, and we must NOT fall through to
-    // `emit_per_shape_link_scores` (which would build a wrong-shaped
-    // stand-in).
+    // Cross-dimensional (arrayed-to-scalar / partial-reduce / broadcast-
+    // reduce) edges -- includes the *variable-backed* reducer aggs like
+    // `total = SUM(pop[*])` and the read-slice-derived shapes (GH #765 /
+    // GH #777). `Some(vec![])` can mean the SIZE/Constant-reducer skip, the
+    // GH #780 loud doom of a projection-feeder edge (a Warning was
+    // accumulated and the edge recorded in `unscoreable_edges`), or the
+    // GH #778/#785 duplicated-dim loud skip -- in every case we must NOT
+    // fall through to `emit_per_shape_link_scores` (which would build a
+    // wrong-shaped stand-in for an edge whose loops were already dropped).
     if let Some(cross_vars) = try_cross_dimensional_link_scores(
         db,
         source_vars,

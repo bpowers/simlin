@@ -279,6 +279,14 @@ fn is_per_element_edge(
 /// single-gate pattern. (The RELATED-dim spelling, `to`'s dims a subset of
 /// `from`'s, is ALSO caught by `is_partial_reduce_edge`; this predicate adds
 /// the disjoint-dim spelling and makes the gate explicit either way.)
+///
+/// The predicate never inspects `from`'s own slice, so it also returns
+/// `true` for a SCALAR-feeder edge into a broadcast agg (`scale → share` for
+/// `share[R] = SUM(pop[nyc,*] * scale)` -- the gate keys on the canonical
+/// co-source slice, and `reads_var` matches feeders too). Inert at the sole
+/// call site: the mixed-branch arm is guarded by
+/// `from_subscripted && to_subscripted`, and a scalar feeder's node is never
+/// subscripted.
 fn is_broadcast_reduce_edge(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
@@ -883,14 +891,17 @@ pub(crate) fn build_element_level_loops(
         // PROJECTION-FEEDER hop (`frac[d1] → growth[d1]`, GH #767 / T5)
         // is admitted by the same gate, so feeder-closure circuits route
         // here too -- their only emitted scores are the per-`(row, slot)`
-        // changed-last scalars. Only the
-        // arrayed-owner (Iterated-armed) acceptance is reachable here -- a
-        // scalar-owner reduce hop has an unsubscripted `to` node, so its
-        // circuits take the mixed branch (whose link builder keeps the
-        // bracketed `from` for the full-reduce name). Only computed for
-        // all-subscripted groups: a mixed circuit (a scalar node present)
-        // already handles the reduce hop via `is_partial_reduce_edge` in
-        // the mixed branch's link builder.
+        // changed-last scalars. Two arrayed-owner acceptances are reachable
+        // here: the Iterated-armed aligned partial reduce AND the GH #777
+        // no-Iterated BROADCAST reduce (`share[Region] = SUM(pop[nyc,*])`,
+        // whose hops resolve the per-(read-row, full-target-element)
+        // scalars); a scalar-owner reduce hop has an unsubscripted `to`
+        // node, so its circuits take the mixed branch (whose link builder
+        // keeps the bracketed `from` for the full-reduce name). Only
+        // computed for all-subscripted groups: a mixed circuit (a scalar
+        // node present) already handles the reduce hop via
+        // `is_partial_reduce_edge` / `is_broadcast_reduce_edge` in the
+        // mixed branch's link builder.
         let representative_has_partial_reduce_hop = all_subscripted && {
             let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
             (0..representative.len()).any(|i| {

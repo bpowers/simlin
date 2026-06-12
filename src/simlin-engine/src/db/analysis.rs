@@ -2044,13 +2044,19 @@ pub fn model_element_causal_edges(
                         // `try_cross_dimensional_link_scores` derives from
                         // the SAME `read_slice_rows` carry exactly these
                         // edges' names, so loop scores over them resolve.
-                        // `variable_backed_reduce_agg` is `None` for the
+                        // The gate also ADMITS the GH #777 arrayed-owner
+                        // scalar-result broadcast slice
+                        // (`share[Region] = SUM(pop[nyc,*])`): this dispatch
+                        // is where its element edges are emitted --
+                        // `emit_agg_routed_edges`' broadcast arm fans each
+                        // read row across `to`'s full element set, matching
+                        // the per-(read-row, full-target-element) scores from
+                        // `emit_broadcast_reduce_link_scores`.
+                        // `variable_backed_reduce_agg` is `None` only for the
                         // whole-extent shape (which keeps the reference
-                        // walker's reduction/broadcast edges below) and the
-                        // GH #777 arrayed-owner scalar-result slice (the
-                        // loud-skip conservative arm). The GH #764
-                        // broadcast/permuted shapes no longer reach this
-                        // `Direct` dispatch at all: since T4 they mint
+                        // walker's reduction/broadcast edges below). The
+                        // GH #764 broadcast/permuted shapes no longer reach
+                        // this `Direct` dispatch at all: since T4 they mint
                         // SYNTHETIC aggs, so their sites classify
                         // `ThroughAgg` and take the arm below.
                         //
