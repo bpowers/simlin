@@ -43,16 +43,26 @@
 //! including the BROADCAST case where the target also iterates `Age`) and
 //! a SUBSET reducer (`SUM(v[*:Sub])`, a StarRange over a proper
 //! subdimension -- GH #766). Both property oracles enumerate expected rows
-//! via `read_slice_rows`, but their strength differs per family:
-//! production's `PerElement` expansion arm consumes the SAME function, so
-//! the mixed property is a shared-derivation consistency check and the
-//! deterministic companion (hand-pinned literal edge names, both axis
-//! orders) is the mixed family's SOLE independent oracle; production's
-//! agg-routed element edges, by contrast, come from `emit_agg_routed_edges`'
-//! own `AxisPlan` enumeration rather than `read_slice_rows` (the
-//! invariant-I4 deviation tracked as GH #783), so the subset property is
-//! genuinely DIFFERENTIAL -- two independent row enumerations that must
-//! agree. Each family has its own forced strategy + property
+//! via `read_slice_rows`, and since GH #783 BOTH production surfaces consume
+//! the SAME single derivation: the `PerElement` expansion arm and the
+//! agg-routed element edges (`emit_agg_routed_edges`) both read
+//! `read_slice_row_parts` (which `read_slice_rows` wraps), closing the I4
+//! drift channel the subset property used to exploit. The two row-shape
+//! properties are therefore both SHARED-DERIVATION consistency checks now
+//! (the test oracle and production walk the same low-level helper), NOT
+//! differential -- a bug in `read_slice_row_parts` itself would change both
+//! sides together and slip past them. The truly independent oracle for each
+//! family is its deterministic companion, which hand-pins literal edge names
+//! against a fixed slice (`element_graph_tests.rs`' subset/sliced/mixed pins
+//! and this file's `*_route_*`/`*_expand_*` companions); for the subset
+//! family the `ltm_array_agg` integration tests additionally pin the NUMERIC
+//! score surface independently, and a mutation run confirmed they catch
+//! `read_slice_row_parts` bugs too. The consistency
+//! properties still earn their keep: they fuzz the per-axis slice shapes,
+//! dimension sizes, and target arities across a far wider corpus than the
+//! hand pins, catching a production consumer that wires the shared derivation
+//! up wrong (wrong arg order, dropped fallback, mis-formatted node name).
+//! Each family has its own forced strategy + property
 //! (`forced_mixed_ref_specs_expand_to_pinned_diagonal`,
 //! `forced_subset_reducer_specs_route_subset_rows`) so the GH #739 vacuity
 //! guard applies -- a strategy that silently stops generating the shape
@@ -782,13 +792,14 @@ fn cross_product(sources: &[String], targets: &[String]) -> Vec<(String, String)
 ///
 /// The expected read rows are enumerated via `read_slice_rows`, with the
 /// per-axis access stated independently from the spec (`Reduced{subset}`).
-/// Production's agg-routed element edges do NOT come from
-/// `read_slice_rows`: `emit_agg_routed_edges` plans its rows with its own
-/// `AxisPlan` machinery (the invariant-I4 deviation tracked as GH #783).
-/// This expectation is therefore genuinely DIFFERENTIAL -- two independent
-/// enumerations of the same slice that must agree -- and the deterministic
-/// companion tests additionally hand-pin literal edge names, anchoring
-/// both enumerations to a fixed oracle.
+/// Since GH #783 production's agg-routed element edges
+/// (`emit_agg_routed_edges`) ALSO consume this derivation -- they read
+/// `read_slice_row_parts`, the structured core `read_slice_rows` wraps -- so
+/// this is a SHARED-DERIVATION consistency check (the test oracle and
+/// production walk the same low-level helper over independently-stated slice
+/// shapes, dimension sizes, and target arities), not the differential it was
+/// pre-#783. The truly independent oracle is the deterministic companion
+/// tests, which hand-pin literal edge names against a fixed slice.
 fn expected_agg_routings(
     spec: &ProjectSpec,
     dim_ctx: &crate::dimensions::DimensionsContext,
@@ -1303,10 +1314,12 @@ fn edges_for_spec(spec: &ProjectSpec) -> (BTreeSet<(String, String)>, ElementCau
 /// `total = 1 + SUM(v0[*:Sub] * scalar_const)`, the feeder interaction)
 /// over `Dim = {a, b, c}` with `Sub = {a, b}` must route ONLY the `Sub`
 /// rows through the aggs. Edge names are hand-pinned literals --
-/// deliberately independent of `read_slice_rows` -- anchoring the
-/// property's differential comparison (test-side `read_slice_rows` vs
-/// production's `AxisPlan` enumeration in `emit_agg_routed_edges`,
-/// GH #783) to a fixed oracle.
+/// deliberately independent of `read_slice_rows` -- so this is a
+/// fully-independent oracle for the subset family (alongside the
+/// `ltm_array_agg` integration tests, which pin the numeric score surface):
+/// since GH #783 both the property and production walk the one
+/// `read_slice_row_parts` derivation, so the property alone could not catch
+/// a bug in that shared helper. These literal pins can.
 #[test]
 fn subset_reducer_specs_route_only_subset_rows() {
     let spec = ProjectSpec {

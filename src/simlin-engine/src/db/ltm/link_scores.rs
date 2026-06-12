@@ -225,7 +225,11 @@ pub(super) fn link_score_dimensions(
 /// `from`'s read slice -- `Pinned` axes fixed to their literal element,
 /// subset-`Reduced` axes enumerated over the subset only -- so the divisor
 /// is the true read count and unread rows get NO score, matching the
-/// element edges `emit_agg_routed_edges` derives from the same slice. For
+/// element edges `emit_agg_routed_edges` derives from the same slice.
+/// Since GH #783 that match is structural, not coincidental: both surfaces
+/// walk the ONE `read_slice_row_parts` derivation (`read_slice_rows` is its
+/// comma-joined + co-reduced projection), so a change to the slice vocabulary
+/// updates both in lockstep (invariant I4). For
 /// an all-`Iterated`/full-extent slice the read rows ARE the cartesian
 /// rows (byte-identical to the pre-T3 derivation). An ITERATED-DIM
 /// PROJECTION FEEDER edge into a variable-backed reduce (GH #767 / T5:

@@ -282,55 +282,73 @@ pub(super) fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<Str
     result
 }
 
-/// One source row a hoisted reducer reads, paired with the agg result slot it
-/// feeds and the co-reduced rows (the rows mapping to the *same* slot -- the
-/// `from`-slice the reducer combines for that slot, used as the
-/// `all_elements` argument for the per-element link-score equation builders).
-pub(crate) struct ReadSliceRow {
-    /// The source element subscript (comma-joined element names).
-    pub(crate) row: String,
-    /// The agg result slot's subscript (the `Iterated` axes' elements,
-    /// comma-joined; empty when the agg is scalar).
-    pub(crate) slot: String,
-    /// All source rows mapping to `slot`, in row-major order.
-    pub(crate) coreduced: Vec<String>,
+/// One source row a hoisted reducer reads, in STRUCTURED form: the element
+/// PARTS of the row (one per source axis) and the PARTS of the agg result
+/// slot it feeds (one per `Iterated` axis, in result-tuple order). This is the
+/// single low-level derivation invariant I4 mandates: every consumer of "which
+/// rows feed which slot" reads it from [`read_slice_row_parts`] -- the
+/// element-graph edge emitter (`emit_agg_routed_edges`) reads the parts
+/// directly (so it can `format_element_name` the row and subscript the agg
+/// node from the slot parts), and the link-score emitters read them through
+/// [`ReadSliceRow`], the comma-joined + co-reduced-grouped projection below.
+///
+/// Keeping the parts (rather than re-joining + re-splitting comma-separated
+/// strings) is load-bearing: a canonical element name CAN contain a comma (a
+/// quoted dimension element like `"a,b"` canonicalizes to `a,b`), so a
+/// joined-then-split round-trip would be ambiguous. Both surfaces sharing the
+/// `Vec<String>` parts is therefore the only representation that PROVABLY
+/// cannot drift.
+pub(crate) struct ReadSliceRowParts {
+    /// The source element of each axis, in the source's declared dimension
+    /// order (one entry per `from` axis).
+    pub(crate) row_parts: Vec<String>,
+    /// The agg result-slot coordinate of each `Iterated` axis, in
+    /// result-tuple order (empty when the agg is scalar -- all axes
+    /// Pinned/Reduced). For a positionally-mapped pair (GH #534) the part is
+    /// the source element's corresponding TARGET-dim element; identity in the
+    /// literal case.
+    pub(crate) slot_parts: Vec<String>,
 }
 
-/// Enumerate the source rows a hoisted reducer reads, given `from`'s
-/// per-source `read_slice` (`AggNode::source_read_slice(from)` -- one
-/// [`crate::ltm_agg::AxisRead`] per `from`'s axis, which holds because
-/// `from` is one of the agg's `sources`) and `from`'s
-/// dimension element lists. A `Pinned` axis is fixed to its single element;
-/// an `Iterated` axis ranges over every element of that axis; a `Reduced`
-/// axis ranges over every element, or -- for a subset-bearing `Reduced`
-/// (a proper-subdimension StarRange, GH #766) -- over only the subset's
-/// elements, so unread rows get no per-row score and divisor-bearing
-/// reducers (MEAN, STDDEV) divide by the subset size via `coreduced`. The
-/// agg result slot for a row is its `Iterated` coordinates in order --
-/// remapped to the corresponding TARGET-dim element via
+/// The single low-level source-row/agg-slot derivation (invariant I4 of the
+/// shape-expressiveness design): enumerate the source rows a hoisted reducer
+/// reads, given `from`'s per-source `read_slice`
+/// (`AggNode::source_read_slice(from)` -- one [`crate::ltm_agg::AxisRead`] per
+/// `from`'s axis, which holds because `from` is one of the agg's `sources`)
+/// and `from`'s dimension element lists. A `Pinned` axis is fixed to its
+/// single element; an `Iterated` axis ranges over every element of that axis;
+/// a `Reduced` axis ranges over every element, or -- for a subset-bearing
+/// `Reduced` (a proper-subdimension StarRange, GH #766) -- over only the
+/// subset's elements, so unread rows get no per-row score and divisor-bearing
+/// reducers (MEAN, STDDEV) divide by the subset size. The agg result slot for
+/// a row is its `Iterated` coordinates in order -- remapped to the
+/// corresponding TARGET-dim element via
 /// [`crate::ltm_agg::iterated_axis_slot_elements`] when the axis is a
 /// positionally-mapped pair (GH #534; identity in the literal case), so the
-/// emitted `{from}[<row>]→{agg}[<slot>]` names match the element graph's
-/// remapped agg-slot nodes.
+/// `{from}[<row>]→{agg}[<slot>]` names the element graph and the link scores
+/// emit agree by construction.
 ///
-/// `None` when `read_slice` doesn't have one entry per `from` axis (it always
-/// should for a hoisted agg whose `sources` include `from`), or when a
-/// mapped `Iterated` axis has no usable slot remap (cannot happen for a slice
-/// `compute_read_slice` accepted -- both gate on the same helper over the
-/// same salsa dimension context -- but a stale invariant degrades to the
-/// caller's conservative fallback rather than mis-slotted scores): the caller
-/// then falls back to the conservative "every source element, scalar agg" form.
-pub(crate) fn read_slice_rows(
+/// Returns rows in row-major cartesian order over the per-axis element lists.
+///
+/// `None` (the SINGLE decline condition both surfaces share -- the I4 fallback
+/// hook) when `read_slice` doesn't have one entry per `from` axis (it always
+/// should for a hoisted agg whose `sources` include `from`), or when a mapped
+/// `Iterated` axis has no usable slot remap (cannot happen for a slice
+/// `compute_read_slice` accepted -- both gate on the same helper over the same
+/// salsa dimension context -- but a stale invariant degrades to the caller's
+/// conservative fallback rather than mis-slotted scores).
+pub(crate) fn read_slice_row_parts(
     read_slice: &[crate::ltm_agg::AxisRead],
     from_dim_element_lists: &[Vec<String>],
     dim_ctx: &crate::dimensions::DimensionsContext,
-) -> Option<Vec<ReadSliceRow>> {
+) -> Option<Vec<ReadSliceRowParts>> {
     use crate::ltm_agg::AxisRead;
     if read_slice.len() != from_dim_element_lists.len() {
         return None;
     }
     // Per axis: the element list to iterate, plus -- for an `Iterated` axis
-    // -- the slot coordinate per source element (index-aligned).
+    // -- the slot coordinate per source element (index-aligned). A
+    // Pinned/Reduced axis contributes a row part but no slot coordinate.
     let per_axis: Vec<(Vec<String>, Option<Vec<String>>)> = read_slice
         .iter()
         .zip(from_dim_element_lists)
@@ -346,38 +364,73 @@ pub(crate) fn read_slice_rows(
             }
         })
         .collect::<Option<Vec<_>>>()?;
-    // Cartesian product, tracking each row's full element tuple and its slot
-    // coordinates.
-    let mut rows: Vec<(Vec<String>, Vec<String>)> = vec![(Vec::new(), Vec::new())];
+    // Cartesian product, accumulating each row's element parts and its slot
+    // coordinate parts.
+    let mut rows: Vec<ReadSliceRowParts> = vec![ReadSliceRowParts {
+        row_parts: Vec::new(),
+        slot_parts: Vec::new(),
+    }];
     for (elems, slot_elems) in &per_axis {
-        let mut next: Vec<(Vec<String>, Vec<String>)> =
-            Vec::with_capacity(rows.len() * elems.len());
-        for (row, slot) in &rows {
+        let mut next: Vec<ReadSliceRowParts> = Vec::with_capacity(rows.len() * elems.len());
+        for partial in &rows {
             for (ei, e) in elems.iter().enumerate() {
-                let mut new_row = row.clone();
-                new_row.push(e.clone());
-                let mut new_slot = slot.clone();
+                let mut row_parts = partial.row_parts.clone();
+                row_parts.push(e.clone());
+                let mut slot_parts = partial.slot_parts.clone();
                 if let Some(slots) = slot_elems {
-                    new_slot.push(slots[ei].clone());
+                    slot_parts.push(slots[ei].clone());
                 }
-                next.push((new_row, new_slot));
+                next.push(ReadSliceRowParts {
+                    row_parts,
+                    slot_parts,
+                });
             }
         }
         rows = next;
     }
-    // Group rows by slot to build each row's `coreduced` set.
+    Some(rows)
+}
+
+/// One source row a hoisted reducer reads, paired with the agg result slot it
+/// feeds and the co-reduced rows (the rows mapping to the *same* slot -- the
+/// `from`-slice the reducer combines for that slot, used as the
+/// `all_elements` argument for the per-element link-score equation builders).
+pub(crate) struct ReadSliceRow {
+    /// The source element subscript (comma-joined element names).
+    pub(crate) row: String,
+    /// The agg result slot's subscript (the `Iterated` axes' elements,
+    /// comma-joined; empty when the agg is scalar).
+    pub(crate) slot: String,
+    /// All source rows mapping to `slot`, in row-major order.
+    pub(crate) coreduced: Vec<String>,
+}
+
+/// The comma-joined + co-reduced-grouped projection of [`read_slice_row_parts`]
+/// (invariant I4), consumed by the link-score emitters. Rows/slots are the
+/// parts joined with `,`; `coreduced` groups every row mapping to the same
+/// slot in row-major order (the `from`-slice the reducer combines for that
+/// slot). See [`read_slice_row_parts`] for the per-axis derivation and the
+/// `None` decline conditions.
+pub(crate) fn read_slice_rows(
+    read_slice: &[crate::ltm_agg::AxisRead],
+    from_dim_element_lists: &[Vec<String>],
+    dim_ctx: &crate::dimensions::DimensionsContext,
+) -> Option<Vec<ReadSliceRow>> {
+    let parts = read_slice_row_parts(read_slice, from_dim_element_lists, dim_ctx)?;
+    // Group rows by joined slot to build each row's `coreduced` set.
     let mut by_slot: HashMap<String, Vec<String>> = HashMap::new();
-    for (row, slot) in &rows {
+    for p in &parts {
         by_slot
-            .entry(slot.join(","))
+            .entry(p.slot_parts.join(","))
             .or_default()
-            .push(row.join(","));
+            .push(p.row_parts.join(","));
     }
     Some(
-        rows.into_iter()
-            .map(|(row, slot)| {
-                let slot = slot.join(",");
-                let row = row.join(",");
+        parts
+            .into_iter()
+            .map(|p| {
+                let slot = p.slot_parts.join(",");
+                let row = p.row_parts.join(",");
                 let coreduced = by_slot[&slot].clone();
                 ReadSliceRow {
                     row,

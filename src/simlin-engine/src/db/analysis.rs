@@ -764,19 +764,29 @@ fn expand_same_element(
 /// Emit the element edges for a reference routed through a hoisted aggregate
 /// node: `source[<read slice>] → agg[<iterated>]` then `agg[<iterated>] →
 /// to[e]`, where `from`'s read slice (`agg.source_read_slice(from)`, one
-/// [`AxisRead`] per source axis) decides which source rows feed each agg
-/// result slot and `agg.result_dims` (the `Iterated` axes' dims) decides how
-/// the agg fans out into `to`.
+/// [`crate::ltm_agg::AxisRead`] per source axis) decides which source rows
+/// feed each agg result slot and `agg.result_dims` (the `Iterated` axes' dims)
+/// decides how the agg fans out into `to`.
 ///
-/// - A [`AxisRead::Pinned`] axis fixes one element of the source on that axis.
-/// - An [`AxisRead::Iterated`] axis ranges; its element selects the agg result
-///   slot's coordinate for that dimension -- remapped to the corresponding
-///   TARGET-dim element via `iterated_axis_slot_elements` when the axis is a
-///   positionally-mapped pair (GH #534; identity in the literal case).
-/// - A [`AxisRead::Reduced`] axis ranges over *every* element (each one feeds
-///   the same agg result slot) -- or, for a subset-bearing `Reduced` (a
-///   proper-subdimension StarRange, GH #766), over only the subset's
-///   elements, so an unread row gets no edge into the agg and loop
+/// The source→slot half is the SINGLE I4 derivation
+/// ([`crate::db::ltm::read_slice_row_parts`]): the element-edge emitter reads
+/// the row/slot PARTS directly while the link-score emitters read the same
+/// derivation through `read_slice_rows`, so the element graph and the link
+/// scores agree on which rows feed which slot by construction rather than via
+/// two parallel enumerations that could drift (GH #783, invariant I4 of the
+/// shape-expressiveness design). The derivation interprets the slice as:
+///
+/// - A [`crate::ltm_agg::AxisRead::Pinned`] axis fixes one element of the
+///   source on that axis.
+/// - An [`crate::ltm_agg::AxisRead::Iterated`] axis ranges; its element selects
+///   the agg result slot's coordinate for that dimension -- remapped to the
+///   corresponding TARGET-dim element via `iterated_axis_slot_elements` when
+///   the axis is a positionally-mapped pair (GH #534; identity in the literal
+///   case).
+/// - A [`crate::ltm_agg::AxisRead::Reduced`] axis ranges over *every* element
+///   (each one feeds the same agg result slot) -- or, for a subset-bearing
+///   `Reduced` (a proper-subdimension StarRange, GH #766), over only the
+///   subset's elements, so an unread row gets no edge into the agg and loop
 ///   enumeration cannot discover loops through it. For the *element graph* a
 ///   representative element would suffice for reachability, but emitting one
 ///   edge per element matches `cross_element_loop_through_sum_reducer`'s
@@ -796,11 +806,15 @@ fn expand_same_element(
 /// half: the slot names ARE `to`'s element nodes, and an agg→to half would
 /// emit degenerate `to[e] → to[e]` self-edges.
 ///
-/// Defensive: if `from`'s read slice doesn't have one entry per source axis
-/// (it always should for a hoisted agg whose `sources` include `from` --
-/// `source_read_slice` returns the empty slice for a non-source, which
-/// trips the same guard), fall back to the conservative "every source
-/// element → agg" form so a stale invariant can't drop edges.
+/// Defensive: when the shared derivation declines -- `read_slice_row_parts`
+/// returns `None` because `from`'s read slice doesn't have one entry per
+/// source axis (it always should for a hoisted agg whose `sources` include
+/// `from` -- `source_read_slice` returns the empty slice for a non-source,
+/// which trips the same arity guard) or a mapped `Iterated` axis has no usable
+/// slot remap -- fall back to the conservative "every source element → scalar
+/// agg" form so a stale invariant can't drop edges. The link-score emitters
+/// share this exact decline condition (the same `None`), so their fallback
+/// engages in lockstep.
 #[allow(clippy::too_many_arguments)]
 fn emit_agg_routed_edges(
     from_name: &str,
@@ -812,8 +826,6 @@ fn emit_agg_routed_edges(
     dim_ctx: &crate::dimensions::DimensionsContext,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
-    use crate::ltm_agg::AxisRead;
-
     // The agg's result-axis dimensions (`AggNode::result_dims`, datamodel-
     // cased), resolved to the `Dimension` objects -- so `cartesian_element_names`
     // / `expand_same_element` and the agg-slot subscripting below can operate
@@ -898,76 +910,54 @@ fn emit_agg_routed_edges(
             }
         }
     } else {
-        // Per source axis, the element-name list to iterate when enumerating
-        // source rows: a `Pinned` axis is fixed to one element; an `Iterated`
-        // or `Reduced` axis ranges over every element. The position of an
-        // `Iterated` axis within the result tuple is tracked so each source
-        // row maps to the matching agg result slot; for a positionally-MAPPED
-        // iterated axis (GH #534) the slot coordinate is the source element's
-        // corresponding TARGET-dim element (`slot_elems`, aligned with
-        // `elems`), not the source element itself.
-        struct AxisPlan {
-            elems: Vec<String>,
-            /// The agg-slot coordinate per source element (index-aligned
-            /// with `elems`); `Some` exactly when this axis is `Iterated`.
-            /// Identity for the literal case, the mapping's positional
-            /// correspondence for a mapped pair.
-            slot_elems: Option<Vec<String>>,
-            /// `Some(j)` if this axis is the `j`th `Iterated` axis (its
-            /// slot element becomes coordinate `j` of the agg result slot);
-            /// `None` otherwise.
-            iterated_pos: Option<usize>,
-        }
-        let mut next_iterated_pos = 0usize;
-        // `None` when a mapped `Iterated` axis has no usable slot remap --
-        // which cannot happen for a slice `compute_read_slice` accepted
-        // (both gate on `iterated_axis_slot_elements` over the same salsa
-        // dimension context), but a stale invariant degrades to the same
-        // conservative fallback as a malformed `read_slice` rather than
-        // emitting mis-slotted edges.
-        let planned: Option<Vec<AxisPlan>> = if read_slice_ok {
-            read_slice
-                .iter()
-                .zip(from_dims)
-                .map(|(a, d)| match a {
-                    AxisRead::Pinned(elem) => Some(AxisPlan {
-                        elems: vec![elem.clone()],
-                        slot_elems: None,
-                        iterated_pos: None,
-                    }),
-                    AxisRead::Iterated { dim, source_dim } => {
-                        let elems = dimension_element_names(d);
-                        let slots = crate::ltm_agg::iterated_axis_slot_elements(
-                            dim, source_dim, &elems, dim_ctx,
-                        )?;
-                        let pos = next_iterated_pos;
-                        next_iterated_pos += 1;
-                        Some(AxisPlan {
-                            elems,
-                            slot_elems: Some(slots),
-                            iterated_pos: Some(pos),
-                        })
-                    }
-                    AxisRead::Reduced { subset } => Some(AxisPlan {
-                        elems: subset.clone().unwrap_or_else(|| dimension_element_names(d)),
-                        slot_elems: None,
-                        iterated_pos: None,
-                    }),
-                })
-                .collect()
+        // Source → agg edges. The source rows and the agg result slot each
+        // feeds come from the SINGLE I4 derivation (`read_slice_row_parts`):
+        // a `Pinned` axis is fixed to one element; an `Iterated` or `Reduced`
+        // axis ranges over every element (a `Reduced` over its subset for a
+        // proper-subdimension StarRange, GH #766); each `Iterated` axis
+        // contributes one slot coordinate, remapped to the source element's
+        // corresponding TARGET-dim element for a positionally-MAPPED pair
+        // (GH #534). The element-edge emitter reads the row/slot PARTS
+        // directly (to `format_element_name` the row and subscript the agg
+        // node); the link-score emitters read the SAME derivation through
+        // `read_slice_rows`, so the two surfaces cannot drift (GH #783).
+        let from_dim_element_lists: Vec<Vec<String>> =
+            from_dims.iter().map(dimension_element_names).collect();
+        // `None` exactly when `read_slice_ok` is false (the arity check is
+        // identical: `from_dim_element_lists.len() == from_dims.len()`) or a
+        // mapped `Iterated` axis has no usable slot remap -- the latter cannot
+        // happen for a slice `compute_read_slice` accepted (both gate on
+        // `iterated_axis_slot_elements` over the same salsa dimension context),
+        // but a stale invariant degrades to the conservative fallback rather
+        // than emitting mis-slotted edges. The condition is byte-equivalent to
+        // the pre-#783 `planned`/`read_slice_ok` gate.
+        let rows = if read_slice_ok {
+            crate::db::ltm::read_slice_row_parts(read_slice, &from_dim_element_lists, dim_ctx)
         } else {
             None
         };
         debug_assert!(
-            !read_slice_ok || planned.is_some(),
+            !read_slice_ok || rows.is_some(),
             "every Iterated axis accepted by compute_read_slice must have a slot remap"
         );
-        let n_iterated = if planned.is_some() {
-            next_iterated_pos
+        if let Some(rows) = rows {
+            for crate::db::ltm::ReadSliceRowParts {
+                row_parts,
+                slot_parts,
+            } in &rows
+            {
+                let from_node = if row_parts.len() == 1 {
+                    format_element_name(from_name, &row_parts[0])
+                } else {
+                    let refs: Vec<&str> = row_parts.iter().map(String::as_str).collect();
+                    format_multi_element_name(from_name, &refs)
+                };
+                element_edges
+                    .entry(from_node)
+                    .or_default()
+                    .insert(agg_node_name(slot_parts));
+            }
         } else {
-            0
-        };
-        let axis_plans: Vec<AxisPlan> = planned.unwrap_or_else(|| {
             // Conservative fallback: every source element, scalar agg. NOTE:
             // for a VARIABLE-BACKED *arrayed* agg this fallback is NOT
             // merely imprecise -- a scalar slot makes `agg_node_name` the
@@ -979,52 +969,18 @@ fn emit_agg_routed_edges(
             // admission -- the bare name IS the element node, so the
             // fallback is safe there.) Unreachable by construction today
             // (`variable_backed_reduce_agg` only admits well-formed slices
-            // whose Iterated remaps exist, and the debug_asserts above pin
-            // the remap invariants), but if the gate is ever widened this
+            // whose Iterated remaps exist, and the debug_assert above pins
+            // the remap invariant), but if the gate is ever widened this
             // fallback must be re-evaluated for the arrayed variable-backed
-            // case (e.g. fall back to the cross-product instead).
-            from_dims
-                .iter()
-                .map(|d| AxisPlan {
-                    elems: dimension_element_names(d),
-                    slot_elems: None,
-                    iterated_pos: None,
-                })
-                .collect()
-        });
-
-        // Source → agg edges: cartesian product over the per-axis element
-        // lists, routing each row to the agg result slot picked out by its
-        // `Iterated` coordinates (remapped via `slot_elems`).
-        let mut rows: Vec<(Vec<String>, Vec<String>)> =
-            vec![(Vec::new(), vec![String::new(); n_iterated])];
-        for plan in &axis_plans {
-            let mut next_rows: Vec<(Vec<String>, Vec<String>)> =
-                Vec::with_capacity(rows.len() * plan.elems.len());
-            for (row_elems, slot) in &rows {
-                for (ei, elem) in plan.elems.iter().enumerate() {
-                    let mut new_row = row_elems.clone();
-                    new_row.push(elem.clone());
-                    let mut new_slot = slot.clone();
-                    if let (Some(j), Some(slots)) = (plan.iterated_pos, &plan.slot_elems) {
-                        new_slot[j] = slots[ei].clone();
-                    }
-                    next_rows.push((new_row, new_slot));
-                }
+            // case (e.g. fall back to the cross-product instead). The scalar
+            // slot (`&[]`) makes `agg_node_name` the bare agg name, matching
+            // the pre-#783 `n_iterated == 0` enumeration.
+            for from_node in cartesian_element_names(from_name, from_dims) {
+                element_edges
+                    .entry(from_node)
+                    .or_default()
+                    .insert(agg_node_name(&[]));
             }
-            rows = next_rows;
-        }
-        for (row_elems, slot) in &rows {
-            let from_node = if row_elems.len() == 1 {
-                format_element_name(from_name, &row_elems[0])
-            } else {
-                let refs: Vec<&str> = row_elems.iter().map(String::as_str).collect();
-                format_multi_element_name(from_name, &refs)
-            };
-            element_edges
-                .entry(from_node)
-                .or_default()
-                .insert(agg_node_name(slot));
         }
     }
 

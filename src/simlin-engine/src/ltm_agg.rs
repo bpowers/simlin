@@ -457,10 +457,12 @@ impl AggNode {
     }
 
     /// The read slice of source `var`, or the EMPTY slice when `var` is not
-    /// a source of this agg. A scalar source's slice is empty too -- for
-    /// the row-enumeration consumers (`emit_agg_routed_edges`,
-    /// `read_slice_rows`) both mean the same thing: no per-row machinery
-    /// applies, degrade to the caller's conservative fallback / scalar arm.
+    /// a source of this agg. A scalar source's slice is empty too -- and since
+    /// GH #783 both row-enumeration consumers (`emit_agg_routed_edges`' element
+    /// edges and the link scores) read it through the ONE
+    /// `read_slice_row_parts` derivation, so the empty slice means the same
+    /// thing on both surfaces: no per-row machinery applies, degrade to the
+    /// caller's conservative fallback / scalar arm.
     pub fn source_read_slice(&self, var: &str) -> &[AxisRead] {
         self.sources
             .iter()
