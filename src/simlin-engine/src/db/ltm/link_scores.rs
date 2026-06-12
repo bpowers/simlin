@@ -904,7 +904,10 @@ fn emit_broadcast_reduce_link_scores(
 /// through the feeder to a warned constant-0 stub. Such an edge is routed
 /// FIRST to the SAME changed-last scalar-feeder convention the synthetic-agg
 /// arm uses for the SUBEXPRESSION spelling -- ONE Bare A2A score
-/// `$⁚ltm⁚link_score⁚scale→growth` over `result_dims`,
+/// `$⁚ltm⁚link_score⁚scale→growth` over the agg's `result_dims` (or over the
+/// OWNER's dims for the GH #777 broadcast slice, whose `result_dims` are
+/// empty -- `share[D9] = SUM(matrix[a,*] * scale)` -- since the single
+/// scalar reducer value feeds every `to[e]` identically),
 /// [`crate::ltm_augment::generate_scalar_feeder_to_agg_equation`] -- so the
 /// two spellings of the same dataflow score identically. Gated on the shared
 /// [`crate::ltm_agg::scalar_feeder_of_variable_backed_agg`] decision, so the
@@ -918,6 +921,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     to: &str,
     model: SourceModel,
     project: SourceProject,
+    dm_dims: &[crate::datamodel::Dimension],
     unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> Option<Vec<LtmSyntheticVar>> {
     // Source must be a scalar, non-module variable.
@@ -959,24 +963,55 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             &agg.equation_text,
         ) {
             Ok(text) => {
-                // The agg is arrayed over `result_dims` here (a scalar-target
-                // whole-RHS reduce with a scalar feeder, `result_dims` empty,
-                // is scalar-to-scalar and never reaches this arrayed-`to`
-                // function). The changed-last text is ApplyToAll-compatible
-                // over `result_dims`: the agg's own reducer body iterated over
-                // those dims, with only the scalar feeder frozen at PREVIOUS.
-                let equation = if agg.result_dims.is_empty() {
-                    datamodel::Equation::Scalar(text)
+                // The score is ALWAYS arrayed here (`to_dims` is non-empty in
+                // this function). Two sub-shapes:
+                //  - ALIGNED reduce (`result_dims` == the owner's dims): the
+                //    score is A2A over `result_dims`.
+                //  - BROADCAST reduce (GH #777: `result_dims` empty, owner
+                //    arrayed -- `share[D9] = SUM(matrix[a,*] * scale)`): the
+                //    single scalar reducer value feeds every `to[e]`
+                //    identically, so the score is A2A over the OWNER's dims.
+                //    Emitting `Equation::Scalar` here would reference the
+                //    bare multi-slot owner in a scalar fragment -- an
+                //    assembly failure whose loops stub to warned constant 0
+                //    (the exact GH #790 defect, one shape over).
+                // The changed-last text is ApplyToAll-compatible in both:
+                // the bare owner reference element-resolves inside its own
+                // A2A context, and the frozen reducer body is either
+                // iterated over `result_dims` (aligned) or scalar-valued
+                // (broadcast -- a Pinned/subset slice broadcasts cleanly).
+                let equation_dims: Vec<String> = if agg.result_dims.is_empty() {
+                    // Map the owner's canonical dim names back to their
+                    // datamodel casing for correct equation parsing (the
+                    // same mapping `link_score_dimensions` applies).
+                    to_dims
+                        .iter()
+                        .map(|d| {
+                            let canonical = d.name();
+                            dm_dims
+                                .iter()
+                                .find(|dm| {
+                                    crate::common::canonicalize(dm.name()).as_ref() == canonical
+                                })
+                                .map(|dm| dm.name().to_string())
+                                .unwrap_or_else(|| canonical.to_string())
+                        })
+                        .collect()
                 } else {
-                    datamodel::Equation::ApplyToAll(agg.result_dims.clone(), text)
+                    agg.result_dims.clone()
                 };
                 return Some(vec![LtmSyntheticVar {
                     name,
-                    equation,
-                    dimensions: agg.result_dims.clone(),
-                    // agg-named target -> routed direct by the synthetic-agg
-                    // check in compile_ltm_synthetic_fragment.
-                    compile_directly: false,
+                    equation: datamodel::Equation::ApplyToAll(equation_dims.clone(), text),
+                    dimensions: equation_dims,
+                    // The non-empty `dimensions` route this through the A2A
+                    // arm of `compile_ltm_synthetic_fragment`, which compiles
+                    // `equation` verbatim -- but set the direct flag anyway:
+                    // the (from, to)-keyed salsa path would re-derive a
+                    // DIFFERENT (changed-first, Bare-shaped) equation than
+                    // this var carries, so falling into it under any future
+                    // dims-handling change would be a silent divergence.
+                    compile_directly: true,
                 }]);
             }
             Err(err) => {
@@ -3067,6 +3102,7 @@ pub(super) fn emit_link_scores_for_edge(
         to,
         model,
         project,
+        dm_dims,
         unscoreable_edges,
     ) {
         vars.extend(cross_vars);

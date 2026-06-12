@@ -9293,14 +9293,15 @@ fn gh791_full_extent_multisource_read_stays_scored() {
 /// variable-backed reduce (`growth[D1] = SUM(matrix[D1,*] * scale)` -- growth
 /// IS the agg, no synthetic minted), closed in a feedback loop through `pop`:
 /// `pop -> scale -> growth -> pop`. The `scale -> growth` hop is the scalar
-/// feeder hop.
-fn gh790_whole_rhs_fixture(reducer: &str) -> datamodel::Project {
+/// feeder hop. `matrix_eqn` lets the spelling-agreement test swap the
+/// constant matrix for a TIME-VARYING one.
+fn gh790_whole_rhs_fixture_with(reducer: &str, matrix_eqn: &str) -> datamodel::Project {
     TestProject::new("gh790_whole_rhs")
         .with_sim_time(0.0, 8.0, 1.0)
         .named_dimension("D1", &["a", "b"])
         .named_dimension("D2", &["c", "d"])
         .array_stock("pop[D1]", "100", &["growth"], &[], None)
-        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], matrix_eqn, None)
         .scalar_aux("scale", "SUM(pop[*]) * 0.005")
         .array_flow(
             "growth[D1]",
@@ -9310,21 +9311,32 @@ fn gh790_whole_rhs_fixture(reducer: &str) -> datamodel::Project {
         .build_datamodel()
 }
 
-/// The SUBEXPRESSION spelling of the SAME dataflow: a constant `0.1` added to
-/// the reducer makes `growth` a non-bare reducer, so LTM hoists the
-/// `SUM(matrix[D1,*] * scale)` into a SYNTHETIC `$⁚ltm⁚agg⁚N` node and the
-/// `scale -> agg` hop rides `emit_source_to_agg_link_scores`' (already
-/// correct) scalar-feeder arm. The two spellings must score the feeder hop --
-/// and the loop -- identically (the strongest test in this task).
-fn gh790_subexpr_fixture() -> datamodel::Project {
+fn gh790_whole_rhs_fixture(reducer: &str) -> datamodel::Project {
+    gh790_whole_rhs_fixture_with(reducer, "5")
+}
+
+/// The SUBEXPRESSION spelling of the SAME dataflow: a constant `prefix`
+/// (`"0.1 + "` or `"0 + "`) added to the reducer makes `growth` a non-bare
+/// reducer, so LTM hoists the `SUM(matrix[D1,*] * scale)` into a SYNTHETIC
+/// `$⁚ltm⁚agg⁚N` node and the `scale -> agg` hop rides
+/// `emit_source_to_agg_link_scores`' (already correct) scalar-feeder arm. The
+/// two spellings must score the feeder hop -- and the loop -- identically
+/// (the strongest test in this task). The `"0 + "` prefix keeps the
+/// SIMULATED DYNAMICS byte-identical to the whole-RHS spelling, which the
+/// time-varying agreement case relies on.
+fn gh790_subexpr_fixture_with(prefix: &str, matrix_eqn: &str) -> datamodel::Project {
     TestProject::new("gh790_subexpr")
         .with_sim_time(0.0, 8.0, 1.0)
         .named_dimension("D1", &["a", "b"])
         .named_dimension("D2", &["c", "d"])
         .array_stock("pop[D1]", "100", &["growth"], &[], None)
-        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], matrix_eqn, None)
         .scalar_aux("scale", "SUM(pop[*]) * 0.005")
-        .array_flow("growth[D1]", "0.1 + SUM(matrix[D1, *] * scale)", None)
+        .array_flow(
+            "growth[D1]",
+            &format!("{prefix}SUM(matrix[D1, *] * scale)"),
+            None,
+        )
         .build_datamodel()
 }
 
@@ -9493,68 +9505,139 @@ fn scalar_feeder_of_whole_rhs_reduce_covers_reducer_class() {
 
 /// GH #790, the SPELLING-AGREEMENT test (the strongest in this task): the
 /// whole-RHS spelling (`growth = SUM(matrix[D1,*] * scale)`, variable-backed)
-/// and the subexpression spelling (`growth = 0.1 + SUM(matrix[D1,*] * scale)`,
-/// synthetic-agg-backed) are two spellings of the SAME dataflow. The scalar
-/// feeder's link score AND the loop scores must AGREE element-for-element,
-/// step-for-step -- the whole-RHS path is now routed to the same changed-last
-/// convention the subexpression path always used.
+/// and the subexpression spelling (`growth = <const> + SUM(matrix[D1,*] *
+/// scale)`, synthetic-agg-backed) are two spellings of the SAME dataflow. The
+/// scalar feeder's link score AND the loop scores must AGREE
+/// element-for-element, step-for-step -- the whole-RHS path is now routed to
+/// the same changed-last convention the subexpression path always used.
+///
+/// Two cases:
+///  - CONSTANT matrix (`0.1 +` prefix): every score is the analytic constant
+///    (feeder +1, loops 0.5), so agreement is exact but trivial.
+///  - TIME-VARYING matrix (`matrix = pop[D1] * 0.05`, `0 +` prefix so the
+///    simulated dynamics are byte-identical between spellings): the
+///    changed-last feeder score is genuinely time-varying (the numerator
+///    `Σ_c matrix_t[r,c]·Δscale` no longer equals `Δgrowth[r]`, which also
+///    carries the `Δmatrix` terms), so pointwise agreement here pins the
+///    CONVENTION, not just the constants. A vacuity guard asserts the score
+///    actually departs from +/-1.
 #[test]
 fn scalar_feeder_whole_rhs_and_subexpr_spellings_agree() {
-    let (whole_results, _) = run_ltm(&gh790_whole_rhs_fixture("SUM"));
-    let (subexpr_results, _) = run_ltm(&gh790_subexpr_fixture());
+    struct Case {
+        label: &'static str,
+        matrix_eqn: &'static str,
+        subexpr_prefix: &'static str,
+        require_time_varying: bool,
+        /// Loops in EACH spelling: the 2 per-element feeder circuits, plus --
+        /// when `matrix` depends on `pop` -- the 4 per-(row, col) co-source
+        /// circuits (`pop[r] -> matrix[r,c] -> growth[r] -> pop[r]`).
+        expected_loops: usize,
+    }
+    let cases = [
+        Case {
+            label: "constant-matrix",
+            matrix_eqn: "5",
+            subexpr_prefix: "0.1 + ",
+            require_time_varying: false,
+            expected_loops: 2,
+        },
+        Case {
+            label: "time-varying-matrix",
+            matrix_eqn: "pop[D1] * 0.05",
+            subexpr_prefix: "0 + ",
+            require_time_varying: true,
+            expected_loops: 6,
+        },
+    ];
 
     const TOL: f64 = 1e-9;
 
-    // The feeder link score: A2A `scale->growth` (whole-RHS) vs A2A
-    // `scale->$agg0` (subexpr). Both are dimensioned over `[D1]` -- compare
-    // per slot.
-    let whole_feeder = offset_of(
-        &whole_results,
-        &format!("{LINK_SCORE_PREFIX}scale\u{2192}growth"),
-    );
-    let sub_feeder = offset_of(
-        &subexpr_results,
-        &format!("{LINK_SCORE_PREFIX}scale\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0"),
-    );
-    for slot in 0..2 {
-        let w = series_at(&whole_results, whole_feeder + slot);
-        let s = series_at(&subexpr_results, sub_feeder + slot);
-        assert_eq!(w.len(), s.len(), "spellings must run the same step count");
-        for (step, (&wv, &sv)) in w.iter().zip(&s).enumerate() {
+    for case in &cases {
+        let (whole_results, _) = run_ltm(&gh790_whole_rhs_fixture_with("SUM", case.matrix_eqn));
+        let (subexpr_results, _) = run_ltm(&gh790_subexpr_fixture_with(
+            case.subexpr_prefix,
+            case.matrix_eqn,
+        ));
+
+        // The feeder link score: A2A `scale->growth` (whole-RHS) vs A2A
+        // `scale->$agg0` (subexpr). Both are dimensioned over `[D1]` --
+        // compare per slot.
+        let whole_feeder = offset_of(
+            &whole_results,
+            &format!("{LINK_SCORE_PREFIX}scale\u{2192}growth"),
+        );
+        let sub_feeder = offset_of(
+            &subexpr_results,
+            &format!("{LINK_SCORE_PREFIX}scale\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0"),
+        );
+        let mut saw_non_unit = false;
+        for slot in 0..2 {
+            let w = series_at(&whole_results, whole_feeder + slot);
+            let s = series_at(&subexpr_results, sub_feeder + slot);
+            assert_eq!(
+                w.len(),
+                s.len(),
+                "[{}] spellings must run the same step count",
+                case.label
+            );
+            for (step, (&wv, &sv)) in w.iter().zip(&s).enumerate() {
+                assert!(
+                    (wv - sv).abs() <= TOL,
+                    "[{}] feeder score slot {slot} step {step}: whole-RHS {wv} != subexpr {sv}",
+                    case.label
+                );
+                if step > 0 && (wv.abs() - 1.0).abs() > 0.01 {
+                    saw_non_unit = true;
+                }
+            }
+        }
+        // Vacuity guard for the time-varying case: a feeder score pinned at
+        // +/-1 would mean the dynamics degenerated back to the trivial
+        // constant-matrix agreement.
+        if case.require_time_varying {
             assert!(
-                (wv - sv).abs() <= TOL,
-                "feeder score slot {slot} step {step}: whole-RHS {wv} != subexpr {sv}"
+                saw_non_unit,
+                "[{}] the time-varying feeder score must depart from +/-1 at \
+                 some step (otherwise this case is as weak as the constant one)",
+                case.label
             );
         }
-    }
 
-    // The loop scores: two per-element circuits in each spelling. Their sorted
-    // step-by-step series must match (the loop products through the shared
-    // scalar feeder are identical).
-    let collect_loops = |results: &Results| -> Vec<Vec<f64>> {
-        let mut series: Vec<Vec<f64>> = ltm_score_var_names(results)
-            .into_iter()
-            .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
-            .map(|n| series_at(results, offset_of(results, &n)))
-            .collect();
-        // Deterministic comparison order: sort by the series content.
-        series.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        series
-    };
-    let whole_loops = collect_loops(&whole_results);
-    let sub_loops = collect_loops(&subexpr_results);
-    assert_eq!(
-        whole_loops.len(),
-        sub_loops.len(),
-        "both spellings must enumerate the same number of loops"
-    );
-    assert_eq!(whole_loops.len(), 2, "expected two per-element loops");
-    for (wl, sl) in whole_loops.iter().zip(&sub_loops) {
-        for (step, (&wv, &sv)) in wl.iter().zip(sl).enumerate() {
-            assert!(
-                (wv - sv).abs() <= 1e-9,
-                "loop score step {step}: whole-RHS {wv} != subexpr {sv}"
-            );
+        // The loop scores: two per-element circuits in each spelling. Their
+        // sorted step-by-step series must match (the loop products through
+        // the shared scalar feeder are identical).
+        let collect_loops = |results: &Results| -> Vec<Vec<f64>> {
+            let mut series: Vec<Vec<f64>> = ltm_score_var_names(results)
+                .into_iter()
+                .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+                .map(|n| series_at(results, offset_of(results, &n)))
+                .collect();
+            // Deterministic comparison order: sort by the series content.
+            series.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            series
+        };
+        let whole_loops = collect_loops(&whole_results);
+        let sub_loops = collect_loops(&subexpr_results);
+        assert_eq!(
+            whole_loops.len(),
+            sub_loops.len(),
+            "[{}] both spellings must enumerate the same number of loops",
+            case.label
+        );
+        assert_eq!(
+            whole_loops.len(),
+            case.expected_loops,
+            "[{}] unexpected loop count",
+            case.label
+        );
+        for (wl, sl) in whole_loops.iter().zip(&sub_loops) {
+            for (step, (&wv, &sv)) in wl.iter().zip(sl).enumerate() {
+                assert!(
+                    (wv - sv).abs() <= TOL,
+                    "[{}] loop score step {step}: whole-RHS {wv} != subexpr {sv}",
+                    case.label
+                );
+            }
         }
     }
 }
@@ -9562,10 +9645,20 @@ fn scalar_feeder_whole_rhs_and_subexpr_spellings_agree() {
 /// GH #790, DISCOVERY-mode twin (the #748/#698 symmetric-exercise lesson):
 /// discovery mode reaches the same `try_scalar_to_arrayed_link_scores`
 /// routing, so the scalar-feeder edge of a whole-RHS variable-backed reduce
-/// must be scored there too -- ONE A2A `scale->growth` score, no broken
+/// must EMIT there too -- ONE A2A `scale->growth` score, no broken
 /// per-element scores, zero warnings.
+///
+/// SCOPE HONESTY: this test asserts the emitted vars and warnings only -- it
+/// does NOT run the discovery SEARCH. The emitted scalar-from Bare A2A name
+/// is currently structurally undiscoverable in the search graph: the
+/// discovery parser's `expand_a2a_link_offsets` subscripts BOTH endpoints
+/// over the score's dims, inventing a `scale[elem]` from-node that never
+/// matches the scalar source's bare node (a pre-existing gap shared with
+/// every scalar-feeder A2A score, e.g. the synthetic-agg arm's; the
+/// discovery offsets fix is queued separately -- see the GH #790 review
+/// follow-up stack).
 #[test]
-fn scalar_feeder_of_whole_rhs_reduce_scores_in_discovery_mode() {
+fn scalar_feeder_of_whole_rhs_reduce_emits_cleanly_in_discovery_mode() {
     let project = gh790_whole_rhs_fixture("SUM");
 
     let mut db = SimlinDb::default();
@@ -9651,4 +9744,153 @@ fn scalar_and_iterated_feeders_coexist_cleanly() {
         "the mixed-feeder fixture must compile every LTM fragment cleanly; got: {:?}",
         assembly_warnings(&db, sync.project)
     );
+}
+
+/// GH #790 review follow-up (the GH #777 broadcast sub-shape): a scalar
+/// feeder of an ARRAYED-owner scalar-result BROADCAST reduce --
+/// `growth[D9] = SUM(matrix[a,*] * scale)` (Pinned slice, NO Iterated axis,
+/// `result_dims` empty, owner arrayed over a dim disjoint from the
+/// source's). `variable_backed_reduce_agg`'s broadcast arm admits it, so the
+/// scalar-feeder routing fires with EMPTY `result_dims`; the initial GH #790
+/// commit emitted `Equation::Scalar` for it, whose bare multi-slot `growth`
+/// reference failed assembly (1 fragment warning + 2 stubbed-loop warnings,
+/// constant-0 series, edge NOT in `unscoreable_edges`) -- the exact
+/// #758/#780 middle state #790 was filed to eliminate, one shape over.
+///
+/// The fix emits `Equation::ApplyToAll` over the OWNER's dims: the single
+/// scalar reducer value feeds every `growth[e]` identically, the bare
+/// `growth` reference element-resolves inside its own A2A context, and the
+/// frozen reducer body (`sum(matrix[a,*] * PREVIOUS(scale))`) is
+/// scalar-valued so it broadcasts cleanly.
+///
+/// Hand-derived per slot `e` (matrix constant = 5, |D2| = 2):
+///
+/// ```text
+/// numerator = growth[e] - sum(matrix[a,*] * PREVIOUS(scale))
+///           = (Σ_c matrix[a,c]) * Δscale = 10·Δscale = Δgrowth[e]
+/// ```
+///
+/// so the A2A feeder score is +1 per slot from step 1, and each of the two
+/// per-element circuits through the shared scalar `scale` scores ~0.5 -- and
+/// must agree pointwise with the SUBEXPRESSION spelling
+/// (`0 + SUM(matrix[a,*] * scale)`, synthetic SCALAR agg) of the same
+/// dataflow.
+#[test]
+fn scalar_feeder_of_broadcast_reduce_scores_via_agg_arm() {
+    let broadcast_fixture = |rhs: &str| -> datamodel::Project {
+        TestProject::new("gh790_broadcast")
+            .with_sim_time(0.0, 8.0, 1.0)
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["c", "d"])
+            .named_dimension("D9", &["p", "q"])
+            .array_stock("pop[D9]", "100", &["growth"], &[], None)
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "5", None)
+            .scalar_aux("scale", "SUM(pop[*]) * 0.005")
+            .array_flow("growth[D9]", rhs, None)
+            .build_datamodel()
+    };
+
+    let project = broadcast_fixture("SUM(matrix[a, *] * scale)");
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // The feeder score is A2A over the OWNER's dims (result_dims is empty
+    // for the broadcast slice), with the changed-last equation.
+    let feeder_name = format!("{LINK_SCORE_PREFIX}scale\u{2192}growth");
+    let feeder = ltm_var(&ltm_vars, &feeder_name);
+    assert_eq!(
+        feeder.dimensions,
+        vec!["D9".to_string()],
+        "the broadcast scalar-feeder score must be A2A over the OWNER's dims"
+    );
+    assert_eq!(
+        feeder.equation.source_text(),
+        "if (TIME = INITIAL_TIME) then 0 else if ((growth - PREVIOUS(growth)) = 0) OR \
+         ((scale - PREVIOUS(scale)) = 0) then 0 else SAFEDIV((growth - (sum(matrix[a, *] * \
+         PREVIOUS(scale)))), ABS((growth - PREVIOUS(growth))), 0) * SIGN((scale - PREVIOUS(scale)))",
+        "the broadcast scalar-feeder changed-last equation must match the hand-derived form"
+    );
+
+    // Zero assembly warnings: the Scalar-emission regression produced 3
+    // (the fragment failure + two stubbed loops).
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "the broadcast scalar-feeder fixture must compile every LTM fragment cleanly; got: {:?}",
+        assembly_warnings(&db, sync.project)
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+
+    const TOL: f64 = 1e-9;
+
+    // +1 per slot at every step past the first.
+    let base = offset_of(&results, &feeder_name);
+    for slot in 0..2 {
+        let series = series_at(&results, base + slot);
+        for (step, &v) in series.iter().enumerate().skip(1) {
+            assert!(
+                (v - 1.0).abs() <= TOL,
+                "broadcast feeder score slot {slot} at step {step}: got {v}, expected +1. \
+                 A constant 0 is the Scalar-emission fragment-failure-stub signature."
+            );
+        }
+    }
+
+    // Two per-element circuits, each ~0.5 sustained.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        2,
+        "expected one per-element loop through the broadcast feeder; got {loop_names:?}"
+    );
+    for name in &loop_names {
+        let series = series_at(&results, offset_of(&results, name));
+        for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+            assert!(
+                (v - 0.5).abs() <= 1e-6,
+                "{name} at step {step}: got {v}, expected ~0.5 (shared-scalar loop)."
+            );
+        }
+    }
+
+    // Spelling agreement: the SUBEXPRESSION spelling of the same dataflow
+    // (`0 +` keeps the dynamics identical) routes the feeder through the
+    // synthetic SCALAR agg's feeder arm; its scalar score must equal every
+    // whole-RHS A2A slot pointwise.
+    let (sub_results, sub_vars) = run_ltm(&broadcast_fixture("0 + SUM(matrix[a, *] * scale)"));
+    let sub_feeder_name = &sub_vars
+        .iter()
+        .find(|v| {
+            v.name
+                .starts_with(&format!("{LINK_SCORE_PREFIX}scale\u{2192}$"))
+        })
+        .expect("the subexpr spelling must emit a scale -> synthetic-agg feeder score")
+        .name;
+    let sub_series = series_at(&sub_results, offset_of(&sub_results, sub_feeder_name));
+    for slot in 0..2 {
+        let w = series_at(&results, base + slot);
+        assert_eq!(
+            w.len(),
+            sub_series.len(),
+            "spellings must run the same step count"
+        );
+        for (step, (&wv, &sv)) in w.iter().zip(&sub_series).enumerate() {
+            assert!(
+                (wv - sv).abs() <= TOL,
+                "broadcast feeder slot {slot} step {step}: whole-RHS {wv} != subexpr {sv}"
+            );
+        }
+    }
 }

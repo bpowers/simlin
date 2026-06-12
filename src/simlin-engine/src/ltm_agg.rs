@@ -1858,7 +1858,9 @@ pub(crate) fn variable_backed_reduce_agg<'a>(
 /// to feed). Returns the variable-backed `AggNode` so the caller can emit
 /// the single changed-last feeder score
 /// ([`crate::ltm_augment::generate_scalar_feeder_to_agg_equation`],
-/// dimensioned over `result_dims`), exactly as the synthetic-agg arm of
+/// dimensioned over `result_dims` -- or over the OWNER's dims for the
+/// GH #777 broadcast slice, whose `result_dims` are empty while the owner is
+/// arrayed), exactly as the synthetic-agg arm of
 /// `emit_source_to_agg_link_scores` does for the SUBEXPRESSION spelling
 /// (`0.1 + SUM(matrix[D1,*] * scale)`).
 ///
