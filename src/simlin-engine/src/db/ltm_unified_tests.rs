@@ -4679,8 +4679,9 @@ fn square_source_duplicate_dim_feeder_scores_are_loudly_skipped() {
          emitted with the wrong row frozen; got: {feeder_vars:?}"
     );
 
-    // The skip is loud: one UnfreezablePartial warning per skipped row,
-    // naming the feeder link-score variable.
+    // The skip is loud: an UnfreezablePartial warning naming the feeder
+    // link-score variable (the first doomed row; GH #780 stops at the first
+    // doom since the whole edge is recorded unscoreable).
     let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
     let has_feeder_warning = diags.iter().any(|CompilationDiagnostic(d)| {
         d.severity == DiagnosticSeverity::Warning
@@ -4697,25 +4698,84 @@ fn square_source_duplicate_dim_feeder_scores_are_loudly_skipped() {
         "the skipped feeder rows must surface a Warning; got: {:?}",
         diags.iter().map(|c| &c.0).collect::<Vec<_>>()
     );
+
+    // GH #780 (the agg-half leg): the doomed `frac -> $⁚ltm⁚agg⁚0` feeder
+    // half must record the edge in `unscoreable_edges`, so every loop
+    // traversing it -- here ALL loops (cube is constant; each circuit runs
+    // pop -> frac -> agg -> x -> pop) -- is DROPPED. Pre-fix this fixture
+    // emitted 5 loop scores referencing the never-emitted
+    // `frac[..]→$⁚ltm⁚agg⁚0[..]` names, each failing fragment compile into
+    // a warned constant-0 stub -- the exact cascade the #758 contract
+    // forbids.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+        "loops through the doomed feeder edge must be dropped, not emitted \
+         as warned 0-stubs; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+    // No emitted equation may reference a never-emitted per-row feeder
+    // SCORE name (the agg aux's own equation legitimately reads the model
+    // variable `frac[d1, d1]`, so the check targets the link-score prefix).
+    for v in &ltm.vars {
+        assert!(
+            !v.equation.source_text().contains(feeder_prefix),
+            "no emitted LTM equation may reference the dropped per-row \
+             feeder scores; {} = {}",
+            v.name,
+            v.equation.source_text()
+        );
+    }
+    // And the model compiles with NO fragment-failure cascade: the only
+    // Assembly warnings anywhere are the loud feeder skips themselves.
+    use salsa::Setter;
+    let mut db2 = SimlinDb::default();
+    let (sp, m2) = {
+        let sync2 = sync_from_datamodel(&db2, &datamodel);
+        (sync2.project, sync2.models["main"].source)
+    };
+    sp.set_ltm_enabled(&mut db2).to(true);
+    compile_project_incremental(&db2, sp, "main").expect("the doomed-feeder model still compiles");
+    let all = crate::db::collect_model_diagnostics(&db2, m2, sp);
+    let non_feeder: Vec<_> = all
+        .iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && !d
+                    .variable
+                    .as_deref()
+                    .is_some_and(|v| v.starts_with(feeder_prefix))
+        })
+        .collect();
+    assert!(
+        non_feeder.is_empty(),
+        "the only warnings are the loud feeder skips -- no loop-score \
+         fragment-failure cascade; got: {non_feeder:?}"
+    );
 }
 
 // ── GH #780: a PartialEquationError link-score skip drops dependent loops ──
 //
-// When `link_score_equation_text_shaped` returns a `PartialEquationError`
-// for an edge (the GH #311 parse class or the GH #526/T7 both-legs-doomed
-// mismatched-dep class), the emission loop must record the edge in
-// `unscoreable_edges` so loop scores traversing it are DROPPED -- ONE loud
-// warning naming the edge, no link-score variable, dependent loops absent.
-// Pre-fix the edge was skipped but NOT recorded, so the loop scores
-// referenced the never-emitted link-score name, failed fragment compile,
-// and degraded to a cascade of warned constant-0 stubs (the #758-contract
-// violation this fixes).
+// When a link-score emitter hits a `PartialEquationError` for an edge (the
+// GH #311 parse class, the GH #526/T7 both-legs-doomed mismatched-dep
+// class, or the GH #743 UnfreezablePartial machinery), it must record the
+// edge in `unscoreable_edges` so loop scores traversing it are DROPPED --
+// ONE loud warning naming the edge, no link-score variable, dependent
+// loops absent. Pre-fix the edge was skipped but NOT recorded, so the loop
+// scores referenced the never-emitted link-score name, failed fragment
+// compile, and degraded to a cascade of warned constant-0 stubs (the
+// #758-contract violation this fixes).
 //
-// The `PartialEquationError` terminal is unreachable through any compiling
-// model (every shaped-path doom is recovered by `shaped_guard_form_text`'s
-// changed-last fallback or pinned to a concrete element upstream -- the
-// reachability finding in the GH #780 work), so the doomed edge is injected
-// with the test-only `ForcePartialEquationErrorGuard` (the same discipline
+// Reachability is per call site: the AGG-HALF emitters' terminals are
+// LIVE-reachable through a compiling model (the square-source duplicate-dim
+// feeder, GH #743 -- tested with the real fixture
+// `square_source_duplicate_dim_feeder_scores_are_loudly_skipped` above),
+// while the SHAPED-QUERY and per-element terminals exercised by the gh780_*
+// tests below are not (every doom on those paths is recovered by
+// `shaped_guard_form_text`'s changed-last fallback or pinned to a concrete
+// element upstream), so those tests inject the doom with the test-only
+// `ForcePartialEquationErrorGuard` (the same discipline
 // `LtmFragmentFailureGuard` / `AggLoopBudgetGuard` use: a fresh `db`, the
 // guard outliving every salsa LTM query in the test).
 
@@ -4865,11 +4925,13 @@ fn gh780_forced_partial_equation_drops_dependent_loops_not_others() {
 
 /// Discovery mode (design decision 3): a forced `PartialEquationError` on a
 /// causal edge must still fire its one loud `Warning` and emit no
-/// `pop -> growth` link score; there is no compile-time loop-drop machinery
-/// in discovery mode, so the missing variable is handled exactly as before
-/// the fix (recording the edge in `unscoreable_edges` is harmless -- the set
-/// is only consumed by the exhaustive loop-drop pass). The model must still
-/// compile and produce only finite series.
+/// `pop -> growth` link score. Discovery mode enumerates no loops at
+/// compile time, so for UNPINNED models the recorded edge has no consumer
+/// -- but the PINNED-loop pass (`model_ltm_variables`' Part 2 pin loop)
+/// runs in discovery mode too and consults `traverses_unscoreable`, so a
+/// doomed-edge pin is dropped there exactly like exhaustive mode (pinned
+/// by `gh780_forced_partial_equation_discovery_pinned_loop_dropped`
+/// below). The model must still compile and produce only finite series.
 #[test]
 fn gh780_forced_partial_equation_discovery_mode_still_warns() {
     use crate::db::ForcePartialEquationErrorGuard;
@@ -4951,6 +5013,107 @@ fn gh780_forced_partial_equation_discovery_mode_still_warns() {
             }
         }
     }
+}
+
+/// Discovery mode DOES consume `unscoreable_edges` at compile time: the
+/// pinned-loop pass runs in discovery mode (pins are the only loop scores
+/// it emits) and drops a pin whose cycle traverses a recorded edge. With
+/// `pop -> growth` doomed, the growth pin must be dropped (with the
+/// pinned-loop warning), while the independent drain pin keeps its loop
+/// score -- the discovery twin of the exhaustive surgical-drop test.
+#[test]
+fn gh780_forced_partial_equation_discovery_pinned_loop_dropped() {
+    use crate::db::ForcePartialEquationErrorGuard;
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use salsa::Setter;
+
+    let mut project = gh780_two_loop_project();
+    // Mint UIDs and pin both loops by their member variables, exactly as
+    // the `SetLoopName` patch primitive would.
+    {
+        let model = &mut project.models[0];
+        let mut uid_of = HashMap::new();
+        for (i, var) in model.variables.iter_mut().enumerate() {
+            let uid = (i as i32) + 1;
+            uid_of.insert(crate::canonicalize(var.get_ident()).into_owned(), uid);
+            match var {
+                datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                datamodel::Variable::Module(m) => m.uid = Some(uid),
+            }
+        }
+        for (name, members) in [
+            ("growth loop", vec!["pop", "growth"]),
+            ("drain loop", vec!["pop", "drain"]),
+        ] {
+            model.loop_metadata.push(datamodel::LoopMetadata {
+                uids: members.iter().map(|v| uid_of[*v]).collect(),
+                deleted: false,
+                name: name.to_string(),
+                description: String::new(),
+            });
+        }
+    }
+
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let _force = ForcePartialEquationErrorGuard::new("pop", "growth");
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+    assert_eq!(ltm.mode, crate::db::LtmMode::Discovery);
+
+    // The doomed-edge pin is dropped; the drain pin keeps its loop score.
+    let loop_scores: Vec<&str> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .map(|v| v.name.as_str())
+        .collect();
+    assert_eq!(
+        loop_scores.len(),
+        1,
+        "exactly the drain pin's loop score survives; got: {loop_scores:?}"
+    );
+    let drain_loop = ltm
+        .vars
+        .iter()
+        .find(|v| v.name.as_str() == loop_scores[0])
+        .unwrap();
+    assert!(
+        drain_loop
+            .equation
+            .source_text()
+            .contains("pop\u{2192}drain"),
+        "the surviving pin is the drain loop; got: {}",
+        drain_loop.equation.source_text()
+    );
+
+    // Diagnostics: the partial-equation warning naming the doomed edge AND
+    // the pinned-loop drop warning naming the growth pin.
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let assembly: Vec<_> = diags
+        .iter()
+        .map(|CompilationDiagnostic(d)| d)
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(d.error, DiagnosticError::Assembly(_))
+        })
+        .collect();
+    assert!(
+        assembly.iter().any(|d| {
+            matches!(&d.error, DiagnosticError::Assembly(msg)
+                if msg.contains("growth loop") && msg.contains("not scored"))
+        }),
+        "the doomed pin must surface the pinned-loop drop warning; got: {assembly:?}"
+    );
 }
 
 /// The disjoint-dim sibling (GH #780 / #769): a forced `PartialEquationError`
@@ -5089,18 +5252,22 @@ fn gh780_forced_partial_equation_scalar_to_arrayed_drops_loop() {
                 && matches!(d.error, DiagnosticError::Assembly(_))
         })
         .collect();
-    // At least one warning (the doomed per-element partial); the edge is
-    // recorded once on the first doomed element, so the loop drops without a
-    // fragment-failure cascade.
+    // EXACTLY one warning -- the first doomed per-element partial; the edge
+    // is recorded on that first doom (the rest of the elements never run),
+    // so the loop drops with no fragment-failure cascade and no per-element
+    // warning spam.
+    assert_eq!(
+        assembly.len(),
+        1,
+        "the doomed scalar->arrayed edge must warn exactly once (the first \
+         doomed per-element partial), NOT a cascade; got: {assembly:?}"
+    );
     assert!(
-        !assembly.is_empty()
-            && assembly.iter().all(|d| {
-                !d.variable
-                    .as_deref()
-                    .is_some_and(|v| v.contains("\u{205A}loop_score\u{205A}"))
-            }),
-        "the doomed scalar->arrayed edge must warn about the per-element \
-         partial, NOT a cascade of loop-score fragment failures; got: {assembly:?}"
+        assembly[0]
+            .variable
+            .as_deref()
+            .is_some_and(|v| v.contains("driver\u{2192}grid")),
+        "the one warning names the doomed per-element link score; got: {assembly:?}"
     );
 }
 

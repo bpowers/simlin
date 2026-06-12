@@ -129,10 +129,13 @@ pub(crate) use ltm::AggLoopBudgetGuard;
 #[cfg(test)]
 pub(crate) use ltm::LtmFragmentFailureGuard;
 // Test-only: the forced-`PartialEquationError` edge override (GH #780), so
-// the unscoreable-edge-recording contract can be exercised end-to-end --
-// the `PartialEquationError` terminal is unreachable through any compiling
-// model (every shaped-path doom is recovered or pinned upstream), so a
-// test-only override + tiny fixture is the only way to drive it (per
+// the unscoreable-edge-recording contract can be exercised end-to-end on
+// the SHAPED-QUERY and per-element paths, whose own partial-equation
+// terminals are unreachable through any compiling model (recovered by the
+// changed-last fallback or pinned to concrete elements upstream). The
+// agg-half emitters' terminals are live-reachable (the square-source
+// duplicate-dim feeder, GH #743) and are tested with a real fixture
+// instead; the override + tiny fixture covers the rest (per
 // docs/dev/rust.md#test-time-budgets).
 #[cfg(test)]
 pub(crate) use ltm::ForcePartialEquationErrorGuard;

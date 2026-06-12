@@ -255,15 +255,21 @@ pub fn link_score_equation_text_shaped<'db>(
                 .collect()
         })
         .unwrap_or_default();
-    // Test-only seam: the `PartialEquationError` terminal is genuinely
-    // unreachable through any compiling model today (every shaped-path
-    // doom is either recovered by `shaped_guard_form_text`'s changed-last
-    // fallback or pinned to a concrete element upstream -- the GH #780
-    // reachability finding). Rather than build a fixture that cannot exist,
-    // an active [`force_partial_equation_error`] override makes a sentinel
-    // edge doom so the unscoreable-edge contract can be exercised
-    // end-to-end (per docs/dev/rust.md#test-time-budgets -- a test-only
-    // override and a tiny fixture, not a contrived production input).
+    // Test-only seam: THIS QUERY's `PartialEquationError` terminal (below)
+    // is unreachable through any compiling model today -- every doom on the
+    // shaped path specifically is either recovered by
+    // `shaped_guard_form_text`'s changed-last fallback or pinned to a
+    // concrete element upstream (the GH #780 reachability probe). That
+    // claim is scoped to this query: the AGG-HALF emitters' partial-
+    // equation sites in `link_scores.rs` ARE live-reachable (the GH #743
+    // `UnfreezablePartial` machinery via the square-source duplicate-dim
+    // feeder; see
+    // `square_source_duplicate_dim_feeder_scores_are_loudly_skipped`).
+    // Rather than build a fixture this query cannot doom on, an active
+    // [`force_partial_equation_error`] override makes a sentinel edge doom
+    // so the unscoreable-edge contract is exercised end-to-end (per
+    // docs/dev/rust.md#test-time-budgets -- a test-only override and a
+    // tiny fixture, not a contrived production input).
     #[cfg(test)]
     if force_partial_equation_error(from_name, to_name) {
         let err = crate::ltm_augment::PartialEquationError::new(

@@ -1553,6 +1553,7 @@ pub fn model_ltm_variables(
                         model,
                         project,
                         &mut vars,
+                        &mut unscoreable_edges,
                     );
                 } else if let Some(agg) = agg_by_name(from_var_level) {
                     emit_agg_to_target_link_scores(
@@ -1564,6 +1565,7 @@ pub fn model_ltm_variables(
                         model,
                         project,
                         &mut vars,
+                        &mut unscoreable_edges,
                     );
                 } else {
                     emit_link_scores_for_edge(
@@ -1850,6 +1852,7 @@ pub fn model_ltm_variables(
                             model,
                             project,
                             &mut vars,
+                            &mut unscoreable_edges,
                         );
                     } else if let Some(agg) = agg_by_name(from_var_level) {
                         emit_agg_to_target_link_scores(
@@ -1861,6 +1864,7 @@ pub fn model_ltm_variables(
                             model,
                             project,
                             &mut vars,
+                            &mut unscoreable_edges,
                         );
                     } else {
                         emit_link_scores_for_edge(
