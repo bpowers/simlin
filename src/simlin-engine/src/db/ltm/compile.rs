@@ -269,11 +269,12 @@ pub fn link_score_equation_text_shaped<'db>(
     // (`bare_feeder_of_unhoisted_reducer_declines_loudly`); the seam is
     // retained because it can doom ONE arbitrary edge of a multi-edge model
     // independent of any equation shape, which the surgical-degradation
-    // tests still need. (The AGG-HALF emitters' partial-equation sites in
-    // `link_scores.rs` were live-reachable all along -- the GH #743
-    // `UnfreezablePartial` machinery via the square-source duplicate-dim
-    // feeder; see
-    // `square_source_duplicate_dim_feeder_scores_are_loudly_skipped`.)
+    // tests still need. (The AGG-HALF feeder emitter's DUPLICATE-DIM
+    // `UnfreezablePartial` bail -- `pin_iterated_dim_indices`, PR #787 --
+    // was its only live square-source caller, but the GH #778/#785 decline
+    // now skips that whole shape at agg minting, so that specific terminal
+    // is unreachable defense-in-depth; see
+    // `square_source_duplicate_dim_reducer_is_loudly_skipped`.)
     #[cfg(test)]
     if force_partial_equation_error(from_name, to_name) {
         let err = crate::ltm_augment::PartialEquationError::new(

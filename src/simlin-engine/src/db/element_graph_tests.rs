@@ -2010,27 +2010,25 @@ fn element_graph_subset_star_range_reads_only_subdimension_rows() {
     assert_no_edge(&result, "arr[c]", "x");
 }
 
-/// Golden pin for the I4 single-derivation refactor (GH #783): a SQUARE
-/// source whose iterated axes carry the SAME target dim twice -- `out[D1] =
-/// base[D1] + SUM(cube[D1, D1, *])` over `cube[D1, D1, D2]`. The synthetic
-/// agg is arrayed over `result_dims = [D1, D1]`, and the source→agg half (the
-/// row enumeration the #783 refactor unifies) routes each `cube[ri, rj, *]`
-/// row to the literal `[ri, rj]` slot -- the FULL `[D1, D1]` cartesian,
-/// including the OFF-diagonal slots (`cube[r1, r2, *] → agg[r1, r2]`). These
-/// source→slot edges are genuinely correct: the reducer text really does read
-/// row `[r1, r2, *]` into slot `[r1, r2]`.
+/// GH #778/#785: a DEGENERATE SQUARE source whose iterated axes carry the
+/// SAME target dim twice -- `out[D1] = base[D1] + SUM(cube[D1, D1, *])` over
+/// `cube[D1, D1, D2]`. The hoist is now DECLINED at minting
+/// (`ltm_agg::result_dims_has_repeated_dim`), so NO `$⁚ltm⁚agg⁚{n}` node is
+/// minted and the reducer's `cube` reference stays on the conservative
+/// `DynamicIndex` cross-product (`emit_edges_for_reference`).
 ///
-/// The PHANTOM behavior tracked by GH #778 lives in the OTHER half -- the
-/// `agg → out` `expand_same_element` fan-out -- which emits the off-diagonal
-/// `agg[r1, r2] → out[r2]` while the link-score projection keeps only the
-/// diagonal, minting warned 0-stub loops. That half is NOT touched by the
-/// #783 source-row-derivation unification; this test deliberately PINS its
-/// current (off-diagonal-emitting) shape so the eventual #778 fix flips a
-/// recorded expectation rather than landing in silence. When #778 is fixed,
-/// the `agg[r1, r2] → out[r2]` assertion below must be inverted (and the
-/// agg's `result_dims` may collapse to `[D1]` under fix-direction 1).
+/// This test was previously a golden pin (`*_routes_full_cartesian`) that
+/// deliberately recorded the now-fixed phantom: the agg→out
+/// `expand_same_element` fan-out emitted the off-diagonal `agg[r1, r2] →
+/// out[r2]` while the link-score projection kept only the diagonal, minting
+/// warned 0-stub loops (#778), and the co-source row partials scored the
+/// phantom off-diagonal rows the simulation never reads (#785). Declining the
+/// hoist makes all of that disappear: the element graph keeps the sound
+/// (coarse) cross-product, and the score side loudly skips the edge
+/// (`emit_unscoreable_duplicated_dim_source_warning`) so loops through it drop
+/// rather than reference never-emitted names.
 #[test]
-fn element_graph_square_source_duplicated_dim_routes_full_cartesian() {
+fn element_graph_square_source_duplicated_dim_declines_to_cross_product() {
     let project = TestProject::new("square_source_elem_graph")
         .named_dimension("D1", &["r1", "r2"])
         .named_dimension("D2", &["c1", "c2"])
@@ -2041,42 +2039,29 @@ fn element_graph_square_source_duplicated_dim_routes_full_cartesian() {
     let result = element_edges(&project);
     let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
 
-    // The agg is arrayed over the duplicated result dim: every slot is a
-    // `[D1, D1]` pair.
+    // No agg node is minted at all (the square-source hoist is declined), so
+    // no node name carries the agg prefix on either side of any edge.
     assert!(
         !result.edges.contains_key(agg) && !result.edges.values().any(|ts| ts.contains(agg)),
-        "the square-source agg must always be subscripted with a [D1,D1] pair, never bare {agg}"
+        "the declined square-source reducer must mint NO agg node; found {agg} in the graph"
     );
 
-    // Source→agg: each `cube[ri, rj, *]` row routes to slot `[ri, rj]` -- the
-    // FULL `[D1, D1]` cartesian (both Age/D2 elems reduced into the slot),
-    // including the off-diagonal slots. These edges are causally real.
+    // `cube` routes as the conservative cross-product: every `cube` element
+    // feeds every `out` element (a sound superset of the true diagonal reads).
     for ri in ["r1", "r2"] {
         for rj in ["r1", "r2"] {
             for ck in ["c1", "c2"] {
-                assert_edge(
-                    &result,
-                    &format!("cube[{ri},{rj},{ck}]"),
-                    &format!("{agg}[{ri},{rj}]"),
-                );
+                for target in ["out[r1]", "out[r2]"] {
+                    assert_edge(&result, &format!("cube[{ri},{rj},{ck}]"), target);
+                }
             }
         }
     }
-    // A `cube` row never feeds a slot whose first two coords it does not name.
-    assert_no_edge(&result, "cube[r1,r1,c1]", &format!("{agg}[r1,r2]"));
-    assert_no_edge(&result, "cube[r1,r2,c1]", &format!("{agg}[r2,r1]"));
 
-    // Agg→out (the GH #778 surface, PINNED at its current off-diagonal-
-    // emitting shape -- NOT fixed by #783): the diagonal slot fans into its
-    // own target...
-    assert_edge(&result, &format!("{agg}[r1,r1]"), "out[r1]");
-    assert_edge(&result, &format!("{agg}[r2,r2]"), "out[r2]");
-    // ...and the off-diagonal slot phantoms into BOTH targets sharing either
-    // D1 occurrence. When GH #778 is fixed these become assert_no_edge.
-    assert_edge(&result, &format!("{agg}[r1,r2]"), "out[r1]");
-    assert_edge(&result, &format!("{agg}[r1,r2]"), "out[r2]"); // GH #778 phantom
-    assert_edge(&result, &format!("{agg}[r2,r1]"), "out[r1]"); // GH #778 phantom
-    assert_edge(&result, &format!("{agg}[r2,r1]"), "out[r2]");
+    // `base[ri]` keeps its diagonal same-element edge into `out[ri]`.
+    assert_edge(&result, "base[r1]", "out[r1]");
+    assert_edge(&result, "base[r2]", "out[r2]");
+    assert_no_edge(&result, "base[r1]", "out[r2]");
 }
 
 /// Golden pin for the I4 single-derivation refactor (GH #783): an

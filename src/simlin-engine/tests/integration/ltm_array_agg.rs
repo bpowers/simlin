@@ -8403,3 +8403,208 @@ fn gh526_natural_and_mapped_deps_keep_changed_first_collapse() {
         "the positionally-mapped dep keeps the changed-first collapse; got: {eqn}"
     );
 }
+
+// ── GH #778/#785: degenerate square-source reducers decline + loud skip ──
+//
+// A reducer whose Iterated axes repeat a target dim mints (pre-fix) a
+// synthetic agg arrayed over `result_dims == [D1, D1]`. The executed A2A
+// simulation reads only the DIAGONAL (`cube[e,e,*]` per target slot `e`), but
+// the LTM machinery enumerated the full square -- so the source→agg co-source
+// half emitted CONFIDENT per-`(row, slot)` link scores on the off-diagonal
+// rows the simulation never reads (`cube[r1,r2,*]→agg[r1,r2]`), reaching the
+// results slab UNWARNED (#785's live silent-wrong-number), while the
+// agg→target element edges fanned out off-diagonal too (#778). PR #787
+// defended only the feeder half.
+//
+// The fix declines the whole shape at agg minting
+// (`result_dims_has_repeated_dim`) and closes the remaining un-hoisted
+// cartesian-branch landing with the GH #758 loud skip. The contract per
+// spelling, in BOTH exhaustive and discovery modes:
+//   - NO per-element co-source link score reaches the slab on a phantom row;
+//   - the edge is loudly skipped (one Warning naming it), warn-once;
+//   - every loop through the shape is dropped (no loop-score cascade);
+//   - the model still simulates and every emitted score series is finite.
+
+/// Assert the post-fix square-source contract for `project` in the given
+/// `discovery` mode. The duplicated-dim sources `expected_skipped` (the
+/// canonical co-source `cube`, plus the feeder `frac` when present) must each
+/// surface exactly one loud edge-level Warning, emit NO per-element link
+/// score, and drag NO loop score into existence.
+fn assert_square_source_loudly_skipped(
+    project: &datamodel::Project,
+    discovery: bool,
+    expected_skipped: &[&str],
+) {
+    let mode = if discovery { "discovery" } else { "exhaustive" };
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    if discovery {
+        set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    }
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    // No synthetic agg is minted for the declined shape.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}agg\u{205A}")),
+        "{mode}: the declined square-source reducer must mint no agg variable; got: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
+
+    // No per-element link score for any duplicated-dim source: the phantom
+    // off-diagonal scores must never reach the slab.
+    for src in expected_skipped {
+        let prefix = format!("{LINK_SCORE_PREFIX}{src}[");
+        let leaked: Vec<&str> = ltm
+            .vars
+            .iter()
+            .filter(|v| v.name.starts_with(&prefix))
+            .map(|v| v.name.as_str())
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "{mode}: no per-element link score may reach the slab for the \
+             duplicated-dim source {src}; got: {leaked:?}"
+        );
+    }
+
+    // Every loop through the unscoreable edges is dropped.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "{mode}: loops through the unscoreable square-source edges must be \
+         dropped, not emitted as warned 0-stubs; got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the declined-square model must still compile with LTM enabled");
+
+    // The skip is loud and warn-once: exactly one Assembly warning per
+    // duplicated-dim source edge, each naming the square-source decline.
+    let warnings = assembly_warnings(&db, sync.project);
+    let square: Vec<&str> = warnings
+        .iter()
+        .filter_map(|w| match &w.error {
+            DiagnosticError::Assembly(m) if m.contains("square-source") => Some(m.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        square.len(),
+        expected_skipped.len(),
+        "{mode}: expected exactly {} square-source skip warnings (warn-once per \
+         edge); got: {square:?}",
+        expected_skipped.len()
+    );
+    for src in expected_skipped {
+        assert!(
+            square.iter().any(|m| m.contains(&format!("{src} -> x"))),
+            "{mode}: the {src} -> x edge must surface a square-source skip warning; \
+             got: {square:?}"
+        );
+    }
+    // No OTHER Assembly warning (no fragment-failure cascade).
+    assert_eq!(
+        warnings.len(),
+        expected_skipped.len(),
+        "{mode}: the only Assembly warnings are the loud square-source skips; \
+         got: {:?}",
+        warnings.iter().map(|w| &w.error).collect::<Vec<_>>()
+    );
+
+    // The model simulates and every emitted score series stays finite.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for name in ltm_score_var_names(&results) {
+        let var = ltm_var(&ltm.vars, &name);
+        let base = offset_of(&results, &name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "{mode}: emitted score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+fn square_source_whole_rhs_fixture() -> datamodel::Project {
+    TestProject::new("square_whole_rhs")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux("cube[D1,D1,D2]", "0.0001 * pop[D1]")
+        .array_stock("pop[D1]", "100", &["x"], &[], None)
+        .array_flow("x[D1]", "SUM(cube[D1, D1, *])", None)
+        .build_datamodel()
+}
+
+fn square_source_inline_fixture() -> datamodel::Project {
+    TestProject::new("square_inline")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux("cube[D1,D1,D2]", "0.0001 * pop[D1]")
+        .array_aux("base[D1]", "0")
+        .array_stock("pop[D1]", "100", &["x"], &[], None)
+        .array_flow("x[D1]", "base[D1] + SUM(cube[D1, D1, *])", None)
+        .build_datamodel()
+}
+
+fn square_source_with_feeder_fixture() -> datamodel::Project {
+    TestProject::new("square_feeder")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux("cube[D1,D1,D2]", "0.0001 * pop[D1]")
+        .array_aux("frac[D1,D1]", "0.0001 * pop[D1]")
+        .array_stock("pop[D1]", "100", &["x"], &[], None)
+        .array_flow("x[D1]", "1 + SUM(cube[D1, D1, *] * frac[D1, D1])", None)
+        .build_datamodel()
+}
+
+/// Whole-RHS spelling (`x[D1] = SUM(cube[D1,D1,*])`): the co-source half's
+/// phantom off-diagonal scores are gone, the `cube -> x` edge is loudly
+/// skipped, and loops through it drop -- in both modes.
+#[test]
+fn square_source_whole_rhs_declines_and_skips_loudly() {
+    assert_square_source_loudly_skipped(&square_source_whole_rhs_fixture(), false, &["cube"]);
+    assert_square_source_loudly_skipped(&square_source_whole_rhs_fixture(), true, &["cube"]);
+}
+
+/// Inline spelling (`x[D1] = base[D1] + SUM(cube[D1,D1,*])`): identical
+/// contract to the whole-RHS form (this spelling predates the
+/// shape-expressiveness phase and was reachable on `main`).
+#[test]
+fn square_source_inline_declines_and_skips_loudly() {
+    assert_square_source_loudly_skipped(&square_source_inline_fixture(), false, &["cube"]);
+    assert_square_source_loudly_skipped(&square_source_inline_fixture(), true, &["cube"]);
+}
+
+/// With-feeder spelling (`x[D1] = 1 + SUM(cube[D1,D1,*] * frac[D1,D1])`):
+/// BOTH duplicated-dim sources -- the co-source `cube` AND the square feeder
+/// `frac` -- are loudly skipped (PR #787 defended only the feeder; now both
+/// halves share one decision).
+#[test]
+fn square_source_with_feeder_declines_and_skips_loudly() {
+    assert_square_source_loudly_skipped(
+        &square_source_with_feeder_fixture(),
+        false,
+        &["cube", "frac"],
+    );
+    assert_square_source_loudly_skipped(
+        &square_source_with_feeder_fixture(),
+        true,
+        &["cube", "frac"],
+    );
+}

@@ -374,11 +374,14 @@ pub(super) fn try_cross_dimensional_link_scores(
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     // The live source's accepted slice, when `to` IS a variable-backed agg
     // reading `from`: lets the body partial resolve a mismatched-arity
-    // feeder dep's index at the slice's ITERATED axis position -- sound
-    // for a repeated-dim co-source like `matrix[D1,D1]`, where a by-name
-    // lookup is ambiguous (see `resolve_mismatched_index_position`). The
-    // un-hoisted cartesian family has no agg and keeps `None` (unique
-    // by-name resolution with the ambiguity bail).
+    // feeder dep's index at the slice's ITERATED axis position (see
+    // `resolve_mismatched_index_position`). The un-hoisted cartesian family
+    // has no agg and keeps `None` (unique by-name resolution with the
+    // ambiguity bail). The repeated-dim co-source case this defended against
+    // (`matrix[D1,D1]`, ambiguous by name) is now declined at agg minting
+    // (GH #778/#785, `result_dims_has_repeated_dim`), so that arm's
+    // duplicate-dim resolution is unreachable defense-in-depth; the live use
+    // is the genuinely mismatched-arity (non-repeated) feeder.
     let live_read_slice = agg_nodes
         .aggs_in_var(to)
         .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))
@@ -507,6 +510,42 @@ pub(super) fn try_cross_dimensional_link_scores(
             // when the pinned-loop pass re-visits the edge.
             if unscoreable_edges.insert((from.to_string(), to.to_string())) {
                 emit_unscoreable_broadcast_reduce_edge_warning(db, model, from, to);
+            }
+            return Some(vec![]);
+        }
+    }
+
+    // GH #778/#785: a DEGENERATE SQUARE-SOURCE reducer (`from`'s dims repeat a
+    // dimension that survives as a result axis -- `cube[D1,D1,*] -> x[D1]`)
+    // reaches HERE post-decline: its agg is no longer minted
+    // (`result_dims_has_repeated_dim`), so the agg branch above did not handle
+    // it, and it falls into the conservative cartesian partial-reduce branch
+    // below. That branch projects each source tuple onto the result axes
+    // through a `from_pos` name->position map, which collapses the duplicated
+    // dim to ONE position (last-match) -- so it would emit confident
+    // per-`(row, result)` scores for the OFF-DIAGONAL source rows
+    // (`cube[r1,r2,*]`) the executed A2A simulation never reads (it reads only
+    // the diagonal `cube[e,e,*]`). The element graph routes this same edge as
+    // the conservative full cross-product (a sound superset), so closing the
+    // score side with the GH #758 loud skip keeps edges and scores in
+    // lockstep: no link-score variable, the edge recorded unscoreable so loops
+    // through it are dropped, one clear diagnostic instead of plausible-looking
+    // wrong numbers.
+    //
+    // Placed AFTER the agg branch deliberately: a repeated-dim SOURCE whose
+    // result is NOT a duplicated dim (`growth[D1] = SUM(matrix[*, D1] * ...)`
+    // over `matrix[D1,D1]`, slice `[Reduced, Iterated]`, `result_dims = [D1]`)
+    // IS hoisted and correctly scored by the agg branch (GH #767) -- it returns
+    // before reaching here, so this skip fires ONLY for the genuinely
+    // un-hoisted square shape whose duplicated dim survives as a result axis.
+    if !result_axis_names.is_empty() {
+        let from_names: Vec<&str> = from_dims.iter().map(|d| d.name()).collect();
+        let result_axis_is_duplicated = result_axis_names
+            .iter()
+            .any(|n| from_names.iter().filter(|fn_| **fn_ == n.as_str()).count() > 1);
+        if result_axis_is_duplicated {
+            if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                emit_unscoreable_duplicated_dim_source_warning(db, model, from, to);
             }
             return Some(vec![]);
         }
@@ -979,6 +1018,40 @@ pub(super) fn emit_unscoreable_broadcast_reduce_edge_warning(
          single scalar value broadcast over {to}'s dimensions, which the per-element \
          score machinery cannot express; this edge will have no link-score variable \
          and feedback loops through it will not be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
+/// Accumulate the GH #778/#785 `Warning` for a declined DEGENERATE
+/// SQUARE-SOURCE reducer edge: `from`'s declared dims repeat a dimension
+/// that survives as a result axis (`cube[D1,D1,*] -> x[D1]`), so the
+/// cartesian partial-reduce projection cannot tell the two `D1` occurrences
+/// apart and would score the off-diagonal source rows the executed A2A
+/// simulation never reads. The whole shape's hoist is declined at minting
+/// (`result_dims_has_repeated_dim`); this is the remaining cartesian-branch
+/// landing, closed with the same loud-skip discipline as the other
+/// unscoreable classes (no link-score variable, the edge recorded in
+/// `unscoreable_edges` so loops through it are dropped).
+pub(super) fn emit_unscoreable_duplicated_dim_source_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    from: &str,
+    to: &str,
+) {
+    use salsa::Accumulator;
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: {from} is \
+         read by a reducer whose iterated axes repeat a dimension (a square-source \
+         read like {from}[D,D,*]), so the executed simulation reads only the diagonal \
+         while the per-element score projection cannot disambiguate the repeated \
+         dimension; this edge will have no link-score variable and feedback loops \
+         through it will not be scored"
     );
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
@@ -1830,9 +1903,8 @@ fn reducer_body_ctx_parts(
 /// keeps its conservative fallback rather than emitting mis-slotted
 /// scores.
 ///
-/// A per-row generator failure (the GH #743 `UnfreezablePartial` machinery
-/// -- live-reachable via the square-source duplicate-dim feeder, see
-/// `square_source_duplicate_dim_feeder_scores_are_loudly_skipped`) dooms
+/// A per-row generator failure (the GH #743 `UnfreezablePartial` machinery,
+/// e.g. a feeder occurrence that cannot be frozen) dooms
 /// the WHOLE `(from, agg)` edge (GH #780): one loud warning naming the
 /// first doomed row, the edge recorded in `unscoreable_edges` (keyed
 /// `(from, agg.name)` -- exactly how a loop's links spell the hop, which
@@ -2067,8 +2139,10 @@ pub(super) fn emit_source_to_agg_link_scores(
         row_dim_names: &row_dim_names,
         dims_ctx: Some(project_dimensions_context(db, project)),
         // The live source's accepted slice: resolves a mismatched-arity
-        // feeder dep's index at the Iterated axis position (sound for
-        // repeated-dim co-sources; see `resolve_mismatched_index_position`).
+        // feeder dep's index at the Iterated axis position (see
+        // `resolve_mismatched_index_position`). The repeated-dim co-source
+        // case is now declined at agg minting (GH #778/#785), so the
+        // duplicate-dim resolution is unreachable defense-in-depth here.
         live_read_slice: Some(agg.source_read_slice(from)),
     };
     let dim_element_lists: Vec<Vec<String>> = from_dims

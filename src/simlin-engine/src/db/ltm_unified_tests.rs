@@ -4652,25 +4652,31 @@ fn scalar_target_reducer_variants_fragments_compile() {
     }
 }
 
-/// PR #784 review (P3): a degenerate SQUARE-source agg -- a reducer whose
-/// iterated axes carry the SAME target dim twice (`x[D1] =
-/// 1 + SUM(cube[D1,D1,*] * frac[D1,D1])`, `result_dims == ["D1","D1"]`)
-/// with a square projection feeder (`frac[D1,D1]`) -- must NOT emit the
-/// feeder's per-`(row, slot)` changed-last scores: the per-slot equation
-/// pins each reducer-text index BY DIM NAME, which is ambiguous for the
-/// duplicated dim (pre-fix, every `d1` occurrence pinned to the FIRST slot
-/// part, so the off-diagonal slot `[r1,r2]` froze `frac[r1,r1]` -- a
-/// silently wrong score). The rows are loudly skipped instead
-/// (`emit_ltm_partial_equation_warning`, the GH #743 unfreezable
-/// machinery), mirroring `resolve_mismatched_index_position`'s uniqueness
-/// defense on the co-source body path.
+/// GH #778/#785: a degenerate SQUARE-source reducer -- iterated axes carry
+/// the SAME target dim twice (`x[D1] = 1 + SUM(cube[D1,D1,*] * frac[D1,D1])`)
+/// -- is now DECLINED at agg minting (`result_dims_has_repeated_dim`), so NO
+/// synthetic agg is minted at all. The whole topology changes from PR #787's
+/// "feeder-half loud skip, co-source half silently wrong" to one coherent
+/// outcome: BOTH duplicated-dim sources (`cube` AND `frac`, each read by `x`
+/// as a `[D1,D1,...]` square) are loudly skipped by the
+/// `try_cross_dimensional_link_scores` cartesian-branch defense
+/// (`emit_unscoreable_duplicated_dim_source_warning`), no per-element link
+/// score is emitted for either, and every loop through the shape is dropped.
+///
+/// This supersedes the PR #787 fixture: pre-decline the co-source half
+/// emitted confident per-`(row, slot)` scores on the phantom off-diagonal
+/// rows the executed A2A simulation never reads -- a silent wrong number on
+/// the link surface (#785's comment). Declining the hoist removes the
+/// co-source/feeder/agg-to-target halves entirely; the ONE remaining surface
+/// (the un-hoisted cartesian partial reduce, whose own `from_pos` map has the
+/// same first-match hazard on the duplicated dim) is closed by the loud skip.
 #[test]
-fn square_source_duplicate_dim_feeder_scores_are_loudly_skipped() {
+fn square_source_duplicate_dim_reducer_is_loudly_skipped() {
     let project = TestProject::new("square_feeder")
         .with_sim_time(0.0, 5.0, 1.0)
         .named_dimension("D1", &["R1", "R2"])
         .named_dimension("D2", &["C1", "C2"])
-        .array_aux("cube[D1,D1,D2]", "1")
+        .array_aux("cube[D1,D1,D2]", "0.0001 * pop[D1]")
         .array_aux("frac[D1,D1]", "0.0001 * pop[D1]")
         .array_stock("pop[D1]", "100", &["x"], &[], None)
         .array_flow("x[D1]", "1 + SUM(cube[D1, D1, *] * frac[D1, D1])", None);
@@ -4679,82 +4685,76 @@ fn square_source_duplicate_dim_feeder_scores_are_loudly_skipped() {
     let sync = sync_from_datamodel(&db, &datamodel);
     let model = sync.models["main"].source;
 
-    // Sanity: the square feeder really is accepted as an iterated-dim
-    // projection feeder of the minted synthetic agg (the shape under test
-    // reaches the feeder emitter at all).
+    // The square-source reducer mints NO agg (the hoist is declined at the
+    // gate): every per-axis emission path that would pin the duplicated dim by
+    // name is structurally avoided.
     let aggs = crate::ltm_agg::enumerate_agg_nodes(&db, model, sync.project);
-    let agg = aggs
-        .aggs
-        .iter()
-        .find(|a| a.is_synthetic)
-        .expect("the inline square-source reducer must mint a synthetic agg");
-    assert_eq!(agg.result_dims, vec!["D1", "D1"]);
-    assert!(agg.source_is_projection_feeder("frac"));
+    assert!(
+        aggs.aggs.is_empty(),
+        "the declined square-source reducer must mint no agg node; got: {:?}",
+        aggs.aggs
+            .iter()
+            .map(|a| (&a.name, &a.result_dims))
+            .collect::<Vec<_>>()
+    );
 
     let ltm = model_ltm_variables(&db, model, sync.project);
-    let feeder_prefix = "$\u{205A}ltm\u{205A}link_score\u{205A}frac[";
-    let feeder_vars: Vec<&str> = ltm
-        .vars
+    // No per-element link score for EITHER duplicated-dim source: neither the
+    // co-source `cube` nor the feeder `frac` reaches the slab on a phantom
+    // off-diagonal row.
+    for src in ["cube", "frac"] {
+        let prefix = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{src}[");
+        let leaked: Vec<&str> = ltm
+            .vars
+            .iter()
+            .filter(|v| v.name.starts_with(&prefix))
+            .map(|v| v.name.as_str())
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "no per-element link score may reach the slab for the duplicated-dim \
+             source {src}; got: {leaked:?}"
+        );
+    }
+
+    // The skip is loud: one edge-level Warning per duplicated-dim source edge
+    // (`cube -> x` and `frac -> x`), both naming the square-source decline.
+    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+    let square_warnings: Vec<&str> = diags
         .iter()
-        .filter(|v| v.name.starts_with(feeder_prefix))
-        .map(|v| v.name.as_str())
+        .filter_map(|CompilationDiagnostic(d)| match (&d.severity, &d.error) {
+            (DiagnosticSeverity::Warning, DiagnosticError::Assembly(msg))
+                if msg.contains("square-source") =>
+            {
+                Some(msg.as_str())
+            }
+            _ => None,
+        })
         .collect();
     assert!(
-        feeder_vars.is_empty(),
-        "ambiguous duplicate-dim slot pins must be loudly skipped, not \
-         emitted with the wrong row frozen; got: {feeder_vars:?}"
+        square_warnings.iter().any(|m| m.contains("cube -> x")),
+        "the co-source cube -> x edge must surface a square-source skip Warning; \
+         got: {square_warnings:?}"
     );
-
-    // The skip is loud: an UnfreezablePartial warning naming the feeder
-    // link-score variable (the first doomed row; GH #780 stops at the first
-    // doom since the whole edge is recorded unscoreable).
-    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
-    let has_feeder_warning = diags.iter().any(|CompilationDiagnostic(d)| {
-        d.severity == DiagnosticSeverity::Warning
-            && d.variable
-                .as_deref()
-                .is_some_and(|v| v.starts_with(feeder_prefix))
-            && matches!(
-                &d.error,
-                DiagnosticError::Assembly(msg) if msg.contains("could not be generated")
-            )
-    });
     assert!(
-        has_feeder_warning,
-        "the skipped feeder rows must surface a Warning; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        square_warnings.iter().any(|m| m.contains("frac -> x")),
+        "the feeder frac -> x edge must surface a square-source skip Warning; \
+         got: {square_warnings:?}"
     );
 
-    // GH #780 (the agg-half leg): the doomed `frac -> $⁚ltm⁚agg⁚0` feeder
-    // half must record the edge in `unscoreable_edges`, so every loop
-    // traversing it -- here ALL loops (cube is constant; each circuit runs
-    // pop -> frac -> agg -> x -> pop) -- is DROPPED. Pre-fix this fixture
-    // emitted 5 loop scores referencing the never-emitted
-    // `frac[..]→$⁚ltm⁚agg⁚0[..]` names, each failing fragment compile into
-    // a warned constant-0 stub -- the exact cascade the #758 contract
-    // forbids.
+    // Every loop through the shape is dropped (the edges are recorded
+    // unscoreable): no loop score is emitted at all.
     assert!(
         !ltm.vars
             .iter()
             .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
-        "loops through the doomed feeder edge must be dropped, not emitted \
-         as warned 0-stubs; got: {:?}",
+        "loops through the unscoreable square-source edges must be dropped, not \
+         emitted as warned 0-stubs; got: {:?}",
         ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
-    // No emitted equation may reference a never-emitted per-row feeder
-    // SCORE name (the agg aux's own equation legitimately reads the model
-    // variable `frac[d1, d1]`, so the check targets the link-score prefix).
-    for v in &ltm.vars {
-        assert!(
-            !v.equation.source_text().contains(feeder_prefix),
-            "no emitted LTM equation may reference the dropped per-row \
-             feeder scores; {} = {}",
-            v.name,
-            v.equation.source_text()
-        );
-    }
-    // And the model compiles with NO fragment-failure cascade: the only
-    // Assembly warnings anywhere are the loud feeder skips themselves.
+
+    // The model compiles with NO fragment-failure cascade: the only Assembly
+    // warnings anywhere are the two loud square-source skips themselves.
     use salsa::Setter;
     let mut db2 = SimlinDb::default();
     let (sp, m2) = {
@@ -4762,22 +4762,20 @@ fn square_source_duplicate_dim_feeder_scores_are_loudly_skipped() {
         (sync2.project, sync2.models["main"].source)
     };
     sp.set_ltm_enabled(&mut db2).to(true);
-    compile_project_incremental(&db2, sp, "main").expect("the doomed-feeder model still compiles");
+    compile_project_incremental(&db2, sp, "main")
+        .expect("the declined-square model still compiles");
     let all = crate::db::collect_model_diagnostics(&db2, m2, sp);
-    let non_feeder: Vec<_> = all
+    let unexpected: Vec<_> = all
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
-                && !d
-                    .variable
-                    .as_deref()
-                    .is_some_and(|v| v.starts_with(feeder_prefix))
+                && matches!(&d.error, DiagnosticError::Assembly(msg) if !msg.contains("square-source"))
         })
         .collect();
     assert!(
-        non_feeder.is_empty(),
-        "the only warnings are the loud feeder skips -- no loop-score \
-         fragment-failure cascade; got: {non_feeder:?}"
+        unexpected.is_empty(),
+        "the only Assembly warnings are the loud square-source skips -- no \
+         loop-score fragment-failure cascade; got: {unexpected:?}"
     );
 }
 
@@ -4793,12 +4791,13 @@ fn square_source_duplicate_dim_feeder_scores_are_loudly_skipped() {
 // compile, and degraded to a cascade of warned constant-0 stubs (the
 // #758-contract violation this fixes).
 //
-// Reachability is per call site: the AGG-HALF emitters' terminals are
-// LIVE-reachable through a compiling model (the square-source duplicate-dim
-// feeder, GH #743 -- tested with the real fixture
-// `square_source_duplicate_dim_feeder_scores_are_loudly_skipped` above),
-// while the SHAPED-QUERY and per-element terminals exercised by the gh780_*
-// tests below are not (every doom on those paths is recovered by
+// Reachability is per call site: the CARTESIAN-BRANCH unscoreable terminal
+// is LIVE-reachable through a compiling model (the degenerate square-source
+// reducer, GH #778/#785 -- tested with the real fixture
+// `square_source_duplicate_dim_reducer_is_loudly_skipped` above, which records
+// both duplicated-dim source edges in `unscoreable_edges` and drops every loop
+// through them), while the SHAPED-QUERY and per-element terminals exercised by
+// the gh780_* tests below are not (every doom on those paths is recovered by
 // `shaped_guard_form_text`'s changed-last fallback or pinned to a concrete
 // element upstream), so those tests inject the doom with the test-only
 // `ForcePartialEquationErrorGuard` (the same discipline

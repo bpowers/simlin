@@ -762,18 +762,27 @@ fn walk_var_equation(
         // (`rowsum[D1] = SUM(matrix[D1, *])`) keeps `[D1]` as its result dims.
         let key = crate::patch::expr2_to_string(expr);
         let result_dims = result_dims_from_read_slice(&slices.canonical, ctx.dm_dims);
-        register_agg(
-            result,
-            next_synthetic_n,
-            &key,
-            var_name,
-            AggKind::VariableBacked {
-                var_name: var_name.to_string(),
-                result_dims,
-            },
-            sources,
-        );
-        return;
+        // DECLINE the degenerate square-source shape (repeated result dim,
+        // GH #778/#785): the per-axis emission paths pin subscript indices by
+        // dim name and disagree across the duplicated occurrence. Declining
+        // here keeps the reducer off ALL of them with one decision; the
+        // reference falls through to `walk_subexpr_for_aggs`, which declines
+        // identically, leaving it on the conservative Direct path. See
+        // [`result_dims_has_repeated_dim`].
+        if !result_dims_has_repeated_dim(&result_dims) {
+            register_agg(
+                result,
+                next_synthetic_n,
+                &key,
+                var_name,
+                AggKind::VariableBacked {
+                    var_name: var_name.to_string(),
+                    result_dims,
+                },
+                sources,
+            );
+            return;
+        }
     }
     walk_subexpr_for_aggs(
         expr,
@@ -843,9 +852,13 @@ fn walk_var_equation(
 /// order; empty for a scalar owner). An `Iterated` axis's `dim` is always
 /// one of them by construction (`classify_axis_access` only mints
 /// `Iterated` for a target iterated dim), so "non-aligned" here can only
-/// mean strict subset, permutation, or a duplicated dim (a square source
-/// read as `SUM(sq[D1,D1,*])` -- routed synthetic, matching what the
-/// inline form of the same text already does).
+/// mean strict subset or permutation. (A duplicated `Iterated` dim -- a
+/// square source `SUM(sq[D1,D1,*])` -- is unreachable through this gate: an
+/// owner with two identical A2A dims is a malformed declaration. The
+/// DEGENERATE SQUARE shape is declined wholesale, BEFORE registration, by
+/// `result_dims_has_repeated_dim` at both `enumerate_agg_nodes` mint sites,
+/// GH #778/#785 -- so neither a variable-backed nor a synthetic agg is minted
+/// for it.)
 fn variable_backed_shape_is_expressible(
     read_slice: &[AxisRead],
     target_iterated_dims: &[String],
@@ -938,9 +951,26 @@ fn walk_subexpr_for_aggs(
             // `idx` non-literal ⇒ not statically describable). A *whole-RHS*
             // reducer (`agg[D1] = SUM(matrix[D1, *])`) is recognized too, but
             // as a variable-backed agg via `walk_var_equation`, not here.
-            if !in_reducer
+            let slices = (!in_reducer)
+                .then(|| combined_read_slice(builtin, ctx))
+                .flatten();
+            let result_dims = slices
+                .as_ref()
+                .map(|s| result_dims_from_read_slice(&s.canonical, ctx.dm_dims));
+            // DECLINE the degenerate square-source shape (repeated result
+            // dim, GH #778/#785): the per-axis emission paths pin subscript
+            // indices by dim name and disagree across the duplicated
+            // occurrence. Declining here routes the reducer onto the same
+            // `else` descent the not-statically-describable carve-outs take,
+            // with `in_reducer` unchanged so the source references keep their
+            // conservative Direct shape. See [`result_dims_has_repeated_dim`].
+            let square_source = result_dims
+                .as_deref()
+                .is_some_and(result_dims_has_repeated_dim);
+            if !square_source
+                && let Some(slices) = slices
+                && let Some(result_dims) = result_dims
                 && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
-                && let Some(slices) = combined_read_slice(builtin, ctx)
                 // `None` (a structurally-impossible missing per-var slice;
                 // see `agg_sources`' rustdoc) declines the hoist: the `else`
                 // arm descends with `in_reducer` unchanged, exactly like the
@@ -948,7 +978,6 @@ fn walk_subexpr_for_aggs(
                 && let Some(sources) = agg_sources(source_vars, &slices, ctx)
             {
                 let key = crate::patch::expr2_to_string(expr);
-                let result_dims = result_dims_from_read_slice(&slices.canonical, ctx.dm_dims);
                 register_agg(
                     result,
                     next_synthetic_n,
@@ -1625,6 +1654,56 @@ fn result_dims_from_read_slice(
             AxisRead::Pinned(_) | AxisRead::Reduced { .. } => None,
         })
         .collect()
+}
+
+/// `true` when a reducer's would-be `result_dims` (the canonical slice's
+/// `Iterated` TARGET dims, in order -- see [`result_dims_from_read_slice`])
+/// repeat a dimension. That is the DEGENERATE SQUARE-SOURCE shape: a reducer
+/// whose iterated axes carry the same target dim twice
+/// (`out[D1] = SUM(sq[D1, D1, *])` over a square `sq[D1, D1, D3]`, the inline
+/// `out[D1] = base[D1] + SUM(sq[D1, D1, *])`, or with a co-source feeder
+/// `x[D1] = 1 + SUM(cube[D1, D1, *] * frac[D1, D1])`).
+///
+/// The executed A2A simulation reads only the DIAGONAL of such a source
+/// (`sq[e, e, *]` per target slot `e`), but the agg's result-slot
+/// enumeration would range over the full `[D1, D1]` square. Every per-axis
+/// emission path that pins a subscript index BY DIM NAME is then ambiguous
+/// across the two `D1` occurrences (the first-match hazard), which is why
+/// the three halves disagreed on this shape:
+///
+/// - the source→slot element graph fans out ALL `[D1, D1]` slots including
+///   the off-diagonal ones the simulation never reads (GH #778);
+/// - the link-score projection (`result_dim_positions`) collapsed both `D1`
+///   occurrences to one target position, emitting diagonal-only agg→target
+///   names that disagree with that edge fan-out;
+/// - the co-source row partial (`pin_body_to_row`) emitted confident
+///   per-`(row, slot)` scores on the phantom off-diagonal edges the
+///   simulation never reads -- a SILENT wrong number on the link surface
+///   (GH #785).
+///
+/// The feeder half was independently defended by PR #787
+/// (`pin_iterated_dim_indices`' ambiguity bail), but only ONE half. Rather
+/// than teach every per-axis path to resolve a repeated dim positionally
+/// (the larger "diagonalize the axis into the `AxisRead` vocabulary"
+/// alternative), this rare shape is DECLINED at the single agg-minting gate
+/// (`enumerate_agg_nodes`' two mint sites), so all halves and both surfaces
+/// (edges and scores) inherit one decision per the epic's "two-surface
+/// decisions share one predicate" invariant. A declined reducer keeps its
+/// references on the conservative paths; the duplicated-dim co-source's
+/// remaining landing (`try_cross_dimensional_link_scores`' cartesian
+/// partial-reduce branch, whose own `from_pos` map has the same first-match
+/// hazard) is closed in lockstep by the loud `#758`/`#780` skip
+/// (`emit_duplicated_dim_source_unscoreable_warning`), so NO surface carries
+/// an unwarned wrong number for this shape.
+///
+/// Keyed on `result_dims` (already the canonical slice's `Iterated` target
+/// dims) so synthetic AND variable-backed minting both inherit it from the
+/// single place those dims are derived.
+pub(crate) fn result_dims_has_repeated_dim(result_dims: &[String]) -> bool {
+    result_dims
+        .iter()
+        .enumerate()
+        .any(|(i, d)| result_dims[..i].contains(d))
 }
 
 /// `true` when `name` is a synthetic aggregate-node name (`$⁚ltm⁚agg⁚{n}`).

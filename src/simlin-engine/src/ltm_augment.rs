@@ -2040,6 +2040,15 @@ pub(crate) fn generate_iterated_feeder_to_agg_equation(
 /// part -- silently freezing the wrong source row for any off-diagonal
 /// slot. Mirrors [`resolve_mismatched_index_position`]'s uniqueness
 /// defense; the caller converts `None` into the loud unfreezable error.
+///
+/// As of GH #778/#785 this ambiguity bail is UNREACHABLE defense-in-depth:
+/// the only caller (`iterated_feeder_row_scores`) feeds the agg's
+/// `result_dims` as `dims`, and a duplicated `result_dims` is now declined at
+/// agg minting (`ltm_agg::result_dims_has_repeated_dim`), so no square-source
+/// agg -- and hence no repeated-dim feeder slot -- ever reaches here. The bail
+/// is retained as a structural guard in case a future change re-admits the
+/// shape upstream; the live square-source landing is now the loud
+/// cartesian-branch skip (`emit_unscoreable_duplicated_dim_source_warning`).
 fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> Option<Expr0> {
     /// The unique position of `name` in `dims`: `None` for an ambiguous
     /// (repeated) dim name, `Some(None)` for a name not in `dims` (left
