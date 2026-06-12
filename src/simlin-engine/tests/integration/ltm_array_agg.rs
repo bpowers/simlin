@@ -8996,3 +8996,289 @@ fn square_owner_whole_rhs_declines_and_skips_loudly() {
     assert_square_source_loudly_skipped(&fixture(), false, &["cube"]);
     assert_square_source_loudly_skipped(&fixture(), true, &["cube"]);
 }
+
+// ---------------------------------------------------------------------------
+// GH #791: I1-declined multi-source STRICT-SLICE reducer -> loud unscoreable
+// edge (was: silent +1.0 cartesian garbage on unread rows)
+// ---------------------------------------------------------------------------
+
+/// GH #791: an I1-DECLINED multi-source whole-RHS reducer whose co-source
+/// slices MISMATCH (`share[Region] = SUM(pop[nyc,*] * w[*])`: `pop`'s slice
+/// `[Pinned(nyc), Reduced]` vs `w`'s `[Reduced]`) mints NO variable-backed
+/// agg, so the `pop -> share` edge fell through `try_cross_dimensional_link_scores`
+/// to the legacy CARTESIAN partial-reduce derivation, which emitted silent
+/// confident link scores INCLUDING for source rows the equation NEVER reads.
+///
+/// Pre-fix, empirically (commit `0fcfba58`): `pop[boston,p]→share[boston]`
+/// existed and read a constant +1.0 although `share` reads only `pop[nyc,*]`;
+/// the read rows were ALSO wrong (`pop[nyc,p]→share[nyc] = 1.0` where the true
+/// SUM contribution share is 0.5). Zero warnings on the link surface; only the
+/// loop surface degraded loudly (5 warned 0-stubs). A silent-wrong-number on
+/// the link surface, violating epic #488's standing invariant.
+///
+/// Post-fix the edge takes the GH #758/#780 loud skip: exactly ONE warning
+/// naming the `pop -> share` edge, NO `pop[*]→share[*]` link-score variable,
+/// loops through it dropped, and the OTHER edges' scores untouched. The decline
+/// re-derives `pop`'s read slice via the same per-axis classifier the hoisting
+/// path uses (`pop[nyc,*]` is a strict slice -> decline), so a full-extent read
+/// would NOT be declined.
+#[test]
+fn gh791_arrayed_owner_mismatched_cosource_strict_slice_skips_loudly() {
+    let project = TestProject::new("gh791_arrayed")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_aux_direct(
+            "share",
+            vec!["Region".into()],
+            "SUM(pop[nyc, *] * w[*])",
+            None,
+        )
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    // No `pop[*]→share[*]` link score of ANY row (read or unread) is emitted:
+    // the cartesian-garbage rows are gone.
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            for row_region in ["nyc", "boston"] {
+                let name = format!("{LINK_SCORE_PREFIX}pop[{row_region},{d2}]\u{2192}share[{e}]");
+                assert!(
+                    ltm.vars.iter().all(|v| v.name != name),
+                    "the declined strict-slice edge must emit NO cartesian link score; \
+                     found {name:?}"
+                );
+            }
+        }
+    }
+
+    // Exactly ONE Assembly warning: the unscoreable `pop -> share` edge. (Before
+    // the fix: 5 -- one per loop score that failed fragment compile, while the
+    // link surface carried unwarned wrong +1.0s.)
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable pop -> share edge); \
+         got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("pop") && msg.contains("share") && msg.contains("strict slice"),
+        "the warning must name the unscoreable edge and the strict-slice reason; got: {msg}"
+    );
+
+    // No loop scores through the declined edge survive: the only enumerated
+    // loops run pop -> share -> inflow -> stock -> pop, all through the doomed
+    // edge, so none are scored.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the unscoreable edge must not emit loop scores; got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // OTHER edges are untouched: the flow-to-stock / aux edges keep their
+    // scores, and every emitted score series stays finite (no garbage).
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name == format!("{LINK_SCORE_PREFIX}inflow\u{2192}stock")),
+        "the unrelated inflow -> stock edge must keep its link score"
+    );
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for name in ltm_score_var_names(&results) {
+        let var = ltm_var(&ltm.vars, &name);
+        let base = offset_of(&results, &name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "emitted score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+/// GH #791, the SCALAR-owner full-reduce arm: `total = SUM(pop[nyc,*] * w[*])`
+/// is the EVEN-MORE-SILENT variant -- the scalar target means the cartesian
+/// full-reduce arm emits `pop[boston,p]→total = 1.0` (unread) and
+/// `pop[nyc,p]→total = 1.0` (true share 0.5) with ZERO warnings on ANY surface
+/// (no loop fails because the scalar target has no off-diagonal naming issue).
+/// The same strict-slice decline closes both arms: ONE warning, no `pop→total`
+/// link scores, loop dropped.
+#[test]
+fn gh791_scalar_owner_mismatched_cosource_strict_slice_skips_loudly() {
+    let project = TestProject::new("gh791_scalar")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .aux("total", "SUM(pop[nyc, *] * w[*])", None)
+        .array_flow("inflow[Region]", "total * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    for region in ["nyc", "boston"] {
+        for d2 in ["p", "q"] {
+            let name = format!("{LINK_SCORE_PREFIX}pop[{region},{d2}]\u{2192}total");
+            assert!(
+                ltm.vars.iter().all(|v| v.name != name),
+                "the declined scalar-target strict-slice edge must emit NO cartesian \
+                 link score; found {name:?}"
+            );
+        }
+    }
+
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable pop -> total edge); \
+         got: {warnings:?}"
+    );
+
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "the loop through the unscoreable pop -> total edge must be dropped"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for name in ltm_score_var_names(&results) {
+        let var = ltm_var(&ltm.vars, &name);
+        let base = offset_of(&results, &name);
+        for slot in 0..slot_count(var, &project.dimensions) {
+            let series = series_at(&results, base + slot);
+            assert!(
+                series.iter().all(|v| v.is_finite()),
+                "emitted score {name} slot {slot} must stay finite; got {series:?}"
+            );
+        }
+    }
+}
+
+/// GH #791 discovery-mode twin: the strict-slice decline records the edge in
+/// `unscoreable_edges`, which the pinned-loop pass consumes in discovery mode
+/// too, so the same `pop -> share` edge is declined there (no cartesian
+/// garbage link score minted) -- exhaustive and discovery agree.
+#[test]
+fn gh791_strict_slice_decline_holds_in_discovery_mode() {
+    let project = TestProject::new("gh791_discovery")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_aux_direct(
+            "share",
+            vec!["Region".into()],
+            "SUM(pop[nyc, *] * w[*])",
+            None,
+        )
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    for d2 in ["p", "q"] {
+        for e in ["nyc", "boston"] {
+            for row_region in ["nyc", "boston"] {
+                let name = format!("{LINK_SCORE_PREFIX}pop[{row_region},{d2}]\u{2192}share[{e}]");
+                assert!(
+                    ltm.vars.iter().all(|v| v.name != name),
+                    "discovery mode must also decline the strict-slice edge; found {name:?}"
+                );
+            }
+        }
+    }
+    // The model still compiles cleanly in discovery mode.
+    compile_project_incremental(&db, sync.project, "main")
+        .expect("discovery-mode LTM compilation should succeed");
+}
+
+/// GH #791 regression pin (the blast-radius boundary): a multi-source reducer
+/// whose source read is the FULL EXTENT must keep its cartesian diagonal scores
+/// -- the strict-slice decline fires ONLY for Pinned/subset reads. Here
+/// `growth[D1] = SUM(matrix[D1,*] * frac)` declines the I1 acceptance (the bare
+/// `frac` feeder, GH #779), so `matrix -> growth` lands on the cartesian
+/// derivation, but `matrix[D1,*]`'s slice is `[Iterated(d1), Reduced]` -- a
+/// full-extent read -- so its four correct diagonal scores
+/// (`matrix[a,c]→growth[a]`, ...) are preserved, NOT loud-skipped. (The bare
+/// `frac -> growth` edge keeps its own separate GH #779 decline.)
+#[test]
+fn gh791_full_extent_multisource_read_stays_scored() {
+    let project = gh779_bare_feeder_fixture("SUM");
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+
+    for row in ["a", "b"] {
+        for col in ["c", "d"] {
+            let name = format!("{LINK_SCORE_PREFIX}matrix[{row},{col}]\u{2192}growth[{row}]");
+            assert!(
+                ltm.vars.iter().any(|v| v.name == name),
+                "the full-extent matrix read must keep its cartesian diagonal score \
+                 {name:?} (NOT be strict-slice-declined); got: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.contains("matrix") && v.name.contains("growth"))
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}

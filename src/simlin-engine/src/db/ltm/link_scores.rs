@@ -586,6 +586,35 @@ pub(super) fn try_cross_dimensional_link_scores(
         }
     }
 
+    // GH #791: the I1-DECLINED STRICT-SLICE family. We are at the legacy
+    // cartesian derivation because no usable variable-backed agg was minted for
+    // this edge (the agg branch above did not fire). The cartesian projection
+    // ranges over the FULL `from` extent by declared dimension positions, which
+    // is sound ONLY when the reducer reads the full extent of `from`. When
+    // `to`'s reducer reads a STRICT slice of `from` -- a `Pinned` element or a
+    // subset-`Reduced` axis, as in the multi-source mismatched-co-source shape
+    // `share[Region] = SUM(pop[nyc,*] * w[*])` (`pop`'s slice
+    // `[Pinned(nyc), Reduced]` declines the I1 acceptance, so no agg is minted)
+    // -- the projection invents scores for `from`'s UNREAD rows
+    // (`pop[boston,*]`) and mis-divides the read rows. Closed with the GH
+    // #758/#780 loud skip: no link-score variable, the edge recorded so loops
+    // through it drop. Re-derives `from`'s read slice via the SAME per-axis
+    // classifier the hoisting path uses (one source of truth), so the decline
+    // and the agg-minting predicate can never disagree about a full-extent
+    // read. A NOT-DESCRIBABLE read (the dynamic-index `SUM(pop[idx,*])` carve-out
+    // and declined mappings) keeps the conservative cartesian -- its
+    // documented intended behavior -- as does a genuine full-extent read (the
+    // aligned `SUM(matrix[D1,*])` diagonal a feeder decline can strand here).
+    if matches!(
+        crate::ltm_agg::unhoisted_reducer_source_read(db, model, project, from, to),
+        crate::ltm_agg::UnhoistedSourceRead::StrictSlice
+    ) {
+        if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+            emit_unscoreable_strict_slice_reduce_warning(db, model, from, to);
+        }
+        return Some(vec![]);
+    }
+
     let source_elements = cartesian_subscripts(&dim_element_lists);
 
     if result_axis_names.is_empty() {
@@ -1184,6 +1213,42 @@ pub(super) fn emit_unscoreable_duplicated_dim_source_warning(
          occurrence of the repeated dimension a result coordinate refers to; \
          this edge will have no link-score variable and feedback loops through \
          it will not be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
+/// Accumulate the GH #791 `Warning` for an I1-declined NOT-hoisted reducer
+/// whose read of `from` is a STRICT slice (a `Pinned` element or a
+/// subset-`Reduced` axis), reached at the legacy cartesian partial-/full-reduce
+/// derivation. The cartesian projection ranges over EVERY `from` element by its
+/// declared dimension positions, so for a strict slice it both invents scores
+/// for UNREAD rows (`pop[boston,*]` though the reducer reads only `pop[nyc,*]`)
+/// and mis-divides the read rows (the un-pinnable mismatched-arity body dooms
+/// the changed-first partial to the |dz/dz| = 1 fallback) -- a SILENT wrong
+/// number on the link surface. Closed with the same loud-skip discipline as the
+/// other unscoreable classes (no link-score variable, the edge recorded in
+/// `unscoreable_edges` so loops through it are dropped).
+pub(super) fn emit_unscoreable_strict_slice_reduce_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    from: &str,
+    to: &str,
+) {
+    use salsa::Accumulator;
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: the reducer in \
+         {to}'s equation reads only a strict slice of {from} (a pinned element or a \
+         subdimension subset, e.g. {from}[nyc,*]), but no variable-backed aggregate \
+         could be minted for it (a multi-source reducer whose co-source slices \
+         disagree), so the only remaining derivation would score {from}'s unread rows \
+         and mis-divide the read rows; this edge will have no link-score variable and \
+         feedback loops through it will not be scored"
     );
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
