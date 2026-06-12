@@ -2040,9 +2040,15 @@ fn element_graph_square_source_duplicated_dim_declines_to_cross_product() {
     let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
 
     // No agg node is minted at all (the square-source hoist is declined), so
-    // no node name carries the agg prefix on either side of any edge.
+    // no node name carries the agg prefix on either side of any edge --
+    // including SUBSCRIPTED slot nodes like `{agg}[r1,r2]`, which an
+    // exact-name membership check would miss.
     assert!(
-        !result.edges.contains_key(agg) && !result.edges.values().any(|ts| ts.contains(agg)),
+        !result.edges.keys().any(|k| k.contains(agg))
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t.contains(agg))),
         "the declined square-source reducer must mint NO agg node; found {agg} in the graph"
     );
 

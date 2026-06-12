@@ -851,14 +851,17 @@ fn walk_var_equation(
 /// `target_iterated_dims` are the owner's A2A dims (canonical, declared
 /// order; empty for a scalar owner). An `Iterated` axis's `dim` is always
 /// one of them by construction (`classify_axis_access` only mints
-/// `Iterated` for a target iterated dim), so "non-aligned" here can only
-/// mean strict subset or permutation. (A duplicated `Iterated` dim -- a
-/// square source `SUM(sq[D1,D1,*])` -- is unreachable through this gate: an
-/// owner with two identical A2A dims is a malformed declaration. The
-/// DEGENERATE SQUARE shape is declined wholesale, BEFORE registration, by
-/// `result_dims_has_repeated_dim` at both `enumerate_agg_nodes` mint sites,
-/// GH #778/#785 -- so neither a variable-backed nor a synthetic agg is minted
-/// for it.)
+/// `Iterated` for a target iterated dim), so "non-aligned" here can also
+/// mean a duplicated dim against a single-occurrence owner
+/// (`out[D1] = SUM(sq[D1,D1,*])`, routed through `walk_subexpr_for_aggs`
+/// where the square-source decline fires). Note an owner declared over the
+/// SAME dim twice (`out2[D1,D1] = SUM(cube[D1,D1,*])`) genuinely compiles
+/// and simulates (each slot reads its own full row), and its
+/// `iterated_dims == target_iterated_dims` makes this function return
+/// `true` -- it is `walk_var_equation`'s `result_dims_has_repeated_dim`
+/// check (GH #778/#785, live and load-bearing, NOT defense-in-depth) that
+/// declines the mint for that spelling, so neither a variable-backed nor a
+/// synthetic agg is ever registered for a repeated-result-dim reduce.
 fn variable_backed_shape_is_expressible(
     read_slice: &[AxisRead],
     target_iterated_dims: &[String],
@@ -951,7 +954,15 @@ fn walk_subexpr_for_aggs(
             // `idx` non-literal ⇒ not statically describable). A *whole-RHS*
             // reducer (`agg[D1] = SUM(matrix[D1, *])`) is recognized too, but
             // as a variable-backed agg via `walk_var_equation`, not here.
-            let slices = (!in_reducer)
+            // Hoist-eligibility prefix, computed in dependency order so the
+            // slice/result-dims derivation runs only for an actual hoistable
+            // reducer App (`reducer_source_vars` is `None` for every other
+            // builtin -- it would be wasted work on the non-reducer majority).
+            let source_vars = (!in_reducer)
+                .then(|| reducer_source_vars(builtin, ctx.variables))
+                .flatten();
+            let slices = source_vars
+                .is_some()
                 .then(|| combined_read_slice(builtin, ctx))
                 .flatten();
             let result_dims = slices
@@ -968,9 +979,9 @@ fn walk_subexpr_for_aggs(
                 .as_deref()
                 .is_some_and(result_dims_has_repeated_dim);
             if !square_source
+                && let Some(source_vars) = source_vars
                 && let Some(slices) = slices
                 && let Some(result_dims) = result_dims
-                && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
                 // `None` (a structurally-impossible missing per-var slice;
                 // see `agg_sources`' rustdoc) declines the hoist: the `else`
                 // arm descends with `in_reducer` unchanged, exactly like the
@@ -1693,7 +1704,7 @@ fn result_dims_from_read_slice(
 /// remaining landing (`try_cross_dimensional_link_scores`' cartesian
 /// partial-reduce branch, whose own `from_pos` map has the same first-match
 /// hazard) is closed in lockstep by the loud `#758`/`#780` skip
-/// (`emit_duplicated_dim_source_unscoreable_warning`), so NO surface carries
+/// (`emit_unscoreable_duplicated_dim_source_warning`), so NO surface carries
 /// an unwarned wrong number for this shape.
 ///
 /// Keyed on `result_dims` (already the canonical slice's `Iterated` target

@@ -8608,3 +8608,28 @@ fn square_source_with_feeder_declines_and_skips_loudly() {
         &["cube", "frac"],
     );
 }
+
+/// Repeated-dim OWNER spelling (`x[D1,D1] = SUM(cube[D1,D1,*])`): an owner
+/// genuinely declared over the same dim twice compiles and simulates (each
+/// slot reads its own full row -- no diagonal restriction), and reaches
+/// `walk_var_equation`'s mint gate with ALIGNED iterated dims
+/// (`variable_backed_shape_is_expressible` returns true) -- so it is the
+/// `result_dims_has_repeated_dim` check itself, live and load-bearing, that
+/// declines the mint there. The per-element projection is still ambiguous
+/// between the two `D1` occurrences, so the edge gets the same loud skip as
+/// the diagonal spellings.
+#[test]
+fn square_owner_whole_rhs_declines_and_skips_loudly() {
+    fn fixture() -> datamodel::Project {
+        TestProject::new("square_owner")
+            .with_sim_time(0.0, 8.0, 1.0)
+            .named_dimension("D1", &["r1", "r2"])
+            .named_dimension("D2", &["c1", "c2"])
+            .array_aux("cube[D1,D1,D2]", "0.0001 * pop[D1,D1]")
+            .array_stock("pop[D1,D1]", "100", &["x"], &[], None)
+            .array_flow("x[D1,D1]", "SUM(cube[D1, D1, *])", None)
+            .build_datamodel()
+    }
+    assert_square_source_loudly_skipped(&fixture(), false, &["cube"]);
+    assert_square_source_loudly_skipped(&fixture(), true, &["cube"]);
+}

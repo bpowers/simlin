@@ -374,14 +374,16 @@ pub(super) fn try_cross_dimensional_link_scores(
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     // The live source's accepted slice, when `to` IS a variable-backed agg
     // reading `from`: lets the body partial resolve a mismatched-arity
-    // feeder dep's index at the slice's ITERATED axis position (see
-    // `resolve_mismatched_index_position`). The un-hoisted cartesian family
-    // has no agg and keeps `None` (unique by-name resolution with the
-    // ambiguity bail). The repeated-dim co-source case this defended against
-    // (`matrix[D1,D1]`, ambiguous by name) is now declined at agg minting
-    // (GH #778/#785, `result_dims_has_repeated_dim`), so that arm's
-    // duplicate-dim resolution is unreachable defense-in-depth; the live use
-    // is the genuinely mismatched-arity (non-repeated) feeder.
+    // feeder dep's index at the slice's ITERATED axis position -- sound and
+    // LOAD-BEARING for a repeated-dim co-source like `matrix[D1,D1]` read as
+    // `SUM(matrix[*, D1] * frac[D1])` (slice `[Reduced, Iterated]`,
+    // `result_dims = [D1]`: still minted, the GH #767 live shape), where a
+    // by-name lookup is ambiguous (see `resolve_mismatched_index_position`).
+    // Only the DOUBLY-Iterated case (two Iterated axes over the same dim,
+    // result_dims repeated) is declined at agg minting (GH #778/#785,
+    // `result_dims_has_repeated_dim`) and so never reaches here. The
+    // un-hoisted cartesian family has no agg and keeps `None` (unique
+    // by-name resolution with the ambiguity bail).
     let live_read_slice = agg_nodes
         .aggs_in_var(to)
         .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))
@@ -426,9 +428,13 @@ pub(super) fn try_cross_dimensional_link_scores(
             // `rows` is `Some` for every slice the gate admits (both gate
             // on the same per-axis data over the same salsa dimension
             // context); a `None` here would mean a stale arity/remap
-            // invariant, and falls through to the conservative cartesian
-            // derivation below rather than emitting mis-slotted scores --
-            // mirroring `emit_source_to_agg_link_scores`' fallback.
+            // invariant, and falls through to the conservative landing
+            // below rather than emitting mis-slotted scores -- the
+            // cartesian derivation, or, for a source whose declared dims
+            // repeat a result axis (the live GH #767 `matrix[D1,D1]`
+            // shape), the GH #778/#785 loud skip (strictly safer than a
+            // cartesian whose projection is ambiguous there). Mirrors
+            // `emit_source_to_agg_link_scores`' fallback.
             if let Some(rows) = rows {
                 let mut cross_vars = Vec::with_capacity(rows.len());
                 for ReadSliceRow {
@@ -522,15 +528,18 @@ pub(super) fn try_cross_dimensional_link_scores(
     // it, and it falls into the conservative cartesian partial-reduce branch
     // below. That branch projects each source tuple onto the result axes
     // through a `from_pos` name->position map, which collapses the duplicated
-    // dim to ONE position (last-match) -- so it would emit confident
-    // per-`(row, result)` scores for the OFF-DIAGONAL source rows
-    // (`cube[r1,r2,*]`) the executed A2A simulation never reads (it reads only
-    // the diagonal `cube[e,e,*]`). The element graph routes this same edge as
-    // the conservative full cross-product (a sound superset), so closing the
-    // score side with the GH #758 loud skip keeps edges and scores in
-    // lockstep: no link-score variable, the edge recorded unscoreable so loops
-    // through it are dropped, one clear diagnostic instead of plausible-looking
-    // wrong numbers.
+    // dim to ONE position (last-match) -- an ambiguous projection: for the
+    // iterated-diagonal spelling (`x[D1] = SUM(cube[D1,D1,*])`) it would
+    // additionally emit confident per-`(row, result)` scores for OFF-DIAGONAL
+    // source rows the executed A2A simulation never reads, and for the
+    // repeated-dim-owner (`x[D1,D1] = ...`) and whole-extent-broadcast
+    // (`SUM(cube[*,*,*])`) spellings the per-element attribution is equally
+    // undisambiguable even though the simulation reads every row. The element
+    // graph routes this same edge as the conservative full cross-product (a
+    // sound superset), so closing the score side with the GH #758 loud skip
+    // keeps edges and scores in lockstep: no link-score variable, the edge
+    // recorded unscoreable so loops through it are dropped, one clear
+    // diagnostic instead of plausible-looking wrong numbers.
     //
     // Placed AFTER the agg branch deliberately: a repeated-dim SOURCE whose
     // result is NOT a duplicated dim (`growth[D1] = SUM(matrix[*, D1] * ...)`
@@ -1030,10 +1039,16 @@ pub(super) fn emit_unscoreable_broadcast_reduce_edge_warning(
 
 /// Accumulate the GH #778/#785 `Warning` for a declined DEGENERATE
 /// SQUARE-SOURCE reducer edge: `from`'s declared dims repeat a dimension
-/// that survives as a result axis (`cube[D1,D1,*] -> x[D1]`), so the
-/// cartesian partial-reduce projection cannot tell the two `D1` occurrences
-/// apart and would score the off-diagonal source rows the executed A2A
-/// simulation never reads. The whole shape's hoist is declined at minting
+/// that survives as a result axis, so the cartesian partial-reduce
+/// projection cannot tell the two occurrences apart -- a result coordinate
+/// is ambiguous between them. The skip covers every spelling of the
+/// predicate: the iterated-diagonal read (`x[D1] = SUM(cube[D1,D1,*])`,
+/// where the projection would additionally score off-diagonal rows the
+/// executed simulation never reads), the repeated-dim OWNER
+/// (`x[D1,D1] = SUM(cube[D1,D1,*])`, where the simulation reads the full
+/// square but the projection is still ambiguous), and the whole-extent
+/// broadcast (`x[D1] = SUM(cube[*,*,*])` over `cube[D1,D1,D2]`). The
+/// hoistable spellings' minting is declined upstream
 /// (`result_dims_has_repeated_dim`); this is the remaining cartesian-branch
 /// landing, closed with the same loud-skip discipline as the other
 /// unscoreable classes (no link-score variable, the edge recorded in
@@ -1046,12 +1061,13 @@ pub(super) fn emit_unscoreable_duplicated_dim_source_warning(
 ) {
     use salsa::Accumulator;
     let msg = format!(
-        "LTM link score for edge {from} -> {to} could not be computed: {from} is \
-         read by a reducer whose iterated axes repeat a dimension (a square-source \
-         read like {from}[D,D,*]), so the executed simulation reads only the diagonal \
-         while the per-element score projection cannot disambiguate the repeated \
-         dimension; this edge will have no link-score variable and feedback loops \
-         through it will not be scored"
+        "LTM link score for edge {from} -> {to} could not be computed: {from}'s \
+         declared dimensions repeat a dimension that also survives as a result \
+         axis of the reducer reading it (a square-source shape like \
+         {from}[D,D,...]), so a per-element score cannot disambiguate which \
+         occurrence of the repeated dimension a result coordinate refers to; \
+         this edge will have no link-score variable and feedback loops through \
+         it will not be scored"
     );
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
@@ -2139,10 +2155,13 @@ pub(super) fn emit_source_to_agg_link_scores(
         row_dim_names: &row_dim_names,
         dims_ctx: Some(project_dimensions_context(db, project)),
         // The live source's accepted slice: resolves a mismatched-arity
-        // feeder dep's index at the Iterated axis position (see
-        // `resolve_mismatched_index_position`). The repeated-dim co-source
-        // case is now declined at agg minting (GH #778/#785), so the
-        // duplicate-dim resolution is unreachable defense-in-depth here.
+        // feeder dep's index at the Iterated axis position -- sound and
+        // LOAD-BEARING for a repeated-dim co-source like `matrix[D1,D1]`
+        // read as `SUM(matrix[*, D1] * frac[D1])` (slice `[Reduced,
+        // Iterated]`, result_dims `[D1]`: still minted, the GH #767 live
+        // shape); see `resolve_mismatched_index_position`. Only the
+        // DOUBLY-Iterated case (result_dims repeated) is declined at agg
+        // minting (GH #778/#785) and never reaches here.
         live_read_slice: Some(agg.source_read_slice(from)),
     };
     let dim_element_lists: Vec<Vec<String>> = from_dims
