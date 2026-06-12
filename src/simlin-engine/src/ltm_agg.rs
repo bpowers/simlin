@@ -1933,11 +1933,27 @@ pub(crate) enum UnhoistedSourceRead {
     /// user the actual slice their equation reads
     /// ([`render_read_slice_for_diagnostic`]) instead of a canned example.
     StrictSlice(Vec<AxisRead>),
+    /// GH #792 unified per-element-owner rule: `to` is a PER-ELEMENT-EQUATION
+    /// (`Ast::Arrayed`) owner and at least one slot body reads `from` inside a
+    /// reducer. At both consultation sites the edge's routed-agg set is empty,
+    /// so every such read is un-hoisted -- and a per-element owner has NO
+    /// whole-edge derivation that can represent per-slot reducer reads: the
+    /// cartesian arm needs a single dt-expression and the Bare per-shape
+    /// stand-in conflates all slots (it simulated to a silent ~-0.0). The
+    /// caller must DECLINE the edge loudly REGARDLESS of whether the reads are
+    /// strict, full-extent, dim-named, or dynamic-index -- the strict/full
+    /// distinction validates the cartesian projection, which does not exist
+    /// for this owner shape. Carries the first statically-describable read
+    /// slice (deterministic sorted-slot walk order) for the diagnostic, or
+    /// `None` when every read is dim-named/dynamic.
+    PerElementReducerRead(Option<Vec<AxisRead>>),
     /// Not statically describable (a dynamic index `pop[idx,*]`, a declined
     /// mapping, a `@N`/`Range`), OR `from` is not a direct subscript/var
-    /// reducer source in `to`'s equation. The conservative cartesian
-    /// cross-product is the DOCUMENTED behavior for the dynamic-index family,
-    /// so the caller keeps it (no decline).
+    /// reducer source in `to`'s equation (e.g. a bare or literal-subscript
+    /// reference outside any reducer -- the disjoint-dim FixedIndex family).
+    /// The conservative cartesian cross-product is the DOCUMENTED behavior
+    /// for the scalar/A2A dynamic-index family, so the caller keeps it (no
+    /// decline).
     NotDescribable,
 }
 
@@ -1964,25 +1980,32 @@ pub(crate) fn render_read_slice_for_diagnostic(slice: &[AxisRead]) -> String {
 
 /// Classify how the NOT-hoisted reducer in `to`'s equation reads its arrayed
 /// source `from`, for the GH #791 cartesian-derivation decline (whole-RHS
-/// scalar/A2A owner) AND the GH #792 Bare-stand-in decline (per-element-equation
-/// owner). Walks `to`'s owner expression(s) to the maximal reducer App that
-/// reads `from` and runs the SAME per-axis classifier (`compute_read_slice` over
-/// `classify_axis_access`) the hoisting path uses, so the decline predicate and
-/// the agg-minting predicate can never disagree about whether a read is
-/// full-extent.
+/// scalar/A2A owner) AND the GH #792 per-element-owner decline.
 ///
 /// For a `Scalar`/`ApplyToAll` owner the verdict is over its single
-/// dt-expression. For an `Ast::Arrayed` (per-element-equation) owner -- the
-/// GH #792 shape -- it is the per-slot combination: a strict slot declines the
-/// WHOLE edge (the edge's one arrayed Bare stand-in conflates all slots, so a
-/// strict slot proves it wrong), with the GH #744 full-extent escape staying
-/// slot-local. See the `Ast::Arrayed` arm for the precedence rationale.
+/// dt-expression: the maximal reducer Apps that read `from` are classified by
+/// the SAME per-axis classifier (`compute_read_slice` over
+/// `classify_axis_access`) the hoisting path uses, with the SAME iterated-dim
+/// context (`enumerate_agg_nodes`' Scalar/A2A arms), so for these owners the
+/// decline predicate and the agg-minting predicate agree axis-for-axis about
+/// whether a read is full-extent. `from` may appear in a reducer more than
+/// once (a self-product) or in two different slices; the single-expr
+/// classifier returns `StrictSlice` if ANY of `from`'s reads is a strict slice
+/// and `NotDescribable` if any is not statically describable -- either way the
+/// cartesian projection cannot soundly attribute that source.
 ///
-/// `from` may appear in a reducer more than once (a self-product) or in two
-/// different slices; the single-expr classifier returns `StrictSlice` if ANY of
-/// `from`'s reads in that expression is a strict slice and `NotDescribable` if
-/// any is not statically describable -- either way the cartesian projection
-/// cannot soundly attribute that source.
+/// For an `Ast::Arrayed` (per-element-equation) owner -- the GH #792 shape --
+/// the rule is deliberately COARSER than the per-axis classification: ANY slot
+/// reading `from` inside a reducer yields [`PerElementReducerRead`] (a
+/// decline), regardless of strict/full-extent/dim-named/dynamic. The per-axis
+/// strict-vs-full distinction exists to validate the CARTESIAN projection,
+/// which requires a single dt-expression a per-element owner does not have;
+/// the only derivation left for these edges is the Bare per-shape stand-in,
+/// which conflates all slots and is wrong for every un-hoisted reducer read
+/// (verified empirically: a full-extent-read fixture's stand-in simulated to
+/// the same silent ~-0.0 as the strict one). See the `Ast::Arrayed` arm.
+///
+/// [`PerElementReducerRead`]: UnhoistedSourceRead::PerElementReducerRead
 ///
 /// Salsa-tracked, keyed on the interned [`LtmLinkId`] (the
 /// `link_score_equation_text` idiom): the body's `reconstruct_model_variables`
@@ -2013,86 +2036,100 @@ pub(crate) fn unhoisted_reducer_source_read<'db>(
     let Some(ast) = to_var.ast() else {
         return UnhoistedSourceRead::NotDescribable;
     };
-    // Mirror `enumerate_agg_nodes`' per-AST context: the A2A dims (and a
-    // per-element owner's declared dims) are the target's iterated dimensions;
-    // a scalar owner has none in scope.
-    let target_iterated_dims: Vec<String> = match ast {
-        Ast::Scalar(_) => vec![],
-        Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => {
-            dims.iter().map(|d| d.name().to_string()).collect()
-        }
-    };
-    let ctx = AggWalkCtx {
-        variables: &variables,
-        target_iterated_dims: &target_iterated_dims,
-        dm_dims: dm_dims.as_slice(),
-        dim_ctx,
-    };
+    // Mirror `enumerate_agg_nodes`' per-AST context exactly: the A2A dims are
+    // the target's iterated dimensions; a scalar owner has none; and a
+    // PER-ELEMENT owner's slots also have NONE in scope (`enumerate_agg_nodes`'
+    // `Ast::Arrayed` arm walks slots with empty `target_iterated_dims` -- each
+    // slot is an equation for a specific element, so a dim-named index like
+    // `pop[Region,*]` is NOT an iterated read there; classifying it `Iterated`
+    // here would call the read full-extent while execution pins the dim to the
+    // slot's element, the GH #792 dim-name finding).
     let from_canon = canonicalize(from).into_owned();
 
     match ast {
-        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
+        Ast::Scalar(expr) => {
+            let ctx = AggWalkCtx {
+                variables: &variables,
+                target_iterated_dims: &[],
+                dm_dims: dm_dims.as_slice(),
+                dim_ctx,
+            };
+            classify_expr_source_read(expr, &ctx, &from_canon)
+        }
+        Ast::ApplyToAll(dims, expr) => {
+            let target_iterated_dims: Vec<String> =
+                dims.iter().map(|d| d.name().to_string()).collect();
+            let ctx = AggWalkCtx {
+                variables: &variables,
+                target_iterated_dims: &target_iterated_dims,
+                dm_dims: dm_dims.as_slice(),
+                dim_ctx,
+            };
             classify_expr_source_read(expr, &ctx, &from_canon)
         }
         // GH #792: a PER-ELEMENT-EQUATION owner (`share[nyc] = SUM(pop[nyc,*] *
-        // w[*])`, `share[boston] = SUM(pop[boston,*] * w[*])`) has no single
-        // dt-expression -- the I1-declined strict-slice reducer lives in the
-        // SLOT bodies. The edge `pop -> share` never reaches the cartesian arm
-        // (a per-element owner skips `try_cross_dimensional_link_scores`), so
-        // before this it fell to the Bare per-shape stand-in: a single arrayed
-        // `link_score:pop->share` simulating to ~-0.0 with no per-edge warning.
-        // Classify each slot's read with the SAME single-expr classifier (one
-        // verdict source, the epic's one-predicate invariant) and combine:
-        // ANY slot that reads `from` STRICTLY (a `StrictSlice`) declines the
-        // WHOLE edge, since the edge's one arrayed Bare stand-in conflates all
-        // slots -- a strict slot proves it wrong for at least that slot. The
-        // GH #744 full-extent escape stays SLOT-LOCAL (a slot whose reducer
-        // reads `from` both full-extent and pinned, `SUM(pop[*] * pop[north])`,
-        // classifies `FullExtent` like the scalar path), since one slot's
-        // full read says nothing about a DIFFERENT slot's strict read. A
-        // strict verdict dominates a `NotDescribable` slot: the strict slot is
-        // provably wrong, so the loud skip is always sound, where the
-        // dynamic-index slot's conservative cross-product is merely "documented
-        // OK" -- declining the whole edge is the conservative choice the issue
-        // prescribes. Longer-term, per-slot pinned slices are statically
-        // describable (each slot pins its row), so a per-element hoist could
-        // score this shape exactly (GH #792, out of scope here).
+        // w[*])` per slot) has no single dt-expression -- un-hoisted reducer
+        // reads live in the SLOT bodies, and the edge has NO whole-edge
+        // derivation that can represent them: `classify_reducer` needs a single
+        // expression (so the cartesian arm is unreachable except through an
+        // EXCEPT default), and the Bare per-shape stand-in conflates all slots
+        // (it simulated to a silent ~-0.0 for strict, dim-named, AND
+        // full-extent slot reads alike -- the full-extent verdict only
+        // validates the cartesian projection, which does not exist here). The
+        // unified rule is therefore: if ANY slot (or the EXCEPT default) reads
+        // `from` inside a maximal reducer -- describable or not -- the edge is
+        // `PerElementReducerRead` and the caller declines it loudly. Only an
+        // owner whose slots reference `from` exclusively OUTSIDE reducers
+        // (bare refs, the disjoint-dim FixedIndex family) stays
+        // `NotDescribable` and keeps its existing emission path. The first
+        // statically-describable slice (sorted-slot walk order, deterministic)
+        // rides along for the diagnostic. Longer-term, per-slot pinned slices
+        // are statically describable (each slot pins its row), so a per-slot
+        // hoist could score this shape exactly -- tracked as a follow-up
+        // enhancement; see the PR's follow-up issue list.
         Ast::Arrayed(_, subscript_map, default_expr, _) => {
-            let mut combined = UnhoistedSourceRead::FullExtent;
+            let ctx = AggWalkCtx {
+                variables: &variables,
+                target_iterated_dims: &[],
+                dm_dims: dm_dims.as_slice(),
+                dim_ctx,
+            };
             let mut keys: Vec<_> = subscript_map.keys().collect();
             keys.sort();
             let slot_exprs = keys
                 .into_iter()
                 .map(|k| &subscript_map[k])
                 .chain(default_expr.iter());
+            let mut any_reducer_read = false;
+            let mut representative: Option<Vec<AxisRead>> = None;
             for expr in slot_exprs {
-                match classify_expr_source_read(expr, &ctx, &from_canon) {
-                    // A strict slot is provably wrong for the Bare stand-in;
-                    // decline immediately with its representative slice.
-                    strict @ UnhoistedSourceRead::StrictSlice(_) => return strict,
-                    // Remember a not-describable slot but keep scanning -- a
-                    // later strict slot still dominates.
-                    UnhoistedSourceRead::NotDescribable => {
-                        combined = UnhoistedSourceRead::NotDescribable;
+                let mut slices: Vec<Option<Vec<AxisRead>>> = Vec::new();
+                collect_from_read_slices_in_reducers(expr, &ctx, &from_canon, false, &mut slices);
+                if !slices.is_empty() {
+                    any_reducer_read = true;
+                    if representative.is_none() {
+                        representative = slices.into_iter().flatten().next();
                     }
-                    // A full-extent (or `from`-free) slot leaves the verdict
-                    // unchanged unless an earlier slot weakened it.
-                    UnhoistedSourceRead::FullExtent => {}
                 }
             }
-            combined
+            if any_reducer_read {
+                UnhoistedSourceRead::PerElementReducerRead(representative)
+            } else {
+                UnhoistedSourceRead::NotDescribable
+            }
         }
     }
 }
 
-/// Classify how a SINGLE owner expression `expr` reads its arrayed source
-/// `from_canon` for the GH #791/#792 cartesian-/Bare-stand-in decline: collect
-/// every read slice of `from` inside `expr`'s maximal reducers and reduce them
-/// to one [`UnhoistedSourceRead`]. Shared by the scalar/A2A whole-RHS owner
-/// (one call over the single dt-expression) and the per-element-equation owner
-/// (one call per slot body, GH #792). Keeping the per-expr logic here -- rather
-/// than inlining it twice -- is what makes the per-slot decision use the EXACT
-/// same predicate as the whole-RHS one.
+/// Classify how a SINGLE Scalar/A2A owner expression `expr` reads its arrayed
+/// source `from_canon` for the GH #791 cartesian decline: collect every read
+/// slice of `from` inside `expr`'s maximal reducers and reduce them to one
+/// [`UnhoistedSourceRead`] (strict-and-never-full-extent => `StrictSlice`).
+/// The per-element (`Ast::Arrayed`) owner deliberately does NOT use this
+/// reduction -- its arm in [`unhoisted_reducer_source_read`] declines on ANY
+/// reducer read of `from`, because the strict-vs-full distinction this
+/// function draws only validates the cartesian projection, which requires a
+/// single dt-expression (GH #792).
 fn classify_expr_source_read(
     expr: &Expr2,
     ctx: &AggWalkCtx<'_>,
@@ -2390,11 +2427,10 @@ mod tests {
     /// GH #792: a PER-ELEMENT-EQUATION (`Ast::Arrayed`) owner whose every slot
     /// holds a strict-slice multi-source reducer (each `share` slot is
     /// `SUM(pop[<region>,*] * w[*])`) classifies the `pop -> share` edge
-    /// `StrictSlice` -- the per-slot verdict combines to a decline. The first
-    /// strict slot in sorted-key order (`boston`) supplies the representative
-    /// slice.
+    /// `PerElementReducerRead` -- a decline. The first describable slice in
+    /// sorted-slot order (`boston`) rides along for the diagnostic.
     #[test]
-    fn unhoisted_source_read_strict_slice_for_per_element_owner() {
+    fn unhoisted_source_read_declines_per_element_strict_slots() {
         let project = TestProject::new("per_element_strict")
             .named_dimension("Region", &["nyc", "boston"])
             .named_dimension("D2", &["p", "q"])
@@ -2409,19 +2445,20 @@ mod tests {
                 ],
                 None,
             );
-        let UnhoistedSourceRead::StrictSlice(slice) = source_read(&project, "pop", "share") else {
-            panic!("a per-element owner with strict-slice slots must classify StrictSlice");
+        let UnhoistedSourceRead::PerElementReducerRead(Some(slice)) =
+            source_read(&project, "pop", "share")
+        else {
+            panic!("per-element strict-slice slots must classify PerElementReducerRead(Some)");
         };
         // Sorted-key walk visits `boston` before `nyc`.
         assert_eq!(render_read_slice_for_diagnostic(&slice), "boston,*");
     }
 
-    /// GH #792 any-strict precedence: ONLY ONE slot reads `pop` (strictly); the
-    /// other slot does not read `pop` at all (so its single-expr verdict is
-    /// `NotDescribable`). The strict slot dominates -> the WHOLE edge is
-    /// `StrictSlice` (decline). This pins the conservative any-strict rule.
+    /// GH #792 any-reducer-read rule: ONLY ONE slot reads `pop` (inside a
+    /// reducer); the other slot does not read `pop` at all. Any slot's reducer
+    /// read declines the WHOLE edge (the Bare stand-in conflates the slots).
     #[test]
-    fn unhoisted_source_read_strict_slice_dominates_non_reader_slot() {
+    fn unhoisted_source_read_declines_when_only_some_slots_read() {
         let project = TestProject::new("per_element_some")
             .named_dimension("Region", &["nyc", "boston"])
             .named_dimension("D2", &["p", "q"])
@@ -2433,31 +2470,121 @@ mod tests {
                 vec![("nyc", "SUM(pop[nyc,*] * w[*])"), ("boston", "0")],
                 None,
             );
-        let UnhoistedSourceRead::StrictSlice(slice) = source_read(&project, "pop", "share") else {
-            panic!("a strict slot must dominate a non-reader slot");
+        let UnhoistedSourceRead::PerElementReducerRead(Some(slice)) =
+            source_read(&project, "pop", "share")
+        else {
+            panic!("a single reducer-reading slot must decline the whole edge");
         };
         assert_eq!(render_read_slice_for_diagnostic(&slice), "nyc,*");
     }
 
-    /// GH #792 full-extent escape stays SLOT-LOCAL: a per-element owner whose
-    /// every slot reads `pop` at FULL EXTENT (`SUM(pop[*,*])`, all-`Reduced`)
-    /// classifies `FullExtent` -- no strict slot, so no decline (the edge keeps
-    /// whatever scoring its agg-routing / per-shape path produces).
+    /// GH #792 finding 2: a per-element owner whose every slot reads `pop` at
+    /// FULL EXTENT inside an I1-declined multi-source reducer
+    /// (`SUM(pop[*,*] * w[*])`) ALSO declines -- the full-extent verdict only
+    /// validates the cartesian projection, which needs a single dt-expression
+    /// a per-element owner does not have; the Bare stand-in is just as wrong
+    /// for full reads (verified ~-0.0 empirically).
     #[test]
-    fn unhoisted_source_read_full_extent_for_per_element_full_reads() {
+    fn unhoisted_source_read_declines_per_element_full_extent_slots() {
         let project = TestProject::new("per_element_full")
+            .named_dimension("Region", &["nyc", "boston"])
+            .named_dimension("D2", &["p", "q"])
+            .array_aux("pop[Region,D2]", "1")
+            .array_aux("w[D2]", "0.5")
+            .array_with_ranges_direct(
+                "share",
+                vec!["Region".into()],
+                vec![
+                    ("nyc", "SUM(pop[*,*] * w[*])"),
+                    ("boston", "SUM(pop[*,*] * w[*])"),
+                ],
+                None,
+            );
+        let UnhoistedSourceRead::PerElementReducerRead(Some(slice)) =
+            source_read(&project, "pop", "share")
+        else {
+            panic!("per-element full-extent multi-source slots must still decline");
+        };
+        assert_eq!(render_read_slice_for_diagnostic(&slice), "*,*");
+    }
+
+    /// GH #792 finding 1: the DIM-NAME spelling (`SUM(pop[Region,*] * w[*])`
+    /// per slot). In a per-element slot no iterated dimension is in scope
+    /// (mirroring `enumerate_agg_nodes`' Arrayed arm), so the dim-named index
+    /// is not statically describable -- but the read IS a reducer read, so the
+    /// edge still declines, with no representative slice for the diagnostic.
+    /// (Execution pins `Region` to the slot's element -- a strict read -- so
+    /// the previous `Iterated => full extent` classification was wrong; the
+    /// executed-value pin lives in the integration twin.)
+    #[test]
+    fn unhoisted_source_read_declines_per_element_dim_named_slots() {
+        let project = TestProject::new("per_element_dim_named")
+            .named_dimension("Region", &["nyc", "boston"])
+            .named_dimension("D2", &["p", "q"])
+            .array_aux("pop[Region,D2]", "1")
+            .array_aux("w[D2]", "0.5")
+            .array_with_ranges_direct(
+                "share",
+                vec!["Region".into()],
+                vec![
+                    ("nyc", "SUM(pop[Region,*] * w[*])"),
+                    ("boston", "SUM(pop[Region,*] * w[*])"),
+                ],
+                None,
+            );
+        assert!(matches!(
+            source_read(&project, "pop", "share"),
+            UnhoistedSourceRead::PerElementReducerRead(None)
+        ));
+    }
+
+    /// GH #792 explicit sub-case decision: a DYNAMIC-INDEX reducer read inside
+    /// a per-element slot (`SUM(pop[idx,*])`) also declines. Pre-fix it was
+    /// silently stand-in'd exactly like the strict spelling (the scalar/A2A
+    /// dynamic-index family keeps its documented conservative cartesian, but a
+    /// per-element owner has no cartesian arm to keep), so declining is both
+    /// sound and consistent; no existing test pinned the old silent behavior.
+    #[test]
+    fn unhoisted_source_read_declines_per_element_dynamic_index_slots() {
+        let project = TestProject::new("per_element_dyn")
+            .named_dimension("Region", &["nyc", "boston"])
+            .named_dimension("D2", &["p", "q"])
+            .array_aux("pop[Region,D2]", "1")
+            .scalar_aux("idx", "2")
+            .array_with_ranges_direct(
+                "share",
+                vec!["Region".into()],
+                vec![("nyc", "SUM(pop[idx,*])"), ("boston", "SUM(pop[idx,*])")],
+                None,
+            );
+        assert!(matches!(
+            source_read(&project, "pop", "share"),
+            UnhoistedSourceRead::PerElementReducerRead(None)
+        ));
+    }
+
+    /// GH #792 non-decline boundary: a per-element owner that references `pop`
+    /// only OUTSIDE any reducer (the disjoint-dim FixedIndex family's shape)
+    /// classifies `NotDescribable` -- no reducer read, so the edge keeps its
+    /// existing emission path (`try_disjoint_dim_arrayed_link_scores` et al).
+    #[test]
+    fn unhoisted_source_read_not_describable_for_per_element_non_reducer_refs() {
+        let project = TestProject::new("per_element_bare")
             .named_dimension("Region", &["nyc", "boston"])
             .named_dimension("D2", &["p", "q"])
             .array_aux("pop[Region,D2]", "1")
             .array_with_ranges_direct(
                 "share",
                 vec!["Region".into()],
-                vec![("nyc", "SUM(pop[*,*])"), ("boston", "SUM(pop[*,*])")],
+                vec![
+                    ("nyc", "pop[nyc,p] * 0.5"),
+                    ("boston", "pop[boston,q] * 0.5"),
+                ],
                 None,
             );
         assert!(matches!(
             source_read(&project, "pop", "share"),
-            UnhoistedSourceRead::FullExtent
+            UnhoistedSourceRead::NotDescribable
         ));
     }
 

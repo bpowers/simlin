@@ -9375,14 +9375,17 @@ fn gh792_per_element_owner_strict_slice_skips_loudly() {
         unreachable!("filtered to Assembly above");
     };
     assert!(
-        msg.contains("pop -> share") && msg.contains("strict slice"),
-        "the warning must name the unscoreable edge and the strict-slice reason; got: {msg}"
+        msg.contains("pop -> share")
+            && msg.contains("per-element equations")
+            && msg.contains("inside a reducer"),
+        "the warning must name the unscoreable edge and the per-element reducer-read \
+         reason; got: {msg}"
     );
     // The rendered slice is whichever slot the deterministic sorted-key walk
     // hits first (boston < nyc), but EITHER pinned spelling is acceptable.
     assert!(
         msg.contains("pop[boston,*]") || msg.contains("pop[nyc,*]"),
-        "the warning must render the ACTUAL strict slice the slots read; got: {msg}"
+        "the warning must render the ACTUAL slice the slots read; got: {msg}"
     );
 
     // No loop scores survive: every enumerated loop runs through the doomed
@@ -9446,19 +9449,16 @@ fn gh792_per_element_owner_strict_slice_holds_in_discovery_mode() {
         .expect("discovery-mode LTM compilation should succeed");
 }
 
-/// GH #792, the MIXED-SLOT decision (any-strict => decline whole edge): ONLY
-/// ONE slot reads `pop`, and it reads it STRICTLY (the `nyc` slot is
-/// `SUM(pop[nyc,*] * w[*])`); the other slot does not read `pop` at all
+/// GH #792, the MIXED-SLOT decision (any reducer-reading slot => decline whole
+/// edge): ONLY ONE slot reads `pop`, inside a strict-slice reducer (the `nyc`
+/// slot is `SUM(pop[nyc,*] * w[*])`); the other slot does not read `pop` at all
 /// (`share[boston] = 0`). The edge's one arrayed Bare stand-in conflates both
-/// slots, so the single strict slot proves it wrong for `nyc` -- we decline the
-/// WHOLE edge loudly. This is the "only SOME slots contain the reducer" mixed
-/// case; the verdict combines per-slot with any-strict precedence (a strict slot
-/// dominates a `from`-free / `NotDescribable` slot). A slot reading `pop` at full
-/// extent via a multi-source reducer would instead mint a variable-backed agg and
-/// route the edge through the agg halves, never reaching this gate, so the
-/// full-extent mixed sub-case is exercised by the agg-routing tests, not here.
+/// slots, so the single reducer-reading slot proves it wrong for `nyc` -- we
+/// decline the WHOLE edge loudly. This is the "only SOME slots contain the
+/// reducer" mixed case of the unified per-element rule (ANY slot's un-hoisted
+/// reducer read of `from` declines, regardless of strict/full/dynamic).
 #[test]
-fn gh792_mixed_slot_any_strict_declines_whole_edge() {
+fn gh792_mixed_slot_reducer_read_declines_whole_edge() {
     let project = TestProject::new("gh792_mixed")
         .with_sim_time(0.0, 8.0, 1.0)
         .named_dimension("Region", &["nyc", "boston"])
@@ -9490,10 +9490,11 @@ fn gh792_mixed_slot_any_strict_declines_whole_edge() {
     let bare = format!("{LINK_SCORE_PREFIX}pop\u{2192}share");
     assert!(
         ltm.vars.iter().all(|v| v.name != bare),
-        "a mixed-slot owner with ANY strict slot must decline the whole edge; found {bare:?}"
+        "a mixed-slot owner with ANY reducer-reading slot must decline the whole edge; \
+         found {bare:?}"
     );
-    // The strict slot (`nyc`) drives the decline, so the rendered slice names
-    // the pinned read.
+    // The reducer-reading slot (`nyc`) drives the decline, so the rendered
+    // slice names its pinned read.
     let warnings = assembly_warnings(&db, sync.project);
     assert_eq!(
         warnings.len(),
@@ -9504,19 +9505,158 @@ fn gh792_mixed_slot_any_strict_declines_whole_edge() {
         unreachable!("filtered to Assembly above");
     };
     assert!(
-        msg.contains("pop -> share") && msg.contains("strict slice") && msg.contains("pop[nyc,*]"),
-        "the mixed-slot warning must name the edge, the reason, and the STRICT slot's \
-         slice (pop[nyc,*]); got: {msg}"
+        msg.contains("pop -> share")
+            && msg.contains("per-element equations")
+            && msg.contains("pop[nyc,*]"),
+        "the mixed-slot warning must name the edge, the per-element reason, and the \
+         reducer-reading slot's slice (pop[nyc,*]); got: {msg}"
     );
 }
 
 // GH #792 no-regression: the working disjoint-dim FixedIndex per-element family
 // (`try_disjoint_dim_arrayed_link_scores`, GH #510) reads `from` via LITERAL
-// element subscripts OUTSIDE any reducer, so the strict-slice verdict (which
-// only collects reads INSIDE reducers) classifies it `NotDescribable` and the
-// edge is byte-identically unaffected. That family is pinned by
+// element subscripts OUTSIDE any reducer, so the unified per-element verdict
+// (which declines only reducer reads) classifies it `NotDescribable` and the
+// edge is byte-identically unaffected (unit pin:
+// `ltm_agg::unhoisted_source_read_not_describable_for_per_element_non_reducer_refs`).
+// The family's end-to-end behavior is pinned by
 // `simulate_ltm.rs::test_disjoint_dim_arrayed_target_per_source_element_link_scores`
 // (AC3.3) and the GH #510 element-graph guards, which the full suite re-runs.
+
+/// Shared body for the GH #792 review-batch spellings: build the per-element
+/// `share` fixture with the given slot equations, assert the loud-skip
+/// contract (no `pop->share` link score of any spelling, exactly one
+/// per-element decline warning, all loops through the edge dropped, unrelated
+/// edges intact), and assert the EXECUTED `share[nyc]` value at t=0 -- the
+/// empirical strictness pin (`pop = stock*0.1 = 10` per cell, `w = 0.5`:
+/// a row-only read sums to 10.0, a whole-`pop` read to 20.0).
+fn assert_gh792_per_element_decline(slots: Vec<(&str, &str)>, expected_share_nyc_t0: f64) {
+    let project = TestProject::new("gh792_spelling")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["nyc", "boston"])
+        .named_dimension("D2", &["p", "q"])
+        .array_aux_direct(
+            "pop",
+            vec!["Region".into(), "D2".into()],
+            "stock[Region] * 0.1",
+            None,
+        )
+        .array_aux_direct("w", vec!["D2".into()], "0.5", None)
+        .array_with_ranges_direct("share", vec!["Region".into()], slots, None)
+        .array_flow("inflow[Region]", "share[Region] * 0.05", None)
+        .array_stock("stock[Region]", "100", &["inflow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+
+    let bare = format!("{LINK_SCORE_PREFIX}pop\u{2192}share");
+    assert!(
+        ltm.vars.iter().all(|v| v.name != bare),
+        "the declined per-element edge must emit NO Bare stand-in link score; \
+         found {bare:?}"
+    );
+    assert!(
+        ltm.vars
+            .iter()
+            .all(|v| !(v.name.starts_with(LINK_SCORE_PREFIX)
+                && v.name.contains("pop")
+                && v.name.contains("share"))),
+        "the declined per-element edge must emit no pop->share link score of ANY \
+         spelling; got: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.contains("pop") && v.name.contains("share"))
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    let warnings = assembly_warnings(&db, sync.project);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one Assembly warning (the unscoreable pop -> share edge); \
+         got: {warnings:?}"
+    );
+    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
+        unreachable!("filtered to Assembly above");
+    };
+    assert!(
+        msg.contains("pop -> share") && msg.contains("per-element equations"),
+        "the warning must name the edge and the per-element reducer-read reason; \
+         got: {msg}"
+    );
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
+        "loops through the unscoreable edge must not emit loop scores"
+    );
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name == format!("{LINK_SCORE_PREFIX}inflow\u{2192}stock")),
+        "the unrelated inflow -> stock edge must keep its link score"
+    );
+
+    // The executed-semantics pin: verify what the simulation ACTUALLY computes
+    // for the slot equation, so the strict-vs-full claim is empirical.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    let nyc_off = offset_of(&results, "share[nyc]");
+    let share_nyc_t0 = results.iter().next().map(|row| row[nyc_off]).unwrap();
+    assert!(
+        (share_nyc_t0 - expected_share_nyc_t0).abs() < 1e-9,
+        "executed share[nyc] at t=0 must be {expected_share_nyc_t0} \
+         (10.0 = strict row-only read, 20.0 = whole-pop read); got {share_nyc_t0}"
+    );
+}
+
+/// GH #792 review finding 1, the DIM-NAME spelling: `share[nyc] =
+/// SUM(pop[Region,*] * w[*])` per slot. EXECUTION resolves `Region` inside the
+/// `nyc` slot to `nyc` -- the executed `share[nyc]` is 10.0 (the strict
+/// row-only value, pinned below), NOT 20.0 -- so the read is semantically
+/// PINNED at the slot's element even though it is spelled with the dim name.
+/// The first fix classified this axis `Iterated` (full extent) by passing the
+/// owner's declared dims as iterated dims -- `enumerate_agg_nodes`' Arrayed arm
+/// deliberately uses EMPTY iterated dims -- so the silent ~-0.0 Bare stand-in
+/// and confident 0.0 loops returned byte-for-byte. The unified rule (any
+/// un-hoisted reducer read in any slot declines) closes it.
+#[test]
+fn gh792_per_element_dim_named_slice_skips_loudly() {
+    assert_gh792_per_element_decline(
+        vec![
+            ("nyc", "SUM(pop[Region, *] * w[*])"),
+            ("boston", "SUM(pop[Region, *] * w[*])"),
+        ],
+        10.0,
+    );
+}
+
+/// GH #792 review finding 2, the FULL-EXTENT multi-source spelling:
+/// `share[nyc] = SUM(pop[*,*] * w[*])` per slot (executed share[nyc] = 20.0,
+/// the genuine whole-`pop` read, pinned below). The reducer is I1-declined
+/// (mismatched co-source arity: `pop`'s `[Reduced,Reduced]` vs `w`'s
+/// `[Reduced]`), so no agg is minted and the edge previously fell to the
+/// silent ~-0.0 Bare stand-in. A `FullExtent` verdict is safe for scalar/A2A
+/// owners ONLY because the cartesian arm scores them; a per-element owner has
+/// no cartesian arm, so full-extent does NOT validate the stand-in and the
+/// unified rule declines this spelling too.
+#[test]
+fn gh792_per_element_full_extent_multisource_skips_loudly() {
+    assert_gh792_per_element_decline(
+        vec![
+            ("nyc", "SUM(pop[*, *] * w[*])"),
+            ("boston", "SUM(pop[*, *] * w[*])"),
+        ],
+        20.0,
+    );
+}
 
 /// The GH #792 fixture: a per-element-equation (`Ast::Arrayed`) `share` whose
 /// every slot holds an I1-declined strict-slice multi-source reducer, closed in

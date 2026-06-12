@@ -598,20 +598,18 @@ pub(super) fn try_cross_dimensional_link_scores(
     // -- the projection invents scores for `from`'s UNREAD rows
     // (`pop[boston,*]`) and mis-divides the read rows. Closed with the GH
     // #758/#780 loud skip: no link-score variable, the edge recorded so loops
-    // through it drop. Re-derives `from`'s read slice via the SAME per-axis
-    // classifier the hoisting path uses (one source of truth), so the decline
-    // and the agg-minting predicate can never disagree about a full-extent
-    // read. A NOT-DESCRIBABLE read (the dynamic-index `SUM(pop[idx,*])` carve-out
-    // and declined mappings) keeps the conservative cartesian -- its
-    // documented intended behavior -- as does a genuine full-extent read (the
-    // aligned `SUM(matrix[D1,*])` diagonal a feeder decline can strand here).
-    let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
-    if let crate::ltm_agg::UnhoistedSourceRead::StrictSlice(slice) =
-        crate::ltm_agg::unhoisted_reducer_source_read(db, link_id, model, project)
-    {
-        if unscoreable_edges.insert((from.to_string(), to.to_string())) {
-            emit_unscoreable_strict_slice_reduce_warning(db, model, from, to, slice);
-        }
+    // through it drop. The verdict re-derives `from`'s read slice via the SAME
+    // per-axis classifier the hoisting path uses for Scalar/A2A owners (so the
+    // two agree axis-for-axis there). The shared helper ALSO declines the
+    // GH #792 per-element-owner family, which can only reach this cartesian
+    // arm through an EXCEPT default expression (`classify_reducer` needs a
+    // single expression); declining it here keeps that spelling consistent
+    // with the per-shape fallthrough below. A NOT-DESCRIBABLE read (the
+    // dynamic-index `SUM(pop[idx,*])` carve-out and declined mappings) keeps
+    // the conservative cartesian -- its documented intended behavior -- as
+    // does a genuine full-extent read on a Scalar/A2A owner (the aligned
+    // `SUM(matrix[D1,*])` diagonal a feeder decline can strand here).
+    if decline_unhoisted_reducer_edge(db, model, project, from, to, unscoreable_edges) {
         return Some(vec![]);
     }
 
@@ -1220,16 +1218,21 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
 }
 
 /// Accumulate the AC3.4 `Warning` for a disjoint-dim arrayed -> arrayed
-/// edge that is not statically scoreable (the target's per-element
-/// equations reference the source via a dynamic index, so which target
+/// edge that has no scoreable per-element derivation: the target's
+/// per-element equations reference the source via something other than
+/// literal element subscripts -- a genuinely dynamic index (which target
 /// slots depend on which source elements can't be decided at compile
-/// time). The edge gets *no* link-score variable, and -- like the GH #758
-/// dim-incompatible class -- the caller records it in `unscoreable_edges`
-/// so loop scores traversing it are dropped (their product could only be
-/// a guaranteed-zero stub). Sub-model *pathway* scores referencing the
-/// missing name still get the fragment compiler's zero-contribution
-/// stub-dep fallback. Both are far less misleading than the scalarized
-/// stand-in the pre-#510 path produced.
+/// time), or an un-hoisted reducer read (a statically-describable slice
+/// for which no disjoint-dim emitter exists; note the GH #514
+/// reclassification labels both site shapes `DynamicIndex`, so they are
+/// indistinguishable here and the message names both). The edge gets *no*
+/// link-score variable, and -- like the GH #758 dim-incompatible class --
+/// the caller records it in `unscoreable_edges` so loop scores traversing
+/// it are dropped (their product could only be a guaranteed-zero stub).
+/// Sub-model *pathway* scores referencing the missing name still get the
+/// fragment compiler's zero-contribution stub-dep fallback. Both are far
+/// less misleading than the scalarized stand-in the pre-#510 path
+/// produced.
 pub(super) fn emit_unscoreable_disjoint_edge_warning(
     db: &dyn Db,
     model: SourceModel,
@@ -1240,8 +1243,9 @@ pub(super) fn emit_unscoreable_disjoint_edge_warning(
     let msg = format!(
         "LTM link score for edge {from} -> {to} could not be computed: {to} is a \
          per-element-equation arrayed variable whose equations reference {from} via a \
-         dynamic index, which is not statically scoreable; this edge will have no \
-         link-score variable and feedback loops through it will not be scored"
+         dynamic index or an un-hoisted reducer read, neither of which has a \
+         per-element derivation here; this edge will have no link-score variable and \
+         feedback loops through it will not be scored"
     );
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
@@ -1374,6 +1378,95 @@ pub(super) fn emit_unscoreable_strict_slice_reduce_warning(
         severity: DiagnosticSeverity::Warning,
     })
     .accumulate(db);
+}
+
+/// Accumulate the GH #792 `Warning` for a PER-ELEMENT-EQUATION
+/// (`Ast::Arrayed`) owner whose slot bodies read `from` inside a reducer that
+/// was not hoisted into an aggregate. A per-element owner has no whole-edge
+/// derivation that can represent per-slot reducer reads: the cartesian arm
+/// needs a single dt-expression, and the Bare per-shape stand-in conflates
+/// all slots (it simulated to a silent ~-0.0 for strict, dim-named, and
+/// full-extent slot reads alike, with downstream loops consuming the silent
+/// near-zero). Closed with the same loud-skip discipline as the other
+/// unscoreable classes (no link-score variable, the edge recorded in
+/// `unscoreable_edges` so loops through it are dropped).
+///
+/// `slice` is the first statically-describable read carried by
+/// [`crate::ltm_agg::UnhoistedSourceRead::PerElementReducerRead`]; when
+/// present the message renders it (`pop[nyc,*]`) so the user sees their own
+/// slice; a dim-named or dynamic read has no describable slice to show.
+pub(super) fn emit_unscoreable_per_element_reducer_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    from: &str,
+    to: &str,
+    slice: Option<&[crate::ltm_agg::AxisRead]>,
+) {
+    use salsa::Accumulator;
+    let example = slice
+        .map(|s| {
+            format!(
+                " (e.g. the slice {from}[{}])",
+                crate::ltm_agg::render_read_slice_for_diagnostic(s)
+            )
+        })
+        .unwrap_or_default();
+    let msg = format!(
+        "LTM link score for edge {from} -> {to} could not be computed: {to} is defined \
+         with per-element equations whose bodies read {from} inside a reducer{example} \
+         that could not be hoisted into an aggregate, and no remaining derivation can \
+         represent the per-slot reads (a single whole-edge stand-in score would \
+         misattribute them) -- so the edge is declined instead: it will have no \
+         link-score variable and feedback loops through it will not be scored"
+    );
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: None,
+        error: DiagnosticError::Assembly(msg),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
+/// Consult the GH #791/#792 verdict (`unhoisted_reducer_source_read`,
+/// salsa-cached on the interned `LtmLinkId`) for `(from, to)` and -- when it
+/// is a declining verdict -- record the edge in `unscoreable_edges` and warn
+/// once (the insert dedups pinned-pass / discovery re-visits). Returns `true`
+/// iff the edge was declined, in which case the caller must emit NO link-score
+/// variable for it.
+///
+/// One helper used by BOTH consultation sites (the cartesian arm of
+/// `try_cross_dimensional_link_scores` and `emit_link_scores_for_edge`'s final
+/// per-shape fallthrough) so they can never disagree about which verdicts
+/// decline: `StrictSlice` (the GH #791 scalar/A2A strict family) and
+/// `PerElementReducerRead` (the GH #792 per-element-owner family, any reducer
+/// read). Both sites are reached only with the edge's routed-agg set empty,
+/// so a declining verdict always describes a genuinely un-hoisted read.
+fn decline_unhoisted_reducer_edge(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    from: &str,
+    to: &str,
+    unscoreable_edges: &mut HashSet<(String, String)>,
+) -> bool {
+    let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
+    match crate::ltm_agg::unhoisted_reducer_source_read(db, link_id, model, project) {
+        crate::ltm_agg::UnhoistedSourceRead::StrictSlice(slice) => {
+            if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                emit_unscoreable_strict_slice_reduce_warning(db, model, from, to, slice);
+            }
+            true
+        }
+        crate::ltm_agg::UnhoistedSourceRead::PerElementReducerRead(slice) => {
+            if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                emit_unscoreable_per_element_reducer_warning(db, model, from, to, slice.as_deref());
+            }
+            true
+        }
+        crate::ltm_agg::UnhoistedSourceRead::FullExtent
+        | crate::ltm_agg::UnhoistedSourceRead::NotDescribable => false,
+    }
 }
 
 /// Surface a `Warning` for a ceteris-paribus partial-equation parse failure
@@ -3129,36 +3222,35 @@ pub(super) fn emit_link_scores_for_edge(
         vars.extend(disjoint_vars);
         return;
     }
-    // GH #792: the PER-ELEMENT-EQUATION (`Ast::Arrayed`) owner with an
-    // I1-declined STRICT-SLICE multi-source reducer in its slots
-    // (`share[nyc] = SUM(pop[nyc,*] * w[*])`, `share[boston] = SUM(pop[boston,*]
-    // * w[*])`). Such an owner never reaches the cartesian arm of
-    // `try_cross_dimensional_link_scores` (where GH #791's twin decline lives),
-    // so before this it fell to `emit_per_shape_link_scores` shape Bare, which
-    // minted ONE arrayed `link_score:pop->share` simulating to ~-0.0 with no
-    // per-edge warning -- other enumerated loops then consumed that silent
-    // near-zero. We consult the SAME verdict the cartesian arm does
-    // (`unhoisted_reducer_source_read`, salsa-cached on the interned
-    // `LtmLinkId`, so this is a cache hit when the cartesian arm or a re-visit
-    // already derived it): a `StrictSlice` here means a NON-hoisted strict-slice
-    // reducer read of `from` in `to`'s slots. We can reach this gate only with
-    // `routed_aggs` empty (else we returned at the agg branch above), so no
-    // reducer reading `from` in `to` was hoisted -- the strict read is genuinely
-    // un-hoisted and the Bare stand-in is genuinely wrong. Take the GH #758/#780
-    // loud skip (one warning naming the edge + its actual slice, no link-score
-    // variable, the edge recorded so loops through it drop). A `FullExtent` /
-    // `NotDescribable` verdict keeps the existing per-shape path byte-identical
-    // -- the disjoint-dim FixedIndex family (already handled above), bare
-    // out-of-reducer refs, and the GH #525 PerElement family all classify
-    // non-`StrictSlice` (a bare `from[m]` outside any reducer is collected by
-    // neither slice walk), so none are touched.
-    let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
-    if let crate::ltm_agg::UnhoistedSourceRead::StrictSlice(slice) =
-        crate::ltm_agg::unhoisted_reducer_source_read(db, link_id, model, project)
-    {
-        if unscoreable_edges.insert((from.to_string(), to.to_string())) {
-            emit_unscoreable_strict_slice_reduce_warning(db, model, from, to, slice);
-        }
+    // GH #792: the PER-ELEMENT-EQUATION (`Ast::Arrayed`) owner whose slot
+    // bodies read `from` inside a reducer (`share[nyc] = SUM(pop[nyc,*] *
+    // w[*])` per slot -- and equally the dim-named `SUM(pop[Region,*] * w[*])`
+    // and full-extent `SUM(pop[*,*] * w[*])` spellings). Such an owner cannot
+    // take the cartesian arm of `try_cross_dimensional_link_scores`
+    // (`classify_reducer` needs a single dt-expression; only an EXCEPT default
+    // gets it there, where the same shared helper declines it), so before this
+    // it fell to `emit_per_shape_link_scores` shape Bare, which minted ONE
+    // arrayed `link_score:pop->share` simulating to ~-0.0 with no per-edge
+    // warning -- other enumerated loops then consumed that silent near-zero.
+    // We consult the SAME verdict the cartesian arm does (salsa-cached on the
+    // interned `LtmLinkId`, so a re-visit is a cache hit). We can reach this
+    // gate only with `routed_aggs` empty (else we returned at the agg branch
+    // above), so no reducer reading `from` in `to` was hoisted -- ANY reducer
+    // read the verdict finds is genuinely un-hoisted, and for a per-element
+    // owner NO remaining derivation represents it: take the GH #758/#780 loud
+    // skip (one warning naming the edge, no link-score variable, the edge
+    // recorded so loops through it drop). NOTE this gate is NOT per-element-
+    // only: a Scalar/A2A owner whose strict-slice reducer edge falls past the
+    // try_* arms to this fallthrough (e.g. an equal-dims A2A owner with a
+    // reducer SUBEXPRESSION, which the cartesian arm's dim-containment check
+    // rejects) is declined here too via `StrictSlice` -- deliberate, the same
+    // edge-granularity decline GH #791 applies on the cartesian arm. A
+    // `FullExtent` / `NotDescribable` verdict keeps the existing per-shape
+    // path byte-identical -- the disjoint-dim FixedIndex family (already
+    // handled above), bare out-of-reducer refs, and the GH #525 PerElement
+    // family all classify `NotDescribable` (a reference outside any reducer
+    // is collected by neither slice walk), so none are touched.
+    if decline_unhoisted_reducer_edge(db, model, project, from, to, unscoreable_edges) {
         return;
     }
     emit_per_shape_link_scores(
