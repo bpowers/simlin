@@ -691,6 +691,16 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         return None;
     }
 
+    // A re-visit of an already-recorded doomed edge (the pinned pass dedups
+    // only edges that EMITTED a var, so a doomed edge is re-visited): the
+    // per-element generator would re-doom deterministically and duplicate
+    // the warning (it fires inside `build_var`, before the recording).
+    // Early-return the loud-decline shape instead -- the #758
+    // warn-once-per-edge convention.
+    if unscoreable_edges.contains(&(from.to_string(), to.to_string())) {
+        return Some(vec![]);
+    }
+
     let to_var = reconstruct_single_variable(db, model, project, to)?;
     // Without a lowered AST we can't derive per-element equations.
     // Decline and let the caller's existing path handle the (degenerate)
@@ -1701,13 +1711,17 @@ fn emit_per_element_link_scores(
                 let name = format!(
                     "$\u{205A}ltm\u{205A}link_score\u{205A}{from}[?]\u{2192}{to}[{element}]"
                 );
-                emit_ltm_partial_equation_warning(
-                    db,
-                    model,
-                    &name,
-                    &crate::ltm_augment::PartialEquationError::new(body_text),
-                );
-                unscoreable_edges.insert((from.to_string(), to.to_string()));
+                // Warn only on first recording (#758 convention): a
+                // pinned-pass re-visit re-dooms deterministically and must
+                // stay silent.
+                if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                    emit_ltm_partial_equation_warning(
+                        db,
+                        model,
+                        &name,
+                        &crate::ltm_augment::PartialEquationError::new(body_text),
+                    );
+                }
                 return true;
             };
             let row = row_parts.join(",");
@@ -1739,9 +1753,11 @@ fn emit_per_element_link_scores(
                     compile_directly: false,
                 }),
                 Err(err) => {
-                    // One doomed (row, e) dooms the edge (GH #780; fn doc).
-                    emit_ltm_partial_equation_warning(db, model, &name, &err);
-                    unscoreable_edges.insert((from.to_string(), to.to_string()));
+                    // One doomed (row, e) dooms the edge (GH #780; fn doc);
+                    // warn only on first recording (#758 convention).
+                    if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                        emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    }
                     return true;
                 }
             }
@@ -1872,9 +1888,11 @@ fn iterated_feeder_row_scores(
             }),
             Err(err) => {
                 // GH #780: one doomed row dooms the whole edge (see the fn
-                // doc). Warn once, record, drop every row's score.
-                emit_ltm_partial_equation_warning(db, model, &name, &err);
-                unscoreable_edges.insert((from.to_string(), agg.name.clone()));
+                // doc). Record + warn-on-first-insert (#758 convention; a
+                // pinned-pass re-visit stays silent), drop every row's score.
+                if unscoreable_edges.insert((from.to_string(), agg.name.clone())) {
+                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                }
                 return Some(vec![]);
             }
         }
@@ -1965,10 +1983,13 @@ pub(super) fn emit_source_to_agg_link_scores(
             Err(err) => {
                 // GH #780: the scalar feeder's single score IS this edge's
                 // entire emission; a doom leaves every loop hop through
-                // `(from, agg)` referencing a missing name. Warn + record
-                // so dependent loop scores drop instead of stubbing.
-                emit_ltm_partial_equation_warning(db, model, &name, &err);
-                unscoreable_edges.insert((from.to_string(), agg.name.clone()));
+                // `(from, agg)` referencing a missing name. Record + warn on
+                // first insert only (#758 convention) so dependent loop
+                // scores drop instead of stubbing and a pinned-pass re-visit
+                // does not duplicate the warning.
+                if unscoreable_edges.insert((from.to_string(), agg.name.clone())) {
+                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                }
             }
         }
         return;
@@ -2353,8 +2374,9 @@ pub(super) fn emit_agg_to_target_link_scores(
             let substituted = match slot_text(expr) {
                 Ok(substituted) => substituted,
                 Err(err) => {
-                    emit_ltm_partial_equation_warning(db, model, &name, &err);
-                    unscoreable_edges.insert((agg.name.clone(), to.to_string()));
+                    if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                        emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    }
                     return;
                 }
             };
@@ -2373,8 +2395,9 @@ pub(super) fn emit_agg_to_target_link_scores(
                     compile_directly: false,
                 }),
                 Err(err) => {
-                    emit_ltm_partial_equation_warning(db, model, &name, &err);
-                    unscoreable_edges.insert((agg.name.clone(), to.to_string()));
+                    if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                        emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    }
                 }
             }
         }
@@ -2391,8 +2414,9 @@ pub(super) fn emit_agg_to_target_link_scores(
                         "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
                         agg.name, to
                     );
-                    emit_ltm_partial_equation_warning(db, model, &name, &err);
-                    unscoreable_edges.insert((agg.name.clone(), to.to_string()));
+                    if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                        emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    }
                     return;
                 }
             };
@@ -2442,9 +2466,11 @@ pub(super) fn emit_agg_to_target_link_scores(
                     Err(err) => {
                         // One doomed element dooms the edge; drop the
                         // already-built per-element vars (`edge_vars` never
-                        // commits) -- see the GH #780 note at the top.
-                        emit_ltm_partial_equation_warning(db, model, &name, &err);
-                        unscoreable_edges.insert((agg.name.clone(), to.to_string()));
+                        // commits) and warn only on first recording (#758
+                        // convention) -- see the GH #780 note at the top.
+                        if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                            emit_ltm_partial_equation_warning(db, model, &name, &err);
+                        }
                         return;
                     }
                 }
@@ -2518,9 +2544,11 @@ pub(super) fn emit_agg_to_target_link_scores(
                     Err(err) => {
                         // One doomed element dooms the edge; drop the
                         // already-built per-element vars (`edge_vars` never
-                        // commits) -- see the GH #780 note at the top.
-                        emit_ltm_partial_equation_warning(db, model, &name, &err);
-                        unscoreable_edges.insert((agg.name.clone(), to.to_string()));
+                        // commits) and warn only on first recording (#758
+                        // convention) -- see the GH #780 note at the top.
+                        if unscoreable_edges.insert((agg.name.clone(), to.to_string())) {
+                            emit_ltm_partial_equation_warning(db, model, &name, &err);
+                        }
                         return;
                     }
                 }

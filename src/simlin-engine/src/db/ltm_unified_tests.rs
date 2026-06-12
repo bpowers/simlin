@@ -5271,6 +5271,86 @@ fn gh780_forced_partial_equation_scalar_to_arrayed_drops_loop() {
     );
 }
 
+/// A pinned-pass RE-VISIT of a doomed edge must not warn twice (round-2
+/// review MINOR): the pinned pass dedups only edges that EMITTED a var
+/// (`emitted_edges`), so a doomed edge -- which emits none -- is re-visited
+/// and its emitter re-dooms deterministically. The new #780 doom sites must
+/// gate the warning on `unscoreable_edges.insert(..)` returning true (the
+/// pre-existing #758 convention), so the re-visit is silent. Repro:
+/// discovery mode (the causal-edge pass visits `driver -> grid` first) plus
+/// a pin through the same edge (the pinned pass re-visits it).
+#[test]
+fn gh780_doomed_edge_pinned_revisit_warns_once() {
+    use crate::db::ForcePartialEquationErrorGuard;
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use salsa::Setter;
+
+    let mut project = crate::test_common::TestProject::new("gh780_revisit")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("d1", &["a", "b"])
+        .stock("driver", "1", &["bump"], &[], None)
+        .flow("bump", "feedback", None)
+        .array_aux("grid[d1]", "driver * 0.1")
+        .aux("feedback", "grid[a] * 0.01", None)
+        .build_datamodel();
+    // Pin the loop through the doomed edge (UIDs + LoopMetadata, the
+    // `SetLoopName` shape) so the pinned pass re-visits `driver -> grid`.
+    {
+        let model = &mut project.models[0];
+        let mut uid_of = HashMap::new();
+        for (i, var) in model.variables.iter_mut().enumerate() {
+            let uid = (i as i32) + 1;
+            uid_of.insert(crate::canonicalize(var.get_ident()).into_owned(), uid);
+            match var {
+                datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                datamodel::Variable::Module(m) => m.uid = Some(uid),
+            }
+        }
+        model.loop_metadata.push(datamodel::LoopMetadata {
+            uids: ["driver", "grid", "feedback", "bump"]
+                .iter()
+                .map(|v| uid_of[*v])
+                .collect(),
+            deleted: false,
+            name: "doomed loop".to_string(),
+            description: String::new(),
+        });
+    }
+
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let _force = ForcePartialEquationErrorGuard::new("driver", "grid");
+
+    let _ = model_ltm_variables(&db, model, source_project);
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let partial_warnings: Vec<_> = diags
+        .iter()
+        .map(|CompilationDiagnostic(d)| d)
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && d.variable
+                    .as_deref()
+                    .is_some_and(|v| v.contains("driver\u{2192}grid"))
+                && matches!(d.error, DiagnosticError::Assembly(_))
+        })
+        .collect();
+    assert_eq!(
+        partial_warnings.len(),
+        1,
+        "a pinned-pass re-visit of the doomed edge must NOT duplicate the \
+         partial-equation warning; got: {partial_warnings:?}"
+    );
+}
+
 /// Slot count for a synthetic var: product of its dimensions' element
 /// counts (1 for a scalar). Mirrors the integration suite's `slot_count`.
 #[cfg(test)]
