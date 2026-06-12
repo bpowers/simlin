@@ -1849,6 +1849,56 @@ pub(crate) fn variable_backed_reduce_agg<'a>(
     })
 }
 
+/// Whether `from` is a SCALAR FEEDER of the variable-backed reduce `to`
+/// (GH #790): `to` IS a variable-backed aggregate node the shared
+/// [`variable_backed_reduce_agg`] gate admits, `from` is one of its sources
+/// carrying an EMPTY read slice (a scalar coefficient -- `scale` in
+/// `growth[D1] = SUM(matrix[D1,*] * scale)`), and the agg's canonical slice
+/// carries a genuine `Reduced` axis (a real reduction exists for the scalar
+/// to feed). Returns the variable-backed `AggNode` so the caller can emit
+/// the single changed-last feeder score
+/// ([`crate::ltm_augment::generate_scalar_feeder_to_agg_equation`],
+/// dimensioned over `result_dims`), exactly as the synthetic-agg arm of
+/// `emit_source_to_agg_link_scores` does for the SUBEXPRESSION spelling
+/// (`0.1 + SUM(matrix[D1,*] * scale)`).
+///
+/// This is the scalar sibling of [`AggNode::source_is_projection_feeder`]
+/// (which discriminates the ARRAYED iterated-dim projection feeder, GH #767):
+/// both feed a hoisted reduce per result slot, but a scalar feeder's value is
+/// constant across the whole co-reduced slice, so its single A2A score
+/// suffices where the arrayed feeder needs per-`(row, slot)` scalars. Gated on
+/// the SAME `variable_backed_reduce_agg` decision the element graph and the
+/// loop builder consult, so the emitted Bare A2A name is exactly the hop the
+/// per-slot loops reference (subscripted-after-quote by
+/// `loop_link_score_ref`).
+pub(crate) fn scalar_feeder_of_variable_backed_agg<'a>(
+    aggs: &'a AggNodesResult,
+    from: &str,
+    to: &str,
+    to_dims: &[crate::dimensions::Dimension],
+) -> Option<&'a AggNode> {
+    let agg = variable_backed_reduce_agg(aggs, from, to, to_dims)?;
+    // `from` must be a SCALAR source: an empty read slice. A non-source's
+    // `source_read_slice` is also empty, but `variable_backed_reduce_agg`
+    // already required `reads_var(from)`, so an empty slice here means a
+    // genuine scalar feeder (every arrayed co-source/feeder carries a
+    // non-empty slice by invariant I2).
+    if !agg.source_read_slice(from).is_empty() {
+        return None;
+    }
+    // A genuine reduction must exist for the scalar to feed (the canonical
+    // co-source slice carries a `Reduced` axis). Defense: a no-co-source agg
+    // (all sources all-`Iterated`) is not a reduce a scalar feeds per slot.
+    if !agg
+        .canonical_read_slice()
+        .iter()
+        .any(|ax| matches!(ax, AxisRead::Reduced { .. }))
+    {
+        return None;
+    }
+    Some(agg)
+}
+
 /// How a NOT-hoisted reducer reads one of its arrayed sources -- the verdict
 /// the legacy cartesian partial-/full-reduce derivation needs to decide
 /// whether its per-`(row, slot)` projection is sound (GH #791).

@@ -894,9 +894,26 @@ fn emit_broadcast_reduce_link_scores(
 /// `PartialEquationError`: the warning is accumulated and the edge recorded
 /// in `unscoreable_edges` so dependent loop scores drop, and the caller must
 /// NOT fall back to `emit_per_shape_link_scores`.
+///
+/// **Scalar-feeder-of-a-variable-backed-reduce (GH #790)**: when `to` IS a
+/// variable-backed reduce reading `from` as a SCALAR FEEDER
+/// (`growth[D1] = SUM(matrix[D1,*] * scale)`), the per-target-element
+/// derivation below would emit `scale → growth[a]` / `[b]` partials that
+/// reference the lagged wildcard slice (`SUM(PREVIOUS(matrix[d1·a,*]) *
+/// scale)`, a GH #541-class uncompilable fragment) and degrade every loop
+/// through the feeder to a warned constant-0 stub. Such an edge is routed
+/// FIRST to the SAME changed-last scalar-feeder convention the synthetic-agg
+/// arm uses for the SUBEXPRESSION spelling -- ONE Bare A2A score
+/// `$⁚ltm⁚link_score⁚scale→growth` over `result_dims`,
+/// [`crate::ltm_augment::generate_scalar_feeder_to_agg_equation`] -- so the
+/// two spellings of the same dataflow score identically. Gated on the shared
+/// [`crate::ltm_agg::scalar_feeder_of_variable_backed_agg`] decision, so the
+/// emitted name is exactly the hop the per-slot loops reference.
+#[allow(clippy::too_many_arguments)] // threads salsa keys + agg nodes + emission context
 pub(super) fn try_scalar_to_arrayed_link_scores(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
+    agg_nodes: &crate::ltm_agg::AggNodesResult,
     from: &str,
     to: &str,
     model: SourceModel,
@@ -920,6 +937,61 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     let to_dims = variable_dimensions(db, *to_sv, project).clone();
     if to_dims.is_empty() {
         return None;
+    }
+
+    // GH #790: a scalar feeder of a variable-backed whole-RHS reduce. The
+    // per-target-element machinery below cannot express this shape (its
+    // partial freezes the reducer's wildcard slice as a lagged whole-array
+    // read that fails fragment compile). Route it to the changed-last
+    // scalar-feeder convention -- ONE Bare A2A score dimensioned over the
+    // agg's `result_dims` -- identical to the synthetic-agg arm's handling of
+    // the subexpression spelling.
+    if let Some(agg) =
+        crate::ltm_agg::scalar_feeder_of_variable_backed_agg(agg_nodes, from, to, &to_dims)
+    {
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
+            from, agg.name
+        );
+        match crate::ltm_augment::generate_scalar_feeder_to_agg_equation(
+            from,
+            &agg.name,
+            &agg.equation_text,
+        ) {
+            Ok(text) => {
+                // The agg is arrayed over `result_dims` here (a scalar-target
+                // whole-RHS reduce with a scalar feeder, `result_dims` empty,
+                // is scalar-to-scalar and never reaches this arrayed-`to`
+                // function). The changed-last text is ApplyToAll-compatible
+                // over `result_dims`: the agg's own reducer body iterated over
+                // those dims, with only the scalar feeder frozen at PREVIOUS.
+                let equation = if agg.result_dims.is_empty() {
+                    datamodel::Equation::Scalar(text)
+                } else {
+                    datamodel::Equation::ApplyToAll(agg.result_dims.clone(), text)
+                };
+                return Some(vec![LtmSyntheticVar {
+                    name,
+                    equation,
+                    dimensions: agg.result_dims.clone(),
+                    // agg-named target -> routed direct by the synthetic-agg
+                    // check in compile_ltm_synthetic_fragment.
+                    compile_directly: false,
+                }]);
+            }
+            Err(err) => {
+                // GH #780 contract: the scalar feeder's single score IS this
+                // edge's entire emission; a doom leaves every loop hop through
+                // `(from, to)` referencing a missing name. Record + warn on
+                // first insert only so dependent loop scores drop instead of
+                // stubbing, and a pinned-pass re-visit does not duplicate the
+                // warning.
+                if unscoreable_edges.insert((from.to_string(), to.to_string())) {
+                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                }
+                return Some(vec![]);
+            }
+        }
     }
 
     // A re-visit of an already-recorded doomed edge (the pinned pass dedups
@@ -2990,6 +3062,7 @@ pub(super) fn emit_link_scores_for_edge(
     if let Some(cross_vars) = try_scalar_to_arrayed_link_scores(
         db,
         source_vars,
+        agg_nodes,
         from,
         to,
         model,
