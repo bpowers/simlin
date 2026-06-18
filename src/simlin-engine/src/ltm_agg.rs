@@ -1057,7 +1057,7 @@ fn agg_candidate_for_builtin(
     if let Some(rank_arg) = array_valued_rank_arg(builtin) {
         let source_vars = rank_source_vars(rank_arg, ctx.variables)?;
         let slices = rank_combined_read_slice(rank_arg, ctx)?;
-        let result_dims = rank_result_dims_from_read_slice(&slices, ctx)?;
+        let result_dims = rank_result_dims_from_read_slice(&slices, ctx, &source_vars)?;
         if result_dims.is_empty() {
             return None;
         }
@@ -1137,11 +1137,16 @@ fn rank_combined_read_slice(rank_arg: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Co
 fn rank_result_dims_from_read_slice(
     slices: &CombinedReadSlices,
     ctx: &AggWalkCtx<'_>,
+    source_vars: &[String],
 ) -> Option<Vec<String>> {
-    let (source_var, _) = slices
-        .per_var
-        .iter()
-        .find(|(_, slice)| slice.as_slice() == slices.canonical.as_slice())?;
+    // `per_var` is a HashMap; use the sorted source list so mapped axes with
+    // equivalent canonical slices always choose the same display dimension.
+    let source_var = source_vars.iter().find(|var| {
+        slices
+            .per_var
+            .get(var.as_str())
+            .is_some_and(|slice| slice.as_slice() == slices.canonical.as_slice())
+    })?;
     let source_dims = ctx
         .variables
         .get(&Ident::<Canonical>::new(source_var))
@@ -4343,6 +4348,35 @@ mod tests {
         assert!(synthetic[0].array_valued_rank);
         assert_eq!(synthetic[0].result_dims, vec!["Region"]);
         assert_eq!(source_names(synthetic[0]), vec!["pop"]);
+    }
+
+    /// GH #796 review: multi-source RANK result dims must not depend on
+    /// `HashMap` iteration order. When several sources share the canonical
+    /// rank slice but carry differently named mapped axes, choose the first
+    /// source in canonical source-name order -- the same order `AggSource`
+    /// emission uses.
+    #[test]
+    fn rank_multi_source_result_dims_use_sorted_source_order() {
+        let project = TestProject::new("rank_multi_source_dim_order")
+            .named_dimension("Region", &["r1", "r2"])
+            .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+            // Declare `b` first to make the expected order source-name-based,
+            // not model declaration order.
+            .array_aux("b[State]", "1")
+            .array_aux("a[Region]", "2")
+            .array_aux("r[Region]", "RANK(a[*] + b[*], 1)");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "multi-source RANK must mint one synthetic aggregate node; got: {:?}",
+            result.aggs
+        );
+        assert!(synthetic[0].array_valued_rank);
+        assert_eq!(source_names(synthetic[0]), vec!["a", "b"]);
+        assert_eq!(synthetic[0].result_dims, vec!["Region"]);
     }
 
     /// GH #776 whole-RHS form: `r[Region] = RANK(pop, 1)` uses the same
