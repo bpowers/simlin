@@ -5077,6 +5077,79 @@ fn previous_of_rank_compiles_per_element() {
     );
 }
 
+/// GH #796 review follow-up: `RANK(matrix[Region,*], 1)` ranks Product within
+/// each Region context. The source-to-RANK helper scores should therefore fan
+/// a north matrix row across north product rank slots only, never into south
+/// rank slots.
+#[test]
+fn rank_context_axis_link_scores_stay_pinned_per_row() {
+    let project = TestProject::new("rank_context_axis_link_scores")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["north", "south"])
+        .named_dimension("Product", &["x", "y"])
+        .array_stock("matrix[Region,Product]", "100", &["growth"], &[], None)
+        .array_aux("ranked[Region,Product]", "RANK(matrix[Region,*], 1)")
+        .array_flow(
+            "growth[Region,Product]",
+            "ranked[Region,Product] * 0.01",
+            None,
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "mixed-context RANK helper scores must compile without warnings"
+    );
+
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let rank_agg = ltm_vars
+        .iter()
+        .find(|v| {
+            v.name.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}")
+                && v.dimensions == vec!["Region".to_string(), "Product".to_string()]
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected Region/Product RANK helper; got: {:?}",
+                ltm_vars
+                    .iter()
+                    .map(|v| (v.name.as_str(), v.dimensions.as_slice()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    for product in ["x", "y"] {
+        let expected = format!(
+            "{LINK_SCORE_PREFIX}matrix[north,x]\u{2192}{}[north,{product}]",
+            rank_agg.name
+        );
+        assert!(
+            ltm_vars.iter().any(|v| v.name == expected),
+            "north row should feed north rank slot {product}; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+        let phantom = format!(
+            "{LINK_SCORE_PREFIX}matrix[north,x]\u{2192}{}[south,{product}]",
+            rank_agg.name
+        );
+        assert!(
+            !ltm_vars.iter().any(|v| v.name == phantom),
+            "north row must not feed south rank slot {product}; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+}
+
 /// GH #742, LTM leg: a link-score partial that freezes an array-valued
 /// non-reducing builtin subtree (`PREVIOUS(rank(pop, 1))` inside the
 /// `scale -> grow` partial of `grow[Region] = scale[Region] * RANK(pop, 1)`)

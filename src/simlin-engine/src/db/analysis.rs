@@ -975,7 +975,7 @@ fn emit_agg_routed_edges(
             if let Some(rows) = rows {
                 for crate::db::ltm::ReadSliceRowParts {
                     row_parts,
-                    slot_parts: _,
+                    slot_parts,
                 } in &rows
                 {
                     let from_node = if row_parts.len() == 1 {
@@ -987,6 +987,7 @@ fn emit_agg_routed_edges(
                     let rank_slots = crate::ltm_agg::rank_output_slot_parts_for_row(
                         read_slice,
                         &rank_dim_element_lists,
+                        slot_parts,
                     )
                     .unwrap_or_else(|| fallback_slots.clone());
                     let entry = element_edges.entry(from_node).or_default();

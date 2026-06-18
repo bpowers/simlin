@@ -1325,6 +1325,33 @@ fn element_graph_rank_mapped_source_uses_result_dimension_slots() {
     assert_no_edge(&result, "b[s2]", &format!("{agg}[s2]"));
 }
 
+/// GH #796 review follow-up: in `RANK(matrix[Region,*], 1)`, the Region
+/// axis is the per-row context and Product is the ranked axis. A north source
+/// row can feed every north product rank slot, but must not feed south slots.
+#[test]
+fn element_graph_rank_context_axis_stays_pinned_per_row() {
+    let project = TestProject::new("rank_context_axis_pinned")
+        .named_dimension("Region", &["north", "south"])
+        .named_dimension("Product", &["x", "y"])
+        .array_aux("matrix[Region,Product]", "1")
+        .array_aux("ranked[Region,Product]", "RANK(matrix[Region,*], 1)");
+
+    let result = element_edges(&project);
+    let agg = crate::ltm_agg::synthetic_agg_name(0);
+    for product in ["x", "y"] {
+        assert_edge(
+            &result,
+            "matrix[north,x]",
+            &format!("{agg}[north,{product}]"),
+        );
+        assert_no_edge(
+            &result,
+            "matrix[north,x]",
+            &format!("{agg}[south,{product}]"),
+        );
+    }
+}
+
 /// #514 (element graph, scalar feeder of an *arrayed* hoisted reducer): a
 /// sliced reducer over an A2A body whose argument also references a *scalar*,
 /// e.g. `growth[D1] = SUM(matrix[D1,*] * scale)` with `scale` scalar -- the

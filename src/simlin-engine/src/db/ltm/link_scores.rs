@@ -2619,9 +2619,10 @@ pub(super) fn emit_source_to_agg_link_scores(
         .collect();
     let dim_ctx = project_dimensions_context(db, project);
     if agg.array_valued_rank {
+        let rank_read_slice = agg.source_read_slice(from);
         let rows: Vec<ReadSliceRowParts> =
-            read_slice_row_parts(agg.source_read_slice(from), &dim_element_lists, dim_ctx)
-                .unwrap_or_else(|| {
+            read_slice_row_parts(rank_read_slice, &dim_element_lists, dim_ctx).unwrap_or_else(
+                || {
                     crate::ltm_agg::cartesian_element_parts(&dim_element_lists)
                         .into_iter()
                         .map(|row_parts| ReadSliceRowParts {
@@ -2629,12 +2630,25 @@ pub(super) fn emit_source_to_agg_link_scores(
                             slot_parts: Vec::new(),
                         })
                         .collect()
-                });
+                },
+            );
 
-        // RANK compares each row against the whole ranked view. Unlike scalar
-        // reducers, an Iterated axis does not partition rows by result slot.
-        let rank_coreduced_rows: Vec<String> =
-            rows.iter().map(|row| row.row_parts.join(",")).collect();
+        let has_reduced_rank_axis = rank_read_slice
+            .iter()
+            .any(|axis| matches!(axis, crate::ltm_agg::AxisRead::Reduced { .. }));
+        // Whole-view RANK compares against every source row. Mixed
+        // context/ranked RANK (`matrix[Region,*]`) compares only rows sharing
+        // the same iterated context slot.
+        let all_rank_rows: Vec<String> = rows.iter().map(|row| row.row_parts.join(",")).collect();
+        let mut rank_rows_by_iterated_slot: HashMap<Vec<String>, Vec<String>> = HashMap::new();
+        if has_reduced_rank_axis {
+            for row in &rows {
+                rank_rows_by_iterated_slot
+                    .entry(row.slot_parts.clone())
+                    .or_default()
+                    .push(row.row_parts.join(","));
+            }
+        }
 
         let rank_dims: Vec<crate::dimensions::Dimension> = agg
             .result_dims
@@ -2656,18 +2670,24 @@ pub(super) fn emit_source_to_agg_link_scores(
 
         for ReadSliceRowParts {
             row_parts,
-            slot_parts: _,
+            slot_parts,
         } in &rows
         {
             let row = row_parts.join(",");
             let qualified_row = crate::ltm_augment::qualify_element_csv(&row, from_dims);
+            let rank_coreduced_rows = if has_reduced_rank_axis {
+                &rank_rows_by_iterated_slot[slot_parts]
+            } else {
+                &all_rank_rows
+            };
             let qualified_coreduced: Vec<String> = rank_coreduced_rows
                 .iter()
                 .map(|e| crate::ltm_augment::qualify_element_csv(e, from_dims))
                 .collect();
             let rank_slots = crate::ltm_agg::rank_output_slot_parts_for_row(
-                agg.source_read_slice(from),
+                rank_read_slice,
                 &rank_dim_element_lists,
+                slot_parts,
             )
             .unwrap_or_else(|| fallback_slots.clone());
 

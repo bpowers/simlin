@@ -1953,22 +1953,42 @@ pub(crate) fn cartesian_element_parts(element_lists: &[Vec<String>]) -> Vec<Vec<
 /// output slot. The output slot elements must come from the helper's
 /// [`AggNode::result_dims`] dimensions, not the current source's declared
 /// dimensions: mapped sibling sources may carry different element names, and
-/// proper StarRange inputs use the subdimension view.
+/// proper StarRange inputs use the subdimension view. When the ranked view
+/// also has reduced axes, `Iterated` axes are context axes and stay fixed to
+/// the row's already-remapped `iterated_slot_parts`; with no reduced axes,
+/// active-dimension spellings like `RANK(pop[D], 1)` rank across the iterated
+/// axis itself and fan out over the whole result dimension.
 pub(crate) fn rank_output_slot_parts_for_row(
     read_slice: &[AxisRead],
     result_dim_element_lists: &[Vec<String>],
+    iterated_slot_parts: &[String],
 ) -> Option<Vec<Vec<String>>> {
+    let has_reduced_axis = read_slice
+        .iter()
+        .any(|axis| matches!(axis, AxisRead::Reduced { .. }));
     let mut result_axis_elements = result_dim_element_lists.iter();
+    let mut iterated_slots = iterated_slot_parts.iter();
     let mut per_output_axis: Vec<Vec<String>> = Vec::new();
     for axis in read_slice {
         match axis {
             AxisRead::Pinned(_) => {}
-            AxisRead::Iterated { .. } | AxisRead::Reduced { .. } => {
+            AxisRead::Iterated { .. } => {
+                let elems = result_axis_elements.next()?;
+                if has_reduced_axis {
+                    per_output_axis.push(vec![iterated_slots.next()?.clone()]);
+                } else {
+                    per_output_axis.push(elems.clone());
+                }
+            }
+            AxisRead::Reduced { .. } => {
                 per_output_axis.push(result_axis_elements.next()?.clone());
             }
         }
     }
     if result_axis_elements.next().is_some() {
+        return None;
+    }
+    if has_reduced_axis && iterated_slots.next().is_some() {
         return None;
     }
     Some(cartesian_element_parts(&per_output_axis))
@@ -4443,7 +4463,8 @@ mod tests {
         assert_eq!(
             rank_output_slot_parts_for_row(
                 &active_dim_read,
-                &[vec!["north".to_string(), "south".to_string()]]
+                &[vec!["north".to_string(), "south".to_string()]],
+                &["north".to_string()],
             ),
             Some(vec![vec!["north".to_string()], vec!["south".to_string()]])
         );
@@ -4452,9 +4473,32 @@ mod tests {
         assert_eq!(
             rank_output_slot_parts_for_row(
                 &mapped_source_read,
-                &[vec!["r1".to_string(), "r2".to_string()]]
+                &[vec!["r1".to_string(), "r2".to_string()]],
+                &[],
             ),
             Some(vec![vec!["r1".to_string()], vec!["r2".to_string()]])
+        );
+
+        let context_plus_ranked_axis = vec![
+            AxisRead::Iterated {
+                dim: "region".to_string(),
+                source_dim: "region".to_string(),
+            },
+            AxisRead::Reduced { subset: None },
+        ];
+        assert_eq!(
+            rank_output_slot_parts_for_row(
+                &context_plus_ranked_axis,
+                &[
+                    vec!["north".to_string(), "south".to_string()],
+                    vec!["x".to_string(), "y".to_string()],
+                ],
+                &["north".to_string()],
+            ),
+            Some(vec![
+                vec!["north".to_string(), "x".to_string()],
+                vec!["north".to_string(), "y".to_string()]
+            ])
         );
     }
 
