@@ -5150,6 +5150,108 @@ fn rank_context_axis_link_scores_stay_pinned_per_row() {
         .expect("VM simulation should run to completion");
 }
 
+/// GH #796 review follow-up: a RANK helper over a source dimension can feed a
+/// target dimension only through a positional mapping. The source-to-helper
+/// half is over the ranked source's `State` slots, and the helper-to-target
+/// half must project each `Region` target element back to the mapped `State`
+/// helper slot instead of emitting an ill-typed bare helper score.
+#[test]
+fn rank_mapped_helper_slots_score_mapped_targets() {
+    let project = TestProject::new("rank_mapped_helper_target_scores")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_stock("score[State]", "100", &["growth"], &[], None)
+        .array_aux("ranked[Region]", "RANK(score[*], 1)")
+        .array_flow("growth[State]", "ranked * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "mapped RANK helper target scores must compile without warnings: {:?}",
+        assembly_warnings(&db, sync.project)
+    );
+
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let rank_agg = ltm_vars
+        .iter()
+        .find(|v| {
+            v.name.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}")
+                && v.dimensions == vec!["State".to_string()]
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected State-dimensioned RANK helper; got: {:?}",
+                ltm_vars
+                    .iter()
+                    .map(|v| (v.name.as_str(), v.dimensions.as_slice()))
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    for (state, region) in [("s1", "r1"), ("s2", "r2")] {
+        let expected = format!(
+            "{LINK_SCORE_PREFIX}{}[{state}]\u{2192}ranked[{region}]",
+            rank_agg.name
+        );
+        assert!(
+            ltm_vars.iter().any(|v| v.name == expected),
+            "rank helper slot {state} should score ranked[{region}]; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+        let bare = format!(
+            "{LINK_SCORE_PREFIX}{}\u{2192}ranked[{region}]",
+            rank_agg.name
+        );
+        assert!(
+            !ltm_vars.iter().any(|v| v.name == bare),
+            "mapped target score must not use the bare helper name {bare}"
+        );
+    }
+
+    let loop_through_rank = ltm_vars.iter().any(|v| {
+        v.name.starts_with(LOOP_SCORE_PREFIX)
+            && v.equation.source_text().contains(
+                format!("{LINK_SCORE_PREFIX}{}[s1]\u{2192}ranked[r1]", rank_agg.name).as_str(),
+            )
+            && v.equation.source_text().contains(
+                format!("{LINK_SCORE_PREFIX}score[s1]\u{2192}{}[s1]", rank_agg.name).as_str(),
+            )
+    });
+    assert!(
+        loop_through_rank,
+        "expected a loop score traversing score[s1] through the mapped RANK helper; loop scores: {:?}",
+        ltm_vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| (v.name.as_str(), v.equation.source_text()))
+            .collect::<Vec<_>>()
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for (state, region) in [("s1", "r1"), ("s2", "r2")] {
+        let name = format!(
+            "{LINK_SCORE_PREFIX}{}[{state}]\u{2192}ranked[{region}]",
+            rank_agg.name
+        );
+        let series = series_at(&results, offset_of(&results, &name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "{name} must stay finite; got {series:?}"
+        );
+    }
+}
+
 /// GH #742, LTM leg: a link-score partial that freezes an array-valued
 /// non-reducing builtin subtree (`PREVIOUS(rank(pop, 1))` inside the
 /// `scale -> grow` partial of `grow[Region] = scale[Region] * RANK(pop, 1)`)
