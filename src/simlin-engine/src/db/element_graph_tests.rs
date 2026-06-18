@@ -1274,6 +1274,84 @@ fn element_graph_scalar_feeder_of_hoisted_reducer_is_bare_node() {
     assert_edge(&result, "pop[boston]", "share[boston]");
 }
 
+/// GH #776: `RANK` is array-valued, so each rank output slot depends on the
+/// whole ranked array, not just the same source element. The bare, wildcard,
+/// and active-dimension spellings are equivalent dataflow and must all
+/// enumerate cross-element paths for rank-mediated loops.
+#[test]
+fn element_graph_rank_arg_reads_all_elements_for_ranked_axis_spellings() {
+    for (name, rank_arg) in [
+        ("rank_bare_arg", "RANK(pop, 1)"),
+        ("rank_wildcard_arg", "RANK(pop[*], 1)"),
+        ("rank_active_dim_arg", "RANK(pop[Region], 1)"),
+    ] {
+        let project = TestProject::new(name)
+            .named_dimension("Region", &["north", "south"])
+            .array_aux("pop[Region]", "100")
+            .array_aux("grow[Region]", rank_arg);
+
+        let result = element_edges(&project);
+        let agg = crate::ltm_agg::synthetic_agg_name(0);
+        for from in ["pop[north]", "pop[south]"] {
+            for slot in ["north", "south"] {
+                assert_edge(&result, from, &format!("{agg}[{slot}]"));
+            }
+        }
+        assert_edge(&result, &format!("{agg}[north]"), "grow[north]");
+        assert_edge(&result, &format!("{agg}[south]"), "grow[south]");
+        assert_no_edge(&result, "pop[north]", "grow[north]");
+        assert_no_edge(&result, "pop[south]", "grow[south]");
+    }
+}
+
+/// GH #796 review: when multi-source RANK chooses its helper dimensions from
+/// a canonical source, mapped sibling sources must still feed those helper
+/// slots. The non-canonical `b[State]` rows map positionally to `Region`, so
+/// the edge names must land on `agg[r1]`/`agg[r2]`, not dangling `agg[s1]`.
+#[test]
+fn element_graph_rank_mapped_source_uses_result_dimension_slots() {
+    let project = TestProject::new("rank_mapped_source_slots")
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_aux("a[Region]", "1")
+        .array_aux("b[State]", "2")
+        .array_aux("grow[Region]", "RANK(a[*] + b[*], 1)");
+
+    let result = element_edges(&project);
+    let agg = crate::ltm_agg::synthetic_agg_name(0);
+    assert_edge(&result, "b[s1]", &format!("{agg}[r1]"));
+    assert_edge(&result, "b[s2]", &format!("{agg}[r2]"));
+    assert_no_edge(&result, "b[s1]", &format!("{agg}[s1]"));
+    assert_no_edge(&result, "b[s2]", &format!("{agg}[s2]"));
+}
+
+/// GH #796 review follow-up: in `RANK(matrix[Region,*], 1)`, the Region
+/// axis is the per-row context and Product is the ranked axis. A north source
+/// row can feed every north product rank slot, but must not feed south slots.
+#[test]
+fn element_graph_rank_context_axis_stays_pinned_per_row() {
+    let project = TestProject::new("rank_context_axis_pinned")
+        .named_dimension("Region", &["north", "south"])
+        .named_dimension("Product", &["x", "y"])
+        .array_aux("matrix[Region,Product]", "1")
+        .array_aux("ranked[Region,Product]", "RANK(matrix[Region,*], 1)");
+
+    let result = element_edges(&project);
+    let agg = crate::ltm_agg::synthetic_agg_name(0);
+    for product in ["x", "y"] {
+        assert_edge(
+            &result,
+            "matrix[north,x]",
+            &format!("{agg}[north,{product}]"),
+        );
+        assert_no_edge(
+            &result,
+            "matrix[north,x]",
+            &format!("{agg}[south,{product}]"),
+        );
+    }
+}
+
 /// #514 (element graph, scalar feeder of an *arrayed* hoisted reducer): a
 /// sliced reducer over an A2A body whose argument also references a *scalar*,
 /// e.g. `growth[D1] = SUM(matrix[D1,*] * scale)` with `scale` scalar -- the

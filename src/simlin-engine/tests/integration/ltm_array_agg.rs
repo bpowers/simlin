@@ -5077,6 +5077,181 @@ fn previous_of_rank_compiles_per_element() {
     );
 }
 
+/// GH #796 review follow-up: `RANK(matrix[Region,*], 1)` ranks Product within
+/// each Region context. The source-to-RANK helper scores should therefore fan
+/// a north matrix row across north product rank slots only, never into south
+/// rank slots.
+#[test]
+fn rank_context_axis_link_scores_stay_pinned_per_row() {
+    let project = TestProject::new("rank_context_axis_link_scores")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["north", "south"])
+        .named_dimension("Product", &["x", "y"])
+        .array_stock("matrix[Region,Product]", "100", &["growth"], &[], None)
+        .array_aux("ranked[Region,Product]", "RANK(matrix[Region,*], 1)")
+        .array_flow(
+            "growth[Region,Product]",
+            "ranked[Region,Product] * 0.01",
+            None,
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "mixed-context RANK helper scores must compile without warnings"
+    );
+
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let rank_agg = ltm_vars
+        .iter()
+        .find(|v| {
+            v.name.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}")
+                && v.dimensions == vec!["Region".to_string(), "Product".to_string()]
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected Region/Product RANK helper; got: {:?}",
+                ltm_vars
+                    .iter()
+                    .map(|v| (v.name.as_str(), v.dimensions.as_slice()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    for product in ["x", "y"] {
+        let expected = format!(
+            "{LINK_SCORE_PREFIX}matrix[north,x]\u{2192}{}[north,{product}]",
+            rank_agg.name
+        );
+        assert!(
+            ltm_vars.iter().any(|v| v.name == expected),
+            "north row should feed north rank slot {product}; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+        let phantom = format!(
+            "{LINK_SCORE_PREFIX}matrix[north,x]\u{2192}{}[south,{product}]",
+            rank_agg.name
+        );
+        assert!(
+            !ltm_vars.iter().any(|v| v.name == phantom),
+            "north row must not feed south rank slot {product}; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+}
+
+/// GH #796 review follow-up: a RANK helper over a source dimension can feed a
+/// target dimension only through a positional mapping. The source-to-helper
+/// half is over the ranked source's `State` slots, and the helper-to-target
+/// half must project each `Region` target element back to the mapped `State`
+/// helper slot instead of emitting an ill-typed bare helper score.
+#[test]
+fn rank_mapped_helper_slots_score_mapped_targets() {
+    let project = TestProject::new("rank_mapped_helper_target_scores")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_stock("score[State]", "100", &["growth"], &[], None)
+        .array_aux("ranked[Region]", "RANK(score[*], 1)")
+        .array_flow("growth[State]", "ranked * 0.01", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    assert!(
+        assembly_warnings(&db, sync.project).is_empty(),
+        "mapped RANK helper target scores must compile without warnings: {:?}",
+        assembly_warnings(&db, sync.project)
+    );
+
+    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
+        .vars
+        .clone();
+    let rank_agg = ltm_vars
+        .iter()
+        .find(|v| {
+            v.name.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}")
+                && v.dimensions == vec!["State".to_string()]
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected State-dimensioned RANK helper; got: {:?}",
+                ltm_vars
+                    .iter()
+                    .map(|v| (v.name.as_str(), v.dimensions.as_slice()))
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    for (state, region) in [("s1", "r1"), ("s2", "r2")] {
+        let expected = format!(
+            "{LINK_SCORE_PREFIX}{}[{state}]\u{2192}ranked[{region}]",
+            rank_agg.name
+        );
+        assert!(
+            ltm_vars.iter().any(|v| v.name == expected),
+            "rank helper slot {state} should score ranked[{region}]; got: {:?}",
+            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        );
+        let bare = format!(
+            "{LINK_SCORE_PREFIX}{}\u{2192}ranked[{region}]",
+            rank_agg.name
+        );
+        assert!(
+            !ltm_vars.iter().any(|v| v.name == bare),
+            "mapped target score must not use the bare helper name {bare}"
+        );
+    }
+
+    let loop_through_rank = ltm_vars.iter().any(|v| {
+        v.name.starts_with(LOOP_SCORE_PREFIX)
+            && v.equation.source_text().contains(
+                format!("{LINK_SCORE_PREFIX}{}[s1]\u{2192}ranked[r1]", rank_agg.name).as_str(),
+            )
+            && v.equation.source_text().contains(
+                format!("{LINK_SCORE_PREFIX}score[s1]\u{2192}{}[s1]", rank_agg.name).as_str(),
+            )
+    });
+    assert!(
+        loop_through_rank,
+        "expected a loop score traversing score[s1] through the mapped RANK helper; loop scores: {:?}",
+        ltm_vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .map(|v| (v.name.as_str(), v.equation.source_text()))
+            .collect::<Vec<_>>()
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("VM simulation should run to completion");
+    let results = vm.into_results();
+    for (state, region) in [("s1", "r1"), ("s2", "r2")] {
+        let name = format!(
+            "{LINK_SCORE_PREFIX}{}[{state}]\u{2192}ranked[{region}]",
+            rank_agg.name
+        );
+        let series = series_at(&results, offset_of(&results, &name));
+        assert!(
+            series.iter().all(|v| v.is_finite()),
+            "{name} must stay finite; got {series:?}"
+        );
+    }
+}
+
 /// GH #742, LTM leg: a link-score partial that freezes an array-valued
 /// non-reducing builtin subtree (`PREVIOUS(rank(pop, 1))` inside the
 /// `scale -> grow` partial of `grow[Region] = scale[Region] * RANK(pop, 1)`)
@@ -5088,18 +5263,12 @@ fn previous_of_rank_compiles_per_element() {
 /// element from the first post-initial step (pre-fix it read a constant
 /// -100-class value off the 0-stubbed scalar helpers).
 ///
-/// GH #771 (shape-expressiveness T1): `RANK` is no longer hoisted into an
-/// aggregate node -- hoisting requires `reducer_collapses_to_scalar`
-/// (invariant I5), and RANK is array-valued, so the scalar `$⁚ltm⁚agg⁚0`
-/// whose own equation could not compile (and whose agg-routed loop scores
-/// were stubbed to 0 behind one pinned Warning) is never minted. The `pop`
-/// reference inside `RANK(pop, 1)` classifies by its syntactic shape
-/// (`Bare` -> diagonal edges), so this fixture now compiles with ZERO
-/// warnings and the direct `pop → grow` loop is genuinely enumerated.
-/// Residual (documented on `reducer_collapses_to_scalar`): loops through
-/// the rank *ordering* (element r's rank changing because element s moved
-/// past it) are not enumerated; the diagonal `pop → grow` loop scores ~0
-/// here because the ranks are constant in this regime -- pinned below.
+/// GH #776: `RANK` is array-valued, so it routes through an arrayed synthetic
+/// agg rather than a scalar reducer agg. Every ranked source row feeds every
+/// rank output slot in its iterated context, so loops through rank ordering
+/// are enumerated, including cross-element loops. The score remains the
+/// documented conservative delta-ratio stand-in; with constant ranks all
+/// rank-mediated loops score ~0 here.
 #[test]
 fn rank_frozen_subtree_link_score_scores_correctly() {
     let project = TestProject::new("gh742_rank")
@@ -5118,12 +5287,12 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("LTM-enabled compilation should succeed");
 
-    // GH #771: RANK is de-hoisted, so no ill-shaped scalar agg exists and
+    // RANK uses an array-valued helper, so no ill-shaped scalar agg exists and
     // NOTHING warns -- the capture helpers and every link/loop score compile.
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
         warnings.is_empty(),
-        "RANK de-hoist must leave zero warnings; got: {warnings:?}"
+        "RANK arrayed agg must leave zero warnings; got: {warnings:?}"
     );
 
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
@@ -5164,12 +5333,10 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
         }
     }
 
-    // Post-#771 the model has TWO Region-dimensioned loops: the
-    // scale-mediated one (pop -> scale -> grow -> inflow -> pop) and the
-    // direct rank-mediated one (pop -> grow -> inflow -> pop), which only
-    // exists now that the de-hoisted `pop` reference inside `RANK(pop, 1)`
-    // emits diagonal Bare edges. Tell them apart by the link-score names
-    // their loop-score equations reference.
+    // The model has one Region-dimensioned scale-mediated loop
+    // (pop -> scale -> grow -> inflow -> pop) plus scalar rank-mediated
+    // loops through the arrayed RANK helper. Tell them apart by the
+    // link-score names their loop-score equations reference.
     fn eqn_text(v: &LtmSyntheticVar) -> &str {
         match &v.equation {
             datamodel::Equation::Scalar(t) => t,
@@ -5177,27 +5344,19 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
             datamodel::Equation::Arrayed(..) => panic!("unexpected Arrayed loop score"),
         }
     }
-    let region_loops: Vec<&LtmSyntheticVar> = ltm
+    let loop_scores: Vec<&LtmSyntheticVar> = ltm
         .vars
         .iter()
         .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
-        .filter(|v| v.dimensions == vec!["Region".to_string()])
         .collect();
-    assert_eq!(
-        region_loops.len(),
-        2,
-        "expected the scale-mediated and rank-mediated Region loops; got: {:?}",
-        region_loops
-            .iter()
-            .map(|v| v.name.as_str())
-            .collect::<Vec<_>>()
-    );
 
     // The scale-mediated loop scores +1 once the flow-to-stock startup
     // guard clears (grow is linear in scale with a constant rank coefficient).
-    let scale_loop = region_loops
+    let scale_loop = loop_scores
         .iter()
-        .find(|v| eqn_text(v).contains("scale\u{2192}grow"))
+        .find(|v| {
+            v.dimensions == vec!["Region".to_string()] && eqn_text(v).contains("scale\u{2192}grow")
+        })
         .expect("the per-element pop/scale/grow/inflow loop must be scored");
     let base = offset_of(&results, &scale_loop.name);
     for slot in 0..slot_count(scale_loop, &project.dimensions) {
@@ -5210,23 +5369,59 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
         }
     }
 
-    // The rank-mediated loop (pop -> grow direct) scores ~0: the ranks are
-    // constant in this regime, so `grow`'s changed-first partial w.r.t.
-    // `pop` is flat. This pins the documented #771 residual -- the diagonal
-    // pop->grow coupling is enumerated but carries no score here, and
-    // cross-element rank-ordering loops are not enumerated at all.
-    let rank_loop = region_loops
+    // The rank-mediated loops score ~0: ranks are constant in this regime,
+    // so each RANK-helper slot has zero delta and the conservative
+    // delta-ratio source half contributes 0. There are three scalar loops:
+    // north self-rank, south self-rank, and the true cross-element
+    // north/south rank-ordering loop.
+    let rank_agg_name = ltm
+        .vars
         .iter()
-        .find(|v| eqn_text(v).contains("pop\u{2192}grow"))
-        .expect("the direct pop/grow/inflow loop must be scored");
-    let base = offset_of(&results, &rank_loop.name);
-    for slot in 0..slot_count(rank_loop, &project.dimensions) {
-        let series = series_at(&results, base + slot);
+        .find(|v| match &v.equation {
+            datamodel::Equation::ApplyToAll(dims, text) => {
+                dims.len() == 1 && dims[0] == "Region" && text == "rank(pop, 1)"
+            }
+            datamodel::Equation::Scalar(_) | datamodel::Equation::Arrayed(..) => false,
+        })
+        .expect("RANK(pop, 1) must be emitted as an arrayed aggregate helper")
+        .name
+        .clone();
+    let agg = rank_agg_name.as_str();
+    let rank_loops: Vec<&LtmSyntheticVar> = loop_scores
+        .iter()
+        .copied()
+        .filter(|v| eqn_text(v).contains(&format!("pop[north]\u{2192}{agg}")))
+        .chain(loop_scores.iter().copied().filter(|v| {
+            eqn_text(v).contains(&format!("pop[south]\u{2192}{agg}"))
+                && !eqn_text(v).contains(&format!("pop[north]\u{2192}{agg}"))
+        }))
+        .collect();
+    assert_eq!(
+        rank_loops.len(),
+        3,
+        "expected north, south, and cross-element rank-mediated loops; got: {:?}",
+        loop_scores
+            .iter()
+            .map(|v| (v.name.as_str(), eqn_text(v)))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rank_loops.iter().any(|v| {
+            let text = eqn_text(v);
+            text.contains(&format!("pop[north]\u{2192}{agg}[south]"))
+                && text.contains(&format!("pop[south]\u{2192}{agg}[north]"))
+        }),
+        "expected a cross-element rank-ordering loop through both rank slots"
+    );
+    for rank_loop in rank_loops {
+        assert!(rank_loop.dimensions.is_empty());
+        let series = series_at(&results, offset_of(&results, &rank_loop.name));
         for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS) {
             assert!(
                 v.abs() < 1e-9,
-                "rank-loop score slot {slot} step {step} must be ~0 (constant ranks); \
-                 got {series:?}"
+                "rank-loop score {} step {step} must be ~0 (constant ranks); \
+                 got {series:?}",
+                rank_loop.name
             );
         }
     }

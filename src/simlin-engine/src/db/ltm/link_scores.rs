@@ -23,7 +23,9 @@ use crate::db::{
 };
 
 use super::compile::{ShapedLinkScore, link_score_equation_text_shaped};
-use super::loops::{ReadSliceRow, cartesian_subscripts, read_slice_rows};
+use super::loops::{
+    ReadSliceRow, ReadSliceRowParts, cartesian_subscripts, read_slice_row_parts, read_slice_rows,
+};
 use super::parse::{
     ltm_equation_dimensions, reconstruct_ltm_var_lowered, retarget_ltm_equation_dims,
 };
@@ -2615,27 +2617,147 @@ pub(super) fn emit_source_to_agg_link_scores(
         .iter()
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
+    let dim_ctx = project_dimensions_context(db, project);
+    if agg.array_valued_rank {
+        let rank_read_slice = agg.source_read_slice(from);
+        let rows: Vec<ReadSliceRowParts> =
+            read_slice_row_parts(rank_read_slice, &dim_element_lists, dim_ctx).unwrap_or_else(
+                || {
+                    crate::ltm_agg::cartesian_element_parts(&dim_element_lists)
+                        .into_iter()
+                        .map(|row_parts| ReadSliceRowParts {
+                            row_parts,
+                            slot_parts: Vec::new(),
+                        })
+                        .collect()
+                },
+            );
+
+        let has_reduced_rank_axis = rank_read_slice
+            .iter()
+            .any(|axis| matches!(axis, crate::ltm_agg::AxisRead::Reduced { .. }));
+        // Whole-view RANK compares against every source row. Mixed
+        // context/ranked RANK (`matrix[Region,*]`) compares only rows sharing
+        // the same iterated context slot.
+        let all_rank_rows: Vec<String> = rows.iter().map(|row| row.row_parts.join(",")).collect();
+        let mut rank_rows_by_iterated_slot: HashMap<Vec<String>, Vec<String>> = HashMap::new();
+        if has_reduced_rank_axis {
+            for row in &rows {
+                rank_rows_by_iterated_slot
+                    .entry(row.slot_parts.clone())
+                    .or_default()
+                    .push(row.row_parts.join(","));
+            }
+        }
+
+        let rank_dims: Vec<crate::dimensions::Dimension> = agg
+            .result_dims
+            .iter()
+            .filter_map(|dim| {
+                dim_ctx
+                    .get(&crate::common::CanonicalDimensionName::from_raw(dim))
+                    .cloned()
+            })
+            .collect();
+        if rank_dims.len() != agg.result_dims.len() {
+            return;
+        }
+        let rank_dim_element_lists: Vec<Vec<String>> = rank_dims
+            .iter()
+            .map(crate::ltm_augment::dimension_element_names)
+            .collect();
+        let fallback_slots = crate::ltm_agg::cartesian_element_parts(&rank_dim_element_lists);
+
+        for ReadSliceRowParts {
+            row_parts,
+            slot_parts,
+        } in &rows
+        {
+            let row = row_parts.join(",");
+            let qualified_row = crate::ltm_augment::qualify_element_csv(&row, from_dims);
+            let rank_coreduced_rows = if has_reduced_rank_axis {
+                &rank_rows_by_iterated_slot[slot_parts]
+            } else {
+                &all_rank_rows
+            };
+            let qualified_coreduced: Vec<String> = rank_coreduced_rows
+                .iter()
+                .map(|e| crate::ltm_augment::qualify_element_csv(e, from_dims))
+                .collect();
+            let rank_slots = crate::ltm_agg::rank_output_slot_parts_for_row(
+                rank_read_slice,
+                &rank_dim_element_lists,
+                slot_parts,
+            )
+            .unwrap_or_else(|| fallback_slots.clone());
+
+            for slot_parts in &rank_slots {
+                let slot = slot_parts.join(",");
+                let (var_name, equation) = if slot.is_empty() {
+                    (
+                        format!(
+                            "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
+                            from, row, agg.name
+                        ),
+                        crate::ltm_augment::generate_element_to_scalar_equation(
+                            from,
+                            &agg.name,
+                            &qualified_row,
+                            &qualified_coreduced,
+                            &classified.kind,
+                            classified.name,
+                            classified.is_bare,
+                            Some(&body_ctx),
+                        ),
+                    )
+                } else {
+                    (
+                        format!(
+                            "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}[{}]",
+                            from, row, agg.name, slot
+                        ),
+                        crate::ltm_augment::generate_element_to_reduced_equation(
+                            from,
+                            &agg.name,
+                            &qualified_row,
+                            &crate::ltm_augment::qualify_element_csv(&slot, &rank_dims),
+                            &qualified_coreduced,
+                            &classified.kind,
+                            classified.name,
+                            classified.is_bare,
+                            Some(&body_ctx),
+                        ),
+                    )
+                };
+                vars.push(LtmSyntheticVar {
+                    name: var_name,
+                    equation: datamodel::Equation::Scalar(equation),
+                    dimensions: vec![],
+                    compile_directly: false,
+                });
+            }
+        }
+        return;
+    }
     // The read rows: only the slice the reducer reads -- `from`'s OWN
     // (per-source) slice -- each row paired with its (possibly
     // mapping-remapped, GH #534) agg slot. If the slice doesn't line up
     // with `from`'s axes (shouldn't happen for a hoisted agg whose
     // `sources` include `from`; a non-source's empty slice trips the same
     // arity guard), fall back to all elements / scalar agg.
-    let rows: Vec<ReadSliceRow> = read_slice_rows(
-        agg.source_read_slice(from),
-        &dim_element_lists,
-        project_dimensions_context(db, project),
-    )
-    .unwrap_or_else(|| {
-        let all = cartesian_subscripts(&dim_element_lists);
-        all.iter()
-            .map(|r| ReadSliceRow {
-                row: r.clone(),
-                slot: String::new(),
-                coreduced: all.clone(),
-            })
-            .collect()
-    });
+    let rows: Vec<ReadSliceRow> =
+        read_slice_rows(agg.source_read_slice(from), &dim_element_lists, dim_ctx).unwrap_or_else(
+            || {
+                let all = cartesian_subscripts(&dim_element_lists);
+                all.iter()
+                    .map(|r| ReadSliceRow {
+                        row: r.clone(),
+                        slot: String::new(),
+                        coreduced: all.clone(),
+                    })
+                    .collect()
+            },
+        );
     for ReadSliceRow {
         row,
         slot,
@@ -2802,19 +2924,96 @@ pub(super) fn emit_agg_to_target_link_scores(
     // denominator carry) via `generate_scalar_to_element_equation`'s
     // per-ident `source_pins`, computed by `source_pins_for_target` below.
 
-    // Positions of an agg's `result_dims` within `to`'s dimensions, so a
-    // target element tuple can be projected onto that agg's slot subscript
-    // (for the link-score name's agg side, and for the per-ident body pins).
-    let positions_in_to_dims = |result_dims: &[String]| -> Vec<usize> {
-        result_dims
-            .iter()
-            .filter_map(|rd| {
-                let canon = crate::common::canonicalize(rd);
-                to_dims.iter().position(|td| td.name() == canon.as_ref())
-            })
-            .collect()
+    let dim_ctx = project_dimensions_context(db, project);
+    #[derive(Clone)]
+    struct AggTargetProjectionAxis {
+        target_pos: usize,
+        target_dim: crate::dimensions::Dimension,
+        result_dim: crate::dimensions::Dimension,
+        mapped_elements: Option<Vec<crate::common::CanonicalElementName>>,
+    }
+    #[derive(Clone)]
+    struct AggTargetProjection {
+        expected_axes: usize,
+        axes: Vec<AggTargetProjectionAxis>,
+    }
+    // Projection of a target element tuple onto an agg's `result_dims`, so the
+    // link-score name, denominator, and per-ident body pin all address the same
+    // helper slot. Exact dimension names use the target element directly
+    // (GH #528). Positionally mapped dims use the same correspondence as A2A
+    // execution: a `Region` target can pin a `State`-dimensioned RANK helper to
+    // the State element read for that Region slot.
+    let target_projection_for_result_dims = |result_dims: &[String]| -> AggTargetProjection {
+        let mut axes = Vec::with_capacity(result_dims.len());
+        for rd in result_dims {
+            let result_canon = crate::common::CanonicalDimensionName::from_raw(rd);
+            if let Some((target_pos, target_dim)) = to_dims
+                .iter()
+                .enumerate()
+                .find(|(_, td)| td.canonical_name() == &result_canon)
+            {
+                axes.push(AggTargetProjectionAxis {
+                    target_pos,
+                    target_dim: target_dim.clone(),
+                    result_dim: target_dim.clone(),
+                    mapped_elements: None,
+                });
+                continue;
+            }
+            let Some(result_dim) = dim_ctx.get(&result_canon).cloned() else {
+                continue;
+            };
+            if let Some((target_pos, target_dim, mapped_elements)) = to_dims
+                .iter()
+                .enumerate()
+                .find_map(|(target_pos, target_dim)| {
+                    dim_ctx
+                        .mapped_element_correspondence(target_dim.canonical_name(), &result_canon)
+                        .map(|mapped_elements| (target_pos, target_dim, mapped_elements))
+                })
+            {
+                axes.push(AggTargetProjectionAxis {
+                    target_pos,
+                    target_dim: target_dim.clone(),
+                    result_dim,
+                    mapped_elements: Some(mapped_elements),
+                });
+            }
+        }
+        AggTargetProjection {
+            expected_axes: result_dims.len(),
+            axes,
+        }
     };
-    let result_dim_positions: Vec<usize> = positions_in_to_dims(&agg.result_dims);
+    let result_dim_projection = target_projection_for_result_dims(&agg.result_dims);
+    let slot_parts_for_target =
+        |projection: &AggTargetProjection, element: &str| -> Option<Vec<String>> {
+            if projection.axes.len() != projection.expected_axes {
+                return None;
+            }
+            let parts: Vec<&str> = if element.is_empty() {
+                Vec::new()
+            } else {
+                element.split(',').collect()
+            };
+            projection
+                .axes
+                .iter()
+                .map(|axis| {
+                    let target_elem = parts.get(axis.target_pos)?;
+                    if let Some(mapped_elements) = &axis.mapped_elements {
+                        let target_elem_name =
+                            crate::common::CanonicalElementName::from_raw(target_elem);
+                        let offset = axis.target_dim.get_offset(&target_elem_name)?;
+                        mapped_elements
+                            .get(offset)
+                            .map(|elem| elem.as_str().to_string())
+                    } else {
+                        Some((*target_elem).to_string())
+                    }
+                })
+                .collect()
+        };
     // The target element projected onto the agg's `result_dims` (the
     // agg-slot subscript), or `None` when the agg is scalar / the
     // projection is empty.
@@ -2822,11 +3021,7 @@ pub(super) fn emit_agg_to_target_link_scores(
         if !agg_is_arrayed {
             return None;
         }
-        let parts: Vec<&str> = element.split(',').collect();
-        let slot: Vec<&str> = result_dim_positions
-            .iter()
-            .filter_map(|&p| parts.get(p).copied())
-            .collect();
+        let slot = slot_parts_for_target(&result_dim_projection, element)?;
         (!slot.is_empty()).then(|| slot.join(","))
     };
     // The agg side of the link-score name for a given target element: the
@@ -2853,22 +3048,25 @@ pub(super) fn emit_agg_to_target_link_scores(
         }
     };
     // The QUALIFIED (`d1·a`) projection of a target element onto an agg's
-    // `result_dims` axes (given their precomputed positions in `to`'s dims)
-    // -- the subscript that agg's ident is pinned to in the
-    // per-target-element equation BODY (one `generate_scalar_to_element_equation`
-    // `source_pins` entry). Qualified like the other pinned deps so
-    // `PREVIOUS(agg[...])` references compile to direct LoadPrevs. `None`
-    // when the projection is empty (a scalar agg; referenced bare, nothing
-    // to pin).
-    let qualified_pin_for_target = |positions: &[usize], element: &str| -> Option<String> {
-        let qualified = crate::ltm_augment::qualify_element_csv(element, &to_dims);
-        let parts: Vec<&str> = qualified.split(',').collect();
-        let slot: Vec<&str> = positions
-            .iter()
-            .filter_map(|&p| parts.get(p).copied())
-            .collect();
-        (!slot.is_empty()).then(|| slot.join(","))
-    };
+    // `result_dims` axes -- the subscript that agg's ident is pinned to in the
+    // per-target-element equation BODY (one
+    // `generate_scalar_to_element_equation` `source_pins` entry). Qualified in
+    // the AGG'S result-dim space, so mapped target dims pin the helper slot they
+    // actually read (`state·s1`), not the target slot (`region·r1`).
+    let qualified_pin_for_target =
+        |projection: &AggTargetProjection, element: &str| -> Option<String> {
+            let slot_parts = slot_parts_for_target(projection, element)?;
+            if slot_parts.is_empty() {
+                return None;
+            }
+            let slot = slot_parts.join(",");
+            let result_dims: Vec<crate::dimensions::Dimension> = projection
+                .axes
+                .iter()
+                .map(|axis| axis.result_dim.clone())
+                .collect();
+            Some(crate::ltm_augment::qualify_element_csv(&slot, &result_dims))
+        };
     // Every ARRAYED agg referenced by the substituted equation needs a body
     // pin (GH #751): the LIVE agg (held live; the GH #528 projection) and
     // every frozen CO-AGG -- another hoisted reducer of the same target,
@@ -2877,16 +3075,16 @@ pub(super) fn emit_agg_to_target_link_scores(
     // Each ident is projected onto ITS OWN `result_dims` positions.
     // `aggs_in_var` yields first-encounter order, so the pin list -- and the
     // emitted equation text -- is deterministic.
-    let arrayed_agg_pin_positions: Vec<(Ident<Canonical>, Vec<usize>)> = {
-        let mut pins: Vec<(Ident<Canonical>, Vec<usize>)> = Vec::new();
+    let arrayed_agg_pin_projections: Vec<(Ident<Canonical>, AggTargetProjection)> = {
+        let mut pins: Vec<(Ident<Canonical>, AggTargetProjection)> = Vec::new();
         if agg_is_arrayed {
-            pins.push((agg_canonical.clone(), result_dim_positions.clone()));
+            pins.push((agg_canonical.clone(), result_dim_projection.clone()));
         }
         for other in agg_nodes.aggs_in_var(to) {
             if other.is_synthetic && other.name != agg.name && !other.result_dims.is_empty() {
                 pins.push((
                     Ident::<Canonical>::new(&other.name),
-                    positions_in_to_dims(&other.result_dims),
+                    target_projection_for_result_dims(&other.result_dims),
                 ));
             }
         }
@@ -2895,10 +3093,10 @@ pub(super) fn emit_agg_to_target_link_scores(
     // The per-ident pin map for one target element: each arrayed agg pinned
     // to the target element's projection onto its own result axes.
     let source_pins_for_target = |element: &str| -> Vec<(Ident<Canonical>, String)> {
-        arrayed_agg_pin_positions
+        arrayed_agg_pin_projections
             .iter()
-            .filter_map(|(ident, positions)| {
-                qualified_pin_for_target(positions, element).map(|slot| (ident.clone(), slot))
+            .filter_map(|(ident, projection)| {
+                qualified_pin_for_target(projection, element).map(|slot| (ident.clone(), slot))
             })
             .collect()
     };

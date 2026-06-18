@@ -97,11 +97,11 @@ use crate::test_common::TestProject;
 /// referencing variable's own index, to keep the dependency DAG acyclic).
 ///
 /// The reducer patterns are deliberately SUM-only: every reducer here is
-/// hoisted, so the per-reducer agg-hop expectations assume `ThroughAgg`
-/// routing. If a later task adds RANK patterns to the strategy, their
-/// expectations must encode the DE-HOISTED `Direct` routing instead --
-/// RANK is array-valued and never hoisted (GH #771,
-/// `ltm_agg::reducer_is_hoistable`).
+/// scalar-valued, so the per-reducer agg-hop expectations assume scalar
+/// reducer routing. If a later task adds RANK patterns to the strategy, their
+/// expectations must encode the ARRAY-valued RANK agg routing instead --
+/// every read row can feed every rank output slot in its iterated context
+/// (GH #776).
 #[derive(Debug, Clone)]
 enum RefPattern {
     /// `vN` -- bare same-element reference.

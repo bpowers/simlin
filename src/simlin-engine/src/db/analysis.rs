@@ -470,12 +470,9 @@ fn emit_edges_for_reference(
             // carve-out (`SUM(pop[idx,*])`, reclassified from `Wildcard` by
             // the IR); `Wildcard` here is a variable-backed WHOLE-EXTENT
             // reducer's whole-RHS argument (a full reduction feeding every
-            // target element), a DE-HOISTED array-valued reducer's wildcard
-            // arg (`RANK(pop[*], 1)` -- GH #771: RANK never sets
-            // `in_reducer`, so the IR's #514 reclassification doesn't fire
-            // and the site keeps its syntactic shape; the cross-product is
-            // the intended coarse-but-sound treatment), or a rare
-            // non-reducer whole-array reference -- a hoisted
+            // target element), or a rare non-reducer whole-array reference.
+            // Hoisted scalar reducers and array-valued RANK helpers are
+            // routed through aggregate nodes before they reach this arm: a
             // *synthetic*-agg reducer reference is routed through the agg
             // (`emit_agg_routed_edges`) and a variable-backed PARTIAL
             // reducer's argument is routed by its read slice through the
@@ -839,28 +836,31 @@ fn emit_agg_routed_edges(
     // The agg's result-axis dimensions (`AggNode::result_dims`, datamodel-
     // cased), resolved to the `Dimension` objects -- so `cartesian_element_names`
     // / `expand_same_element` and the agg-slot subscripting below can operate
-    // on them directly. The agg's result dims are always dimensions the target
-    // `to` iterates over (they come from the target equation's iterated
-    // dimensions), and -- when the reducer reads its arrayed source by the
-    // matching iterated subscript -- a subset of the arrayed source's dims too,
-    // so we can recover the `Dimension` from `from_dims` (preferred -- it's the
-    // source row axis) or from `to_dims` (needed when `from` is a *scalar*
-    // feeder of the agg, and for a mapped sliced reducer -- GH #534 -- whose
-    // result dim is the target's iterated dim, absent from the source's
-    // declared dims). `read_slice_ok` keys the source-row layout
-    // machinery below off the well-formed slice; it is independent of where the
-    // `Iterated` `Dimension`s come from. The slice is `from`'s OWN
-    // (per-source) slice -- empty for a non-source, which fails the arity
-    // check and degrades to the conservative fallback.
+    // on them directly. Scalar reducers usually derive these from target
+    // iterated dims; array-valued RANK can also derive them from a ranked source
+    // dim or proper StarRange subdimension, so resolve through the project-wide
+    // dimension context before falling back to the local source/target dims.
+    // `read_slice_ok` keys the source-row layout machinery below off the
+    // well-formed slice; it is independent of where the result `Dimension`s
+    // come from. The slice is `from`'s OWN (per-source) slice -- empty for a
+    // non-source, which fails the arity check and degrades to the conservative
+    // fallback.
     let read_slice = agg.source_read_slice(from_name);
     let read_slice_ok = !from_dims.is_empty() && read_slice.len() == from_dims.len();
     let resolve_result_dim = |name: &str| -> Option<crate::dimensions::Dimension> {
         let canon = canonicalize(name);
-        from_dims
-            .iter()
-            .chain(to_dims.iter())
-            .find(|d| d.name() == canon.as_ref())
+        dim_ctx
+            .get(&crate::common::CanonicalDimensionName::from_raw(
+                canon.as_ref(),
+            ))
             .cloned()
+            .or_else(|| {
+                from_dims
+                    .iter()
+                    .chain(to_dims.iter())
+                    .find(|d| d.name() == canon.as_ref())
+                    .cloned()
+            })
     };
     let iterated_dims: Vec<crate::dimensions::Dimension> = agg
         .result_dims
@@ -968,7 +968,42 @@ fn emit_agg_routed_edges(
         let broadcast_targets: Option<Vec<String>> =
             (!agg.is_synthetic && agg.result_dims.is_empty() && !to_dims.is_empty())
                 .then(|| cartesian_element_names(to_name, to_dims));
-        if let Some(rows) = rows {
+        if agg.array_valued_rank {
+            let rank_dim_element_lists: Vec<Vec<String>> =
+                iterated_dims.iter().map(dimension_element_names).collect();
+            let fallback_slots = crate::ltm_agg::cartesian_element_parts(&rank_dim_element_lists);
+            if let Some(rows) = rows {
+                for crate::db::ltm::ReadSliceRowParts {
+                    row_parts,
+                    slot_parts,
+                } in &rows
+                {
+                    let from_node = if row_parts.len() == 1 {
+                        format_element_name(from_name, &row_parts[0])
+                    } else {
+                        let refs: Vec<&str> = row_parts.iter().map(String::as_str).collect();
+                        format_multi_element_name(from_name, &refs)
+                    };
+                    let rank_slots = crate::ltm_agg::rank_output_slot_parts_for_row(
+                        read_slice,
+                        &rank_dim_element_lists,
+                        slot_parts,
+                    )
+                    .unwrap_or_else(|| fallback_slots.clone());
+                    let entry = element_edges.entry(from_node).or_default();
+                    for slot in &rank_slots {
+                        entry.insert(agg_node_name(slot));
+                    }
+                }
+            } else {
+                for from_node in cartesian_element_names(from_name, from_dims) {
+                    let entry = element_edges.entry(from_node).or_default();
+                    for slot in &fallback_slots {
+                        entry.insert(agg_node_name(slot));
+                    }
+                }
+            }
+        } else if let Some(rows) = rows {
             for crate::db::ltm::ReadSliceRowParts {
                 row_parts,
                 slot_parts,

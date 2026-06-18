@@ -82,9 +82,10 @@
 //! one variable read with two different slices (I3b), and a no-`Reduced`
 //! source outside the projection rule (a Pinned-bearing, dim-subset,
 //! permuted, or mapped mix; see [`accept_source_slices`]). `RANK` is
-//! recognized as a reducer but never hoisted (GH #771): it is ARRAY-valued,
-//! so an agg node -- "a scalar value per result slot" -- has no value to
-//! hold for it; see [`reducer_is_hoistable`].
+//! recognized as ARRAY-valued (GH #771) and is represented separately by an
+//! arrayed synthetic agg whose output axes are the ranked argument's
+//! non-pinned axes; each ranked source row feeds every rank-output slot in
+//! its iterated context (GH #776).
 //!
 //! Whole-RHS reduces with a non-trivial slice *are* recognized -- the
 //! variable is the agg, `result_dims` carries the `Iterated` axes' dims, and
@@ -202,19 +203,11 @@ pub(crate) fn reducer_kind_from_name(name: &str, arity: usize) -> Option<Reducer
 /// silently corrupts. The three consumers are
 /// `builtins_visitor::arg_has_bare_var_ref` (the GH #541 arrayed-capture
 /// gate), `ltm_augment::expr_is_array_slice_valued` (the GH #743
-/// unfreezable-`PREVIOUS` detector), and [`reducer_is_hoistable`] (the agg
-/// hoisting gate, GH #771): an agg node *is* "a scalar value per result
-/// slot", and RANK has no such value to name.
-///
-/// Residual of the GH #771 de-hoist: a `RANK(pop, dir)` reference
-/// classifies by its syntactic shape (a bare `pop` is `Bare` -> diagonal
-/// edges), so loops through the rank ORDERING -- element r's rank changing
-/// because element s moved past it -- are not enumerated. This replaces the
-/// strictly-worse pre-#771 state (cross-element loops enumerated through an
-/// ill-shaped scalar agg whose every score was warned-zero); the
-/// alternative -- reclassifying value-shaped reducer args as `DynamicIndex`
-/// -- would recreate the GH #525 phantom pathology (cross-product edges
-/// reading diagonal scores) and was rejected.
+/// unfreezable-`PREVIOUS` detector), and scalar-reducer agg minting
+/// ([`reducer_is_hoistable`], GH #771). LTM still routes RANK references
+/// through synthetic aggs, but those aggs are marked array-valued and their
+/// source→agg half uses the RANK-specific all-read-rows-to-all-output-slots
+/// treatment rather than the scalar reducer row→slot treatment (GH #776).
 pub(crate) fn reducer_collapses_to_scalar(name: &str, arity: usize) -> bool {
     reducer_kind_from_name(name, arity).is_some() && name != "rank"
 }
@@ -246,23 +239,25 @@ fn builtin_reducer_arity<E>(builtin: &BuiltinFn<E>) -> usize {
 /// shape-expressiveness design).
 ///
 /// `SIZE` is recognized as a reducer but never hoisted (its link score is
-/// always 0), and it never sets the element-graph walker's `in_reducer`
-/// marker. `RANK` is recognized but never hoisted either (GH #771): it is
-/// ARRAY-valued, so a scalar agg node for it has an ill-typed equation that
-/// cannot compile -- an agg node exists to give a scalar reduction a name,
-/// and RANK has no scalar reduction to name. Its references stay `Direct`
-/// (a bare arg classifies `Bare` -> diagonal edges, scored by the GH #742
-/// arrayed-capture machinery). This is the predicate the reference-site
-/// IR's AST walk (`db::ltm_ir::walk_all_in_expr`) uses to flip
-/// `child_in_reducer`, and that [`reducer_source_vars`] uses to gate which
-/// subexpressions become aggregate nodes, so the agg enumerator, the
-/// element graph, and the link-score generator all agree on the hoisted set.
+/// always 0). `RANK` is recognized but not scalar-hoistable (GH #771): it is
+/// ARRAY-valued, so it uses the separate array-valued agg path. This
+/// predicate therefore gates only scalar-valued reducer aggs; the
+/// reference-site IR uses [`builtin_routes_through_agg`] so RANK arguments
+/// are still marked as aggregate-routed when an array-valued RANK agg was
+/// minted (GH #776).
 pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
     let arity = builtin_reducer_arity(builtin);
     matches!(
         reducer_kind_from_name(builtin.name(), arity),
         Some(ReducerKind::Linear | ReducerKind::Nonlinear)
     ) && reducer_collapses_to_scalar(builtin.name(), arity)
+}
+
+/// `true` when references inside `builtin` may route through an aggregate
+/// node. Scalar reducers use [`reducer_is_hoistable`]; array-valued `RANK`
+/// uses a synthetic arrayed agg whose source half has RANK-specific routing.
+pub(crate) fn builtin_routes_through_agg<E>(builtin: &BuiltinFn<E>) -> bool {
+    reducer_is_hoistable(builtin) || matches!(builtin, BuiltinFn::Rank(_, _))
 }
 
 /// How one *source axis* of a hoisted reducer is consumed.
@@ -446,6 +441,14 @@ pub struct AggNode {
     /// value; `false` when the owning variable already *is* the aggregate
     /// node (its entire dt-equation is exactly this reducer).
     pub is_synthetic: bool,
+    /// `true` for a synthetic helper representing array-valued `RANK`.
+    ///
+    /// A scalar reducer's read-slice rows feed one scalar result slot each
+    /// (`SUM(matrix[D1,*])`: every `matrix[d1,*]` row feeds `agg[d1]`).
+    /// `RANK` is different: every ranked source row can change every rank
+    /// output element in the same iterated context, so the source→agg half
+    /// fans each read row out across all non-pinned result-axis slots.
+    pub array_valued_rank: bool,
 }
 
 impl AggNode {
@@ -732,8 +735,12 @@ fn walk_var_equation(
     next_synthetic_n: &mut usize,
 ) {
     if let Expr2::App(builtin, _, _) = expr
-        && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
-        && let Some(slices) = combined_read_slice(builtin, ctx)
+        && let Some(candidate) = agg_candidate_for_builtin(builtin, ctx)
+        // Array-valued RANK helpers are always synthetic. The owning variable
+        // is the final consumer of the rank array, not the rank helper itself;
+        // keeping the normal agg→target half preserves the same projection
+        // path as an inline rank subexpression.
+        && !candidate.array_valued_rank
         // A whole-RHS reducer whose slice/result shape the variable-backed
         // machinery cannot express is NOT variable-backed: it falls through
         // to `walk_subexpr_for_aggs`, which mints a *synthetic* agg for the
@@ -747,12 +754,12 @@ fn walk_var_equation(
         // the CANONICAL (co-source) slice -- a projection feeder's
         // all-`Iterated` slice (GH #767) says nothing about the reducer's
         // result shape.
-        && variable_backed_shape_is_expressible(&slices.canonical, ctx.target_iterated_dims)
+        && variable_backed_shape_is_expressible(&candidate.slices.canonical, ctx.target_iterated_dims)
         // `None` (a structurally-impossible missing per-var slice; see
         // `agg_sources`' rustdoc) falls through to `walk_subexpr_for_aggs`,
         // whose own `agg_sources` call declines identically -- the
         // reference stays on the conservative Direct path.
-        && let Some(sources) = agg_sources(source_vars, &slices, ctx)
+        && let Some(sources) = agg_sources(candidate.source_vars, &candidate.slices, ctx)
     {
         // Whole-RHS reducer: the variable IS the aggregate node. The agg
         // node's result shape is the *reducer's* result shape (the `Iterated`
@@ -762,7 +769,7 @@ fn walk_var_equation(
         // value); a partial reduce keyed by the active A2A dimension
         // (`rowsum[D1] = SUM(matrix[D1, *])`) keeps `[D1]` as its result dims.
         let key = crate::patch::expr2_to_string(expr);
-        let result_dims = result_dims_from_read_slice(&slices.canonical, ctx.dm_dims);
+        let result_dims = candidate.result_dims;
         // DECLINE the degenerate square-source shape (repeated result dim,
         // GH #778/#785): the per-axis emission paths pin subscript indices by
         // dim name and disagree across the duplicated occurrence. Declining
@@ -779,6 +786,7 @@ fn walk_var_equation(
                 AggKind::VariableBacked {
                     var_name: var_name.to_string(),
                     result_dims,
+                    array_valued_rank: false,
                 },
                 sources,
             );
@@ -961,16 +969,9 @@ fn walk_subexpr_for_aggs(
             // slice/result-dims derivation runs only for an actual hoistable
             // reducer App (`reducer_source_vars` is `None` for every other
             // builtin -- it would be wasted work on the non-reducer majority).
-            let source_vars = (!in_reducer)
-                .then(|| reducer_source_vars(builtin, ctx.variables))
+            let candidate = (!in_reducer)
+                .then(|| agg_candidate_for_builtin(builtin, ctx))
                 .flatten();
-            let slices = source_vars
-                .is_some()
-                .then(|| combined_read_slice(builtin, ctx))
-                .flatten();
-            let result_dims = slices
-                .as_ref()
-                .map(|s| result_dims_from_read_slice(&s.canonical, ctx.dm_dims));
             // DECLINE the degenerate square-source shape (repeated result
             // dim, GH #778/#785): the per-axis emission paths pin subscript
             // indices by dim name and disagree across the duplicated
@@ -978,18 +979,17 @@ fn walk_subexpr_for_aggs(
             // `else` descent the not-statically-describable carve-outs take,
             // with `in_reducer` unchanged so the source references keep their
             // conservative Direct shape. See [`result_dims_has_repeated_dim`].
-            let square_source = result_dims
-                .as_deref()
+            let square_source = candidate
+                .as_ref()
+                .map(|c| c.result_dims.as_slice())
                 .is_some_and(result_dims_has_repeated_dim);
             if !square_source
-                && let Some(source_vars) = source_vars
-                && let Some(slices) = slices
-                && let Some(result_dims) = result_dims
+                && let Some(candidate) = candidate
                 // `None` (a structurally-impossible missing per-var slice;
                 // see `agg_sources`' rustdoc) declines the hoist: the `else`
                 // arm descends with `in_reducer` unchanged, exactly like the
                 // not-statically-describable carve-outs.
-                && let Some(sources) = agg_sources(source_vars, &slices, ctx)
+                && let Some(sources) = agg_sources(candidate.source_vars, &candidate.slices, ctx)
             {
                 let key = crate::patch::expr2_to_string(expr);
                 register_agg(
@@ -997,7 +997,10 @@ fn walk_subexpr_for_aggs(
                     next_synthetic_n,
                     &key,
                     owner_var,
-                    AggKind::Synthetic { result_dims },
+                    AggKind::Synthetic {
+                        result_dims: candidate.result_dims,
+                        array_valued_rank: candidate.array_valued_rank,
+                    },
                     sources,
                 );
                 // Descend with `in_reducer = true` so nested reducers are
@@ -1039,14 +1042,179 @@ fn walk_subexpr_for_aggs(
     }
 }
 
+/// A reducer-like builtin that can be represented by an [`AggNode`].
+struct AggCandidate {
+    source_vars: Vec<String>,
+    slices: CombinedReadSlices,
+    result_dims: Vec<String>,
+    array_valued_rank: bool,
+}
+
+fn agg_candidate_for_builtin(
+    builtin: &BuiltinFn<Expr2>,
+    ctx: &AggWalkCtx<'_>,
+) -> Option<AggCandidate> {
+    if let Some(rank_arg) = array_valued_rank_arg(builtin) {
+        let source_vars = rank_source_vars(rank_arg, ctx.variables)?;
+        let slices = rank_combined_read_slice(rank_arg, ctx)?;
+        let result_dims = rank_result_dims_from_read_slice(&slices, ctx, &source_vars)?;
+        if result_dims.is_empty() {
+            return None;
+        }
+        return Some(AggCandidate {
+            source_vars,
+            slices,
+            result_dims,
+            array_valued_rank: true,
+        });
+    }
+
+    let source_vars = reducer_source_vars(builtin, ctx.variables)?;
+    let slices = combined_read_slice(builtin, ctx)?;
+    let result_dims = result_dims_from_read_slice(&slices.canonical, ctx.dm_dims);
+    Some(AggCandidate {
+        source_vars,
+        slices,
+        result_dims,
+        array_valued_rank: false,
+    })
+}
+
+fn array_valued_rank_arg(builtin: &BuiltinFn<Expr2>) -> Option<&Expr2> {
+    match builtin {
+        BuiltinFn::Rank(arg, _) => Some(arg),
+        _ => None,
+    }
+}
+
+/// Model variables referenced by RANK's ranked argument.
+///
+/// The direction argument is intentionally excluded from the agg's sources:
+/// it remains a direct dependency of the target expression. The RANK helper
+/// represents how the ranked array values feed rank slots, and the source
+/// half's scoring machinery assumes that relationship.
+fn rank_source_vars(
+    rank_arg: &Expr2,
+    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+) -> Option<Vec<String>> {
+    let mut sources: Vec<String> = Vec::new();
+    collect_var_refs(rank_arg, &mut sources);
+    sources.retain(|name| variables.contains_key(&Ident::<Canonical>::new(name)));
+    if sources.is_empty() {
+        return None;
+    }
+    let has_arrayed_source = sources.iter().any(|name| {
+        variables
+            .get(&Ident::<Canonical>::new(name))
+            .and_then(|v| v.get_dimensions())
+            .map(|dims| !dims.is_empty())
+            .unwrap_or(false)
+    });
+    if !has_arrayed_source {
+        return None;
+    }
+    sources.sort();
+    sources.dedup();
+    Some(sources)
+}
+
+fn rank_combined_read_slice(rank_arg: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<CombinedReadSlices> {
+    let mut refs: Vec<(String, Vec<AxisRead>)> = Vec::new();
+    let mut ok = true;
+    collect_arrayed_source_slices(rank_arg, ctx, &mut refs, &mut ok);
+    if !ok || refs.is_empty() {
+        return None;
+    }
+    accept_source_slices(refs)
+}
+
+/// RANK's output shape is the ranked argument's non-pinned axis shape.
+///
+/// Scalar reducers use only `Iterated` axes as result dims because the
+/// `Reduced` axes collapse away. RANK is array-valued, so the full output
+/// helper is dimensioned over both the surrounding iterated axes and the
+/// ranked axes; only literal `Pinned` axes disappear.
+fn rank_result_dims_from_read_slice(
+    slices: &CombinedReadSlices,
+    ctx: &AggWalkCtx<'_>,
+    source_vars: &[String],
+) -> Option<Vec<String>> {
+    // `per_var` is a HashMap; use the sorted source list so mapped axes with
+    // equivalent canonical slices always choose the same display dimension.
+    let source_var = source_vars.iter().find(|var| {
+        slices
+            .per_var
+            .get(var.as_str())
+            .is_some_and(|slice| slice.as_slice() == slices.canonical.as_slice())
+    })?;
+    let source_dims = ctx
+        .variables
+        .get(&Ident::<Canonical>::new(source_var))
+        .and_then(|v| v.get_dimensions())?;
+    if source_dims.len() != slices.canonical.len() {
+        return None;
+    }
+    let mut result_dims = Vec::new();
+    for (axis, source_dim) in slices.canonical.iter().zip(source_dims) {
+        match axis {
+            AxisRead::Pinned(_) => {}
+            AxisRead::Iterated { dim, .. } => {
+                result_dims.push(canonical_dim_to_datamodel(dim, ctx.dm_dims));
+            }
+            AxisRead::Reduced { subset } => {
+                result_dims.push(rank_reduced_axis_result_dim(
+                    source_dim,
+                    subset.as_deref(),
+                    ctx,
+                ));
+            }
+        }
+    }
+    Some(result_dims)
+}
+
+fn rank_reduced_axis_result_dim(
+    source_dim: &crate::dimensions::Dimension,
+    subset: Option<&[String]>,
+    ctx: &AggWalkCtx<'_>,
+) -> String {
+    let Some(subset) = subset else {
+        return canonical_dim_to_datamodel(source_dim.name(), ctx.dm_dims);
+    };
+    let source_elems = crate::ltm_augment::dimension_element_names(source_dim);
+    let source_canon = source_dim.canonical_name();
+    for dm_dim in ctx.dm_dims {
+        let candidate = crate::common::CanonicalDimensionName::from_raw(dm_dim.name());
+        let Some(rel) = ctx
+            .dim_ctx
+            .get_subdimension_relation(&candidate, source_canon)
+        else {
+            continue;
+        };
+        let candidate_subset: Option<Vec<String>> = rel
+            .parent_offsets
+            .iter()
+            .map(|&o| source_elems.get(o).cloned())
+            .collect();
+        if candidate_subset.as_deref() == Some(subset) {
+            return dm_dim.name().to_string();
+        }
+    }
+    canonical_dim_to_datamodel(source_dim.name(), ctx.dm_dims)
+}
+
 /// What sort of aggregate node a reducer subexpression maps to.
 enum AggKind {
     /// A `$⁚ltm⁚agg⁚{n}` auxiliary must be minted.
-    Synthetic { result_dims: Vec<String> },
+    Synthetic {
+        result_dims: Vec<String>,
+        array_valued_rank: bool,
+    },
     /// The owning variable already is the aggregate node.
     VariableBacked {
         var_name: String,
         result_dims: Vec<String>,
+        array_valued_rank: bool,
     },
 }
 
@@ -1120,7 +1288,10 @@ fn register_agg(
     sources: Vec<AggSource>,
 ) {
     let idx = match kind {
-        AggKind::Synthetic { result_dims } => {
+        AggKind::Synthetic {
+            result_dims,
+            array_valued_rank,
+        } => {
             if let Some(&existing) = result.synthetic_by_key.get(key) {
                 existing
             } else {
@@ -1132,6 +1303,7 @@ fn register_agg(
                     result_dims,
                     sources,
                     is_synthetic: true,
+                    array_valued_rank,
                 });
                 let idx = result.aggs.len() - 1;
                 result.synthetic_by_key.insert(key.to_string(), idx);
@@ -1141,6 +1313,7 @@ fn register_agg(
         AggKind::VariableBacked {
             var_name,
             result_dims,
+            array_valued_rank,
         } => {
             // Each whole-RHS-reducer variable is its own aggregate node;
             // never deduped, and not entered in `synthetic_by_key`.
@@ -1150,6 +1323,7 @@ fn register_agg(
                 result_dims,
                 sources,
                 is_synthetic: false,
+                array_valued_rank,
             });
             result.aggs.len() - 1
         }
@@ -1754,6 +1928,70 @@ pub(crate) fn result_dims_has_repeated_dim(result_dims: &[String]) -> bool {
         .iter()
         .enumerate()
         .any(|(i, d)| result_dims[..i].contains(d))
+}
+
+/// Cartesian product of element-name lists, preserving each tuple as parts.
+pub(crate) fn cartesian_element_parts(element_lists: &[Vec<String>]) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = vec![Vec::new()];
+    for elems in element_lists {
+        let mut next = Vec::with_capacity(out.len() * elems.len());
+        for prefix in &out {
+            for elem in elems {
+                let mut tuple = prefix.clone();
+                tuple.push(elem.clone());
+                next.push(tuple);
+            }
+        }
+        out = next;
+    }
+    out
+}
+
+/// The RANK output slots a source row can affect.
+///
+/// RANK is array-valued, so each non-pinned ranked axis can contribute every
+/// output slot. The output slot elements must come from the helper's
+/// [`AggNode::result_dims`] dimensions, not the current source's declared
+/// dimensions: mapped sibling sources may carry different element names, and
+/// proper StarRange inputs use the subdimension view. When the ranked view
+/// also has reduced axes, `Iterated` axes are context axes and stay fixed to
+/// the row's already-remapped `iterated_slot_parts`; with no reduced axes,
+/// active-dimension spellings like `RANK(pop[D], 1)` rank across the iterated
+/// axis itself and fan out over the whole result dimension.
+pub(crate) fn rank_output_slot_parts_for_row(
+    read_slice: &[AxisRead],
+    result_dim_element_lists: &[Vec<String>],
+    iterated_slot_parts: &[String],
+) -> Option<Vec<Vec<String>>> {
+    let has_reduced_axis = read_slice
+        .iter()
+        .any(|axis| matches!(axis, AxisRead::Reduced { .. }));
+    let mut result_axis_elements = result_dim_element_lists.iter();
+    let mut iterated_slots = iterated_slot_parts.iter();
+    let mut per_output_axis: Vec<Vec<String>> = Vec::new();
+    for axis in read_slice {
+        match axis {
+            AxisRead::Pinned(_) => {}
+            AxisRead::Iterated { .. } => {
+                let elems = result_axis_elements.next()?;
+                if has_reduced_axis {
+                    per_output_axis.push(vec![iterated_slots.next()?.clone()]);
+                } else {
+                    per_output_axis.push(elems.clone());
+                }
+            }
+            AxisRead::Reduced { .. } => {
+                per_output_axis.push(result_axis_elements.next()?.clone());
+            }
+        }
+    }
+    if result_axis_elements.next().is_some() {
+        return None;
+    }
+    if has_reduced_axis && iterated_slots.next().is_some() {
+        return None;
+    }
+    Some(cartesian_element_parts(&per_output_axis))
 }
 
 /// `true` when `name` is a synthetic aggregate-node name (`$⁚ltm⁚agg⁚{n}`).
@@ -4093,12 +4331,11 @@ mod tests {
         assert_eq!(reducer_kind(&size), Some(ReducerKind::Constant));
         assert_eq!(reducer_kind(&abs), None);
 
-        // Hoistable: recognized AND not Constant AND scalar-valued (I5) --
+        // Scalar-hoistable: recognized AND not Constant AND scalar-valued (I5) --
         // SUM / 1-arg MEAN / 1-arg MIN / 1-arg MAX / STDDEV. SIZE is
         // recognized but never hoisted (its link score is always 0); RANK is
-        // recognized but never hoisted (array-valued -- a scalar agg node
-        // for it cannot compile, GH #771); 2-arg MIN/MAX are not recognized
-        // at all.
+        // not scalar-hoistable (array-valued -- it uses its own agg path,
+        // GH #771/#776); 2-arg MIN/MAX are not recognized at all.
         assert!(reducer_is_hoistable(&sum));
         assert!(reducer_is_hoistable(&mean_1));
         assert!(reducer_is_hoistable(&min_1));
@@ -4137,45 +4374,154 @@ mod tests {
         assert_eq!(reducer_kind_from_name("abs", 1), None);
     }
 
-    /// GH #771: a RANK subexpression is NOT hoisted -- RANK is array-valued
-    /// (Vensim VECTOR RANK), so a scalar agg node for it has an ill-typed
-    /// equation. `reducer_is_hoistable` requires
-    /// `reducer_collapses_to_scalar` (invariant I5), keeping the `pop`
-    /// reference on the Direct path (`Bare` -> diagonal edges, scored by
-    /// the GH #742 arrayed-capture machinery).
+    /// GH #776: a RANK subexpression mints an ARRAY-valued synthetic agg,
+    /// not a scalar reducer agg. Its result dims are the ranked argument's
+    /// non-pinned axes, so a bare one-dimensional source ranks over Region.
     #[test]
-    fn rank_subexpression_is_not_hoisted() {
-        let project = TestProject::new("rank_not_hoisted")
+    fn rank_subexpression_mints_array_valued_synthetic_agg() {
+        let project = TestProject::new("rank_array_agg")
             .named_dimension("Region", &["north", "south"])
             .array_aux("pop[Region]", "100")
             .array_aux("scale[Region]", "pop[Region] * 0.01")
             .array_aux("grow[Region]", "scale[Region] * RANK(pop, 1)");
 
         let result = agg_nodes(&project);
-        assert!(
-            result.aggs.is_empty(),
-            "RANK must not mint an aggregate node; got: {:?}",
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "RANK must mint one synthetic aggregate node; got: {:?}",
             result.aggs
+        );
+        assert!(synthetic[0].array_valued_rank);
+        assert_eq!(synthetic[0].result_dims, vec!["Region"]);
+        assert_eq!(source_names(synthetic[0]), vec!["pop"]);
+    }
+
+    /// GH #796 review: multi-source RANK result dims must not depend on
+    /// `HashMap` iteration order. When several sources share the canonical
+    /// rank slice but carry differently named mapped axes, choose the first
+    /// source in canonical source-name order -- the same order `AggSource`
+    /// emission uses.
+    #[test]
+    fn rank_multi_source_result_dims_use_sorted_source_order() {
+        let project = TestProject::new("rank_multi_source_dim_order")
+            .named_dimension("Region", &["r1", "r2"])
+            .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+            // Declare `b` first to make the expected order source-name-based,
+            // not model declaration order.
+            .array_aux("b[State]", "1")
+            .array_aux("a[Region]", "2")
+            .array_aux("r[Region]", "RANK(a[*] + b[*], 1)");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "multi-source RANK must mint one synthetic aggregate node; got: {:?}",
+            result.aggs
+        );
+        assert!(synthetic[0].array_valued_rank);
+        assert_eq!(source_names(synthetic[0]), vec!["a", "b"]);
+        assert_eq!(synthetic[0].result_dims, vec!["Region"]);
+    }
+
+    /// GH #796 review: array-valued RANK over a proper StarRange returns the
+    /// ranked subdimension view. Its synthetic helper must be dimensioned over
+    /// `Core`, not the parent `Region`, or helper slots and source halves drift.
+    #[test]
+    fn rank_star_range_result_dims_preserve_subdimension() {
+        let project = TestProject::new("rank_star_range_subdimension")
+            .named_dimension("Region", &["a", "b", "c"])
+            .named_dimension("Core", &["a", "b"])
+            .array_aux("arr[Region]", "10")
+            .array_aux("ranking[Core]", "RANK(arr[*:Core], 1)");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "subdimension RANK must mint one synthetic aggregate node; got: {:?}",
+            result.aggs
+        );
+        assert!(synthetic[0].array_valued_rank);
+        assert_eq!(synthetic[0].result_dims, vec!["Core"]);
+    }
+
+    /// GH #796 review: the source-to-RANK slot helper is shared by element
+    /// graph edges and link-score names. It must fan active/iterated axes out
+    /// across every RANK output slot and use result-dimension element names,
+    /// not source-dimension names, for mapped sibling sources.
+    #[test]
+    fn rank_output_slots_use_result_dimension_elements() {
+        let active_dim_read = vec![AxisRead::Iterated {
+            dim: "region".to_string(),
+            source_dim: "region".to_string(),
+        }];
+        assert_eq!(
+            rank_output_slot_parts_for_row(
+                &active_dim_read,
+                &[vec!["north".to_string(), "south".to_string()]],
+                &["north".to_string()],
+            ),
+            Some(vec![vec!["north".to_string()], vec!["south".to_string()]])
+        );
+
+        let mapped_source_read = vec![AxisRead::Reduced { subset: None }];
+        assert_eq!(
+            rank_output_slot_parts_for_row(
+                &mapped_source_read,
+                &[vec!["r1".to_string(), "r2".to_string()]],
+                &[],
+            ),
+            Some(vec![vec!["r1".to_string()], vec!["r2".to_string()]])
+        );
+
+        let context_plus_ranked_axis = vec![
+            AxisRead::Iterated {
+                dim: "region".to_string(),
+                source_dim: "region".to_string(),
+            },
+            AxisRead::Reduced { subset: None },
+        ];
+        assert_eq!(
+            rank_output_slot_parts_for_row(
+                &context_plus_ranked_axis,
+                &[
+                    vec!["north".to_string(), "south".to_string()],
+                    vec!["x".to_string(), "y".to_string()],
+                ],
+                &["north".to_string()],
+            ),
+            Some(vec![
+                vec!["north".to_string(), "x".to_string()],
+                vec!["north".to_string(), "y".to_string()]
+            ])
         );
     }
 
-    /// GH #771 (whole-RHS form): `r[Region] = RANK(pop, 1)` is not a
-    /// variable-backed aggregate node either -- the de-hoist applies to
-    /// both agg kinds (the gate is `reducer_source_vars`'
-    /// `reducer_is_hoistable`, shared by both walks).
+    /// GH #776 whole-RHS form: `r[Region] = RANK(pop, 1)` uses the same
+    /// synthetic array-valued helper as the inline spelling, rather than
+    /// becoming a variable-backed scalar reducer agg.
     #[test]
-    fn rank_whole_rhs_is_not_variable_backed() {
+    fn rank_whole_rhs_mints_synthetic_not_variable_backed() {
         let project = TestProject::new("rank_whole_rhs")
             .named_dimension("Region", &["north", "south"])
             .array_aux("pop[Region]", "100")
             .array_aux("r[Region]", "RANK(pop, 1)");
 
         let result = agg_nodes(&project);
-        assert!(
-            result.aggs.is_empty(),
-            "whole-RHS RANK must not become a variable-backed agg; got: {:?}",
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "whole-RHS RANK must mint one synthetic aggregate node; got: {:?}",
             result.aggs
         );
+        assert!(synthetic[0].array_valued_rank);
+        assert!(result.aggs.iter().all(|a| a.is_synthetic));
     }
 
     /// GH #766: a StarRange naming a dimension that is NEITHER the axis's

@@ -47,11 +47,10 @@ use crate::db::{Db, RefShape, SourceModel, SourceProject, reconstruct_model_vari
 /// according to the shape's normal broadcast/diagonal rules).
 ///
 /// `in_reducer` is true iff [`reducer_keys`] is non-empty: the reference site
-/// occurs syntactically inside an array-reducing builtin call (`SUM`/`MEAN`/
-/// `MIN`/`MAX`/`STDDEV` -- the `crate::ltm_agg::reducer_is_hoistable` set;
-/// `SIZE`, the array-valued `RANK` (GH #771), and the 2-arg `MIN`/`MAX` are
-/// *not* hoisted reducers). It is the coarse signal for "this site belongs to
-/// a reducer read".
+/// occurs syntactically inside an aggregate-routed builtin call
+/// (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`, plus array-valued `RANK`). `SIZE` and
+/// the 2-arg `MIN`/`MAX` are not routed. It is the coarse signal for "this
+/// site belongs to an aggregate read".
 ///
 /// `reducer_keys` carries the canonical printed text of every enclosing
 /// hoistable reducer, outermost to innermost. Routing must match a site to an
@@ -312,8 +311,9 @@ struct WalkCtx<'a> {
 /// dimension same-element case) falling back to [`classify_subscript_shape`]
 /// (`lookup_dims` resolves a referenced variable's dimensions on demand for
 /// the literal-subscript / position checks); `in_reducer` propagates through
-/// `child_in_reducer = in_reducer || reducer_is_hoistable(builtin)` (SIZE
-/// excluded -- its result doesn't depend on element values). Walk order is
+/// `builtin_routes_through_agg(builtin)` (SIZE excluded -- its result doesn't
+/// depend on element values; RANK included via its array-valued agg path).
+/// Walk order is
 /// left-to-right DFS over the AST, matching `enumerate_agg_nodes`, so the
 /// per-source site `Vec`s are deterministic (a salsa requirement on the
 /// cached IR result).
@@ -380,9 +380,9 @@ fn collect_all_reference_sites(
 /// Recursive helper for [`collect_all_reference_sites`]: left-to-right DFS
 /// over an `Expr2` tree, pushing one [`ReferenceSite`] per model-variable
 /// reference (bucketed by source name). `in_reducer` becomes `true` once we
-/// descend into a `reducer_is_hoistable` builtin's argument and stays sticky
-/// (a reducer nested in another reducer's arg is still inside *a* reducer);
-/// `SIZE` is not `reducer_is_hoistable`, so it never sets the flag.
+/// descend into a builtin that can route through an aggregate node and stays
+/// sticky (a reducer nested in another reducer's arg is still inside *a*
+/// reducer); `SIZE` does not route through an agg, so it never sets the flag.
 fn walk_all_in_expr(
     expr: &crate::ast::Expr2,
     ctx: &WalkCtx<'_>,
@@ -450,7 +450,7 @@ fn walk_all_in_expr(
             }
         }
         Expr2::App(builtin, _, _) => {
-            let pushed_reducer_key = crate::ltm_agg::reducer_is_hoistable(builtin);
+            let pushed_reducer_key = crate::ltm_agg::builtin_routes_through_agg(builtin);
             if pushed_reducer_key {
                 reducer_keys.push(crate::patch::expr2_to_string(expr));
             }
@@ -735,14 +735,9 @@ pub(crate) fn model_ltm_reference_sites(
                     // `Direct` `Wildcard` site only ever means "a hoisted
                     // reducer's (ignored) syntactic shape", "a whole-RHS
                     // variable-backed reducer's argument", a NON-hoisting
-                    // builtin's wildcard arg -- `SIZE(pop[*])` and the
-                    // de-hoisted array-valued `RANK(pop[*], 1)` (GH #771):
-                    // neither is `reducer_is_hoistable`, so `in_reducer` is
-                    // never set for their args and this reclassification
-                    // deliberately does NOT fire; the site keeps `Wildcard`
-                    // and takes `emit_edges_for_reference`'s conservative
-                    // cross-product arm, the same coarse-but-sound treatment
-                    // a Direct `DynamicIndex` gets -- or a (rare) bare
+                    // builtin's wildcard arg such as `SIZE(pop[*])`, which
+                    // never sets `in_reducer` and deliberately keeps
+                    // `Wildcard`, or a (rare) bare
                     // non-reducer whole-array reference (`arr[*]` outside
                     // any builtin), which likewise keeps `Wildcard` and the
                     // cross-product. The original #514 AC4.5 invariant
