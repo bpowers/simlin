@@ -2631,13 +2631,10 @@ pub(super) fn emit_source_to_agg_link_scores(
                         .collect()
                 });
 
-        let mut coreduced_by_iterated_slot: HashMap<Vec<String>, Vec<String>> = HashMap::new();
-        for row in &rows {
-            coreduced_by_iterated_slot
-                .entry(row.slot_parts.clone())
-                .or_default()
-                .push(row.row_parts.join(","));
-        }
+        // RANK compares each row against the whole ranked view. Unlike scalar
+        // reducers, an Iterated axis does not partition rows by result slot.
+        let rank_coreduced_rows: Vec<String> =
+            rows.iter().map(|row| row.row_parts.join(",")).collect();
 
         let rank_dims: Vec<crate::dimensions::Dimension> = agg
             .result_dims
@@ -2659,19 +2656,18 @@ pub(super) fn emit_source_to_agg_link_scores(
 
         for ReadSliceRowParts {
             row_parts,
-            slot_parts,
+            slot_parts: _,
         } in &rows
         {
             let row = row_parts.join(",");
             let qualified_row = crate::ltm_augment::qualify_element_csv(&row, from_dims);
-            let qualified_coreduced: Vec<String> = coreduced_by_iterated_slot[slot_parts]
+            let qualified_coreduced: Vec<String> = rank_coreduced_rows
                 .iter()
                 .map(|e| crate::ltm_augment::qualify_element_csv(e, from_dims))
                 .collect();
             let rank_slots = crate::ltm_agg::rank_output_slot_parts_for_row(
                 agg.source_read_slice(from),
-                &dim_element_lists,
-                slot_parts,
+                &rank_dim_element_lists,
             )
             .unwrap_or_else(|| fallback_slots.clone());
 

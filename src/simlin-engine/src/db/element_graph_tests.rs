@@ -1275,14 +1275,15 @@ fn element_graph_scalar_feeder_of_hoisted_reducer_is_bare_node() {
 }
 
 /// GH #776: `RANK` is array-valued, so each rank output slot depends on the
-/// whole ranked array, not just the same source element. The bare and wildcard
-/// spellings are equivalent dataflow and must both enumerate cross-element
-/// paths for rank-mediated loops.
+/// whole ranked array, not just the same source element. The bare, wildcard,
+/// and active-dimension spellings are equivalent dataflow and must all
+/// enumerate cross-element paths for rank-mediated loops.
 #[test]
-fn element_graph_rank_arg_reads_all_elements_for_bare_and_wildcard_spellings() {
+fn element_graph_rank_arg_reads_all_elements_for_ranked_axis_spellings() {
     for (name, rank_arg) in [
         ("rank_bare_arg", "RANK(pop, 1)"),
         ("rank_wildcard_arg", "RANK(pop[*], 1)"),
+        ("rank_active_dim_arg", "RANK(pop[Region], 1)"),
     ] {
         let project = TestProject::new(name)
             .named_dimension("Region", &["north", "south"])
@@ -1301,6 +1302,27 @@ fn element_graph_rank_arg_reads_all_elements_for_bare_and_wildcard_spellings() {
         assert_no_edge(&result, "pop[north]", "grow[north]");
         assert_no_edge(&result, "pop[south]", "grow[south]");
     }
+}
+
+/// GH #796 review: when multi-source RANK chooses its helper dimensions from
+/// a canonical source, mapped sibling sources must still feed those helper
+/// slots. The non-canonical `b[State]` rows map positionally to `Region`, so
+/// the edge names must land on `agg[r1]`/`agg[r2]`, not dangling `agg[s1]`.
+#[test]
+fn element_graph_rank_mapped_source_uses_result_dimension_slots() {
+    let project = TestProject::new("rank_mapped_source_slots")
+        .named_dimension("Region", &["r1", "r2"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_aux("a[Region]", "1")
+        .array_aux("b[State]", "2")
+        .array_aux("grow[Region]", "RANK(a[*] + b[*], 1)");
+
+    let result = element_edges(&project);
+    let agg = crate::ltm_agg::synthetic_agg_name(0);
+    assert_edge(&result, "b[s1]", &format!("{agg}[r1]"));
+    assert_edge(&result, "b[s2]", &format!("{agg}[r2]"));
+    assert_no_edge(&result, "b[s1]", &format!("{agg}[s1]"));
+    assert_no_edge(&result, "b[s2]", &format!("{agg}[s2]"));
 }
 
 /// #514 (element graph, scalar feeder of an *arrayed* hoisted reducer): a

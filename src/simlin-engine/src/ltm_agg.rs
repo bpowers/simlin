@@ -1161,12 +1161,46 @@ fn rank_result_dims_from_read_slice(
             AxisRead::Iterated { dim, .. } => {
                 result_dims.push(canonical_dim_to_datamodel(dim, ctx.dm_dims));
             }
-            AxisRead::Reduced { subset: _ } => {
-                result_dims.push(canonical_dim_to_datamodel(source_dim.name(), ctx.dm_dims));
+            AxisRead::Reduced { subset } => {
+                result_dims.push(rank_reduced_axis_result_dim(
+                    source_dim,
+                    subset.as_deref(),
+                    ctx,
+                ));
             }
         }
     }
     Some(result_dims)
+}
+
+fn rank_reduced_axis_result_dim(
+    source_dim: &crate::dimensions::Dimension,
+    subset: Option<&[String]>,
+    ctx: &AggWalkCtx<'_>,
+) -> String {
+    let Some(subset) = subset else {
+        return canonical_dim_to_datamodel(source_dim.name(), ctx.dm_dims);
+    };
+    let source_elems = crate::ltm_augment::dimension_element_names(source_dim);
+    let source_canon = source_dim.canonical_name();
+    for dm_dim in ctx.dm_dims {
+        let candidate = crate::common::CanonicalDimensionName::from_raw(dm_dim.name());
+        let Some(rel) = ctx
+            .dim_ctx
+            .get_subdimension_relation(&candidate, source_canon)
+        else {
+            continue;
+        };
+        let candidate_subset: Option<Vec<String>> = rel
+            .parent_offsets
+            .iter()
+            .map(|&o| source_elems.get(o).cloned())
+            .collect();
+        if candidate_subset.as_deref() == Some(subset) {
+            return dm_dim.name().to_string();
+        }
+    }
+    canonical_dim_to_datamodel(source_dim.name(), ctx.dm_dims)
 }
 
 /// What sort of aggregate node a reducer subexpression maps to.
@@ -1915,32 +1949,26 @@ pub(crate) fn cartesian_element_parts(element_lists: &[Vec<String>]) -> Vec<Vec<
 
 /// The RANK output slots a source row can affect.
 ///
-/// `iterated_slot_parts` are the row's already-remapped `Iterated` axis
-/// coordinates from `read_slice_row_parts`. Each `Iterated` output axis is
-/// fixed to that coordinate, while each `Reduced` output axis ranges over
-/// the ranked extent. `Pinned` axes do not appear in the rank output.
+/// RANK is array-valued, so each non-pinned ranked axis can contribute every
+/// output slot. The output slot elements must come from the helper's
+/// [`AggNode::result_dims`] dimensions, not the current source's declared
+/// dimensions: mapped sibling sources may carry different element names, and
+/// proper StarRange inputs use the subdimension view.
 pub(crate) fn rank_output_slot_parts_for_row(
     read_slice: &[AxisRead],
-    source_dim_element_lists: &[Vec<String>],
-    iterated_slot_parts: &[String],
+    result_dim_element_lists: &[Vec<String>],
 ) -> Option<Vec<Vec<String>>> {
-    if read_slice.len() != source_dim_element_lists.len() {
-        return None;
-    }
-    let mut iterated_slots = iterated_slot_parts.iter();
+    let mut result_axis_elements = result_dim_element_lists.iter();
     let mut per_output_axis: Vec<Vec<String>> = Vec::new();
-    for (axis, elems) in read_slice.iter().zip(source_dim_element_lists) {
+    for axis in read_slice {
         match axis {
             AxisRead::Pinned(_) => {}
-            AxisRead::Iterated { .. } => {
-                per_output_axis.push(vec![iterated_slots.next()?.clone()]);
-            }
-            AxisRead::Reduced { subset } => {
-                per_output_axis.push(subset.clone().unwrap_or_else(|| elems.clone()));
+            AxisRead::Iterated { .. } | AxisRead::Reduced { .. } => {
+                per_output_axis.push(result_axis_elements.next()?.clone());
             }
         }
     }
-    if iterated_slots.next().is_some() {
+    if result_axis_elements.next().is_some() {
         return None;
     }
     Some(cartesian_element_parts(&per_output_axis))
@@ -4377,6 +4405,57 @@ mod tests {
         assert!(synthetic[0].array_valued_rank);
         assert_eq!(source_names(synthetic[0]), vec!["a", "b"]);
         assert_eq!(synthetic[0].result_dims, vec!["Region"]);
+    }
+
+    /// GH #796 review: array-valued RANK over a proper StarRange returns the
+    /// ranked subdimension view. Its synthetic helper must be dimensioned over
+    /// `Core`, not the parent `Region`, or helper slots and source halves drift.
+    #[test]
+    fn rank_star_range_result_dims_preserve_subdimension() {
+        let project = TestProject::new("rank_star_range_subdimension")
+            .named_dimension("Region", &["a", "b", "c"])
+            .named_dimension("Core", &["a", "b"])
+            .array_aux("arr[Region]", "10")
+            .array_aux("ranking[Core]", "RANK(arr[*:Core], 1)");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "subdimension RANK must mint one synthetic aggregate node; got: {:?}",
+            result.aggs
+        );
+        assert!(synthetic[0].array_valued_rank);
+        assert_eq!(synthetic[0].result_dims, vec!["Core"]);
+    }
+
+    /// GH #796 review: the source-to-RANK slot helper is shared by element
+    /// graph edges and link-score names. It must fan active/iterated axes out
+    /// across every RANK output slot and use result-dimension element names,
+    /// not source-dimension names, for mapped sibling sources.
+    #[test]
+    fn rank_output_slots_use_result_dimension_elements() {
+        let active_dim_read = vec![AxisRead::Iterated {
+            dim: "region".to_string(),
+            source_dim: "region".to_string(),
+        }];
+        assert_eq!(
+            rank_output_slot_parts_for_row(
+                &active_dim_read,
+                &[vec!["north".to_string(), "south".to_string()]]
+            ),
+            Some(vec![vec!["north".to_string()], vec!["south".to_string()]])
+        );
+
+        let mapped_source_read = vec![AxisRead::Reduced { subset: None }];
+        assert_eq!(
+            rank_output_slot_parts_for_row(
+                &mapped_source_read,
+                &[vec!["r1".to_string(), "r2".to_string()]]
+            ),
+            Some(vec![vec!["r1".to_string()], vec!["r2".to_string()]])
+        );
     }
 
     /// GH #776 whole-RHS form: `r[Region] = RANK(pop, 1)` uses the same
