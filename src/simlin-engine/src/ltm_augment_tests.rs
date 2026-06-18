@@ -4472,8 +4472,8 @@ fn references_bare_source_inside_reducer_detects_only_the_dangerous_shape() {
         &frac,
         false
     ));
-    // RANK is array-valued and never hoisted (GH #771/#742): its bare arg is
-    // a genuine Bare diagonal reference, not the feeder shape.
+    // RANK is array-valued and uses its own agg-routing path (GH #771/#776):
+    // its bare arg is not the scalar-reducer feeder shape.
     assert!(!references_bare_source_inside_reducer(
         &parse("RANK(frac, 1)"),
         &frac,

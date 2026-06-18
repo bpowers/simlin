@@ -23,7 +23,9 @@ use crate::db::{
 };
 
 use super::compile::{ShapedLinkScore, link_score_equation_text_shaped};
-use super::loops::{ReadSliceRow, cartesian_subscripts, read_slice_rows};
+use super::loops::{
+    ReadSliceRow, ReadSliceRowParts, cartesian_subscripts, read_slice_row_parts, read_slice_rows,
+};
 use super::parse::{
     ltm_equation_dimensions, reconstruct_ltm_var_lowered, retarget_ltm_equation_dims,
 };
@@ -2615,27 +2617,131 @@ pub(super) fn emit_source_to_agg_link_scores(
         .iter()
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
+    let dim_ctx = project_dimensions_context(db, project);
+    if agg.array_valued_rank {
+        let rows: Vec<ReadSliceRowParts> =
+            read_slice_row_parts(agg.source_read_slice(from), &dim_element_lists, dim_ctx)
+                .unwrap_or_else(|| {
+                    crate::ltm_agg::cartesian_element_parts(&dim_element_lists)
+                        .into_iter()
+                        .map(|row_parts| ReadSliceRowParts {
+                            row_parts,
+                            slot_parts: Vec::new(),
+                        })
+                        .collect()
+                });
+
+        let mut coreduced_by_iterated_slot: HashMap<Vec<String>, Vec<String>> = HashMap::new();
+        for row in &rows {
+            coreduced_by_iterated_slot
+                .entry(row.slot_parts.clone())
+                .or_default()
+                .push(row.row_parts.join(","));
+        }
+
+        let rank_dims: Vec<crate::dimensions::Dimension> = agg
+            .result_dims
+            .iter()
+            .filter_map(|dim| {
+                dim_ctx
+                    .get(&crate::common::CanonicalDimensionName::from_raw(dim))
+                    .cloned()
+            })
+            .collect();
+        if rank_dims.len() != agg.result_dims.len() {
+            return;
+        }
+        let rank_dim_element_lists: Vec<Vec<String>> = rank_dims
+            .iter()
+            .map(crate::ltm_augment::dimension_element_names)
+            .collect();
+        let fallback_slots = crate::ltm_agg::cartesian_element_parts(&rank_dim_element_lists);
+
+        for ReadSliceRowParts {
+            row_parts,
+            slot_parts,
+        } in &rows
+        {
+            let row = row_parts.join(",");
+            let qualified_row = crate::ltm_augment::qualify_element_csv(&row, from_dims);
+            let qualified_coreduced: Vec<String> = coreduced_by_iterated_slot[slot_parts]
+                .iter()
+                .map(|e| crate::ltm_augment::qualify_element_csv(e, from_dims))
+                .collect();
+            let rank_slots = crate::ltm_agg::rank_output_slot_parts_for_row(
+                agg.source_read_slice(from),
+                &dim_element_lists,
+                slot_parts,
+            )
+            .unwrap_or_else(|| fallback_slots.clone());
+
+            for slot_parts in &rank_slots {
+                let slot = slot_parts.join(",");
+                let (var_name, equation) = if slot.is_empty() {
+                    (
+                        format!(
+                            "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
+                            from, row, agg.name
+                        ),
+                        crate::ltm_augment::generate_element_to_scalar_equation(
+                            from,
+                            &agg.name,
+                            &qualified_row,
+                            &qualified_coreduced,
+                            &classified.kind,
+                            classified.name,
+                            classified.is_bare,
+                            Some(&body_ctx),
+                        ),
+                    )
+                } else {
+                    (
+                        format!(
+                            "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}[{}]",
+                            from, row, agg.name, slot
+                        ),
+                        crate::ltm_augment::generate_element_to_reduced_equation(
+                            from,
+                            &agg.name,
+                            &qualified_row,
+                            &crate::ltm_augment::qualify_element_csv(&slot, &rank_dims),
+                            &qualified_coreduced,
+                            &classified.kind,
+                            classified.name,
+                            classified.is_bare,
+                            Some(&body_ctx),
+                        ),
+                    )
+                };
+                vars.push(LtmSyntheticVar {
+                    name: var_name,
+                    equation: datamodel::Equation::Scalar(equation),
+                    dimensions: vec![],
+                    compile_directly: false,
+                });
+            }
+        }
+        return;
+    }
     // The read rows: only the slice the reducer reads -- `from`'s OWN
     // (per-source) slice -- each row paired with its (possibly
     // mapping-remapped, GH #534) agg slot. If the slice doesn't line up
     // with `from`'s axes (shouldn't happen for a hoisted agg whose
     // `sources` include `from`; a non-source's empty slice trips the same
     // arity guard), fall back to all elements / scalar agg.
-    let rows: Vec<ReadSliceRow> = read_slice_rows(
-        agg.source_read_slice(from),
-        &dim_element_lists,
-        project_dimensions_context(db, project),
-    )
-    .unwrap_or_else(|| {
-        let all = cartesian_subscripts(&dim_element_lists);
-        all.iter()
-            .map(|r| ReadSliceRow {
-                row: r.clone(),
-                slot: String::new(),
-                coreduced: all.clone(),
-            })
-            .collect()
-    });
+    let rows: Vec<ReadSliceRow> =
+        read_slice_rows(agg.source_read_slice(from), &dim_element_lists, dim_ctx).unwrap_or_else(
+            || {
+                let all = cartesian_subscripts(&dim_element_lists);
+                all.iter()
+                    .map(|r| ReadSliceRow {
+                        row: r.clone(),
+                        slot: String::new(),
+                        coreduced: all.clone(),
+                    })
+                    .collect()
+            },
+        );
     for ReadSliceRow {
         row,
         slot,

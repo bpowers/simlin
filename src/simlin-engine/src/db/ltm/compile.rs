@@ -410,8 +410,9 @@ struct LoweredLtmVariable {
 /// the agg-hoistable reducer set (`ltm_agg::reducer_kind_from_name`),
 /// which differs: `SIZE` is never hoisted into an agg (its link score is
 /// constant 0) yet Pass-1 decomposes its argument exactly like `SUM`'s
-/// (and `RANK` -- recognized as a reducer, never hoisted post-GH #771 --
-/// is never Pass-1-decomposed either). Deriving the original (text-scan)
+/// (and `RANK` -- recognized as array-valued and routed through its own LTM
+/// agg path post-GH #776 -- is never Pass-1-decomposed either). Deriving the
+/// original (text-scan)
 /// gate from
 /// the wrong set silently stubbed any fragment embedding
 /// `SIZE(<array expression>)` -- the demonstrated GH #738 round-2

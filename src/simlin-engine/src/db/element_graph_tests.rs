@@ -1274,6 +1274,35 @@ fn element_graph_scalar_feeder_of_hoisted_reducer_is_bare_node() {
     assert_edge(&result, "pop[boston]", "share[boston]");
 }
 
+/// GH #776: `RANK` is array-valued, so each rank output slot depends on the
+/// whole ranked array, not just the same source element. The bare and wildcard
+/// spellings are equivalent dataflow and must both enumerate cross-element
+/// paths for rank-mediated loops.
+#[test]
+fn element_graph_rank_arg_reads_all_elements_for_bare_and_wildcard_spellings() {
+    for (name, rank_arg) in [
+        ("rank_bare_arg", "RANK(pop, 1)"),
+        ("rank_wildcard_arg", "RANK(pop[*], 1)"),
+    ] {
+        let project = TestProject::new(name)
+            .named_dimension("Region", &["north", "south"])
+            .array_aux("pop[Region]", "100")
+            .array_aux("grow[Region]", rank_arg);
+
+        let result = element_edges(&project);
+        let agg = crate::ltm_agg::synthetic_agg_name(0);
+        for from in ["pop[north]", "pop[south]"] {
+            for slot in ["north", "south"] {
+                assert_edge(&result, from, &format!("{agg}[{slot}]"));
+            }
+        }
+        assert_edge(&result, &format!("{agg}[north]"), "grow[north]");
+        assert_edge(&result, &format!("{agg}[south]"), "grow[south]");
+        assert_no_edge(&result, "pop[north]", "grow[north]");
+        assert_no_edge(&result, "pop[south]", "grow[south]");
+    }
+}
+
 /// #514 (element graph, scalar feeder of an *arrayed* hoisted reducer): a
 /// sliced reducer over an A2A body whose argument also references a *scalar*,
 /// e.g. `growth[D1] = SUM(matrix[D1,*] * scale)` with `scale` scalar -- the

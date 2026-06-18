@@ -1466,8 +1466,8 @@ fn contains_unfreezable_previous(expr: &Expr0) -> bool {
 /// equation whose only reducer is SIZE keeps the changed-first convention
 /// (the whole reducer is freezable as `PREVIOUS(size(...))`), so it does
 /// not reach this gate. RANK is excluded by that predicate: it is
-/// array-valued and never hoisted (GH #771/#742), so its bare arg is a
-/// genuine `Bare` diagonal reference, not this feeder shape.
+/// array-valued and uses its own agg-routing path (GH #771/#776), so its
+/// bare arg is not this scalar-reducer feeder shape.
 fn references_bare_source_inside_reducer(
     expr: &Expr0,
     source: &Ident<Canonical>,

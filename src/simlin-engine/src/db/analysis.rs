@@ -470,12 +470,9 @@ fn emit_edges_for_reference(
             // carve-out (`SUM(pop[idx,*])`, reclassified from `Wildcard` by
             // the IR); `Wildcard` here is a variable-backed WHOLE-EXTENT
             // reducer's whole-RHS argument (a full reduction feeding every
-            // target element), a DE-HOISTED array-valued reducer's wildcard
-            // arg (`RANK(pop[*], 1)` -- GH #771: RANK never sets
-            // `in_reducer`, so the IR's #514 reclassification doesn't fire
-            // and the site keeps its syntactic shape; the cross-product is
-            // the intended coarse-but-sound treatment), or a rare
-            // non-reducer whole-array reference -- a hoisted
+            // target element), or a rare non-reducer whole-array reference.
+            // Hoisted scalar reducers and array-valued RANK helpers are
+            // routed through aggregate nodes before they reach this arm: a
             // *synthetic*-agg reducer reference is routed through the agg
             // (`emit_agg_routed_edges`) and a variable-backed PARTIAL
             // reducer's argument is routed by its read slice through the
@@ -968,7 +965,45 @@ fn emit_agg_routed_edges(
         let broadcast_targets: Option<Vec<String>> =
             (!agg.is_synthetic && agg.result_dims.is_empty() && !to_dims.is_empty())
                 .then(|| cartesian_element_names(to_name, to_dims));
-        if let Some(rows) = rows {
+        if agg.array_valued_rank {
+            let fallback_slots: Vec<Vec<String>> = crate::ltm_agg::cartesian_element_parts(
+                &iterated_dims
+                    .iter()
+                    .map(dimension_element_names)
+                    .collect::<Vec<_>>(),
+            );
+            if let Some(rows) = rows {
+                for crate::db::ltm::ReadSliceRowParts {
+                    row_parts,
+                    slot_parts,
+                } in &rows
+                {
+                    let from_node = if row_parts.len() == 1 {
+                        format_element_name(from_name, &row_parts[0])
+                    } else {
+                        let refs: Vec<&str> = row_parts.iter().map(String::as_str).collect();
+                        format_multi_element_name(from_name, &refs)
+                    };
+                    let rank_slots = crate::ltm_agg::rank_output_slot_parts_for_row(
+                        read_slice,
+                        &from_dim_element_lists,
+                        slot_parts,
+                    )
+                    .unwrap_or_else(|| fallback_slots.clone());
+                    let entry = element_edges.entry(from_node).or_default();
+                    for slot in &rank_slots {
+                        entry.insert(agg_node_name(slot));
+                    }
+                }
+            } else {
+                for from_node in cartesian_element_names(from_name, from_dims) {
+                    let entry = element_edges.entry(from_node).or_default();
+                    for slot in &fallback_slots {
+                        entry.insert(agg_node_name(slot));
+                    }
+                }
+            }
+        } else if let Some(rows) = rows {
             for crate::db::ltm::ReadSliceRowParts {
                 row_parts,
                 slot_parts,
