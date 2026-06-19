@@ -518,13 +518,6 @@ export function Login(props: LoginProps): React.JSX.Element {
                 {state.emailError}
               </p>
             )}
-            {/* Server-session failure relayed from App (IdP sign-in succeeded
-             * but creating the server session failed, bouncing the user back). */}
-            {props.error !== undefined && (
-              <p role="alert" className={clsx(typography.body2, styles.formError)}>
-                {props.error}
-              </p>
-            )}
           </div>
         );
     }
@@ -543,7 +536,19 @@ export function Login(props: LoginProps): React.JSX.Element {
               <CircularProgress label="Signing you in" />
             </div>
           ) : (
-            <div className={styles.innerInner}>{loginUI}</div>
+            <div className={styles.innerInner}>
+              {loginUI}
+              {/* Server-session failure relayed from App (the IdP/password
+                  sign-in succeeded but creating the server session failed,
+                  bouncing the user back). Rendered outside the emailLoginFlow
+                  switch so it is visible on every card -- e.g. an email/password
+                  user whose session exchange fails stays on the 'signin' card. */}
+              {props.error !== undefined && (
+                <p role="alert" className={clsx(typography.body2, styles.formError)}>
+                  {props.error}
+                </p>
+              )}
+            </div>
           )}
         </div>
       </div>

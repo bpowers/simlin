@@ -677,6 +677,19 @@ describe('Login rendering guards', () => {
     expect(screen.getByText(/finish signing you in/i)).not.toBeNull();
   });
 
+  test('a server-session error stays visible on the email sign-in card', () => {
+    // An email/password user whose Firebase sign-in succeeds but whose /session
+    // exchange fails is left on the 'signin' card (emailLoginFlow === 'signin'),
+    // not the landing screen. The session error is rendered outside the flow
+    // switch, so it must remain visible there too.
+    render(<Login disabled={false} auth={makeAuth()} error="We couldn't finish signing you in." />);
+    fireEvent.click(screen.getByText('Sign in with email'));
+    // We are on the combined sign-in card...
+    expect(screen.getByLabelText('Password')).not.toBeNull();
+    // ...and the relayed session error is still shown.
+    expect(screen.getByText(/finish signing you in/i)).not.toBeNull();
+  });
+
   test('the form onSubmit is a no-op guard (submission does not itself sign in)', () => {
     // The browser fires the submit button's onClick on Enter; the form's own
     // onSubmit just preventDefaults so the page never navigates. A raw form
