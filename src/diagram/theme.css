@@ -97,7 +97,18 @@
   --color-cloud-stroke: #6388dc;
 }
 
-/* Dark mode overrides (for StaticDiagram) */
+/*
+ * Dark-mode overrides for the StaticDiagram CANVAS ONLY.
+ *
+ * StaticDiagram (the non-interactive thumbnail/export renderer) wraps its
+ * canvas SVG in a [data-theme="dark"] element, so the variables below retheme
+ * the canvas primitives (Stock/Flow/Cloud/Connector/Module/etc.) it draws.
+ * Nothing else in the app sets data-theme: the interactive editor chrome,
+ * the detail panels, and the src/app shell are intentionally light-only for
+ * now. Dark-mode parity across those surfaces is a deliberately-unbuilt,
+ * best-effort item (see the root CLAUDE.md), so do not assume a dark editor
+ * exists just because these canvas tokens do.
+ */
 [data-theme="dark"] {
   --color-black: #bbbbbb;
   --color-white: #222222;

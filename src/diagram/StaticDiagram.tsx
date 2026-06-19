@@ -113,6 +113,9 @@ export function StaticDiagram(props: DiagramProps): React.ReactElement | null {
     />
   );
 
+  // This is the only place in the app that sets data-theme, so dark mode applies
+  // ONLY to the canvas primitives rendered here (themed via theme.css). The
+  // interactive editor chrome and app shell are intentionally light-only for now.
   const themedCanvas = <div data-theme={isDarkTheme ? 'dark' : undefined}>{canvasElement}</div>;
 
   if (canUseDOM) {

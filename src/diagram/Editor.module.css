@@ -183,22 +183,6 @@
   white-space: nowrap;
 }
 
-[data-theme="dark"] .breadcrumbLink {
-  color: #90caf9;
-}
-
-[data-theme="dark"] .breadcrumbLink:hover {
-  background: rgba(144, 202, 249, 0.08);
-}
-
-[data-theme="dark"] .breadcrumbCurrent {
-  color: #e0e0e0;
-}
-
-[data-theme="dark"] .breadcrumbSeparator {
-  color: #666;
-}
-
 .sharedModelBanner {
   position: absolute;
   top: var(--shared-model-banner-top);
@@ -225,11 +209,6 @@
   .sharedModelBanner {
     width: min(var(--panel-width-lg), calc(100vw - 16px));
   }
-}
-
-[data-theme="dark"] .sharedModelBanner {
-  background: #3e2723;
-  color: #ffcc80;
 }
 
 .editor {
