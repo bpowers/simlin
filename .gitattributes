@@ -1,25 +1,18 @@
-# Line-ending and binary-classification policy for the whole repo (issue #800).
+# Line-ending and binary-classification policy (issue #800).
 #
-# Default: treat every file as text and normalize it to LF in the index, and
-# check it out as LF on every platform. `text=auto` makes git auto-detect
-# binary content (a file with NUL bytes -- or other binary markers, such as a
-# bare-CR "classic Mac" separator -- is left untouched), and `eol=lf` forces
-# LF on the files git does treat as text. So the only line ending that can be
-# committed for a text file is `\n`, on Windows checkouts included.
-*  text=auto eol=lf
-
-# Explicit binary markers (belt-and-suspenders): these extensions are always
-# binary, so mark them `binary` (== `-text -diff`) to guarantee git never
-# applies eol conversion even if a file's first 8000 bytes happen to look
-# text-like. The list covers every binary type actually tracked in this repo.
+# Default: our source and configuration normalize to LF in the index and on
+# checkout. `text=auto` auto-detects binary content (files with NUL bytes, etc.)
+# and leaves it alone; `eol=lf` forces LF for everything git treats as text, so
+# LF is the only line ending that can be committed for normalized text -- on
+# Windows checkouts included.
 #
-# NOTE: we deliberately do NOT add per-path rules for the vendored CR-only
-# (classic-Mac line-ended) `.tab`/`.csv` golden fixtures (e.g.
-# test/test-models/**/output.tab). git auto-detects those as binary via the
-# bare-CR heuristic, so `text=auto` already leaves them byte-for-byte intact,
-# while the SIBLING CRLF-ended `output.tab` fixtures DO get normalized to LF.
-# A blanket `output.tab binary` rule would wrongly pin those CRLF siblings.
+# Scope: this normalizes OUR source. Vendored / third-party / model / golden
+# fixtures are deliberately preserved byte-for-byte (stable sha256) by the
+# `-text` rules at the bottom -- we do not rewrite the line endings of model
+# files or reference outputs we did not author.
+* text=auto eol=lf
 
+# --- Binary files: never line-ending-converted ------------------------------
 # Images
 *.png   binary
 *.jpg   binary
@@ -61,3 +54,29 @@ src/app/scripts/* linguist-vendored
 src/app/config/* linguist-vendored
 src/simlin-engine/src/stdlib.gen.rs linguist-generated=true
 src/simlin-engine/src/project_io.gen.rs linguist-generated=true
+
+# --- Preserve byte-for-byte (no EOL conversion) -----------------------------
+# These rules come last so they win over the `* text=auto eol=lf` default for
+# any overlap. `-text` (not `binary`) so the files still produce textual diffs.
+#
+# Model definition files (Vensim .mdl/.MDL, Stella/XMILE .stmx/.itmx/.xmile),
+# wherever they live: many are vendored or are reference fixtures whose exact
+# bytes (and sha256) we keep stable, and we don't rewrite their line endings.
+*.mdl   -text
+*.MDL   -text
+*.stmx  -text
+*.itmx  -text
+*.xmile -text
+
+# The entire test/ tree is third-party / reference fixtures: vendored model
+# corpora (test-models, sdeverywhere -- each with its own LICENSE/README/build
+# scripts) plus golden simulation outputs (.tab/.csv/.dat/.CIN). Keep it
+# pristine and byte-identical to upstream.
+test/** -text
+
+# Model + golden test fixtures that live under src/ (engine/binding tests) are
+# data, not source, so they are exempt from the src/ LF normalization and kept
+# byte-exact (e.g. the SIR_output.csv golden the libsimlin tests reference).
+src/libsimlin/testdata/**          -text
+src/pysimlin/tests/fixtures/**     -text
+src/simlin-serve/tests/fixtures/** -text
