@@ -116,11 +116,15 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
 
   if (!projectBinary || !projectVersion) {
     // A load failure used to render bare, unstyled error text; the in-flight
-    // state used to be a blank <div/>. Both now fill the viewport with a styled
-    // surface so an open never reads as a hang or broken markup.
+    // state used to be a blank <div/>. Both now render a styled, centered
+    // surface. In embedded mode it fills the embed element (no fixed-viewport
+    // overlay) so a slow or failed embedded model never covers the host page --
+    // mirroring the success branch, which also drops the full-viewport `.bg`
+    // when embedded.
+    const placeholderClass = embedded ? styles.centerEmbedded : styles.center;
     if (serviceErrors.length > 0) {
       return (
-        <div className={styles.center}>
+        <div className={placeholderClass}>
           <div className={styles.errorBox} role="alert">
             <p className={styles.errorTitle}>We couldn&apos;t open this model</p>
             <p className={styles.errorMessage}>{first(serviceErrors).message}</p>
@@ -132,7 +136,7 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
       );
     }
     return (
-      <div className={styles.center}>
+      <div className={placeholderClass}>
         <CircularProgress label="Loading model" />
       </div>
     );

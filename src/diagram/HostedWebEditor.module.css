@@ -6,7 +6,8 @@
 }
 
 /* Full-viewport surface for the in-flight (spinner) and load-error states so
-   neither collapses to a thin strip or reads as a blank/broken page. */
+   neither collapses to a thin strip or reads as a blank/broken page. Used by
+   the standalone hosted editor (not embeds -- see .centerEmbedded). */
 .center {
   position: fixed;
   inset: 0;
@@ -14,6 +15,20 @@
   align-items: center;
   justify-content: center;
   background: #f2f2f2;
+}
+
+/* Embedded variant of the loading/error surface: fills the embed element and
+   centers content WITHOUT a fixed-viewport overlay, so a slow or failed
+   embedded model stays within its `sd-model` host element instead of covering
+   the entire host page. min-height keeps it visible before the diagram (which
+   would otherwise supply the embed's height) has loaded. */
+.centerEmbedded {
+  width: 100%;
+  min-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
 }
 
 .errorBox {

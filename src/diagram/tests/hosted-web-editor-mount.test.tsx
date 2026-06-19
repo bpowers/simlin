@@ -132,4 +132,27 @@ describe('HostedWebEditor mount load', () => {
       deferred.resolve(errorResponse());
     });
   });
+
+  it('uses an embed-local placeholder, not the fixed-viewport overlay, when embedded', async () => {
+    // In embedded mode the loading and error surfaces must stay within the
+    // sd-model host element; a position:fixed `.center` would cover the whole
+    // host page while a slow/failed embed loads.
+    const deferred = createDeferred<Response>();
+    const fetchMock = jest.fn(() => deferred.promise);
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const { container } = render(<HostedWebEditor username="alice" projectName="climate" baseURL="" embedded={true} />);
+    await flushDeferredLoad();
+
+    // Loading: embed-local layout, not the fixed-viewport overlay.
+    expect(container.querySelector('.centerEmbedded')).not.toBeNull();
+    expect(container.querySelector('.center')).toBeNull();
+
+    // Failure: likewise embed-local.
+    await act(async () => {
+      deferred.resolve(errorResponse());
+    });
+    expect(container.querySelector('.centerEmbedded')).not.toBeNull();
+    expect(container.querySelector('.center')).toBeNull();
+  });
 });
