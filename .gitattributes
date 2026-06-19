@@ -1,6 +1,62 @@
-# Normalize Python sources to LF line endings (see issue #596).
+# Line-ending and binary-classification policy for the whole repo (issue #800).
+#
+# Default: treat every file as text and normalize it to LF in the index, and
+# check it out as LF on every platform. `text=auto` makes git auto-detect
+# binary content (a file with NUL bytes -- or other binary markers, such as a
+# bare-CR "classic Mac" separator -- is left untouched), and `eol=lf` forces
+# LF on the files git does treat as text. So the only line ending that can be
+# committed for a text file is `\n`, on Windows checkouts included.
+*  text=auto eol=lf
+
+# Explicit binary markers (belt-and-suspenders): these extensions are always
+# binary, so mark them `binary` (== `-text -diff`) to guarantee git never
+# applies eol conversion even if a file's first 8000 bytes happen to look
+# text-like. The list covers every binary type actually tracked in this repo.
+#
+# NOTE: we deliberately do NOT add per-path rules for the vendored CR-only
+# (classic-Mac line-ended) `.tab`/`.csv` golden fixtures (e.g.
+# test/test-models/**/output.tab). git auto-detects those as binary via the
+# bare-CR heuristic, so `text=auto` already leaves them byte-for-byte intact,
+# while the SIBLING CRLF-ended `output.tab` fixtures DO get normalized to LF.
+# A blanket `output.tab binary` rule would wrongly pin those CRLF siblings.
+
+# Images
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+
+# Fonts
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.eot   binary
+
+# Documents / spreadsheets
+*.pdf   binary
+*.xls   binary
+*.xlsx  binary
+
+# Serialized protobuf instances (DB-compatible; never line-ending-converted)
+*.pb       binary
+*.protobin binary
+
+# Vensim binary data/model files (.vdf/.vdfx/.vmf are undocumented binary
+# formats; see docs/design/vdf.md). gitattributes matching is case-sensitive,
+# so the uppercase extensions Vensim emits are listed explicitly.
+*.vdf  binary
+*.VDF  binary
+*.vdfx binary
+*.VMF  binary
+*.vmf  binary
+
+# Python sources normalize to LF (folded in from the prior #596 rule; now
+# redundant under the `* text=auto eol=lf` default, kept for clarity).
 *.py text eol=lf
 
+# Linguist hints (GitHub language stats); unrelated to line endings.
 src/app/scripts/* linguist-vendored
 src/app/config/* linguist-vendored
 src/simlin-engine/src/stdlib.gen.rs linguist-generated=true
