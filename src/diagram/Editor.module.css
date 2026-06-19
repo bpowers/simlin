@@ -190,6 +190,10 @@
   width: min(var(--panel-width-sm), calc(100vw - 16px));
   padding: 4px 12px;
   font-size: 12px;
+  /* Explicit line-height makes the banner's rendered height deterministic (it
+     must not depend on the global reset's inherited 1.5, which a host bundle
+     may not load) so --shared-model-banner-height can match it. */
+  line-height: 1.4;
   color: var(--color-text-muted);
   background: #fff3e0;
   border-radius: 4px;

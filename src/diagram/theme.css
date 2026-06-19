@@ -15,10 +15,13 @@
   --searchbar-height: 48px;
   /* The shared-model banner sits just below the search bar (4px gap). */
   --shared-model-banner-top: calc(8px + var(--searchbar-height) + 4px);
-  /* Upper-bound estimate of the text-driven banner height (4px*2 padding +
-     a 12px font line box), not a measured constant; the 4px clearance baked
-     into --panel-top-inset-with-banner absorbs minor line-height variance. */
-  --shared-model-banner-height: 22px;
+  /* Banner height reserved by --panel-top-inset-with-banner. Sized for the
+     worst realistic case -- a two-line wrapped banner -- because the longer
+     "used by N modules" message wraps at the narrow (sm) panel width. With the
+     banner's explicit line-height:1.4 and 4px*2 padding, one line is ~25px and
+     two wrapped lines are ~42px; a single-line banner just leaves more
+     clearance. (English copy maxes at two lines; revisit if i18n is added.) */
+  --shared-model-banner-height: 42px;
 
   /* Vertical room the floating detail panels reserve at their top so their
      content clears the search/breadcrumb bar that overlays the top of this
