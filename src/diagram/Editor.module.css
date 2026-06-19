@@ -59,7 +59,7 @@
   position: absolute;
   top: 8px;
   right: 8px;
-  height: 48px;
+  height: var(--searchbar-height);
   /* Clamp to the viewport on narrow screens so the bar never overflows the
      left edge (it is anchored right:8px); stays in lockstep with the detail
      panel cards that share this slot. */
@@ -93,7 +93,7 @@
   position: absolute;
   top: 8px;
   right: 8px;
-  height: 48px;
+  height: var(--searchbar-height);
   width: var(--panel-width-sm);
   box-sizing: border-box;
 }
@@ -102,6 +102,17 @@
   position: absolute;
   top: 8px;
   right: 8px;
+}
+
+/* When the shared-model banner is shown it overlays the top of this same
+   slot (just below the search bar), so the open detail panel must reserve
+   extra top room to clear BOTH. The panel children read --panel-top-inset
+   for their top padding; overriding the variable here cascades to whichever
+   panel (variable/module/error) is mounted. This intentionally only grows
+   the panel's reserved EMPTY band, leaving the search-bar-over-panel paint
+   order untouched (see getDetails/getSearchBar ordering in Editor.tsx). */
+.varDetailsWithBanner {
+  --panel-top-inset: var(--panel-top-inset-with-banner);
 }
 
 .searchButton {
@@ -190,7 +201,7 @@
 
 .sharedModelBanner {
   position: absolute;
-  top: 60px;
+  top: var(--shared-model-banner-top);
   right: 8px;
   width: min(var(--panel-width-sm), calc(100vw - 16px));
   padding: 4px 12px;

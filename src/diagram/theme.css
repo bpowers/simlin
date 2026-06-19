@@ -7,11 +7,31 @@
   --panel-width-md: 420px;
   --panel-width-lg: 480px;
 
+  /* Top-right floating chrome geometry. The search bar, the optional
+     shared-model banner, and the detail panels all share the same
+     top-right slot (anchored top:8px right:8px), so their vertical offsets
+     are derived from one set of tokens to keep them from drifting apart.
+     The 8px below is the shared slot top (.searchBar/.varDetails top:8px). */
+  --searchbar-height: 48px;
+  /* The shared-model banner sits just below the search bar (4px gap). */
+  --shared-model-banner-top: calc(8px + var(--searchbar-height) + 4px);
+  /* Upper-bound estimate of the text-driven banner height (4px*2 padding +
+     a 12px font line box), not a measured constant; the 4px clearance baked
+     into --panel-top-inset-with-banner absorbs minor line-height variance. */
+  --shared-model-banner-height: 22px;
+
   /* Vertical room the floating detail panels reserve at their top so their
-     content clears the 48px search/breadcrumb bar that shares the top-right
-     slot (panel top at 8px + 48px bar - small overlap). All three detail
-     panels read this so they cannot drift apart. */
-  --panel-top-inset: 52px;
+     content clears the search/breadcrumb bar that overlays the top of this
+     same slot (slot top 8px + 48px bar + 4px gap = content at y=60). All
+     three detail panels read this so they cannot drift apart. */
+  --panel-top-inset: calc(8px + var(--searchbar-height) + 4px - 8px);
+  /* When the shared-model banner is present it occupies the band the base
+     inset would have left empty, so the panels reserve enough room to clear
+     BOTH the search bar and the banner (banner bottom + 4px gap). The Editor
+     applies .varDetailsWithBanner to swap this in when the banner shows. */
+  --panel-top-inset-with-banner: calc(
+    var(--shared-model-banner-top) - 8px + var(--shared-model-banner-height) + 4px
+  );
 
   /* Spacing (base: 8px grid) */
   --spacing-1: 8px;
