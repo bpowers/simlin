@@ -251,6 +251,9 @@ export function InnerApp(): React.JSX.Element {
       return undefined;
     }
 
+    // A successful session clears any prior session-error message so it cannot
+    // linger in state and resurface on the login screen after a later logout.
+    setState({ loginError: undefined });
     handleUsernameChanged();
   }
 
@@ -306,7 +309,7 @@ export function InnerApp(): React.JSX.Element {
     // invalidate() can rethrow a pending request's rejection (it awaits any
     // in-flight fetch), which would otherwise escape Home's fire-and-forget
     // call as an unhandled rejection.
-    setState({ user: undefined, isNewUser: undefined, firebaseIdToken: null });
+    setState({ user: undefined, isNewUser: undefined, firebaseIdToken: null, loginError: undefined });
     try {
       await userInfo.invalidate();
     } catch (err) {

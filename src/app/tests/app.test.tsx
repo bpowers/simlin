@@ -89,8 +89,12 @@ jest.mock('../Home', () => {
 jest.mock('../Login', () => {
   const React = require('react');
   return {
-    Login: (props: { disabled?: boolean }) =>
-      React.createElement('div', { 'data-testid': 'login', 'data-disabled': String(!!props.disabled) }, 'Login'),
+    Login: (props: { disabled?: boolean; error?: string }) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'login', 'data-disabled': String(!!props.disabled), 'data-error': props.error ?? '' },
+        'Login',
+      ),
   };
 });
 
@@ -594,6 +598,75 @@ describe('InnerApp logout', () => {
       expect(screen.queryByTestId('home')).toBeNull();
       expect(screen.queryByTestId('login')).not.toBeNull();
     });
+  });
+
+  test('a session error is cleared after a successful sign-in and does not resurface after logout', async () => {
+    // Regression: state.loginError was never cleared, so a user who hit a
+    // /session failure, then signed in successfully (a retry), then logged out
+    // would see the stale "couldn't finish signing you in" error on the fresh
+    // login screen. The success path (and logout) now clear it.
+    let allowSession = false;
+    let sessionCreated = false;
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async (input: unknown, init?: { method?: string }) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/user')) {
+        return sessionCreated ? userResponse(200, { id: 'alice' }) : userResponse(401, {});
+      }
+      if (url.endsWith('/session')) {
+        if (method === 'DELETE') {
+          sessionCreated = false;
+          return userResponse(200, {});
+        }
+        // POST: fails until the retry, then creates the session.
+        if (!allowSession) {
+          return userResponse(500, {});
+        }
+        sessionCreated = true;
+        return userResponse(200, {});
+      }
+      return userResponse(401, {});
+    });
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    renderApp('/');
+    await waitFor(() => {
+      expect(loginIsDisabled()).toBe('false');
+    });
+
+    // First attempt: /session POST fails -> loginError set and surfaced on Login.
+    await act(async () => {
+      await latestAuthListener()(makeFirebaseUser());
+      await flushMacrotasks();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('login').getAttribute('data-error')).toMatch(/finish signing you in/i);
+    });
+
+    // Retry: /session POST now succeeds -> user committed, Home renders, and the
+    // prior loginError is cleared on the success path.
+    allowSession = true;
+    await act(async () => {
+      await latestAuthListener()(makeFirebaseUser());
+      await flushMacrotasks();
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId('home')).not.toBeNull();
+    });
+
+    // Sign out -> back to Login with NO stale session error.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('logout'));
+      await flushMacrotasks();
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId('login')).not.toBeNull();
+    });
+    expect(screen.getByTestId('login').getAttribute('data-error')).toBe('');
+
+    consoleSpy.mockRestore();
+    setFetchRoutes({});
   });
 
   test('still returns to the login screen when every network step rejects', async () => {
