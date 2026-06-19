@@ -7,11 +7,23 @@
   --panel-width-md: 420px;
   --panel-width-lg: 480px;
 
-  /* Spacing (base: 8px) */
+  /* Vertical room the floating detail panels reserve at their top so their
+     content clears the 48px search/breadcrumb bar that shares the top-right
+     slot (panel top at 8px + 48px bar - small overlap). All three detail
+     panels read this so they cannot drift apart. */
+  --panel-top-inset: 52px;
+
+  /* Spacing (base: 8px grid) */
   --spacing-1: 8px;
   --spacing-1-5: 12px;
   --spacing-2: 16px;
   --spacing-3: 24px;
+  --spacing-4: 32px;
+  --spacing-5: 40px;
+  --spacing-6: 48px;
+  --spacing-7: 56px;
+  --spacing-8: 64px;
+  --spacing-9: 72px;
   --spacing-10: 80px;
 
   /* Palette - Common */
@@ -37,6 +49,29 @@
   --color-text-muted: #666;
   --color-text-light: #888;
   --color-connector: gray;
+
+  /* Surfaces: panel/card backgrounds, borders, and the recessed input wells
+     used by the equation/units/notes editors. Tokenized so light/dark and a
+     future "flatter surfaces" pass change one place instead of ~20 files. */
+  --color-surface: #ffffff;
+  --color-border: #dddddd;
+  --color-field-bg: #f5f5f5;
+
+  /* Elevation shadows. These three triplets were copy-pasted verbatim across a
+     dozen components; tokenizing them lets the "subtler elevation" design
+     direction be dialed in centrally. Values match the prior inline strings. */
+  --shadow-sm:
+    0px 2px 1px -1px rgba(0, 0, 0, 0.2),
+    0px 1px 1px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 3px 0px rgba(0, 0, 0, 0.12);
+  --shadow-md:
+    0px 3px 1px -2px rgba(0, 0, 0, 0.2),
+    0px 2px 2px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 5px 0px rgba(0, 0, 0, 0.12);
+  --shadow-lg:
+    0px 3px 5px -1px rgba(0, 0, 0, 0.2),
+    0px 6px 10px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 18px 0px rgba(0, 0, 0, 0.12);
 
   /* Diagram - Cloud colors */
   --color-cloud-stroke: #6388dc;

@@ -14,17 +14,17 @@ function fillOf(container: HTMLElement): string | null {
 describe('Status', () => {
   test('renders a green circle when status is ok', () => {
     const { container } = render(<Status status="ok" onClick={jest.fn()} />);
-    expect(fillOf(container)).toBe('#81c784');
+    expect(fillOf(container)).toBe('#2e7d32');
   });
 
-  test('renders an orange circle when status is error', () => {
+  test('renders a red circle when status is error', () => {
     const { container } = render(<Status status="error" onClick={jest.fn()} />);
-    expect(fillOf(container)).toBe('rgb(255, 152, 0)');
+    expect(fillOf(container)).toBe('#c62828');
   });
 
   test('renders a grey circle when status is disabled', () => {
     const { container } = render(<Status status="disabled" onClick={jest.fn()} />);
-    expect(fillOf(container)).toBe('#DCDCDC');
+    expect(fillOf(container)).toBe('#bdbdbd');
   });
 
   test('clicking the circle invokes onClick', () => {

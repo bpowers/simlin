@@ -4,3 +4,39 @@
   height: 100%;
   position: fixed;
 }
+
+/* Full-viewport surface for the in-flight (spinner) and load-error states so
+   neither collapses to a thin strip or reads as a blank/broken page. */
+.center {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f2f2f2;
+}
+
+.errorBox {
+  max-width: 480px;
+  width: 100%;
+  margin: var(--spacing-3);
+  padding: var(--spacing-3);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface);
+}
+
+.errorTitle {
+  margin: 0 0 var(--spacing-1);
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--color-error);
+}
+
+.errorMessage {
+  margin: 0 0 var(--spacing-2);
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

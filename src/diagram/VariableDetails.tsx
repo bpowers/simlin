@@ -502,7 +502,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
         </Slate>
 
         <div className={styles.cardActions}>
-          <Button size="small" color="secondary" onClick={handleVariableDelete} className={styles.buttonLeft}>
+          <Button size="small" color="error" onClick={handleVariableDelete} className={styles.buttonLeft}>
             Delete
           </Button>
           <div className={styles.buttonRight}>
@@ -515,8 +515,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
           </div>
         </div>
 
-        <hr />
-        <br />
+        <div className={styles.chartDivider} />
         {chartOrErrors}
       </div>
     );

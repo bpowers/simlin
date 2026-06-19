@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
+import clsx from 'clsx';
 
 import {
   signInWithRedirect,
@@ -18,6 +19,7 @@ import {
   AppleIcon,
   EmailIcon,
   Button,
+  CircularProgress,
   SvgIcon,
   Card,
   CardActions,
@@ -48,6 +50,9 @@ type EmailLoginStates = 'signin' | 'signup' | 'recover' | 'recoverSent';
 export interface LoginProps {
   disabled: boolean;
   auth: FirebaseAuth;
+  // Set by App when the server /session exchange fails after a successful IdP
+  // sign-in; shown on the landing screen so the bounce-back isn't silent.
+  error?: string;
 }
 
 interface LoginState {
@@ -309,8 +314,6 @@ export function Login(props: LoginProps): React.JSX.Element {
     return false;
   };
 
-  const disabledClass = props.disabled ? styles.disabled : styles.innerInner;
-
   let loginUI: React.JSX.Element | undefined = undefined;
   if (!props.disabled) {
     switch (state.emailLoginFlow) {
@@ -348,7 +351,7 @@ export function Login(props: LoginProps): React.JSX.Element {
                   autoFocus={state.email !== ''}
                 />
                 {state.signinError !== undefined && (
-                  <p role="alert" className={typography.body2}>
+                  <p role="alert" className={clsx(typography.body2, styles.formError)}>
                     {state.signinError}
                   </p>
                 )}
@@ -511,8 +514,15 @@ export function Login(props: LoginProps): React.JSX.Element {
              * network failure) would set emailError but stay invisible because
              * no email-flow card is mounted to render it. */}
             {state.emailError !== undefined && (
-              <p role="alert" className={typography.body2}>
+              <p role="alert" className={clsx(typography.body2, styles.formError)}>
                 {state.emailError}
+              </p>
+            )}
+            {/* Server-session failure relayed from App (IdP sign-in succeeded
+             * but creating the server session failed, bouncing the user back). */}
+            {props.error !== undefined && (
+              <p role="alert" className={clsx(typography.body2, styles.formError)}>
+                {props.error}
               </p>
             )}
           </div>
@@ -525,7 +535,16 @@ export function Login(props: LoginProps): React.JSX.Element {
       <div className={styles.middle}>
         <div className={styles.inner}>
           <ModelIcon className={styles.logo} />
-          <div className={disabledClass}>{loginUI}</div>
+          {/* While the initial auth state resolves (props.disabled), show a
+              spinner rather than an opacity:0 blank, which read as a broken
+              half-loaded page on cold/slow loads. */}
+          {props.disabled ? (
+            <div className={styles.loading}>
+              <CircularProgress label="Signing you in" />
+            </div>
+          ) : (
+            <div className={styles.innerInner}>{loginUI}</div>
+          )}
         </div>
       </div>
     </div>

@@ -63,7 +63,9 @@ export function NewUser(props: NewUserProps): React.JSX.Element {
     if (!(status >= 200 && status < 400)) {
       const body = await response.json();
       const errorMsg =
-        body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
+        body && body.error
+          ? (body.error as string)
+          : `We couldn't save your username (HTTP ${status}). It may be taken -- try another.`;
       setErrorMsg(errorMsg);
       return;
     }

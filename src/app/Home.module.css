@@ -2,6 +2,8 @@
   flex-grow: 1;
 }
 
+/* Matches the dense Toolbar's min-height (48px); offsets the fixed AppBar so
+   content is not tucked underneath it. */
 .toolbarSpacer {
   height: 48px;
 }
@@ -17,12 +19,13 @@
   margin: 0;
 }
 
-.profileIcon {
-  margin-left: 8px;
-}
-
-.sdTitle {
-  font-weight: 300;
+/* Trailing toolbar controls as one flex row: a single gap is the only spacing
+   source, so the New Project button and the avatar stay vertically centered and
+   evenly spaced without per-child margins. */
+.toolbarActions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
 }
 
 .avatar {
@@ -30,28 +33,29 @@
   height: 32px;
 }
 
-.menuButton {
-  margin-right: 20px;
-}
-
-.newProjectButton {
-  color: white;
-  border: 1px solid rgba(255, 255, 255, 0.76);
-  text-decoration: none;
-  margin-right: 16px;
-}
-
 .paper {
-  margin: 24px;
-  padding: 12px;
+  padding: var(--spacing-2);
 }
 
 /*
- * Project card title. typography.heading5 zeroes the <h3> margin (MUI
- * style), so restore the deliberate space around it here.
+ * Project card title. typography.heading6 zeroes the <h3> margin (MUI
+ * style); restore deliberate space (clear of the preview above, tight to the
+ * description below) so title and description read as a title/subtitle pair.
  */
 .cardTitle {
-  margin: 24px 0;
+  margin: var(--spacing-1-5) 0 4px;
+}
+
+/* Secondary description: muted and clamped to two lines so cards in a row keep
+   even heights instead of growing ragged with long text. */
+.cardDescription {
+  margin: 0;
+  color: var(--color-text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .preview {
@@ -66,20 +70,41 @@
 }
 
 .modelLink {
-  color: white;
+  color: inherit;
   text-decoration: none;
 }
 
-.newForm {
-  margin: 32px;
-  padding: 12px;
-}
-
+/* The grid owns the gutter (gap, set inline) and is inset by matching padding,
+   so inner and outer gutters are equal and the cards carry no margin. */
 .projectGrid {
   box-sizing: border-box;
   margin-left: auto;
   margin-right: auto;
   max-width: 1024px;
+  padding: var(--spacing-3);
+}
+
+/* Centered column for the loading spinner, the empty "No models yet" onboarding
+   state, and the load-error retry prompt -- replaces the previous blank page. */
+.statusArea {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-2);
+  min-height: 50vh;
+  padding: var(--spacing-10) var(--spacing-3);
+  text-align: center;
+}
+
+.statusTitle {
+  margin: 0;
+}
+
+.statusBody {
+  margin: 0;
+  max-width: 360px;
+  color: var(--color-text-muted);
 }
 
 /*

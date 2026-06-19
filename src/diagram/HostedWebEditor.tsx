@@ -8,6 +8,8 @@ import { baseURL } from '@simlin/core/common';
 import { first } from '@simlin/core/collections';
 
 import { Editor, ProtobufProjectData } from './Editor';
+import Button from './components/Button';
+import CircularProgress from './components/CircularProgress';
 import { ErrorBoundary } from './ErrorBoundary';
 import { HostedWebEditorError, ProjectEndpoint, loadProject, saveProject } from './hosted-web-editor-core';
 // Imported as a namespace so the delete-flow navigation and DELETE go through
@@ -113,10 +115,27 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
   };
 
   if (!projectBinary || !projectVersion) {
+    // A load failure used to render bare, unstyled error text; the in-flight
+    // state used to be a blank <div/>. Both now fill the viewport with a styled
+    // surface so an open never reads as a hang or broken markup.
     if (serviceErrors.length > 0) {
-      return <div>{first(serviceErrors).message}</div>;
+      return (
+        <div className={styles.center}>
+          <div className={styles.errorBox} role="alert">
+            <p className={styles.errorTitle}>We couldn&apos;t open this model</p>
+            <p className={styles.errorMessage}>{first(serviceErrors).message}</p>
+            <Button variant="contained" color="primary" onClick={() => window.location.reload()}>
+              Reload
+            </Button>
+          </div>
+        </div>
+      );
     }
-    return <div />;
+    return (
+      <div className={styles.center}>
+        <CircularProgress label="Loading model" />
+      </div>
+    );
   }
 
   const classNames = embedded ? undefined : styles.bg;

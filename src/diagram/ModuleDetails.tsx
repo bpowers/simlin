@@ -251,8 +251,14 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
           </table>
         )}
         <div className={styles.addInputButton}>
-          <Button size="small" variant="outlined" onClick={handleAddReference} data-testid="add-input-button">
-            <AddIcon /> Add Input
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<AddIcon />}
+            onClick={handleAddReference}
+            data-testid="add-input-button"
+          >
+            Add Input
           </Button>
         </div>
       </div>
@@ -337,7 +343,7 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
         {renderUnitsDocsEditors()}
 
         <div className={styles.cardActions}>
-          <Button size="small" color="secondary" onClick={handleDelete} className={styles.deleteButton}>
+          <Button size="small" color="error" onClick={handleDelete} className={styles.deleteButton}>
             Delete Module
           </Button>
         </div>

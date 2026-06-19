@@ -25,6 +25,20 @@
   display: inline-block;
 }
 
+/* Centered spinner shown while the initial auth handshake resolves. */
+.loading {
+  display: flex;
+  justify-content: center;
+  padding-top: var(--spacing-1);
+}
+
+/* Card-level / OAuth credential errors: match the red field-error treatment so
+   they read as errors rather than ordinary helper text. */
+.formError {
+  color: var(--color-error);
+  margin-top: var(--spacing-1);
+}
+
 .optionsButtons {
   display: flex;
   flex-direction: column;
@@ -33,8 +47,10 @@
 }
 
 .optionsButtons button {
-  width: 240px;
-  justify-content: flex-start;
+  /* Shared, viewport-aware width so the provider buttons and the email form
+     line up on the same column edge and never overflow a narrow phone. */
+  width: min(280px, calc(100vw - 32px));
+  justify-content: center;
 }
 
 .recoverInstructions {
@@ -42,16 +58,11 @@
   margin-bottom: var(--spacing-2);
 }
 
-.disabled {
-  pointer-events: none;
-  opacity: 0;
-}
-
 .logo {
   display: block;
-  width: 160px;
-  height: 160px;
-  margin: 0 auto 24px;
+  width: 120px;
+  height: 120px;
+  margin: 0 auto var(--spacing-3);
 }
 
 .appleButton {
@@ -62,17 +73,17 @@
   background-color: #333;
 }
 
+/* Neutral grey, not a brand red: the email path is the tertiary option, and a
+   red button read as destructive and collided with Google's own brand color. */
 .emailButton {
-  background-color: #db4437;
+  background-color: #5f6368;
 }
 
 .emailButton:hover {
-  background-color: #c33d2e;
+  background-color: #4a4d52;
 }
 
 .emailForm {
   text-align: left;
-  min-width: 275px;
-  max-width: 360px;
-  width: 100%;
+  width: min(280px, calc(100vw - 32px));
 }

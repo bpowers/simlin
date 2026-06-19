@@ -3,7 +3,7 @@
 }
 
 .error {
-  background-color: #c62828;
+  background-color: var(--color-error);
 }
 
 .info {

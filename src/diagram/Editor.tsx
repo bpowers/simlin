@@ -1316,7 +1316,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         <div>
           {latest.current.state.modelErrors.map((err) => {
             const id = errorKey(err);
-            return <Toast variant="warning" id={id} onClose={handleCloseSnackbar} message={err.message} key={id} />;
+            // These are genuine failures (engine open, sim-run, save/service
+            // errors), so use the red error variant rather than amber warning.
+            return <Toast variant="error" id={id} onClose={handleCloseSnackbar} message={err.message} key={id} />;
           })}
         </div>
       </Snackbar>

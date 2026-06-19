@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
+import clsx from 'clsx';
 
 import { fromUint8Array } from '@simlin/core/base64';
 
@@ -53,7 +54,9 @@ export function NewProject(props: NewProjectProps): React.JSX.Element {
   const [descriptionField, setDescriptionField] = React.useState('');
   const [errorMsg, setErrorMsg] = React.useState<string | undefined>(undefined);
   const [projectPB, setProjectPB] = React.useState<Uint8Array | undefined>(undefined);
-  const [isPublic, setIsPublic] = React.useState<boolean | undefined>(undefined);
+  // Controlled from the start (false, not undefined) so the Radix checkbox never
+  // flips from uncontrolled to controlled on first toggle.
+  const [isPublic, setIsPublic] = React.useState<boolean>(false);
 
   // The deferred setProjectName() (scheduled via setTimeout from handleClose)
   // and the async uploadModel continuation read the freshest form values and
@@ -63,14 +66,14 @@ export function NewProject(props: NewProjectProps): React.JSX.Element {
     projectNameField: string;
     descriptionField: string;
     projectPB: Uint8Array | undefined;
-    isPublic: boolean | undefined;
+    isPublic: boolean;
     onProjectCreated: (project: Project) => void;
   }>(
     undefined as unknown as {
       projectNameField: string;
       descriptionField: string;
       projectPB: Uint8Array | undefined;
-      isPublic: boolean | undefined;
+      isPublic: boolean;
       onProjectCreated: (project: Project) => void;
     },
   );
@@ -120,7 +123,9 @@ export function NewProject(props: NewProjectProps): React.JSX.Element {
     if (!(status >= 200 && status < 400)) {
       const body = await response.json();
       const errorMsg =
-        body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
+        body && body.error
+          ? (body.error as string)
+          : `We couldn't create your project (HTTP ${status}). Please try again.`;
       setErrorMsg(errorMsg);
       return;
     }
@@ -164,7 +169,7 @@ export function NewProject(props: NewProjectProps): React.JSX.Element {
       }
     } catch (e) {
       // The engine never produced a handle, so there's nothing to dispose.
-      setErrorMsg(`${e}`);
+      setErrorMsg(`That model couldn't be imported: ${e}`);
       return;
     }
 
@@ -178,14 +183,16 @@ export function NewProject(props: NewProjectProps): React.JSX.Element {
       const activeProject = projectFromJson(json);
       const views = activeProject.models.get('main')?.views;
       if (!views || views.length === 0) {
-        setErrorMsg(`can't import model with no view at this time.`);
+        setErrorMsg(
+          `That model has no diagram to import yet. Open it in its original tool, add a view, and try again.`,
+        );
         return;
       }
 
       setProjectPB(projectPB);
       setErrorMsg(undefined);
     } catch (e) {
-      setErrorMsg(`${e}`);
+      setErrorMsg(`That model couldn't be imported: ${e}`);
     } finally {
       await engineProject.dispose();
     }
@@ -195,83 +202,76 @@ export function NewProject(props: NewProjectProps): React.JSX.Element {
   return (
     <div>
       <h2 className={typography.heading2}>Create a project</h2>
-      <div className={styles.subtitle}>
-        <p className={typography.subtitle1}>A project holds models and data, along with simulation results.</p>
-      </div>
-      <br />
-      <TextField
-        onChange={handleProjectNameChanged}
-        autoFocus
-        id="projectName"
-        label="Project Name"
-        type="text"
-        error={errorMsg !== undefined}
-        onKeyPress={handleKeyPress}
-        fullWidth
-        InputProps={{
-          startAdornment: <InputAdornment position="start">{props.user.id}/</InputAdornment>,
-        }}
-      />
-      <br />
-      <br />
-      <TextField
-        onChange={handleDescriptionChanged}
-        id="description"
-        label="Project Description"
-        type="text"
-        onKeyPress={handleKeyPress}
-        fullWidth
-      />
+      <p className={clsx(typography.subtitle1, styles.subtitle)}>
+        A project holds models and data, along with simulation results.
+      </p>
+      <div className={styles.formStack}>
+        <TextField
+          onChange={handleProjectNameChanged}
+          autoFocus
+          id="projectName"
+          label="Project Name"
+          type="text"
+          error={errorMsg !== undefined}
+          onKeyPress={handleKeyPress}
+          fullWidth
+          InputProps={{
+            startAdornment: <InputAdornment position="start">{props.user.id}/</InputAdornment>,
+          }}
+        />
+        <TextField
+          onChange={handleDescriptionChanged}
+          id="description"
+          label="Project Description"
+          type="text"
+          onKeyPress={handleKeyPress}
+          fullWidth
+        />
 
-      <br />
-      <br />
-
-      <Accordion>
-        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-          <div>
-            <span>Advanced</span>
-          </div>
-        </AccordionSummary>
-        <AccordionDetails>
-          <form>
-            <div className={styles.advancedGrid}>
-              <div className={styles.gridCol8}>
-                <span>Use existing model</span>
-              </div>
-              <div className={styles.gridCol4}>
-                <Button variant="contained" className="NewProject-upload-button" color="secondary" component="label">
-                  Select
-                  <input
-                    style={{ display: 'none' }}
-                    accept=".stmx,.itmx,.xmile,.mdl"
-                    id="xmile-model-file"
-                    type="file"
-                    onChange={uploadModel}
-                  />
-                </Button>
-              </div>
-              <div className={styles.gridCol12}>
-                <FormControlLabel
-                  control={<Checkbox checked={isPublic} onChange={handlePublicChecked} />}
-                  label="Publicly accessible"
-                />
-              </div>
+        <Accordion>
+          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+            <div>
+              <span>Advanced</span>
             </div>
-          </form>
-        </AccordionDetails>
-      </Accordion>
+          </AccordionSummary>
+          <AccordionDetails>
+            <form>
+              <div className={styles.advancedGrid}>
+                <div className={styles.gridCol8}>
+                  <span>Use existing model</span>
+                </div>
+                <div className={styles.gridCol4}>
+                  <Button variant="contained" className="NewProject-upload-button" color="secondary" component="label">
+                    Select
+                    <input
+                      style={{ display: 'none' }}
+                      accept=".stmx,.itmx,.xmile,.mdl"
+                      id="xmile-model-file"
+                      type="file"
+                      onChange={uploadModel}
+                    />
+                  </Button>
+                </div>
+                <div className={styles.gridCol12}>
+                  <FormControlLabel
+                    control={<Checkbox checked={isPublic} onChange={handlePublicChecked} />}
+                    label="Publicly accessible"
+                  />
+                </div>
+              </div>
+            </form>
+          </AccordionDetails>
+        </Accordion>
 
-      <br />
-      <br />
-      <br />
-      <p className={typography.subtitle2} style={{ whiteSpace: 'pre-wrap' }}>
-        <b>{warningText || '\xa0'}</b>
-      </p>
-      <p className={typography.textRight}>
-        <Button onClick={handleClose} color="primary">
-          Create
-        </Button>
-      </p>
+        <p className={clsx(typography.subtitle2, styles.warning)}>
+          <b>{warningText || '\xa0'}</b>
+        </p>
+        <div className={styles.actions}>
+          <Button onClick={handleClose} color="primary" variant="contained">
+            Create
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

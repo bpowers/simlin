@@ -372,37 +372,38 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
           type="number"
           margin="normal"
         />
-        <br />
-        <TextField
-          className={styles.xScaleMin}
-          error={xScaleError}
-          label="X axis min"
-          value={xMin}
-          onChange={handleXMinChange}
-          type="number"
-          margin="normal"
-        />
-        <TextField
-          className={styles.xScaleMax}
-          error={xScaleError}
-          label="X axis max"
-          value={xMax}
-          onChange={handleXMaxChange}
-          type="number"
-          margin="normal"
-        />
-        <TextField
-          className={styles.datapoints}
-          error={datapointCountError}
-          label="Datapoint Count"
-          value={datapointCount}
-          onChange={handleDatapointCountChange}
-          type="number"
-          margin="normal"
-        />
+        <div className={styles.xAxisRow}>
+          <TextField
+            error={xScaleError}
+            label="X axis min"
+            value={xMin}
+            onChange={handleXMinChange}
+            type="number"
+            margin="normal"
+            fullWidth
+          />
+          <TextField
+            error={xScaleError}
+            label="X axis max"
+            value={xMax}
+            onChange={handleXMaxChange}
+            type="number"
+            margin="normal"
+            fullWidth
+          />
+          <TextField
+            error={datapointCountError}
+            label="Datapoint Count"
+            value={datapointCount}
+            onChange={handleDatapointCountChange}
+            type="number"
+            margin="normal"
+            fullWidth
+          />
+        </div>
       </div>
       <div className={styles.cardActions}>
-        <Button size="small" color="secondary" onClick={handleLookupRemove} className={styles.buttonLeft}>
+        <Button size="small" color="error" onClick={handleLookupRemove} className={styles.buttonLeft}>
           Remove
         </Button>
         <div className={styles.buttonRight}>
