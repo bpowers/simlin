@@ -85,14 +85,14 @@ export function Menu(props: MenuProps): React.ReactElement {
   const anchorRect = useAnchorRect(anchorEl, open);
   const contentRef = React.useRef<HTMLDivElement>(null);
   // True while a focus move is one the other handlers already own -- a pointer
-  // press (handled by the mousedown listener) or Escape's focus-restore -- so
+  // press (handled by the pointerdown listener) or Escape's focus-restore -- so
   // the blur handler does not also close. It stays false for a genuine keyboard
   // focus-out (Tab/Shift+Tab), which is the only case blur-close should fire.
   const skipBlurCloseRef = React.useRef(false);
 
   // Dismiss on Escape or a pointer press outside the menu, only while open.
   // The listeners are registered after the render that mounts the menu, so the
-  // click that opened it (already past its mousedown) never self-closes it.
+  // press that opened it (already past its pointerdown) never self-closes it.
   React.useEffect(() => {
     if (!open) {
       return;
@@ -102,7 +102,7 @@ export function Menu(props: MenuProps): React.ReactElement {
         event.preventDefault();
         onClose();
         // Keyboard dismissal returns focus to the trigger (Radix did this);
-        // outside-click dismissal does not, so the clicked element keeps focus.
+        // outside-press dismissal does not, so the pressed element keeps focus.
         // The focus move fires a blur synchronously, so guard it from
         // double-closing.
         skipBlurCloseRef.current = true;
@@ -110,7 +110,13 @@ export function Menu(props: MenuProps): React.ReactElement {
         skipBlurCloseRef.current = false;
       }
     };
-    const onMouseDown = (event: MouseEvent): void => {
+    // Use pointerdown in CAPTURE, not mousedown: surfaces like the diagram
+    // canvas preventDefault() on pointerdown for pan/drag, which suppresses the
+    // compatibility mousedown -- a mousedown listener would miss those presses
+    // and the menu would stay stuck open. Capture also runs before the target's
+    // own handlers, so we see the press regardless of what it does (matching
+    // Radix's outside-interaction handling).
+    const onPointerDown = (event: PointerEvent): void => {
       // Any focus shift this press causes is owned here, not by blur-close.
       skipBlurCloseRef.current = true;
       const target = event.target as Node;
@@ -127,16 +133,16 @@ export function Menu(props: MenuProps): React.ReactElement {
       }
       onClose();
     };
-    const onMouseUp = (): void => {
+    const onPointerUp = (): void => {
       skipBlurCloseRef.current = false;
     };
     document.addEventListener('keydown', onKeyDown);
-    document.addEventListener('mousedown', onMouseDown);
-    document.addEventListener('mouseup', onMouseUp);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('pointerup', onPointerUp, true);
     return () => {
       document.removeEventListener('keydown', onKeyDown);
-      document.removeEventListener('mousedown', onMouseDown);
-      document.removeEventListener('mouseup', onMouseUp);
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('pointerup', onPointerUp, true);
     };
   }, [open, onClose, anchorEl]);
 

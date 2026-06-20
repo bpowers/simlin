@@ -217,7 +217,7 @@ describe('Menu dismissal and keyboard', () => {
         <MenuItem>One</MenuItem>
       </Menu>,
     );
-    fireEvent.mouseDown(anchor);
+    fireEvent.pointerDown(anchor);
     expect(onClose).not.toHaveBeenCalled();
     anchor.remove();
   });
@@ -232,7 +232,9 @@ describe('Menu dismissal and keyboard', () => {
         <MenuItem>One</MenuItem>
       </Menu>,
     );
-    fireEvent.mouseDown(outside);
+    // pointerdown (not mousedown): surfaces like the canvas preventDefault the
+    // compatibility mouse event, so the dismiss listener must observe pointers.
+    fireEvent.pointerDown(outside);
     expect(onClose).toHaveBeenCalledTimes(1);
     anchor.remove();
     outside.remove();
@@ -304,7 +306,7 @@ describe('Menu dismissal and keyboard', () => {
     );
     const { rerender } = render(tree(true));
 
-    fireEvent.mouseDown(outside); // dismiss via outside press (strands the flag)
+    fireEvent.pointerDown(outside); // dismiss via outside press (strands the flag)
     expect(onClose).toHaveBeenCalledTimes(1);
 
     rerender(tree(false)); // close
