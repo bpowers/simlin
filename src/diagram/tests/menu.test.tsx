@@ -256,4 +256,50 @@ describe('Menu dismissal and keyboard', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
     anchor.remove();
   });
+
+  it('dismisses when focus leaves to browser chrome (null relatedTarget)', () => {
+    const anchor = document.createElement('button');
+    document.body.appendChild(anchor);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    // Tab from the only item often blurs to browser chrome / body with a null
+    // relatedTarget; focus has still left the menu, so it must close.
+    const item = screen.getByRole('menuitem');
+    fireEvent.blur(item, { relatedTarget: null });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    anchor.remove();
+  });
+
+  it('still closes on keyboard focus-out after a prior outside-click dismissal', () => {
+    // Regression: the outside-press path sets skipBlurCloseRef and closes inside
+    // the mousedown listener, tearing down the mouseup reset before it fires.
+    // Reopening must clear the stranded flag so keyboard focus-out still closes.
+    const anchor = document.createElement('button');
+    const outside = document.createElement('div');
+    document.body.append(anchor, outside);
+    const onClose = jest.fn();
+    const tree = (open: boolean) => (
+      <Menu anchorEl={anchor} open={open} onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>
+    );
+    const { rerender } = render(tree(true));
+
+    fireEvent.mouseDown(outside); // dismiss via outside press (strands the flag)
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    rerender(tree(false)); // close
+    rerender(tree(true)); // reopen -> flag must be cleared
+
+    const item = screen.getByRole('menuitem');
+    fireEvent.blur(item, { relatedTarget: outside });
+    expect(onClose).toHaveBeenCalledTimes(2);
+
+    anchor.remove();
+    outside.remove();
+  });
 });

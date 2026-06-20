@@ -150,11 +150,15 @@ export function Menu(props: MenuProps): React.ReactElement {
 
   // Move focus into the menu when it opens so keyboard users land on it; the
   // portal is appended at the end of <body>, so without this they would have to
-  // tab through the whole page to reach it.
+  // tab through the whole page to reach it. Also clear skipBlurCloseRef so each
+  // open starts clean: an outside-press dismissal closes the menu (calling
+  // onClose) synchronously inside the mousedown listener, which tears down the
+  // mouseup reset before it runs, leaving the flag stranded true for next time.
   React.useEffect(() => {
     if (!open) {
       return;
     }
+    skipBlurCloseRef.current = false;
     enabledItems()[0]?.focus();
   }, [open, enabledItems]);
 
@@ -186,16 +190,17 @@ export function Menu(props: MenuProps): React.ReactElement {
     }
   };
 
-  // A genuine keyboard focus-out of the menu (Tab/Shift+Tab) dismisses it --
-  // including Shift+Tab back to the trigger. A move BETWEEN items is not "out",
-  // and pointer- or Escape-driven focus moves are owned by their own handlers
+  // A genuine keyboard focus-out of the menu dismisses it -- Tab/Shift+Tab to
+  // another element, back to the trigger, or out to browser chrome (where
+  // relatedTarget is null). Only a move BETWEEN items stays open; pointer- and
+  // Escape-driven focus moves are owned by their own handlers
   // (skipBlurCloseRef), so they do not double-close here.
   const onContentBlur = (event: React.FocusEvent<HTMLDivElement>): void => {
-    const next = event.relatedTarget as Node | null;
-    if (!next || skipBlurCloseRef.current) {
+    if (skipBlurCloseRef.current) {
       return;
     }
-    if (contentRef.current?.contains(next)) {
+    const next = event.relatedTarget as Node | null;
+    if (next && contentRef.current?.contains(next)) {
       return;
     }
     onClose();
