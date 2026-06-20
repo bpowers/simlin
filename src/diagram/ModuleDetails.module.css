@@ -13,6 +13,9 @@
   scrollbar-gutter: stable;
   border-radius: 4px;
   background: var(--color-surface);
+  /* Own the foreground so the native <select> and the units/notes wells stay
+     legible when the surface flips dark. */
+  color: var(--color-text-primary);
   box-shadow: var(--shadow-1);
 }
 

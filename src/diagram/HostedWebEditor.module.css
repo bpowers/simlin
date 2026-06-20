@@ -39,6 +39,9 @@
   border: 1px solid var(--color-border);
   border-radius: 4px;
   background: var(--color-surface);
+  /* Own the foreground so the error message stays legible when the surface
+     flips dark. */
+  color: var(--color-text-primary);
 }
 
 .errorTitle {

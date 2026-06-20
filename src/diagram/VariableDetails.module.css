@@ -9,6 +9,10 @@
   scrollbar-gutter: stable;
   border-radius: 4px;
   background: var(--color-surface);
+  /* Own the foreground so inheriting content -- the equation/units/notes wells
+     and KaTeX (rendered with currentColor) -- stays legible when the surface
+     flips dark. */
+  color: var(--color-text-primary);
   box-shadow: var(--shadow-1);
 }
 

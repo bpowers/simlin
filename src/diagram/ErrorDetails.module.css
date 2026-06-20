@@ -4,6 +4,9 @@
   box-sizing: border-box;
   border-radius: 4px;
   background: var(--color-surface);
+  /* Own the foreground so the "no errors" message stays legible when the
+     surface flips dark. */
+  color: var(--color-text-primary);
   box-shadow: var(--shadow-1);
 }
 

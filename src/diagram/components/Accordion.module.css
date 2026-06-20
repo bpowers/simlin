@@ -2,6 +2,9 @@
   border: 1px solid var(--color-border);
   border-radius: 4px;
   background-color: var(--color-surface);
+  /* Pair the surface with its text token so the trigger/content stay legible
+     when --color-surface flips dark. */
+  color: var(--color-text-primary);
 }
 
 .accordion::before {

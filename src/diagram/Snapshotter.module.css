@@ -5,6 +5,8 @@
   margin-right: var(--spacing-1);
   border-radius: 4px;
   background: var(--color-surface);
+  /* Own the foreground so the camera icon (currentColor) flips with the surface. */
+  color: var(--color-text-primary);
   box-shadow: var(--shadow-2);
 }
 

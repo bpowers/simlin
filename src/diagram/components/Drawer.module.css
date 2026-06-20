@@ -22,6 +22,8 @@
   bottom: 0;
   z-index: 1200;
   background: var(--color-surface);
+  /* Portaled sheet: own the foreground so its contents flip with the surface. */
+  color: var(--color-text-primary);
   overflow-y: auto;
   box-shadow: var(--shadow-16);
   transform: translateX(0);

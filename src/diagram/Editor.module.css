@@ -74,6 +74,8 @@
   padding: 0 8px;
   border-radius: 4px;
   background: var(--color-surface);
+  /* Own the foreground so the native search <input> text flips with the surface. */
+  color: var(--color-text-primary);
   box-shadow: var(--shadow-2);
 }
 
