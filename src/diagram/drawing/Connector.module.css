@@ -19,7 +19,7 @@
 
 .connectorBg {
   stroke-width: 7px;
-  stroke: white;
+  stroke: var(--color-white);
   opacity: 0;
   fill: none;
 }

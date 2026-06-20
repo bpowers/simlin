@@ -1,16 +1,16 @@
 .card {
   background-color: var(--color-surface);
-  color: rgba(0, 0, 0, 0.87);
+  color: var(--color-text-primary);
   border-radius: 4px;
   overflow: hidden;
 }
 
 .outlined {
-  border: 1px solid rgba(0, 0, 0, 0.12);
+  border: 1px solid var(--color-border);
 }
 
 .elevation {
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
 }
 
 .cardContent {

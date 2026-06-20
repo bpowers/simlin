@@ -1,6 +1,6 @@
 .paper {
-  background-color: #fff;
-  color: rgba(0, 0, 0, 0.87);
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
   transition: box-shadow 300ms cubic-bezier(0.4, 0, 0.2, 1) 0ms;
   border-radius: 4px;
 }
@@ -10,9 +10,9 @@
 }
 
 .elevation1 {
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
 }
 
 .elevation2 {
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-3);
 }

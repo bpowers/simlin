@@ -9,7 +9,7 @@
   stroke-width: 1;
   stroke-linejoin: round;
   stroke: var(--color-selected);
-  fill: white;
+  fill: var(--color-white);
 }
 
 .arrowheadConnector {
@@ -27,6 +27,6 @@
 }
 
 .arrowheadBg {
-  fill: white;
+  fill: var(--color-white);
   opacity: 0;
 }

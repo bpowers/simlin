@@ -1,5 +1,5 @@
 .link {
-  color: #1976d2;
+  color: var(--color-primary);
   cursor: pointer;
 }
 

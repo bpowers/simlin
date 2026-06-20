@@ -1,7 +1,7 @@
 .accordion {
-  border: 1px solid rgba(0, 0, 0, 0.12);
+  border: 1px solid var(--color-border);
   border-radius: 4px;
-  background-color: #fff;
+  background-color: var(--color-surface);
 }
 
 .accordion::before {
@@ -32,11 +32,11 @@
 }
 
 .trigger:hover {
-  background-color: rgba(0, 0, 0, 0.04);
+  background-color: var(--color-action-hover);
 }
 
 .trigger:focus-visible {
-  outline: 2px solid #1976d2;
+  outline: 2px solid var(--color-primary);
   outline-offset: -2px;
 }
 
@@ -54,7 +54,7 @@
 .expandIcon {
   display: flex;
   align-items: center;
-  color: rgba(0, 0, 0, 0.54);
+  color: var(--color-text-muted);
   transition: transform 150ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 

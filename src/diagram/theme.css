@@ -36,6 +36,12 @@
     var(--shared-model-banner-top) - 8px + var(--shared-model-banner-height) + 4px
   );
 
+  /* Dense toolbar height. The app's fixed AppBar uses a dense Toolbar; the
+     spacer that offsets page content from under it (src/app/Home.module.css
+     .toolbarSpacer) derives from this same token as Toolbar's .dense min-height
+     so the two cannot drift apart. */
+  --toolbar-dense-height: 48px;
+
   /* Spacing (base: 8px grid) */
   --spacing-1: 8px;
   --spacing-1-5: 12px;
@@ -49,72 +55,179 @@
   --spacing-9: 72px;
   --spacing-10: 80px;
 
+  /* Type scale. rem-based so editor/panel text honors the user's browser zoom
+     and root font-size (the raw-px sizes this replaced did not). 0.75rem == 12px
+     at the default root; mirrors MUI's "caption" variant
+     (src/app/typography.module.css). */
+  --font-size-caption: 0.75rem;
+
   /* Palette - Common */
   --color-black: #000000;
   --color-white: #ffffff;
+  /* Ink that sits on a saturated brand fill or a permanently-dark chip
+     (AppBar, contained buttons, the FAB, snackbars, tooltips). Unlike
+     --color-white this NEVER inverts under dark mode: those surfaces stay
+     dark/colored in both themes, so their text must stay light. (MUI's
+     common.white / contrastText.) */
+  --color-contrast-text: #ffffff;
 
   /* Palette - Brand */
   --color-primary: #1976d2;
   --color-secondary: #dc004e;
   --color-selected: #4444dd;
+  /* Hover fills for contained buttons/FAB: the brand color one step darker. */
+  --color-primary-dark: #1565c0;
+  --color-secondary-dark: #9a0036;
+  --color-error-dark: #b71c1c;
+  /* Low-opacity brand tints for text/outlined-button hover backgrounds, and the
+     half-opacity brand outline of outlined buttons. Kept as the literal brand
+     rgba so a single edit retints every state. The breadcrumb link's former
+     0.08 primary hover normalizes onto --color-primary-hover (0.04) -- one
+     hover weight for the whole UI; the link's primary text color and pointer
+     cursor already carry the affordance. */
+  --color-primary-hover: rgba(25, 118, 210, 0.04);
+  --color-secondary-hover: rgba(220, 0, 78, 0.04);
+  --color-error-hover: rgba(198, 40, 40, 0.04);
+  --color-primary-outline: rgba(25, 118, 210, 0.5);
+  --color-secondary-outline: rgba(220, 0, 78, 0.5);
+  --color-error-outline: rgba(198, 40, 40, 0.5);
 
   /* Palette - Status */
   --color-error: #c62828;
   --color-success: #2e7d32;
   --color-warning: #f57f17;
 
-  /* Palette - UI */
+  /* Palette - UI (canvas + chrome shared) */
   --color-target-good: rgb(76, 175, 80);
   --color-target-bad: rgb(244, 67, 54);
   --color-indicator-warning: rgb(255, 152, 0);
   --color-drag-selection: #6363ff;
-  --color-divider: #ddd;
-  --color-text-muted: #666;
-  --color-text-light: #888;
   --color-connector: gray;
+  --color-cloud-stroke: #6388dc;
 
-  /* Surfaces: panel/card backgrounds, borders, and the recessed input wells
-     used by the equation/units/notes editors. Tokenized so light/dark and a
-     future "flatter surfaces" pass change one place instead of ~20 files. */
+  /* Neutral text. Alpha-over-surface (MUI-style) so the one scale reads on any
+     background and flips cleanly in dark mode. The light values equal the hexes
+     they consolidated: muted == the old #666, light is the centroid of the
+     #888/#999/#aaa greys it replaced (so each shifts at most ~one step), primary
+     absorbs #333 and rgba(0,0,0,0.87), disabled the rgba(0,0,0,0.26) greys. */
+  --color-text-primary: rgba(0, 0, 0, 0.87);
+  --color-text-muted: rgba(0, 0, 0, 0.6);
+  --color-text-light: rgba(0, 0, 0, 0.4);
+  --color-text-disabled: rgba(0, 0, 0, 0.26);
+
+  /* Hairlines and surface/input borders. --divider and --border share the MUI
+     0.12 weight (lines between content vs. a surface outline); --border-input is
+     the heavier 0.23 used by text fields, selects, and outlined buttons. They
+     absorb the old #ddd/#eee (->divider/border) and #ccc/0.23/0.42 (->input). */
+  --color-divider: rgba(0, 0, 0, 0.12);
+  --color-border: rgba(0, 0, 0, 0.12);
+  --color-border-input: rgba(0, 0, 0, 0.23);
+
+  /* Action-state overlays and the modal/drawer scrim. */
+  --color-action-hover: rgba(0, 0, 0, 0.04);
+  --color-backdrop: rgba(0, 0, 0, 0.5);
+
+  /* Surfaces: panel/card/menu/dialog backgrounds, the recessed input wells used
+     by the equation/units/notes editors, and the app page background.
+     Tokenized so light/dark and a future "flatter surfaces" pass change one
+     place instead of ~20 files. */
   --color-surface: #ffffff;
-  --color-border: #dddddd;
   --color-field-bg: #f5f5f5;
+  --color-background: #f2f2f2;
+  /* Neutral raised controls: the speed-dial's secondary action buttons. */
+  --color-control-bg: #e0e0e0;
+  --color-control-bg-hover: #d0d0d0;
+  /* Permanently-dark chips that hold --color-contrast-text ink. */
+  --color-snackbar-bg: #323232;
+  --color-tooltip-bg: #616161;
+  /* Translucent overlay surface (the line-chart hover tooltip). */
+  --color-overlay-surface: rgba(255, 255, 255, 0.95);
+  /* Amber wash behind the shared-model banner. */
+  --color-banner-warning-bg: #fff3e0;
+  /* Highlighted option in the autocomplete listbox. */
+  --color-option-highlight: #add8e6;
+  /* Default avatar background (initials chip). */
+  --color-avatar-bg: #bdbdbd;
 
-  /* Elevation shadows. These three triplets were copy-pasted verbatim across a
-     dozen components; tokenizing them lets the "subtler elevation" design
-     direction be dialed in centrally. Values match the prior inline strings. */
-  --shadow-sm:
+  /* Elevation shadows, keyed to MUI's dp elevation levels so the "subtler
+     elevation" design direction can be dialed in centrally. 1/2/3 are the three
+     repeated low triplets; 4/8/16/24 are the distinct higher levels used by the
+     AppBar, menus/popovers, the drawer, and dialogs respectively. */
+  --shadow-1:
     0px 2px 1px -1px rgba(0, 0, 0, 0.2),
     0px 1px 1px 0px rgba(0, 0, 0, 0.14),
     0px 1px 3px 0px rgba(0, 0, 0, 0.12);
-  --shadow-md:
+  --shadow-2:
     0px 3px 1px -2px rgba(0, 0, 0, 0.2),
     0px 2px 2px 0px rgba(0, 0, 0, 0.14),
     0px 1px 5px 0px rgba(0, 0, 0, 0.12);
-  --shadow-lg:
+  --shadow-3:
     0px 3px 5px -1px rgba(0, 0, 0, 0.2),
     0px 6px 10px 0px rgba(0, 0, 0, 0.14),
     0px 1px 18px 0px rgba(0, 0, 0, 0.12);
-
-  /* Diagram - Cloud colors */
-  --color-cloud-stroke: #6388dc;
+  --shadow-4:
+    0px 2px 4px -1px rgba(0, 0, 0, 0.2),
+    0px 4px 5px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 10px 0px rgba(0, 0, 0, 0.12);
+  --shadow-8:
+    0px 5px 5px -3px rgba(0, 0, 0, 0.2),
+    0px 8px 10px 1px rgba(0, 0, 0, 0.14),
+    0px 3px 14px 2px rgba(0, 0, 0, 0.12);
+  --shadow-16:
+    0px 8px 10px -5px rgba(0, 0, 0, 0.2),
+    0px 16px 24px 2px rgba(0, 0, 0, 0.14),
+    0px 6px 30px 5px rgba(0, 0, 0, 0.12);
+  --shadow-24:
+    0px 11px 15px -7px rgba(0, 0, 0, 0.2),
+    0px 24px 38px 3px rgba(0, 0, 0, 0.14),
+    0px 9px 46px 8px rgba(0, 0, 0, 0.12);
 }
 
 /*
- * Dark-mode overrides for the StaticDiagram CANVAS ONLY.
+ * Dark-mode overrides.
  *
  * StaticDiagram (the non-interactive thumbnail/export renderer) wraps its
- * canvas SVG in a [data-theme="dark"] element, so the variables below retheme
- * the canvas primitives (Stock/Flow/Cloud/Connector/Module/etc.) it draws.
- * Nothing else in the app sets data-theme: the interactive editor chrome,
- * the detail panels, and the src/app shell are intentionally light-only for
- * now. Dark-mode parity across those surfaces is a deliberately-unbuilt,
- * best-effort item (see the root CLAUDE.md), so do not assume a dark editor
- * exists just because these canvas tokens do.
+ * canvas SVG in a [data-theme="dark"] element, so the canvas primitives below
+ * (Stock/Flow/Cloud/Connector/Module/group/etc.) retheme there today. The
+ * editor-chrome and component-library tokens below also carry dark values so
+ * that a future dark editor (root CLAUDE.md lists dark mode as a supported,
+ * best-effort target) themes correctly instead of rendering white boxes with
+ * invisible text. Nothing in the shipping app sets data-theme="dark" on the
+ * chrome yet, so these chrome overrides are inert in the current light-only UI
+ * -- they are infrastructure, not a switch being flipped here.
  */
 [data-theme="dark"] {
+  /* Canvas primitives. */
   --color-black: #bbbbbb;
   --color-white: #222222;
   --color-cloud-stroke: #2d498a;
   --color-connector: #777777;
+
+  /* Neutral text / borders / overlays flip to light-on-dark. */
+  --color-text-primary: rgba(255, 255, 255, 0.87);
+  --color-text-muted: rgba(255, 255, 255, 0.6);
+  --color-text-light: rgba(255, 255, 255, 0.4);
+  --color-text-disabled: rgba(255, 255, 255, 0.3);
+  --color-divider: rgba(255, 255, 255, 0.12);
+  --color-border: rgba(255, 255, 255, 0.12);
+  --color-border-input: rgba(255, 255, 255, 0.23);
+  --color-action-hover: rgba(255, 255, 255, 0.08);
+  --color-backdrop: rgba(0, 0, 0, 0.6);
+
+  /* Surfaces darken; the permanently-dark chips and contrast ink do not flip. */
+  --color-surface: #1e1e1e;
+  --color-field-bg: #2a2a2a;
+  --color-background: #121212;
+  --color-control-bg: #424242;
+  --color-control-bg-hover: #4a4a4a;
+  --color-snackbar-bg: #484848;
+  --color-overlay-surface: rgba(40, 40, 40, 0.95);
+  --color-banner-warning-bg: #3a2f1a;
+  --color-option-highlight: #2f4858;
+  --color-avatar-bg: #5f5f5f;
+
+  /* Brand hover tints need more presence on a dark surface to register. */
+  --color-primary-hover: rgba(25, 118, 210, 0.16);
+  --color-secondary-hover: rgba(220, 0, 78, 0.16);
+  --color-error-hover: rgba(198, 40, 40, 0.16);
 }

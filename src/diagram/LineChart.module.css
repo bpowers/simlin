@@ -6,8 +6,8 @@
 .tooltip {
   position: absolute;
   pointer-events: none;
-  background: rgba(255, 255, 255, 0.95);
-  border: 1px solid #ccc;
+  background: var(--color-overlay-surface);
+  border: 1px solid var(--color-border-input);
   border-radius: 4px;
   padding: 6px 8px;
   font-size: 12px;

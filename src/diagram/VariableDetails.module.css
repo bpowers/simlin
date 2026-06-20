@@ -9,7 +9,7 @@
   scrollbar-gutter: stable;
   border-radius: 4px;
   background: var(--color-surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
 }
 
 @media (min-width: 900px) and (max-width: 1199.95px) {

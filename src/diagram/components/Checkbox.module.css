@@ -6,7 +6,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 2px solid rgba(0, 0, 0, 0.54);
+  border: 2px solid var(--color-text-muted);
   background-color: transparent;
   cursor: pointer;
 }
@@ -17,7 +17,7 @@
 }
 
 .checkbox:focus-visible {
-  outline: 2px solid #1976d2;
+  outline: 2px solid var(--color-primary);
   outline-offset: 2px;
 }
 
@@ -26,18 +26,18 @@
 }
 
 .primary[data-state='checked'] {
-  background-color: #1976d2;
+  background-color: var(--color-primary);
 }
 
 .secondary[data-state='checked'] {
-  background-color: #dc004e;
+  background-color: var(--color-secondary);
 }
 
 .indicator {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--color-contrast-text);
 }
 
 .checkIcon {

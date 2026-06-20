@@ -50,7 +50,7 @@
 }
 
 .textPrimary:hover {
-  background-color: rgba(25, 118, 210, 0.04);
+  background-color: var(--color-primary-hover);
 }
 
 /* text + secondary */
@@ -60,7 +60,7 @@
 }
 
 .textSecondary:hover {
-  background-color: rgba(220, 0, 78, 0.04);
+  background-color: var(--color-secondary-hover);
 }
 
 /* text + error */
@@ -70,51 +70,51 @@
 }
 
 .textError:hover {
-  background-color: rgba(198, 40, 40, 0.04);
+  background-color: var(--color-error-hover);
 }
 
 /* contained + primary */
 .containedPrimary {
-  color: #fff;
+  color: var(--color-contrast-text);
   background-color: var(--color-primary);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-2);
 }
 
 .containedPrimary:hover {
-  background-color: #1565c0;
+  background-color: var(--color-primary-dark);
 }
 
 /* contained + secondary */
 .containedSecondary {
-  color: #fff;
+  color: var(--color-contrast-text);
   background-color: var(--color-secondary);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-2);
 }
 
 .containedSecondary:hover {
-  background-color: #9a0036;
+  background-color: var(--color-secondary-dark);
 }
 
 /* contained + error */
 .containedError {
-  color: #fff;
+  color: var(--color-contrast-text);
   background-color: var(--color-error);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-2);
 }
 
 .containedError:hover {
-  background-color: #b71c1c;
+  background-color: var(--color-error-dark);
 }
 
 /* disabled states */
 .disabledText {
-  color: rgba(0, 0, 0, 0.26);
+  color: var(--color-text-disabled);
   pointer-events: none;
 }
 
 .disabledContained {
-  color: rgba(0, 0, 0, 0.26);
-  background-color: rgba(0, 0, 0, 0.12);
+  color: var(--color-text-disabled);
+  background-color: var(--color-divider);
   box-shadow: none;
   pointer-events: none;
 }
@@ -122,49 +122,49 @@
 /* outlined + primary */
 .outlinedPrimary {
   color: var(--color-primary);
-  border: 1px solid rgba(25, 118, 210, 0.5);
+  border: 1px solid var(--color-primary-outline);
   background: transparent;
 }
 
 .outlinedPrimary:hover {
   border-color: var(--color-primary);
-  background-color: rgba(25, 118, 210, 0.04);
+  background-color: var(--color-primary-hover);
 }
 
 /* outlined + secondary */
 .outlinedSecondary {
   color: var(--color-secondary);
-  border: 1px solid rgba(220, 0, 78, 0.5);
+  border: 1px solid var(--color-secondary-outline);
   background: transparent;
 }
 
 .outlinedSecondary:hover {
   border-color: var(--color-secondary);
-  background-color: rgba(220, 0, 78, 0.04);
+  background-color: var(--color-secondary-hover);
 }
 
 /* outlined + error */
 .outlinedError {
   color: var(--color-error);
-  border: 1px solid rgba(198, 40, 40, 0.5);
+  border: 1px solid var(--color-error-outline);
   background: transparent;
 }
 
 .outlinedError:hover {
   border-color: var(--color-error);
-  background-color: rgba(198, 40, 40, 0.04);
+  background-color: var(--color-error-hover);
 }
 
 /* outlined + inherit */
 .outlinedInherit {
   color: inherit;
-  border: 1px solid rgba(0, 0, 0, 0.23);
+  border: 1px solid var(--color-border-input);
   background: transparent;
 }
 
 .outlinedInherit:hover {
-  border-color: rgba(0, 0, 0, 0.87);
-  background-color: rgba(0, 0, 0, 0.04);
+  border-color: var(--color-text-primary);
+  background-color: var(--color-action-hover);
 }
 
 /* text + inherit */
@@ -174,12 +174,12 @@
 }
 
 .textInherit:hover {
-  background-color: rgba(0, 0, 0, 0.04);
+  background-color: var(--color-action-hover);
 }
 
 .disabledOutlined {
-  color: rgba(0, 0, 0, 0.26);
-  border-color: rgba(0, 0, 0, 0.12);
+  color: var(--color-text-disabled);
+  border-color: var(--color-border);
   pointer-events: none;
 }
 

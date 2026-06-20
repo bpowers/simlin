@@ -13,11 +13,11 @@
 }
 
 .snackbarContent {
-  background: #323232;
-  color: #fff;
+  background: var(--color-snackbar-bg);
+  color: var(--color-contrast-text);
   border-radius: 4px;
   padding: 6px 16px;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-3);
   display: flex;
   align-items: center;
   flex-wrap: wrap;

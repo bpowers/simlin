@@ -8,6 +8,6 @@
 .axis {
   stroke-width: 0.75px;
   stroke-linecap: round;
-  stroke: #999;
+  stroke: var(--color-text-light);
   fill: none;
 }

@@ -24,7 +24,7 @@
   margin-left: 12px;
   border-radius: 4px;
   background: var(--color-surface);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-2);
 }
 
 .snapshotCardContent {
@@ -51,7 +51,7 @@
 }
 
 .menuButton {
-  color: #666;
+  color: var(--color-text-muted);
   flex: 0 0 auto;
 }
 
@@ -74,7 +74,7 @@
   padding: 0 8px;
   border-radius: 4px;
   background: var(--color-surface);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-2);
 }
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
@@ -116,18 +116,18 @@
 }
 
 .searchButton {
-  color: #aaa;
+  color: var(--color-text-light);
 }
 
 .clearSearchButton {
-  color: #aaa;
+  color: var(--color-text-light);
   cursor: pointer;
 }
 
 .divider {
   width: 1px;
   height: 24px;
-  background: #ddd;
+  background: var(--color-divider);
   flex: 0 0 auto;
 }
 
@@ -138,8 +138,8 @@
   flex: 0 0 auto;
   overflow: hidden;
   max-width: 40%;
-  font-size: 13px;
-  color: var(--color-text-muted, #666);
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
 }
 
 .breadcrumbLink {
@@ -147,8 +147,8 @@
   border: none;
   padding: 2px 4px;
   cursor: pointer;
-  color: var(--color-primary, #1976d2);
-  font-size: 13px;
+  color: var(--color-primary);
+  font-size: 0.8125rem;
   font-family: inherit;
   border-radius: 2px;
   white-space: nowrap;
@@ -157,7 +157,7 @@
 }
 
 .breadcrumbLink:hover {
-  background: rgba(25, 118, 210, 0.08);
+  background: var(--color-primary-hover);
 }
 
 .breadcrumbCurrent {
@@ -172,12 +172,12 @@
   flex: 0 0 auto;
   width: 16px;
   height: 16px;
-  color: #999;
+  color: var(--color-text-light);
 }
 
 .readOnlyBadge {
-  font-size: 11px;
-  color: #999;
+  font-size: 0.6875rem;
+  color: var(--color-text-light);
   font-style: italic;
   padding: 0 4px;
   white-space: nowrap;
@@ -189,13 +189,13 @@
   right: 8px;
   width: min(var(--panel-width-sm), calc(100vw - 16px));
   padding: 4px 12px;
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   /* Explicit line-height makes the banner's rendered height deterministic (it
      must not depend on the global reset's inherited 1.5, which a host bundle
      may not load) so --shared-model-banner-height can match it. */
   line-height: 1.4;
   color: var(--color-text-muted);
-  background: #fff3e0;
+  background: var(--color-banner-warning-bg);
   border-radius: 4px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   text-align: center;

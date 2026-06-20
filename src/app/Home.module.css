@@ -2,10 +2,11 @@
   flex-grow: 1;
 }
 
-/* Matches the dense Toolbar's min-height (48px); offsets the fixed AppBar so
-   content is not tucked underneath it. */
+/* Offsets the fixed AppBar so content is not tucked underneath it. Derives from
+   the same --toolbar-dense-height token as Toolbar's .dense min-height so the
+   spacer and the dense Toolbar height cannot drift apart. */
 .toolbarSpacer {
-  height: 48px;
+  height: var(--toolbar-dense-height);
 }
 
 /*
