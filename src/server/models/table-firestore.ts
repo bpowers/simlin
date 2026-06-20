@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { CollectionReference, FieldPath, Firestore } from '@google-cloud/firestore';
+import { CollectionReference, FieldPath, Firestore } from 'firebase-admin/firestore';
 import { Message } from 'google-protobuf';
 
 import { Query, SerializableClass, Table } from './table';

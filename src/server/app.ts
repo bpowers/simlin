@@ -7,7 +7,6 @@ import * as path from 'path';
 import { IncomingMessage, ServerResponse } from 'http';
 
 import * as admin from 'firebase-admin';
-import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
@@ -128,7 +127,6 @@ class App {
     // put the redirect before the request logger to remove noise
     this.app.use(redirectToHttps);
     this.app.use(requestLogger);
-    this.app.use(cookieParser());
     this.app.use(seshcookie(this.app.get('authentication').seshcookie));
 
     // etags don't work well on Google App Engine, and we don't have

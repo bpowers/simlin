@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { Firestore } from '@google-cloud/firestore';
+import { Firestore, getFirestore } from 'firebase-admin/firestore';
 
 import { File } from '../schemas/file_pb';
 import { Preview } from '../schemas/preview_pb';
@@ -36,7 +36,7 @@ export class FirestoreDatabase implements Database {
 }
 
 export async function createFirestoreDatabase(_opts: DatabaseOptions): Promise<Database> {
-  const client = new Firestore();
+  const client = getFirestore();
   const db = new FirestoreDatabase(client);
   await db.init();
   return db;
