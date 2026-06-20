@@ -168,6 +168,33 @@ describe('Autocomplete', () => {
     }
   });
 
+  test('closes the list on an outside pointer press even without an input blur', async () => {
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot']}
+        onChange={() => {}}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref}>
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('autocomplete-input'), { target: { value: 'ap' } });
+    await screen.findByText('apple');
+
+    // A press on a surface that prevents the focus change never blurs the input
+    // (here we simply do not fire blur), so the list must close on the pointer
+    // press itself.
+    fireEvent.pointerDown(document.body);
+
+    await waitFor(() => {
+      expect(screen.queryByText('apple')).toBeNull();
+    });
+  });
+
   test('commits the highlighted option on keyboard blur (tab away)', () => {
     const onChange = jest.fn();
     render(

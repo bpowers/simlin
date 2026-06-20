@@ -98,6 +98,32 @@ export function useCombobox(config: UseComboboxConfig): UseComboboxResult {
     };
   }, []);
 
+  // Dismiss the list on a pointer press outside the field and the listbox.
+  // Blur alone is not enough: a press on a surface that prevents the focus
+  // change (e.g. the diagram canvas preventDefault()s pointerdown for pan/drag)
+  // never blurs the input, so the portaled listbox would stay open over it.
+  // Capture phase runs before such handlers, and we match the field/listbox by
+  // their ids (the listbox is portaled, so it is not a DOM descendant here).
+  React.useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const onOutsidePointerDown = (event: PointerEvent): void => {
+      const target = event.target as Node;
+      const input = document.getElementById(inputId);
+      const menu = document.getElementById(menuId);
+      if (input?.contains(target) || menu?.contains(target)) {
+        return;
+      }
+      setIsOpen(false);
+      setHighlightedIndex(-1);
+    };
+    document.addEventListener('pointerdown', onOutsidePointerDown, true);
+    return () => {
+      document.removeEventListener('pointerdown', onOutsidePointerDown, true);
+    };
+  }, [isOpen, inputId, menuId]);
+
   // Keep the keyboard-highlighted option visible: focus stays on the input
   // (combobox pattern), so arrowing past the fold of a list taller than the
   // popup would otherwise move the highlight off-screen with nothing scrolling.
