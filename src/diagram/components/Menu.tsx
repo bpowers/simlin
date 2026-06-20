@@ -282,7 +282,13 @@ export function MenuItem(props: MenuItemProps): React.ReactElement {
   return (
     <div
       role="menuitem"
-      tabIndex={disabled ? -1 : 0}
+      // Roving focus: items are not in the document tab sequence. The menu
+      // focuses the first item on open and arrow keys move focus
+      // programmatically, while Tab/Shift+Tab (which we do not intercept) leave
+      // the menu entirely -- nothing here is tabbable -- and the resulting
+      // focus-out dismisses it, matching Radix's menu behavior. With every item
+      // at tabIndex=0 a multi-item menu would instead trap Tab on the next item.
+      tabIndex={-1}
       aria-disabled={disabled || undefined}
       data-disabled={disabled ? '' : undefined}
       className={clsx(styles.menuItem, className)}

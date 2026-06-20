@@ -162,6 +162,21 @@ describe('Menu dismissal and keyboard', () => {
     expect(document.activeElement).toBe(items[0]);
   });
 
+  it('keeps items out of the document tab sequence (roving focus)', () => {
+    // Items use tabIndex=-1 so Tab/Shift+Tab leave the menu (and the resulting
+    // focus-out dismisses it) instead of cycling between items; navigation
+    // within the menu is via the arrow keys, exercised separately.
+    render(
+      <Menu anchorEl={document.createElement('button')} open onClose={() => {}}>
+        <MenuItem>First</MenuItem>
+        <MenuItem>Second</MenuItem>
+      </Menu>,
+    );
+    for (const item of screen.getAllByRole('menuitem')) {
+      expect(item.tabIndex).toBe(-1);
+    }
+  });
+
   it('arrow keys move focus between items, wrapping', () => {
     render(
       <Menu anchorEl={document.createElement('button')} open onClose={() => {}}>
