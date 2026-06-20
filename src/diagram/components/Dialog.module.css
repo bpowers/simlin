@@ -1,5 +1,5 @@
 .overlay {
-  background-color: rgba(0, 0, 0, 0.5);
+  background-color: var(--color-backdrop);
   position: fixed;
   inset: 0;
   z-index: 1200;
@@ -16,12 +16,9 @@
 }
 
 .content {
-  background-color: #fff;
+  background-color: var(--color-surface);
   border-radius: 4px;
-  box-shadow:
-    0px 11px 15px -7px rgba(0, 0, 0, 0.2),
-    0px 24px 38px 3px rgba(0, 0, 0, 0.14),
-    0px 9px 46px 8px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-24);
   position: fixed;
   top: 50%;
   left: 50%;
@@ -55,7 +52,7 @@
   font-size: 1.25rem;
   font-weight: 500;
   line-height: 1.6;
-  color: rgba(0, 0, 0, 0.87);
+  color: var(--color-text-primary);
 }
 
 .dialogContent {
@@ -66,7 +63,7 @@
 
 .contentText {
   margin: 0;
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--color-text-muted);
   font-size: 1rem;
   line-height: 1.5;
 }

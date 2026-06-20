@@ -1,14 +1,14 @@
 .group rect {
   stroke-width: 1px;
-  stroke: #999999;
-  fill: #f5f5f5;
+  stroke: var(--color-text-light);
+  fill: var(--color-field-bg);
   fill-opacity: 0.5;
 }
 
 .group .label {
   font-size: 12px;
   font-weight: 500;
-  fill: #666666;
+  fill: var(--color-text-muted);
   /* Canvas text defaults to text-anchor: middle; groups anchor at the
      top-left so the label sits inside the rect, not straddling its edge. */
   text-anchor: start;

@@ -5,7 +5,7 @@
   margin-right: var(--spacing-1);
   border-radius: 4px;
   background: var(--color-surface);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-2);
 }
 
 .divider {

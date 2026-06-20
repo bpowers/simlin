@@ -1,12 +1,9 @@
 .menuContent {
   min-width: 120px;
-  background-color: #fff;
+  background-color: var(--color-surface);
   border-radius: 4px;
   padding: 8px 0;
-  box-shadow:
-    0px 5px 5px -3px rgba(0, 0, 0, 0.2),
-    0px 8px 10px 1px rgba(0, 0, 0, 0.14),
-    0px 3px 14px 2px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-8);
   z-index: 1300;
   animation: fadeIn 0.1s ease-out;
 }
@@ -29,13 +26,13 @@
   font-size: 0.875rem;
   line-height: 1.5;
   cursor: pointer;
-  color: rgba(0, 0, 0, 0.87);
+  color: var(--color-text-primary);
   outline: none;
 }
 
 .menuItem:hover,
 .menuItem:focus {
-  background-color: rgba(0, 0, 0, 0.04);
+  background-color: var(--color-action-hover);
 }
 
 .menuItem[data-disabled] {

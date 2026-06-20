@@ -11,8 +11,8 @@
   border-radius: 50%;
   overflow: hidden;
   user-select: none;
-  background-color: #bdbdbd;
-  color: #fafafa;
+  background-color: var(--color-avatar-bg);
+  color: var(--color-contrast-text);
 }
 
 .image {

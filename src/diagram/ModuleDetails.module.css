@@ -13,7 +13,10 @@
   scrollbar-gutter: stable;
   border-radius: 4px;
   background: var(--color-surface);
-  box-shadow: var(--shadow-sm);
+  /* Own the foreground so the native <select> and the units/notes wells stay
+     legible when the surface flips dark. */
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-1);
 }
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
@@ -37,10 +40,10 @@
 }
 
 .header {
-  font-size: 16px;
+  font-size: 1rem;
   font-weight: 500;
   margin-bottom: 12px;
-  color: #333;
+  color: var(--color-text-primary);
 }
 
 .modelRefSection {
@@ -48,24 +51,24 @@
 }
 
 .modelRefLabel {
-  font-size: 12px;
-  color: #666;
+  font-size: var(--font-size-caption);
+  color: var(--color-text-muted);
   margin-bottom: 4px;
 }
 
 .modelRefSelect {
   width: 100%;
   padding: 8px;
-  border: 1px solid #ccc;
+  border: 1px solid var(--color-border-input);
   border-radius: 4px;
-  font-size: 14px;
-  background: #fff;
+  font-size: 0.875rem;
+  background: var(--color-surface);
   cursor: pointer;
   appearance: auto;
 }
 
 .modelRefSelect:focus {
-  outline: 2px solid var(--color-primary, #1976d2);
+  outline: 2px solid var(--color-primary);
   outline-offset: -2px;
 }
 
@@ -80,17 +83,17 @@
 }
 
 .sectionTitle {
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   font-weight: 500;
-  color: #666;
+  color: var(--color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin-bottom: 6px;
 }
 
 .emptyMessage {
-  font-size: 13px;
-  color: #999;
+  font-size: 0.8125rem;
+  color: var(--color-text-light);
   font-style: italic;
   padding: 4px 0;
 }
@@ -98,23 +101,23 @@
 .wiringTable {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .wiringTable th {
   text-align: left;
   font-weight: 500;
-  color: #666;
+  color: var(--color-text-muted);
   padding: 4px 8px;
-  border-bottom: 1px solid #ddd;
-  font-size: 12px;
+  border-bottom: 1px solid var(--color-divider);
+  font-size: var(--font-size-caption);
 }
 
 .wiringTable td {
   padding: 4px 8px;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--color-divider);
   font-family: 'Roboto Mono', monospace;
-  font-size: 12px;
+  font-size: var(--font-size-caption);
 }
 
 .wiringRow {
@@ -138,8 +141,8 @@
 .portList li {
   padding: 3px 0;
   font-family: 'Roboto Mono', monospace;
-  font-size: 12px;
-  color: #333;
+  font-size: var(--font-size-caption);
+  color: var(--color-text-primary);
 }
 
 .unitsEditor {
