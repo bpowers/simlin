@@ -73,13 +73,17 @@ export function useCombobox(config: UseComboboxConfig): UseComboboxResult {
   const inputId = `${baseId}-input`;
   const itemId = (index: number) => `${baseId}-item-${index}`;
 
-  // Whether a mouse press is what is causing the current input blur. A blur from
-  // a click (dismissing the list or pressing elsewhere) must NOT auto-commit the
-  // highlighted option; only a keyboard-driven blur (tab away) accepts it, which
-  // matches downshift. The click-induced blur fires synchronously in the same
-  // task as the mousedown, so a deferred reset clears the flag right after that
-  // blur -- it can never strand true (no reliance on a mouseup that a release
-  // outside the window might never deliver).
+  // Whether a pointer press is what is causing the current input blur. A blur
+  // from a press (dismissing the list or pressing elsewhere) must NOT auto-commit
+  // the highlighted option; only a keyboard-driven blur (tab away) accepts it,
+  // which matches downshift. We listen on `pointerdown` (not `mousedown`):
+  // pointerdown fires for both mouse and touch and -- crucially on touch -- BEFORE
+  // the focus shift, so the flag is already set when the blur fires (a synthetic
+  // mousedown would arrive too late and the tap-outside would wrongly commit).
+  // The press-induced blur fires synchronously in the same task as the
+  // pointerdown, so a deferred reset clears the flag right after that blur -- it
+  // can never strand true (no reliance on a pointerup that a release outside the
+  // window might never deliver).
   const pointerDownRef = React.useRef(false);
   React.useEffect(() => {
     const onPointerDown = (): void => {
@@ -88,9 +92,9 @@ export function useCombobox(config: UseComboboxConfig): UseComboboxResult {
         pointerDownRef.current = false;
       }, 0);
     };
-    document.addEventListener('mousedown', onPointerDown, true);
+    document.addEventListener('pointerdown', onPointerDown, true);
     return () => {
-      document.removeEventListener('mousedown', onPointerDown, true);
+      document.removeEventListener('pointerdown', onPointerDown, true);
     };
   }, []);
 

@@ -191,7 +191,7 @@ describe('Autocomplete', () => {
     expect(onChange).toHaveBeenCalledWith(null, 'apple');
   });
 
-  test('does not commit the highlight on a mouse-driven blur', () => {
+  test('does not commit the highlight on a pointer-driven blur (mouse or touch)', () => {
     const onChange = jest.fn();
     render(
       <Autocomplete
@@ -209,9 +209,11 @@ describe('Autocomplete', () => {
     const input = screen.getByTestId('autocomplete-input');
     fireEvent.change(input, { target: { value: 'a' } });
     fireEvent.keyDown(input, { key: 'ArrowDown' }); // highlight 'apple'
-    // A pointer press in progress means this blur is a click elsewhere, not a
-    // tab-away, so the highlight must not be auto-committed.
-    fireEvent.mouseDown(document.body);
+    // A pointer press in progress means this blur is a tap/click elsewhere, not a
+    // tab-away, so the highlight must not be auto-committed. pointerdown fires for
+    // both mouse and touch, and on touch precedes the focus shift -- which is why
+    // the tracker keys on it rather than mousedown.
+    fireEvent.pointerDown(document.body);
     fireEvent.blur(input);
 
     expect(onChange).not.toHaveBeenCalled();
