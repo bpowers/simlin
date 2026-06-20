@@ -23,17 +23,25 @@
      clearance. (English copy maxes at two lines; revisit if i18n is added.) */
   --shared-model-banner-height: 42px;
 
+  /* Visible breathing room between the overlaying search/breadcrumb bar (or the
+     shared-model banner) and the first content of the detail panel beneath it.
+     Matches the panels' 16px side/bottom padding so the visible card carries a
+     uniform inset on all four edges. A prior 4px value left content -- most
+     visibly the centered "error free" message -- cramped against the bar's
+     bottom edge; the still-earlier literal 72px over-corrected the other way. */
+  --panel-content-gap: 16px;
+
   /* Vertical room the floating detail panels reserve at their top so their
      content clears the search/breadcrumb bar that overlays the top of this
-     same slot (slot top 8px + 48px bar + 4px gap = content at y=60). All
-     three detail panels read this so they cannot drift apart. */
-  --panel-top-inset: calc(8px + var(--searchbar-height) + 4px - 8px);
+     same slot (slot top 8px + 48px bar + gap). All three detail panels read
+     this so they cannot drift apart. */
+  --panel-top-inset: calc(8px + var(--searchbar-height) + var(--panel-content-gap) - 8px);
   /* When the shared-model banner is present it occupies the band the base
      inset would have left empty, so the panels reserve enough room to clear
-     BOTH the search bar and the banner (banner bottom + 4px gap). The Editor
+     BOTH the search bar and the banner (banner bottom + gap). The Editor
      applies .varDetailsWithBanner to swap this in when the banner shows. */
   --panel-top-inset-with-banner: calc(
-    var(--shared-model-banner-top) - 8px + var(--shared-model-banner-height) + 4px
+    var(--shared-model-banner-top) - 8px + var(--shared-model-banner-height) + var(--panel-content-gap)
   );
 
   /* Dense toolbar height. The app's fixed AppBar uses a dense Toolbar; the
