@@ -72,24 +72,24 @@ export function useCombobox(config: UseComboboxConfig): UseComboboxResult {
   const inputId = `${baseId}-input`;
   const itemId = (index: number) => `${baseId}-item-${index}`;
 
-  // Whether a pointer press is currently down. A blur caused by a mouse click
-  // (dismissing the list or pressing elsewhere) must NOT auto-commit the
+  // Whether a mouse press is what is causing the current input blur. A blur from
+  // a click (dismissing the list or pressing elsewhere) must NOT auto-commit the
   // highlighted option; only a keyboard-driven blur (tab away) accepts it, which
-  // matches downshift. Always-on so mouseup always fires and the flag is never
-  // stranded.
+  // matches downshift. The click-induced blur fires synchronously in the same
+  // task as the mousedown, so a deferred reset clears the flag right after that
+  // blur -- it can never strand true (no reliance on a mouseup that a release
+  // outside the window might never deliver).
   const pointerDownRef = React.useRef(false);
   React.useEffect(() => {
     const onPointerDown = (): void => {
       pointerDownRef.current = true;
-    };
-    const onPointerUp = (): void => {
-      pointerDownRef.current = false;
+      setTimeout(() => {
+        pointerDownRef.current = false;
+      }, 0);
     };
     document.addEventListener('mousedown', onPointerDown, true);
-    document.addEventListener('mouseup', onPointerUp, true);
     return () => {
       document.removeEventListener('mousedown', onPointerDown, true);
-      document.removeEventListener('mouseup', onPointerUp, true);
     };
   }, []);
 
