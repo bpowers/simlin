@@ -84,6 +84,11 @@ export function Menu(props: MenuProps): React.ReactElement {
 
   const anchorRect = useAnchorRect(anchorEl, open);
   const contentRef = React.useRef<HTMLDivElement>(null);
+  // True while a focus move is one the other handlers already own -- a pointer
+  // press (handled by the mousedown listener) or Escape's focus-restore -- so
+  // the blur handler does not also close. It stays false for a genuine keyboard
+  // focus-out (Tab/Shift+Tab), which is the only case blur-close should fire.
+  const skipBlurCloseRef = React.useRef(false);
 
   // Dismiss on Escape or a pointer press outside the menu, only while open.
   // The listeners are registered after the render that mounts the menu, so the
@@ -94,13 +99,20 @@ export function Menu(props: MenuProps): React.ReactElement {
     }
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
+        event.preventDefault();
         onClose();
         // Keyboard dismissal returns focus to the trigger (Radix did this);
         // outside-click dismissal does not, so the clicked element keeps focus.
+        // The focus move fires a blur synchronously, so guard it from
+        // double-closing.
+        skipBlurCloseRef.current = true;
         anchorEl?.focus();
+        skipBlurCloseRef.current = false;
       }
     };
     const onMouseDown = (event: MouseEvent): void => {
+      // Any focus shift this press causes is owned here, not by blur-close.
+      skipBlurCloseRef.current = true;
       const target = event.target as Node;
       const content = contentRef.current;
       // The anchor is logically part of the trigger, so a press on it is not
@@ -115,11 +127,16 @@ export function Menu(props: MenuProps): React.ReactElement {
       }
       onClose();
     };
+    const onMouseUp = (): void => {
+      skipBlurCloseRef.current = false;
+    };
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('mouseup', onMouseUp);
     return () => {
       document.removeEventListener('keydown', onKeyDown);
       document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('mouseup', onMouseUp);
     };
   }, [open, onClose, anchorEl]);
 
@@ -169,14 +186,16 @@ export function Menu(props: MenuProps): React.ReactElement {
     }
   };
 
-  // Tabbing (or any focus move) out of the menu dismisses it. A move BETWEEN
-  // items, or back to the anchor (the Escape path focuses it), is not "out".
+  // A genuine keyboard focus-out of the menu (Tab/Shift+Tab) dismisses it --
+  // including Shift+Tab back to the trigger. A move BETWEEN items is not "out",
+  // and pointer- or Escape-driven focus moves are owned by their own handlers
+  // (skipBlurCloseRef), so they do not double-close here.
   const onContentBlur = (event: React.FocusEvent<HTMLDivElement>): void => {
     const next = event.relatedTarget as Node | null;
-    if (!next) {
+    if (!next || skipBlurCloseRef.current) {
       return;
     }
-    if (contentRef.current?.contains(next) || anchorEl?.contains(next)) {
+    if (contentRef.current?.contains(next)) {
       return;
     }
     onClose();

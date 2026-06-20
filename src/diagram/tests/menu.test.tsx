@@ -239,4 +239,21 @@ describe('Menu dismissal and keyboard', () => {
     anchor.remove();
     outside.remove();
   });
+
+  it('dismisses when keyboard focus moves back to the trigger (shift+tab)', () => {
+    const anchor = document.createElement('button');
+    document.body.appendChild(anchor);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    // Shift+Tab can land focus on the trigger; that is still leaving the menu,
+    // so it must close (no mouse press happened, so it is not exempted).
+    const item = screen.getByRole('menuitem');
+    fireEvent.blur(item, { relatedTarget: anchor });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    anchor.remove();
+  });
 });
