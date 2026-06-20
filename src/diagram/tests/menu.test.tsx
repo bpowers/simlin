@@ -30,7 +30,7 @@ function mockRect(el: HTMLElement, initial: { top: number; left: number; width: 
   };
 }
 
-// The proxy span Radix anchors to is the (asChild) trigger; it carries
+// The proxy span the menu renders to mirror the anchor rect; it carries
 // aria-haspopup="menu" and is the only position:fixed element we render.
 function getProxySpan(): HTMLElement {
   const el = document.querySelector<HTMLElement>('[aria-haspopup="menu"]');
