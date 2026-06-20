@@ -127,7 +127,11 @@ export function AccordionDetails(props: AccordionDetailsProps): React.ReactEleme
       style={style}
       data-state={open ? 'open' : 'closed'}
     >
-      <div className={styles.detailsInner}>
+      {/* The content stays mounted so the grid-rows height transition can run,
+          but a collapsed panel must not be reachable by keyboard or exposed to
+          assistive tech (Radix used `hidden`). `inert` removes the whole
+          subtree from tab order and the a11y tree while keeping it laid out. */}
+      <div className={styles.detailsInner} inert={open ? undefined : true}>
         <div className={styles.detailsContent}>{children}</div>
       </div>
     </div>

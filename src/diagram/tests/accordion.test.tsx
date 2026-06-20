@@ -68,4 +68,15 @@ describe('Accordion', () => {
     renderAccordion();
     expect(screen.getByTestId('icon')).not.toBeNull();
   });
+
+  test('collapsed content is inert and becomes interactive when opened', () => {
+    renderAccordion();
+    const region = screen.getByRole('region');
+    // Collapsed: the content subtree is inert (not keyboard-reachable).
+    expect(region.querySelector('[inert]')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /summary/i }));
+    // Open: the inert attribute is gone, so the content is interactive.
+    expect(region.querySelector('[inert]')).toBeNull();
+  });
 });
