@@ -135,6 +135,39 @@ describe('Autocomplete', () => {
     });
   });
 
+  test('scrolls the keyboard-highlighted option into view', async () => {
+    // jsdom does not implement scrollIntoView, so install a stub to observe the
+    // call (the component guards with optional chaining for exactly this reason).
+    const scrollFn = jest.fn();
+    (HTMLElement.prototype as unknown as { scrollIntoView: unknown }).scrollIntoView = scrollFn;
+    try {
+      render(
+        <Autocomplete
+          value={null}
+          options={['apple', 'apricot', 'avocado']}
+          onChange={() => {}}
+          renderInput={(params) => (
+            <div ref={params.InputProps.ref}>
+              <input {...params.inputProps} data-testid="autocomplete-input" />
+            </div>
+          )}
+        />,
+      );
+
+      const input = screen.getByTestId('autocomplete-input');
+      fireEvent.change(input, { target: { value: 'a' } });
+      await screen.findByText('apple');
+
+      // Arrow navigation must scroll the now-highlighted row into view.
+      fireEvent.keyDown(input, { key: 'ArrowDown' });
+      await waitFor(() => {
+        expect(scrollFn).toHaveBeenCalled();
+      });
+    } finally {
+      delete (HTMLElement.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
   test('selecting an option fills the input even when uncontrolled', async () => {
     // The parent ignores onChange (value stays null), so the input text must
     // come from the component itself -- downshift used to set it on select.

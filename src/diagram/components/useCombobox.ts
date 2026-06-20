@@ -72,6 +72,18 @@ export function useCombobox(config: UseComboboxConfig): UseComboboxResult {
   const inputId = `${baseId}-input`;
   const itemId = (index: number) => `${baseId}-item-${index}`;
 
+  // Keep the keyboard-highlighted option visible: focus stays on the input
+  // (combobox pattern), so arrowing past the fold of a list taller than the
+  // popup would otherwise move the highlight off-screen with nothing scrolling.
+  // `block: 'nearest'` only scrolls when the row is actually out of view.
+  React.useEffect(() => {
+    if (!isOpen || highlightedIndex < 0) {
+      return;
+    }
+    const el = document.getElementById(`${baseId}-item-${highlightedIndex}`);
+    el?.scrollIntoView?.({ block: 'nearest' });
+  }, [isOpen, highlightedIndex, baseId]);
+
   const selectItem = React.useCallback(
     (item: string) => {
       // Set the field text to the chosen item (downshift did this). Without it

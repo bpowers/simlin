@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { getApps, initializeApp } from 'firebase-admin/app';
 import { Firestore, getFirestore } from 'firebase-admin/firestore';
 
 import { File } from '../schemas/file_pb';
@@ -36,6 +37,14 @@ export class FirestoreDatabase implements Database {
 }
 
 export async function createFirestoreDatabase(_opts: DatabaseOptions): Promise<Database> {
+  // getFirestore() resolves against the default Firebase app and throws
+  // `app/no-app` if none has been initialized. App bootstrap calls
+  // admin.initializeApp() before building the DB, but standalone callers (e.g.
+  // scripts/debug-import.mjs) do not -- so initialize on demand when no app
+  // exists yet. The previous `new Firestore()` had no such prerequisite.
+  if (getApps().length === 0) {
+    initializeApp();
+  }
   const client = getFirestore();
   const db = new FirestoreDatabase(client);
   await db.init();
