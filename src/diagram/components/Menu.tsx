@@ -95,13 +95,25 @@ export function Menu(props: MenuProps): React.ReactElement {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         onClose();
+        // Keyboard dismissal returns focus to the trigger (Radix did this);
+        // outside-click dismissal does not, so the clicked element keeps focus.
+        anchorEl?.focus();
       }
     };
     const onMouseDown = (event: MouseEvent): void => {
+      const target = event.target as Node;
       const content = contentRef.current;
-      if (content && !content.contains(event.target as Node)) {
-        onClose();
+      // The anchor is logically part of the trigger, so a press on it is not
+      // "outside": treating it as outside would close the menu on the same
+      // press that a toggling trigger handler then reopens (a redundant
+      // close->reopen flicker), and would defeat a trigger meant to toggle.
+      if (content && content.contains(target)) {
+        return;
       }
+      if (anchorEl && anchorEl.contains(target)) {
+        return;
+      }
+      onClose();
     };
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('mousedown', onMouseDown);
@@ -109,7 +121,66 @@ export function Menu(props: MenuProps): React.ReactElement {
       document.removeEventListener('keydown', onKeyDown);
       document.removeEventListener('mousedown', onMouseDown);
     };
-  }, [open, onClose]);
+  }, [open, onClose, anchorEl]);
+
+  const enabledItems = React.useCallback(
+    (): HTMLElement[] =>
+      Array.from(
+        contentRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"])') ?? [],
+      ),
+    [],
+  );
+
+  // Move focus into the menu when it opens so keyboard users land on it; the
+  // portal is appended at the end of <body>, so without this they would have to
+  // tab through the whole page to reach it.
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+    enabledItems()[0]?.focus();
+  }, [open, enabledItems]);
+
+  const onContentKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    const items = enabledItems();
+    if (items.length === 0) {
+      return;
+    }
+    const current = items.indexOf(document.activeElement as HTMLElement);
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault();
+        items[(current + 1) % items.length]?.focus();
+        break;
+      case 'ArrowUp':
+        event.preventDefault();
+        items[(current - 1 + items.length) % items.length]?.focus();
+        break;
+      case 'Home':
+        event.preventDefault();
+        items[0]?.focus();
+        break;
+      case 'End':
+        event.preventDefault();
+        items[items.length - 1]?.focus();
+        break;
+      default:
+        break;
+    }
+  };
+
+  // Tabbing (or any focus move) out of the menu dismisses it. A move BETWEEN
+  // items, or back to the anchor (the Escape path focuses it), is not "out".
+  const onContentBlur = (event: React.FocusEvent<HTMLDivElement>): void => {
+    const next = event.relatedTarget as Node | null;
+    if (!next) {
+      return;
+    }
+    if (contentRef.current?.contains(next) || anchorEl?.contains(next)) {
+      return;
+    }
+    onClose();
+  };
 
   // Position the content as a fixed overlay derived directly from the live
   // anchor rect -- top/bottom from the vertical origin, left/right from the
@@ -145,7 +216,15 @@ export function Menu(props: MenuProps): React.ReactElement {
         }}
       />
       {open && (
-        <div ref={contentRef} id={id} role="menu" className={clsx(styles.menuContent, className)} style={contentStyle}>
+        <div
+          ref={contentRef}
+          id={id}
+          role="menu"
+          className={clsx(styles.menuContent, className)}
+          style={contentStyle}
+          onKeyDown={onContentKeyDown}
+          onBlur={onContentBlur}
+        >
           <MenuCloseContext.Provider value={onClose}>{children}</MenuCloseContext.Provider>
         </div>
       )}

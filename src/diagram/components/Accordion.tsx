@@ -126,12 +126,18 @@ export function AccordionDetails(props: AccordionDetailsProps): React.ReactEleme
       className={clsx(styles.details, className)}
       style={style}
       data-state={open ? 'open' : 'closed'}
+      // The content stays mounted so the grid-rows height transition can run,
+      // but a collapsed panel must not be reachable by keyboard or exposed to
+      // assistive tech (Radix used `hidden`). `inert` on the region itself --
+      // not just the inner wrapper -- removes the whole subtree from tab order
+      // and the a11y tree while keeping it laid out for the transition;
+      // `aria-hidden` makes the a11y-tree removal explicit (and not reliant on
+      // every engine wiring inert into the accessibility tree), so a closed
+      // panel is never announced as an empty region.
+      inert={open ? undefined : true}
+      aria-hidden={open ? undefined : true}
     >
-      {/* The content stays mounted so the grid-rows height transition can run,
-          but a collapsed panel must not be reachable by keyboard or exposed to
-          assistive tech (Radix used `hidden`). `inert` removes the whole
-          subtree from tab order and the a11y tree while keeping it laid out. */}
-      <div className={styles.detailsInner} inert={open ? undefined : true}>
+      <div className={styles.detailsInner}>
         <div className={styles.detailsContent}>{children}</div>
       </div>
     </div>

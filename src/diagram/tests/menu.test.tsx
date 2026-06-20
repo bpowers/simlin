@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import { render, act } from '@testing-library/react';
+import { render, act, fireEvent, screen } from '@testing-library/react';
 
 import { Menu, MenuItem } from '../components/Menu';
 
@@ -147,5 +147,96 @@ describe('Menu anchor positioning (issue #710)', () => {
     expect(getProxySpan().style.left).toBe('600px');
 
     anchor.remove();
+  });
+});
+
+describe('Menu dismissal and keyboard', () => {
+  it('moves focus to the first menu item when opened', () => {
+    render(
+      <Menu anchorEl={document.createElement('button')} open onClose={() => {}}>
+        <MenuItem>First</MenuItem>
+        <MenuItem>Second</MenuItem>
+      </Menu>,
+    );
+    const items = screen.getAllByRole('menuitem');
+    expect(document.activeElement).toBe(items[0]);
+  });
+
+  it('arrow keys move focus between items, wrapping', () => {
+    render(
+      <Menu anchorEl={document.createElement('button')} open onClose={() => {}}>
+        <MenuItem>First</MenuItem>
+        <MenuItem>Second</MenuItem>
+      </Menu>,
+    );
+    const items = screen.getAllByRole('menuitem');
+    fireEvent.keyDown(items[0], { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[1]);
+    fireEvent.keyDown(items[1], { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[0]); // wraps
+    fireEvent.keyDown(items[0], { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(items[1]); // wraps backward
+  });
+
+  it('Escape closes and returns focus to the anchor', () => {
+    const anchor = document.createElement('button');
+    document.body.appendChild(anchor);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(anchor);
+    anchor.remove();
+  });
+
+  it('a press on the anchor is not treated as an outside dismissal', () => {
+    const anchor = document.createElement('button');
+    document.body.appendChild(anchor);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    fireEvent.mouseDown(anchor);
+    expect(onClose).not.toHaveBeenCalled();
+    anchor.remove();
+  });
+
+  it('a press outside the menu and anchor dismisses it', () => {
+    const anchor = document.createElement('button');
+    const outside = document.createElement('div');
+    document.body.append(anchor, outside);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    fireEvent.mouseDown(outside);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    anchor.remove();
+    outside.remove();
+  });
+
+  it('dismisses when focus leaves the menu (tab-out)', () => {
+    const anchor = document.createElement('button');
+    const outside = document.createElement('button');
+    document.body.append(anchor, outside);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    const item = screen.getByRole('menuitem');
+    fireEvent.blur(item, { relatedTarget: outside });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    anchor.remove();
+    outside.remove();
   });
 });

@@ -74,11 +74,15 @@ export function useCombobox(config: UseComboboxConfig): UseComboboxResult {
 
   const selectItem = React.useCallback(
     (item: string) => {
+      // Set the field text to the chosen item (downshift did this). Without it
+      // an uncontrolled consumer -- one that does not feed `value` back in --
+      // would keep showing the partial text the user typed, not the selection.
+      onInputValueChange({ inputValue: item });
       onSelectedItemChange({ selectedItem: item });
       setIsOpen(false);
       setHighlightedIndex(-1);
     },
-    [onSelectedItemChange],
+    [onInputValueChange, onSelectedItemChange],
   );
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {

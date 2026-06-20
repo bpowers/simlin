@@ -16,13 +16,24 @@ function renderAccordion(props: React.ComponentProps<typeof Accordion> = {}) {
 }
 
 describe('Accordion', () => {
-  test('renders the summary as a button and exposes a region', () => {
-    renderAccordion();
+  test('wires the region to the summary button', () => {
+    // Collapsed, the region is inert (removed from the a11y tree), so query it
+    // through the DOM rather than getByRole, which filters inaccessible nodes.
+    const { container } = renderAccordion();
     const trigger = screen.getByRole('button', { name: /summary/i });
-    expect(trigger).not.toBeNull();
-    const region = screen.getByRole('region');
-    expect(region.getAttribute('aria-labelledby')).toBe(trigger.getAttribute('id'));
-    expect(trigger.getAttribute('aria-controls')).toBe(region.getAttribute('id'));
+    const region = container.querySelector('[role="region"]');
+    expect(region).not.toBeNull();
+    expect(region?.getAttribute('aria-labelledby')).toBe(trigger.getAttribute('id'));
+    expect(trigger.getAttribute('aria-controls')).toBe(region?.getAttribute('id'));
+  });
+
+  test('the region is hidden from assistive tech until expanded', () => {
+    renderAccordion();
+    // Collapsed: getByRole excludes the inert region.
+    expect(screen.queryByRole('region')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /summary/i }));
+    // Expanded: the region is exposed again.
+    expect(screen.queryByRole('region')).not.toBeNull();
   });
 
   test('is collapsed by default and toggles open on click', () => {
@@ -70,13 +81,13 @@ describe('Accordion', () => {
   });
 
   test('collapsed content is inert and becomes interactive when opened', () => {
-    renderAccordion();
-    const region = screen.getByRole('region');
-    // Collapsed: the content subtree is inert (not keyboard-reachable).
-    expect(region.querySelector('[inert]')).not.toBeNull();
+    const { container } = renderAccordion();
+    const region = container.querySelector('[role="region"]');
+    // Collapsed: the region subtree is inert (not keyboard-reachable).
+    expect(region?.hasAttribute('inert')).toBe(true);
 
     fireEvent.click(screen.getByRole('button', { name: /summary/i }));
     // Open: the inert attribute is gone, so the content is interactive.
-    expect(region.querySelector('[inert]')).toBeNull();
+    expect(region?.hasAttribute('inert')).toBe(false);
   });
 });

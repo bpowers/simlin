@@ -135,6 +135,33 @@ describe('Autocomplete', () => {
     });
   });
 
+  test('selecting an option fills the input even when uncontrolled', async () => {
+    // The parent ignores onChange (value stays null), so the input text must
+    // come from the component itself -- downshift used to set it on select.
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot', 'banana']}
+        onChange={() => {}}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref}>
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    const input = screen.getByTestId('autocomplete-input') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'ap' } });
+
+    const apple = await screen.findByText('apple');
+    fireEvent.click(apple);
+
+    await waitFor(() => {
+      expect(input.value).toBe('apple');
+    });
+  });
+
   test('clearOnEscape clears selection on Escape key', async () => {
     const onChange = jest.fn();
     render(
