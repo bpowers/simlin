@@ -72,6 +72,27 @@ export function useCombobox(config: UseComboboxConfig): UseComboboxResult {
   const inputId = `${baseId}-input`;
   const itemId = (index: number) => `${baseId}-item-${index}`;
 
+  // Whether a pointer press is currently down. A blur caused by a mouse click
+  // (dismissing the list or pressing elsewhere) must NOT auto-commit the
+  // highlighted option; only a keyboard-driven blur (tab away) accepts it, which
+  // matches downshift. Always-on so mouseup always fires and the flag is never
+  // stranded.
+  const pointerDownRef = React.useRef(false);
+  React.useEffect(() => {
+    const onPointerDown = (): void => {
+      pointerDownRef.current = true;
+    };
+    const onPointerUp = (): void => {
+      pointerDownRef.current = false;
+    };
+    document.addEventListener('mousedown', onPointerDown, true);
+    document.addEventListener('mouseup', onPointerUp, true);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown, true);
+      document.removeEventListener('mouseup', onPointerUp, true);
+    };
+  }, []);
+
   // Keep the keyboard-highlighted option visible: focus stays on the input
   // (combobox pattern), so arrowing past the fold of a list taller than the
   // popup would otherwise move the highlight off-screen with nothing scrolling.
@@ -159,8 +180,15 @@ export function useCombobox(config: UseComboboxConfig): UseComboboxResult {
     // same affordance downshift gave the wiring editor's selects.
     onClick: () => setIsOpen(true),
     onBlur: () => {
-      setIsOpen(false);
-      setHighlightedIndex(-1);
+      // A keyboard blur (tab away) with an active highlight accepts that option,
+      // the way downshift did, so keyboard users don't lose the choice they
+      // navigated to. A mouse-driven blur (click elsewhere) just closes.
+      if (!pointerDownRef.current && isOpen && highlightedIndex >= 0 && highlightedIndex < items.length) {
+        selectItem(items[highlightedIndex]);
+      } else {
+        setIsOpen(false);
+        setHighlightedIndex(-1);
+      }
     },
   });
 

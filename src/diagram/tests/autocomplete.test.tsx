@@ -168,6 +168,55 @@ describe('Autocomplete', () => {
     }
   });
 
+  test('commits the highlighted option on keyboard blur (tab away)', () => {
+    const onChange = jest.fn();
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot', 'avocado']}
+        onChange={onChange}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref}>
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    const input = screen.getByTestId('autocomplete-input');
+    fireEvent.change(input, { target: { value: 'a' } });
+    fireEvent.keyDown(input, { key: 'ArrowDown' }); // highlight 'apple'
+    fireEvent.blur(input);
+
+    expect(onChange).toHaveBeenCalledWith(null, 'apple');
+  });
+
+  test('does not commit the highlight on a mouse-driven blur', () => {
+    const onChange = jest.fn();
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot', 'avocado']}
+        onChange={onChange}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref}>
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    const input = screen.getByTestId('autocomplete-input');
+    fireEvent.change(input, { target: { value: 'a' } });
+    fireEvent.keyDown(input, { key: 'ArrowDown' }); // highlight 'apple'
+    // A pointer press in progress means this blur is a click elsewhere, not a
+    // tab-away, so the highlight must not be auto-committed.
+    fireEvent.mouseDown(document.body);
+    fireEvent.blur(input);
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   test('selecting an option fills the input even when uncontrolled', async () => {
     // The parent ignores onChange (value stays null), so the input text must
     // come from the component itself -- downshift used to set it on select.
