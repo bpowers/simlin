@@ -3,10 +3,13 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 // Functional core for HostedWebEditor's project HTTP operations: load, save, and
-// delete. Each function is framework-free (no React, no DOM) and takes `fetch` as
-// an injected dependency so it can be unit-tested without a browser. The
-// component shell in HostedWebEditor.tsx maps these results onto React state and
-// the window navigation.
+// delete. Each function is framework-free (no React) and calls the global `fetch`
+// directly. Tests stub `globalThis.fetch` rather than injecting it: the native
+// `fetch` throws "Illegal invocation" when called as a method of any object other
+// than the global (`endpoint.fetch(...)` rebinds `this` to `endpoint`), so the
+// dependency-injection variant worked under jest mocks but broke in real browsers.
+// The component shell in HostedWebEditor.tsx maps these results onto React state
+// and the window navigation.
 
 import { fromUint8Array, toUint8Array } from '@simlin/core/base64';
 import { defined } from '@simlin/core/common';
@@ -26,7 +29,6 @@ export interface ProjectEndpoint {
   base: string;
   username: string;
   projectName: string;
-  fetch: typeof fetch;
 }
 
 // The result of loadProject(). loadProject never rejects: a network error, a
@@ -44,7 +46,7 @@ export function projectApiPath(endpoint: ProjectEndpoint): string {
 export async function loadProject(endpoint: ProjectEndpoint): Promise<LoadResult> {
   const apiPath = projectApiPath(endpoint);
   try {
-    const response = await endpoint.fetch(apiPath);
+    const response = await fetch(apiPath);
     if (response.status >= 400) {
       return { kind: 'error', message: `unable to load ${apiPath}` };
     }
@@ -78,7 +80,7 @@ export async function saveProject(
   };
 
   const apiPath = projectApiPath(endpoint);
-  const response = await endpoint.fetch(apiPath, {
+  const response = await fetch(apiPath, {
     credentials: 'same-origin',
     method: 'POST',
     cache: 'no-cache',
@@ -107,7 +109,7 @@ export async function saveProject(
 // it and stay open for a retry.
 export async function deleteProject(endpoint: ProjectEndpoint): Promise<string> {
   const apiPath = projectApiPath(endpoint);
-  const response = await endpoint.fetch(apiPath, {
+  const response = await fetch(apiPath, {
     credentials: 'same-origin',
     method: 'DELETE',
     cache: 'no-cache',

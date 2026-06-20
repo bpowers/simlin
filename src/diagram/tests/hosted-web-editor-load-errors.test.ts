@@ -11,24 +11,27 @@
 // error, a non-JSON body, or a response missing pb/version used to escape as an
 // unhandled rejection and leave the editor permanently blank. loadProject now
 // returns a discriminated result (loaded | error) instead of mutating component
-// state, so these tests assert that result directly with an injected fetch.
+// state, so these tests assert that result directly. The core calls the global
+// `fetch` (not an injected one -- native fetch throws "Illegal invocation" when
+// called as a method of any object but the global), so the tests stub it.
 
 import { fromUint8Array } from '@simlin/core/base64';
 
 import { loadProject, ProjectEndpoint } from '../hosted-web-editor-core';
 
-function makeEndpoint(fetchImpl: () => Promise<unknown>): ProjectEndpoint {
-  return {
-    base: 'http://test.invalid',
-    username: 'alice',
-    projectName: 'climate',
-    fetch: fetchImpl as unknown as typeof fetch,
-  };
+const endpoint: ProjectEndpoint = { base: 'http://test.invalid', username: 'alice', projectName: 'climate' };
+
+const originalFetch = globalThis.fetch;
+function installFetch(impl: () => Promise<unknown>): void {
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = impl as unknown as typeof fetch;
 }
+afterEach(() => {
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+});
 
 describe('loadProject error handling', () => {
   it('surfaces a network-level fetch rejection as an error result', async () => {
-    const endpoint = makeEndpoint(() => Promise.reject(new Error('connection refused')));
+    installFetch(() => Promise.reject(new Error('connection refused')));
 
     const result = await loadProject(endpoint);
 
@@ -39,7 +42,7 @@ describe('loadProject error handling', () => {
   });
 
   it('surfaces a non-JSON response body as an error result', async () => {
-    const endpoint = makeEndpoint(async () => ({
+    installFetch(async () => ({
       status: 200,
       json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
     }));
@@ -50,7 +53,7 @@ describe('loadProject error handling', () => {
   });
 
   it('surfaces a response missing pb/version as an error result', async () => {
-    const endpoint = makeEndpoint(async () => ({
+    installFetch(async () => ({
       status: 200,
       json: async () => ({}),
     }));
@@ -62,7 +65,7 @@ describe('loadProject error handling', () => {
 
   it('returns a loaded result for a well-formed response', async () => {
     const pb = new Uint8Array([1, 2, 3]);
-    const endpoint = makeEndpoint(async () => ({
+    installFetch(async () => ({
       status: 200,
       json: async () => ({ pb: fromUint8Array(pb), version: 4 }),
     }));

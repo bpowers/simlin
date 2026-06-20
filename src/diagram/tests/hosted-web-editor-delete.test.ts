@@ -9,9 +9,11 @@
 // deleteProject() issues DELETE /api/projects/:user/:name and, on success,
 // returns the home URL the caller should navigate to. On any non-2xx/3xx
 // response it throws so the in-editor confirmation dialog can surface the message
-// and keep itself open for a retry. The function is framework-free, so these
-// tests drive it directly with an injected fetch -- the HostedWebEditor shell's
-// only added behavior is calling window.location.assign with the returned URL.
+// and keep itself open for a retry. The function is framework-free and calls the
+// global `fetch` directly (native fetch throws "Illegal invocation" when called as
+// a method of any object but the global), so these tests stub `globalThis.fetch`.
+// The HostedWebEditor shell's only added behavior is calling window.location.assign
+// with the returned URL.
 
 import { deleteProject, ProjectEndpoint } from '../hosted-web-editor-core';
 
@@ -19,25 +21,22 @@ function jsonResponse(status: number, body: unknown): Response {
   return { status, json: async () => body } as unknown as Response;
 }
 
-function makeEndpoint(
-  fetchImpl: (input: string, init?: RequestInit) => Promise<Response>,
-  overrides: Partial<ProjectEndpoint> = {},
-): ProjectEndpoint {
-  return {
-    base: '',
-    username: 'alice',
-    projectName: 'climate',
-    fetch: fetchImpl as unknown as typeof fetch,
-    ...overrides,
-  };
+const originalFetch = globalThis.fetch;
+function installFetch(impl: (input: string, init?: RequestInit) => Promise<Response>): jest.Mock {
+  const mock = jest.fn(impl);
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = mock as unknown as typeof fetch;
+  return mock;
 }
+afterEach(() => {
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+});
 
 describe('deleteProject', () => {
   test('DELETEs the project endpoint and returns the home URL on success', async () => {
     // `App.tsx` passes baseURL="" in production, so a relative path is the
     // realistic case.
-    const fetchMock = jest.fn(async () => jsonResponse(200, {}));
-    const endpoint = makeEndpoint(fetchMock, { base: '', username: 'alice', projectName: 'climate' });
+    const fetchMock = installFetch(async () => jsonResponse(200, {}));
+    const endpoint: ProjectEndpoint = { base: '', username: 'alice', projectName: 'climate' };
 
     const homeUrl = await deleteProject(endpoint);
 
@@ -49,12 +48,8 @@ describe('deleteProject', () => {
   });
 
   test('honors a custom base for both the request and the returned URL', async () => {
-    const fetchMock = jest.fn(async () => jsonResponse(200, {}));
-    const endpoint = makeEndpoint(fetchMock, {
-      base: 'https://example.test',
-      username: 'bob',
-      projectName: 'world3',
-    });
+    const fetchMock = installFetch(async () => jsonResponse(200, {}));
+    const endpoint: ProjectEndpoint = { base: 'https://example.test', username: 'bob', projectName: 'world3' };
 
     const homeUrl = await deleteProject(endpoint);
 
@@ -64,13 +59,15 @@ describe('deleteProject', () => {
   });
 
   test('throws the server error message on failure', async () => {
-    const endpoint = makeEndpoint(async () => jsonResponse(401, { error: 'unauthorized' }));
+    installFetch(async () => jsonResponse(401, { error: 'unauthorized' }));
+    const endpoint: ProjectEndpoint = { base: '', username: 'alice', projectName: 'climate' };
 
     await expect(deleteProject(endpoint)).rejects.toThrow('unauthorized');
   });
 
   test('throws a status-bearing message when the error response has no body message', async () => {
-    const endpoint = makeEndpoint(async () => jsonResponse(500, {}));
+    installFetch(async () => jsonResponse(500, {}));
+    const endpoint: ProjectEndpoint = { base: '', username: 'alice', projectName: 'climate' };
 
     await expect(deleteProject(endpoint)).rejects.toThrow(/500/);
   });

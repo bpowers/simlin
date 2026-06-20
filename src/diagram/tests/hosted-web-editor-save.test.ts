@@ -9,8 +9,9 @@
 // saveProject() POSTs the serialized project and returns either the new server
 // version (success) or an error message (any non-2xx/3xx response). The
 // HostedWebEditor shell maps a `saved` result onto projectVersion and an `error`
-// result onto its service-error list. The function is framework-free, so these
-// tests drive it directly with an injected fetch.
+// result onto its service-error list. The function is framework-free and calls the
+// global `fetch` directly (native fetch throws "Illegal invocation" when called as
+// a method of any object but the global), so these tests stub `globalThis.fetch`.
 
 import { saveProject, ProjectEndpoint } from '../hosted-web-editor-core';
 import type { ProtobufProjectData } from '../Editor';
@@ -19,14 +20,17 @@ function jsonResponse(status: number, body: unknown): Response {
   return { status, json: async () => body } as unknown as Response;
 }
 
-function makeEndpoint(fetchImpl: (input: string, init?: RequestInit) => Promise<Response>): ProjectEndpoint {
-  return {
-    base: '',
-    username: 'alice',
-    projectName: 'climate',
-    fetch: fetchImpl as unknown as typeof fetch,
-  };
+const endpoint: ProjectEndpoint = { base: '', username: 'alice', projectName: 'climate' };
+
+const originalFetch = globalThis.fetch;
+function installFetch(impl: (input: string, init?: RequestInit) => Promise<Response>): jest.Mock {
+  const mock = jest.fn(impl);
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = mock as unknown as typeof fetch;
+  return mock;
 }
+afterEach(() => {
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+});
 
 function makeProject(): ProtobufProjectData {
   return { data: new Uint8Array([1, 2, 3]) } as unknown as ProtobufProjectData;
@@ -34,8 +38,7 @@ function makeProject(): ProtobufProjectData {
 
 describe('saveProject', () => {
   test('POSTs the project and returns the new version on success', async () => {
-    const fetchMock = jest.fn(async () => jsonResponse(200, { version: 7 }));
-    const endpoint = makeEndpoint(fetchMock);
+    const fetchMock = installFetch(async () => jsonResponse(200, { version: 7 }));
 
     const result = await saveProject(endpoint, makeProject(), 6);
 
@@ -49,7 +52,7 @@ describe('saveProject', () => {
   });
 
   test('returns the server error message on a non-2xx response', async () => {
-    const endpoint = makeEndpoint(async () => jsonResponse(409, { error: 'version conflict' }));
+    installFetch(async () => jsonResponse(409, { error: 'version conflict' }));
 
     const result = await saveProject(endpoint, makeProject(), 6);
 
@@ -57,7 +60,7 @@ describe('saveProject', () => {
   });
 
   test('returns a status-bearing message when the error response has no body message', async () => {
-    const endpoint = makeEndpoint(async () => jsonResponse(500, {}));
+    installFetch(async () => jsonResponse(500, {}));
 
     const result = await saveProject(endpoint, makeProject(), 6);
 

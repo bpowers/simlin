@@ -42,7 +42,6 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
     base: getBaseURL(),
     username,
     projectName,
-    fetch,
   });
 
   const appendServiceError = (msg: string): void => {
