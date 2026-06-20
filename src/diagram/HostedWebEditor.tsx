@@ -8,6 +8,8 @@ import { baseURL } from '@simlin/core/common';
 import { first } from '@simlin/core/collections';
 
 import { Editor, ProtobufProjectData } from './Editor';
+import Button from './components/Button';
+import CircularProgress from './components/CircularProgress';
 import { ErrorBoundary } from './ErrorBoundary';
 import { HostedWebEditorError, ProjectEndpoint, loadProject, saveProject } from './hosted-web-editor-core';
 // Imported as a namespace so the delete-flow navigation and DELETE go through
@@ -113,10 +115,31 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
   };
 
   if (!projectBinary || !projectVersion) {
+    // A load failure used to render bare, unstyled error text; the in-flight
+    // state used to be a blank <div/>. Both now render a styled, centered
+    // surface. In embedded mode it fills the embed element (no fixed-viewport
+    // overlay) so a slow or failed embedded model never covers the host page --
+    // mirroring the success branch, which also drops the full-viewport `.bg`
+    // when embedded.
+    const placeholderClass = embedded ? styles.centerEmbedded : styles.center;
     if (serviceErrors.length > 0) {
-      return <div>{first(serviceErrors).message}</div>;
+      return (
+        <div className={placeholderClass}>
+          <div className={styles.errorBox} role="alert">
+            <p className={styles.errorTitle}>We couldn&apos;t open this model</p>
+            <p className={styles.errorMessage}>{first(serviceErrors).message}</p>
+            <Button variant="contained" color="primary" onClick={() => window.location.reload()}>
+              Reload
+            </Button>
+          </div>
+        </div>
+      );
     }
-    return <div />;
+    return (
+      <div className={placeholderClass}>
+        <CircularProgress label="Loading model" />
+      </div>
+    );
   }
 
   const classNames = embedded ? undefined : styles.bg;

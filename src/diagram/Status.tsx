@@ -16,8 +16,14 @@ interface StatusProps {
 // stable during a pan. React.memo restores the old PureComponent shallow-prop
 // bailout so it does not re-render every frame. The Editor's `onClick` is a
 // stable bound handler, so the memo holds.
+// Mirror the theme status tokens (theme.css): success green for a healthy
+// model, error RED -- not the warning orange the dot previously used, which
+// read a hard model error as a soft advisory -- and a medium grey (rather than
+// the near-white #DCDCDC, which barely showed on the white search bar) when the
+// model is not simulatable. Inlined rather than via var() because this fills an
+// SVG presentation attribute; the dot only ever renders on the light search bar.
 export const Status = React.memo(function Status({ status, onClick }: StatusProps): React.ReactElement {
-  const fill = status === 'ok' ? '#81c784' : status === 'error' ? 'rgb(255, 152, 0)' : '#DCDCDC';
+  const fill = status === 'ok' ? '#2e7d32' : status === 'error' ? '#c62828' : '#bdbdbd';
   return (
     <svg className={styles.status}>
       <circle cx={12} cy={12} r={12} fill={fill} onClick={onClick} />

@@ -7,11 +7,46 @@
   --panel-width-md: 420px;
   --panel-width-lg: 480px;
 
-  /* Spacing (base: 8px) */
+  /* Top-right floating chrome geometry. The search bar, the optional
+     shared-model banner, and the detail panels all share the same
+     top-right slot (anchored top:8px right:8px), so their vertical offsets
+     are derived from one set of tokens to keep them from drifting apart.
+     The 8px below is the shared slot top (.searchBar/.varDetails top:8px). */
+  --searchbar-height: 48px;
+  /* The shared-model banner sits just below the search bar (4px gap). */
+  --shared-model-banner-top: calc(8px + var(--searchbar-height) + 4px);
+  /* Banner height reserved by --panel-top-inset-with-banner. Sized for the
+     worst realistic case -- a two-line wrapped banner -- because the longer
+     "used by N modules" message wraps at the narrow (sm) panel width. With the
+     banner's explicit line-height:1.4 and 4px*2 padding, one line is ~25px and
+     two wrapped lines are ~42px; a single-line banner just leaves more
+     clearance. (English copy maxes at two lines; revisit if i18n is added.) */
+  --shared-model-banner-height: 42px;
+
+  /* Vertical room the floating detail panels reserve at their top so their
+     content clears the search/breadcrumb bar that overlays the top of this
+     same slot (slot top 8px + 48px bar + 4px gap = content at y=60). All
+     three detail panels read this so they cannot drift apart. */
+  --panel-top-inset: calc(8px + var(--searchbar-height) + 4px - 8px);
+  /* When the shared-model banner is present it occupies the band the base
+     inset would have left empty, so the panels reserve enough room to clear
+     BOTH the search bar and the banner (banner bottom + 4px gap). The Editor
+     applies .varDetailsWithBanner to swap this in when the banner shows. */
+  --panel-top-inset-with-banner: calc(
+    var(--shared-model-banner-top) - 8px + var(--shared-model-banner-height) + 4px
+  );
+
+  /* Spacing (base: 8px grid) */
   --spacing-1: 8px;
   --spacing-1-5: 12px;
   --spacing-2: 16px;
   --spacing-3: 24px;
+  --spacing-4: 32px;
+  --spacing-5: 40px;
+  --spacing-6: 48px;
+  --spacing-7: 56px;
+  --spacing-8: 64px;
+  --spacing-9: 72px;
   --spacing-10: 80px;
 
   /* Palette - Common */
@@ -38,11 +73,45 @@
   --color-text-light: #888;
   --color-connector: gray;
 
+  /* Surfaces: panel/card backgrounds, borders, and the recessed input wells
+     used by the equation/units/notes editors. Tokenized so light/dark and a
+     future "flatter surfaces" pass change one place instead of ~20 files. */
+  --color-surface: #ffffff;
+  --color-border: #dddddd;
+  --color-field-bg: #f5f5f5;
+
+  /* Elevation shadows. These three triplets were copy-pasted verbatim across a
+     dozen components; tokenizing them lets the "subtler elevation" design
+     direction be dialed in centrally. Values match the prior inline strings. */
+  --shadow-sm:
+    0px 2px 1px -1px rgba(0, 0, 0, 0.2),
+    0px 1px 1px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 3px 0px rgba(0, 0, 0, 0.12);
+  --shadow-md:
+    0px 3px 1px -2px rgba(0, 0, 0, 0.2),
+    0px 2px 2px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 5px 0px rgba(0, 0, 0, 0.12);
+  --shadow-lg:
+    0px 3px 5px -1px rgba(0, 0, 0, 0.2),
+    0px 6px 10px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 18px 0px rgba(0, 0, 0, 0.12);
+
   /* Diagram - Cloud colors */
   --color-cloud-stroke: #6388dc;
 }
 
-/* Dark mode overrides (for StaticDiagram) */
+/*
+ * Dark-mode overrides for the StaticDiagram CANVAS ONLY.
+ *
+ * StaticDiagram (the non-interactive thumbnail/export renderer) wraps its
+ * canvas SVG in a [data-theme="dark"] element, so the variables below retheme
+ * the canvas primitives (Stock/Flow/Cloud/Connector/Module/etc.) it draws.
+ * Nothing else in the app sets data-theme: the interactive editor chrome,
+ * the detail panels, and the src/app shell are intentionally light-only for
+ * now. Dark-mode parity across those surfaces is a deliberately-unbuilt,
+ * best-effort item (see the root CLAUDE.md), so do not assume a dark editor
+ * exists just because these canvas tokens do.
+ */
 [data-theme="dark"] {
   --color-black: #bbbbbb;
   --color-white: #222222;

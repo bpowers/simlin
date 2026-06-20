@@ -1,3 +1,7 @@
+/* Bottom-left controls. The undo/zoom cards (40px tall) sit at bottom:24 and
+   the SpeedDial FAB (56px tall) at bottom:16 so the two clusters share a
+   vertical CENTER line (24 + 40/2 == 16 + 56/2 == 44px from the bottom); the
+   8px offset is exactly (56-40)/2, not an accidental mismatch. */
 .undoRedoBar {
   display: flex;
   position: absolute;
@@ -19,8 +23,8 @@
   margin-top: 12px;
   margin-left: 12px;
   border-radius: 4px;
-  background: #fff;
-  box-shadow: 0px 3px 1px -2px rgba(0,0,0,0.2), 0px 2px 2px 0px rgba(0,0,0,0.14), 0px 1px 5px 0px rgba(0,0,0,0.12);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-md);
 }
 
 .snapshotCardContent {
@@ -55,8 +59,11 @@
   position: absolute;
   top: 8px;
   right: 8px;
-  height: 48px;
-  width: var(--panel-width-sm);
+  height: var(--searchbar-height);
+  /* Clamp to the viewport on narrow screens so the bar never overflows the
+     left edge (it is anchored right:8px); stays in lockstep with the detail
+     panel cards that share this slot. */
+  width: min(var(--panel-width-sm), calc(100vw - 16px));
   /* Explicit border-box: the global reset is not reliably present in every
      host bundle, and without it the 8px horizontal padding makes this box
      16px wider than the details card it must align with. */
@@ -66,19 +73,19 @@
   gap: 8px;
   padding: 0 8px;
   border-radius: 4px;
-  background: #fff;
-  box-shadow: 0px 3px 1px -2px rgba(0,0,0,0.2), 0px 2px 2px 0px rgba(0,0,0,0.14), 0px 1px 5px 0px rgba(0,0,0,0.12);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-md);
 }
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
   .searchBar {
-    width: var(--panel-width-md);
+    width: min(var(--panel-width-md), calc(100vw - 16px));
   }
 }
 
 @media (min-width: 1200px) {
   .searchBar {
-    width: var(--panel-width-lg);
+    width: min(var(--panel-width-lg), calc(100vw - 16px));
   }
 }
 
@@ -86,7 +93,7 @@
   position: absolute;
   top: 8px;
   right: 8px;
-  height: 48px;
+  height: var(--searchbar-height);
   width: var(--panel-width-sm);
   box-sizing: border-box;
 }
@@ -95,6 +102,17 @@
   position: absolute;
   top: 8px;
   right: 8px;
+}
+
+/* When the shared-model banner is shown it overlays the top of this same
+   slot (just below the search bar), so the open detail panel must reserve
+   extra top room to clear BOTH. The panel children read --panel-top-inset
+   for their top padding; overriding the variable here cascades to whichever
+   panel (variable/module/error) is mounted. This intentionally only grows
+   the panel's reserved EMPTY band, leaving the search-bar-over-panel paint
+   order untouched (see getDetails/getSearchBar ordering in Editor.tsx). */
+.varDetailsWithBanner {
+  --panel-top-inset: var(--panel-top-inset-with-banner);
 }
 
 .searchButton {
@@ -165,30 +183,18 @@
   white-space: nowrap;
 }
 
-[data-theme="dark"] .breadcrumbLink {
-  color: #90caf9;
-}
-
-[data-theme="dark"] .breadcrumbLink:hover {
-  background: rgba(144, 202, 249, 0.08);
-}
-
-[data-theme="dark"] .breadcrumbCurrent {
-  color: #e0e0e0;
-}
-
-[data-theme="dark"] .breadcrumbSeparator {
-  color: #666;
-}
-
 .sharedModelBanner {
   position: absolute;
-  top: 60px;
+  top: var(--shared-model-banner-top);
   right: 8px;
-  width: var(--panel-width-sm);
+  width: min(var(--panel-width-sm), calc(100vw - 16px));
   padding: 4px 12px;
   font-size: 12px;
-  color: #666;
+  /* Explicit line-height makes the banner's rendered height deterministic (it
+     must not depend on the global reset's inherited 1.5, which a host bundle
+     may not load) so --shared-model-banner-height can match it. */
+  line-height: 1.4;
+  color: var(--color-text-muted);
   background: #fff3e0;
   border-radius: 4px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
@@ -199,19 +205,14 @@
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
   .sharedModelBanner {
-    width: var(--panel-width-md);
+    width: min(var(--panel-width-md), calc(100vw - 16px));
   }
 }
 
 @media (min-width: 1200px) {
   .sharedModelBanner {
-    width: var(--panel-width-lg);
+    width: min(var(--panel-width-lg), calc(100vw - 16px));
   }
-}
-
-[data-theme="dark"] .sharedModelBanner {
-  background: #3e2723;
-  color: #ffcc80;
 }
 
 .editor {

@@ -3,31 +3,37 @@
  * Version 2.0, that can be found in the LICENSE file. */
 
 .card {
-  width: var(--panel-width-sm);
+  /* Clamp to the viewport on narrow screens so the panel never overflows the
+     left edge or dominates the canvas (it is anchored right:8px). */
+  width: min(var(--panel-width-sm), calc(100vw - 16px));
   /* Match .searchBar: see VariableDetails.module.css */
   box-sizing: border-box;
   max-height: calc(100vh - 18px);
   overflow-y: auto;
   scrollbar-gutter: stable;
   border-radius: 4px;
-  background: #fff;
-  box-shadow: 0px 2px 1px -1px rgba(0,0,0,0.2), 0px 1px 1px 0px rgba(0,0,0,0.14), 0px 1px 3px 0px rgba(0,0,0,0.12);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
 }
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
   .card {
-    width: var(--panel-width-md);
+    width: min(var(--panel-width-md), calc(100vw - 16px));
   }
 }
 
 @media (min-width: 1200px) {
   .card {
-    width: var(--panel-width-lg);
+    width: min(var(--panel-width-lg), calc(100vw - 16px));
   }
 }
 
+/* Reserve the top band so the module's header/title clears the 48px
+   search+breadcrumb bar that overlays this same top-right slot. Without this
+   the module name renders behind the (later-painted, opaque) search bar -- the
+   sibling Variable/Error panels reserve the same band via --panel-top-inset. */
 .cardContent {
-  padding: 16px;
+  padding: var(--panel-top-inset) 16px 16px;
 }
 
 .header {
@@ -137,7 +143,7 @@
 }
 
 .unitsEditor {
-  background-color: rgba(245, 245, 245);
+  background-color: var(--color-field-bg);
   border-radius: 4px;
   margin-top: 4px;
   padding: 4px;
@@ -147,7 +153,7 @@
 }
 
 .notesEditor {
-  background-color: rgba(245, 245, 245);
+  background-color: var(--color-field-bg);
   border-radius: 4px;
   margin-top: 4px;
   padding: 4px;
@@ -165,55 +171,4 @@
 
 .deleteButton {
   margin-right: auto;
-}
-
-/* Dark mode overrides */
-[data-theme="dark"] .card {
-  background: #1e1e1e;
-}
-
-[data-theme="dark"] .header {
-  color: #eee;
-}
-
-[data-theme="dark"] .modelRefSelect {
-  background: #2a2a2a;
-  color: #eee;
-  border-color: #555;
-}
-
-[data-theme="dark"] .modelRefLabel {
-  color: #aaa;
-}
-
-[data-theme="dark"] .sectionTitle {
-  color: #aaa;
-}
-
-[data-theme="dark"] .emptyMessage {
-  color: #777;
-}
-
-[data-theme="dark"] .wiringTable th {
-  color: #aaa;
-  border-bottom-color: #444;
-}
-
-[data-theme="dark"] .wiringTable td {
-  border-bottom-color: #333;
-  color: #ddd;
-}
-
-[data-theme="dark"] .portList li {
-  color: #ddd;
-}
-
-[data-theme="dark"] .unitsEditor {
-  background-color: #2a2a2a;
-  color: #eee;
-}
-
-[data-theme="dark"] .notesEditor {
-  background-color: #2a2a2a;
-  color: #eee;
 }

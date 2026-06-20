@@ -1316,7 +1316,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         <div>
           {latest.current.state.modelErrors.map((err) => {
             const id = errorKey(err);
-            return <Toast variant="warning" id={id} onClose={handleCloseSnackbar} message={err.message} key={id} />;
+            // These are genuine failures (engine open, sim-run, save/service
+            // errors), so use the red error variant rather than amber warning.
+            return <Toast variant="error" id={id} onClose={handleCloseSnackbar} message={err.message} key={id} />;
           })}
         </div>
       </Snackbar>
@@ -1956,11 +1958,11 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
 
   // Renamed from the class method getErrorDetails() to avoid colliding with the
   // module-level getErrorDetails(error) helper (used by handleDownloadXmile).
-  const getErrorDetailsPanel = (): React.ReactElement => {
+  const getErrorDetailsPanel = (varDetailsClassName: string): React.ReactElement => {
     const { cachedErrors } = latest.current.state.controllerSnapshot;
 
     return (
-      <div className={styles.varDetails}>
+      <div className={varDetailsClassName}>
         <ErrorDetails
           status={latest.current.state.controllerSnapshot.status}
           simError={cachedErrors.simError}
@@ -1972,34 +1974,49 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     );
   };
 
-  // Shows a thin info banner when inside a module whose model is shared
-  // by multiple module instances, or when viewing a stdlib model.
-  const getSharedModelBanner = (): React.ReactNode => {
+  // Decides whether the shared-model info banner shows, and with what label.
+  // The banner and the detail panel's banner-aware top inset must agree on this
+  // single decision: the banner overlays the top of the same top-right slot as
+  // the panels, so when it is present the open panel reserves extra top room to
+  // clear it (see .varDetailsWithBanner). Computing the decision once here keeps
+  // the two consumers from drifting apart.
+  type SharedModelBannerInfo = { visible: false } | { visible: true; label: React.ReactNode };
+
+  const getSharedModelBannerInfo = (): SharedModelBannerInfo => {
     const { modelStack, modelName } = latest.current.state.controllerSnapshot;
-    if (modelStack.length === 0) return undefined;
+    if (modelStack.length === 0) return { visible: false };
 
     const project = getProject();
-    if (!project) return undefined;
+    if (!project) return { visible: false };
 
     // AC4.4: stdlib models show read-only message
     if (isStdlibModel(modelName)) {
-      return <div className={styles.sharedModelBanner}>Standard library model (read-only)</div>;
+      return { visible: true, label: 'Standard library model (read-only)' };
     }
 
     // AC4.1, AC4.2: count instances
     const count = countModelInstances(project, modelName);
 
     // AC4.3: single instance shows no banner
-    if (count <= 1) return undefined;
+    if (count <= 1) return { visible: false };
 
-    return (
-      <div className={styles.sharedModelBanner}>
-        This model is used by {count} modules &mdash; changes affect all instances
-      </div>
-    );
+    return {
+      visible: true,
+      label: <>This model is used by {count} modules &mdash; changes affect all instances</>,
+    };
   };
 
-  const getDetails = (): React.ReactElement | undefined => {
+  // Shows a thin info banner when inside a module whose model is shared
+  // by multiple module instances, or when viewing a stdlib model.
+  const getSharedModelBanner = (info: SharedModelBannerInfo): React.ReactNode => {
+    if (!info.visible) return undefined;
+    return <div className={styles.sharedModelBanner}>{info.label}</div>;
+  };
+
+  // bannerVisible lifts the open panel's reserved top band (via the
+  // .varDetailsWithBanner modifier) so its content clears the shared-model
+  // banner that overlays the top of this same slot.
+  const getDetails = (bannerVisible: boolean): React.ReactElement | undefined => {
     const { embedded } = props;
 
     if (embedded) {
@@ -2010,8 +2027,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       return;
     }
 
+    const varDetailsClassName = clsx(styles.varDetails, bannerVisible && styles.varDetailsWithBanner);
+
     if (latest.current.state.showDetails === 'errors') {
-      return getErrorDetailsPanel();
+      return getErrorDetailsPanel(varDetailsClassName);
     }
 
     const namedElement = getNamedSelectedElement();
@@ -2026,7 +2045,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
 
     if (variable.type === 'module') {
       return (
-        <div className={styles.varDetails}>
+        <div className={varDetailsClassName}>
           <ModuleDetails
             key={`md-${latest.current.state.controllerSnapshot.projectGeneration}-${ident}`}
             variable={variable}
@@ -2048,7 +2067,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     const activeTab = latest.current.state.variableDetailsActiveTab;
 
     return (
-      <div className={styles.varDetails}>
+      <div className={varDetailsClassName}>
         <VariableDetails
           key={`vd-${latest.current.state.controllerSnapshot.projectGeneration}-${ident}`}
           variable={variable}
@@ -2356,12 +2375,19 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
 
   const classNames = clsx(styles.editor, embedded ? '' : styles.editorBg);
 
+  // Compute the shared-model banner decision once so the banner and the detail
+  // panel's banner-aware top inset agree. getDetails() is rendered BEFORE
+  // getSearchBar() so the opaque search bar paints over the panel's reserved
+  // empty top band -- the banner-aware inset only grows that band, preserving
+  // the paint-order overlay (it does NOT lift the panel above the search bar).
+  const sharedModelBannerInfo = getSharedModelBannerInfo();
+
   return (
     <div className={classNames}>
       {getDrawer()}
-      {getDetails()}
+      {getDetails(sharedModelBannerInfo.visible)}
       {getSearchBar()}
-      {getSharedModelBanner()}
+      {getSharedModelBanner(sharedModelBannerInfo)}
       {getCanvas()}
       {getSnackbar()}
       {getEditorControls()}

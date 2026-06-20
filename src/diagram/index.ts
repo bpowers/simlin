@@ -12,6 +12,8 @@ export { renderSvgToString } from './render-common';
 // UI Components
 export { default as Button } from './components/Button';
 export { default as IconButton } from './components/IconButton';
+export { default as CircularProgress } from './components/CircularProgress';
+export type { CircularProgressProps } from './components/CircularProgress';
 export { default as TextField } from './components/TextField';
 export { default as SvgIcon } from './components/SvgIcon';
 export type { SvgIconProps } from './components/SvgIcon';

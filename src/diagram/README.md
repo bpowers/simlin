@@ -35,7 +35,7 @@ The package also exports 40+ UI components (`Button`, `Dialog`, `Drawer`, `Tabs`
 
 The package imports a CSS reset and defines CSS custom properties for theming. Your bundler must support CSS imports. CSS Modules (`.module.css`) are used for component-scoped styles.
 
-Dark mode is supported via `[data-theme="dark"]` on a parent element.
+Dark mode is currently limited to the static diagram canvas. `StaticDiagram` (the non-interactive thumbnail/export renderer) wraps its canvas in a `[data-theme="dark"]` element, which rethemes the canvas primitives via the tokens in `theme.css`. The interactive editor, the detail panels, and the host app shell do not set `data-theme` and are intentionally light-only for now; dark-mode parity across those surfaces is unbuilt.
 
 ## License
 

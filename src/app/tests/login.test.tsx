@@ -82,6 +82,7 @@ jest.mock(
       AppleIcon: () => null,
       EmailIcon: () => null,
       Button,
+      CircularProgress: () => React.createElement('div', { role: 'progressbar' }),
       SvgIcon: Pass('SvgIcon'),
       Card: Pass('Card'),
       CardActions: Pass('CardActions'),
@@ -664,6 +665,29 @@ describe('Login rendering guards', () => {
     render(<Login disabled={true} auth={makeAuth()} />);
     expect(screen.queryByText('Sign in with Google')).toBeNull();
     expect(screen.queryByText('Sign in with email')).toBeNull();
+  });
+
+  test('when disabled, a loading spinner is shown instead of a blank screen', () => {
+    render(<Login disabled={true} auth={makeAuth()} />);
+    expect(screen.getByRole('progressbar')).not.toBeNull();
+  });
+
+  test('a server-session error relayed from App is surfaced on the landing screen', () => {
+    render(<Login disabled={false} auth={makeAuth()} error="We couldn't finish signing you in." />);
+    expect(screen.getByText(/finish signing you in/i)).not.toBeNull();
+  });
+
+  test('a server-session error stays visible on the email sign-in card', () => {
+    // An email/password user whose Firebase sign-in succeeds but whose /session
+    // exchange fails is left on the 'signin' card (emailLoginFlow === 'signin'),
+    // not the landing screen. The session error is rendered outside the flow
+    // switch, so it must remain visible there too.
+    render(<Login disabled={false} auth={makeAuth()} error="We couldn't finish signing you in." />);
+    fireEvent.click(screen.getByText('Sign in with email'));
+    // We are on the combined sign-in card...
+    expect(screen.getByLabelText('Password')).not.toBeNull();
+    // ...and the relayed session error is still shown.
+    expect(screen.getByText(/finish signing you in/i)).not.toBeNull();
   });
 
   test('the form onSubmit is a no-op guard (submission does not itself sign in)', () => {

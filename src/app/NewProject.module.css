@@ -1,17 +1,43 @@
 .subtitle {
-  margin-top: 16px;
+  margin-top: var(--spacing-2);
+  margin-bottom: 0;
+  color: var(--color-text-muted);
+}
+
+/* Vertical form rhythm on the 8px grid, replacing the old <br/> stacks whose
+   height drifted with font metrics. */
+.formStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  margin-top: var(--spacing-3);
+}
+
+/* Reserves one line so the layout doesn't jump when an error appears. */
+.warning {
+  margin: 0;
+  min-height: 1.5em;
+  color: var(--color-error);
+  white-space: pre-wrap;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .advancedGrid {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
-  gap: 80px;
+  column-gap: var(--spacing-2);
+  row-gap: var(--spacing-2);
   align-items: center;
   width: 100%;
 }
 
 .gridCol4 {
   grid-column: span 4;
+  text-align: right;
 }
 
 .gridCol8 {

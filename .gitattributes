@@ -1,7 +1,82 @@
-# Normalize Python sources to LF line endings (see issue #596).
+# Line-ending and binary-classification policy (issue #800).
+#
+# Default: our source and configuration normalize to LF in the index and on
+# checkout. `text=auto` auto-detects binary content (files with NUL bytes, etc.)
+# and leaves it alone; `eol=lf` forces LF for everything git treats as text, so
+# LF is the only line ending that can be committed for normalized text -- on
+# Windows checkouts included.
+#
+# Scope: this normalizes OUR source. Vendored / third-party / model / golden
+# fixtures are deliberately preserved byte-for-byte (stable sha256) by the
+# `-text` rules at the bottom -- we do not rewrite the line endings of model
+# files or reference outputs we did not author.
+* text=auto eol=lf
+
+# --- Binary files: never line-ending-converted ------------------------------
+# Images
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+
+# Fonts
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.eot   binary
+
+# Documents / spreadsheets
+*.pdf   binary
+*.xls   binary
+*.xlsx  binary
+
+# Serialized protobuf instances (DB-compatible; never line-ending-converted)
+*.pb       binary
+*.protobin binary
+
+# Vensim binary data/model files (.vdf/.vdfx/.vmf are undocumented binary
+# formats; see docs/design/vdf.md). gitattributes matching is case-sensitive,
+# so the uppercase extensions Vensim emits are listed explicitly.
+*.vdf  binary
+*.VDF  binary
+*.vdfx binary
+*.VMF  binary
+*.vmf  binary
+
+# Python sources normalize to LF (folded in from the prior #596 rule; now
+# redundant under the `* text=auto eol=lf` default, kept for clarity).
 *.py text eol=lf
 
+# Linguist hints (GitHub language stats); unrelated to line endings.
 src/app/scripts/* linguist-vendored
 src/app/config/* linguist-vendored
 src/simlin-engine/src/stdlib.gen.rs linguist-generated=true
 src/simlin-engine/src/project_io.gen.rs linguist-generated=true
+
+# --- Preserve byte-for-byte (no EOL conversion) -----------------------------
+# These rules come last so they win over the `* text=auto eol=lf` default for
+# any overlap. `-text` (not `binary`) so the files still produce textual diffs.
+#
+# Model definition files (Vensim .mdl/.MDL, Stella/XMILE .stmx/.itmx/.xmile),
+# wherever they live: many are vendored or are reference fixtures whose exact
+# bytes (and sha256) we keep stable, and we don't rewrite their line endings.
+*.mdl   -text
+*.MDL   -text
+*.stmx  -text
+*.itmx  -text
+*.xmile -text
+
+# The entire test/ tree is third-party / reference fixtures: vendored model
+# corpora (test-models, sdeverywhere -- each with its own LICENSE/README/build
+# scripts) plus golden simulation outputs (.tab/.csv/.dat/.CIN). Keep it
+# pristine and byte-identical to upstream.
+test/** -text
+
+# Model + golden test fixtures that live under src/ (engine/binding tests) are
+# data, not source, so they are exempt from the src/ LF normalization and kept
+# byte-exact (e.g. the SIR_output.csv golden the libsimlin tests reference).
+src/libsimlin/testdata/**          -text
+src/pysimlin/tests/fixtures/**     -text
+src/simlin-serve/tests/fixtures/** -text

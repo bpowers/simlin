@@ -101,6 +101,9 @@ interface AppState {
   user?: User;
   auth: FirebaseAuth;
   firebaseIdToken?: string | null;
+  // Surfaced on the Login screen when the server /session exchange fails after a
+  // successful IdP sign-in (otherwise the user is silently bounced back to Login).
+  loginError?: string;
 }
 
 function getBaseURL(): string {
@@ -237,12 +240,20 @@ export function InnerApp(): React.JSX.Element {
     if (!(status >= 200 && status < 400)) {
       const body = await response.json();
       const errorMsg =
-        body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
-      // appendModelError(errorMsg);
-      console.log(`session error: ${errorMsg}`);
+        body && body.error
+          ? (body.error as string)
+          : `We couldn't finish signing you in (HTTP ${status}). Please try again.`;
+      // Surface to the login screen rather than swallowing to the console: the
+      // user authenticated with the IdP but the server session failed and they
+      // get bounced back to Login, where without this it looks like a no-op.
+      console.error(`session error: ${errorMsg}`);
+      setState({ loginError: errorMsg });
       return undefined;
     }
 
+    // A successful session clears any prior session-error message so it cannot
+    // linger in state and resurface on the login screen after a later logout.
+    setState({ loginError: undefined });
     handleUsernameChanged();
   }
 
@@ -298,7 +309,7 @@ export function InnerApp(): React.JSX.Element {
     // invalidate() can rethrow a pending request's rejection (it awaits any
     // in-flight fetch), which would otherwise escape Home's fire-and-forget
     // call as an unhandled rejection.
-    setState({ user: undefined, isNewUser: undefined, firebaseIdToken: null });
+    setState({ user: undefined, isNewUser: undefined, firebaseIdToken: null, loginError: undefined });
     try {
       await userInfo.invalidate();
     } catch (err) {
@@ -381,7 +392,7 @@ export function InnerApp(): React.JSX.Element {
   // skip the high level auth check, to enable public models
   if (!/\/.*\/.*/.test(window.location.pathname)) {
     if (!state.user) {
-      return <Login disabled={state.authUnknown} auth={state.auth} />;
+      return <Login disabled={state.authUnknown} auth={state.auth} error={state.loginError} />;
     }
 
     if (state.isNewUser) {

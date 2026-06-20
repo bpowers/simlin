@@ -1,0 +1,24 @@
+.spinner {
+  display: inline-block;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border-style: solid;
+  border-color: var(--color-primary);
+  /* One open quadrant turns the ring into a recognizable spinner glyph. */
+  border-right-color: transparent;
+  animation: spin 0.8s linear infinite;
+}
+
+/* Honor reduced-motion: keep the ring (still reads as "loading") but stop the
+   rotation rather than spinning, per the prefers-reduced-motion contract. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

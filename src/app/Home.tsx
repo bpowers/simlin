@@ -9,6 +9,7 @@ import clsx from 'clsx';
 import {
   AppBar,
   Button,
+  CircularProgress,
   ImageList,
   ImageListItem,
   IconButton,
@@ -18,7 +19,6 @@ import {
   Toolbar,
   Avatar,
   AccountCircleIcon,
-  MenuIcon,
 } from '@simlin/diagram';
 
 import { NewProject } from './NewProject';
@@ -43,6 +43,11 @@ const AnchorOrigin = {
 function Home(props: HomeProps): React.JSX.Element {
   const [anchorEl, setAnchorEl] = React.useState<HTMLElement | undefined>(undefined);
   const [projects, setProjects] = React.useState<readonly Project[]>([]);
+  // Distinguishes "still loading", "load failed", and "loaded (maybe empty)" so
+  // the three no longer collapse into the same blank page. Without this a fetch
+  // failure, a slow network, and a brand-new account all rendered an identical
+  // empty grid with no feedback.
+  const [loadState, setLoadState] = React.useState<'loading' | 'loaded' | 'error'>('loading');
 
   // The mutable, non-render instance state that lived as class instance fields:
   // the pending setTimeout(0) handle for the deferred getProjects() and an
@@ -65,17 +70,30 @@ function Home(props: HomeProps): React.JSX.Element {
       const status = response.status;
       if (!(status >= 200 && status < 400)) {
         console.error(`couldn't fetch projects: HTTP ${status}`);
+        if (!refs.current.unmounted) {
+          setLoadState('error');
+        }
         return;
       }
       projects = (await response.json()) as Project[];
     } catch (err) {
       console.error("couldn't fetch projects:", err);
+      if (!refs.current.unmounted) {
+        setLoadState('error');
+      }
       return;
     }
     if (refs.current.unmounted) {
       return;
     }
     setProjects(projects);
+    setLoadState('loaded');
+  };
+
+  // Re-run the fetch from the error state's Retry button.
+  const handleRetry = (): void => {
+    setLoadState('loading');
+    void getProjects();
   };
 
   // Mount / unmount effect (formerly componentDidMount / componentWillUnmount).
@@ -123,12 +141,6 @@ function Home(props: HomeProps): React.JSX.Element {
     window.location.pathname = '/' + project.id;
   };
 
-  const getGridListCols = () => {
-    // TODO: this should be 1 on small screens, but useMediaQuery doesn't
-    //       work in class components, only function components.
-    return 2;
-  };
-
   const newProjectForm = () => {
     return (
       <div className={styles.newProjectForm}>
@@ -142,18 +154,64 @@ function Home(props: HomeProps): React.JSX.Element {
   };
 
   const projectsView = () => {
+    if (loadState === 'loading') {
+      return (
+        <div className={styles.statusArea}>
+          <CircularProgress label="Loading your models" />
+        </div>
+      );
+    }
+
+    if (loadState === 'error') {
+      return (
+        <div className={styles.statusArea}>
+          <h2 className={clsx(typography.heading5, styles.statusTitle)}>We couldn&apos;t load your models</h2>
+          <p className={clsx(typography.body2, styles.statusBody)}>
+            Something went wrong reaching the server. Check your connection and try again.
+          </p>
+          <Button variant="contained" color="primary" onClick={handleRetry}>
+            Retry
+          </Button>
+        </div>
+      );
+    }
+
+    if (projects.length === 0) {
+      return (
+        <div className={styles.statusArea}>
+          <h2 className={clsx(typography.heading5, styles.statusTitle)}>No models yet</h2>
+          <p className={clsx(typography.body2, styles.statusBody)}>
+            Create your first model to start debugging your intuition.
+          </p>
+          <Link to="/new" className={styles.modelLink}>
+            <Button variant="contained" color="primary">
+              New Project
+            </Button>
+          </Link>
+        </div>
+      );
+    }
+
     return (
       <div className={styles.projectGrid}>
-        <ImageList cols={getGridListCols()} gap={0}>
+        {/* auto-fill + minmax reflows the grid from 1 column on a phone up to as
+            many ~280px columns as fit, replacing the old hardcoded 2-up that
+            squeezed two tiny cards side-by-side on mobile. The grid owns the
+            gutter (gap), so the cards carry no margin -- inner and outer gutters
+            match. min(280px, 100%) keeps a single card from overflowing very
+            narrow viewports. */}
+        <ImageList gap={24} style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(280px, 100%), 1fr))' }}>
           {projects.map((project) => (
             <ImageListItem key={project.id} style={{ height: 'auto' }}>
               <Link to={`/${project.id}`} className={styles.modelLink}>
-                <Paper className={styles.paper} elevation={4}>
+                <Paper className={styles.paper} elevation={1}>
                   <div className={styles.preview}>
                     <img src={`/api/preview/${project.id}`} alt="model preview" className={styles.previewImg} />
                   </div>
-                  <h3 className={clsx(typography.heading5, styles.cardTitle)}>{project.displayName}</h3>
-                  <p>{project.description}&nbsp;</p>
+                  <h3 className={clsx(typography.heading6, styles.cardTitle)}>{project.displayName}</h3>
+                  {project.description && (
+                    <p className={clsx(typography.body2, styles.cardDescription)}>{project.description}</p>
+                  )}
                 </Paper>
               </Link>
             </ImageListItem>
@@ -166,10 +224,15 @@ function Home(props: HomeProps): React.JSX.Element {
   const { photoUrl } = props.user;
   const open = Boolean(anchorEl);
 
+  // Render the fallback through Avatar too, so the no-photo state keeps the same
+  // 32px circle as the photo state instead of shrinking to a bare 24px icon and
+  // shifting the toolbar's trailing edge.
   const account = photoUrl ? (
     <Avatar alt={props.user.displayName} src={photoUrl} className={styles.avatar} />
   ) : (
-    <AccountCircleIcon />
+    <Avatar alt={props.user.displayName} className={styles.avatar}>
+      <AccountCircleIcon />
+    </Avatar>
   );
 
   const content = props.isNewProject ? newProjectForm() : projectsView();
@@ -178,23 +241,19 @@ function Home(props: HomeProps): React.JSX.Element {
     <div className={clsx(styles.root)}>
       <AppBar position="fixed">
         <Toolbar variant="dense">
-          <IconButton className={styles.menuButton} color="inherit" aria-label="Menu" edge="start" size="small">
-            <MenuIcon />
-          </IconButton>
           <h6 className={clsx(typography.heading6, typography.colorInherit, styles.appBarTitle)}>
             <Link to="/" className={styles.modelLink}>
               Simlin
             </Link>
           </h6>
-          <div>
+          <div className={styles.toolbarActions}>
             <Link to="/new" className={styles.modelLink}>
-              <Button variant="outlined" className={styles.newProjectButton}>
+              <Button variant="outlined" color="inherit">
                 New Project
               </Button>
             </Link>
 
             <IconButton
-              className={styles.profileIcon}
               aria-owns={open ? 'menu-appbar' : undefined}
               aria-haspopup="true"
               onClick={handleMenu}

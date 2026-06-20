@@ -1,5 +1,6 @@
 .card {
-  width: var(--panel-width-sm);
+  /* Clamp to the viewport on narrow screens (anchored right:8px). */
+  width: min(var(--panel-width-sm), calc(100vw - 16px));
   /* Match .searchBar: both must compute as border-box so their edges align
      regardless of whether the global reset is present in the host bundle. */
   box-sizing: border-box;
@@ -7,28 +8,29 @@
   overflow-y: auto;
   scrollbar-gutter: stable;
   border-radius: 4px;
-  background: #fff;
-  box-shadow: 0px 2px 1px -1px rgba(0,0,0,0.2), 0px 1px 1px 0px rgba(0,0,0,0.14), 0px 1px 3px 0px rgba(0,0,0,0.12);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
 }
 
 @media (min-width: 900px) and (max-width: 1199.95px) {
   .card {
-    width: var(--panel-width-md);
+    width: min(var(--panel-width-md), calc(100vw - 16px));
   }
 }
 
 @media (min-width: 1200px) {
   .card {
-    width: var(--panel-width-lg);
+    width: min(var(--panel-width-lg), calc(100vw - 16px));
   }
 }
 
+/* Clears the 48px search/breadcrumb bar overlaying the top of this slot. */
 .inner {
-  padding-top: 52px;
+  padding-top: var(--panel-top-inset);
 }
 
 .eqnEditor {
-  background-color: rgba(245, 245, 245);
+  background-color: var(--color-field-bg);
   border-radius: 4px;
   margin-top: 4px;
   padding: 4px;
@@ -38,7 +40,7 @@
 }
 
 .eqnPreview {
-  background-color: rgba(245, 245, 245);
+  background-color: var(--color-field-bg);
   border-radius: 4px;
   margin-top: 4px;
   padding: 8px;
@@ -91,7 +93,7 @@
 }
 
 .unitsEditor {
-  background-color: rgba(245, 245, 245);
+  background-color: var(--color-field-bg);
   border-radius: 4px;
   margin-top: 4px;
   padding: 4px;
@@ -101,7 +103,7 @@
 }
 
 .notesEditor {
-  background-color: rgba(245, 245, 245);
+  background-color: var(--color-field-bg);
   border-radius: 4px;
   margin-top: 4px;
   padding: 4px;
@@ -134,7 +136,13 @@
 }
 
 .errorList {
-  color: #cc0000;
+  color: var(--color-error);
+}
+
+/* Replaces a default <hr/> + <br/> with a quiet 1px rule on the 8px grid. */
+.chartDivider {
+  border-top: 1px solid var(--color-divider);
+  margin: var(--spacing-2) 0;
 }
 
 .cardContent {

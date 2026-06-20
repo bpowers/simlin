@@ -13,10 +13,12 @@
   position: relative;
   top: 0;
   left: 0;
+  /* Symmetric gutters reserve equal room for the back (left) and close (right)
+     buttons so the centered wordmark is actually centered (was 64 vs 70). */
   padding-left: 64px;
   padding-top: 12px;
   padding-bottom: 12px;
-  padding-right: 70px;
+  padding-right: 64px;
   height: 100%;
   width: 100%;
 }

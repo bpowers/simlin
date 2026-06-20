@@ -10,20 +10,14 @@
   margin-top: 4px;
 }
 
-.xScaleMin {
-  width: 30%;
-  padding-right: 4px;
-}
-
-.xScaleMax {
-  width: 30%;
-  padding-left: 4px;
-  padding-right: 4px;
-}
-
-.datapoints {
-  width: 40%;
-  padding-left: 4px;
+/* The three x-axis controls share one even, gap-spaced row instead of relying
+   on hand-tuned percentage widths plus padding (which could wrap raggedly at
+   the md/lg panel widths). */
+.xAxisRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: var(--spacing-1);
+  margin-top: var(--spacing-1);
 }
 
 .buttonLeft {
