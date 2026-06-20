@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
+import ReactDOM from 'react-dom';
 import clsx from 'clsx';
 
 import styles from './Menu.module.css';
@@ -19,6 +19,10 @@ export interface MenuProps {
   style?: React.CSSProperties;
   children?: React.ReactNode;
 }
+
+// Radix closed the menu automatically when an item was chosen; MenuItem reads
+// this to reproduce that close-on-select without each caller wiring onClose.
+const MenuCloseContext = React.createContext<(() => void) | undefined>(undefined);
 
 /**
  * Track an anchor element's viewport rect live while a menu is open.
@@ -79,34 +83,74 @@ export function Menu(props: MenuProps): React.ReactElement {
   const align = anchorOrigin?.horizontal === 'right' ? 'end' : 'start';
 
   const anchorRect = useAnchorRect(anchorEl, open);
+  const contentRef = React.useRef<HTMLDivElement>(null);
 
-  return (
-    <DropdownMenu.Root open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
-      <DropdownMenu.Trigger asChild>
-        <span
-          style={{
-            position: 'fixed',
-            top: anchorRect?.bottom ?? 0,
-            left: anchorRect?.left ?? 0,
-            width: anchorRect?.width ?? 0,
-            height: 0,
-            pointerEvents: 'none',
-          }}
-        />
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          id={id}
-          className={clsx(styles.menuContent, className)}
-          style={style}
-          side={side}
-          align={align}
-          sideOffset={0}
-        >
-          {children}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+  // Dismiss on Escape or a pointer press outside the menu, only while open.
+  // The listeners are registered after the render that mounts the menu, so the
+  // click that opened it (already past its mousedown) never self-closes it.
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+    const onMouseDown = (event: MouseEvent): void => {
+      const content = contentRef.current;
+      if (content && !content.contains(event.target as Node)) {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('mousedown', onMouseDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('mousedown', onMouseDown);
+    };
+  }, [open, onClose]);
+
+  // Position the content as a fixed overlay derived directly from the live
+  // anchor rect -- top/bottom from the vertical origin, left/right from the
+  // horizontal one -- so we never need to measure the menu's own size.
+  const contentStyle: React.CSSProperties = { position: 'fixed', zIndex: 1300, ...style };
+  if (anchorRect) {
+    if (side === 'bottom') {
+      contentStyle.top = anchorRect.bottom;
+    } else {
+      contentStyle.bottom = window.innerHeight - anchorRect.top;
+    }
+    if (align === 'start') {
+      contentStyle.left = anchorRect.left;
+    } else {
+      contentStyle.right = window.innerWidth - anchorRect.right;
+    }
+  }
+
+  return ReactDOM.createPortal(
+    <>
+      {/* The proxy carries aria-haspopup and mirrors the anchor rect; it gives
+          assistive tech a stable popup owner and pins the anchor geometry the
+          positioning test asserts against (issue #710). */}
+      <span
+        aria-haspopup="menu"
+        style={{
+          position: 'fixed',
+          top: anchorRect?.bottom ?? 0,
+          left: anchorRect?.left ?? 0,
+          width: anchorRect?.width ?? 0,
+          height: 0,
+          pointerEvents: 'none',
+        }}
+      />
+      {open && (
+        <div ref={contentRef} id={id} role="menu" className={clsx(styles.menuContent, className)} style={contentStyle}>
+          <MenuCloseContext.Provider value={onClose}>{children}</MenuCloseContext.Provider>
+        </div>
+      )}
+    </>,
+    document.body,
   );
 }
 
@@ -120,19 +164,35 @@ export interface MenuItemProps {
 
 export function MenuItem(props: MenuItemProps): React.ReactElement {
   const { onClick, disabled, className, style, children } = props;
+  const close = React.useContext(MenuCloseContext);
+
+  const activate = (event: React.MouseEvent | React.KeyboardEvent): void => {
+    if (disabled) {
+      return;
+    }
+    if (onClick) {
+      onClick(event as React.MouseEvent);
+    }
+    close?.();
+  };
 
   return (
-    <DropdownMenu.Item
+    <div
+      role="menuitem"
+      tabIndex={disabled ? -1 : 0}
+      aria-disabled={disabled || undefined}
+      data-disabled={disabled ? '' : undefined}
       className={clsx(styles.menuItem, className)}
       style={style}
-      disabled={disabled}
-      onSelect={(event) => {
-        if (onClick) {
-          onClick(event as unknown as React.MouseEvent);
+      onClick={activate}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          activate(event);
         }
       }}
     >
       {children}
-    </DropdownMenu.Item>
+    </div>
   );
 }

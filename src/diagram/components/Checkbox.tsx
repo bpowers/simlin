@@ -3,7 +3,6 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import * as RadixCheckbox from '@radix-ui/react-checkbox';
 import clsx from 'clsx';
 
 import styles from './Checkbox.module.css';
@@ -23,21 +22,40 @@ export interface CheckboxProps {
 export default function Checkbox(props: CheckboxProps): React.ReactElement {
   const { checked, defaultChecked, onChange, disabled, name, color = 'primary', className, style } = props;
 
+  // Support both controlled (`checked`) and uncontrolled (`defaultChecked`)
+  // use, mirroring the prior Radix behavior so the rendered data-state always
+  // reflects the live value rather than only the initial prop.
+  const isControlled = checked !== undefined;
+  const [internalChecked, setInternalChecked] = React.useState(defaultChecked ?? false);
+  const isChecked = isControlled ? checked : internalChecked;
+
+  const handleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const next = event.target.checked;
+    if (!isControlled) {
+      setInternalChecked(next);
+    }
+    if (onChange) {
+      onChange(next);
+    }
+  };
+
   return (
-    <RadixCheckbox.Root
-      className={clsx(styles.checkbox, color === 'secondary' ? styles.secondary : styles.primary, className)}
-      style={style}
-      checked={checked}
-      defaultChecked={defaultChecked}
-      // Radix's CheckedState is boolean | 'indeterminate'; normalize so the
-      // (checked: boolean) contract our callers type against actually holds.
-      onCheckedChange={onChange ? (state) => onChange(state === true) : undefined}
-      disabled={disabled}
-      name={name}
-    >
-      <RadixCheckbox.Indicator className={styles.indicator}>
-        <CheckIcon className={styles.checkIcon} />
-      </RadixCheckbox.Indicator>
-    </RadixCheckbox.Root>
+    <span className={styles.root}>
+      <input
+        type="checkbox"
+        className={clsx(styles.checkbox, color === 'secondary' ? styles.secondary : styles.primary, className)}
+        style={style}
+        data-state={isChecked ? 'checked' : 'unchecked'}
+        checked={isChecked}
+        onChange={handleChange}
+        disabled={disabled}
+        name={name}
+      />
+      {isChecked && (
+        <span className={styles.indicator} aria-hidden="true">
+          <CheckIcon className={styles.checkIcon} />
+        </span>
+      )}
+    </span>
   );
 }

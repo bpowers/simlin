@@ -5,10 +5,10 @@
 import * as React from 'react';
 import ReactDOM from 'react-dom';
 
-import { useCombobox } from 'downshift';
 import clsx from 'clsx';
 
 import styles from './Autocomplete.module.css';
+import { useCombobox } from './useCombobox';
 
 export interface AutocompleteRenderInputParams {
   InputProps: {
@@ -26,10 +26,6 @@ interface AutocompleteProps {
   clearOnEscape?: boolean;
   options: string[];
   renderInput: (params: AutocompleteRenderInputParams) => React.ReactNode;
-}
-
-function itemToString(item: string | null): string {
-  return item || '';
 }
 
 export default function Autocomplete(props: AutocompleteProps) {
@@ -56,26 +52,14 @@ export default function Autocomplete(props: AutocompleteProps) {
 
   const { isOpen, getInputProps, getMenuProps, getItemProps, highlightedIndex } = useCombobox({
     items: filteredOptions,
-    itemToString,
     inputValue,
-    selectedItem: value || null,
     onInputValueChange: ({ inputValue: newInputValue }) => {
       setInputValue(newInputValue || '');
     },
     onSelectedItemChange: ({ selectedItem }) => {
       onChange(null, selectedItem || null);
     },
-    stateReducer: (state, actionAndChanges) => {
-      const { type, changes } = actionAndChanges;
-      if (clearOnEscape && type === useCombobox.stateChangeTypes.InputKeyDownEscape) {
-        return {
-          ...changes,
-          selectedItem: null,
-          inputValue: '',
-        };
-      }
-      return changes;
-    },
+    clearOnEscape,
   });
 
   const updateDropdownPosition = React.useCallback(() => {
