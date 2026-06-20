@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import { render, fireEvent, screen, waitFor, act } from '@testing-library/react';
+import { render, fireEvent, screen, waitFor, act, createEvent } from '@testing-library/react';
 import Autocomplete from '../components/Autocomplete';
 
 // Simple controlled component to test Autocomplete with external value changes.
@@ -215,6 +215,35 @@ describe('Autocomplete', () => {
     fireEvent.blur(input);
 
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test('option press prevents default on pointerdown so touch taps keep focus', async () => {
+    // On touch, focus can shift on pointerdown (before the synthesized
+    // mousedown); preventing it keeps focus on the input so the list is not
+    // unmounted by a blur before the tap's click selects the option.
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot']}
+        onChange={() => {}}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref}>
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('autocomplete-input'), { target: { value: 'ap' } });
+    const option = await screen.findByText('apple');
+
+    const pointerDown = createEvent.pointerDown(option);
+    fireEvent(option, pointerDown);
+    expect(pointerDown.defaultPrevented).toBe(true);
+
+    const mouseDown = createEvent.mouseDown(option);
+    fireEvent(option, mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
   });
 
   test('selecting an option fills the input even when uncontrolled', async () => {

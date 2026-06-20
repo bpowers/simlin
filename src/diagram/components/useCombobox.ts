@@ -50,6 +50,7 @@ export interface ComboboxItemProps {
   'aria-selected': boolean;
   onMouseMove: () => void;
   onMouseDown: (event: React.MouseEvent) => void;
+  onPointerDown: (event: React.PointerEvent) => void;
   onClick: () => void;
 }
 
@@ -202,9 +203,13 @@ export function useCombobox(config: UseComboboxConfig): UseComboboxResult {
     id: itemId(index),
     'aria-selected': highlightedIndex === index,
     onMouseMove: () => setHighlightedIndex(index),
-    // Keep focus on the input so the trailing blur doesn't beat the click and
-    // close the listbox before the selection registers.
+    // Keep focus on the input across both mouse and touch, so the trailing blur
+    // doesn't beat the click/tap and close (unmount) the listbox before the
+    // selection registers. onMouseDown covers the mouse compatibility blur;
+    // onPointerDown fires first for touch (and mouse), before the focus shift, so
+    // tapping an option on a touch device still selects it.
     onMouseDown: (event) => event.preventDefault(),
+    onPointerDown: (event) => event.preventDefault(),
     onClick: () => selectItem(item),
   });
 
