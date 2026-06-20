@@ -158,8 +158,8 @@ export function Menu(props: MenuProps): React.ReactElement {
   // portal is appended at the end of <body>, so without this they would have to
   // tab through the whole page to reach it. Also clear skipBlurCloseRef so each
   // open starts clean: an outside-press dismissal closes the menu (calling
-  // onClose) synchronously inside the mousedown listener, which tears down the
-  // mouseup reset before it runs, leaving the flag stranded true for next time.
+  // onClose) synchronously inside the pointerdown listener, which tears down the
+  // pointerup reset before it runs, leaving the flag stranded true for next time.
   React.useEffect(() => {
     if (!open) {
       return;

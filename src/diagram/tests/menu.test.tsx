@@ -267,7 +267,7 @@ describe('Menu dismissal and keyboard', () => {
       </Menu>,
     );
     // Shift+Tab can land focus on the trigger; that is still leaving the menu,
-    // so it must close (no mouse press happened, so it is not exempted).
+    // so it must close (no pointer press happened, so it is not exempted).
     const item = screen.getByRole('menuitem');
     fireEvent.blur(item, { relatedTarget: anchor });
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -293,7 +293,7 @@ describe('Menu dismissal and keyboard', () => {
 
   it('still closes on keyboard focus-out after a prior outside-click dismissal', () => {
     // Regression: the outside-press path sets skipBlurCloseRef and closes inside
-    // the mousedown listener, tearing down the mouseup reset before it fires.
+    // the pointerdown listener, tearing down the pointerup reset before it fires.
     // Reopening must clear the stranded flag so keyboard focus-out still closes.
     const anchor = document.createElement('button');
     const outside = document.createElement('div');
