@@ -6,7 +6,13 @@
   overflow-y: auto;
 }
 
+/* No overflow:hidden here: the item may hold a card (Paper) whose elevation
+   shadow is meant to render outside the tile. Clipping it caused inconsistent
+   shadows -- with the grid's default align-items:stretch, a card shorter than
+   the tallest in its row was stretched taller than its content, leaking a
+   bottom shadow line, while the row-defining card had its shadow clipped flush.
+   Children that need to crop their own content (e.g. an image) should clip
+   themselves. position:relative is kept so tiles can host absolute overlays. */
 .imageListItem {
-  overflow: hidden;
   position: relative;
 }

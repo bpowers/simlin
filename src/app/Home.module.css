@@ -34,8 +34,22 @@
   height: 32px;
 }
 
+/* Cards fill their grid cell so every card in a row is the same height and the
+   elevation shadow sits at a consistent bottom edge instead of floating above
+   ragged whitespace. Pairs with .cardLink, which makes the intervening anchor a
+   full-height block so this height:100% resolves against the stretched cell. */
 .paper {
   padding: var(--spacing-2);
+  height: 100%;
+  box-sizing: border-box;
+}
+
+/* The card's clickable wrapper. modelLink only zeroes link color/decoration;
+   this makes it a block that fills the grid cell so the Paper's height:100% has
+   a definite height to resolve against. */
+.cardLink {
+  display: block;
+  height: 100%;
 }
 
 /*

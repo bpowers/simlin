@@ -203,7 +203,7 @@ function Home(props: HomeProps): React.JSX.Element {
         <ImageList gap={24} style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(280px, 100%), 1fr))' }}>
           {projects.map((project) => (
             <ImageListItem key={project.id} style={{ height: 'auto' }}>
-              <Link to={`/${project.id}`} className={styles.modelLink}>
+              <Link to={`/${project.id}`} className={clsx(styles.modelLink, styles.cardLink)}>
                 <Paper className={styles.paper} elevation={1}>
                   <div className={styles.preview}>
                     <img src={`/api/preview/${project.id}`} alt="model preview" className={styles.previewImg} />
