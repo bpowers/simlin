@@ -435,3 +435,45 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+
+    /// A module freshly drawn in the editor carries an EMPTY model_name -- it
+    /// has no target model assigned yet (see `Editor.tsx`'s `upsertModule` with
+    /// `modelName: ''`). That empty name is absent from the inference
+    /// `models_s1` map, so unit inference must skip the module rather than
+    /// panic on the missing key. Regression for the `self.models[model_name]`
+    /// index panic in `units_infer::gen_all_constraints`, which surfaced as a
+    /// WASM panic ("no entry found for key") -- and a cascading recursive-mutex
+    /// panic from re-entering the panic path -- when a newly drawn module was
+    /// persisted.
+    #[test]
+    fn module_with_empty_model_name_does_not_panic() {
+        let sim_specs = sim_specs_with_units("parsec");
+
+        let mod_inst = crate::datamodel::Variable::Module(crate::datamodel::Module {
+            ident: "mod_inst".to_string(),
+            model_name: String::new(),
+            documentation: String::new(),
+            units: None,
+            references: vec![],
+            compat: crate::datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        });
+        // A unit-declared sibling makes inference run with real constraints.
+        let model = x_model("main", vec![x_aux("input", "6", Some("widget")), mod_inst]);
+        let project = x_project(sim_specs, &[model]);
+
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+
+        // Before the fix this panicked inside units_infer; now it returns
+        // cleanly, skipping the dangling module's constraints.
+        check_model_units(&db, sync.models["main"].source, sync.project);
+    }
+}

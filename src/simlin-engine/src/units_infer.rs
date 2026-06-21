@@ -834,21 +834,31 @@ impl UnitInferer<'_> {
                 ..
             } = var
             {
-                let submodel = self.models[model_name];
-                let subprefix = format!("{prefix}{ident}·");
-                for input in inputs {
-                    let src_var = format!("{}{}", prefix, input.src);
-                    let dst_var = format!("{}{}", subprefix, input.dst);
-                    let src = format!("@{src_var}");
-                    let dst = format!("@{dst_var}");
-                    // src = dst === 1 = src/dst
-                    let units: UnitMap = [(src, 1), (dst, -1)].iter().cloned().collect();
-                    // Module input constraint: both caller and callee are sources
-                    constraints.push(
-                        LocatedConstraint::new(units, &src_var, None).with_source(&dst_var, None),
-                    );
+                // A module may reference a model that is not in the map: a
+                // freshly drawn module in the editor carries an empty
+                // model_name until its target model is assigned (and a dangling
+                // reference can outlive a deleted model). Skip the submodel
+                // constraints rather than panicking on the missing key -- the
+                // variable still falls through to its declared-units constraint
+                // below, and inference is partial-result so the rest of the
+                // model resolves.
+                if let Some(&submodel) = self.models.get(model_name) {
+                    let subprefix = format!("{prefix}{ident}·");
+                    for input in inputs {
+                        let src_var = format!("{}{}", prefix, input.src);
+                        let dst_var = format!("{}{}", subprefix, input.dst);
+                        let src = format!("@{src_var}");
+                        let dst = format!("@{dst_var}");
+                        // src = dst === 1 = src/dst
+                        let units: UnitMap = [(src, 1), (dst, -1)].iter().cloned().collect();
+                        // Module input constraint: both caller and callee are sources
+                        constraints.push(
+                            LocatedConstraint::new(units, &src_var, None)
+                                .with_source(&dst_var, None),
+                        );
+                    }
+                    self.gen_all_constraints(submodel, &subprefix, constraints);
                 }
-                self.gen_all_constraints(submodel, &subprefix, constraints);
             }
             // we only should be adding constraints based on the equation if
             // the variable _doesn't_ have an associated lookup table/graphical
