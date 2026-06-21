@@ -3,10 +3,30 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import * as RadixAccordion from '@radix-ui/react-accordion';
 import clsx from 'clsx';
 
 import styles from './Accordion.module.css';
+
+interface AccordionContextValue {
+  open: boolean;
+  disabled: boolean;
+  toggle: () => void;
+  triggerId: string;
+  contentId: string;
+}
+
+// Shares the single-item disclosure state between the composed
+// Accordion/AccordionSummary/AccordionDetails parts, the way Radix's internal
+// context did, so callers keep composing them as independent children.
+const AccordionContext = React.createContext<AccordionContextValue | undefined>(undefined);
+
+function useAccordionContext(part: string): AccordionContextValue {
+  const ctx = React.useContext(AccordionContext);
+  if (!ctx) {
+    throw new Error(`${part} must be rendered inside an <Accordion>`);
+  }
+  return ctx;
+}
 
 export interface AccordionProps {
   defaultExpanded?: boolean;
@@ -19,30 +39,40 @@ export interface AccordionProps {
 }
 
 export function Accordion(props: AccordionProps): React.ReactElement {
-  const { defaultExpanded, expanded, onChange, disabled, className, style, children } = props;
+  const { defaultExpanded, expanded, onChange, disabled = false, className, style, children } = props;
 
-  const value = expanded ? 'item' : '';
-  const defaultValue = defaultExpanded ? 'item' : undefined;
+  const isControlled = expanded !== undefined;
+  const [internalOpen, setInternalOpen] = React.useState(defaultExpanded ?? false);
+  const open = isControlled ? expanded : internalOpen;
+
+  const reactId = React.useId();
+  const triggerId = `${reactId}-trigger`;
+  const contentId = `${reactId}-content`;
+
+  const toggle = React.useCallback(() => {
+    if (disabled) {
+      return;
+    }
+    const next = !open;
+    if (!isControlled) {
+      setInternalOpen(next);
+    }
+    if (onChange) {
+      onChange(next);
+    }
+  }, [disabled, open, isControlled, onChange]);
+
+  const ctx = React.useMemo<AccordionContextValue>(
+    () => ({ open, disabled, toggle, triggerId, contentId }),
+    [open, disabled, toggle, triggerId, contentId],
+  );
 
   return (
-    <RadixAccordion.Root
-      type="single"
-      collapsible
-      value={expanded !== undefined ? value : undefined}
-      defaultValue={defaultValue}
-      onValueChange={(newValue) => {
-        if (onChange) {
-          onChange(newValue === 'item');
-        }
-      }}
-      disabled={disabled}
-      className={clsx(styles.accordion, className)}
-      style={style}
-    >
-      <RadixAccordion.Item value="item" className={styles.item}>
-        {children}
-      </RadixAccordion.Item>
-    </RadixAccordion.Root>
+    <div className={clsx(styles.accordion, className)} style={style} data-state={open ? 'open' : 'closed'}>
+      <AccordionContext.Provider value={ctx}>
+        <div className={styles.item}>{children}</div>
+      </AccordionContext.Provider>
+    </div>
   );
 }
 
@@ -55,14 +85,26 @@ export interface AccordionSummaryProps {
 
 export function AccordionSummary(props: AccordionSummaryProps): React.ReactElement {
   const { expandIcon, className, style, children } = props;
+  const { open, disabled, toggle, triggerId, contentId } = useAccordionContext('AccordionSummary');
 
   return (
-    <RadixAccordion.Header className={styles.header}>
-      <RadixAccordion.Trigger className={clsx(styles.trigger, className)} style={style}>
+    <h3 className={styles.header}>
+      <button
+        type="button"
+        id={triggerId}
+        className={clsx(styles.trigger, className)}
+        style={style}
+        aria-expanded={open}
+        aria-controls={contentId}
+        disabled={disabled}
+        data-state={open ? 'open' : 'closed'}
+        data-disabled={disabled ? '' : undefined}
+        onClick={toggle}
+      >
         <span className={styles.content}>{children}</span>
         {expandIcon && <span className={styles.expandIcon}>{expandIcon}</span>}
-      </RadixAccordion.Trigger>
-    </RadixAccordion.Header>
+      </button>
+    </h3>
   );
 }
 
@@ -74,10 +116,30 @@ export interface AccordionDetailsProps {
 
 export function AccordionDetails(props: AccordionDetailsProps): React.ReactElement {
   const { className, style, children } = props;
+  const { open, triggerId, contentId } = useAccordionContext('AccordionDetails');
 
   return (
-    <RadixAccordion.Content className={clsx(styles.details, className)} style={style}>
-      <div className={styles.detailsInner}>{children}</div>
-    </RadixAccordion.Content>
+    <div
+      id={contentId}
+      role="region"
+      aria-labelledby={triggerId}
+      className={clsx(styles.details, className)}
+      style={style}
+      data-state={open ? 'open' : 'closed'}
+      // The content stays mounted so the grid-rows height transition can run,
+      // but a collapsed panel must not be reachable by keyboard or exposed to
+      // assistive tech (Radix used `hidden`). `inert` on the region itself --
+      // not just the inner wrapper -- removes the whole subtree from tab order
+      // and the a11y tree while keeping it laid out for the transition;
+      // `aria-hidden` makes the a11y-tree removal explicit (and not reliant on
+      // every engine wiring inert into the accessibility tree), so a closed
+      // panel is never announced as an empty region.
+      inert={open ? undefined : true}
+      aria-hidden={open ? undefined : true}
+    >
+      <div className={styles.detailsInner}>
+        <div className={styles.detailsContent}>{children}</div>
+      </div>
+    </div>
   );
 }

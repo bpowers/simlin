@@ -3,7 +3,6 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import * as Tooltip from '@radix-ui/react-tooltip';
 
 import clsx from 'clsx';
 
@@ -59,11 +58,9 @@ export default function SpeedDial(props: SpeedDialProps): React.ReactElement {
         {enrichedIcon}
       </button>
       {open && (
-        <Tooltip.Provider delayDuration={300}>
-          <div className={styles.actions} role="menu">
-            {children}
-          </div>
-        </Tooltip.Provider>
+        <div className={styles.actions} role="menu">
+          {children}
+        </div>
       )}
     </div>
   );
@@ -81,29 +78,25 @@ export function SpeedDialAction(props: SpeedDialActionProps): React.ReactElement
   const { icon, title, className, onClick, selected } = props;
   return (
     <div className={styles.action} role="menuitem">
-      <Tooltip.Root>
-        <Tooltip.Trigger asChild>
-          <button
-            className={clsx(
-              styles.actionButton,
-              styles.actionButtonOpen,
-              selected && styles.actionButtonSelected,
-              className,
-            )}
-            onClick={onClick}
-            aria-label={title}
-            type="button"
-          >
-            {icon}
-          </button>
-        </Tooltip.Trigger>
-        <Tooltip.Portal>
-          <Tooltip.Content className={styles.tooltip} side="right" sideOffset={8} collisionPadding={16}>
-            {title}
-            <Tooltip.Arrow className={styles.tooltipArrow} />
-          </Tooltip.Content>
-        </Tooltip.Portal>
-      </Tooltip.Root>
+      <button
+        className={clsx(
+          styles.actionButton,
+          styles.actionButtonOpen,
+          selected && styles.actionButtonSelected,
+          className,
+        )}
+        onClick={onClick}
+        aria-label={title}
+        type="button"
+      >
+        {icon}
+      </button>
+      {/* CSS-only tooltip: shown on hover/focus of the action via the sibling
+          selectors in the stylesheet. aria-hidden because the button's
+          aria-label already conveys the name to assistive tech. */}
+      <span className={styles.tooltip} role="tooltip" aria-hidden="true">
+        {title}
+      </span>
     </div>
   );
 }

@@ -9,7 +9,6 @@
 // the user onto req.user, and DELETE /session clears the cookie.
 
 import express from 'express';
-import cookieParser from 'cookie-parser';
 import { seshcookie } from '../seshcookie/seshcookie';
 import http from 'http';
 
@@ -35,7 +34,6 @@ function fakeUserTable(known: Record<string, FakeUser>) {
 function createTestApp(): express.Express {
   const app = express();
 
-  app.use(cookieParser());
   app.use(
     seshcookie({
       key: 'test-key-for-encryption-1234',
@@ -140,7 +138,6 @@ describe('seshcookie-backed session auth', () => {
 
   it('a session naming an unknown user does not populate req.user', async () => {
     const app = express();
-    app.use(cookieParser());
     app.use(
       seshcookie({
         key: 'test-key-for-encryption-1234',

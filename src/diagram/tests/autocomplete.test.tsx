@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import { render, fireEvent, screen, waitFor, act } from '@testing-library/react';
+import { render, fireEvent, screen, waitFor, act, createEvent } from '@testing-library/react';
 import Autocomplete from '../components/Autocomplete';
 
 // Simple controlled component to test Autocomplete with external value changes.
@@ -132,6 +132,173 @@ describe('Autocomplete', () => {
 
     await waitFor(() => {
       expect(input.value).toBe('');
+    });
+  });
+
+  test('scrolls the keyboard-highlighted option into view', async () => {
+    // jsdom does not implement scrollIntoView, so install a stub to observe the
+    // call (the component guards with optional chaining for exactly this reason).
+    const scrollFn = jest.fn();
+    (HTMLElement.prototype as unknown as { scrollIntoView: unknown }).scrollIntoView = scrollFn;
+    try {
+      render(
+        <Autocomplete
+          value={null}
+          options={['apple', 'apricot', 'avocado']}
+          onChange={() => {}}
+          renderInput={(params) => (
+            <div ref={params.InputProps.ref}>
+              <input {...params.inputProps} data-testid="autocomplete-input" />
+            </div>
+          )}
+        />,
+      );
+
+      const input = screen.getByTestId('autocomplete-input');
+      fireEvent.change(input, { target: { value: 'a' } });
+      await screen.findByText('apple');
+
+      // Arrow navigation must scroll the now-highlighted row into view.
+      fireEvent.keyDown(input, { key: 'ArrowDown' });
+      await waitFor(() => {
+        expect(scrollFn).toHaveBeenCalled();
+      });
+    } finally {
+      delete (HTMLElement.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
+  test('closes the list on an outside pointer press even without an input blur', async () => {
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot']}
+        onChange={() => {}}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref}>
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('autocomplete-input'), { target: { value: 'ap' } });
+    await screen.findByText('apple');
+
+    // A press on a surface that prevents the focus change never blurs the input
+    // (here we simply do not fire blur), so the list must close on the pointer
+    // press itself.
+    fireEvent.pointerDown(document.body);
+
+    await waitFor(() => {
+      expect(screen.queryByText('apple')).toBeNull();
+    });
+  });
+
+  test('commits the highlighted option on keyboard blur (tab away)', () => {
+    const onChange = jest.fn();
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot', 'avocado']}
+        onChange={onChange}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref}>
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    const input = screen.getByTestId('autocomplete-input');
+    fireEvent.change(input, { target: { value: 'a' } });
+    fireEvent.keyDown(input, { key: 'ArrowDown' }); // highlight 'apple'
+    fireEvent.blur(input);
+
+    expect(onChange).toHaveBeenCalledWith(null, 'apple');
+  });
+
+  test('does not commit the highlight on a pointer-driven blur (mouse or touch)', () => {
+    const onChange = jest.fn();
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot', 'avocado']}
+        onChange={onChange}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref}>
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    const input = screen.getByTestId('autocomplete-input');
+    fireEvent.change(input, { target: { value: 'a' } });
+    fireEvent.keyDown(input, { key: 'ArrowDown' }); // highlight 'apple'
+    // A pointer press in progress means this blur is a tap/click elsewhere, not a
+    // tab-away, so the highlight must not be auto-committed. pointerdown fires for
+    // both mouse and touch, and on touch precedes the focus shift -- which is why
+    // the tracker keys on it rather than mousedown.
+    fireEvent.pointerDown(document.body);
+    fireEvent.blur(input);
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test('option press prevents default on pointerdown so touch taps keep focus', async () => {
+    // On touch, focus can shift on pointerdown (before the synthesized
+    // mousedown); preventing it keeps focus on the input so the list is not
+    // unmounted by a blur before the tap's click selects the option.
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot']}
+        onChange={() => {}}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref}>
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('autocomplete-input'), { target: { value: 'ap' } });
+    const option = await screen.findByText('apple');
+
+    const pointerDown = createEvent.pointerDown(option);
+    fireEvent(option, pointerDown);
+    expect(pointerDown.defaultPrevented).toBe(true);
+
+    const mouseDown = createEvent.mouseDown(option);
+    fireEvent(option, mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
+  });
+
+  test('selecting an option fills the input even when uncontrolled', async () => {
+    // The parent ignores onChange (value stays null), so the input text must
+    // come from the component itself -- downshift used to set it on select.
+    render(
+      <Autocomplete
+        value={null}
+        options={['apple', 'apricot', 'banana']}
+        onChange={() => {}}
+        renderInput={(params) => (
+          <div ref={params.InputProps.ref}>
+            <input {...params.inputProps} data-testid="autocomplete-input" />
+          </div>
+        )}
+      />,
+    );
+
+    const input = screen.getByTestId('autocomplete-input') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'ap' } });
+
+    const apple = await screen.findByText('apple');
+    fireEvent.click(apple);
+
+    await waitFor(() => {
+      expect(input.value).toBe('apple');
     });
   });
 

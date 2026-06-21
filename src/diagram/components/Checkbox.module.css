@@ -1,11 +1,20 @@
+.root {
+  position: relative;
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+}
+
 .checkbox {
   all: unset;
+  /* `all: unset` does not reliably drop the native checkbox glyph across
+     engines; force it off so our own box + indicator render cleanly. */
+  appearance: none;
+  -webkit-appearance: none;
+  box-sizing: border-box;
   width: 18px;
   height: 18px;
   border-radius: 2px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   border: 2px solid var(--color-text-muted);
   background-color: transparent;
   cursor: pointer;
@@ -34,10 +43,14 @@
 }
 
 .indicator {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--color-contrast-text);
+  /* The box itself (the input) owns clicks; the overlay must not intercept. */
+  pointer-events: none;
 }
 
 .checkIcon {

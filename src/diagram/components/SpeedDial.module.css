@@ -90,24 +90,45 @@
   background-color: var(--color-secondary-dark);
 }
 
+/* CSS-only tooltip to the right of its action button. Hidden until the action
+   is hovered or focused; an 8px gap and a left-pointing arrow mirror the prior
+   Radix tooltip's side="right" sideOffset={8}. The 300ms show delay reproduces
+   delayDuration={300}; hiding is immediate. */
 .tooltip {
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: 8px;
   background: var(--color-tooltip-bg);
   color: var(--color-contrast-text);
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 0.75rem;
   font-family: inherit;
+  white-space: nowrap;
   z-index: 1400;
-  animation: tooltipFadeIn 150ms ease-out;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 150ms ease-out, visibility 0s linear 150ms;
 }
 
-.tooltipArrow {
-  fill: var(--color-tooltip-bg);
+.tooltip::before {
+  content: '';
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 4px solid transparent;
+  border-right-color: var(--color-tooltip-bg);
 }
 
-@keyframes tooltipFadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+.action:hover .tooltip,
+.action:focus-within .tooltip {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 150ms ease-out 300ms, visibility 0s linear 300ms;
 }
 
 .iconWrapper {

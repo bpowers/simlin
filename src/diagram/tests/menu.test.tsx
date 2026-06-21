@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import { render, act } from '@testing-library/react';
+import { render, act, fireEvent, screen } from '@testing-library/react';
 
 import { Menu, MenuItem } from '../components/Menu';
 
@@ -30,7 +30,7 @@ function mockRect(el: HTMLElement, initial: { top: number; left: number; width: 
   };
 }
 
-// The proxy span Radix anchors to is the (asChild) trigger; it carries
+// The proxy span the menu renders to mirror the anchor rect; it carries
 // aria-haspopup="menu" and is the only position:fixed element we render.
 function getProxySpan(): HTMLElement {
   const el = document.querySelector<HTMLElement>('[aria-haspopup="menu"]');
@@ -147,5 +147,176 @@ describe('Menu anchor positioning (issue #710)', () => {
     expect(getProxySpan().style.left).toBe('600px');
 
     anchor.remove();
+  });
+});
+
+describe('Menu dismissal and keyboard', () => {
+  it('moves focus to the first menu item when opened', () => {
+    render(
+      <Menu anchorEl={document.createElement('button')} open onClose={() => {}}>
+        <MenuItem>First</MenuItem>
+        <MenuItem>Second</MenuItem>
+      </Menu>,
+    );
+    const items = screen.getAllByRole('menuitem');
+    expect(document.activeElement).toBe(items[0]);
+  });
+
+  it('keeps items out of the document tab sequence (roving focus)', () => {
+    // Items use tabIndex=-1 so Tab/Shift+Tab leave the menu (and the resulting
+    // focus-out dismisses it) instead of cycling between items; navigation
+    // within the menu is via the arrow keys, exercised separately.
+    render(
+      <Menu anchorEl={document.createElement('button')} open onClose={() => {}}>
+        <MenuItem>First</MenuItem>
+        <MenuItem>Second</MenuItem>
+      </Menu>,
+    );
+    for (const item of screen.getAllByRole('menuitem')) {
+      expect(item.tabIndex).toBe(-1);
+    }
+  });
+
+  it('arrow keys move focus between items, wrapping', () => {
+    render(
+      <Menu anchorEl={document.createElement('button')} open onClose={() => {}}>
+        <MenuItem>First</MenuItem>
+        <MenuItem>Second</MenuItem>
+      </Menu>,
+    );
+    const items = screen.getAllByRole('menuitem');
+    fireEvent.keyDown(items[0], { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[1]);
+    fireEvent.keyDown(items[1], { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[0]); // wraps
+    fireEvent.keyDown(items[0], { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(items[1]); // wraps backward
+  });
+
+  it('Escape closes and returns focus to the anchor', () => {
+    const anchor = document.createElement('button');
+    document.body.appendChild(anchor);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(anchor);
+    anchor.remove();
+  });
+
+  it('a press on the anchor is not treated as an outside dismissal', () => {
+    const anchor = document.createElement('button');
+    document.body.appendChild(anchor);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    fireEvent.pointerDown(anchor);
+    expect(onClose).not.toHaveBeenCalled();
+    anchor.remove();
+  });
+
+  it('a press outside the menu and anchor dismisses it', () => {
+    const anchor = document.createElement('button');
+    const outside = document.createElement('div');
+    document.body.append(anchor, outside);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    // pointerdown (not mousedown): surfaces like the canvas preventDefault the
+    // compatibility mouse event, so the dismiss listener must observe pointers.
+    fireEvent.pointerDown(outside);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    anchor.remove();
+    outside.remove();
+  });
+
+  it('dismisses when focus leaves the menu (tab-out)', () => {
+    const anchor = document.createElement('button');
+    const outside = document.createElement('button');
+    document.body.append(anchor, outside);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    const item = screen.getByRole('menuitem');
+    fireEvent.blur(item, { relatedTarget: outside });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    anchor.remove();
+    outside.remove();
+  });
+
+  it('dismisses when keyboard focus moves back to the trigger (shift+tab)', () => {
+    const anchor = document.createElement('button');
+    document.body.appendChild(anchor);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    // Shift+Tab can land focus on the trigger; that is still leaving the menu,
+    // so it must close (no pointer press happened, so it is not exempted).
+    const item = screen.getByRole('menuitem');
+    fireEvent.blur(item, { relatedTarget: anchor });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    anchor.remove();
+  });
+
+  it('dismisses when focus leaves to browser chrome (null relatedTarget)', () => {
+    const anchor = document.createElement('button');
+    document.body.appendChild(anchor);
+    const onClose = jest.fn();
+    render(
+      <Menu anchorEl={anchor} open onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>,
+    );
+    // Tab from the only item often blurs to browser chrome / body with a null
+    // relatedTarget; focus has still left the menu, so it must close.
+    const item = screen.getByRole('menuitem');
+    fireEvent.blur(item, { relatedTarget: null });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    anchor.remove();
+  });
+
+  it('still closes on keyboard focus-out after a prior outside-click dismissal', () => {
+    // Regression: the outside-press path sets skipBlurCloseRef and closes inside
+    // the pointerdown listener, tearing down the pointerup reset before it fires.
+    // Reopening must clear the stranded flag so keyboard focus-out still closes.
+    const anchor = document.createElement('button');
+    const outside = document.createElement('div');
+    document.body.append(anchor, outside);
+    const onClose = jest.fn();
+    const tree = (open: boolean) => (
+      <Menu anchorEl={anchor} open={open} onClose={onClose}>
+        <MenuItem>One</MenuItem>
+      </Menu>
+    );
+    const { rerender } = render(tree(true));
+
+    fireEvent.pointerDown(outside); // dismiss via outside press (strands the flag)
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    rerender(tree(false)); // close
+    rerender(tree(true)); // reopen -> flag must be cleared
+
+    const item = screen.getByRole('menuitem');
+    fireEvent.blur(item, { relatedTarget: outside });
+    expect(onClose).toHaveBeenCalledTimes(2);
+
+    anchor.remove();
+    outside.remove();
   });
 });

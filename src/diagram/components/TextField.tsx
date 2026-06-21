@@ -129,7 +129,7 @@ export default function TextField(props: TextFieldProps): React.ReactElement {
               onKeyPress={onKeyPress}
               {...rest}
               {...restInputProps}
-              // After the spreads: restInputProps (downshift's
+              // After the spreads: restInputProps (the combobox
               // getInputProps() when used inside Autocomplete) must win for
               // value/onChange/keyboard handling, but the rendered id has
               // to stay inputId so <label htmlFor={inputId}> keeps pointing
