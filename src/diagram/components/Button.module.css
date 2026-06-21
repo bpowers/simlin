@@ -155,15 +155,18 @@
   background-color: var(--color-error-hover);
 }
 
-/* outlined + inherit */
+/* outlined + inherit: the border tracks the inherited text color (currentColor)
+   rather than the fixed dark --color-border-input, so on a colored surface like
+   the AppBar (white "inherit" text) the outline matches the label instead of
+   reading as a muddy near-black hairline. */
 .outlinedInherit {
   color: inherit;
-  border: 1px solid var(--color-border-input);
+  border: 1px solid currentColor;
   background: transparent;
 }
 
 .outlinedInherit:hover {
-  border-color: var(--color-text-primary);
+  border-color: currentColor;
   background-color: var(--color-action-hover);
 }
 
