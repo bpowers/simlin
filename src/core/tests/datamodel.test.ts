@@ -305,6 +305,82 @@ describe('Module', () => {
     expect(restored.modelName).toBe('SectorModel');
     expect(restored.references.length).toBe(1);
   });
+
+  it('roundtrips a freshly-drawn module (empty modelName, no references)', () => {
+    // The editor creates a module with an EMPTY modelName until the user
+    // assigns a target model -- the exact state that panicked the engine in
+    // c1c4c954. The empty modelName must survive serialization (the Rust
+    // `model_name` is a required String, so a dropped field is an FFI hard
+    // error) and deserialize back to empty.
+    const mod: Module = {
+      type: 'module',
+      ident: 'new_module',
+      modelName: '',
+      documentation: '',
+      units: '',
+      references: [],
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: undefined,
+    };
+
+    const json = moduleToJson(mod);
+    expect(json.modelName).toBe('');
+    expect(json.references ?? []).toEqual([]);
+
+    const restored = moduleFromJson(json);
+    expect(restored.modelName).toBe('');
+    expect(restored.references).toEqual([]);
+  });
+
+  it('preserves placeholder references with empty src/dst', () => {
+    // The wiring UI persists partially-filled rows (empty src or dst) as the
+    // user builds up inputs; these must round-trip verbatim, not be coalesced
+    // or dropped.
+    const mod: Module = {
+      type: 'module',
+      ident: 'sector',
+      modelName: 'SectorModel',
+      documentation: '',
+      units: '',
+      references: [
+        { src: '', dst: '' },
+        { src: 'food', dst: '' },
+      ],
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: 5,
+    };
+
+    const restored = moduleFromJson(moduleToJson(mod));
+    expect(restored.references).toEqual([
+      { src: '', dst: '' },
+      { src: 'food', dst: '' },
+    ]);
+  });
+
+  it('roundtrips a module-qualified dst reference', () => {
+    // The canonical reference dst is the module-qualified `{moduleIdent}·{port}`
+    // form (the engine strips the prefix to wire the input); the middot must
+    // survive the JSON round trip intact.
+    const mod: Module = {
+      type: 'module',
+      ident: 'sector',
+      modelName: 'SectorModel',
+      documentation: '',
+      units: '',
+      references: [{ src: 'food', dst: 'sector·sector_input' }],
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: 5,
+    };
+
+    const restored = moduleFromJson(moduleToJson(mod));
+    expect(restored.references[0].dst).toBe('sector·sector_input');
+  });
 });
 
 describe('View Elements', () => {
