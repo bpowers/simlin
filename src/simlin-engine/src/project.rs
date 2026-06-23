@@ -304,4 +304,34 @@ mod tests {
             unit_errs,
         );
     }
+
+    /// A module referencing a model that does not exist must not panic the
+    /// legacy `from_salsa` construction path (GH #806): `module_deps`'
+    /// initial-branch HashMap index and `topo_sort`'s unknown-ident assertion
+    /// both degrade gracefully instead of crashing with an "internal compiler
+    /// error" on this user-controllable input (a freshly-drawn module, or a
+    /// reference to a deleted model). The production salsa path already rejects
+    /// such a project cleanly; this guards the test-only oracle path too.
+    #[test]
+    fn from_salsa_module_with_missing_model_does_not_panic() {
+        use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+
+        let module = datamodel::Variable::Module(datamodel::Module {
+            ident: "m".to_string(),
+            model_name: "nonexistent".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        });
+        let model = x_model("main", vec![x_aux("x", "1", None), module]);
+        let dm = x_project(sim_specs_with_units("years"), &[model]);
+
+        // Drives Project::from_datamodel -> from_salsa -> set_dependencies ->
+        // module_deps / topo_sort. Before the guards these panicked on the
+        // dangling model_name; now construction returns without crashing.
+        let _project = Project::from(dm);
+    }
 }

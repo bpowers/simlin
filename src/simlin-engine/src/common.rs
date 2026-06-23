@@ -2651,20 +2651,32 @@ pub fn topo_sort<'out>(
             return;
         }
         used.insert(ident);
+        // An ident with no dependencies entry is a dangling reference -- skip it
+        // rather than panicking. A dangling module reference (an empty or missing
+        // `model_name`) on the legacy `from_salsa` path can leave such an ident
+        // in the dependency set; it is not a real variable to place in the
+        // runlist, so dropping it keeps this test-only path from crashing with an
+        // "internal compiler error" on user-controllable input (GH #806). The
+        // production salsa path uses `topo_sort_str` and rejects a
+        // dangling/cyclic module graph up front, so valid runlists -- where every
+        // ident has a deps entry -- are unaffected (result == runlist).
         if let Some(deps) = dependencies.get(ident) {
             for dep in deps.iter() {
                 add(dependencies, result, used, dep)
             }
-        } else {
-            panic!("internal compiler error: unknown ident {}", ident.as_str());
+            result.push(ident);
         }
-        result.push(ident);
     }
 
     for ident in runlist.into_iter() {
         add(dependencies, &mut result, &mut used, ident);
     }
 
-    assert_eq!(runlist_len, result.len());
+    // For a well-formed runlist every ident has a dependencies entry and every
+    // dependency is itself in the runlist, so `result` holds exactly the runlist
+    // idents (`result.len() == runlist_len`). A dangling reference (GH #806) is
+    // skipped above, so the result may be shorter; we no longer assert equality
+    // (it would re-introduce a panic on the bad input this guards against).
+    debug_assert!(result.len() <= runlist_len);
     result
 }
