@@ -143,6 +143,27 @@ pub fn analyze_model(
     let json_model = model_snapshot(project, model_name)
         .ok_or_else(|| format!("model '{model_name}' not found in project"))?;
 
+    // A cyclic / self-referential module graph reachable from the analyzed model
+    // would panic the recursive causal-graph / layout queries this analysis
+    // drives. Surface it as an actionable `analysis_error` (the model snapshot is
+    // intact, loops empty), matching the non-compilable-model degradation rather
+    // than aborting (GH #806). Scoped to reachability from `model_name` so an
+    // unrelated draft cycle elsewhere does not block analyzing a valid model.
+    if let Some((_code, msg)) =
+        crate::db::project_module_graph(&*db, source_project).cycle_error_from(model_name)
+    {
+        return Ok(ModelAnalysis {
+            model: json_model,
+            time: vec![],
+            loop_dominance: vec![],
+            partitions: vec![],
+            dominant_loops_by_period: vec![],
+            analysis_error: Some(msg),
+            truncated: false,
+            agg_recovery_truncated: false,
+        });
+    }
+
     // Enable LTM discovery for this analysis; restore flags before returning
     // so the caller's db state stays clean.
     source_project.set_ltm_enabled(db).to(true);

@@ -272,7 +272,36 @@ describe('ModuleDetails wiring editor', () => {
       const dstOption = screen.getByText('input_food');
       fireEvent.click(dstOption);
 
-      expect(callbacks.onReferencesChange).toHaveBeenCalledWith('hares_mod', [{ src: 'food', dst: 'input_food' }]);
+      // The bare dropdown port is persisted in the canonical module-qualified
+      // form the engine wires against ({moduleIdent}·{port}).
+      expect(callbacks.onReferencesChange).toHaveBeenCalledWith('hares_mod', [
+        { src: 'food', dst: 'hares_mod·input_food' },
+      ]);
+    });
+
+    test('a module-qualified dst is displayed as the bare port name', () => {
+      const variable = makeModule('hares_mod', 'hares', {
+        references: [{ src: 'food', dst: 'hares_mod·input_food' }],
+      });
+      const project = makeProject([
+        makeModel('main', [variable, makeAux('food')]),
+        makeModel('hares', [makeAux('input_food', { canBeModuleInput: true })]),
+      ]);
+      const callbacks = defaultCallbacks();
+
+      render(
+        <ModuleDetails
+          variable={variable}
+          viewElement={makeViewElement('hares_mod')}
+          project={project}
+          currentModelName="main"
+          {...callbacks}
+        />,
+      );
+
+      // The qualified dst renders as the bare port, not the raw `hares_mod·input_food`.
+      const dstInput = screen.getByPlaceholderText('Select input') as HTMLInputElement;
+      expect(dstInput.value).toBe('input_food');
     });
   });
 

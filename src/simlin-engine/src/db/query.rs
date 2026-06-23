@@ -16,7 +16,7 @@
 //! queries (`variable_relevant_dimensions`/`variable_dimensions`/
 //! `variable_size`).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::*;
 use crate::common::{Canonical, Ident};
@@ -595,4 +595,140 @@ pub fn variable_size(db: &dyn Db, var: SourceVariable, project: SourceProject) -
     } else {
         dims.iter().map(|d| d.len()).product()
     }
+}
+
+/// The project's explicit module-instance graph: each model maps to the models
+/// its `Variable::Module`s instantiate (only existing targets -- the same edges
+/// the recursive `model_module_map` / `compute_layout` queries follow). Built
+/// with flat reads so cycle detection never recurses through salsa.
+///
+/// A cycle in this graph makes those recursive queries loop, which salsa turns
+/// into an unrecoverable dependency-graph panic (the empty-`model_name` sibling
+/// of this class was fixed in c1c4c954; GH #806). Every production compile /
+/// diagnostic / analysis entry point consults this FIRST -- scoped to the models
+/// reachable from the requested root -- so a cycle surfaces as a clean
+/// `CircularDependency` error rather than aborting WASM, WITHOUT rejecting a
+/// valid root just because an unrelated draft elsewhere in the project is cyclic.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+pub struct ModuleReferenceGraph {
+    edges: BTreeMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+}
+
+impl ModuleReferenceGraph {
+    /// The first module cycle REACHABLE FROM `root` as a closed path of model
+    /// names (start repeated at the end), or `None` if `root`'s reachable
+    /// subgraph is acyclic (or `root` names no model). Iterative 3-color DFS so a
+    /// pathologically deep chain cannot overflow the stack; deterministic given
+    /// the sorted adjacency. Scoping to reachability is what keeps an unrelated
+    /// draft cycle from rejecting a compile of `root` -- the recursive queries
+    /// only loop for modules under the requested root.
+    pub fn cycle_reachable_from(&self, root: &str) -> Option<Vec<Ident<Canonical>>> {
+        let root_ident: Ident<Canonical> = Ident::new(root);
+        if !self.edges.contains_key(&root_ident) {
+            return None;
+        }
+
+        #[derive(Clone, Copy, PartialEq)]
+        enum Color {
+            Gray,
+            Black,
+        }
+
+        // `path` mirrors the Gray frames currently on the stack, so a back-edge
+        // yields the exact cycle. Owned idents keep the borrow simple; the graph
+        // is model-sized, so the clones are cheap.
+        let mut color: BTreeMap<Ident<Canonical>, Color> = BTreeMap::new();
+        let mut stack: Vec<(Ident<Canonical>, usize)> = vec![(root_ident.clone(), 0)];
+        let mut path: Vec<Ident<Canonical>> = vec![root_ident.clone()];
+        color.insert(root_ident, Color::Gray);
+
+        while let Some((node, child_idx)) = stack.last().cloned() {
+            let Some(children) = self.edges.get(&node) else {
+                stack.pop();
+                path.pop();
+                continue;
+            };
+            if child_idx >= children.len() {
+                color.insert(node, Color::Black);
+                stack.pop();
+                path.pop();
+                continue;
+            }
+            stack.last_mut().unwrap().1 += 1;
+            let child = children[child_idx].clone();
+            match color.get(&child).copied() {
+                Some(Color::Gray) => {
+                    // Back-edge: the cycle runs from `child`'s position in the
+                    // current path, closed by `child` again.
+                    let start = path.iter().position(|n| *n == child).unwrap();
+                    let mut cycle = path[start..].to_vec();
+                    cycle.push(child);
+                    return Some(cycle);
+                }
+                Some(Color::Black) => {}
+                None => {
+                    color.insert(child.clone(), Color::Gray);
+                    stack.push((child.clone(), 0));
+                    path.push(child);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Formats a cycle reachable from `root` as a `(CircularDependency, message)`
+    /// diagnostic pair, or `None` if `root` reaches no cycle.
+    pub fn cycle_error_from(&self, root: &str) -> Option<(crate::common::ErrorCode, String)> {
+        self.cycle_reachable_from(root).map(|cycle| {
+            let path = cycle
+                .iter()
+                .map(|m| m.as_str().to_string())
+                .collect::<Vec<_>>()
+                .join(" → ");
+            (
+                crate::common::ErrorCode::CircularDependency,
+                format!("circular module reference: {path}"),
+            )
+        })
+    }
+}
+
+/// Build the project's explicit module-instance graph (see
+/// [`ModuleReferenceGraph`]). Reads each model's module variables and their
+/// target `model_name`s with flat salsa reads (no recursion). Implicit
+/// (SMOOTH/DELAY/TREND/stdlib) modules can only reference leaf stdlib models, so
+/// they can never close a user cycle and are intentionally omitted.
+#[salsa::tracked(returns(ref))]
+pub fn project_module_graph(db: &dyn Db, project: SourceProject) -> ModuleReferenceGraph {
+    let models = project.models(db);
+
+    // Build the adjacency deterministically (sorted models, sorted vars) so the
+    // reported cycle is stable across processes and salsa invalidations.
+    let mut sorted_models: Vec<(&String, &SourceModel)> = models.iter().collect();
+    sorted_models.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut edges: BTreeMap<Ident<Canonical>, Vec<Ident<Canonical>>> = BTreeMap::new();
+    for (name, model) in sorted_models {
+        let model_ident: Ident<Canonical> = Ident::new(name);
+        let source_vars = model.variables(db);
+        let mut sorted_var_names: Vec<&String> = source_vars.keys().collect();
+        sorted_var_names.sort_unstable();
+
+        let mut targets = Vec::new();
+        for var_name in sorted_var_names {
+            let svar = &source_vars[var_name];
+            if svar.kind(db) == SourceVariableKind::Module {
+                let target = canonicalize(svar.model_name(db));
+                // Only follow targets that exist -- a dangling / empty
+                // `model_name` is not a cycle (and is handled elsewhere).
+                if models.contains_key(target.as_ref()) {
+                    targets.push(Ident::new(target.as_ref()));
+                }
+            }
+        }
+        edges.insert(model_ident, targets);
+    }
+
+    ModuleReferenceGraph { edges }
 }

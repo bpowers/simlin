@@ -170,7 +170,14 @@ fn module_deps(
     } = var
     {
         if ctx.is_initial {
-            let model = ctx.models[model_name];
+            // A module may reference a model that is not present (an empty or
+            // dangling `model_name`: a freshly-drawn module or a reference to a
+            // deleted model). Skip its submodel deps gracefully rather than
+            // indexing `ctx.models` and panicking -- mirroring the guarded twin
+            // in `module_output_deps` (GH #806).
+            let Some(model) = ctx.models.get(model_name).copied() else {
+                return vec![];
+            };
             // FIXME: do this higher up
             let module_inputs = &inputs.iter().map(|mi| mi.dst.clone()).collect();
             if let Some(initial_deps) = model.initial_deps(module_inputs) {
