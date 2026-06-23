@@ -158,6 +158,22 @@ pub fn collect_model_diagnostics(
 
 /// Collect all diagnostics for every model in a synced project.
 pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Diagnostic> {
+    // A module-reference cycle would drive the per-model diagnostic passes into
+    // the recursive module queries' salsa cycle panic. Surface it as one
+    // project-level diagnostic and skip those passes entirely (GH #806).
+    if let Some((code, message)) = &project_module_cycle(db, project).cycle_error {
+        return vec![Diagnostic {
+            model: String::new(),
+            variable: None,
+            error: DiagnosticError::Model(Error::new(
+                crate::common::ErrorKind::Model,
+                *code,
+                Some(message.clone()),
+            )),
+            severity: DiagnosticSeverity::Error,
+        }];
+    }
+
     let mut all = Vec::new();
     for source_model in project.models(db).values() {
         let diags = collect_model_diagnostics(db, *source_model, project);

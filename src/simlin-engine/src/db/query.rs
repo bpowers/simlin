@@ -16,7 +16,7 @@
 //! queries (`variable_relevant_dimensions`/`variable_dimensions`/
 //! `variable_size`).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::*;
 use crate::common::{Canonical, Ident};
@@ -595,4 +595,132 @@ pub fn variable_size(db: &dyn Db, var: SourceVariable, project: SourceProject) -
     } else {
         dims.iter().map(|d| d.len()).product()
     }
+}
+
+/// Result of the project-wide module-reference cycle check.
+///
+/// `cycle_error` is `Some((code, message))` when the explicit module-instance
+/// graph -- each model's `Variable::Module` -> the model named by its
+/// `model_name` -- contains a cycle (a self-referential or mutually-recursive
+/// module). Such a graph makes the recursive `model_module_map` /
+/// `compute_layout` salsa queries loop, which salsa turns into an unrecoverable
+/// dependency-graph panic (the empty-`model_name` sibling of this class was
+/// fixed in c1c4c954; GH #806). Every production compile / diagnostic / analysis
+/// entry point consults this FIRST so a cycle surfaces as a clean
+/// `CircularDependency` error rather than aborting WASM.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+pub struct ModuleCycleResult {
+    pub cycle_error: Option<(crate::common::ErrorCode, String)>,
+}
+
+/// Detect a cycle in the project's explicit module-instance graph.
+///
+/// Reads each model's module variables and their target `model_name`s (the same
+/// edges the recursive queries follow), then runs an iterative DFS. Implicit
+/// (SMOOTH/DELAY/TREND/stdlib) modules can only reference leaf stdlib models, so
+/// they can never close a user cycle and are intentionally omitted.
+#[salsa::tracked(returns(ref))]
+pub fn project_module_cycle(db: &dyn Db, project: SourceProject) -> ModuleCycleResult {
+    let models = project.models(db);
+
+    // Build the adjacency deterministically (sorted models, sorted vars) so the
+    // reported cycle is stable across processes and salsa invalidations.
+    let mut sorted_models: Vec<(&String, &SourceModel)> = models.iter().collect();
+    sorted_models.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut adjacency: BTreeMap<Ident<Canonical>, Vec<Ident<Canonical>>> = BTreeMap::new();
+    for (name, model) in sorted_models {
+        let model_ident: Ident<Canonical> = Ident::new(name);
+        let source_vars = model.variables(db);
+        let mut sorted_var_names: Vec<&String> = source_vars.keys().collect();
+        sorted_var_names.sort_unstable();
+
+        let mut targets = Vec::new();
+        for var_name in sorted_var_names {
+            let svar = &source_vars[var_name];
+            if svar.kind(db) == SourceVariableKind::Module {
+                let target = canonicalize(svar.model_name(db));
+                // Only follow targets that exist -- a dangling / empty
+                // `model_name` is not a cycle (and is handled elsewhere).
+                if models.contains_key(target.as_ref()) {
+                    targets.push(Ident::new(target.as_ref()));
+                }
+            }
+        }
+        adjacency.insert(model_ident, targets);
+    }
+
+    let cycle_error = find_module_reference_cycle(&adjacency).map(|cycle| {
+        let path = cycle
+            .iter()
+            .map(|m| m.as_str().to_string())
+            .collect::<Vec<_>>()
+            .join(" → ");
+        (
+            crate::common::ErrorCode::CircularDependency,
+            format!("circular module reference: {path}"),
+        )
+    });
+
+    ModuleCycleResult { cycle_error }
+}
+
+/// Pure 3-color DFS over the module-instance graph. Returns the first cycle as a
+/// closed path of model names (start repeated at the end), or `None` if acyclic.
+/// Iterative so a pathologically deep chain cannot overflow the stack.
+/// Deterministic given a sorted adjacency.
+fn find_module_reference_cycle(
+    adjacency: &BTreeMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+) -> Option<Vec<Ident<Canonical>>> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+
+    let mut color: BTreeMap<&Ident<Canonical>, Color> =
+        adjacency.keys().map(|k| (k, Color::White)).collect();
+
+    for root in adjacency.keys() {
+        if color[root] != Color::White {
+            continue;
+        }
+        // Each frame is (node, index of the next child to visit). `path` mirrors
+        // the Gray frames on the stack so a back-edge yields the exact cycle.
+        let mut stack: Vec<(&Ident<Canonical>, usize)> = vec![(root, 0)];
+        let mut path: Vec<&Ident<Canonical>> = vec![root];
+        color.insert(root, Color::Gray);
+
+        while let Some(&(node, child_idx)) = stack.last() {
+            let children = &adjacency[node];
+            if child_idx >= children.len() {
+                color.insert(node, Color::Black);
+                stack.pop();
+                path.pop();
+                continue;
+            }
+            stack.last_mut().unwrap().1 += 1;
+            let child = &children[child_idx];
+            match color.get(child).copied().unwrap_or(Color::Black) {
+                Color::White => {
+                    color.insert(child, Color::Gray);
+                    stack.push((child, 0));
+                    path.push(child);
+                }
+                Color::Gray => {
+                    // Back-edge: the cycle runs from `child`'s position in the
+                    // current path back to `node`, closed by `child` again.
+                    let start = path.iter().position(|n| *n == child).unwrap();
+                    let mut cycle: Vec<Ident<Canonical>> =
+                        path[start..].iter().map(|n| (*n).clone()).collect();
+                    cycle.push(child.clone());
+                    return Some(cycle);
+                }
+                Color::Black => {}
+            }
+        }
+    }
+
+    None
 }

@@ -1921,6 +1921,13 @@ pub fn assemble_simulation(
         return Err(msg);
     }
 
+    // A cyclic / self-referential module graph would drive the recursive
+    // instance-enumeration, layout, and module-map queries into a salsa
+    // dependency-graph cycle panic. Reject it cleanly first (GH #806).
+    if let Some((_code, msg)) = &project_module_cycle(db, project).cycle_error {
+        return Err(msg.clone());
+    }
+
     // Enumerate module instances by walking module variables recursively.
     // Each unique (model_name, input_set) pair gets its own CompiledModule.
     let module_instances = enumerate_module_instances(db, project, &main_model_name)?;
