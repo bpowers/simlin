@@ -15,9 +15,43 @@ import {
   updateReferenceSrc,
   updateReferenceDst,
   getAvailableSrcVariables,
+  qualifyDst,
+  unqualifyDst,
 } from '../module-wiring';
 
 // -- Tests --
+
+describe('qualifyDst', () => {
+  it('prefixes a bare port with the module ident and the canonical separator', () => {
+    expect(qualifyDst('hares_mod', 'input_food')).toBe('hares_mod·input_food');
+  });
+
+  it('keeps an empty port empty (placeholder rows are not dangling prefixes)', () => {
+    expect(qualifyDst('hares_mod', '')).toBe('');
+  });
+});
+
+describe('unqualifyDst', () => {
+  it('recovers the bare port from a module-qualified dst', () => {
+    expect(unqualifyDst('hares_mod·input_food')).toBe('input_food');
+  });
+
+  it('tolerates a legacy period separator (XMILE-imported, pre-patch)', () => {
+    expect(unqualifyDst('hares_mod.input_food')).toBe('input_food');
+  });
+
+  it('returns an already-bare value unchanged', () => {
+    expect(unqualifyDst('input_food')).toBe('input_food');
+  });
+
+  it('returns empty for empty input', () => {
+    expect(unqualifyDst('')).toBe('');
+  });
+
+  it('round-trips with qualifyDst', () => {
+    expect(unqualifyDst(qualifyDst('m', 'port'))).toBe('port');
+  });
+});
 
 describe('isDuplicateReference', () => {
   it('returns false for empty references array', () => {

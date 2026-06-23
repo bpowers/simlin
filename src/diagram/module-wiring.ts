@@ -6,6 +6,35 @@
 
 import type { ModuleReference } from '@simlin/core/datamodel';
 
+// A module reference `dst` is stored in the canonical module-qualified form
+// `{moduleIdent}·{port}`: the engine's `build_module_inputs` strips that prefix
+// to recover the child input port, and a BARE `dst` (just the port) silently
+// fails to wire -- the port reads its default and the simulation is quietly
+// wrong. The wiring UI works in bare port names, so persist the qualified form
+// and strip it for display. `·` (·) is the canonical separator the engine
+// canonicalizes to; a literal `.` is tolerated on read for a model imported
+// straight from XMILE that has not yet round-tripped through a patch.
+const MODULE_PORT_SEPARATOR = '·';
+
+/**
+ * Qualifies a bare child input-port name into the canonical `{moduleIdent}·{port}`
+ * reference `dst`. An empty port stays empty so new-row placeholders persist as
+ * empty (not a dangling `moduleIdent·`).
+ */
+export function qualifyDst(moduleIdent: string, port: string): string {
+  return port ? `${moduleIdent}${MODULE_PORT_SEPARATOR}${port}` : '';
+}
+
+/**
+ * Recovers the bare child input-port name from a reference `dst` for display:
+ * the segment after the final module separator (`·` or a legacy `.`), or the
+ * whole string when there is no separator (an already-bare or empty value).
+ */
+export function unqualifyDst(dst: string): string {
+  const sep = Math.max(dst.lastIndexOf(MODULE_PORT_SEPARATOR), dst.lastIndexOf('.'));
+  return sep >= 0 ? dst.slice(sep + 1) : dst;
+}
+
 /**
  * Returns true if a reference with the same src and dst already exists.
  */

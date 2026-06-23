@@ -18,7 +18,9 @@ import { STDLIB_PREFIX } from './module-navigation';
 import {
   addReference,
   getAvailableSrcVariables,
+  qualifyDst,
   removeReference,
+  unqualifyDst,
   updateReferenceDst,
   updateReferenceSrc,
 } from './module-wiring';
@@ -181,7 +183,9 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
   };
 
   const handleDstChange = (index: number, newDst: string): void => {
-    const updated = updateReferenceDst(variable.references, index, newDst);
+    // The dropdown yields a bare child port; persist the canonical
+    // module-qualified `{moduleIdent}·{port}` form the engine wires against.
+    const updated = updateReferenceDst(variable.references, index, qualifyDst(variable.ident, newDst));
     onReferencesChange(variable.ident, updated);
   };
 
@@ -230,7 +234,7 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
                   </td>
                   <td className={styles.wiringDropdown}>
                     <Autocomplete
-                      value={ref.dst || null}
+                      value={unqualifyDst(ref.dst) || null}
                       options={dstOptions}
                       onChange={(_: React.SyntheticEvent | null, newValue: string | null) => {
                         if (newValue) {
