@@ -1095,6 +1095,8 @@ mod ltm_unified_tests;
 #[cfg(test)]
 mod module_cycle_tests;
 #[cfg(test)]
+mod module_wiring_tests;
+#[cfg(test)]
 mod prev_init_tests;
 #[cfg(test)]
 mod tests;

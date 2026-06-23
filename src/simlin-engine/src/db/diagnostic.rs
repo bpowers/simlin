@@ -125,6 +125,13 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // cap).
     crate::db::units::check_model_units(db, model, project);
 
+    // Validate each explicit module variable's input wiring (GH #806 sibling):
+    // a reference whose `dst` names no input of the target model, or whose bare
+    // `src` names no variable in this model, is silently dropped at assembly and
+    // the port reads its default -- a quietly-wrong simulation. The salsa path
+    // had lost the legacy `BadModuleInputDst`/`BadModuleInputSrc` check.
+    model_module_wiring_diagnostics(db, model, project);
+
     // When LTM is enabled, also trigger the LTM diagnostic pass so that
     // diagnostics accumulated by the LTM pipeline surface through
     // `collect_all_diagnostics`: the auto-flip-to-discovery warning from
@@ -140,6 +147,97 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // so these warnings reach `simlin-mcp`/`libsimlin`/pysimlin (GH #466).
     if project.ltm_enabled(db) {
         model_ltm_fragment_diagnostics(db, model, project);
+    }
+}
+
+/// Validate the input wiring of each explicit module variable in `model`.
+///
+/// A module reference is `{ src, dst }` where `dst` is the module-qualified
+/// `{module}·{port}` form naming an input of the target model and `src` is a
+/// variable in the enclosing model. `build_module_inputs` SILENTLY DROPS a
+/// reference whose `dst` does not match an existing child input -- the port then
+/// reads its default and the simulation is quietly wrong, with no error. The
+/// legacy monolithic path returned `BadModuleInputDst`/`BadModuleInputSrc` here;
+/// the salsa path dropped the check. Re-add it as a Warning (partial-result
+/// philosophy: a mis-wired input should not block the rest of the model).
+///
+/// Validated conservatively to avoid false positives:
+/// - empty placeholder endpoints (the new-row UI pattern) are skipped;
+/// - only an EXISTING target model is checked (an empty / dangling `model_name`
+///   is a separate concern and the empty name is the normal freshly-drawn state);
+/// - a `src` is checked only when it is a bare ident (no `·`) and not an engine
+///   synthetic (`$⁚…`) -- a qualified cross-module output or temporary is left
+///   to the equation checker.
+#[salsa::tracked]
+pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
+    use salsa::Accumulator;
+
+    let source_vars = model.variables(db);
+    let project_models = project.models(db);
+    let model_name = model.name(db);
+
+    let mut module_names: Vec<&String> = source_vars
+        .iter()
+        .filter(|(_, sv)| sv.kind(db) == SourceVariableKind::Module)
+        .map(|(name, _)| name)
+        .collect();
+    module_names.sort_unstable();
+
+    let emit = |code: crate::common::ErrorCode, message: String| {
+        CompilationDiagnostic(Diagnostic {
+            model: model_name.clone(),
+            variable: None,
+            error: DiagnosticError::Model(Error::new(
+                crate::common::ErrorKind::Model,
+                code,
+                Some(message),
+            )),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    };
+
+    for module_name in module_names {
+        let svar = &source_vars[module_name];
+        let child_canonical = crate::canonicalize(svar.model_name(db));
+        let Some(child_model) = project_models.get(child_canonical.as_ref()) else {
+            continue;
+        };
+        let child_vars = child_model.variables(db);
+        let prefix = format!("{module_name}\u{00B7}");
+
+        for reference in svar.module_refs(db).iter() {
+            let dst = crate::canonicalize(&reference.dst);
+            if !dst.is_empty() {
+                let resolves = dst
+                    .strip_prefix(prefix.as_str())
+                    .is_some_and(|port| child_vars.contains_key(port));
+                if !resolves {
+                    emit(
+                        crate::common::ErrorCode::BadModuleInputDst,
+                        format!(
+                            "module '{module_name}' input wiring target '{}' does not name an input of model '{}'",
+                            reference.dst, child_canonical
+                        ),
+                    );
+                }
+            }
+
+            let src = crate::canonicalize(&reference.src);
+            if !src.is_empty()
+                && !src.contains('\u{00B7}')
+                && !src.starts_with("$\u{205A}")
+                && !source_vars.contains_key(src.as_ref())
+            {
+                emit(
+                    crate::common::ErrorCode::BadModuleInputSrc,
+                    format!(
+                        "module '{module_name}' input source '{}' does not name a variable in model '{model_name}'",
+                        reference.src
+                    ),
+                );
+            }
+        }
     }
 }
 
