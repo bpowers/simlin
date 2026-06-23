@@ -131,6 +131,53 @@ fn mutually_recursive_modules_error_without_panicking() {
     assert!(analysis.analysis_error.is_some());
 }
 
+/// An unused draft cycle (`a <-> b`) that the requested `main` model does not
+/// reach must NOT block compiling or analyzing `main` -- the recursive queries
+/// only loop for modules under the requested root. The cycle is still surfaced
+/// as a diagnostic for the affected models. Regression for the Codex review
+/// finding on PR #807 (the project-wide guard over-rejected valid roots).
+#[test]
+fn unused_draft_cycle_does_not_block_valid_main() {
+    let mut project = TestProject::new("test").build_datamodel();
+    project.models = vec![
+        model("main", vec![aux_var("x", "1")]),
+        model("a", vec![module_var("to_b", "b")]),
+        model("b", vec![module_var("to_a", "a")]),
+    ];
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let sp = sync.project;
+
+    // `main` cannot reach the a<->b cycle, so it compiles cleanly.
+    assert!(
+        compile_project_incremental(&db, sp, "main").is_ok(),
+        "a valid main must compile despite an unrelated draft cycle"
+    );
+
+    // Diagnostics still surface the draft cycle (for the affected models),
+    // without hiding main's own (empty) diagnostics.
+    let diags = collect_all_diagnostics(&db, sp);
+    assert!(
+        has_circular_diagnostic(&diags),
+        "the unrelated draft cycle should still be reported: {diags:?}"
+    );
+
+    // Analyzing main succeeds (no analysis_error); analyzing a cyclic model degrades.
+    let main_analysis =
+        analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model must not panic");
+    assert!(
+        main_analysis.analysis_error.is_none(),
+        "analyzing a valid main must not error on an unrelated draft cycle"
+    );
+    let a_analysis =
+        analyze_model(&project, &mut db, sp, "a", None).expect("analyze_model must not panic");
+    assert!(
+        a_analysis.analysis_error.is_some(),
+        "analyzing a model that reaches a cycle must surface an analysis_error"
+    );
+}
+
 /// A valid nested-module project (no cycle) must still compile and produce no
 /// spurious cycle diagnostic -- the guard must not false-positive on legitimate
 /// acyclic nesting.

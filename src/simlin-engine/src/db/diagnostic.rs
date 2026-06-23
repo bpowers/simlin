@@ -256,26 +256,30 @@ pub fn collect_model_diagnostics(
 
 /// Collect all diagnostics for every model in a synced project.
 pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Diagnostic> {
-    // A module-reference cycle would drive the per-model diagnostic passes into
-    // the recursive module queries' salsa cycle panic. Surface it as one
-    // project-level diagnostic and skip those passes entirely (GH #806).
-    if let Some((code, message)) = &project_module_cycle(db, project).cycle_error {
-        return vec![Diagnostic {
-            model: String::new(),
-            variable: None,
-            error: DiagnosticError::Model(Error::new(
-                crate::common::ErrorKind::Model,
-                *code,
-                Some(message.clone()),
-            )),
-            severity: DiagnosticSeverity::Error,
-        }];
-    }
+    let graph = project_module_graph(db, project);
 
     let mut all = Vec::new();
-    for source_model in project.models(db).values() {
-        let diags = collect_model_diagnostics(db, *source_model, project);
-        all.extend(diags);
+    for (name, source_model) in project.models(db) {
+        // A model that can REACH a module cycle would drive its per-model passes
+        // (compile_var_fragment recursing through the submodel) into the salsa
+        // cycle panic. Report the cycle for that model and skip its passes. A
+        // model that reaches no cycle is processed normally, so a valid model's
+        // diagnostics are not hidden by an unrelated draft cycle elsewhere
+        // (GH #806).
+        if let Some((code, message)) = graph.cycle_error_from(name) {
+            all.push(Diagnostic {
+                model: name.clone(),
+                variable: None,
+                error: DiagnosticError::Model(Error::new(
+                    crate::common::ErrorKind::Model,
+                    code,
+                    Some(message),
+                )),
+                severity: DiagnosticSeverity::Error,
+            });
+            continue;
+        }
+        all.extend(collect_model_diagnostics(db, *source_model, project));
     }
     all
 }

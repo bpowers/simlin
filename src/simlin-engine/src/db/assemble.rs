@@ -1921,11 +1921,16 @@ pub fn assemble_simulation(
         return Err(msg);
     }
 
-    // A cyclic / self-referential module graph would drive the recursive
-    // instance-enumeration, layout, and module-map queries into a salsa
-    // dependency-graph cycle panic. Reject it cleanly first (GH #806).
-    if let Some((_code, msg)) = &project_module_cycle(db, project).cycle_error {
-        return Err(msg.clone());
+    // A cyclic / self-referential module graph reachable FROM THE MAIN MODEL
+    // would drive the recursive instance-enumeration, layout, and module-map
+    // queries into a salsa dependency-graph cycle panic. Reject it cleanly first
+    // (GH #806). Scoped to reachability from `main`: assembly starts from main
+    // and only recurses into its instantiated modules, so an unrelated draft
+    // cycle elsewhere in the project must not block compiling a valid main.
+    if let Some((_code, msg)) =
+        project_module_graph(db, project).cycle_error_from(main_model_canonical.as_ref())
+    {
+        return Err(msg);
     }
 
     // Enumerate module instances by walking module variables recursively.

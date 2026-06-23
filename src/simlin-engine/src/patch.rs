@@ -528,6 +528,22 @@ fn apply_rename_variable(
 
     if let Some(var) = model.variables.get_mut(target_index) {
         var.set_ident(new_ident.as_str().to_string());
+
+        // If the renamed variable is itself a module instance, its OWN input
+        // references carry the module-qualified `{old}·{port}` dst prefix. The
+        // engine rebuilds inputs under the new `{new}·` prefix and would drop a
+        // stale `{old}·port` reference, silently unwiring every input. Reprefix
+        // them so the wiring survives renaming the module variable.
+        if let Variable::Module(module) = var {
+            let old_prefix = format!("{}\u{00B7}", old_ident.as_str());
+            let new_prefix = format!("{}\u{00B7}", new_ident.as_str());
+            for reference in module.references.iter_mut() {
+                let dst_canonical = canonicalize(reference.dst.as_str());
+                if let Some(port) = dst_canonical.strip_prefix(old_prefix.as_str()) {
+                    reference.dst = format!("{new_prefix}{port}");
+                }
+            }
+        }
     }
 
     // Cross-model fix-up: the variable just renamed may be a module INPUT PORT.
@@ -2568,6 +2584,101 @@ mod tests {
 
         // The wiring must still carry local_input(10) -> renamed_port -> 20.
         assert!((reader_value(&project) - 20.0).abs() < 1e-6);
+    }
+
+    /// Renaming the MODULE VARIABLE itself must reprefix its own input
+    /// references: `dst` is the module-qualified `{moduleIdent}·{port}` form, so
+    /// after `my_module` -> `renamed_module` the engine rebuilds inputs under the
+    /// `renamed_module·` prefix and would drop a stale `my_module·input_var`
+    /// reference, silently unwiring the input. Regression for the Codex review
+    /// finding on PR #807.
+    #[test]
+    fn rename_module_variable_retargets_its_own_dst_prefix() {
+        // A minimal module-with-input fixture (no output reader, so the test is
+        // not entangled with module-output reference renaming).
+        let mut project = TestProject::new("test")
+            .aux("local_input", "10", None)
+            .build_datamodel();
+        project.models.push(datamodel::Model {
+            name: "submodel".to_string(),
+            sim_specs: None,
+            variables: vec![Variable::Aux(datamodel::Aux {
+                ident: "input_var".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    visibility: Visibility::Public,
+                    ..datamodel::Compat::default()
+                },
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        });
+        apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "main".to_string(),
+                    ops: vec![ModelOperation::UpsertModule(datamodel::Module {
+                        ident: "my_module".to_string(),
+                        model_name: "submodel".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "local_input".to_string(),
+                            dst: "my_module·input_var".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    })],
+                }],
+            },
+        )
+        .unwrap();
+
+        apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "main".to_string(),
+                    ops: vec![ModelOperation::RenameVariable {
+                        from: "my_module".to_string(),
+                        to: "renamed_module".to_string(),
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        match project
+            .get_model("main")
+            .unwrap()
+            .get_variable("renamed_module")
+            .unwrap()
+        {
+            Variable::Module(m) => {
+                assert_eq!(m.references.len(), 1);
+                assert_eq!(
+                    m.references[0].dst, "renamed_module·input_var",
+                    "the module's own dst prefix did not follow the module-variable rename"
+                );
+            }
+            _ => panic!("expected module"),
+        }
+
+        // The input must still resolve (the engine strips the new prefix and
+        // wires local_input into the child port), so the project still compiles.
+        TestProject::from_datamodel(project).assert_compiles_incremental();
     }
 
     /// `canonicalize_module` canonicalized only the module ident, leaving the

@@ -63,10 +63,10 @@ pub use input::{
 mod query;
 pub(crate) use query::canonical_module_input_set;
 pub use query::{
-    ImplicitVarMeta, ModuleCycleResult, ParsedVariableResult, VariableDeps,
+    ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, VariableDeps,
     model_implicit_var_info, model_module_ident_context, model_module_map,
     parse_source_variable_with_module_context, project_converted_dimensions,
-    project_datamodel_dims, project_dimensions_context, project_module_cycle,
+    project_datamodel_dims, project_dimensions_context, project_module_graph,
     project_units_context, variable_dimensions, variable_direct_dependencies,
     variable_relevant_dimensions, variable_size,
 };
