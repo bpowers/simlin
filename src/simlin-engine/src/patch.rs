@@ -189,6 +189,17 @@ fn canonicalize_aux(aux: &mut datamodel::Aux) {
 
 fn canonicalize_module(module: &mut datamodel::Module) {
     canonicalize_ident(&mut module.ident);
+    // Canonicalize the reference endpoints too, mirroring `canonicalize_stock`'s
+    // inflow/outflow canonicalization. `src`/`dst` are variable idents (`dst` is
+    // the module-qualified `module·port` form); leaving them verbatim lets a
+    // non-canonical `src`/`dst` arriving via the FFI `apply_patch`
+    // (pysimlin `upsert_module`) disagree with the canonical idents every
+    // UI/engine consumer compares against. Empty placeholder endpoints
+    // canonicalize to empty and are preserved.
+    for reference in module.references.iter_mut() {
+        canonicalize_ident(&mut reference.src);
+        canonicalize_ident(&mut reference.dst);
+    }
 }
 
 fn get_uid(var: &Variable) -> Option<i32> {
@@ -436,6 +447,20 @@ fn apply_delete_variable(model: &mut datamodel::Model, ident_str: &str) -> Resul
         }
     }
 
+    // Drop any module input wiring whose `src` named the deleted variable.
+    // Mirrors the stock-flow and group-member cleanup above: a left-behind
+    // `src` becomes a dependency on a non-existent variable, making the whole
+    // project fail to compile with a confusing "missing variable" message. The
+    // rename path already rewrites module references; the delete path was the
+    // asymmetric gap.
+    for var in model.variables.iter_mut() {
+        if let Variable::Module(module) = var {
+            module
+                .references
+                .retain(|reference| canonicalize(reference.src.as_str()) != ident);
+        }
+    }
+
     for group in model.groups.iter_mut() {
         group
             .members
@@ -505,7 +530,52 @@ fn apply_rename_variable(
         var.set_ident(new_ident.as_str().to_string());
     }
 
+    // Cross-model fix-up: the variable just renamed may be a module INPUT PORT.
+    // Every PARENT module that instantiates this model wires into the OLD port
+    // name via its `dst` (the module-qualified `module·port` form), and those
+    // references live in OTHER models that the single-model rename above never
+    // visits. Without retargeting them the parent silently feeds the renamed
+    // port its default value -- wrong numbers, no error.
+    retarget_parent_module_dst(project, model_name, &old_ident, &new_ident);
+
     Ok(())
+}
+
+/// Retarget the `dst` of every parent module reference that wires into the
+/// just-renamed input port of `target_model_name`.
+///
+/// A module reference `dst` is the canonical `{module_ident}·{port}` form (see
+/// `build_module_inputs`). For each module instance pointing at
+/// `target_model_name`, rewrite a reference whose port suffix names `old_ident`
+/// to name `new_ident`. Gated on the module's target model so an unrelated model
+/// with a like-named variable is untouched.
+fn retarget_parent_module_dst(
+    project: &mut datamodel::Project,
+    target_model_name: &str,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) {
+    let target_canonical = canonicalize(target_model_name);
+    for model in project.models.iter_mut() {
+        for var in model.variables.iter_mut() {
+            let Variable::Module(module) = var else {
+                continue;
+            };
+            if canonicalize(module.model_name.as_str()) != target_canonical {
+                continue;
+            }
+            let prefix = format!("{}\u{00B7}", canonicalize(module.ident.as_str()));
+            for reference in module.references.iter_mut() {
+                let dst_canonical = canonicalize(reference.dst.as_str());
+                let Some(port) = dst_canonical.strip_prefix(prefix.as_str()) else {
+                    continue;
+                };
+                if canonicalize(port).as_ref() == old_ident.as_str() {
+                    reference.dst = format!("{prefix}{}", new_ident.as_str());
+                }
+            }
+        }
+    }
 }
 
 fn rename_model_equations(
@@ -2315,6 +2385,244 @@ mod tests {
                 assert_eq!(m.references.len(), 1);
                 assert_eq!(m.references[0].src, "local_input");
                 assert_eq!(m.references[0].dst, "input_var");
+            }
+            _ => panic!("expected module"),
+        }
+    }
+
+    /// A parent `main` with `local_input`, a `submodel` exposing an input port
+    /// (`input_var`) and a public `output = input_var * 2`, and `main` holding
+    /// `my_module` wired `local_input -> input_var` plus a `reader` of the
+    /// module output. With the wiring intact `reader` simulates to 20.
+    fn project_with_wired_module() -> datamodel::Project {
+        let mut project = TestProject::new("test")
+            .aux("local_input", "10", None)
+            .build_datamodel();
+
+        project.models[0]
+            .variables
+            .push(Variable::Aux(datamodel::Aux {
+                ident: "reader".to_string(),
+                equation: Equation::Scalar("my_module·output".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }));
+
+        project.models.push(datamodel::Model {
+            name: "submodel".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Aux(datamodel::Aux {
+                    ident: "input_var".to_string(),
+                    equation: Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        can_be_module_input: true,
+                        visibility: Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "output".to_string(),
+                    equation: Equation::Scalar("input_var * 2".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        visibility: Visibility::Public,
+                        ..datamodel::Compat::default()
+                    },
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        });
+
+        let module = datamodel::Module {
+            ident: "my_module".to_string(),
+            model_name: "submodel".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![datamodel::ModuleReference {
+                src: "local_input".to_string(),
+                dst: "my_module·input_var".to_string(),
+            }],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        };
+        apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "main".to_string(),
+                    ops: vec![ModelOperation::UpsertModule(module)],
+                }],
+            },
+        )
+        .unwrap();
+        project
+    }
+
+    fn reader_value(project: &datamodel::Project) -> f64 {
+        let series = TestProject::from_datamodel(project.clone()).vm_result("reader");
+        *series.last().expect("reader produced no samples")
+    }
+
+    /// Regression for the asymmetric delete cleanup: `apply_delete_variable`
+    /// pruned deleted flows from stock in/outflows and group members, but left
+    /// module references whose `src` named the deleted variable -- a dangling
+    /// dependency on a non-existent variable that made the whole project fail to
+    /// compile with a confusing "missing variable" message.
+    #[test]
+    fn delete_variable_prunes_dangling_module_src() {
+        let mut project = project_with_wired_module();
+        assert!((reader_value(&project) - 20.0).abs() < 1e-6);
+
+        apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "main".to_string(),
+                    ops: vec![ModelOperation::DeleteVariable {
+                        ident: "local_input".to_string(),
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        match project
+            .get_model("main")
+            .unwrap()
+            .get_variable("my_module")
+            .unwrap()
+        {
+            Variable::Module(m) => assert!(
+                m.references.is_empty(),
+                "deleted variable still wired as a module src: {:?}",
+                m.references
+            ),
+            _ => panic!("expected module"),
+        }
+
+        // The project must still compile and simulate (the module is now
+        // unwired, so its input falls back to the port default of 0).
+        TestProject::from_datamodel(project.clone()).assert_compiles_incremental();
+        assert!((reader_value(&project) - 0.0).abs() < 1e-6);
+    }
+
+    /// Regression for the cross-model rename gap: renaming a child model's input
+    /// port left every parent module's `dst` pointing at the old name, so the
+    /// parent silently fed the renamed port its default value (wrong numbers, no
+    /// error). The rename must retarget parent module references too.
+    #[test]
+    fn rename_child_input_port_retargets_parent_module_dst() {
+        let mut project = project_with_wired_module();
+        assert!((reader_value(&project) - 20.0).abs() < 1e-6);
+
+        apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "submodel".to_string(),
+                    ops: vec![ModelOperation::RenameVariable {
+                        from: "input_var".to_string(),
+                        to: "renamed_port".to_string(),
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        match project
+            .get_model("main")
+            .unwrap()
+            .get_variable("my_module")
+            .unwrap()
+        {
+            Variable::Module(m) => {
+                assert_eq!(m.references.len(), 1);
+                assert_eq!(
+                    m.references[0].dst, "my_module·renamed_port",
+                    "parent module dst did not follow the child input-port rename"
+                );
+            }
+            _ => panic!("expected module"),
+        }
+
+        // The wiring must still carry local_input(10) -> renamed_port -> 20.
+        assert!((reader_value(&project) - 20.0).abs() < 1e-6);
+    }
+
+    /// `canonicalize_module` canonicalized only the module ident, leaving the
+    /// reference endpoints verbatim -- so a non-canonical `src`/`dst` arriving
+    /// via the FFI `apply_patch` (pysimlin `upsert_module`) disagreed with the
+    /// canonical idents every UI/engine consumer compares against. Mirror
+    /// `canonicalize_stock`'s inflow/outflow canonicalization.
+    #[test]
+    fn upsert_module_canonicalizes_references() {
+        let mut project = TestProject::new("test").build_datamodel();
+        project.models.push(datamodel::Model {
+            name: "submodel".to_string(),
+            sim_specs: None,
+            variables: vec![],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        });
+
+        let module = datamodel::Module {
+            ident: "My Module".to_string(),
+            model_name: "submodel".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![datamodel::ModuleReference {
+                src: "Local Input".to_string(),
+                dst: "My Module·Input Var".to_string(),
+            }],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        };
+
+        apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "main".to_string(),
+                    ops: vec![ModelOperation::UpsertModule(module)],
+                }],
+            },
+        )
+        .unwrap();
+
+        match project
+            .get_model("main")
+            .unwrap()
+            .get_variable("my_module")
+            .unwrap()
+        {
+            Variable::Module(m) => {
+                assert_eq!(m.references[0].src, "local_input");
+                assert_eq!(m.references[0].dst, "my_module·input_var");
             }
             _ => panic!("expected module"),
         }
