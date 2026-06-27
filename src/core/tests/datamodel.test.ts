@@ -118,6 +118,14 @@ describe('GraphicalFunction', () => {
     expect(restored.yPoints).toEqual([5, 10, 15, 20]);
     expect(restored.xPoints).toBeUndefined();
   });
+
+  it('should default empty yPoints to a zero-width x scale', () => {
+    const restored = graphicalFunctionFromJson({});
+
+    expect(restored.xScale).toEqual({ min: 0, max: 0 });
+    expect(restored.yPoints).toEqual([]);
+    expect(restored.xPoints).toBeUndefined();
+  });
 });
 
 describe('Stock', () => {

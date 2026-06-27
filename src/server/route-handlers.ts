@@ -29,11 +29,6 @@ export interface ProjectRouteHandlerDeps {
 }
 
 /**
- * Database operations needed to delete a project: looking the project up to
- * verify ownership, then removing the project document and all stored content
- * blobs for that project.
- */
-/**
  * Database operations needed to clean up a project's cached preview PNG.
  */
 export interface DeletablePreviewDb {
