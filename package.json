@@ -36,6 +36,8 @@
     "build": "pnpm -r run build",
     "clean": "pnpm -r run clean && cargo clean",
     "deploy:web": "bash scripts/deploy-web.sh",
+    "deploy:web:staged": "bash scripts/deploy-web-staged.sh",
+    "build:deploy-staging": "node scripts/build-deploy-staging.mjs",
     "start": "node src/server/lib",
     "test:scripts": "node --test scripts/tests/*.test.mjs",
     "test": "pnpm test:scripts && pnpm --filter @simlin/core --filter @simlin/diagram --filter @simlin/engine --filter @simlin/app --filter @simlin/server --filter @simlin/serve-web --parallel run test",

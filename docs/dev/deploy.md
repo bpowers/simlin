@@ -40,6 +40,16 @@ The script names `deploy:assemble` / `deploy:clean` / `deploy:web` use a colon b
 
 Pass extra flags through to `gcloud` after `--`, e.g. `pnpm deploy:web --no-promote`.
 
+### Smaller deploy: `pnpm deploy:web:staged` (proven locally, pending a real gcloud test)
+
+`pnpm deploy:web` deploys from the workspace root, so GAE's instance `pnpm install` installs every workspace package's dependency closure (~590 MB / 1171 packages) even though the server's runtime closure is ~8 packages. App Engine standard always reinstalls from the deployed `package.json` + lockfile (no vendored-`node_modules` option), so the fix is to deploy a self-contained directory whose `package.json` is just the server's prod closure.
+
+`pnpm deploy:web:staged` does that: it runs the same `clean` -> `build` -> `deploy:assemble` -> `verify-deploy-build.sh` as `deploy:web`, then [`scripts/build-deploy-staging.mjs`](/scripts/build-deploy-staging.mjs) assembles `deploy-staging/` (gitignored) containing `lib/`, `config/`, `default_projects/`, the assembled `public/`, a minimal `package.json`, a generated `pnpm-lock.yaml`, `.gcloudignore`, and a copy of `.app.prod.yaml` as `app.yaml`; finally it runs `gcloud app deploy deploy-staging/app.yaml`. The two unpublished workspace packages (`@simlin/core`, `@simlin/engine`) are vendored into `deploy-staging/vendor/` and referenced via `file:` deps (a registry install would 404). The pure transforms live in [`scripts/deploy-staging-manifests.mjs`](/scripts/deploy-staging-manifests.mjs) (unit-tested via `pnpm test:scripts`); `node scripts/build-deploy-staging.mjs` can also be run standalone (after a build) to inspect the artifact.
+
+Result locally: **80 MB / 230 packages** installed (vs 590 MB / 1171), a 28.7 MB upload payload; the staged server boots and serves `/`, `/api/user` (401), the embed component, and static assets. This also keeps the upload well under GAE's 10k-file cap.
+
+What's NOT yet verified: the real `gcloud` upload and the nodejs24 buildpack honoring `packageManager: pnpm@10.6.0` (corepack) + accepting the frozen lockfile. Run `pnpm deploy:web:staged --no-promote`, watch the build log to confirm the instance ran a successful frozen `pnpm install`, then run the post-deploy smoke test before switching traffic. Until that passes, `pnpm deploy:web` is the default/fallback.
+
 ### Recommended: deploy without promoting, smoke-test, then switch traffic
 
 `pnpm deploy:web` switches production traffic the moment `gcloud app deploy` finishes. For a routine change that's fine. After a long gap, or when the toolchain or dependencies have moved, split it:
@@ -128,6 +138,6 @@ The `frontend` job in [`.github/workflows/ci.yaml`](/.github/workflows/ci.yaml) 
 
 Things to know that don't have a clean fix yet:
 
-- GAE's Node buildpack installs the full dependency set on the instance -- pnpm v10 with `NODE_ENV=production` no longer skips devDependencies (upstream bug [GoogleCloudPlatform/buildpacks#591](https://github.com/GoogleCloudPlatform/buildpacks/issues/591)) -- so the GAE build pulls in `@rsbuild/*`, `jest`, `slate`, `radix`, rspress, and every other workspace devDep. Slow, fat, and `.npmrc`'s `strict-peer-dependencies=true` makes an unmet transitive peer abort the build. Tracked as tech debt: see [docs/tech-debt.md](/docs/tech-debt.md) "Web deploy uploads the whole monorepo and GAE installs the full dep set" -- the proper fix is a self-contained server bundle (e.g. via `pnpm deploy --legacy --prod <dir>` plus vendored workspace deps) deployed from a staging directory rather than the workspace root, but it needs design work and a real `gcloud` test before shipping.
+- `pnpm deploy:web` deploys from the workspace root, so GAE's Node buildpack installs the *whole workspace's* dependency set on the instance -- `@rsbuild/*`, `jest`, `slate`, `radix`, rspress, vite, and every other package's deps (~590 MB / 1171 packages), none needed by the server at runtime. App Engine standard always reinstalls from the deployed `package.json` + lockfile and has no vendored-`node_modules` escape hatch, so the only lever is the deployed manifest. The smaller-deploy fix is implemented as **`pnpm deploy:web:staged`** (see below); it is locally proven but still pending a real `gcloud --no-promote` test, so `deploy:web` remains the default. Tracked in [docs/tech-debt.md](/docs/tech-debt.md) "Web deploy uploads the whole monorepo and GAE installs the full dep set".
 - Server-side PNG preview (`src/server/render.ts`) parses and rasterizes user-uploaded models in-process with no size cap beyond the 10 MB request body limit and no timeout.
 - There's no error reporting or alerting. Cloud Logging and the GAE metrics dashboard are it.

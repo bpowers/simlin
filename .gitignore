@@ -43,6 +43,7 @@ node_modules
 /src/app/build
 /src/app/build-component
 /src/app/test-results
+/deploy-staging
 
 # misc
 .DS_Store
