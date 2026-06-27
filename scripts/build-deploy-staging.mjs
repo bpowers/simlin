@@ -25,11 +25,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+
 import {
   buildStagingServerManifest,
   rewriteVendoredManifest,
   assertNoWorkspaceProtocol,
   stagingGcloudignore,
+  seedLockfileFromRoot,
+  untestedPackages,
 } from './deploy-staging-manifests.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -170,17 +174,27 @@ function main() {
   fs.writeFileSync(path.join(stagingDir, '.gcloudignore'), stagingGcloudignore());
   fs.copyFileSync(prodYaml, path.join(stagingDir, 'app.yaml'));
 
-  // 7. Lockfile: generate it the way the instance install will consume it --
-  //    a single-project (no-workspace) lockfile matching this exact manifest.
+  // 7. Lockfile: SEED it from the committed root lockfile, then prune to the
+  //    staging closure. The seed (root `packages`/`snapshots` with `importers`
+  //    dropped) makes pnpm reuse the already-locked, CI-tested versions for the
+  //    server's deps and resolve only what is new (the file: vendored
+  //    packages); without it, `pnpm install` would resolve the semver ranges
+  //    fresh against the registry at deploy time and could pin a newer,
+  //    untested version than the workspace built and tested against.
+  //
   //    --ignore-workspace detaches from the repo's pnpm-workspace.yaml even
   //    though the staging dir sits under the repo root. The peer-resolution
   //    settings are pinned explicitly so the generated lockfile's `settings`
-  //    block does NOT depend on the operator's ambient config (a ~/.npmrc that
-  //    flips auto-install-peers or strict-peer-dependencies would otherwise
-  //    bake a different settings block into the lockfile and could trip GAE's
-  //    frozen install). These values match pnpm's defaults, which is what the
-  //    staging dir (it ships no .npmrc) gets on the instance.
-  console.log('==> Generating pnpm-lock.yaml for the staging manifest');
+  //    block does NOT depend on the operator's ambient ~/.npmrc; they match
+  //    pnpm's defaults, which is what the staging dir (it ships no .npmrc) gets
+  //    on the instance.
+  const rootLockPath = path.join(REPO_ROOT, 'pnpm-lock.yaml');
+  if (!fs.existsSync(rootLockPath)) {
+    die(`root pnpm-lock.yaml not found at ${rootLockPath}; the staged deploy derives its pinned versions from it`);
+  }
+  const rootLock = parseYaml(fs.readFileSync(rootLockPath, 'utf8'));
+  fs.writeFileSync(path.join(stagingDir, 'pnpm-lock.yaml'), stringifyYaml(seedLockfileFromRoot(rootLock)));
+  console.log('==> Generating pnpm-lock.yaml (seeded from the committed root lockfile)');
   execFileSync(
     'pnpm',
     [
@@ -192,6 +206,20 @@ function main() {
     ],
     { cwd: stagingDir, stdio: 'inherit' },
   );
+
+  // 7b. Guarantee nothing drifted past the tested workspace lockfile. With the
+  //     seed this is empty; the check is the explicit safety net that the
+  //     deploy only ships versions the workspace install actually resolved.
+  const stagingLock = parseYaml(fs.readFileSync(path.join(stagingDir, 'pnpm-lock.yaml'), 'utf8'));
+  const drifted = untestedPackages(stagingLock, rootLock);
+  if (drifted.length > 0) {
+    die(
+      `staging lockfile resolved ${drifted.length} package version(s) absent from the committed ` +
+        `root pnpm-lock.yaml:\n${drifted.map((d) => `  - ${d}`).join('\n')}\n` +
+        `These were never installed/tested by the workspace. Run \`pnpm install\` at the repo ` +
+        `root, commit the updated pnpm-lock.yaml, rebuild, and redeploy.`,
+    );
+  }
 
   // 8. Self-verify the assembled artifact before anyone deploys it.
   verify(stagingDir);

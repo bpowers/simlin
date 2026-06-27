@@ -160,3 +160,53 @@ export function rewriteVendoredManifest(pkg) {
 export function stagingGcloudignore() {
   return ['node_modules', '.DS_Store', ''].join('\n');
 }
+
+/**
+ * Build a seed `pnpm-lock.yaml` object from the committed root (workspace)
+ * lockfile: keep the resolution cache (`packages`/`snapshots`) + `settings` and
+ * `lockfileVersion`, but DROP `importers`. The seed is written into the staging
+ * dir before `pnpm install --lockfile-only`, so pnpm reuses the already-locked
+ * (and CI-tested) versions for the server's deps and only resolves what is new
+ * (the `file:` vendored packages), then prunes `packages`/`snapshots` down to
+ * the staging closure. Dropping `importers` is what makes the prune happen:
+ * leaving the workspace importers in keeps every other package reachable, so
+ * the staging lockfile balloons back to the whole-workspace closure.
+ *
+ * Without this seed the staging lockfile is resolved fresh against the registry
+ * at deploy time and could pin a newer, untested version (direct or transitive)
+ * than the one the workspace built and tested against.
+ */
+export function seedLockfileFromRoot(rootLock) {
+  const seed = { lockfileVersion: rootLock.lockfileVersion };
+  if (rootLock.settings !== undefined) seed.settings = rootLock.settings;
+  if (rootLock.packages !== undefined) seed.packages = rootLock.packages;
+  if (rootLock.snapshots !== undefined) seed.snapshots = rootLock.snapshots;
+  return seed;
+}
+
+/**
+ * The set of registry `name@version` keys in a parsed pnpm lockfile's
+ * `packages` map, with any `(peer...)` suffix stripped and local `file:`/`link:`
+ * entries (the vendored workspace packages) excluded -- those are resolved
+ * locally and never come from the registry.
+ */
+export function registryPackageKeys(lock) {
+  const out = new Set();
+  for (const key of Object.keys(lock?.packages ?? {})) {
+    if (key.includes('@file:') || key.includes('@link:')) continue;
+    out.add(key.replace(/\(.*$/, ''));
+  }
+  return out;
+}
+
+/**
+ * Registry packages resolved in the staging lockfile that are absent from the
+ * root lockfile -- i.e. versions that were NOT part of the workspace install
+ * the build and tests ran against. A non-empty result means the staging deploy
+ * would ship an untested version; the builder fails loud on it. Seeding makes
+ * this empty in the normal case; the check is the belt-and-suspenders guarantee.
+ */
+export function untestedPackages(stagingLock, rootLock) {
+  const root = registryPackageKeys(rootLock);
+  return [...registryPackageKeys(stagingLock)].filter((key) => !root.has(key)).sort();
+}

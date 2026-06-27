@@ -7,6 +7,9 @@ import {
   rewriteVendoredManifest,
   assertNoWorkspaceProtocol,
   stagingGcloudignore,
+  seedLockfileFromRoot,
+  registryPackageKeys,
+  untestedPackages,
 } from '../deploy-staging-manifests.mjs';
 
 // A trimmed stand-in for src/server/package.json.
@@ -202,5 +205,72 @@ describe('stagingGcloudignore', () => {
 describe('WORKSPACE_PACKAGES', () => {
   it('enumerates exactly the two vendored workspace packages', () => {
     assert.deepEqual([...WORKSPACE_PACKAGES].sort(), ['@simlin/core', '@simlin/engine']);
+  });
+});
+
+describe('seedLockfileFromRoot', () => {
+  const rootLock = {
+    lockfileVersion: '9.0',
+    settings: { autoInstallPeers: true, excludeLinksFromLockfile: false },
+    importers: { '.': {}, 'src/server': { dependencies: {} }, 'src/app': { dependencies: {} } },
+    packages: { 'express@5.2.1': {}, 'helmet@8.2.0': {} },
+    snapshots: { 'express@5.2.1': {}, 'helmet@8.2.0': {} },
+  };
+
+  it('drops importers (so pnpm prunes to the staging closure)', () => {
+    const seed = seedLockfileFromRoot(rootLock);
+    assert.equal(seed.importers, undefined);
+  });
+
+  it('keeps lockfileVersion, settings, packages, and snapshots (the resolution cache)', () => {
+    const seed = seedLockfileFromRoot(rootLock);
+    assert.equal(seed.lockfileVersion, '9.0');
+    assert.deepEqual(seed.settings, rootLock.settings);
+    assert.deepEqual(seed.packages, rootLock.packages);
+    assert.deepEqual(seed.snapshots, rootLock.snapshots);
+  });
+
+  it('does not mutate the root lockfile object', () => {
+    const before = JSON.stringify(rootLock);
+    seedLockfileFromRoot(rootLock);
+    assert.equal(JSON.stringify(rootLock), before);
+  });
+});
+
+describe('registryPackageKeys', () => {
+  it('returns name@version keys, excluding file:/link: vendored packages', () => {
+    const keys = registryPackageKeys({
+      packages: {
+        'express@5.2.1': {},
+        '@simlin/core@file:vendor/core': {},
+        '@simlin/engine@link:../engine': {},
+      },
+    });
+    assert.deepEqual([...keys].sort(), ['express@5.2.1']);
+  });
+
+  it('strips peer-dependency suffixes', () => {
+    const keys = registryPackageKeys({ packages: { 'ts-jest@29.4.6(typescript@5.9.3)': {} } });
+    assert.ok(keys.has('ts-jest@29.4.6'));
+  });
+
+  it('tolerates a lockfile with no packages map', () => {
+    assert.equal(registryPackageKeys({}).size, 0);
+  });
+});
+
+describe('untestedPackages', () => {
+  const rootLock = { packages: { 'express@5.2.1': {}, 'helmet@8.2.0': {}, 'cors@2.8.6': {} } };
+
+  it('is empty when every staging version exists in the root lockfile', () => {
+    const stagingLock = {
+      packages: { 'express@5.2.1': {}, 'helmet@8.2.0': {}, '@simlin/core@file:vendor/core': {} },
+    };
+    assert.deepEqual(untestedPackages(stagingLock, rootLock), []);
+  });
+
+  it('flags a staging version that drifted past the root (tested) lockfile', () => {
+    const stagingLock = { packages: { 'express@5.2.1': {}, 'helmet@8.3.0': {} } };
+    assert.deepEqual(untestedPackages(stagingLock, rootLock), ['helmet@8.3.0']);
   });
 });
