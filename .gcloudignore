@@ -51,3 +51,13 @@ node_modules
 /src/pysimlin/.venv/
 /src/pysimlin/build/
 /src/pysimlin/dist/
+
+# The staged-deploy output dir (scripts/build-deploy-staging.mjs). It is left
+# in place after `pnpm deploy:web:staged` so a --no-promote smoke test can
+# inspect exactly what was uploaded. Exclude it here so a SUBSEQUENT fallback
+# `pnpm deploy:web` -- which uploads from the repo root -- does not re-upload
+# the ~28 MB staged artifact (its own app.yaml carrying the session secret, the
+# vendored packages, lockfile, and public bundle) or burn the 10k-file budget.
+# The staged deploy itself uploads from deploy-staging/ with its own
+# .gcloudignore, so this root entry does not affect it.
+/deploy-staging/
