@@ -25,10 +25,13 @@ interface HostedWebEditorProps {
   embedded?: boolean;
   baseURL?: string;
   readOnlyMode?: boolean;
+  // Forwarded to Editor: gates the module-creation tool. The app supplies this
+  // from its build environment so production hides the still-maturing feature.
+  moduleCreationEnabled?: boolean;
 }
 
 export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement {
-  const { username, projectName, embedded, readOnlyMode } = props;
+  const { username, projectName, embedded, readOnlyMode, moduleCreationEnabled } = props;
 
   const [serviceErrors, setServiceErrors] = React.useState<readonly Error[]>([]);
   const [projectBinary, setProjectBinary] = React.useState<Readonly<Uint8Array> | undefined>(undefined);
@@ -155,6 +158,7 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
           onSave={handleSave}
           onDeleteProject={readOnlyMode ? undefined : handleDelete}
           readOnlyMode={readOnlyMode}
+          moduleCreationEnabled={moduleCreationEnabled}
         />
       </ErrorBoundary>
     </div>

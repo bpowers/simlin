@@ -197,6 +197,12 @@ interface EditorPropsBase {
   name: string; // used when saving
   embedded?: boolean;
   readOnlyMode?: boolean;
+  // Gates the SpeedDial's module-CREATION tool (the only entry point to the
+  // module-creation flow). Module wiring/details editing and drill-in
+  // navigation are unaffected. Defaults to enabled when omitted; hosts disable
+  // it where the still-maturing creation feature should be hidden (e.g. the app
+  // turns it off for production builds while keeping it on in development).
+  moduleCreationEnabled?: boolean;
   // Optional selection callback fired after each selection change. Hosts
   // (e.g. simlin-serve's EditorHost) use this to forward selection state
   // to backend listeners; HostedWebEditor in src/app does not subscribe.
@@ -2300,6 +2306,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       return undefined;
     }
 
+    // Module creation defaults on; hosts opt out (e.g. production app builds).
+    const moduleCreationEnabled = props.moduleCreationEnabled ?? true;
+
     return (
       <SpeedDial
         ariaLabel="hide or show editor tools"
@@ -2334,12 +2343,14 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
           onClick={handleSelectLink}
           selected={selectedTool === 'link'}
         />
-        <SpeedDialAction
-          icon={<ModuleIcon />}
-          title="Module"
-          onClick={handleSelectModule}
-          selected={selectedTool === 'module'}
-        />
+        {moduleCreationEnabled && (
+          <SpeedDialAction
+            icon={<ModuleIcon />}
+            title="Module"
+            onClick={handleSelectModule}
+            selected={selectedTool === 'module'}
+          />
+        )}
       </SpeedDial>
     );
   };

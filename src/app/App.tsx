@@ -368,6 +368,10 @@ export function InnerApp(): React.JSX.Element {
         projectName={projectName}
         baseURL={getBaseURL()}
         readOnlyMode={readOnlyMode}
+        // Module creation is still maturing: keep it in development builds but
+        // hide it in production. RSBuild inlines NODE_ENV and tree-shakes the
+        // unused branch, so production bundles ship with the tool disabled.
+        moduleCreationEnabled={process.env.NODE_ENV === 'development'}
       />
     );
   }, []);
