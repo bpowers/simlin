@@ -11,7 +11,7 @@ import { Project } from '../schemas/project_pb';
 import { User } from '../schemas/user_pb';
 
 import { Database, DatabaseOptions } from './db-interfaces';
-import { FirestoreTable } from './table-firestore';
+import { FirestoreTable, firestoreDocumentId } from './table-firestore';
 import { Table } from './table';
 
 export class FirestoreDatabase implements Database {
@@ -33,6 +33,26 @@ export class FirestoreDatabase implements Database {
 
   async init(): Promise<void> {
     await Promise.all([this.file.init(), this.project.init(), this.preview.init(), this.user.init()]);
+  }
+
+  async deleteProjectAndFiles(projectId: string, currentFileId: string | undefined): Promise<void> {
+    const files = await this.client.collection('files').where('projectId', '==', projectId).get();
+    const historicalFileRefs = files.docs.filter((doc) => doc.id !== currentFileId).map((doc) => doc.ref);
+
+    for (let i = 0; i < historicalFileRefs.length; i += 500) {
+      const batch = this.client.batch();
+      for (const ref of historicalFileRefs.slice(i, i + 500)) {
+        batch.delete(ref);
+      }
+      await batch.commit();
+    }
+
+    const finalBatch = this.client.batch();
+    finalBatch.delete(this.client.collection('project').doc(firestoreDocumentId(projectId)));
+    if (currentFileId) {
+      finalBatch.delete(this.client.collection('files').doc(firestoreDocumentId(currentFileId)));
+    }
+    await finalBatch.commit();
   }
 }
 

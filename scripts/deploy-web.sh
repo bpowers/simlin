@@ -57,6 +57,8 @@ if [ ! -f "$REPO_ROOT/.app.prod.yaml" ]; then
     exit 1
 fi
 
+node "$REPO_ROOT/scripts/validate-app-prod-config.mjs" "$REPO_ROOT/.app.prod.yaml"
+
 export NODE_ENV=production
 
 echo "==> pnpm clean"

@@ -29,17 +29,6 @@ export interface ProjectRouteHandlerDeps {
 }
 
 /**
- * Database operations needed to delete a project: looking the project up to
- * verify ownership, then removing the project document. Deleting the project
- * doc is what makes the project disappear from listings and the SSR route;
- * the (orphaned) `File` documents are intentionally left behind, consistent
- * with how every save already orphans the prior `File` doc.
- */
-export interface DeletableProjectDb extends ProjectDb {
-  deleteOne(id: string): Promise<void>;
-}
-
-/**
  * Database operations needed to clean up a project's cached preview PNG.
  */
 export interface DeletablePreviewDb {
@@ -48,8 +37,9 @@ export interface DeletablePreviewDb {
 
 export interface DeleteProjectHandlerDeps {
   db: {
-    project: DeletableProjectDb;
+    project: ProjectDb;
     preview: DeletablePreviewDb;
+    deleteProjectAndFiles(id: string, currentFileId: string | undefined): Promise<void>;
   };
 }
 
@@ -127,9 +117,9 @@ export function createProjectRouteHandler(deps: ProjectRouteHandlerDeps) {
  * owner may delete it. Ownership is checked twice: once against the URL
  * username before any DB lookup -- so a logged-in user can't probe whether
  * another user's private project exists via the 404-vs-401 distinction -- and
- * again against the stored record's ownerId as defense in depth. The cached
- * preview PNG is removed on a best-effort basis; the underlying `File`
- * documents are intentionally left orphaned.
+ * again against the stored record's ownerId as defense in depth. Stored model
+ * contents are deleted with the project; the cached preview PNG is removed on
+ * a best-effort basis.
  */
 export function createDeleteProjectHandler(deps: DeleteProjectHandlerDeps) {
   return async (req: Request, res: Response): Promise<void> => {
@@ -159,7 +149,13 @@ export function createDeleteProjectHandler(deps: DeleteProjectHandlerDeps) {
       return;
     }
 
-    await deps.db.project.deleteOne(projectId);
+    try {
+      await deps.db.deleteProjectAndFiles(projectId, project.getFileId());
+    } catch (err) {
+      logger.error(`unable to delete project ${projectId}: ${err}`);
+      res.status(500).json({ error: 'unable to delete project' });
+      return;
+    }
 
     // A stale preview is harmless once the project doc is gone (the preview
     // route 404s without a project), so don't fail the request if it can't

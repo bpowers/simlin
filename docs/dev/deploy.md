@@ -70,7 +70,8 @@ On the instance GAE runs `pnpm install`, then the root `start` script: `node src
 `app.yaml` is committed; `.app.prod.yaml` is gitignored and lives only on your machine, and `pnpm deploy:web` deploys `.app.prod.yaml`. Treat the committed `app.yaml` as the reference -- it carries the handler routes and the `runtime` / `instance_class` / scaling block production should match. Diff `.app.prod.yaml` against it before deploying:
 
 - `runtime`: `nodejs24`. (`nodejs18` is EOL on GAE; `nodejs16`, the runtime of the last deploy before May 2026, is gone entirely -- which is why there's no "redeploy the old commit" rollback.)
-- The handler list: `/static`, `/`, `/new`, `/legal*`, `/privacy`, `robots.txt`, `ads.txt`, favicon, `manifest.json`, then `/.*` -> `script: auto`. The SPA's dynamic routes like `/:username/:projectName` fall through to `/.*`, i.e. the Express server.
+- `build_env_variables.GOOGLE_NODE_RUN_SCRIPTS`: `''`. The local deploy script already runs the monorepo build and stages the exact artifact to upload; this prevents App Engine's Node buildpack from running the root `build` script again during staging.
+- The handler list: `/static`, `/`, `/new`, `/legal*`, `/privacy`, `robots.txt`, `ads.txt`, favicon, `manifest.json`, then `/.*` -> `script: auto`. The `/` and `/new` static HTML handlers carry CSP/HSTS headers because they bypass Express Helmet. The SPA's dynamic routes like `/:username/:projectName` fall through to `/.*`, i.e. the Express server.
 - `env_variables`: the committed `app.yaml` has none; the server needs a couple (next section). They live in `.app.prod.yaml`.
 
 GAE ignores `app.yaml`'s `skip_files` when a `.gcloudignore` exists (it does), so `skip_files` in `.app.prod.yaml` is dead -- maintain `.gcloudignore` instead.
@@ -92,7 +93,7 @@ The server loads `config/default.json`, then `config/production.json` when `NODE
 - [ ] `git status` is clean.
 - [ ] `gcloud config get-value project` is the production project.
 - [ ] `gcloud app versions list --service=default` shows a known-good current version -- note its ID, that's your rollback target. (If GAE has garbage-collected it, there is no rollback; see below.)
-- [ ] `.app.prod.yaml` reconciled against `app.yaml` (`runtime: nodejs24`, handlers, `authentication__seshcookie__key` set to the value already in use).
+- [ ] `.app.prod.yaml` reconciled against `app.yaml` (`runtime: nodejs24`, `build_env_variables.GOOGLE_NODE_RUN_SCRIPTS: ''`, handlers, `authentication__seshcookie__key` set to the value already in use).
 - [ ] `wasm-opt --version` works; `rustup show` lists the `wasm32-unknown-unknown` target.
 
 ## Post-deploy smoke test

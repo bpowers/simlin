@@ -26,12 +26,14 @@ function mockProject(id: string, ownerId?: string): MockProjectRecord {
 interface MockDeps {
   deps: DeleteProjectHandlerDeps;
   projectFindOne: jest.Mock;
-  projectDeleteCalls: string[];
+  projectDeleteCalls: Array<{ projectId: string; currentFileId: string | undefined }>;
   previewDeleteCalls: string[];
 }
 
-function mockDeps(opts: { project?: MockProjectRecord; previewDeleteRejects?: boolean } = {}): MockDeps {
-  const projectDeleteCalls: string[] = [];
+function mockDeps(
+  opts: { project?: MockProjectRecord; previewDeleteRejects?: boolean; projectDeleteRejects?: boolean } = {},
+): MockDeps {
+  const projectDeleteCalls: Array<{ projectId: string; currentFileId: string | undefined }> = [];
   const previewDeleteCalls: string[] = [];
   const projectFindOne = jest.fn().mockResolvedValue(opts.project);
   return {
@@ -42,9 +44,6 @@ function mockDeps(opts: { project?: MockProjectRecord; previewDeleteRejects?: bo
       db: {
         project: {
           findOne: projectFindOne,
-          deleteOne: jest.fn(async (id: string) => {
-            projectDeleteCalls.push(id);
-          }),
         },
         preview: {
           deleteOne: jest.fn(async (id: string) => {
@@ -54,6 +53,12 @@ function mockDeps(opts: { project?: MockProjectRecord; previewDeleteRejects?: bo
             }
           }),
         },
+        deleteProjectAndFiles: jest.fn(async (projectId: string, currentFileId: string | undefined) => {
+          projectDeleteCalls.push({ projectId, currentFileId });
+          if (opts.projectDeleteRejects) {
+            throw new Error('project delete failed');
+          }
+        }),
       },
     },
   };
@@ -95,14 +100,14 @@ function mockRequest(opts: { username?: string; projectName?: string; userId?: s
 }
 
 describe('createDeleteProjectHandler', () => {
-  it('deletes the project and preview docs and returns 200 for the owner', async () => {
+  it('deletes the project contents, project doc, and preview doc and returns 200 for the owner', async () => {
     const { deps, projectDeleteCalls, previewDeleteCalls } = mockDeps({ project: mockProject('alice/climate') });
     const handler = createDeleteProjectHandler(deps);
     const { res, statusCode, jsonBody } = mockResponse();
 
     await handler(mockRequest({ username: 'alice', projectName: 'climate', userId: 'alice' }), res);
 
-    expect(projectDeleteCalls).toEqual(['alice/climate']);
+    expect(projectDeleteCalls).toEqual([{ projectId: 'alice/climate', currentFileId: 'file-abc' }]);
     expect(previewDeleteCalls).toEqual(['alice/climate']);
     expect(statusCode()).toBe(200);
     expect(jsonBody()).toEqual({});
@@ -119,8 +124,24 @@ describe('createDeleteProjectHandler', () => {
 
     await handler(mockRequest({ userId: 'alice' }), res);
 
-    expect(projectDeleteCalls).toEqual(['alice/climate']);
+    expect(projectDeleteCalls).toEqual([{ projectId: 'alice/climate', currentFileId: 'file-abc' }]);
     expect(statusCode()).toBe(200);
+  });
+
+  it('returns 500 and does not delete the preview when project-content deletion fails', async () => {
+    const { deps, projectDeleteCalls, previewDeleteCalls } = mockDeps({
+      project: mockProject('alice/climate'),
+      projectDeleteRejects: true,
+    });
+    const handler = createDeleteProjectHandler(deps);
+    const { res, statusCode, jsonBody } = mockResponse();
+
+    await handler(mockRequest({ userId: 'alice' }), res);
+
+    expect(projectDeleteCalls).toEqual([{ projectId: 'alice/climate', currentFileId: 'file-abc' }]);
+    expect(previewDeleteCalls).toEqual([]);
+    expect(statusCode()).toBe(500);
+    expect(jsonBody()).toEqual({ error: 'unable to delete project' });
   });
 
   it('returns 404 when the project does not exist', async () => {

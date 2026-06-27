@@ -708,7 +708,7 @@ impl From<GraphicalFunction> for datamodel::GraphicalFunction {
 
         let x_scale = gf.x_scale.unwrap_or(GraphicalFunctionScale {
             min: 0.0,
-            max: (y_points.len() - 1) as f64,
+            max: y_points.len().saturating_sub(1) as f64,
         });
 
         let y_scale = gf
@@ -2104,6 +2104,23 @@ mod tests {
                 assert_eq!(json_gf.y_points, json_gf3.y_points, "Failed for: {}", name);
             }
         }
+    }
+
+    #[test]
+    fn empty_graphical_function_uses_zero_width_x_scale() {
+        let json_gf = GraphicalFunction {
+            points: vec![],
+            y_points: vec![],
+            kind: "continuous".to_string(),
+            x_scale: None,
+            y_scale: None,
+        };
+
+        let dm_gf: datamodel::GraphicalFunction = json_gf.into();
+
+        assert_eq!(dm_gf.x_scale.min, 0.0);
+        assert_eq!(dm_gf.x_scale.max, 0.0);
+        assert!(dm_gf.y_points.is_empty());
     }
 
     #[test]

@@ -55,6 +55,7 @@ class TestErrorCode:
         assert ErrorCode.DOES_NOT_EXIST == 1
         assert ErrorCode.CIRCULAR_DEPENDENCY == 21
         assert ErrorCode.GENERIC == 32
+        assert ErrorCode.BAD_OVERRIDE == 34
 
     def test_error_code_to_string(self) -> None:
         """Test converting error codes to strings."""

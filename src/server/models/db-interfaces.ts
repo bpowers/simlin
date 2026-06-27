@@ -19,4 +19,6 @@ export interface Database {
   readonly project: Table<Project>;
   readonly preview: Table<Preview>;
   readonly user: Table<User>;
+
+  deleteProjectAndFiles(projectId: string, currentFileId: string | undefined): Promise<void>;
 }
