@@ -1,5 +1,8 @@
 runtime: nodejs24
 
+build_env_variables:
+  GOOGLE_NODE_RUN_SCRIPTS: ''
+
 instance_class: F4
 automatic_scaling:
   max_concurrent_requests: 100
@@ -13,11 +16,17 @@ handlers:
   static_files: public/index.html
   upload: public/index.html
   secure: always
+  http_headers:
+    Strict-Transport-Security: "max-age=31536000; includeSubDomains; preload"
+    Content-Security-Policy: "default-src 'self'; frame-src 'self' https://simlin.firebaseapp.com https://auth.simlin.com; base-uri 'self'; block-all-mixed-content; connect-src 'self' https://www.googleapis.com https://securetoken.googleapis.com https://identitytoolkit.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self'; img-src 'self' data: blob: https://*.googleusercontent.com https://www.gstatic.com; object-src 'none'; script-src 'self' blob: 'unsafe-eval' https://apis.google.com; script-src-attr 'none'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; upgrade-insecure-requests"
 
 - url: /new$
   static_files: public/index.html
   upload: public/index.html
   secure: always
+  http_headers:
+    Strict-Transport-Security: "max-age=31536000; includeSubDomains; preload"
+    Content-Security-Policy: "default-src 'self'; frame-src 'self' https://simlin.firebaseapp.com https://auth.simlin.com; base-uri 'self'; block-all-mixed-content; connect-src 'self' https://www.googleapis.com https://securetoken.googleapis.com https://identitytoolkit.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self'; img-src 'self' data: blob: https://*.googleusercontent.com https://www.gstatic.com; object-src 'none'; script-src 'self' blob: 'unsafe-eval' https://apis.google.com; script-src-attr 'none'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; upgrade-insecure-requests"
 
 - url: /(legal|legal/cookies|privacy)$
   static_files: public/\1/index.html

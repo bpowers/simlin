@@ -42,6 +42,7 @@ class ErrorCode(IntEnum):
     UNIT_DEFINITION_ERRORS = 31
     GENERIC = 32
     UNIT_MISMATCH = 33
+    BAD_OVERRIDE = 34
 
 
 class ErrorKind(IntEnum):

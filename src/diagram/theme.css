@@ -1,6 +1,7 @@
 /* Theme CSS Custom Properties for Simlin Diagram Components */
 
-:root {
+:root,
+:host {
   /* Panel widths (sidebar panels: search bar, variable details, error details) */
   /* Note: SearchbarWidthSm and SearchbarWidthLg in Editor.tsx must stay in sync */
   --panel-width-sm: 359px;
@@ -204,7 +205,8 @@
  * chrome yet, so these chrome overrides are inert in the current light-only UI
  * -- they are infrastructure, not a switch being flipped here.
  */
-[data-theme="dark"] {
+[data-theme="dark"],
+:host([data-theme="dark"]) {
   /* Canvas primitives. */
   --color-black: #bbbbbb;
   --color-white: #222222;

@@ -98,7 +98,36 @@ if [ -f public/static/js/sd-component.js ]; then
     fi
 fi
 
-# 5. A hashed WASM blob exists somewhere under public/static/wasm/, and it
+# 5. The web component stylesheet is shipped beside the SPA CSS. The
+#    component renders inside a closed shadow root, so document-level CSS from
+#    the embedding page cannot style it; sd-component.js links this exact file
+#    into the shadow tree.
+if [ ! -f public/static/css/sd-component.css ]; then
+    fail "public/static/css/sd-component.css missing (closed-shadow web component would render without its stylesheet)"
+else
+    size=$(wc -c < public/static/css/sd-component.css)
+    if [ "$size" -lt 1024 ]; then
+        fail "public/static/css/sd-component.css is suspiciously small ($size bytes)"
+    elif ! LC_ALL=C grep -q 'simlinCanvas' public/static/css/sd-component.css; then
+        fail "public/static/css/sd-component.css does not contain expected diagram canvas styles"
+    elif ! LC_ALL=C grep -q -- '--color-primary' public/static/css/sd-component.css; then
+        fail "public/static/css/sd-component.css does not contain expected theme styles"
+    elif ! LC_ALL=C grep -q 'KaTeX_Main' public/static/css/sd-component.css; then
+        fail "public/static/css/sd-component.css does not contain expected KaTeX styles"
+    else
+        pass "public/static/css/sd-component.css exists and contains editor styles ($size bytes)"
+    fi
+fi
+
+if [ -f public/static/js/sd-component.js ]; then
+    if ! grep -q '/static/css/sd-component.css' public/static/js/sd-component.js; then
+        fail "public/static/js/sd-component.js does not link /static/css/sd-component.css into the shadow root"
+    else
+        pass "public/static/js/sd-component.js links the component stylesheet"
+    fi
+fi
+
+# 6. A hashed WASM blob exists somewhere under public/static/wasm/, and it
 #    is the SLIM browser artifact. rsbuild emits the engine WASM via
 #    Rspack's asset module with a content hash; the exact filename varies.
 #    The browser bundle must come from libsimlin-browser.wasm (built
@@ -124,7 +153,7 @@ else
     fi
 fi
 
-# 6. The engine package's source WASM was built, and it is the FULL
+# 7. The engine package's source WASM was built, and it is the FULL
 #    artifact. The server runtime loads this via require('@simlin/engine')
 #    and its model-preview pipeline calls simlin_project_render_png; a
 #    slim WASM here would 500 every preview render. A missing or empty
@@ -144,7 +173,7 @@ else
     fi
 fi
 
-# 7. The compiled server bundle exists. GAE runs `node src/server/lib`
+# 8. The compiled server bundle exists. GAE runs `node src/server/lib`
 #    on the instance; an empty lib/ would crash-loop without a useful
 #    error.
 if [ ! -f src/server/lib/index.js ]; then

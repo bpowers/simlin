@@ -45,14 +45,15 @@ describe('theme.css token contracts', () => {
   const theme = readCss('theme.css');
 
   function darkBlock(css: string): string {
-    const m = /\[data-theme="dark"\]\s*\{([\s\S]*?)\}/.exec(css);
+    const m = /\[data-theme="dark"\]\s*,\s*:host\(\[data-theme="dark"\]\)\s*\{([\s\S]*?)\}/.exec(css);
     if (!m) {
-      throw new Error('no [data-theme="dark"] block in theme.css');
+      throw new Error('no [data-theme="dark"] / :host([data-theme="dark"]) block in theme.css');
     }
     return m[1];
   }
 
-  it('defines the dense-toolbar and caption tokens in :root', () => {
+  it('defines the dense-toolbar and caption tokens in :root and shadow hosts', () => {
+    expect(theme).toMatch(/:root,\s*:host\s*\{/);
     expect(theme).toMatch(/--toolbar-dense-height:\s*48px/);
     expect(theme).toMatch(/--font-size-caption:\s*0\.75rem/);
   });

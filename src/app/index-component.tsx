@@ -6,6 +6,9 @@ import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 
 import { baseURL } from '@simlin/core/common';
+import '@simlin/diagram/reset.css';
+import 'katex/dist/katex.min.css';
+import '@simlin/diagram/theme.css';
 import { HostedWebEditor } from '@simlin/diagram/HostedWebEditor';
 
 // try to get the base URL from the src attribute of the current script
@@ -25,6 +28,7 @@ class SDModel extends HTMLElement {
     this.attachShadow({ mode: 'closed' }).appendChild(mountPoint);
 
     const base = `${scriptURL.protocol}//${scriptURL.host}`;
+    const stylesheet = `${base}/static/css/sd-component.css`;
 
     const username = this.getAttribute('username') || '';
     const projectName = this.getAttribute('projectName') || '';
@@ -33,6 +37,7 @@ class SDModel extends HTMLElement {
       <div className="model-Editor-full">
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,400,500" />
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto+Mono&display=swap" />
+        <link rel="stylesheet" href={stylesheet} />
         <HostedWebEditor username={username} projectName={projectName} embedded={true} baseURL={base} />
       </div>,
     );

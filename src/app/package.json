@@ -44,7 +44,7 @@
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
     "lint": "eslint --cache --cache-location node_modules/.cache/eslint/ .",
     "prepublishOnly": "pnpm build",
-    "deploy:assemble": "cp -r build/* public && cp -r build-component/static/js/* ./public/static/js/ && { [ ! -d build-component/static/wasm ] || cp -r build-component/static/wasm/* ./public/static/wasm/; } && rm public ../server/public ../server/default_projects",
+    "deploy:assemble": "cp -r build/* public && cp -r build-component/static/js/* ./public/static/js/ && { [ ! -d build-component/static/css ] || cp -r build-component/static/css/* ./public/static/css/; } && { [ ! -d build-component/static/wasm ] || cp -r build-component/static/wasm/* ./public/static/wasm/; } && { [ ! -d build-component/static/media ] || cp -r build-component/static/media/* ./public/static/media/; } && rm public ../server/public ../server/default_projects",
     "deploy:clean": "git checkout HEAD -- ../../public/index.html ./public ../server/public ../server/default_projects && rm -rf public/asset-manifest.json public/static/js public/static/wasm public/static/css public/static/media build build-component",
     "clean": "rm -rf ./lib.browser ./build ./build-component ./node_modules/.cache",
     "build": "pnpm run build:frontend && pnpm run build:webcomponent",

@@ -527,15 +527,6 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-08
 
-### 56. y_points.len() - 1 underflows to usize::MAX in JSON GraphicalFunction
-
-- **Component**: simlin-engine (`src/simlin-engine/src/json.rs:692-695`)
-- **Severity**: medium
-- **Description**: When deserialising a JSON `GraphicalFunction` with no explicit `x_scale`, the default `x_scale.max` is `(y_points.len() - 1) as f64`. If `y_points` is empty, `0_usize - 1` wraps to `usize::MAX` and casts to `1.84e19_f64`, producing a `GraphicalFunction` whose x-scale is `[0, 1.84e19]`. The TypeScript twin (`graphicalFunctionFromJson` in `src/core/datamodel.ts:112`) does the same calculation correctly with `Math.max(0, ...)`. Introduced in commit fd224e99 (initial JSON serialization support).
-- **Suspected fix**: `y_points.len().saturating_sub(1) as f64`.
-- **Owner**: unassigned
-- **Last reviewed**: 2026-05-08
-
 ### 57. Stale @system-dynamics/* import path in build-selection-map.test.ts
 
 - **Component**: diagram (`src/diagram/tests/build-selection-map.test.ts:6-7`)

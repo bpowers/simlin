@@ -20,6 +20,10 @@ interface Schema {
   [x: string]: unknown;
 }
 
+export function firestoreDocumentId(id: string): string {
+  return id.replace('/', '|');
+}
+
 export class FirestoreTable<T extends Message> implements Table<T> {
   readonly kind: SerializableClass<T>;
   readonly opts: FirestoreTableOptions;
@@ -35,12 +39,8 @@ export class FirestoreTable<T extends Message> implements Table<T> {
 
   async init(): Promise<void> {}
 
-  private static filterId(id: string): string {
-    return id.replace('/', '|');
-  }
-
   private docRef(id: string) {
-    return this.collection.doc(FirestoreTable.filterId(id));
+    return this.collection.doc(firestoreDocumentId(id));
   }
 
   private deserialize(value: Buffer): T {
@@ -80,7 +80,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
   }
 
   async find(idPrefix: string): Promise<T[]> {
-    idPrefix = FirestoreTable.filterId(idPrefix);
+    idPrefix = firestoreDocumentId(idPrefix);
     // https://stackoverflow.com/questions/46573804/firestore-query-documents-startswith-a-string
     const successor =
       idPrefix.substring(0, idPrefix.length - 1) + String.fromCharCode(idPrefix.charCodeAt(idPrefix.length - 1) + 1);

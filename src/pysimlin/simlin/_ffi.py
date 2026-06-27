@@ -97,18 +97,30 @@ def extract_error_details(err_ptr: Any) -> list[Any]:
         if c_detail != ffi.NULL:
             details.append(
                 ErrorDetail(
-                    code=ErrorCode(c_detail.code),
+                    code=coerce_int_enum(ErrorCode, c_detail.code, ErrorCode.GENERIC),
                     message=c_to_string(c_detail.message) or "",
                     model_name=c_to_string(c_detail.model_name),
                     variable_name=c_to_string(c_detail.variable_name),
                     start_offset=c_detail.start_offset,
                     end_offset=c_detail.end_offset,
-                    kind=ErrorKind(c_detail.kind),
-                    unit_error_kind=UnitErrorKind(c_detail.unit_error_kind),
-                    severity=ErrorSeverity(c_detail.severity),
+                    kind=coerce_int_enum(ErrorKind, c_detail.kind, ErrorKind.VARIABLE),
+                    unit_error_kind=coerce_int_enum(
+                        UnitErrorKind,
+                        c_detail.unit_error_kind,
+                        UnitErrorKind.NOT_APPLICABLE,
+                    ),
+                    severity=coerce_int_enum(ErrorSeverity, c_detail.severity, ErrorSeverity.ERROR),
                 )
             )
     return details
+
+
+def coerce_int_enum(enum_cls: Any, value: int, default: Any) -> Any:
+    """Decode C enum values without letting future ABI additions mask the error."""
+    try:
+        return enum_cls(value)
+    except ValueError:
+        return default
 
 
 def check_out_error(out_error_ptr: Any, operation: str = "operation") -> None:

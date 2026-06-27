@@ -18,6 +18,7 @@ import { Application } from './application';
 import { authn } from './authn';
 import authz from './authz';
 import { favicon } from './favicon';
+import { validateRuntimeConfig } from './config-validation';
 import * as logger from './logger';
 import { createDatabase } from './models/db';
 import { redirectToHttps } from './redirect-to-https';
@@ -110,6 +111,7 @@ class App {
         }
       }
     }
+    validateRuntimeConfig(process.env.NODE_ENV, this.app.get('authentication'));
   }
 
   async setup(): Promise<void> {
