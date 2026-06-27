@@ -5,6 +5,7 @@ import process from 'node:process';
 import { parseDocument } from 'yaml';
 
 const BUILD_SCRIPT_KEY = 'GOOGLE_NODE_RUN_SCRIPTS';
+const NODE_ENV_KEY = 'NODE_ENV';
 const SESSION_KEY = 'authentication__seshcookie__key';
 
 function isRecord(value) {
@@ -45,6 +46,13 @@ export function validateAppProdConfig(source, filename = '.app.prod.yaml') {
   }
 
   const env = config.env_variables;
+  const nodeEnv = isRecord(env) ? env[NODE_ENV_KEY] : undefined;
+  if (nodeEnv !== 'production') {
+    errors.push({
+      message: 'env_variables.NODE_ENV must be set to production',
+    });
+  }
+
   const sessionKey = isRecord(env) ? env[SESSION_KEY] : undefined;
   if (typeof sessionKey !== 'string' || sessionKey.trim() === '' || sessionKey.trim() === 'IN ENV') {
     errors.push({
