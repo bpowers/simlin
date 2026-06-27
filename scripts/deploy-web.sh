@@ -57,17 +57,7 @@ if [ ! -f "$REPO_ROOT/.app.prod.yaml" ]; then
     exit 1
 fi
 
-if ! grep -q 'GOOGLE_NODE_RUN_SCRIPTS' "$REPO_ROOT/.app.prod.yaml"; then
-    echo "ERROR: .app.prod.yaml must set build_env_variables.GOOGLE_NODE_RUN_SCRIPTS to suppress App Engine's buildpack rebuild." >&2
-    echo "       See the committed app.yaml reference and docs/dev/deploy.md." >&2
-    exit 1
-fi
-
-if ! grep -q 'authentication__seshcookie__key' "$REPO_ROOT/.app.prod.yaml"; then
-    echo "ERROR: .app.prod.yaml must set env_variables.authentication__seshcookie__key to the existing production session key." >&2
-    echo "       See docs/dev/deploy.md." >&2
-    exit 1
-fi
+node "$REPO_ROOT/scripts/validate-app-prod-config.mjs" "$REPO_ROOT/.app.prod.yaml"
 
 export NODE_ENV=production
 

@@ -14,7 +14,8 @@
     "@playwright/test": "^1.58.1",
     "prettier": "^3.8.1",
     "ts-protoc-gen": "^0.15.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "yaml": "^2.4.2"
   },
   "scripts": {
     "js-needs-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?)/' | xargs prettier -l",
@@ -36,7 +37,8 @@
     "clean": "pnpm -r run clean && cargo clean",
     "deploy:web": "bash scripts/deploy-web.sh",
     "start": "node src/server/lib",
-    "test": "pnpm --filter @simlin/core --filter @simlin/diagram --filter @simlin/engine --filter @simlin/app --filter @simlin/server --filter @simlin/serve-web --parallel run test",
+    "test:scripts": "node --test scripts/tests/*.test.mjs",
+    "test": "pnpm test:scripts && pnpm --filter @simlin/core --filter @simlin/diagram --filter @simlin/engine --filter @simlin/app --filter @simlin/server --filter @simlin/serve-web --parallel run test",
     "test:ui": "playwright test",
     "test:ui:ui": "playwright test --ui"
   }
