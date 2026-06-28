@@ -20,5 +20,8 @@
 .cardActions {
   display: flex;
   align-items: center;
+  /* 8px between adjacent action buttons (8px grid); coexists with a child's
+     `margin-left: auto` used to right-align the action group. */
+  gap: 8px;
   padding: 8px 16px;
 }
