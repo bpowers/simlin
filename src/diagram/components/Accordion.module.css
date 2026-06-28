@@ -21,6 +21,10 @@
 
 .trigger {
   all: unset;
+  /* `all: unset` resets box-sizing to content-box, so without this `width: 100%`
+     plus the horizontal padding would overflow the bordered container by 32px,
+     pushing the right-aligned expand icon outside the box. */
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-between;
