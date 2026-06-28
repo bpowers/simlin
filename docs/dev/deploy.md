@@ -63,6 +63,28 @@ gcloud app services set-traffic default --splits=<version>=1
 
 (`--no-promote` flows through to `gcloud app deploy` via the script's `"$@"` passthrough; the script still runs `deploy:clean` afterward via the trap.)
 
+### Canary deploy + Firebase login: `pnpm deploy:canary`
+
+The `--no-promote` flow above lets you `curl` the canary, but you cannot actually **log in** to it: Firebase OAuth (`signInWithRedirect` via `auth.simlin.com`) rejects any origin not in Firebase's *Authorized domains*, and the canary is reachable only at a versioned `https://<version>-dot-<project>...appspot.com` URL that isn't on that list. So a full end-to-end test (including Google sign-in, the new-user flow, and saving a model) isn't possible on a bare `--no-promote` version.
+
+[`scripts/deploy-canary.mjs`](/scripts/deploy-canary.mjs) (`pnpm deploy:canary`) closes that gap. It:
+
+1. Reads the target project (`gcloud config get-value project`; override with `--project <id>` or `SIMLIN_CANARY_PROJECT`) and prints a warning that it touches **production** Firebase config and deploys (but does **not** promote traffic).
+2. Builds + deploys via `scripts/deploy-web-staged.sh --no-promote` (it does **not** pass `--version`, so gcloud auto-generates the version id).
+3. Discovers the just-deployed version id (`gcloud app versions list --sort-by=~version.createTime --limit=1`) and its region-aware URL (`gcloud app browse --no-launch-browser --version=<id>`).
+4. Adds that version's host to the Identity Toolkit `authorizedDomains` list via a **read-modify-write**: GET the config, append the host to the full existing list, then PATCH it back with `?updateMask=authorizedDomains`. The PATCH replaces the whole repeated field, so it always sends the complete current-plus-new list -- it never wipes `localhost` / `firebaseapp.com` / `app.simlin.com`. It prints the before/after list.
+5. Prints the canary URL, the smoke-test checklist, the exact `gcloud app services set-traffic default --splits=<id>=1` promote command, and the exact cleanup command. **It does not promote traffic.**
+
+After testing, clean up:
+
+```bash
+pnpm deploy:canary --cleanup <version>   # de-authorize the host + stop the version
+```
+
+Cleanup is the inverse: it removes the host from `authorizedDomains` (same read-modify-write) and stops the version (it also prints the `gcloud app versions delete` command if you want to free the slot).
+
+This deliberately uses **your own** credentials (`gcloud auth print-access-token`), not the CI deploy service account: mutating Firebase auth config needs `roles/firebaseauth.admin`, an operator-level grant intentionally kept off the CI SA. The deploy/authorize and the traffic promote are separate, explicit steps so traffic is never switched implicitly. Keep the canary host authorized only while you are testing it -- leaving stale appspot hosts in `authorizedDomains` needlessly widens the OAuth surface.
+
 ## What gets uploaded, and what runs on the instance
 
 `gcloud app deploy` uploads the whole repo except `.gcloudignore` entries: `node_modules`, `target/`, `test/`, `/build*`, `scripts/`, `.github/`, `website/`, `examples/`, `src/jupyter/`, `src/app/public`, `src/app/build*`, `src/server/public`, `src/server/config`, `src/app/firebase.json`, and `.app.prod.yaml` itself. Not excluded, and load-bearing:

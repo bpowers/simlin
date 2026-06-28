@@ -37,6 +37,7 @@
     "clean": "pnpm -r run clean && cargo clean",
     "deploy:web": "bash scripts/deploy-web.sh",
     "deploy:web:staged": "bash scripts/deploy-web-staged.sh",
+    "deploy:canary": "node scripts/deploy-canary.mjs",
     "build:deploy-staging": "node scripts/build-deploy-staging.mjs",
     "start": "node src/server/lib",
     "test:scripts": "node --test scripts/tests/*.test.mjs",
