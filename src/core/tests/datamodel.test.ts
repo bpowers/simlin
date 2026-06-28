@@ -48,6 +48,8 @@ import type {
   ScalarEquation,
   ApplyToAllEquation,
   ArrayedEquation,
+  ArrayedElement,
+  DataSource,
   SimSpecs,
   Dimension,
   Source,
@@ -68,6 +70,9 @@ import type {
   JsonFlowViewElement,
   JsonLinkViewElement,
   JsonCloudViewElement,
+  JsonStock,
+  JsonAuxiliary,
+  JsonModule,
 } from '@simlin/engine';
 import { defined, type Series } from '../common';
 
@@ -141,6 +146,8 @@ describe('Stock', () => {
       nonNegative: true,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -202,6 +209,8 @@ describe('Flow', () => {
       nonNegative: true,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -239,6 +248,8 @@ describe('Aux', () => {
       gf: undefined,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -271,6 +282,8 @@ describe('Aux', () => {
       gf,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -296,6 +309,9 @@ describe('Module', () => {
       documentation: 'A sector submodel',
       units: '',
       references: [{ src: 'input_var', dst: 'sector_input' }],
+      canBeModuleInput: false,
+      isPublic: false,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -327,6 +343,9 @@ describe('Module', () => {
       documentation: '',
       units: '',
       references: [],
+      canBeModuleInput: false,
+      isPublic: false,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -356,6 +375,9 @@ describe('Module', () => {
         { src: '', dst: '' },
         { src: 'food', dst: '' },
       ],
+      canBeModuleInput: false,
+      isPublic: false,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -380,6 +402,9 @@ describe('Module', () => {
       documentation: '',
       units: '',
       references: [{ src: 'food', dst: 'sector·sector_input' }],
+      canBeModuleInput: false,
+      isPublic: false,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -388,6 +413,30 @@ describe('Module', () => {
 
     const restored = moduleFromJson(moduleToJson(mod));
     expect(restored.references[0].dst).toBe('sector·sector_input');
+  });
+
+  it('round-trips module compat (canBeModuleInput, isPublic, dataSource)', () => {
+    // The engine's From<Module> (json.rs) reads these three compat fields and
+    // defaults the rest, so a module edit must preserve exactly these.
+    const json: JsonModule = {
+      name: 'sector',
+      modelName: 'SectorModel',
+      compat: {
+        canBeModuleInput: true,
+        isPublic: true,
+        dataSource: { kind: 'constants', file: 'c.csv', tabOrDelimiter: ',', rowOrCol: '1', cell: 'A1' },
+      },
+    };
+    const restored = moduleFromJson(json);
+    expect(restored.canBeModuleInput).toBe(true);
+    expect(restored.isPublic).toBe(true);
+    expect(restored.dataSource?.kind).toBe('constants');
+    expect(restored.dataSource?.file).toBe('c.csv');
+
+    const out = moduleToJson(restored);
+    expect(out.compat?.canBeModuleInput).toBe(true);
+    expect(out.compat?.isPublic).toBe(true);
+    expect(out.compat?.dataSource).toEqual(json.compat!.dataSource);
   });
 });
 
@@ -837,6 +886,8 @@ describe('canBeModuleInput and isPublic', () => {
       nonNegative: false,
       canBeModuleInput: true,
       isPublic: true,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -859,6 +910,8 @@ describe('canBeModuleInput and isPublic', () => {
       nonNegative: false,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -880,6 +933,8 @@ describe('canBeModuleInput and isPublic', () => {
       nonNegative: true,
       canBeModuleInput: true,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -924,6 +979,8 @@ describe('canBeModuleInput and isPublic', () => {
       nonNegative: false,
       canBeModuleInput: true,
       isPublic: true,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -945,6 +1002,8 @@ describe('canBeModuleInput and isPublic', () => {
       nonNegative: true,
       canBeModuleInput: false,
       isPublic: true,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -988,6 +1047,8 @@ describe('canBeModuleInput and isPublic', () => {
       gf: undefined,
       canBeModuleInput: true,
       isPublic: true,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -1008,6 +1069,8 @@ describe('canBeModuleInput and isPublic', () => {
       gf: undefined,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -1035,6 +1098,8 @@ describe('Arrayed Equations', () => {
       nonNegative: false,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -1061,16 +1126,20 @@ describe('Arrayed Equations', () => {
       equation: {
         type: 'arrayed',
         dimensionNames: ['regions'],
-        elements: new Map<string, string>([
-          ['north', '50'],
-          ['south', '75'],
+        elements: new Map<string, ArrayedElement>([
+          ['north', { equation: '50', graphicalFunction: undefined, activeInitial: undefined }],
+          ['south', { equation: '75', graphicalFunction: undefined, activeInitial: undefined }],
         ]),
+        defaultEquation: undefined,
+        hasExceptDefault: false,
       },
       documentation: 'Demand by region',
       units: '',
       gf: undefined,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -1087,8 +1156,8 @@ describe('Arrayed Equations', () => {
     const eq = restored.equation as ArrayedEquation;
     expect(eq.dimensionNames).toEqual(['regions']);
     expect(eq.elements.size).toBe(2);
-    expect(eq.elements.get('north')).toBe('50');
-    expect(eq.elements.get('south')).toBe('75');
+    expect(eq.elements.get('north')?.equation).toBe('50');
+    expect(eq.elements.get('south')?.equation).toBe('75');
   });
 });
 
@@ -1150,6 +1219,8 @@ describe('Model', () => {
       nonNegative: false,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -1166,6 +1237,8 @@ describe('Model', () => {
       nonNegative: false,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -1209,6 +1282,8 @@ describe('Project', () => {
       nonNegative: true,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -1225,6 +1300,8 @@ describe('Project', () => {
       nonNegative: true,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -1240,6 +1317,8 @@ describe('Project', () => {
       gf: undefined,
       canBeModuleInput: false,
       isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -1347,6 +1426,8 @@ describe('projectAttachData', () => {
     gf: undefined,
     canBeModuleInput: false,
     isPublic: false,
+    activeInitial: undefined,
+    dataSource: undefined,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -1459,5 +1540,161 @@ describe('projectAttachData', () => {
     const v = defined(attached.models.get('main')).variables.get('unused');
 
     expect(v?.data).toBeUndefined();
+  });
+});
+
+// These tests pin the wire fields that an editor upsert (a full variable
+// replace by UID) previously dropped, because datamodel.ts neither read them
+// on the way in nor wrote them on the way out. The JSON key names are the
+// source of truth in the Rust serializer src/simlin-engine/src/json.rs
+// (all #[serde(rename_all = "camelCase")]):
+//   - Compat: activeInitial, nonNegative, canBeModuleInput, isPublic, dataSource
+//   - JsonDataSource: kind ("data"/"constants"/"lookups"/"subscript"), file,
+//     tabOrDelimiter, rowOrCol, cell
+//   - ArrayedEquation: dimensions, equation (the EXCEPT default), elements,
+//     hasExceptDefault
+//   - ElementEquation: subscript, equation, compat, graphicalFunction
+// The engine-driven round-trip in datamodel-roundtrip-e2e.test.ts re-checks
+// these names against the real serializer, so a wrong key here cannot pass
+// silently.
+describe('variable compat round-trip (silent data-loss regression)', () => {
+  it('round-trips activeInitial on a stock through compat', () => {
+    const json: JsonStock = {
+      name: 'level',
+      inflows: [],
+      outflows: [],
+      initialEquation: '0',
+      compat: { activeInitial: 'starting_level' },
+    };
+    const restored = stockFromJson(json);
+    expect(restored.activeInitial).toBe('starting_level');
+    expect(stockToJson(restored).compat?.activeInitial).toBe('starting_level');
+  });
+
+  it('round-trips activeInitial on a flow and an aux through compat', () => {
+    const flow = flowFromJson({ name: 'rate', equation: '1', compat: { activeInitial: '2' } });
+    expect(flow.activeInitial).toBe('2');
+    expect(flowToJson(flow).compat?.activeInitial).toBe('2');
+
+    const aux = auxFromJson({ name: 'a', equation: '1', compat: { activeInitial: '3' } });
+    expect(aux.activeInitial).toBe('3');
+    expect(auxToJson(aux).compat?.activeInitial).toBe('3');
+  });
+
+  it('round-trips compat.dataSource (GET DIRECT DATA) on an aux', () => {
+    const json: JsonAuxiliary = {
+      name: 'imported',
+      compat: {
+        dataSource: {
+          kind: 'data',
+          file: 'data.xlsx',
+          tabOrDelimiter: 'Sheet1',
+          rowOrCol: 'A',
+          cell: 'B2',
+        },
+      },
+    };
+    const restored = auxFromJson(json);
+    const ds = restored.dataSource as DataSource;
+    expect(ds.kind).toBe('data');
+    expect(ds.file).toBe('data.xlsx');
+    expect(ds.tabOrDelimiter).toBe('Sheet1');
+    expect(ds.rowOrCol).toBe('A');
+    expect(ds.cell).toBe('B2');
+
+    const out = auxToJson(restored).compat?.dataSource;
+    expect(out).toEqual(json.compat!.dataSource);
+  });
+
+  it('maps each dataSource kind and falls back to "data" for unknown', () => {
+    for (const kind of ['data', 'constants', 'lookups', 'subscript'] as const) {
+      const aux = auxFromJson({
+        name: 'x',
+        compat: { dataSource: { kind, file: 'f', tabOrDelimiter: '', rowOrCol: '', cell: '' } },
+      });
+      expect(aux.dataSource?.kind).toBe(kind);
+    }
+    const unknown = auxFromJson({
+      name: 'x',
+      compat: { dataSource: { kind: 'bogus', file: 'f', tabOrDelimiter: '', rowOrCol: '', cell: '' } },
+    });
+    expect(unknown.dataSource?.kind).toBe('data');
+  });
+
+  it('round-trips the EXCEPT default equation and hasExceptDefault flag', () => {
+    const json: JsonAuxiliary = {
+      name: 'arr',
+      arrayedEquation: {
+        dimensions: ['dim'],
+        equation: '99',
+        hasExceptDefault: true,
+        elements: [{ subscript: 'a', equation: '1' }],
+      },
+    };
+    const restored = auxFromJson(json);
+    const eq = restored.equation as ArrayedEquation;
+    expect(eq.defaultEquation).toBe('99');
+    expect(eq.hasExceptDefault).toBe(true);
+
+    const out = auxToJson(restored).arrayedEquation!;
+    expect(out.equation).toBe('99');
+    expect(out.hasExceptDefault).toBe(true);
+  });
+
+  it('infers hasExceptDefault from a present default when the flag is absent', () => {
+    // Mirrors the engine: legacy JSON without the flag infers true when a
+    // default equation is present.
+    const restored = auxFromJson({
+      name: 'arr',
+      arrayedEquation: { dimensions: ['dim'], equation: '7', elements: [{ subscript: 'a', equation: '1' }] },
+    });
+    expect((restored.equation as ArrayedEquation).hasExceptDefault).toBe(true);
+
+    // No default equation => no flag emitted on the way out.
+    const noDefault = auxFromJson({
+      name: 'arr',
+      arrayedEquation: { dimensions: ['dim'], elements: [{ subscript: 'a', equation: '1' }] },
+    });
+    const eq = noDefault.equation as ArrayedEquation;
+    expect(eq.defaultEquation).toBeUndefined();
+    expect(eq.hasExceptDefault).toBe(false);
+    const out = auxToJson(noDefault).arrayedEquation!;
+    expect(out.equation).toBeUndefined();
+    expect(out.hasExceptDefault).toBeUndefined();
+  });
+
+  it('round-trips per-element graphical functions and per-element activeInitial', () => {
+    const json: JsonAuxiliary = {
+      name: 'arr',
+      arrayedEquation: {
+        dimensions: ['dim'],
+        elements: [
+          {
+            subscript: 'a',
+            equation: '1',
+            graphicalFunction: { yPoints: [0, 1, 2], xScale: { min: 0, max: 2 }, yScale: { min: 0, max: 2 } },
+            compat: { activeInitial: 'a0' },
+          },
+          { subscript: 'b', equation: '2' },
+        ],
+      },
+    };
+    const restored = auxFromJson(json);
+    const eq = restored.equation as ArrayedEquation;
+    const a = eq.elements.get('a') as ArrayedElement;
+    expect(a.equation).toBe('1');
+    expect(a.graphicalFunction?.yPoints).toEqual([0, 1, 2]);
+    expect(a.activeInitial).toBe('a0');
+    const b = eq.elements.get('b') as ArrayedElement;
+    expect(b.graphicalFunction).toBeUndefined();
+    expect(b.activeInitial).toBeUndefined();
+
+    const out = auxToJson(restored).arrayedEquation!;
+    const outA = out.elements!.find((e) => e.subscript === 'a')!;
+    expect(outA.graphicalFunction?.yPoints).toEqual([0, 1, 2]);
+    expect(outA.compat?.activeInitial).toBe('a0');
+    const outB = out.elements!.find((e) => e.subscript === 'b')!;
+    expect(outB.graphicalFunction).toBeUndefined();
+    expect(outB.compat).toBeUndefined();
   });
 });

@@ -14,7 +14,13 @@ import Button from './components/Button';
 import { canonicalize } from '@simlin/core/canonicalize';
 
 import { Project as EngineProject } from '@simlin/engine';
-import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs, JsonArrayedEquation } from '@simlin/engine';
+import type {
+  JsonProjectPatch,
+  JsonModelOperation,
+  JsonSimSpecs,
+  JsonArrayedEquation,
+  JsonModule,
+} from '@simlin/engine';
 import { stockFlowViewToJson } from './view-conversion';
 import {
   Project,
@@ -36,6 +42,7 @@ import {
   flowToJson,
   auxToJson,
   moduleToJson,
+  arrayedEquationToJson,
   type ModuleReference,
 } from '@simlin/core/datamodel';
 import { defined, exists, setsEqual } from '@simlin/core/common';
@@ -1553,15 +1560,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         },
       };
     } else if (eq.type === 'arrayed') {
-      return {
-        arrayedEquation: {
-          dimensions: [...eq.dimensionNames],
-          elements: [...eq.elements.entries()].map(([subscript, eqStr]) => ({
-            subscript,
-            equation: eqStr,
-          })),
-        },
-      };
+      // Use the shared serializer so per-element graphical functions, per-element
+      // ACTIVE INITIAL equations, and the EXCEPT default round-trip through the
+      // upsert (a hand-rolled mapping here previously dropped them).
+      return { arrayedEquation: arrayedEquationToJson(eq) };
     }
     return { equation: '' };
   };
@@ -1620,14 +1622,15 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
           },
         };
       } else if (variable.type === 'module') {
-        // Modules have no equations or graphical functions -- only units and docs
+        // Modules have no equations or graphical functions -- only units and docs.
+        // Use moduleToJson to preserve all fields (including compat flags
+        // canBeModuleInput, isPublic, dataSource), then override edited fields.
+        const base = moduleToJson(variable);
         op = {
           type: 'upsertModule',
           payload: {
             module: {
-              name: variable.ident,
-              modelName: variable.modelName,
-              references: variable.references.map((ref) => ({ src: ref.src, dst: ref.dst })),
+              ...base,
               units: newUnits ?? variable.units ?? undefined,
               documentation: newDocs ?? variable.documentation ?? undefined,
             },
@@ -1732,15 +1735,13 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       const variable = model.variables.get(ident);
       if (!variable || variable.type !== 'module') return;
 
+      // Preserve all fields (including compat) via moduleToJson; override the model ref.
       const op: JsonModelOperation = {
         type: 'upsertModule',
         payload: {
           module: {
-            name: variable.ident,
+            ...moduleToJson(variable),
             modelName: newModelName,
-            references: variable.references.map((ref) => ({ src: ref.src, dst: ref.dst })),
-            units: variable.units || undefined,
-            documentation: variable.documentation || undefined,
           },
         },
       };
@@ -1762,13 +1763,12 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       const variable = model.variables.get(ident);
       if (!variable || variable.type !== 'module') return;
 
+      // Preserve all fields (including compat) via moduleToJson; override units/docs.
       const op: JsonModelOperation = {
         type: 'upsertModule',
         payload: {
           module: {
-            name: variable.ident,
-            modelName: variable.modelName,
-            references: variable.references.map((ref) => ({ src: ref.src, dst: ref.dst })),
+            ...moduleToJson(variable),
             units: newUnits ?? variable.units ?? undefined,
             documentation: newDocs ?? variable.documentation ?? undefined,
           },
@@ -1794,15 +1794,13 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       const variable = model.variables.get(ident);
       if (!variable || variable.type !== 'module') return;
 
+      // Preserve all fields (including compat) via moduleToJson; override references.
       const op: JsonModelOperation = {
         type: 'upsertModule',
         payload: {
           module: {
-            name: variable.ident,
-            modelName: variable.modelName,
+            ...moduleToJson(variable),
             references: newReferences.map((ref) => ({ src: ref.src, dst: ref.dst })),
-            units: variable.units || undefined,
-            documentation: variable.documentation || undefined,
           },
         },
       };
@@ -1830,26 +1828,14 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       newModelName = getUniqueDuplicateName(moduleIdent, project);
     }
 
-    // Look up existing module to preserve metadata through the model reference change
+    // Look up existing module to preserve metadata (including compat) through the
+    // model reference change; moduleToJson carries every field forward.
     const model = getModel();
     const existingModule = model?.variables.get(moduleIdent);
-    const modulePayload: {
-      name: string;
-      modelName: string;
-      references?: { src: string; dst: string }[];
-      units?: string;
-      documentation?: string;
-    } = {
-      name: moduleIdent,
-      modelName: newModelName,
-    };
-    if (existingModule && existingModule.type === 'module') {
-      if (existingModule.references.length > 0) {
-        modulePayload.references = existingModule.references.map((ref) => ({ src: ref.src, dst: ref.dst }));
-      }
-      if (existingModule.units) modulePayload.units = existingModule.units;
-      if (existingModule.documentation) modulePayload.documentation = existingModule.documentation;
-    }
+    const modulePayload: JsonModule =
+      existingModule && existingModule.type === 'module'
+        ? { ...moduleToJson(existingModule), name: moduleIdent, modelName: newModelName }
+        : { name: moduleIdent, modelName: newModelName };
 
     const patch: JsonProjectPatch = {
       projectOps: [{ type: 'addModel', payload: { name: newModelName } }],

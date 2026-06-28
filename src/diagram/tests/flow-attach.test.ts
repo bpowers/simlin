@@ -109,6 +109,8 @@ function makeStockVar(ident: string, inflows: string[] = [], outflows: string[] 
     nonNegative: false,
     canBeModuleInput: false,
     isPublic: false,
+    activeInitial: undefined,
+    dataSource: undefined,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,

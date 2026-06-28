@@ -31,6 +31,21 @@ export interface JsonGraphicalFunction {
 }
 
 /**
+ * External-data reference (Vensim GET DIRECT DATA / CONSTANTS / LOOKUPS /
+ * SUBSCRIPT). Field names and the `kind` string values match the Rust
+ * `json::JsonDataSource` serializer in src/simlin-engine/src/json.rs
+ * (`#[serde(rename_all = "camelCase")]`; kind is one of
+ * `data`/`constants`/`lookups`/`subscript`).
+ */
+export interface JsonDataSource {
+  kind: string;
+  file: string;
+  tabOrDelimiter: string;
+  rowOrCol: string;
+  cell: string;
+}
+
+/**
  * Vensim compatibility options for a variable.
  */
 export interface JsonCompat {
@@ -38,6 +53,7 @@ export interface JsonCompat {
   nonNegative?: boolean;
   canBeModuleInput?: boolean;
   isPublic?: boolean;
+  dataSource?: JsonDataSource;
 }
 
 /**
@@ -58,6 +74,12 @@ export interface JsonArrayedEquation {
   equation?: string;
   compat?: JsonCompat;
   elements?: JsonElementEquation[];
+  /**
+   * Whether `equation` is an EXCEPT default applied to elements not covered
+   * by `elements` (Vensim EXCEPT). Matches the Rust `hasExceptDefault` field;
+   * only meaningful when a default `equation` is present.
+   */
+  hasExceptDefault?: boolean;
 }
 
 /**

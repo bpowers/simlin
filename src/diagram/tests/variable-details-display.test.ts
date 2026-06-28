@@ -17,6 +17,8 @@ function aux(overrides: Partial<Aux> = {}): Variable {
     gf: undefined,
     canBeModuleInput: false,
     isPublic: false,
+    activeInitial: undefined,
+    dataSource: undefined,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,

@@ -22,6 +22,7 @@ import {
   type JsonGraphicalFunctionScale,
   type JsonArrayedEquation,
   type JsonElementEquation,
+  type JsonDataSource,
   type JsonView,
   type JsonViewElement,
   type JsonStockViewElement,
@@ -146,6 +147,56 @@ export function graphicalFunctionToJson(gf: GraphicalFunction): JsonGraphicalFun
   return result;
 }
 
+// DataSource: external-data reference (Vensim GET DIRECT DATA / CONSTANTS /
+// LOOKUPS / SUBSCRIPT). Carried on a variable's compat so an edit to any other
+// field does not drop the reference. The wire shape and `kind` values are
+// defined by the Rust json::JsonDataSource serializer (src/simlin-engine/src/json.rs).
+
+export type DataSourceKind = 'data' | 'constants' | 'lookups' | 'subscript';
+
+export interface DataSource {
+  readonly kind: DataSourceKind;
+  readonly file: string;
+  readonly tabOrDelimiter: string;
+  readonly rowOrCol: string;
+  readonly cell: string;
+}
+
+function dataSourceKindFromJson(kind: string): DataSourceKind {
+  // Mirror the Rust data_source_from_json fallback: any unrecognized kind
+  // (including the default "data") maps to 'data'.
+  switch (kind) {
+    case 'constants':
+      return 'constants';
+    case 'lookups':
+      return 'lookups';
+    case 'subscript':
+      return 'subscript';
+    default:
+      return 'data';
+  }
+}
+
+export function dataSourceFromJson(json: JsonDataSource): DataSource {
+  return {
+    kind: dataSourceKindFromJson(json.kind),
+    file: json.file ?? '',
+    tabOrDelimiter: json.tabOrDelimiter ?? '',
+    rowOrCol: json.rowOrCol ?? '',
+    cell: json.cell ?? '',
+  };
+}
+
+export function dataSourceToJson(ds: DataSource): JsonDataSource {
+  return {
+    kind: ds.kind,
+    file: ds.file,
+    tabOrDelimiter: ds.tabOrDelimiter,
+    rowOrCol: ds.rowOrCol,
+    cell: ds.cell,
+  };
+}
+
 // Equation types
 
 export interface ScalarEquation {
@@ -159,32 +210,100 @@ export interface ApplyToAllEquation {
   readonly equation: string;
 }
 
+// A single element of an arrayed (per-element) equation. Carries the
+// element's equation plus any per-element graphical function and ACTIVE
+// INITIAL equation (the only per-element compat field the engine round-trips).
+export interface ArrayedElement {
+  readonly equation: string;
+  readonly graphicalFunction: GraphicalFunction | undefined;
+  readonly activeInitial: string | undefined;
+}
+
 export interface ArrayedEquation {
   readonly type: 'arrayed';
   readonly dimensionNames: readonly string[];
-  readonly elements: ReadonlyMap<string, string>;
+  readonly elements: ReadonlyMap<string, ArrayedElement>;
+  // The EXCEPT default equation applied to elements not listed in `elements`,
+  // and the flag indicating it is an EXCEPT default. `hasExceptDefault` is only
+  // meaningful when `defaultEquation` is set.
+  readonly defaultEquation: string | undefined;
+  readonly hasExceptDefault: boolean;
 }
 
 export type Equation = ScalarEquation | ApplyToAllEquation | ArrayedEquation;
+
+// Build the datamodel ArrayedEquation from its JSON form, preserving per-element
+// equations, graphical functions, and ACTIVE INITIAL equations as well as the
+// EXCEPT default. Shared by stocks, flows, and auxes (the per-element shape is
+// identical across variable kinds).
+export function arrayedEquationFromJson(json: JsonArrayedEquation): ArrayedEquation {
+  const dimensionNames: readonly string[] = json.dimensions ?? [];
+  const elements = new Map<string, ArrayedElement>(
+    (json.elements ?? []).map(
+      (el: JsonElementEquation) =>
+        [
+          el.subscript,
+          {
+            equation: el.equation,
+            graphicalFunction: el.graphicalFunction ? graphicalFunctionFromJson(el.graphicalFunction) : undefined,
+            // The engine only round-trips activeInitial out of a per-element compat.
+            activeInitial: el.compat?.activeInitial,
+          },
+        ] as [string, ArrayedElement],
+    ),
+  );
+  // Mirror the engine: a legacy payload without hasExceptDefault infers `true`
+  // when a default equation is present (preserving pre-flag behavior).
+  const hasExceptDefault = json.hasExceptDefault ?? json.equation !== undefined;
+  return {
+    type: 'arrayed',
+    dimensionNames,
+    elements,
+    defaultEquation: json.equation,
+    hasExceptDefault,
+  };
+}
+
+// Serialize a datamodel ArrayedEquation back to JSON. Only emits the EXCEPT
+// default flag when a default equation is present (mirroring the engine, where
+// the flag is meaningless without one).
+export function arrayedEquationToJson(eq: ArrayedEquation): JsonArrayedEquation {
+  const result: JsonArrayedEquation = {
+    dimensions: [...eq.dimensionNames],
+    elements: [...eq.elements].map(([subscript, el]) => {
+      const jsonEl: JsonElementEquation = { subscript, equation: el.equation };
+      if (el.graphicalFunction) {
+        jsonEl.graphicalFunction = graphicalFunctionToJson(el.graphicalFunction);
+      }
+      if (el.activeInitial) {
+        jsonEl.compat = { activeInitial: el.activeInitial };
+      }
+      return jsonEl;
+    }),
+  };
+  if (eq.defaultEquation !== undefined) {
+    result.equation = eq.defaultEquation;
+    result.hasExceptDefault = eq.hasExceptDefault;
+  }
+  return result;
+}
 
 function stockEquationFromJson(
   initialEquation: string | undefined,
   arrayedEquation: JsonArrayedEquation | undefined,
 ): Equation {
   if (arrayedEquation) {
-    const dimensionNames: readonly string[] = arrayedEquation.dimensions ?? [];
+    // Per-element equations imply an 'arrayed' equation; otherwise it's applyToAll.
+    // Known inert divergence: a payload with an EXCEPT default but zero elements
+    // routes to applyToAll here (the engine routes Some([]) to Arrayed), dropping
+    // hasExceptDefault. This is semantically equivalent (a default with no excepted
+    // subscripts applies to all elements either way) and real models never emit it.
     if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
-      return {
-        type: 'arrayed',
-        dimensionNames,
-        elements: new Map<string, string>(
-          arrayedEquation.elements.map((el: JsonElementEquation) => [el.subscript, el.equation] as [string, string]),
-        ),
-      };
+      return arrayedEquationFromJson(arrayedEquation);
     } else {
       return {
         type: 'applyToAll',
-        dimensionNames,
+        dimensionNames: arrayedEquation.dimensions ?? [],
         equation: arrayedEquation.equation ?? '',
       };
     }
@@ -203,23 +322,18 @@ function auxEquationFromJson(
   }
 
   if (arrayedEquation) {
-    const dimensionNames: readonly string[] = arrayedEquation.dimensions ?? [];
+    // Per-element equations imply an 'arrayed' equation; otherwise it's applyToAll.
+    // Known inert divergence: a payload with an EXCEPT default but zero elements
+    // routes to applyToAll here (the engine routes Some([]) to Arrayed), dropping
+    // hasExceptDefault. This is semantically equivalent (a default with no excepted
+    // subscripts applies to all elements either way) and real models never emit it.
     if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
-      return {
-        equation: {
-          type: 'arrayed',
-          dimensionNames,
-          elements: new Map<string, string>(
-            arrayedEquation.elements.map((el: JsonElementEquation) => [el.subscript, el.equation] as [string, string]),
-          ),
-        },
-        graphicalFunction,
-      };
+      return { equation: arrayedEquationFromJson(arrayedEquation), graphicalFunction };
     } else {
       return {
         equation: {
           type: 'applyToAll',
-          dimensionNames,
+          dimensionNames: arrayedEquation.dimensions ?? [],
           equation: arrayedEquation.equation ?? '',
         },
         graphicalFunction,
@@ -243,12 +357,7 @@ function stockEquationToJson(equation: Equation): { initialEquation?: string; ar
       },
     };
   } else if (equation.type === 'arrayed') {
-    return {
-      arrayedEquation: {
-        dimensions: [...equation.dimensionNames],
-        elements: [...equation.elements].map(([subscript, eqn]) => ({ subscript, equation: eqn })),
-      },
-    };
+    return { arrayedEquation: arrayedEquationToJson(equation) };
   }
   return {};
 }
@@ -264,12 +373,7 @@ function auxEquationToJson(equation: Equation): { equation?: string; arrayedEqua
       },
     };
   } else if (equation.type === 'arrayed') {
-    return {
-      arrayedEquation: {
-        dimensions: [...equation.dimensionNames],
-        elements: [...equation.elements].map(([subscript, eqn]) => ({ subscript, equation: eqn })),
-      },
-    };
+    return { arrayedEquation: arrayedEquationToJson(equation) };
   }
   return {};
 }
@@ -287,6 +391,10 @@ export interface Stock {
   readonly nonNegative: boolean;
   readonly canBeModuleInput: boolean;
   readonly isPublic: boolean;
+  // Vensim ACTIVE INITIAL: the variable's separate initialization equation.
+  readonly activeInitial: string | undefined;
+  // External-data reference (Vensim GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT).
+  readonly dataSource: DataSource | undefined;
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
@@ -303,6 +411,8 @@ export interface Flow {
   readonly nonNegative: boolean;
   readonly canBeModuleInput: boolean;
   readonly isPublic: boolean;
+  readonly activeInitial: string | undefined;
+  readonly dataSource: DataSource | undefined;
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
@@ -318,6 +428,8 @@ export interface Aux {
   readonly gf: GraphicalFunction | undefined;
   readonly canBeModuleInput: boolean;
   readonly isPublic: boolean;
+  readonly activeInitial: string | undefined;
+  readonly dataSource: DataSource | undefined;
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
@@ -344,6 +456,12 @@ export interface Module {
   readonly documentation: string;
   readonly units: string;
   readonly references: readonly ModuleReference[];
+  // The engine reads only canBeModuleInput, isPublic, and dataSource out of a
+  // module's compat (From<Module> in json.rs uses defaults for the rest), so
+  // ACTIVE INITIAL and nonNegative are intentionally absent here.
+  readonly canBeModuleInput: boolean;
+  readonly isPublic: boolean;
+  readonly dataSource: DataSource | undefined;
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
@@ -385,6 +503,8 @@ export function stockFromJson(json: JsonStock): Stock {
     nonNegative: json.compat?.nonNegative || json.nonNegative || false,
     canBeModuleInput: json.compat?.canBeModuleInput ?? false,
     isPublic: json.compat?.isPublic ?? false,
+    activeInitial: json.compat?.activeInitial,
+    dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -429,6 +549,18 @@ export function stockToJson(stock: Stock): JsonStock {
     }
     result.compat.isPublic = true;
   }
+  if (stock.activeInitial) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.activeInitial = stock.activeInitial;
+  }
+  if (stock.dataSource) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.dataSource = dataSourceToJson(stock.dataSource);
+  }
   if (stock.documentation) {
     result.documentation = stock.documentation;
   }
@@ -453,6 +585,8 @@ export function flowFromJson(json: JsonFlow): Flow {
     nonNegative: json.compat?.nonNegative || json.nonNegative || false,
     canBeModuleInput: json.compat?.canBeModuleInput ?? false,
     isPublic: json.compat?.isPublic ?? false,
+    activeInitial: json.compat?.activeInitial,
+    dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -498,6 +632,18 @@ export function flowToJson(flow: Flow): JsonFlow {
     }
     result.compat.isPublic = true;
   }
+  if (flow.activeInitial) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.activeInitial = flow.activeInitial;
+  }
+  if (flow.dataSource) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.dataSource = dataSourceToJson(flow.dataSource);
+  }
   if (flow.documentation) {
     result.documentation = flow.documentation;
   }
@@ -519,6 +665,8 @@ export function auxFromJson(json: JsonAuxiliary): Aux {
     gf: graphicalFunction,
     canBeModuleInput: json.compat?.canBeModuleInput ?? false,
     isPublic: json.compat?.isPublic ?? false,
+    activeInitial: json.compat?.activeInitial,
+    dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -558,6 +706,18 @@ export function auxToJson(aux: Aux): JsonAuxiliary {
     }
     result.compat.isPublic = true;
   }
+  if (aux.activeInitial) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.activeInitial = aux.activeInitial;
+  }
+  if (aux.dataSource) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.dataSource = dataSourceToJson(aux.dataSource);
+  }
   if (aux.documentation) {
     result.documentation = aux.documentation;
   }
@@ -572,6 +732,9 @@ export function moduleFromJson(json: JsonModule): Module {
     documentation: json.documentation ?? '',
     units: json.units ?? '',
     references: (json.references ?? []).map((ref: JsonModuleReference) => moduleReferenceFromJson(ref)),
+    canBeModuleInput: json.compat?.canBeModuleInput ?? false,
+    isPublic: json.compat?.isPublic ?? false,
+    dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -592,6 +755,24 @@ export function moduleToJson(mod: Module): JsonModule {
   }
   if (mod.units) {
     result.units = mod.units;
+  }
+  if (mod.canBeModuleInput) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.canBeModuleInput = true;
+  }
+  if (mod.isPublic) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.isPublic = true;
+  }
+  if (mod.dataSource) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.dataSource = dataSourceToJson(mod.dataSource);
   }
   if (mod.documentation) {
     result.documentation = mod.documentation;
