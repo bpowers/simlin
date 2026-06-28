@@ -81,7 +81,9 @@ function rewriteDepBlock(deps, fileRef, context) {
  *
  * @param serverPkg parsed src/server/package.json
  * @param opts.vendorDir relative dir the workspace packages are vendored under (default ./vendor)
- * @param opts.packageManager optional packageManager string to pin (e.g. "pnpm@10.6.0")
+ * @param opts.packageManager optional packageManager string to pin (e.g. "pnpm@10.6.0").
+ *   When it is a `pnpm@<version>` spec, engines.pnpm is also pinned to that
+ *   version (the GAE buildpack reads engines.pnpm, not corepack/packageManager).
  */
 export function buildStagingServerManifest(serverPkg, opts = {}) {
   const { vendorDir = './vendor', packageManager } = opts;
@@ -114,8 +116,29 @@ export function buildStagingServerManifest(serverPkg, opts = {}) {
     manifest.optionalDependencies = optionalDependencies;
   }
 
+  // Carry forward any engines the server declared, then pin engines.pnpm from
+  // the packageManager version. App Engine's Node buildpack reads engines.pnpm
+  // and gives it precedence over packageManager/corepack (implemented in
+  // GoogleCloudPlatform/buildpacks pnpm.go/registry.go), where an exact version
+  // short-circuits registry resolution to exactly that pnpm. Without it the
+  // buildpack may fall back to its bundled pnpm and re-resolve or reject our
+  // frozen lockfile, failing the deploy. The explicit pin wins over any
+  // inherited pnpm range so the buildpack uses exactly the locked version.
+  // packageManager is still emitted verbatim (corepack wants the full spec incl.
+  // the +sha512 hash); the bare version is required here because a +hash
+  // constraint would miss the exact-semver fast path.
+  const engines = { ...(serverPkg.engines ?? {}) };
   if (packageManager) {
     manifest.packageManager = packageManager;
+    // packageManager spec: `pnpm@<version>` optionally with a `+<hash>` build
+    // suffix (e.g. `pnpm@10.6.0+sha512.<hash>`). engines wants the bare version.
+    const m = /^pnpm@([^+\s]+)/.exec(packageManager.trim());
+    if (m) {
+      engines.pnpm = m[1];
+    }
+  }
+  if (Object.keys(engines).length > 0) {
+    manifest.engines = engines;
   }
   return manifest;
 }
