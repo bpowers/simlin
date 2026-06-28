@@ -6,7 +6,7 @@
  * @jest-environment node
  */
 
-import type { ModuleReference } from '@simlin/core/datamodel';
+import type { ModuleReference, Module, Aux } from '@simlin/core/datamodel';
 
 import {
   isDuplicateReference,
@@ -17,7 +17,27 @@ import {
   getAvailableSrcVariables,
   qualifyDst,
   unqualifyDst,
+  buildModuleReferencePayload,
 } from '../module-wiring';
+
+function makeModule(overrides: Partial<Module> = {}): Module {
+  return {
+    type: 'module',
+    ident: 'hares_inst',
+    modelName: 'hares',
+    documentation: 'doc',
+    units: 'widgets',
+    references: [{ src: 'predators', dst: 'hares_inst·input_food' }],
+    canBeModuleInput: true,
+    isPublic: true,
+    dataSource: undefined,
+    data: undefined,
+    errors: undefined,
+    unitErrors: undefined,
+    uid: 7,
+    ...overrides,
+  };
+}
 
 // -- Tests --
 
@@ -252,5 +272,59 @@ describe('getAvailableSrcVariables', () => {
     const vars = new Map<string, { type: string; ident: string }>();
     const result = getAvailableSrcVariables(vars);
     expect(result).toEqual([]);
+  });
+});
+
+describe('buildModuleReferencePayload', () => {
+  it('preserves compat (canBeModuleInput/isPublic/dataSource) while re-pointing the model', () => {
+    // upsertModule is a full-replace by UID, so re-pointing a module at a new
+    // model must carry every field forward -- compat is the data-loss trap.
+    const existing = makeModule({
+      canBeModuleInput: true,
+      isPublic: true,
+      dataSource: { kind: 'data', file: 'd.csv', tabOrDelimiter: ',', rowOrCol: 'A', cell: 'B2' },
+    });
+    const payload = buildModuleReferencePayload(existing, 'hares_inst', 'hares_copy');
+    expect(payload.name).toBe('hares_inst');
+    expect(payload.modelName).toBe('hares_copy');
+    expect(payload.compat?.canBeModuleInput).toBe(true);
+    expect(payload.compat?.isPublic).toBe(true);
+    expect(payload.compat?.dataSource).toEqual({
+      kind: 'data',
+      file: 'd.csv',
+      tabOrDelimiter: ',',
+      rowOrCol: 'A',
+      cell: 'B2',
+    });
+    // existing references/units/documentation also carry forward
+    expect(payload.references).toEqual([{ src: 'predators', dst: 'hares_inst·input_food' }]);
+    expect(payload.units).toBe('widgets');
+    expect(payload.documentation).toBe('doc');
+  });
+
+  it('returns a bare {name, modelName} when there is no existing module', () => {
+    const payload = buildModuleReferencePayload(undefined, 'new_inst', 'new_model');
+    expect(payload).toEqual({ name: 'new_inst', modelName: 'new_model' });
+  });
+
+  it('returns a bare payload when the existing variable is not a module', () => {
+    const aux: Aux = {
+      type: 'aux',
+      ident: 'not_a_module',
+      equation: { type: 'scalar', equation: '1' },
+      documentation: '',
+      units: '',
+      gf: undefined,
+      canBeModuleInput: false,
+      isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: 3,
+    };
+    const payload = buildModuleReferencePayload(aux, 'x', 'y');
+    expect(payload).toEqual({ name: 'x', modelName: 'y' });
   });
 });

@@ -14,13 +14,7 @@ import Button from './components/Button';
 import { canonicalize } from '@simlin/core/canonicalize';
 
 import { Project as EngineProject } from '@simlin/engine';
-import type {
-  JsonProjectPatch,
-  JsonModelOperation,
-  JsonSimSpecs,
-  JsonArrayedEquation,
-  JsonModule,
-} from '@simlin/engine';
+import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs, JsonArrayedEquation } from '@simlin/engine';
 import { stockFlowViewToJson } from './view-conversion';
 import {
   Project,
@@ -69,6 +63,7 @@ import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 import { isStdlibModel } from './module-navigation';
 import { countModelInstances } from './module-details-utils';
+import { buildModuleReferencePayload } from './module-wiring';
 import { BreadcrumbBar } from './BreadcrumbBar';
 import { ProjectController, type ProjectSnapshot, type EngineApi } from './project-controller';
 
@@ -1832,13 +1827,11 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     }
 
     // Look up existing module to preserve metadata (including compat) through the
-    // model reference change; moduleToJson carries every field forward.
+    // model reference change; the shared helper carries every field forward
+    // (incl. compat) and keeps this in lockstep with the duplicate-model path.
     const model = getModel();
     const existingModule = model?.variables.get(moduleIdent);
-    const modulePayload: JsonModule =
-      existingModule && existingModule.type === 'module'
-        ? { ...moduleToJson(existingModule), name: moduleIdent, modelName: newModelName }
-        : { name: moduleIdent, modelName: newModelName };
+    const modulePayload = buildModuleReferencePayload(existingModule, moduleIdent, newModelName);
 
     const patch: JsonProjectPatch = {
       projectOps: [{ type: 'addModel', payload: { name: newModelName } }],
@@ -1897,26 +1890,13 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         });
       }
 
-      // Preserve existing module metadata through the model reference change
+      // Preserve ALL existing module fields (incl. compat: canBeModuleInput /
+      // isPublic / dataSource) through the model reference change. The hand-built
+      // payload here previously dropped compat -- the same full-replace data-loss
+      // trap fixed elsewhere; use the shared helper so it matches its sibling.
       const currentModel = getModel();
       const existingModule = currentModel?.variables.get(moduleIdent);
-      const dupModulePayload: {
-        name: string;
-        modelName: string;
-        references?: { src: string; dst: string }[];
-        units?: string;
-        documentation?: string;
-      } = {
-        name: moduleIdent,
-        modelName: newModelName,
-      };
-      if (existingModule && existingModule.type === 'module') {
-        if (existingModule.references.length > 0) {
-          dupModulePayload.references = existingModule.references.map((ref) => ({ src: ref.src, dst: ref.dst }));
-        }
-        if (existingModule.units) dupModulePayload.units = existingModule.units;
-        if (existingModule.documentation) dupModulePayload.documentation = existingModule.documentation;
-      }
+      const dupModulePayload = buildModuleReferencePayload(existingModule, moduleIdent, newModelName);
 
       // Combined patch: create model, copy contents, update module reference.
       // Engine processes projectOps before model ops (patch.rs).
