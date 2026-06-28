@@ -503,9 +503,12 @@ export function stockFromJson(json: JsonStock): Stock {
     outflows: json.outflows ?? [],
     // OR-merge: old code never writes compat booleans and new code never
     // writes top-level booleans, so both cannot be meaningfully set at once.
+    // Mirrors the engine's JSON reader (json.rs), which OR-merges all three
+    // legacy top-level flags so a project saved in the old schema is not
+    // silently stripped on the next edit.
     nonNegative: json.compat?.nonNegative || json.nonNegative || false,
-    canBeModuleInput: json.compat?.canBeModuleInput ?? false,
-    isPublic: json.compat?.isPublic ?? false,
+    canBeModuleInput: json.compat?.canBeModuleInput || json.canBeModuleInput || false,
+    isPublic: json.compat?.isPublic || json.isPublic || false,
     activeInitial: json.compat?.activeInitial,
     dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
     data: undefined,
@@ -585,9 +588,12 @@ export function flowFromJson(json: JsonFlow): Flow {
     gf: graphicalFunction,
     // OR-merge: old code never writes compat booleans and new code never
     // writes top-level booleans, so both cannot be meaningfully set at once.
+    // Mirrors the engine's JSON reader (json.rs), which OR-merges all three
+    // legacy top-level flags so a project saved in the old schema is not
+    // silently stripped on the next edit.
     nonNegative: json.compat?.nonNegative || json.nonNegative || false,
-    canBeModuleInput: json.compat?.canBeModuleInput ?? false,
-    isPublic: json.compat?.isPublic ?? false,
+    canBeModuleInput: json.compat?.canBeModuleInput || json.canBeModuleInput || false,
+    isPublic: json.compat?.isPublic || json.isPublic || false,
     activeInitial: json.compat?.activeInitial,
     dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
     data: undefined,
@@ -666,8 +672,10 @@ export function auxFromJson(json: JsonAuxiliary): Aux {
     documentation: json.documentation ?? '',
     units: json.units ?? '',
     gf: graphicalFunction,
-    canBeModuleInput: json.compat?.canBeModuleInput ?? false,
-    isPublic: json.compat?.isPublic ?? false,
+    // OR-merge legacy top-level flags with compat, mirroring the engine's JSON
+    // reader (json.rs); old JSON wrote them at top level, new JSON under compat.
+    canBeModuleInput: json.compat?.canBeModuleInput || json.canBeModuleInput || false,
+    isPublic: json.compat?.isPublic || json.isPublic || false,
     activeInitial: json.compat?.activeInitial,
     dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
     data: undefined,
@@ -735,8 +743,10 @@ export function moduleFromJson(json: JsonModule): Module {
     documentation: json.documentation ?? '',
     units: json.units ?? '',
     references: (json.references ?? []).map((ref: JsonModuleReference) => moduleReferenceFromJson(ref)),
-    canBeModuleInput: json.compat?.canBeModuleInput ?? false,
-    isPublic: json.compat?.isPublic ?? false,
+    // OR-merge legacy top-level flags with compat, mirroring the engine's JSON
+    // reader (json.rs); old JSON wrote them at top level, new JSON under compat.
+    canBeModuleInput: json.compat?.canBeModuleInput || json.canBeModuleInput || false,
+    isPublic: json.compat?.isPublic || json.isPublic || false,
     dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
     data: undefined,
     errors: undefined,

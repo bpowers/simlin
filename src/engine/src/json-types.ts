@@ -107,6 +107,10 @@ export interface JsonStock {
   compat?: JsonCompat;
   /** @deprecated Legacy field; read from compat.nonNegative in new format. */
   nonNegative?: boolean;
+  /** @deprecated Legacy field; read from compat.canBeModuleInput in new format. */
+  canBeModuleInput?: boolean;
+  /** @deprecated Legacy field; read from compat.isPublic in new format. */
+  isPublic?: boolean;
 }
 
 /**
@@ -123,6 +127,10 @@ export interface JsonFlow {
   compat?: JsonCompat;
   /** @deprecated Legacy field; read from compat.nonNegative in new format. */
   nonNegative?: boolean;
+  /** @deprecated Legacy field; read from compat.canBeModuleInput in new format. */
+  canBeModuleInput?: boolean;
+  /** @deprecated Legacy field; read from compat.isPublic in new format. */
+  isPublic?: boolean;
 }
 
 /**
@@ -137,6 +145,10 @@ export interface JsonAuxiliary {
   documentation?: string;
   arrayedEquation?: JsonArrayedEquation;
   compat?: JsonCompat;
+  /** @deprecated Legacy field; read from compat.canBeModuleInput in new format. */
+  canBeModuleInput?: boolean;
+  /** @deprecated Legacy field; read from compat.isPublic in new format. */
+  isPublic?: boolean;
 }
 
 /**
@@ -150,6 +162,10 @@ export interface JsonModule {
   documentation?: string;
   references?: JsonModuleReference[];
   compat?: JsonCompat;
+  /** @deprecated Legacy field; read from compat.canBeModuleInput in new format. */
+  canBeModuleInput?: boolean;
+  /** @deprecated Legacy field; read from compat.isPublic in new format. */
+  isPublic?: boolean;
 }
 
 /**

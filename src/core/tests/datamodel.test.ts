@@ -197,6 +197,48 @@ describe('Stock', () => {
   });
 });
 
+describe('legacy top-level canBeModuleInput / isPublic', () => {
+  // The engine's JSON reader (json.rs) OR-merges legacy top-level
+  // canBeModuleInput/isPublic with compat for stock/flow/aux/module (read from
+  // old JSON, never written). datamodel.ts must mirror it so a project saved in
+  // the old Go `sd` JSON schema -- flags at the top level rather than under
+  // compat -- does not silently lose module-input / public visibility the next
+  // time the variable is edited and re-upserted.
+  it('stockFromJson reads legacy top-level flags', () => {
+    const stock = stockFromJson({ name: 'level', inflows: [], outflows: [], canBeModuleInput: true, isPublic: true });
+    expect(stock.canBeModuleInput).toBe(true);
+    expect(stock.isPublic).toBe(true);
+  });
+
+  it('flowFromJson reads legacy top-level flags', () => {
+    const flow = flowFromJson({ name: 'rate', canBeModuleInput: true, isPublic: true });
+    expect(flow.canBeModuleInput).toBe(true);
+    expect(flow.isPublic).toBe(true);
+  });
+
+  it('auxFromJson reads legacy top-level flags', () => {
+    const aux = auxFromJson({ name: 'x', canBeModuleInput: true, isPublic: true });
+    expect(aux.canBeModuleInput).toBe(true);
+    expect(aux.isPublic).toBe(true);
+  });
+
+  it('moduleFromJson reads legacy top-level flags', () => {
+    const mod = moduleFromJson({ name: 'sub_inst', modelName: 'sub', canBeModuleInput: true, isPublic: true });
+    expect(mod.canBeModuleInput).toBe(true);
+    expect(mod.isPublic).toBe(true);
+  });
+
+  it('moduleFromJson still reads the new compat format', () => {
+    const mod = moduleFromJson({
+      name: 'sub_inst',
+      modelName: 'sub',
+      compat: { canBeModuleInput: true, isPublic: true },
+    });
+    expect(mod.canBeModuleInput).toBe(true);
+    expect(mod.isPublic).toBe(true);
+  });
+});
+
 describe('Flow', () => {
   it('should roundtrip correctly', () => {
     const flow: Flow = {
