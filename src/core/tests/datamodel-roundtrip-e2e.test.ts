@@ -19,17 +19,36 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project, configureWasm, ready, resetWasm } from '@simlin/engine';
 import type { JsonProjectPatch } from '@simlin/engine';
 
 import { projectFromJson, projectToJson, auxToJson, stockToJson, moduleToJson } from '../datamodel';
 
+// This e2e drives the REAL WASM engine, so it needs `pnpm build` to have
+// produced the engine package (lib/) and libsimlin.wasm. Keep `pnpm --filter
+// @simlin/core test` runnable standalone on a clean checkout by SKIPPING (not
+// failing) when the built engine is absent; CI and the pre-commit hook build
+// first, so this integration coverage always runs there. The @simlin/engine
+// VALUE import is dynamic (inside loadWasm) so a missing build does not break
+// module resolution for the skipped suite -- the pure datamodel.test.ts still
+// covers every field without the engine.
+const wasmPath = path.join(__dirname, '..', '..', 'engine', 'core', 'libsimlin.wasm');
+const engineBuilt = fs.existsSync(wasmPath);
+const describeIfEngine = engineBuilt ? describe : describe.skip;
+if (!engineBuilt) {
+  console.warn(
+    `[datamodel-roundtrip-e2e] skipping engine-backed checks: ${wasmPath} not found; run \`pnpm build\` to exercise them.`,
+  );
+}
+
+type EngineModule = typeof import('@simlin/engine');
+let engine: EngineModule;
+
 async function loadWasm(): Promise<void> {
-  const wasmPath = path.join(__dirname, '..', '..', 'engine', 'core', 'libsimlin.wasm');
+  engine = await import('@simlin/engine');
   const wasmBuffer = fs.readFileSync(wasmPath);
-  await resetWasm();
-  configureWasm({ source: wasmBuffer });
-  await ready();
+  await engine.resetWasm();
+  engine.configureWasm({ source: wasmBuffer });
+  await engine.ready();
 }
 
 // A project whose variables carry every field that datamodel.ts previously
@@ -147,7 +166,7 @@ interface ParsedProject {
 }
 
 async function serializeProject(json: string): Promise<ParsedProject> {
-  const project = await Project.openJson(json);
+  const project = await engine.Project.openJson(json);
   try {
     return JSON.parse(await project.serializeJson()) as ParsedProject;
   } finally {
@@ -195,7 +214,7 @@ function assertAllFieldsPresent(parsed: ParsedProject): void {
   });
 }
 
-describe('datamodel round-trip through the real engine serializer', () => {
+describeIfEngine('datamodel round-trip through the real engine serializer', () => {
   beforeAll(async () => {
     await loadWasm();
   });
@@ -218,7 +237,7 @@ describe('datamodel round-trip through the real engine serializer', () => {
   });
 
   it('survives a full upsert replace (the literal data-loss bug)', async () => {
-    const project = await Project.openJson(BASE_PROJECT);
+    const project = await engine.Project.openJson(BASE_PROJECT);
     try {
       const datamodel = projectFromJson(JSON.parse(await project.serializeJson()) as never);
       const model = datamodel.models.get('main');
