@@ -36,6 +36,7 @@ import {
   flowToJson,
   auxToJson,
   moduleToJson,
+  arrayedEquationToJson,
   type ModuleReference,
 } from '@simlin/core/datamodel';
 import { defined, exists, setsEqual } from '@simlin/core/common';
@@ -62,6 +63,7 @@ import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 import { isStdlibModel } from './module-navigation';
 import { countModelInstances } from './module-details-utils';
+import { buildModuleReferencePayload } from './module-wiring';
 import { BreadcrumbBar } from './BreadcrumbBar';
 import { ProjectController, type ProjectSnapshot, type EngineApi } from './project-controller';
 
@@ -644,8 +646,11 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     r.controller?.scheduleSimRun();
   };
 
-  const updateView = async (view: StockFlowView): Promise<void> => {
-    await r.controller?.updateView(view);
+  // Discrete element/structure edits pass { recordHistory: true } so each one
+  // becomes individually undoable; the per-frame viewport stream goes through
+  // queueViewUpdate (never records). See the controller's updateView doc.
+  const updateView = async (view: StockFlowView, opts?: { recordHistory?: boolean }): Promise<void> => {
+    await r.controller?.updateView(view, opts);
   };
 
   const queueViewUpdate = async (view: StockFlowView): Promise<void> => {
@@ -838,7 +843,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       await applyPatchOrReportError(patch, 'delete');
     }
 
-    await updateView({ ...view, elements, nextUid });
+    await updateView({ ...view, elements, nextUid }, { recordHistory: true });
     scheduleSimRun();
   }, []);
 
@@ -853,7 +858,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         return { ...element, labelSide: side };
       });
 
-      await updateView({ ...view, elements });
+      await updateView({ ...view, elements }, { recordHistory: true });
     },
     [],
   );
@@ -906,7 +911,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         }
       }
 
-      await updateView({ ...view, nextUid: result.nextUid, elements: [...result.elements] });
+      await updateView({ ...view, nextUid: result.nextUid, elements: [...result.elements] }, { recordHistory: true });
       setState({
         selection,
         flowStillBeingCreated: inCreation,
@@ -953,7 +958,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     }
     view = { ...view, nextUid, elements };
 
-    await updateView(view);
+    await updateView(view, { recordHistory: true });
     setState({ selection });
   }, []);
 
@@ -1029,7 +1034,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     // even when the upsert errored).
     await applyPatchOrReportError(patch, 'variable creation');
 
-    await updateView({ ...view, nextUid, elements });
+    await updateView({ ...view, nextUid, elements }, { recordHistory: true });
     setState({
       selection: new Set<number>(),
     });
@@ -1049,7 +1054,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       });
 
       const elements = view.elements.map((el) => updatedElements.get(el.uid) ?? el);
-      await updateView({ ...view, elements });
+      await updateView({ ...view, elements }, { recordHistory: true });
     },
     [],
   );
@@ -1553,15 +1558,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         },
       };
     } else if (eq.type === 'arrayed') {
-      return {
-        arrayedEquation: {
-          dimensions: [...eq.dimensionNames],
-          elements: [...eq.elements.entries()].map(([subscript, eqStr]) => ({
-            subscript,
-            equation: eqStr,
-          })),
-        },
-      };
+      // Use the shared serializer so per-element graphical functions, per-element
+      // ACTIVE INITIAL equations, and the EXCEPT default round-trip through the
+      // upsert (a hand-rolled mapping here previously dropped them).
+      return { arrayedEquation: arrayedEquationToJson(eq) };
     }
     return { equation: '' };
   };
@@ -1620,14 +1620,15 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
           },
         };
       } else if (variable.type === 'module') {
-        // Modules have no equations or graphical functions -- only units and docs
+        // Modules have no equations or graphical functions -- only units and docs.
+        // Use moduleToJson to preserve all fields (including compat flags
+        // canBeModuleInput, isPublic, dataSource), then override edited fields.
+        const base = moduleToJson(variable);
         op = {
           type: 'upsertModule',
           payload: {
             module: {
-              name: variable.ident,
-              modelName: variable.modelName,
-              references: variable.references.map((ref) => ({ src: ref.src, dst: ref.dst })),
+              ...base,
               units: newUnits ?? variable.units ?? undefined,
               documentation: newDocs ?? variable.documentation ?? undefined,
             },
@@ -1732,15 +1733,13 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       const variable = model.variables.get(ident);
       if (!variable || variable.type !== 'module') return;
 
+      // Preserve all fields (including compat) via moduleToJson; override the model ref.
       const op: JsonModelOperation = {
         type: 'upsertModule',
         payload: {
           module: {
-            name: variable.ident,
+            ...moduleToJson(variable),
             modelName: newModelName,
-            references: variable.references.map((ref) => ({ src: ref.src, dst: ref.dst })),
-            units: variable.units || undefined,
-            documentation: variable.documentation || undefined,
           },
         },
       };
@@ -1762,13 +1761,12 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       const variable = model.variables.get(ident);
       if (!variable || variable.type !== 'module') return;
 
+      // Preserve all fields (including compat) via moduleToJson; override units/docs.
       const op: JsonModelOperation = {
         type: 'upsertModule',
         payload: {
           module: {
-            name: variable.ident,
-            modelName: variable.modelName,
-            references: variable.references.map((ref) => ({ src: ref.src, dst: ref.dst })),
+            ...moduleToJson(variable),
             units: newUnits ?? variable.units ?? undefined,
             documentation: newDocs ?? variable.documentation ?? undefined,
           },
@@ -1794,15 +1792,13 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       const variable = model.variables.get(ident);
       if (!variable || variable.type !== 'module') return;
 
+      // Preserve all fields (including compat) via moduleToJson; override references.
       const op: JsonModelOperation = {
         type: 'upsertModule',
         payload: {
           module: {
-            name: variable.ident,
-            modelName: variable.modelName,
+            ...moduleToJson(variable),
             references: newReferences.map((ref) => ({ src: ref.src, dst: ref.dst })),
-            units: variable.units || undefined,
-            documentation: variable.documentation || undefined,
           },
         },
       };
@@ -1830,26 +1826,12 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       newModelName = getUniqueDuplicateName(moduleIdent, project);
     }
 
-    // Look up existing module to preserve metadata through the model reference change
+    // Look up existing module to preserve metadata (including compat) through the
+    // model reference change; the shared helper carries every field forward
+    // (incl. compat) and keeps this in lockstep with the duplicate-model path.
     const model = getModel();
     const existingModule = model?.variables.get(moduleIdent);
-    const modulePayload: {
-      name: string;
-      modelName: string;
-      references?: { src: string; dst: string }[];
-      units?: string;
-      documentation?: string;
-    } = {
-      name: moduleIdent,
-      modelName: newModelName,
-    };
-    if (existingModule && existingModule.type === 'module') {
-      if (existingModule.references.length > 0) {
-        modulePayload.references = existingModule.references.map((ref) => ({ src: ref.src, dst: ref.dst }));
-      }
-      if (existingModule.units) modulePayload.units = existingModule.units;
-      if (existingModule.documentation) modulePayload.documentation = existingModule.documentation;
-    }
+    const modulePayload = buildModuleReferencePayload(existingModule, moduleIdent, newModelName);
 
     const patch: JsonProjectPatch = {
       projectOps: [{ type: 'addModel', payload: { name: newModelName } }],
@@ -1908,26 +1890,13 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         });
       }
 
-      // Preserve existing module metadata through the model reference change
+      // Preserve ALL existing module fields (incl. compat: canBeModuleInput /
+      // isPublic / dataSource) through the model reference change. The hand-built
+      // payload here previously dropped compat -- the same full-replace data-loss
+      // trap fixed elsewhere; use the shared helper so it matches its sibling.
       const currentModel = getModel();
       const existingModule = currentModel?.variables.get(moduleIdent);
-      const dupModulePayload: {
-        name: string;
-        modelName: string;
-        references?: { src: string; dst: string }[];
-        units?: string;
-        documentation?: string;
-      } = {
-        name: moduleIdent,
-        modelName: newModelName,
-      };
-      if (existingModule && existingModule.type === 'module') {
-        if (existingModule.references.length > 0) {
-          dupModulePayload.references = existingModule.references.map((ref) => ({ src: ref.src, dst: ref.dst }));
-        }
-        if (existingModule.units) dupModulePayload.units = existingModule.units;
-        if (existingModule.documentation) dupModulePayload.documentation = existingModule.documentation;
-      }
+      const dupModulePayload = buildModuleReferencePayload(existingModule, moduleIdent, newModelName);
 
       // Combined patch: create model, copy contents, update module reference.
       // Engine processes projectOps before model ops (patch.rs).

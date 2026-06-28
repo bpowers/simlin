@@ -204,6 +204,78 @@ describe('ProjectController optimistic view updates', () => {
     await controller.dispose();
   });
 
+  it('updateView records undo history only when recordHistory is set', async () => {
+    // Discrete element/structure edits (create/delete/move/flow-attach/etc.)
+    // funnel their final engine state through updateView and must each produce
+    // exactly one undo entry. A plain updateView (the legacy default) and the
+    // viewport-only queueViewUpdate path must record nothing.
+    const engine = makeFakeEngine();
+    const { config } = makeControllerConfig({ engine, format: 'protobuf', initialData: snap(1) });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+
+    const view = controller.getView() as StockFlowView;
+
+    // A plain updateView (no opts) refreshes the project but records nothing.
+    const genBefore = controller.getSnapshot().projectGeneration;
+    await controller.updateView({ ...view, zoom: 2 });
+    expect(controller.canUndo()).toBe(false);
+    expect(controller.getSnapshot().projectGeneration).toBe(genBefore);
+
+    // queueViewUpdate (pan/zoom/momentum) likewise records nothing.
+    await controller.queueViewUpdate({ ...view, zoom: 3 });
+    expect(controller.canUndo()).toBe(false);
+    expect(controller.getSnapshot().projectGeneration).toBe(genBefore);
+
+    // A discrete edit (recordHistory: true) advances history exactly once.
+    await controller.updateView({ ...view, zoom: 4 }, { recordHistory: true });
+    expect(controller.canUndo()).toBe(true);
+    expect(controller.getSnapshot().projectGeneration).toBe(genBefore + 1);
+
+    // undo then redo round-trips the cursor.
+    controller.undoRedo('undo');
+    await flushTimers();
+    expect(controller.canRedo()).toBe(true);
+    controller.undoRedo('redo');
+    await flushTimers();
+    expect(controller.canRedo()).toBe(false);
+    await controller.dispose();
+  });
+
+  it('undo after a recordHistory updateView reopens the engine from the pre-edit snapshot', async () => {
+    // Prove restoration, not just the cursor move: the undo reopen must pull the
+    // serialized snapshot captured BEFORE the edit back into the engine.
+    const openedWith: Uint8Array[] = [];
+    let counter = 100;
+    const engine = makeFakeEngine({ protobuf: () => new Uint8Array([counter++]) });
+    const config = {
+      initialProjectVersion: 1,
+      input: { format: 'protobuf' as const, data: new Uint8Array([1]) },
+      openProtobuf: async (data: Uint8Array) => {
+        openedWith.push(data);
+        return engine;
+      },
+      openJson: async () => engine,
+      save: async () => 1,
+      onError: () => {},
+    };
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+    // History head is the post-open snapshot ([100]).
+    const view = controller.getView() as StockFlowView;
+    await controller.updateView({ ...view, zoom: 9 }, { recordHistory: true });
+    // The edit recorded a fresh head, so there is a distinct pre-edit snapshot
+    // to restore (without this the undo would merely clamp to the only entry).
+    expect(controller.canUndo()).toBe(true);
+
+    controller.undoRedo('undo');
+    await flushTimers();
+
+    // The reopen restored the pre-edit snapshot ([100]) into the engine.
+    expect(openedWith[openedWith.length - 1]).toEqual(new Uint8Array([100]));
+    await controller.dispose();
+  });
+
   it('stashes the queued view when no engine is installed yet and replays it on reopen', async () => {
     // Drive queueViewUpdate before any engine exists (controller just
     // constructed), then confirm the next engine pulls the queued view.

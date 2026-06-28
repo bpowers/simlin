@@ -69,6 +69,42 @@ describe('buildStagingServerManifest', () => {
     assert.equal(buildStagingServerManifest(serverPkg).packageManager, undefined);
   });
 
+  it('pins engines.pnpm from the packageManager version (the GAE buildpack reads engines, not corepack)', () => {
+    const out = buildStagingServerManifest(serverPkg, { packageManager: 'pnpm@10.6.0' });
+    assert.equal(out.engines.pnpm, '10.6.0');
+  });
+
+  it('strips the +sha512 build-metadata suffix when deriving engines.pnpm', () => {
+    const out = buildStagingServerManifest(serverPkg, {
+      packageManager: 'pnpm@10.6.0+sha512.abc123def456',
+    });
+    assert.equal(out.engines.pnpm, '10.6.0');
+    // packageManager itself is preserved verbatim (corepack still wants the hash).
+    assert.equal(out.packageManager, 'pnpm@10.6.0+sha512.abc123def456');
+  });
+
+  it('adds no engines when no packageManager is provided and the server declares none', () => {
+    assert.equal(buildStagingServerManifest(serverPkg).engines, undefined);
+  });
+
+  it('preserves the server-declared engines when no packageManager is provided', () => {
+    const withEngines = { ...serverPkg, engines: { node: '>=20' } };
+    const out = buildStagingServerManifest(withEngines);
+    assert.deepEqual(out.engines, { node: '>=20' });
+  });
+
+  it('merges the pnpm pin into the server-declared engines, with the pin winning', () => {
+    const withEngines = { ...serverPkg, engines: { node: '>=20', pnpm: '>=9' } };
+    const out = buildStagingServerManifest(withEngines, { packageManager: 'pnpm@10.6.0' });
+    assert.deepEqual(out.engines, { node: '>=20', pnpm: '10.6.0' });
+  });
+
+  it('adds no engines.pnpm for a non-pnpm packageManager, but keeps packageManager', () => {
+    const out = buildStagingServerManifest(serverPkg, { packageManager: 'yarn@4.1.0' });
+    assert.equal(out.packageManager, 'yarn@4.1.0');
+    assert.equal(out.engines, undefined);
+  });
+
   it('produces a manifest with no residual workspace: protocol', () => {
     const out = buildStagingServerManifest(serverPkg);
     // Should not throw.

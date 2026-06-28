@@ -4,7 +4,31 @@
 
 // pattern: Functional Core -- pure functions for immutable reference array manipulation
 
-import type { ModuleReference } from '@simlin/core/datamodel';
+import { type ModuleReference, type Variable, moduleToJson } from '@simlin/core/datamodel';
+import type { JsonModule } from '@simlin/engine';
+
+/**
+ * Build the upsertModule payload that re-points an existing module variable at
+ * `newModelName` while preserving every other field. upsertModule is a
+ * full-replace by UID, so hand-listing fields silently drops anything omitted --
+ * notably compat (canBeModuleInput / isPublic / dataSource), the same
+ * silent-data-loss trap fixed elsewhere in this change. Basing the payload on
+ * moduleToJson(existing) and overriding only name/modelName carries every field
+ * forward. Falls back to a bare {name, modelName} when there is no existing
+ * module (or the variable at that ident is not a module). Shared by the
+ * create-model-for-module and duplicate-model-for-module handlers so the two
+ * cannot drift apart again.
+ */
+export function buildModuleReferencePayload(
+  existing: Variable | undefined,
+  moduleIdent: string,
+  newModelName: string,
+): JsonModule {
+  if (existing && existing.type === 'module') {
+    return { ...moduleToJson(existing), name: moduleIdent, modelName: newModelName };
+  }
+  return { name: moduleIdent, modelName: newModelName };
+}
 
 // A module reference `dst` is stored in the canonical module-qualified form
 // `{moduleIdent}·{port}`: the engine's `build_module_inputs` strips that prefix
