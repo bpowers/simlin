@@ -247,11 +247,18 @@ function accessToken() {
 }
 
 /** Build + deploy the staged server with --no-promote (traffic stays put). */
-function deployStagedNoPromote() {
+function deployStagedNoPromote(project) {
   console.log('\n==> Building and deploying the staged server with --no-promote (no traffic switch)\n');
   // Reuse the proven staged build/deploy orchestration; do NOT pass --version,
-  // so gcloud auto-generates the version id we then discover below.
-  run('bash', [path.join(REPO_ROOT, 'scripts/deploy-web-staged.sh'), '--no-promote']);
+  // so gcloud auto-generates the version id we then discover below. Pass the
+  // resolved --project through (deploy-web-staged.sh forwards "$@" to
+  // `gcloud app deploy`): otherwise an operator who selected a non-default
+  // project via --project/SIMLIN_CANARY_PROJECT would deploy HEAD to the
+  // AMBIENT gcloud project while the version lookup and Firebase mutation below
+  // target the selected one -- a split-brain that could deploy to the wrong
+  // project. resolveProject() always yields a concrete id, so this is also
+  // correct (and harmlessly explicit) in the default case.
+  run('bash', [path.join(REPO_ROOT, 'scripts/deploy-web-staged.sh'), '--no-promote', `--project=${project}`]);
 }
 
 /**
@@ -425,7 +432,7 @@ async function runDeployMode(project, token) {
   const preflight = await getIdentityConfig(project, token);
   printDomains('current authorizedDomains', preflight.authorizedDomains ?? []);
 
-  deployStagedNoPromote();
+  deployStagedNoPromote(project);
 
   const versionId = latestVersionId(project);
   const { url, host } = versionUrlAndHost(project, versionId);
