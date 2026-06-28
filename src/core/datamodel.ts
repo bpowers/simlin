@@ -293,12 +293,15 @@ function stockEquationFromJson(
   arrayedEquation: JsonArrayedEquation | undefined,
 ): Equation {
   if (arrayedEquation) {
-    // Per-element equations imply an 'arrayed' equation; otherwise it's applyToAll.
-    // Known inert divergence: a payload with an EXCEPT default but zero elements
-    // routes to applyToAll here (the engine routes Some([]) to Arrayed), dropping
-    // hasExceptDefault. This is semantically equivalent (a default with no excepted
-    // subscripts applies to all elements either way) and real models never emit it.
-    if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
+    // The engine distinguishes ApplyToAll from Arrayed by the PRESENCE of the
+    // `elements` field, not by it being non-empty (json.rs: ApplyToAll omits
+    // `elements`; Arrayed always emits it, even as []). An Arrayed with no
+    // explicit elements + an EXCEPT default + hasExceptDefault:false means every
+    // element is missing and evaluates to 0, NOT the default (compiler/mod.rs:
+    // a missing element uses the default only when apply_default_for_missing is
+    // true). Collapsing that to applyToAll would silently change behavior, so
+    // route on presence: `elements` present (even []) => arrayed.
+    if (arrayedEquation.elements !== undefined) {
       return arrayedEquationFromJson(arrayedEquation);
     } else {
       return {
@@ -322,12 +325,12 @@ function auxEquationFromJson(
   }
 
   if (arrayedEquation) {
-    // Per-element equations imply an 'arrayed' equation; otherwise it's applyToAll.
-    // Known inert divergence: a payload with an EXCEPT default but zero elements
-    // routes to applyToAll here (the engine routes Some([]) to Arrayed), dropping
-    // hasExceptDefault. This is semantically equivalent (a default with no excepted
-    // subscripts applies to all elements either way) and real models never emit it.
-    if (arrayedEquation.elements && arrayedEquation.elements.length > 0) {
+    // Route on the PRESENCE of `elements`, not on it being non-empty -- see the
+    // matching note in stockEquationFromJson. The engine emits `elements` for
+    // every Arrayed (even []) and omits it for ApplyToAll; an Arrayed with no
+    // explicit elements + hasExceptDefault:false has every element evaluate to 0,
+    // which collapsing to applyToAll would silently change.
+    if (arrayedEquation.elements !== undefined) {
       return { equation: arrayedEquationFromJson(arrayedEquation), graphicalFunction };
     } else {
       return {

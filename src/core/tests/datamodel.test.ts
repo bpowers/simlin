@@ -1159,6 +1159,61 @@ describe('Arrayed Equations', () => {
     expect(eq.elements.get('north')?.equation).toBe('50');
     expect(eq.elements.get('south')?.equation).toBe('75');
   });
+
+  // The engine serializes ApplyToAll with NO `elements` field and Arrayed with
+  // `elements` PRESENT (even []). An Arrayed with elements:[] + a default +
+  // hasExceptDefault:false means EVERY element is missing and evaluates to 0 (a
+  // missing element uses the default only when apply_default_for_missing/
+  // hasExceptDefault is true -- compiler/mod.rs -- else 0.0). Collapsing such a
+  // payload to applyToAll would make every element use the default instead: a
+  // real behavior change the next editor upsert would persist. So the read path
+  // must route on `elements` PRESENCE, not on it being non-empty.
+  it('keeps a zero-element arrayed aux arrayed (EXCEPT-excludes-all), not applyToAll', () => {
+    const restored = auxFromJson({
+      name: 'demand',
+      arrayedEquation: {
+        dimensions: ['regions'],
+        equation: '99',
+        elements: [],
+        hasExceptDefault: false,
+      },
+    });
+    expect(restored.equation.type).toBe('arrayed');
+    const eq = restored.equation as ArrayedEquation;
+    expect(eq.dimensionNames).toEqual(['regions']);
+    expect(eq.elements.size).toBe(0);
+    expect(eq.defaultEquation).toBe('99');
+    expect(eq.hasExceptDefault).toBe(false);
+
+    // Round-trips back to elements:[] + equation:'99' + hasExceptDefault:false,
+    // which the engine reads as Arrayed(.., [], Some('99'), false).
+    const out = auxToJson(restored);
+    expect(out.arrayedEquation).toBeDefined();
+    expect(out.arrayedEquation!.elements).toEqual([]);
+    expect(out.arrayedEquation!.equation).toBe('99');
+    expect(out.arrayedEquation!.hasExceptDefault).toBe(false);
+  });
+
+  it('keeps a zero-element arrayed stock arrayed (EXCEPT-excludes-all), not applyToAll', () => {
+    const restored = stockFromJson({
+      name: 'level',
+      initialEquation: '',
+      inflows: [],
+      outflows: [],
+      arrayedEquation: {
+        dimensions: ['regions'],
+        equation: '99',
+        elements: [],
+        hasExceptDefault: false,
+      },
+    });
+    expect(restored.equation.type).toBe('arrayed');
+    const eq = restored.equation as ArrayedEquation;
+    expect(eq.dimensionNames).toEqual(['regions']);
+    expect(eq.elements.size).toBe(0);
+    expect(eq.defaultEquation).toBe('99');
+    expect(eq.hasExceptDefault).toBe(false);
+  });
 });
 
 describe('LinkViewElement multiPoint', () => {
