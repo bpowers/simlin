@@ -667,11 +667,25 @@ export class ProjectController {
   }
 
   /**
-   * Optimistic view update: reflect the new view in the snapshot immediately
-   * (so the UI never flashes stale positions), then round-trip through the
-   * engine. View edits never record undo history.
+   * Optimistic view update for a DISCRETE element/structure edit (create,
+   * delete, element/group move, label move, flow/link attach): reflect the new
+   * view in the snapshot immediately (so the UI never flashes stale positions),
+   * then round-trip through the engine.
+   *
+   * `recordHistory` controls whether this edit advances the undo buffer; it
+   * defaults to false so the bare call stays a non-recording view refresh. Each
+   * discrete user edit passes `recordHistory: true` so it becomes individually
+   * undoable. For the handlers that apply a content patch (via
+   * applyPatchOrReportError) BEFORE calling this, the snapshot serialized here
+   * captures the engine state AFTER both the content patch and the view update,
+   * so a single recorded entry covers the whole edit -- no double-recording.
+   *
+   * The per-frame viewport stream (pan/zoom/momentum/resize) does NOT come
+   * through here -- it uses queueViewUpdate, which never records, so a momentum
+   * flick cannot evict real edits from the small undo buffer.
    */
-  async updateView(view: StockFlowView): Promise<void> {
+  async updateView(view: StockFlowView, opts: { recordHistory?: boolean } = {}): Promise<void> {
+    const { recordHistory = false } = opts;
     this.applyOptimisticView(view);
 
     const engine = this.engine;
@@ -687,7 +701,7 @@ export class ProjectController {
       this.reportError(err.message ?? 'Unknown error during view update');
       return;
     }
-    await this.updateProject(await engine.serializeProtobuf(), { scheduleSave: true, recordHistory: false });
+    await this.updateProject(await engine.serializeProtobuf(), { scheduleSave: true, recordHistory });
   }
 
   /**

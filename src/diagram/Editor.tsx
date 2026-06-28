@@ -651,8 +651,11 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     r.controller?.scheduleSimRun();
   };
 
-  const updateView = async (view: StockFlowView): Promise<void> => {
-    await r.controller?.updateView(view);
+  // Discrete element/structure edits pass { recordHistory: true } so each one
+  // becomes individually undoable; the per-frame viewport stream goes through
+  // queueViewUpdate (never records). See the controller's updateView doc.
+  const updateView = async (view: StockFlowView, opts?: { recordHistory?: boolean }): Promise<void> => {
+    await r.controller?.updateView(view, opts);
   };
 
   const queueViewUpdate = async (view: StockFlowView): Promise<void> => {
@@ -845,7 +848,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       await applyPatchOrReportError(patch, 'delete');
     }
 
-    await updateView({ ...view, elements, nextUid });
+    await updateView({ ...view, elements, nextUid }, { recordHistory: true });
     scheduleSimRun();
   }, []);
 
@@ -860,7 +863,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         return { ...element, labelSide: side };
       });
 
-      await updateView({ ...view, elements });
+      await updateView({ ...view, elements }, { recordHistory: true });
     },
     [],
   );
@@ -913,7 +916,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         }
       }
 
-      await updateView({ ...view, nextUid: result.nextUid, elements: [...result.elements] });
+      await updateView({ ...view, nextUid: result.nextUid, elements: [...result.elements] }, { recordHistory: true });
       setState({
         selection,
         flowStillBeingCreated: inCreation,
@@ -960,7 +963,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     }
     view = { ...view, nextUid, elements };
 
-    await updateView(view);
+    await updateView(view, { recordHistory: true });
     setState({ selection });
   }, []);
 
@@ -1036,7 +1039,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     // even when the upsert errored).
     await applyPatchOrReportError(patch, 'variable creation');
 
-    await updateView({ ...view, nextUid, elements });
+    await updateView({ ...view, nextUid, elements }, { recordHistory: true });
     setState({
       selection: new Set<number>(),
     });
@@ -1056,7 +1059,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       });
 
       const elements = view.elements.map((el) => updatedElements.get(el.uid) ?? el);
-      await updateView({ ...view, elements });
+      await updateView({ ...view, elements }, { recordHistory: true });
     },
     [],
   );
