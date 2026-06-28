@@ -178,6 +178,16 @@ describe('parseArgs', () => {
   it('throws on an unknown argument', () => {
     assert.throws(() => parseArgs(['--bogus']), /unknown argument/);
   });
+
+  it('throws when --project has no value', () => {
+    // A prod-mutating tool must not silently fall back to the default project
+    // when an override was clearly intended (e.g. `--project $EMPTY`).
+    assert.throws(() => parseArgs(['--project']), /--project requires a value/);
+    assert.throws(() => parseArgs(['--project', '--cleanup', 'v']), /--project requires a value/);
+    assert.throws(() => parseArgs(['--project', '']), /--project requires a value/);
+    assert.throws(() => parseArgs(['--project=']), /--project requires a value/);
+    assert.throws(() => parseArgs(['--project=   ']), /--project requires a value/);
+  });
 });
 
 describe('versionTrafficShare', () => {

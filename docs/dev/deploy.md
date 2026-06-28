@@ -78,10 +78,10 @@ The `--no-promote` flow above lets you `curl` the canary, but you cannot actuall
 After testing, clean up:
 
 ```bash
-pnpm deploy:canary --cleanup <version>   # de-authorize the host + stop the version
+pnpm deploy:canary --cleanup <version>   # de-authorize the host + delete the version
 ```
 
-Cleanup is the inverse: it removes the host from `authorizedDomains` (same read-modify-write) and stops the version (it also prints the `gcloud app versions delete` command if you want to free the slot).
+Cleanup is the inverse: it removes the host from `authorizedDomains` (same read-modify-write) and deletes the version (freeing its slot toward the GAE version cap). It deletes rather than `stop`s because production uses `automatic_scaling`, for which `gcloud app versions stop` is rejected. The delete is guarded by the version's current traffic share: if you have already promoted the canary it is now production, so cleanup refuses to delete it (de-authorizing the host only) and tells you to delete the previous, now-idle version instead -- cleanup can never cause an outage.
 
 This deliberately uses **your own** credentials (`gcloud auth print-access-token`), not the CI deploy service account: mutating Firebase auth config needs `roles/firebaseauth.admin`, an operator-level grant intentionally kept off the CI SA. The deploy/authorize and the traffic promote are separate, explicit steps so traffic is never switched implicitly. Keep the canary host authorized only while you are testing it -- leaving stale appspot hosts in `authorizedDomains` needlessly widens the OAuth surface.
 

@@ -130,9 +130,9 @@ export function extractUrl(text) {
  * map is missing/malformed, and treats a non-finite-number allocation as 0
  * (never truthy) so the caller's serving check can't be fooled by a string.
  *
- * Cleanup uses this to REFUSE to stop a version that is serving traffic: once
- * the operator promotes the canary, it IS production, and stopping it is a full
- * outage. De-authorizing the host is always safe; only the stop is dangerous.
+ * Cleanup uses this to REFUSE to delete a version that is serving traffic: once
+ * the operator promotes the canary, it IS production, and deleting it is a full
+ * outage. De-authorizing the host is always safe; only the delete is dangerous.
  */
 export function versionTrafficShare(allocations, versionId) {
   if (!allocations || typeof allocations !== 'object') return 0;
@@ -166,9 +166,19 @@ export function parseArgs(argv) {
         args.mode = 'cleanup';
         args.version = takeVal();
         break;
-      case '--project':
-        args.project = takeVal();
+      case '--project': {
+        // Fail loud on a missing/blank value: this tool deploys and mutates
+        // PROD Firebase config, so `--project $EMPTY` (or `--project --cleanup`)
+        // must error rather than silently fall back to the gcloud default and
+        // operate on the wrong project. Omitting --project entirely is still
+        // fine -- that intentionally uses the env var / gcloud default.
+        const value = takeVal();
+        if (value === undefined || value.trim() === '') {
+          throw new Error('--project requires a value, e.g. --project my-gcp-project');
+        }
+        args.project = value;
         break;
+      }
       case '--help':
       case '-h':
         args.mode = 'help';
@@ -291,14 +301,22 @@ function versionUrlAndHost(project, id) {
   return { url, host: hostFromUrl(url) };
 }
 
-/** Stop a version's instances (cleanup). Delete is mentioned as an option. */
-function stopVersion(project, id) {
-  run('gcloud', ['app', 'versions', 'stop', id, '--service=default', `--project=${project}`]);
+/**
+ * Delete an idle canary version (cleanup). We delete rather than `stop` because
+ * `gcloud app versions stop` only works for manual/basic scaling, and prod uses
+ * automatic_scaling (app.yaml) -- a stop would error out, leaving the version
+ * (and its slot toward the GAE version cap) behind. delete works for any scaling
+ * and reclaims the slot. The caller guarantees this version serves no traffic
+ * (gcloud also refuses to delete a version that is receiving traffic). gcloud
+ * prompts for confirmation; stdio is inherited so the operator confirms.
+ */
+function deleteVersion(project, id) {
+  run('gcloud', ['app', 'versions', 'delete', id, '--service=default', `--project=${project}`]);
 }
 
 /**
  * The `default` service's current traffic split as a { versionId: fraction }
- * map. Read from `gcloud app services describe` so cleanup can avoid stopping a
+ * map. Read from `gcloud app services describe` so cleanup can avoid deleting a
  * version that is serving traffic. Returns {} if the service has no split yet.
  */
 function serviceTrafficAllocations(project) {
@@ -387,8 +405,8 @@ function printHelp() {
       '      Firebase authorizedDomains so you can log in and smoke-test it.',
       '',
       '  node scripts/deploy-canary.mjs --cleanup <version> [--project <id>]',
-      '      Remove that version host from authorizedDomains, then stop the version',
-      '      UNLESS it is serving traffic (a promoted canary is production; the stop',
+      '      Remove that version host from authorizedDomains, then delete the version',
+      '      UNLESS it is serving traffic (a promoted canary is production; the delete',
       '      is refused so cleanup can never cause an outage).',
       '',
       'Project defaults to `gcloud config get-value project`; override with',
@@ -455,15 +473,15 @@ function printPostDeploy(project, versionId, url) {
       `  gcloud app services set-traffic default --splits=${versionId}=1 ${projectFlag}`,
       '',
       'Cleanup -- two cases:',
-      `  (a) ABANDONING the canary (did NOT promote): de-authorizes the host AND stops`,
+      `  (a) ABANDONING the canary (did NOT promote): de-authorizes the host AND deletes`,
       '      the version, which is safe because it serves no traffic:',
       `        node scripts/deploy-canary.mjs --cleanup ${versionId} ${projectFlag}`,
       '  (b) AFTER PROMOTING: this version is now production. The same cleanup command',
-      '      is safe to run -- it will de-authorize the host but REFUSE to stop a',
-      '      serving version. To reclaim resources, stop the PREVIOUS (now-idle)',
+      '      is safe to run -- it will de-authorize the host but REFUSE to delete a',
+      '      serving version. To reclaim resources, delete the PREVIOUS (now-idle)',
       '      version instead, not this one:',
       `        gcloud app versions list --service=default ${projectFlag}`,
-      `        gcloud app versions stop <previous-version> --service=default ${projectFlag}`,
+      `        gcloud app versions delete <previous-version> --service=default ${projectFlag}`,
       '',
       'NOTE: keep the canary host authorized only as long as you are testing it;',
       'leaving stale appspot hosts in authorizedDomains widens the OAuth surface.',
@@ -473,7 +491,7 @@ function printPostDeploy(project, versionId, url) {
 
 async function runCleanupMode(project, token, versionId) {
   // Derive the host the same way the deploy path did (browse is region-aware).
-  // Do this BEFORE stopping the version so browse can still resolve it.
+  // Do this BEFORE deleting the version so browse can still resolve it.
   const { host } = versionUrlAndHost(project, versionId);
   console.log(`==> Cleaning up canary version ${versionId} (host ${host})`);
 
@@ -489,37 +507,32 @@ async function runCleanupMode(project, token, versionId) {
     printDomains('after', after);
   }
 
-  // Guard the stop: if the operator promoted this canary, it is now serving
-  // production traffic and stopping it is a full-site outage. De-authorizing the
-  // host above is always safe; only the stop is dangerous, so we refuse it here
-  // rather than blindly running it.
+  // Guard the delete: if the operator promoted this canary, it is now serving
+  // production traffic and deleting it is a full-site outage. De-authorizing the
+  // host above is always safe; only the delete is dangerous, so we refuse it
+  // here rather than blindly running it.
   const share = versionTrafficShare(serviceTrafficAllocations(project), versionId);
   if (share > 0) {
     const pct = (share * 100).toFixed(share < 0.01 ? 2 : 0);
     console.log(
       [
         '',
-        `REFUSING TO STOP version ${versionId}: it is serving ${pct}% of default-service traffic.`,
+        `REFUSING TO DELETE version ${versionId}: it is serving ${pct}% of default-service traffic.`,
         'De-authorized the host only. If you promoted the canary, it IS production now --',
-        'stopping it would take the site down. To reclaim resources, stop the PREVIOUS',
+        'deleting it would take the site down. To reclaim resources, delete the PREVIOUS',
         '(now-idle) version instead:',
         `  gcloud app versions list --service=default --project=${project}`,
-        `  gcloud app versions stop <previous-version> --service=default --project=${project}`,
+        `  gcloud app versions delete <previous-version> --service=default --project=${project}`,
       ].join('\n'),
     );
     return;
   }
 
-  console.log('\n==> Stopping the canary version (it is serving no traffic)');
-  stopVersion(project, versionId);
-  console.log(
-    [
-      '',
-      `Done. Version ${versionId} is stopped and its host is de-authorized.`,
-      'To remove the version entirely (frees the slot toward the GAE version cap):',
-      `  gcloud app versions delete ${versionId} --service=default --project=${project}`,
-    ].join('\n'),
-  );
+  // delete (not stop): prod uses automatic_scaling, where `gcloud app versions
+  // stop` is rejected; delete works and frees the slot toward the version cap.
+  console.log('\n==> Deleting the canary version (it is serving no traffic)');
+  deleteVersion(project, versionId);
+  console.log(`\nDone. Version ${versionId} is deleted and its host is de-authorized.`);
 }
 
 async function main() {
