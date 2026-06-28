@@ -239,6 +239,39 @@ describe('legacy top-level canBeModuleInput / isPublic', () => {
   });
 });
 
+describe('ACTIVE INITIAL under arrayedEquation.compat', () => {
+  // The engine's JSON reader (json.rs) reads a flow/aux ACTIVE INITIAL from the
+  // top-level compat first, then falls back to arrayedEquation.compat (a legacy/
+  // native JSON shape). datamodel.ts must mirror it so an arrayed flow/aux that
+  // stored ACTIVE INITIAL on the arrayed equation does not lose it on the next
+  // edit+upsert. (Stocks have no such fallback in the engine reader, so we do
+  // not add one here.)
+  it('flowFromJson falls back to arrayedEquation.compat.activeInitial', () => {
+    const flow = flowFromJson({
+      name: 'rate',
+      arrayedEquation: { dimensions: ['region'], equation: '1', compat: { activeInitial: '7' } },
+    });
+    expect(flow.activeInitial).toBe('7');
+  });
+
+  it('auxFromJson falls back to arrayedEquation.compat.activeInitial', () => {
+    const aux = auxFromJson({
+      name: 'x',
+      arrayedEquation: { dimensions: ['region'], equation: '1', compat: { activeInitial: '9' } },
+    });
+    expect(aux.activeInitial).toBe('9');
+  });
+
+  it('top-level compat.activeInitial wins over the arrayed fallback', () => {
+    const aux = auxFromJson({
+      name: 'x',
+      compat: { activeInitial: 'top' },
+      arrayedEquation: { dimensions: ['region'], equation: '1', compat: { activeInitial: 'arrayed' } },
+    });
+    expect(aux.activeInitial).toBe('top');
+  });
+});
+
 describe('Flow', () => {
   it('should roundtrip correctly', () => {
     const flow: Flow = {

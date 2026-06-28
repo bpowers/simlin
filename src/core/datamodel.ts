@@ -594,7 +594,9 @@ export function flowFromJson(json: JsonFlow): Flow {
     nonNegative: json.compat?.nonNegative || json.nonNegative || false,
     canBeModuleInput: json.compat?.canBeModuleInput || json.canBeModuleInput || false,
     isPublic: json.compat?.isPublic || json.isPublic || false,
-    activeInitial: json.compat?.activeInitial,
+    // ACTIVE INITIAL: top-level compat wins, else fall back to the arrayed
+    // equation's compat (a legacy/native JSON shape the engine reader accepts).
+    activeInitial: json.compat?.activeInitial || json.arrayedEquation?.compat?.activeInitial,
     dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
     data: undefined,
     errors: undefined,
@@ -676,7 +678,9 @@ export function auxFromJson(json: JsonAuxiliary): Aux {
     // reader (json.rs); old JSON wrote them at top level, new JSON under compat.
     canBeModuleInput: json.compat?.canBeModuleInput || json.canBeModuleInput || false,
     isPublic: json.compat?.isPublic || json.isPublic || false,
-    activeInitial: json.compat?.activeInitial,
+    // ACTIVE INITIAL: top-level compat wins, else fall back to the arrayed
+    // equation's compat (a legacy/native JSON shape the engine reader accepts).
+    activeInitial: json.compat?.activeInitial || json.arrayedEquation?.compat?.activeInitial,
     dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
     data: undefined,
     errors: undefined,
