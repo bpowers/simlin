@@ -259,10 +259,7 @@ export function computeFlowAttachment(
   variables: ReadonlyMap<string, Variable>,
   params: FlowAttachParams,
 ): FlowAttachResult {
-  const { targetUid, fauxTargetCenter, isSourceAttach } = params;
-  // cursorMoveDelta is reassigned in the creation-snapped-to-target path, so
-  // keep a local mutable copy rather than mutating params.
-  let cursorMoveDelta = params.cursorMoveDelta;
+  const { targetUid, fauxTargetCenter, isSourceAttach, cursorMoveDelta } = params;
 
   let selection: ReadonlySet<UID> | undefined = undefined;
   let isCreatingNew = false;
@@ -343,17 +340,31 @@ export function computeFlowAttachment(
     }
     const lastPt = last(flow.points);
     if (lastPt.attachedToUid === fauxCloudTargetUid) {
-      let newCloud = false;
-      let to: StockViewElement | CloudViewElement;
       if (targetUid) {
-        to = getUid(targetUid) as StockViewElement | CloudViewElement;
+        // Attaching the new flow's sink to an existing stock/cloud. The
+        // in-creation flow's points are degenerate -- both sit at the press
+        // point, since the drag offset is applied only at render time and never
+        // committed back to the element. Routing that degenerate flow through
+        // UpdateCloudAndFlow with a zero delta collapses the sink onto the
+        // source's column (the zero-delta branch defaults to a vertical axis and
+        // sets sink.x = source.x), leaving the flow attached to the target by
+        // uid but drawn back at the press point. Instead snap the sink point's
+        // coordinates onto the target's center -- matching the element-centered
+        // point convention used everywhere else -- and re-center the valve so
+        // the created flow renders connected.
+        const to = getUid(targetUid) as StockViewElement | CloudViewElement;
         state.stockAttachingIdent = defined(to.ident);
-        cursorMoveDelta = {
-          x: 0,
-          y: 0,
+        const src = first(flow.points);
+        flow = {
+          ...flow,
+          points: flow.points.map((pt) =>
+            pt.attachedToUid === fauxCloudTargetUid ? { ...pt, x: to.x, y: to.y, attachedToUid: to.uid } : pt,
+          ),
+          x: (src.x + to.x) / 2,
+          y: (src.y + to.y) / 2,
         };
       } else {
-        to = {
+        let to: StockViewElement | CloudViewElement = {
           type: 'cloud' as const,
           uid: state.nextUid++,
           x: defined(fauxTargetCenter).x,
@@ -362,19 +373,18 @@ export function computeFlowAttachment(
           isZeroRadius: false,
           ident: undefined,
         };
-        newCloud = true;
-      }
-      flow = {
-        ...flow,
-        points: flow.points.map((pt) => {
-          if (pt.attachedToUid === fauxCloudTargetUid) {
-            return { ...pt, attachedToUid: to.uid };
-          }
-          return pt;
-        }),
-      };
-      [to, flow] = UpdateCloudAndFlow(to, flow, cursorMoveDelta);
-      if (newCloud) {
+        flow = {
+          ...flow,
+          points: flow.points.map((pt) => {
+            if (pt.attachedToUid === fauxCloudTargetUid) {
+              return { ...pt, attachedToUid: to.uid };
+            }
+            return pt;
+          }),
+        };
+        // The new sink cloud is materialized at the press point; the real drag
+        // delta moves it (and the flow's sink) out to the release position.
+        [to, flow] = UpdateCloudAndFlow(to, flow, cursorMoveDelta);
         elements = [...elements, to];
       }
     }

@@ -422,6 +422,34 @@ describe('computeFlowAttachment', () => {
       expect(snkOp.inflows).toEqual([flowIdent]);
     });
 
+    it('cloud source to target stock: sink attaches to the stock, no sink cloud created', () => {
+      // The exact UI scenario: flow tool, press on empty space (source cloud),
+      // drag the sink onto a stock, release. targetUid is the stock.
+      const sinkStock = makeStockEl(1, 'snk', 300, 100);
+      const flow = makeFlowEl(inCreationUid, 'new_flow', 150, 100, [
+        { x: 50, y: 100, attachedToUid: inCreationCloudUid },
+        { x: 280, y: 100, attachedToUid: fauxCloudTargetUid },
+      ]);
+      const view = makeView([sinkStock], 5);
+      const variables = varsOf(makeStockVar('snk'));
+
+      const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 1, inCreation: true }));
+
+      const realFlow = result.elements.find((e) => e.type === 'flow') as FlowViewElement;
+      const sinkPt = realFlow.points[realFlow.points.length - 1];
+      // the sink point attaches to the stock (uid 1), not a freshly-created cloud
+      expect(sinkPt.attachedToUid).toBe(1);
+      // ...and its coordinates land on the stock so the flow renders connected,
+      // rather than collapsing back onto the source/press point.
+      expect(sinkPt.x).toBe(300);
+      expect(sinkPt.y).toBe(100);
+      // only the source cloud is materialized; no sink cloud
+      expect(result.elements.filter((e) => e.type === 'cloud').length).toBe(1);
+      // the stock gains the flow as an inflow
+      const snkOp = payloadOf(stockFlowsOpFor(result.ops, 'snk'));
+      expect(snkOp.inflows).toEqual([realFlow.ident]);
+    });
+
     it('stock source to empty space: faux target becomes a new cloud at fauxTargetCenter', () => {
       const srcStock = makeStockEl(1, 'src', 0, 100);
       const flow = makeFlowEl(inCreationUid, 'new_flow', 150, 100, [

@@ -331,6 +331,21 @@ describe('Canvas gestures: creation tools (checklist 12)', () => {
 
     expect(h.callbacks.onMoveFlow).toHaveBeenCalledTimes(1);
   });
+
+  it('flow tool: releasing the sink on a stock attaches the flow to that stock', () => {
+    const stock = makeStock(1, 'pop', 300, 200);
+    const h = renderCanvas({ elements: [stock], selectedTool: 'flow' });
+    h.clearMountCalls();
+
+    pointerDown(h.svg, 100, 200); // empty space, aligned in y with the stock
+    pointerMove(h.svg, 200, 200, { buttons: 1 });
+    pointerMove(h.svg, 300, 200, { buttons: 1 }); // cursor over the stock center
+    pointerUp(h.svg, 300, 200);
+
+    expect(h.callbacks.onMoveFlow).toHaveBeenCalledTimes(1);
+    const [, targetUid] = h.callbacks.onMoveFlow.mock.calls[0];
+    expect(targetUid).toBe(1); // attached to the stock (uid 1), not 0 (empty space)
+  });
 });
 
 describe('Canvas gestures: link/flow tool from a named element (checklist 13)', () => {
