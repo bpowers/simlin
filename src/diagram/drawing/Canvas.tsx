@@ -598,16 +598,24 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
   };
 
-  const getElementByUid = (uid: UID): ViewElement => {
-    let element: ViewElement | undefined;
+  // Non-throwing element lookup. Returns undefined for the two creation
+  // sentinels when their backing element has already been cleared, and for any
+  // uid not present in the (version-cached) element map. Callers that can
+  // legitimately encounter a transiently-unresolvable uid (e.g. a selection
+  // that still references inCreationUid for one render after creation hands off
+  // to name-editing) use this and skip rather than crash; getElementByUid keeps
+  // the strict, throwing contract for everyone else.
+  const tryGetElementByUid = (uid: UID): ViewElement | undefined => {
     if (uid === inCreationUid) {
-      element = latest.current.inCreation;
+      return latest.current.inCreation;
     } else if (uid === inCreationCloudUid) {
-      element = latest.current.inCreationCloud;
-    } else {
-      element = r.elements.get(uid);
+      return latest.current.inCreationCloud;
     }
-    return defined(element);
+    return r.elements.get(uid);
+  };
+
+  const getElementByUid = (uid: UID): ViewElement => {
+    return defined(tryGetElementByUid(uid));
   };
 
   const isSelected = (element: ViewElement): boolean => latest.current.props.selection.has(element.uid);
@@ -2577,12 +2585,23 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     dragRect = <rect className={styles.dragRectOverlay} x={x} y={y} width={w} height={h} />;
   }
 
-  if (!isEditingNameNow || props.selection.size === 0) {
+  // Resolve the element being named, if any. The selection can transiently
+  // reference inCreationUid for one render after a flow creation hands off to
+  // name-editing: the pointer-up enters editingName and clears the in-creation
+  // element in the same commit, but props.selection only updates to the real
+  // flow uid once the host's async attach lands. In that render the editing
+  // element is unresolvable -- skip the name editor (the next render, after the
+  // selection commits, shows it for the real element) rather than crashing.
+  // Same transient-skip rationale as buildSelectionMap.
+  const editingElement =
+    isEditingNameNow && props.selection.size === 1
+      ? (tryGetElementByUid(only(props.selection)) as NamedViewElement | undefined)
+      : undefined;
+  if (!editingElement) {
     overlayClass += ' ' + styles.noPointerEvents;
   } else {
     const zoom = getCanvasZoom();
-    const editingUid = only(props.selection);
-    const editingElement = getElementByUid(editingUid) as NamedViewElement;
+    const editingUid = editingElement.uid;
     const { rw, rh } = labelRadii(editingElement.type);
     const side = editingElement.labelSide;
     const offset = getCanvasOffset();

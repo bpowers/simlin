@@ -310,6 +310,27 @@ describe('Canvas gestures: creation tools (checklist 12)', () => {
     // Cancelling the initial flow name deletes the just-created flow.
     expect(h.callbacks.onDeleteSelection).toHaveBeenCalledTimes(1);
   });
+
+  it('flow tool: releasing does not crash before the host commits the new selection (async attach)', () => {
+    // Regression: Editor.handleFlowAttach commits the new flow's selection
+    // asynchronously (after the engine round-trip). The pointer-up that creates
+    // the flow enters name-editing AND clears the in-creation element in the
+    // same commit, but props.selection still holds inCreationUid (-2) until that
+    // async commit lands. The name-editor render must not dereference the
+    // now-cleared in-creation element. Unlike the test above, onMoveFlow here
+    // deliberately does NOT commit a selection, modeling that gap -- which is
+    // exactly what the real (async) host does for one render.
+    const stock = makeStock(1, 'pop', 300, 200);
+    const h = renderCanvas({ elements: [stock], selectedTool: 'flow' });
+    h.clearMountCalls();
+
+    pointerDown(h.svg, 100, 200); // empty space -> source cloud materializes
+    pointerMove(h.svg, 200, 200, { buttons: 1 });
+    pointerMove(h.svg, 295, 200, { buttons: 1 }); // drag the sink toward the stock
+    expect(() => pointerUp(h.svg, 300, 200)).not.toThrow();
+
+    expect(h.callbacks.onMoveFlow).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('Canvas gestures: link/flow tool from a named element (checklist 13)', () => {
