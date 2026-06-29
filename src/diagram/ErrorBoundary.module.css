@@ -44,3 +44,49 @@
   font-size: 13px;
   color: var(--color-text-muted, #666);
 }
+
+.actions {
+  margin-top: var(--spacing-2, 16px);
+  display: flex;
+  gap: var(--spacing-1, 8px);
+}
+
+.copyButton {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+  border: 1px solid var(--color-border-input, rgba(0, 0, 0, 0.23));
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-primary, rgba(0, 0, 0, 0.87));
+  cursor: pointer;
+}
+
+.copyButton:hover {
+  background: var(--color-action-hover, rgba(0, 0, 0, 0.04));
+}
+
+.details {
+  margin-top: var(--spacing-2, 16px);
+  font-size: 13px;
+}
+
+.detailsSummary {
+  cursor: pointer;
+  color: var(--color-text-muted, #666);
+}
+
+.stack {
+  margin: var(--spacing-1, 8px) 0 0;
+  padding: var(--spacing-1, 8px);
+  max-height: 240px;
+  overflow: auto;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--color-action-hover, rgba(0, 0, 0, 0.04));
+  border-radius: 4px;
+  color: var(--color-text-primary, rgba(0, 0, 0, 0.87));
+}

@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 
 import { ErrorBoundary } from '../ErrorBoundary';
 
@@ -39,6 +39,42 @@ describe('ErrorBoundary', () => {
     expect(alert.textContent).toContain('kaboom in render');
     // componentDidCatch logged the error.
     expect(consoleErrorSpy).toHaveBeenCalled();
+  });
+
+  it('exposes the stack and copies a formatted report including host context', () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+
+    render(
+      <ErrorBoundary context={{ project: 'bpowers/fooz' }}>
+        <Boom message="kaboom in render" />
+      </ErrorBoundary>,
+    );
+
+    // The full report (including the stack) is printed in an expandable block.
+    const printed = screen.getByText(/Component stack:|Stack:/);
+    expect(printed.textContent).toContain('kaboom in render');
+
+    const button = screen.getByRole('button', { name: 'Copy details' });
+    fireEvent.click(button);
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const copied = writeText.mock.calls[0][0] as string;
+    expect(copied).toContain('Error: kaboom in render');
+    expect(copied).toContain('project: bpowers/fooz');
+  });
+
+  it('does not throw when the clipboard API is unavailable', () => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+
+    render(
+      <ErrorBoundary>
+        <Boom message="no clipboard here" />
+      </ErrorBoundary>,
+    );
+
+    const button = screen.getByRole('button', { name: 'Copy details' });
+    expect(() => fireEvent.click(button)).not.toThrow();
   });
 
   it('renders normal children unchanged when nothing throws', () => {

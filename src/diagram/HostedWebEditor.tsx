@@ -148,7 +148,7 @@ export function HostedWebEditor(props: HostedWebEditorProps): React.ReactElement
 
   return (
     <div className={classNames}>
-      <ErrorBoundary resetKey={`${username}/${projectName}`}>
+      <ErrorBoundary resetKey={`${username}/${projectName}`} context={{ project: `${username}/${projectName}` }}>
         <Editor
           inputFormat="protobuf"
           initialProjectBinary={projectBinary}
