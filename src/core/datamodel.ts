@@ -1214,6 +1214,71 @@ export interface StockFlowView {
   readonly useLetteredPolarity: boolean;
 }
 
+// Coerce a coordinate to a finite number, repairing null/undefined/NaN/Infinity
+// (which can arrive via imported models, hand-edited files, or older bugs) to a
+// safe default. A non-finite coordinate serializes to JSON `null`, which the
+// engine's patch parser rejects, so a model carrying one would otherwise be
+// permanently uneditable (issue #818). Repairing on load keeps such a model
+// usable; the affected element lands at the fallback position (visibly flagging
+// that something was off) instead of bricking the editor.
+function finiteCoord(v: number, fallback = 0): number {
+  return Number.isFinite(v) ? v : fallback;
+}
+
+// Repairs any non-finite coordinate on a freshly-deserialized view element,
+// returning the element UNCHANGED (same reference) for the common all-finite
+// case so this is a true no-op for well-formed data (it runs on every model
+// load and engine round-trip). Only a corrupt element is rebuilt. See
+// finiteCoord / issue #818.
+function sanitizeElementCoords(el: ViewElement): ViewElement {
+  const fin = (v: number): boolean => Number.isFinite(v);
+  switch (el.type) {
+    case 'aux':
+    case 'stock':
+    case 'module':
+    case 'alias':
+    case 'cloud':
+      if (fin(el.x) && fin(el.y)) {
+        return el;
+      }
+      return { ...el, x: finiteCoord(el.x), y: finiteCoord(el.y) };
+    case 'flow':
+      if (fin(el.x) && fin(el.y) && el.points.every((p) => fin(p.x) && fin(p.y))) {
+        return el;
+      }
+      return {
+        ...el,
+        x: finiteCoord(el.x),
+        y: finiteCoord(el.y),
+        points: el.points.map((p) => ({ ...p, x: finiteCoord(p.x), y: finiteCoord(p.y) })),
+      };
+    case 'link': {
+      const arcOk = el.arc === undefined || fin(el.arc);
+      const multiOk = !el.multiPoint || el.multiPoint.every((p) => fin(p.x) && fin(p.y));
+      if (arcOk && multiOk) {
+        return el;
+      }
+      return {
+        ...el,
+        // A non-finite arc becomes a straight link rather than a broken curve.
+        arc: arcOk ? el.arc : undefined,
+        multiPoint: el.multiPoint?.map((p) => ({ ...p, x: finiteCoord(p.x), y: finiteCoord(p.y) })),
+      };
+    }
+    case 'group':
+      if (fin(el.x) && fin(el.y) && fin(el.width) && fin(el.height)) {
+        return el;
+      }
+      return {
+        ...el,
+        x: finiteCoord(el.x),
+        y: finiteCoord(el.y),
+        width: finiteCoord(el.width),
+        height: finiteCoord(el.height),
+      };
+  }
+}
+
 export function stockFlowViewFromJson(json: JsonView, variables: ReadonlyMap<string, Variable>): StockFlowView {
   let maxUid = -1;
   const namedElements = new Map<string, UID>();
@@ -1259,7 +1324,10 @@ export function stockFlowViewFromJson(json: JsonView, variables: ReadonlyMap<str
     return e;
   });
 
-  const elements: readonly ViewElement[] = rawElements.map((element) => {
+  const elements: readonly ViewElement[] = rawElements.map((rawElement) => {
+    // Repair any non-finite coordinate before the element enters the live model
+    // (issue #818); a no-op for well-formed data.
+    const element = sanitizeElementCoords(rawElement);
     if (element.type === 'stock' && element.var) {
       const stock = element.var;
       const inflows: readonly UID[] = stock.inflows
@@ -1278,13 +1346,19 @@ export function stockFlowViewFromJson(json: JsonView, variables: ReadonlyMap<str
     nextUid = 1;
   }
 
-  const viewBox = json.viewBox ? rectFromJson(json.viewBox) : rectDefault();
+  const rawViewBox = json.viewBox ? rectFromJson(json.viewBox) : rectDefault();
+  const viewBox: Rect = {
+    x: finiteCoord(rawViewBox.x),
+    y: finiteCoord(rawViewBox.y),
+    width: finiteCoord(rawViewBox.width),
+    height: finiteCoord(rawViewBox.height),
+  };
 
   return {
     nextUid,
     elements,
     viewBox,
-    zoom: json.zoom ?? 1,
+    zoom: finiteCoord(json.zoom ?? 1, 1),
     useLetteredPolarity: json.useLetteredPolarity ?? false,
   };
 }
@@ -1309,6 +1383,69 @@ export function stockFlowViewToJson(view: StockFlowView): JsonView {
   }
 
   return result;
+}
+
+/**
+ * Returns a human-readable description of the first non-finite coordinate found
+ * in the view (an element x/y, a flow point, a link arc/multipoint, a group's
+ * size, or the viewBox/zoom), or undefined if every coordinate is finite.
+ *
+ * A non-finite coordinate (NaN/Infinity) serializes to JSON `null`, which the
+ * engine's patch parser rejects with "invalid type: null, expected f64" -- which
+ * historically bricked a model (every subsequent edit failed). Callers use this
+ * to refuse a corrupt view update before it reaches the engine (issue #818).
+ */
+export function findNonFiniteViewCoord(view: StockFlowView): string | undefined {
+  const check = (label: string, ...values: number[]): string | undefined => {
+    for (const v of values) {
+      if (!Number.isFinite(v)) {
+        return `${label}=${v}`;
+      }
+    }
+    return undefined;
+  };
+
+  for (const el of view.elements) {
+    let bad: string | undefined;
+    switch (el.type) {
+      case 'aux':
+      case 'stock':
+      case 'module':
+      case 'alias':
+      case 'cloud':
+        bad = check(`${el.type} uid=${el.uid} x/y`, el.x, el.y);
+        break;
+      case 'flow':
+        bad = check(`flow uid=${el.uid} valve`, el.x, el.y);
+        for (let i = 0; !bad && i < el.points.length; i++) {
+          const p = el.points[i];
+          bad = check(`flow uid=${el.uid} point[${i}]`, p.x, p.y);
+        }
+        break;
+      case 'link':
+        if (el.arc !== undefined) {
+          bad = check(`link uid=${el.uid} arc`, el.arc);
+        }
+        if (!bad && el.multiPoint) {
+          for (let i = 0; !bad && i < el.multiPoint.length; i++) {
+            const p = el.multiPoint[i];
+            bad = check(`link uid=${el.uid} multiPoint[${i}]`, p.x, p.y);
+          }
+        }
+        break;
+      case 'group':
+        bad = check(`group uid=${el.uid} x/y/w/h`, el.x, el.y, el.width, el.height);
+        break;
+    }
+    if (bad) {
+      return bad;
+    }
+  }
+
+  return (
+    check('viewBox', view.viewBox.x, view.viewBox.y, view.viewBox.width, view.viewBox.height) ??
+    check('zoom', view.zoom)
+  );
 }
 
 // LoopMetadata

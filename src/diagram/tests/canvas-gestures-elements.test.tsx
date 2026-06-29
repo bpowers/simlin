@@ -451,3 +451,49 @@ describe('Canvas gestures: name editing (checklist 15)', () => {
     expect(h.callbacks.onRenameVariable).toHaveBeenCalledTimes(1);
   });
 });
+
+// A flow or link whose endpoint UID points at an element that is not present in
+// the view is a corrupt/dangling reference. It can arise transiently (an undo
+// rebuild that renders before the project swaps, issue #817) or be persisted in
+// model data (issue #812, which left the whole model permanently uneditable).
+// The element renderers must degrade gracefully -- skip the broken element --
+// rather than throw out of render and take the entire editor down via the
+// ErrorBoundary.
+describe('Canvas rendering: dangling element references (#812, #817)', () => {
+  it('does not crash when a flow references a missing source/sink, and still renders healthy elements', () => {
+    const goodAux = makeAux(10, 'healthy', 100, 100);
+    // sink point attaches to uid 999, which does not exist in the view.
+    const danglingFlow = makeFlow(
+      3,
+      'broken flow',
+      [
+        { x: 100, y: 100, attachedToUid: 998 },
+        { x: 300, y: 100, attachedToUid: 999 },
+      ],
+      { x: 200, y: 100 },
+    );
+
+    let h!: CanvasHarness;
+    expect(() => {
+      h = renderCanvas({ elements: [goodAux, danglingFlow] });
+    }).not.toThrow();
+
+    // The broken flow is skipped; the healthy aux still renders.
+    expect(h.query('.simlin-flow')).toBeNull();
+    expect(h.query('.simlin-aux')).not.toBeNull();
+  });
+
+  it('does not crash when a link references a missing from/to endpoint', () => {
+    const goodAux = makeAux(10, 'healthy', 100, 100);
+    // from/to reference uids that do not exist.
+    const danglingLink = makeLink(20, 901, 902);
+
+    let h!: CanvasHarness;
+    expect(() => {
+      h = renderCanvas({ elements: [goodAux, danglingLink] });
+    }).not.toThrow();
+
+    expect(h.query('.simlin-arrowhead-link')).toBeNull();
+    expect(h.query('.simlin-aux')).not.toBeNull();
+  });
+});

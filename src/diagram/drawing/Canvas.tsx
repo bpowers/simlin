@@ -680,7 +680,12 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
 
     const arrowUid = only(latest.current.props.selection);
-    const arrow = getElementByUid(arrowUid);
+    // Guard against a stale selection pointing at a now-missing element (e.g. an
+    // undo landing mid-drag) rather than throwing during render.
+    const arrow = tryGetElementByUid(arrowUid);
+    if (!arrow) {
+      return undefined;
+    }
 
     const off = r.selectionCenterOffset;
     const delta = latest.current.moveDelta || { x: 0, y: 0 };
@@ -823,7 +828,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     if (!validTarget) {
       return undefined;
     }
-    const from = selectionUpdates.get(link.fromUid) || getElementByUid(link.fromUid);
+    const from = selectionUpdates.get(link.fromUid) || tryGetElementByUid(link.fromUid);
+    if (!from) {
+      return undefined;
+    }
     const arcPt = getArcPoint();
     return arcPt ? computeLinkCreationArc(from, validTarget, arcPt) : undefined;
   };
@@ -2153,7 +2161,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     return <Group key={element.uid} {...groupProps} />;
   };
 
-  const connector = (element: LinkViewElement): React.ReactElement => {
+  const connector = (element: LinkViewElement): React.ReactElement | undefined => {
     const draggingArrowhead = isDraggingArrowhead(interaction);
     const selected = props.selection.has(element.uid);
 
@@ -2164,8 +2172,14 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       element = updatedElement;
     }
 
-    const from = r.derived.selectionUpdates.get(element.fromUid) || getElementByUid(element.fromUid);
-    let to = r.derived.selectionUpdates.get(element.toUid) || getElementByUid(element.toUid);
+    // A dangling from/to reference (uid not in the view) is corrupt data -- see
+    // flow() above. Skip rendering the broken link rather than throwing out of
+    // render (#812, #817).
+    const from = r.derived.selectionUpdates.get(element.fromUid) || tryGetElementByUid(element.fromUid);
+    let to = r.derived.selectionUpdates.get(element.toUid) || tryGetElementByUid(element.toUid);
+    if (!from || !to) {
+      return;
+    }
     let isSticky = false;
 
     // Dragging this link's arrowhead — covers both new-link creation and
@@ -2234,18 +2248,22 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     if (!sourceId) {
       return;
     }
-    const source = getElementByUid(sourceId);
-    if (source.type !== 'stock' && source.type !== 'cloud') {
-      throw new Error('invariant broken');
+    // A dangling endpoint reference (source/sink uid not in the view) is corrupt
+    // data -- transient during an undo rebuild (#817) or persisted (#812). Skip
+    // rendering the broken flow rather than throwing out of render and taking the
+    // whole editor down via the ErrorBoundary.
+    const source = tryGetElementByUid(sourceId);
+    if (!source || (source.type !== 'stock' && source.type !== 'cloud')) {
+      return;
     }
 
     const sinkId = last(element.points).attachedToUid;
     if (!sinkId) {
       return;
     }
-    const sink = getElementByUid(sinkId);
-    if (sink.type !== 'stock' && sink.type !== 'cloud') {
-      throw new Error('invariant broken');
+    const sink = tryGetElementByUid(sinkId);
+    if (!sink || (sink.type !== 'stock' && sink.type !== 'cloud')) {
+      return;
     }
 
     return (

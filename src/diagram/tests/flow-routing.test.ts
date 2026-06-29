@@ -2693,4 +2693,51 @@ describe('Flow routing', () => {
       expect(newFlow.points).toEqual(flow.points);
     });
   });
+
+  describe('non-finite coordinate guard in adjustFlows (#818)', () => {
+    // adjustFlows computes the valve's fractional position by dividing by
+    // (origStock.x - otherEnd.x) / (origStock.y - otherEnd.y). For a flow whose
+    // attached endpoint and other end share an axis (a vertical or horizontal
+    // flow) that denominator is zero. The non-cloud branch guarded it with
+    // `|| 1`, but the cloud branch did not -- so dragging a cloud on such a flow
+    // produced a NaN/Infinity valve coordinate, which serialized to JSON null and
+    // bricked the model. Moving must always yield finite coordinates.
+    it('keeps the valve finite for a vertical cloud flow with an off-axis valve', () => {
+      // Vertical flow: cloud (uid 1) and the other end (uid 2) share x = 100.
+      // The valve sits off that axis (x = 150), as can happen with the degenerate
+      // geometry older flow-creation bugs left behind.
+      const cloud = makeCloud(1, 3, 100, 100);
+      const flow = makeFlow(3, 150, 200, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 100, y: 300, attachedToUid: 2 },
+      ]);
+
+      const [, newFlow] = UpdateCloudAndFlow(cloud, flow, { x: 5, y: 20 });
+
+      expect(Number.isFinite(newFlow.x)).toBe(true);
+      expect(Number.isFinite(newFlow.y)).toBe(true);
+      for (const p of newFlow.points) {
+        expect(Number.isFinite(p.x)).toBe(true);
+        expect(Number.isFinite(p.y)).toBe(true);
+      }
+    });
+
+    it('keeps the valve finite for a horizontal cloud flow with an off-axis valve', () => {
+      // Horizontal flow: cloud and other end share y = 100; valve off-axis (y=150).
+      const cloud = makeCloud(1, 3, 100, 100);
+      const flow = makeFlow(3, 200, 150, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 300, y: 100, attachedToUid: 2 },
+      ]);
+
+      const [, newFlow] = UpdateCloudAndFlow(cloud, flow, { x: 20, y: 5 });
+
+      expect(Number.isFinite(newFlow.x)).toBe(true);
+      expect(Number.isFinite(newFlow.y)).toBe(true);
+      for (const p of newFlow.points) {
+        expect(Number.isFinite(p.x)).toBe(true);
+        expect(Number.isFinite(p.y)).toBe(true);
+      }
+    });
+  });
 });

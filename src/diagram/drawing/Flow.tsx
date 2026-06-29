@@ -603,9 +603,14 @@ function adjustFlows(
 
     // FIXME: reduce this duplication
     if (isCloud) {
+      // Guard the denominators against zero: for a vertical flow origStock.x ===
+      // otherEnd.x (and likewise y for a horizontal flow), which without the
+      // `|| 1` divides by zero and yields a NaN/Infinity valve -- serialized to
+      // JSON null, that bricks the model (#818). The non-cloud branch below
+      // already guards this; the duplication kept the fix out of this copy.
       const fraction = {
-        x: flow.x === otherEnd.x ? 0.5 : (stock.x - otherEnd.x) / (origStock.x - otherEnd.x),
-        y: flow.y === otherEnd.y ? 0.5 : (stock.y - otherEnd.y) / (origStock.y - otherEnd.y),
+        x: flow.x === otherEnd.x ? 0.5 : (stock.x - otherEnd.x) / (origStock.x - otherEnd.x || 1),
+        y: flow.y === otherEnd.y ? 0.5 : (stock.y - otherEnd.y) / (origStock.y - otherEnd.y || 1),
       };
       const d = {
         x: flow.x === otherEnd.x ? stock.x - otherEnd.x : flow.x - otherEnd.x,

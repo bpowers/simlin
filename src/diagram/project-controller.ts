@@ -34,6 +34,7 @@ import {
   Rect,
   projectFromJson,
   projectAttachData,
+  findNonFiniteViewCoord,
 } from '@simlin/core/datamodel';
 import { defined, mapSet, setsEqual, toInt, uint8ArraysEqual, type Series } from '@simlin/core/common';
 import { first, getOrThrow } from '@simlin/core/collections';
@@ -500,6 +501,14 @@ export class ProjectController {
 
       this.batch(() => {
         this.project = withErrors;
+        // A reopen restores different project content (the undo/redo path). Bump
+        // the version (Canvas render-cache key) and the generation (detail-panel
+        // remount key) in the SAME notification as the content swap, so the
+        // version-keyed element cache rebuilds from the restored view and the
+        // panels re-seed from restored content. undoRedo deliberately does NOT
+        // bump these synchronously -- see the comment there (#817).
+        this.projectVersion = this.projectVersion + 0.01;
+        this.projectGeneration += 1;
         this.notify();
       });
 
@@ -684,7 +693,29 @@ export class ProjectController {
    * through here -- it uses queueViewUpdate, which never records, so a momentum
    * flick cannot evict real edits from the small undo buffer.
    */
+  /**
+   * Guard against a view carrying a non-finite (NaN/Infinity) coordinate. Such a
+   * coordinate serializes to JSON `null`, which the engine's patch parser rejects
+   * with "invalid type: null, expected f64" -- historically bricking the model
+   * (every later edit failed and the element rendered displaced). A non-finite
+   * coordinate always means an upstream geometry bug, so we refuse the update
+   * entirely (no optimistic apply, no patch) and surface a descriptive error
+   * rather than corrupting the model. Returns true when the view is safe to
+   * apply. (issue #818)
+   */
+  private viewCoordsAreFinite(view: StockFlowView): boolean {
+    const bad = findNonFiniteViewCoord(view);
+    if (bad === undefined) {
+      return true;
+    }
+    this.reportError(`internal error: refusing a view update with a non-finite coordinate (${bad})`);
+    return false;
+  }
+
   async updateView(view: StockFlowView, opts: { recordHistory?: boolean } = {}): Promise<void> {
+    if (!this.viewCoordsAreFinite(view)) {
+      return;
+    }
     const { recordHistory = false } = opts;
     this.applyOptimisticView(view);
 
@@ -712,6 +743,9 @@ export class ProjectController {
    * once the engine arrives.
    */
   async queueViewUpdate(view: StockFlowView): Promise<void> {
+    if (!this.viewCoordsAreFinite(view)) {
+      return;
+    }
     this.applyOptimisticView(view);
 
     const engine = this.engine;
@@ -827,12 +861,17 @@ export class ProjectController {
 
   /**
    * Move the undo cursor and reopen the engine from the restored snapshot.
-   * The version/generation bump happens synchronously (so the cursor move and
-   * details-panel remount are reflected immediately); the engine reopen is
-   * deferred via setTimeout. After the reopen, if the restored project no
-   * longer contains the viewed model (e.g. undo after creating and drilling
-   * into a new submodel), navigation resets to 'main' and `navResetSeq` bumps
-   * so the Editor clears its selection/details/tool state.
+   * Only the cursor (`projectOffset`) moves synchronously; the version and
+   * generation bump (and the notify that drives re-render / details-panel
+   * remount) are deferred to the engine reopen so they land together with the
+   * restored content -- see the inline comment below and openEngineProject
+   * (#817). One consequence: the UndoRedoBar's enabled state, read from the
+   * snapshot, updates a macrotask later (after the reopen notifies) rather than
+   * on click; canUndo()/canRedo() the live methods still reflect the cursor
+   * immediately. After the reopen, if the restored project no longer contains
+   * the viewed model (e.g. undo after creating and drilling into a new
+   * submodel), navigation resets to 'main' and `navResetSeq` bumps so the
+   * Editor clears its selection/details/tool state.
    */
   undoRedo(kind: 'undo' | 'redo'): void {
     const delta = kind === 'undo' ? 1 : -1;
@@ -841,14 +880,17 @@ export class ProjectController {
     projectOffset = Math.max(projectOffset, 0);
     const serializedProject = defined(this.projectHistory[projectOffset]);
 
-    this.batch(() => {
-      this.projectOffset = projectOffset;
-      this.projectVersion = this.projectVersion + 0.01;
-      // Undo/redo restores different project content, so the details panels
-      // must remount to re-seed from the restored variables.
-      this.projectGeneration += 1;
-      this.notify();
-    });
+    // Move the undo cursor synchronously so canUndo/canRedo (live methods) and a
+    // rapid second click compute the right next offset. But do NOT bump
+    // projectVersion/projectGeneration or notify yet: this.project is still the
+    // pre-undo content and the rebuild is async. Bumping the version now would
+    // make the Canvas cache its uid lookup from the stale (pre-undo) view, then
+    // the async reopen would swap in the restored view WITHOUT re-bumping the
+    // version -- leaving the version-keyed element cache stale relative to
+    // props.view, the transient inconsistency behind the dangling-ref undo crash
+    // (#817). The bump + notify happens once, inside openEngineProject, in the
+    // same batch as the content swap.
+    this.projectOffset = projectOffset;
 
     setTimeout(() => {
       if (this.disposed) {

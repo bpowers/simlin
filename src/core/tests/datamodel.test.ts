@@ -21,6 +21,7 @@ import {
   cloudViewElementFromJson,
   stockFlowViewFromJson,
   stockFlowViewToJson,
+  findNonFiniteViewCoord,
   simSpecsFromJson,
   simSpecsToJson,
   dimensionFromJson,
@@ -59,6 +60,8 @@ import type {
   LinkViewElement,
   CloudViewElement,
   AuxViewElement,
+  ViewElement,
+  Point,
   LoopMetadata,
   MacroSpec,
   Model,
@@ -1826,5 +1829,125 @@ describe('variable compat round-trip (silent data-loss regression)', () => {
     const outB = out.elements!.find((e) => e.subscript === 'b')!;
     expect(outB.graphicalFunction).toBeUndefined();
     expect(outB.compat).toBeUndefined();
+  });
+});
+
+describe('findNonFiniteViewCoord (#818)', () => {
+  const view = (elements: readonly ViewElement[], extra?: Partial<StockFlowView>): StockFlowView => ({
+    nextUid: 100,
+    elements,
+    viewBox: { x: 0, y: 0, width: 0, height: 0 },
+    zoom: 1,
+    useLetteredPolarity: false,
+    ...extra,
+  });
+
+  const stock = (uid: number, x: number, y: number): StockViewElement => ({
+    type: 'stock',
+    uid,
+    name: `s${uid}`,
+    ident: `s${uid}`,
+    var: undefined,
+    x,
+    y,
+    labelSide: 'top',
+    isZeroRadius: false,
+    inflows: [],
+    outflows: [],
+  });
+
+  const flow = (uid: number, valve: { x: number; y: number }, points: readonly Point[]): FlowViewElement => ({
+    type: 'flow',
+    uid,
+    name: `f${uid}`,
+    ident: `f${uid}`,
+    var: undefined,
+    x: valve.x,
+    y: valve.y,
+    labelSide: 'bottom',
+    points,
+    isZeroRadius: false,
+  });
+
+  it('returns undefined when every coordinate is finite', () => {
+    const v = view([stock(1, 10, 20), flow(2, { x: 30, y: 20 }, [{ x: 10, y: 20, attachedToUid: 1 }])]);
+    expect(findNonFiniteViewCoord(v)).toBeUndefined();
+  });
+
+  it('detects a NaN element coordinate', () => {
+    const v = view([stock(1, NaN, 20)]);
+    expect(findNonFiniteViewCoord(v)).toContain('stock uid=1');
+  });
+
+  it('detects a NaN flow valve coordinate', () => {
+    const v = view([flow(2, { x: NaN, y: 20 }, [{ x: 10, y: 20, attachedToUid: 1 }])]);
+    expect(findNonFiniteViewCoord(v)).toContain('flow uid=2 valve');
+  });
+
+  it('detects a NaN flow point coordinate', () => {
+    const v = view([flow(2, { x: 30, y: 20 }, [{ x: NaN, y: 20, attachedToUid: 1 }])]);
+    expect(findNonFiniteViewCoord(v)).toContain('flow uid=2 point[0]');
+  });
+
+  it('detects Infinity as non-finite', () => {
+    const v = view([stock(1, 10, Infinity)]);
+    expect(findNonFiniteViewCoord(v)).toContain('stock uid=1');
+  });
+
+  it('detects a NaN viewBox dimension', () => {
+    const v = view([stock(1, 10, 20)], { viewBox: { x: 0, y: 0, width: NaN, height: 10 } });
+    expect(findNonFiniteViewCoord(v)).toContain('viewBox');
+  });
+});
+
+describe('stockFlowViewFromJson coordinate sanitization (#818)', () => {
+  it('repairs a null/missing element coordinate to a finite value on load', () => {
+    const json = {
+      elements: [{ type: 'stock', uid: 1, name: 'pop', x: null, y: 5, labelSide: 'top' }],
+    } as unknown as Parameters<typeof stockFlowViewFromJson>[0];
+
+    const view = stockFlowViewFromJson(json, new Map());
+    const stock = view.elements[0];
+    expect(Number.isFinite(stock.x)).toBe(true);
+    expect(stock.y).toBe(5);
+    // The repaired view passes the serialization guard.
+    expect(findNonFiniteViewCoord(view)).toBeUndefined();
+  });
+
+  it('repairs a null flow point coordinate on load', () => {
+    const json = {
+      elements: [
+        {
+          type: 'flow',
+          uid: 2,
+          name: 'f',
+          x: 10,
+          y: 20,
+          labelSide: 'bottom',
+          points: [
+            { x: null, y: 0 },
+            { x: 5, y: 0, attachedToUid: 1 },
+          ],
+        },
+      ],
+    } as unknown as Parameters<typeof stockFlowViewFromJson>[0];
+
+    const view = stockFlowViewFromJson(json, new Map());
+    const flow = view.elements[0] as FlowViewElement;
+    expect(flow.points.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))).toBe(true);
+    expect(findNonFiniteViewCoord(view)).toBeUndefined();
+  });
+
+  it('repairs a non-finite zoom/viewBox on load', () => {
+    const json = {
+      elements: [],
+      viewBox: { x: 0, y: 0, width: NaN, height: 10 },
+      zoom: null,
+    } as unknown as Parameters<typeof stockFlowViewFromJson>[0];
+
+    const view = stockFlowViewFromJson(json, new Map());
+    expect(Number.isFinite(view.viewBox.width)).toBe(true);
+    expect(Number.isFinite(view.zoom)).toBe(true);
+    expect(findNonFiniteViewCoord(view)).toBeUndefined();
   });
 });

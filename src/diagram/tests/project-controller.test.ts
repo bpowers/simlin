@@ -12,7 +12,7 @@
 // error cache, navigation, and snapshot immutability/coalescing -- all against
 // the FakeEngineProject helper, with no jsdom or real WASM.
 
-import { projectFromJson, type StockFlowView } from '@simlin/core/datamodel';
+import { projectFromJson, type StockFlowView, type StockViewElement } from '@simlin/core/datamodel';
 import type { JsonProject, ErrorDetail } from '@simlin/engine';
 import { SimlinErrorKind } from '@simlin/engine';
 
@@ -324,6 +324,41 @@ describe('ProjectController undo/redo', () => {
     s = controller.getSnapshot();
     expect(s.canRedo).toBe(false); // editing discarded the redo branch
     expect(historyLen).toBe(MaxUndoSize);
+    await controller.dispose();
+  });
+
+  it('defers the version/generation bump until the restored project is installed (#817)', async () => {
+    // undoRedo must not bump projectVersion/projectGeneration synchronously: at
+    // click time this.project is still the pre-undo content and the rebuild is
+    // async. Bumping the version then would make the Canvas cache its uid lookup
+    // from the stale view, and the async rebuild swaps in the restored view
+    // WITHOUT re-bumping the version -- leaving the version-keyed element cache
+    // stale relative to props.view, the transient inconsistency behind the
+    // dangling-ref undo crash (#817). The bump must land in the same
+    // notification as the content swap.
+    const engine = makeFakeEngine();
+    const { config } = makeControllerConfig({ engine, format: 'protobuf', initialData: snap(1) });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+
+    const view = controller.getView() as StockFlowView;
+    await controller.updateView({ ...view, zoom: 4 }, { recordHistory: true });
+    const before = controller.getSnapshot();
+
+    controller.undoRedo('undo');
+    // Synchronously: the cursor moved (canRedo via the live method), but the
+    // published snapshot's version/generation are untouched -- no stale-content
+    // render is forced.
+    expect(controller.canRedo()).toBe(true);
+    const sync = controller.getSnapshot();
+    expect(sync.projectVersion).toBe(before.projectVersion);
+    expect(sync.projectGeneration).toBe(before.projectGeneration);
+
+    // After the async reopen installs the restored project, the bump lands.
+    await flushTimers();
+    const after = controller.getSnapshot();
+    expect(after.projectVersion).toBeGreaterThan(before.projectVersion);
+    expect(after.projectGeneration).toBe(before.projectGeneration + 1);
     await controller.dispose();
   });
 
@@ -657,5 +692,64 @@ describe('fake-engine fixture', () => {
     const project = projectFromJson(JSON.parse(validProjectJson()) as JsonProject);
     expect(project.name).toBe('test');
     expect(project.models.has('main')).toBe(true);
+  });
+});
+
+describe('ProjectController non-finite coordinate guard (#818)', () => {
+  const badStock = (): StockViewElement => ({
+    type: 'stock',
+    uid: 999,
+    name: 'bad',
+    ident: 'bad',
+    var: undefined,
+    x: NaN,
+    y: 0,
+    labelSide: 'top',
+    isZeroRadius: false,
+    inflows: [],
+    outflows: [],
+  });
+
+  it('updateView refuses a view with a non-finite coordinate (no patch, no optimistic bump)', async () => {
+    const engine = makeFakeEngine();
+    const { config, errors } = makeControllerConfig({ engine, format: 'protobuf', initialData: snap(1) });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+
+    const view = controller.getView() as StockFlowView;
+    const patchesBefore = engine.appliedPatches.length;
+    const versionBefore = controller.getSnapshot().projectVersion;
+
+    // A move/geometry bug that produced NaN would serialize to JSON null and the
+    // engine would reject the patch, historically leaving the model uneditable.
+    const badView: StockFlowView = { ...view, elements: [...view.elements, badStock()] };
+    await controller.updateView(badView, { recordHistory: true });
+
+    // No patch reached the engine, and the optimistic view (version bump) never
+    // applied -- the canvas stays at the last good state instead of bricking.
+    expect(engine.appliedPatches.length).toBe(patchesBefore);
+    expect(controller.getSnapshot().projectVersion).toBe(versionBefore);
+    expect(controller.canUndo()).toBe(false);
+    // The host is told why, with a descriptive (debuggable) message.
+    expect(errors.length).toBe(1);
+    expect(errors[0].message).toContain('uid=999');
+    await controller.dispose();
+  });
+
+  it('queueViewUpdate refuses a view with a non-finite coordinate', async () => {
+    const engine = makeFakeEngine();
+    const { config, errors } = makeControllerConfig({ engine, format: 'protobuf', initialData: snap(1) });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+
+    const view = controller.getView() as StockFlowView;
+    const patchesBefore = engine.appliedPatches.length;
+
+    const badView: StockFlowView = { ...view, elements: [...view.elements, badStock()] };
+    await controller.queueViewUpdate(badView);
+
+    expect(engine.appliedPatches.length).toBe(patchesBefore);
+    expect(errors.length).toBe(1);
+    await controller.dispose();
   });
 });
