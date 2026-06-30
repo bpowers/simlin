@@ -52,6 +52,7 @@ import { Connector, ConnectorProps, computeLinkCreationArc } from './Connector';
 import { EditableLabel } from './EditableLabel';
 import { Flow, flowBounds } from './Flow';
 import { applyGroupMovement } from '../group-movement';
+import { growInCreationFlow } from '../flow-attach';
 import { Group, groupBounds, GroupProps } from './Group';
 import { Module, moduleBounds, moduleContains, ModuleProps } from './Module';
 import { anyModuleHasModelReference } from '../module-warning';
@@ -888,6 +889,33 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       });
 
       selectionUpdates = new Map([...selectionUpdates, ...updatedElements]);
+    }
+
+    // Grow the in-creation flow's live preview. The flow tool stages a degenerate
+    // flow (both points at the press point) and records the drag only as
+    // moveDelta; applyGroupMovement can't grow it (a cloud->cloud flow translates
+    // rigidly, so it stays zero-length and invisible). Route it here the way the
+    // commit (computeFlowAttachment) does: the sink follows the cursor, or snaps
+    // onto a hovered stock's edge, with the source fixed and the flow orthogonal,
+    // so the preview matches what releasing the drag will produce.
+    if (inCreationNow?.type === 'flow' && latest.current.moveDelta && isDraggingArrowhead(latest.current.interaction)) {
+      let previewTarget: StockViewElement | undefined;
+      for (const el of displayElements) {
+        if (el.type === 'stock' && isValidTarget(el)) {
+          previewTarget = el;
+          break;
+        }
+      }
+      const grown = growInCreationFlow(inCreationNow, defined(latest.current.moveDelta), previewTarget);
+      selectionUpdates = new Map(selectionUpdates);
+      selectionUpdates.set(inCreationUid, grown);
+      // applyGroupMovement's single-flow path runs UpdateFlow, whose cloud->cloud
+      // case rigidly translates BOTH clouds by moveDelta -- dragging the source
+      // cloud along to the cursor. Restore it to its staged position so the flow
+      // grows from a planted tail. (The faux sink cloud isn't rendered.)
+      if (inCreationCloudNow) {
+        selectionUpdates.set(inCreationCloudUid, inCreationCloudNow);
+      }
     }
 
     const derived: RenderDerivation = {

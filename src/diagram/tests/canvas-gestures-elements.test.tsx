@@ -28,11 +28,48 @@ import {
   renderCanvas,
   type CanvasHarness,
 } from './canvas-gesture-harness';
+import { CloudRadius, StockWidth } from '../drawing/default';
 
 function lastSelection(fn: jest.Mock): number[] {
   const calls = fn.mock.calls;
   const last = calls[calls.length - 1];
   return last ? [...(last[0] as Set<number>)].sort((a, b) => a - b) : [];
+}
+
+// Parse the rendered flow path's polyline points from its `d` attribute
+// (e.g. "M100,200L180,200" -> [[100,200],[180,200]]). The inner flow path is
+// drawn straight from the flow element's points, so this reflects the live
+// geometry the user sees. NOTE: the line's final point is pulled back by a fixed
+// glyph inset (finalAdjust) to leave room for the arrowhead, so use this for
+// growth/orientation -- not for the exact endpoint (use arrowheadPoint for that).
+function flowPoints(h: CanvasHarness): Array<[number, number]> {
+  const inner = h.query('.simlin-flow .simlin-inner');
+  const d = inner?.getAttribute('d') ?? '';
+  const nums = (d.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
+  const pts: Array<[number, number]> = [];
+  for (let i = 0; i + 1 < nums.length; i += 2) {
+    pts.push([nums[i], nums[i + 1]]);
+  }
+  return pts;
+}
+
+// The flow arrowhead is drawn at the TRUE sink endpoint -- where the arrow
+// actually points -- via transform="rotate(angle, x, y)". Extract (x, y).
+function arrowheadPoint(h: CanvasHarness): [number, number] {
+  const head = h.query('.simlin-arrowhead-bg');
+  const t = head?.getAttribute('transform') ?? '';
+  const m = t.match(/rotate\([^,]+,\s*(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)/);
+  return m ? [Number(m[1]), Number(m[2])] : [NaN, NaN];
+}
+
+// Clouds render via transform="matrix(sx,0,0,sy, x-radius, y-radius)"; recover
+// each cloud's center as (translateX + radius, translateY + radius).
+function cloudCenters(h: CanvasHarness): Array<[number, number]> {
+  return h.queryAll('.simlin-cloud').map((el) => {
+    const t = el.getAttribute('transform') ?? '';
+    const m = t.match(/matrix\([^,]+,[^,]+,[^,]+,[^,]+,\s*(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)/);
+    return m ? [Number(m[1]) + CloudRadius, Number(m[2]) + CloudRadius] : [NaN, NaN];
+  });
 }
 
 // A horizontal flow stock -> cloud, with the stock wired to the flow.
@@ -345,6 +382,110 @@ describe('Canvas gestures: creation tools (checklist 12)', () => {
     expect(h.callbacks.onMoveFlow).toHaveBeenCalledTimes(1);
     const [, targetUid] = h.callbacks.onMoveFlow.mock.calls[0];
     expect(targetUid).toBe(1); // attached to the stock (uid 1), not 0 (empty space)
+  });
+});
+
+describe('Canvas gestures: flow tool live preview (a)', () => {
+  // As the user drags the flow tool, the in-creation flow must GROW toward the
+  // cursor as an orthogonal segment (it previously rendered as a zero-length,
+  // invisible path), and snap to the stock's edge when the cursor is over a
+  // valid stock. We assert on the rendered flow path geometry, not just presence.
+
+  it('the in-creation flow grows orthogonally toward the cursor (not degenerate)', () => {
+    const stock = makeStock(1, 'pop', 300, 200);
+    const h = renderCanvas({ elements: [stock], selectedTool: 'flow' });
+    h.clearMountCalls();
+
+    pointerDown(h.svg, 100, 200); // press empty space, level with the stock, to its left
+    pointerMove(h.svg, 180, 200, { buttons: 1 }); // drag right, NOT yet over the stock
+
+    const line = flowPoints(h);
+    expect(line.length).toBeGreaterThanOrEqual(2);
+    const lineStart = line[0];
+    const lineEnd = line[line.length - 1];
+    // grew a visible length (was a zero-length, invisible path before the fix)
+    expect(Math.hypot(lineEnd[0] - lineStart[0], lineEnd[1] - lineStart[1])).toBeGreaterThan(50);
+    // horizontal (orthogonal): the line stays on the source's y
+    expect(lineEnd[1]).toBeCloseTo(lineStart[1]);
+    // the arrowhead (true endpoint) points right at the cursor
+    const head = arrowheadPoint(h);
+    expect(head[0]).toBeCloseTo(180);
+    expect(head[1]).toBeCloseTo(200);
+  });
+
+  it('the in-creation flow snaps to the stock edge when the cursor is over a stock', () => {
+    const stock = makeStock(1, 'pop', 300, 200);
+    const h = renderCanvas({ elements: [stock], selectedTool: 'flow' });
+    h.clearMountCalls();
+
+    pointerDown(h.svg, 100, 200); // press level with the stock
+    pointerMove(h.svg, 180, 200, { buttons: 1 });
+    pointerMove(h.svg, 295, 200, { buttons: 1 }); // cursor now over the stock (center 300)
+
+    const head = arrowheadPoint(h);
+    // pinned to the stock's LEFT edge (300 - StockWidth/2 = 277.5), NOT the cursor
+    // (295) and NOT the stock center (300, which drew the arrowhead behind it)
+    expect(head[0]).toBeCloseTo(300 - StockWidth / 2);
+    expect(head[0]).not.toBeCloseTo(300);
+    expect(head[0]).toBeLessThan(295); // snapped back to the edge, left of the cursor
+    expect(head[1]).toBeCloseTo(200); // still horizontal
+  });
+
+  it('a dominant vertical drag grows a vertical in-creation flow', () => {
+    const h = renderCanvas({ elements: [], selectedTool: 'flow' });
+    h.clearMountCalls();
+
+    pointerDown(h.svg, 200, 100); // press empty space
+    pointerMove(h.svg, 200, 220, { buttons: 1 }); // drag straight down
+
+    const line = flowPoints(h);
+    const lineStart = line[0];
+    const lineEnd = line[line.length - 1];
+    expect(Math.abs(lineEnd[1] - lineStart[1])).toBeGreaterThan(50); // grew downward
+    // the arrowhead points straight down at the cursor (x unchanged, vertical)
+    const head = arrowheadPoint(h);
+    expect(head[0]).toBeCloseTo(200);
+    expect(head[1]).toBeCloseTo(220);
+  });
+
+  it('grows LEFTWARD toward the cursor (not degenerate)', () => {
+    const h = renderCanvas({ elements: [], selectedTool: 'flow' });
+    h.clearMountCalls();
+
+    pointerDown(h.svg, 300, 200); // press empty space
+    pointerMove(h.svg, 220, 200, { buttons: 1 }); // drag LEFT
+
+    const line = flowPoints(h);
+    expect(Math.abs(line[line.length - 1][0] - line[0][0])).toBeGreaterThan(50); // grew
+    const head = arrowheadPoint(h);
+    expect(head[0]).toBeCloseTo(220); // arrowhead at the cursor, to the left
+    expect(head[1]).toBeCloseTo(200);
+  });
+
+  it('grows UPWARD toward the cursor (not degenerate)', () => {
+    const h = renderCanvas({ elements: [], selectedTool: 'flow' });
+    h.clearMountCalls();
+
+    pointerDown(h.svg, 200, 300); // press empty space
+    pointerMove(h.svg, 200, 220, { buttons: 1 }); // drag UP
+
+    const head = arrowheadPoint(h);
+    expect(head[0]).toBeCloseTo(200); // vertical
+    expect(head[1]).toBeCloseTo(220); // arrowhead at the cursor, above
+  });
+
+  it('plants the source cloud at the tail, not on the arrowhead at the cursor', () => {
+    const h = renderCanvas({ elements: [], selectedTool: 'flow' });
+    h.clearMountCalls();
+
+    pointerDown(h.svg, 100, 200); // press empty space -> source cloud planted here
+    pointerMove(h.svg, 180, 200, { buttons: 1 }); // drag right
+
+    const centers = cloudCenters(h);
+    // the source cloud stays at the tail (the press point)...
+    expect(centers.some(([x, y]) => Math.abs(x - 100) < 1 && Math.abs(y - 200) < 1)).toBe(true);
+    // ...and does NOT ride along to the cursor/arrowhead at x=180
+    expect(centers.some(([x]) => Math.abs(x - 180) < 1)).toBe(false);
   });
 });
 

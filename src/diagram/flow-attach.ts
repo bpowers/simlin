@@ -468,3 +468,51 @@ export function computeFlowAttachment(
     isCreatingNew,
   };
 }
+
+/**
+ * Compute the GROWN geometry of the in-creation flow for the live drag preview.
+ *
+ * The flow tool stages a degenerate flow (both points at the press point) and
+ * records the drag only as `moveDelta` (= press - cursor, the Canvas
+ * convention); it never rewrites the staged flow's points. So the preview has
+ * to be derived here: route the sink toward the cursor (over empty space) or
+ * onto a hovered stock's edge, keeping the SOURCE fixed and the flow
+ * orthogonal. This mirrors what `computeFlowAttachment` produces on release, so
+ * the live preview matches the committed result.
+ *
+ * `target` is the valid stock under the cursor (or undefined over empty space).
+ * Pure: returns a new flow element; the caller swaps it into the render.
+ */
+export function growInCreationFlow(
+  flow: FlowViewElement,
+  moveDelta: CanvasPoint,
+  target: StockViewElement | CloudViewElement | undefined,
+): FlowViewElement {
+  const sinkPt = last(flow.points);
+  if (target !== undefined) {
+    // Hovering a valid stock: pin the sink to its edge -- the same routing the
+    // commit (computeFlowAttachment) and reattachEndpoint use. Temporarily
+    // attach the sink to the target so UpdateCloudAndFlow can route and clip it;
+    // the real attachment is (re)computed on release.
+    const attached: FlowViewElement = {
+      ...flow,
+      points: flow.points.map((pt, i) => (i === flow.points.length - 1 ? { ...pt, attachedToUid: target.uid } : pt)),
+    };
+    const sinkDelta = { x: sinkPt.x - target.x, y: sinkPt.y - target.y };
+    const targetAtOldSink = { ...target, x: sinkPt.x, y: sinkPt.y } as StockViewElement | CloudViewElement;
+    return UpdateCloudAndFlow(targetAtOldSink, attached, sinkDelta)[1];
+  }
+  // Over empty space: the sink follows the cursor. Move the faux sink cloud (the
+  // sink point's current attachment) from the press point by moveDelta;
+  // UpdateCloudAndFlow picks the axis from moveDelta and keeps the source fixed.
+  const sinkCloud: CloudViewElement = {
+    type: 'cloud',
+    uid: sinkPt.attachedToUid ?? fauxCloudTargetUid,
+    flowUid: flow.uid,
+    x: sinkPt.x,
+    y: sinkPt.y,
+    isZeroRadius: false,
+    ident: undefined,
+  };
+  return UpdateCloudAndFlow(sinkCloud, flow, moveDelta)[1];
+}

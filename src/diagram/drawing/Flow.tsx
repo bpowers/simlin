@@ -529,7 +529,13 @@ function adjustFlows(
       };
 
       if (inCreation) {
-        horizontal = d.x > d.y;
+        // The flow is degenerate (all points coincide), so its own orientation
+        // can't pick the axis -- recover it from the larger-magnitude component
+        // of the source->target delta. A signed `d.x > d.y` here silently left
+        // leftward/upward creations degenerate: the perpendicular component is
+        // zeroed upstream, so the signed test collapsed to `d.x > 0` / `0 > d.y`,
+        // which is wrong for the negative direction on each axis.
+        horizontal = Math.abs(d.x) > Math.abs(d.y);
       }
 
       const adjust = {
