@@ -26,6 +26,7 @@ import {
   inCreationCloudUid as canvasInCreationCloudUid,
   inCreationUid as canvasInCreationUid,
 } from '../drawing/Canvas';
+import { StockWidth, StockHeight } from '../drawing/default';
 
 // ----- fixture helpers (mirroring flow-routing.test.ts patterns) -----
 
@@ -422,13 +423,19 @@ describe('computeFlowAttachment', () => {
       expect(snkOp.inflows).toEqual([flowIdent]);
     });
 
-    it('cloud source to target stock: sink attaches to the stock, no sink cloud created', () => {
-      // The exact UI scenario: flow tool, press on empty space (source cloud),
-      // drag the sink onto a stock, release. targetUid is the stock.
+    it('cloud source to target stock: sink pins to the stock EDGE, flow horizontal, valve on the segment', () => {
+      // The exact UI scenario, faithful to runtime: the flow tool stages a
+      // DEGENERATE in-creation flow (both points AND the valve at the press
+      // point, since the drag offset is applied only at render time and never
+      // committed back to the element); the user drags the sink onto a stock and
+      // releases (targetUid = the stock). The sink must land on the stock's EDGE
+      // (not its center -- the center put the arrowhead behind the stock, the
+      // 71752f3b regression), the flow must be orthogonal, and the valve must sit
+      // ON the source->sink segment (not at/behind the stock center).
       const sinkStock = makeStockEl(1, 'snk', 300, 100);
-      const flow = makeFlowEl(inCreationUid, 'new_flow', 150, 100, [
+      const flow = makeFlowEl(inCreationUid, 'new_flow', 50, 100, [
         { x: 50, y: 100, attachedToUid: inCreationCloudUid },
-        { x: 280, y: 100, attachedToUid: fauxCloudTargetUid },
+        { x: 50, y: 100, attachedToUid: fauxCloudTargetUid },
       ]);
       const view = makeView([sinkStock], 5);
       const variables = varsOf(makeStockVar('snk'));
@@ -436,18 +443,50 @@ describe('computeFlowAttachment', () => {
       const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 1, inCreation: true }));
 
       const realFlow = result.elements.find((e) => e.type === 'flow') as FlowViewElement;
+      const sourcePt = realFlow.points[0];
       const sinkPt = realFlow.points[realFlow.points.length - 1];
       // the sink point attaches to the stock (uid 1), not a freshly-created cloud
       expect(sinkPt.attachedToUid).toBe(1);
-      // ...and its coordinates land on the stock so the flow renders connected,
-      // rather than collapsing back onto the source/press point.
-      expect(sinkPt.x).toBe(300);
-      expect(sinkPt.y).toBe(100);
+      // ...landing on the stock's LEFT edge (center.x - StockWidth/2), NOT its
+      // center: the source is to the left, so the flow enters the left face.
+      expect(sinkPt.x).toBeCloseTo(300 - StockWidth / 2);
+      expect(sinkPt.x).not.toBe(300);
+      // ...and the flow is horizontal: the sink shares the source's y.
+      expect(sinkPt.y).toBe(sourcePt.y);
+      // a straight (2-point) orthogonal segment
+      expect(realFlow.points.length).toBe(2);
+      // the valve sits strictly between the source and the (edge-clipped) sink,
+      // i.e. on the visible segment -- never at/behind the stock center.
+      expect(realFlow.x).toBeGreaterThan(sourcePt.x);
+      expect(realFlow.x).toBeLessThan(sinkPt.x);
+      expect(realFlow.y).toBe(sourcePt.y);
       // only the source cloud is materialized; no sink cloud
       expect(result.elements.filter((e) => e.type === 'cloud').length).toBe(1);
       // the stock gains the flow as an inflow
       const snkOp = payloadOf(stockFlowsOpFor(result.ops, 'snk'));
       expect(snkOp.inflows).toEqual([realFlow.ident]);
+    });
+
+    it('cloud source above a target stock: sink pins to the TOP edge and the flow is vertical', () => {
+      // Press above the stock, drag straight down onto it: the flow must route
+      // vertically and pin to the stock's top edge (center.y - StockHeight/2).
+      const sinkStock = makeStockEl(1, 'snk', 300, 200);
+      const flow = makeFlowEl(inCreationUid, 'new_flow', 300, 120, [
+        { x: 300, y: 50, attachedToUid: inCreationCloudUid },
+        { x: 300, y: 180, attachedToUid: fauxCloudTargetUid },
+      ]);
+      const view = makeView([sinkStock], 5);
+      const variables = varsOf(makeStockVar('snk'));
+
+      const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 1, inCreation: true }));
+
+      const realFlow = result.elements.find((e) => e.type === 'flow') as FlowViewElement;
+      const sourcePt = realFlow.points[0];
+      const sinkPt = realFlow.points[realFlow.points.length - 1];
+      expect(sinkPt.attachedToUid).toBe(1);
+      expect(sinkPt.y).toBeCloseTo(200 - StockHeight / 2); // top edge, not center
+      expect(sinkPt.y).not.toBe(200);
+      expect(sinkPt.x).toBe(sourcePt.x); // vertical
     });
 
     it('stock source to empty space: faux target becomes a new cloud at fauxTargetCenter', () => {

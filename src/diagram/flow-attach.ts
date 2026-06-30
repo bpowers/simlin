@@ -341,28 +341,36 @@ export function computeFlowAttachment(
     const lastPt = last(flow.points);
     if (lastPt.attachedToUid === fauxCloudTargetUid) {
       if (targetUid) {
-        // Attaching the new flow's sink to an existing stock/cloud. The
+        // Attaching the new flow's sink to an existing stock. Route it exactly
+        // the way an existing flow's endpoint reattaches (see reattachEndpoint):
+        // pin the sink to the stock's EDGE and keep the flow orthogonal. The
         // in-creation flow's points are degenerate -- both sit at the press
         // point, since the drag offset is applied only at render time and never
-        // committed back to the element. Routing that degenerate flow through
-        // UpdateCloudAndFlow with a zero delta collapses the sink onto the
-        // source's column (the zero-delta branch defaults to a vertical axis and
-        // sets sink.x = source.x), leaving the flow attached to the target by
-        // uid but drawn back at the press point. Instead snap the sink point's
-        // coordinates onto the target's center -- matching the element-centered
-        // point convention used everywhere else -- and re-center the valve so
-        // the created flow renders connected.
+        // committed back to the element -- so we drive UpdateCloudAndFlow from
+        // the current sink point: place the target at the old sink position, then
+        // move it to the stock by the resulting delta. UpdateCloudAndFlow picks
+        // the axis from that delta, aligns the sink to the source's axis, and
+        // clips it to the stock face (a degenerate flow stays straight). This
+        // replaces an earlier snap-to-center that drew the arrowhead behind the
+        // stock; a prior zero-delta route had instead collapsed the sink onto the
+        // source column, which is why the center snap was tried.
         const to = getUid(targetUid) as StockViewElement | CloudViewElement;
-        state.stockAttachingIdent = defined(to.ident);
-        const src = first(flow.points);
+        if (to.type === 'stock') {
+          state.stockAttachingIdent = defined(to.ident);
+        }
+        const oldSink = last(flow.points);
         flow = {
           ...flow,
           points: flow.points.map((pt) =>
-            pt.attachedToUid === fauxCloudTargetUid ? { ...pt, x: to.x, y: to.y, attachedToUid: to.uid } : pt,
+            pt.attachedToUid === fauxCloudTargetUid ? { ...pt, attachedToUid: to.uid } : pt,
           ),
-          x: (src.x + to.x) / 2,
-          y: (src.y + to.y) / 2,
         };
+        const sinkDelta = { x: oldSink.x - to.x, y: oldSink.y - to.y };
+        const targetAtOldSink = { ...to, x: oldSink.x, y: oldSink.y } as StockViewElement | CloudViewElement;
+        // A flow sink only ever attaches to a stock (isValidTarget gates the
+        // canvas to stock targets), and a stock keeps its position in the view --
+        // so we discard the routed endpoint and keep only the re-routed flow.
+        [, flow] = UpdateCloudAndFlow(targetAtOldSink, flow, sinkDelta);
       } else {
         let to: StockViewElement | CloudViewElement = {
           type: 'cloud' as const,
