@@ -8,6 +8,13 @@ ignore = [
     # dependency, but loro hasn't bumped postcard yet. Ignoring rather than
     # pinning ourselves because the only fix is upstream-driven.
     "RUSTSEC-2023-0089",
+    # ttf-parser is unmaintained (the author declared it so; see
+    # harfbuzz/ttf-parser#217). It's a transitive dep of our SVG-to-PNG render
+    # stack we don't control: resvg -> usvg -> {fontdb, rustybuzz} -> ttf-parser.
+    # The advisory states "No safe upgrade is available", and resvg/usvg have
+    # not migrated off it, so the only fix is upstream-driven. No code-execution
+    # or memory-safety risk -- it is purely a maintenance-status advisory.
+    "RUSTSEC-2026-0192",
 ]
 
 [licenses]
