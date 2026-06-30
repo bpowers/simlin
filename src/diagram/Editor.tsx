@@ -658,7 +658,14 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   };
 
   const handleDialClick = React.useCallback((_event: React.MouseEvent<HTMLButtonElement>): void => {
-    setState((prev) => ({ dialOpen: !prev.dialOpen }));
+    // Toggle the palette open/closed. Closing it deselects the active tool so the
+    // canvas returns to plain selection mode -- matching the load-time state where
+    // no tool is selected (the clearing was dropped in 5191a9b6 and is restored
+    // here). Opening leaves any selected tool untouched.
+    setState((prev) => ({
+      dialOpen: !prev.dialOpen,
+      selectedTool: prev.dialOpen ? undefined : prev.selectedTool,
+    }));
   }, []);
 
   const handleDialClose = React.useCallback((_e: React.SyntheticEvent, reason: CloseReason): void => {
@@ -2079,44 +2086,36 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     setState({ selectedTool: undefined });
   }, []);
 
+  // Clicking a tool selects it; clicking the already-active tool deselects it
+  // (toggle), returning to plain selection mode -- the load-time state.
   const handleSelectStock = React.useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    setState({
-      selectedTool: 'stock',
-    });
+    setState((prev) => ({ selectedTool: prev.selectedTool === 'stock' ? undefined : 'stock' }));
   }, []);
 
   const handleSelectFlow = React.useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    setState({
-      selectedTool: 'flow',
-    });
+    setState((prev) => ({ selectedTool: prev.selectedTool === 'flow' ? undefined : 'flow' }));
   }, []);
 
   const handleSelectAux = React.useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    setState({
-      selectedTool: 'aux',
-    });
+    setState((prev) => ({ selectedTool: prev.selectedTool === 'aux' ? undefined : 'aux' }));
   }, []);
 
   const handleSelectLink = React.useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    setState({
-      selectedTool: 'link',
-    });
+    setState((prev) => ({ selectedTool: prev.selectedTool === 'link' ? undefined : 'link' }));
   }, []);
 
   const handleSelectModule = React.useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    setState({
-      selectedTool: 'module',
-    });
+    setState((prev) => ({ selectedTool: prev.selectedTool === 'module' ? undefined : 'module' }));
   }, []);
 
   // Undo/redo is fully owned by the controller: it moves the undo cursor,
