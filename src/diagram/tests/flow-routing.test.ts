@@ -2333,6 +2333,56 @@ describe('Flow routing', () => {
     });
   });
 
+  describe('UpdateCloudAndFlow - valve fraction on parallel cloud drag (adjustFlows isCloud branch)', () => {
+    // A parallel drag of a straight cloud flow constrains the cloud to the flow
+    // axis and re-places the valve via adjustFlows' isCloud branch, which
+    // preserves the valve's fractional position between the fixed other end and
+    // the moved cloud using base=min(otherEnd, cloud) + abs(fraction*d). These
+    // pin that formula's output (the ONLY reachable adjustFlows branch: its sole
+    // caller passes isCloud=true).
+    // Fixture: source point at x=100 (uid 1), cloud sink at x=200 (uid 3), flow
+    // horizontal at y=100; drag the cloud right by 20 (cloud -> x=220).
+    const makeParallelCase = (valveX: number) => {
+      const cloud = makeCloud(3, 30, 200, 100);
+      const flow = makeFlow(30, valveX, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 200, y: 100, attachedToUid: 3 },
+      ]);
+      return UpdateCloudAndFlow(cloud, flow, { x: -20, y: 0 });
+    };
+
+    it('scales an off-center valve toward the moved cloud', () => {
+      // fraction.x = (220-100)/(200-100) = 1.2; d.x = 175-100 = 75;
+      // valve.x = min(100,220) + |1.2*75| = 100 + 90 = 190.
+      const [newCloud, newFlow] = makeParallelCase(175);
+      expect(newFlow.points.length).toBe(2);
+      expect(newCloud.x).toBe(220);
+      expect(newFlow.x).toBe(190);
+      expect(newFlow.y).toBe(100);
+    });
+
+    it('scales a centered valve toward the moved cloud', () => {
+      // fraction.x = 1.2; d.x = 150-100 = 50; valve.x = 100 + |1.2*50| = 160.
+      const [, newFlow] = makeParallelCase(150);
+      expect(newFlow.x).toBe(160);
+      expect(newFlow.y).toBe(100);
+    });
+
+    it('leaves the valve in place for a zero-delta drag (identity)', () => {
+      // fraction.x = (200-100)/(200-100) = 1; d.x = 175-100 = 75;
+      // valve.x = 100 + |1*75| = 175 (unchanged).
+      const cloud = makeCloud(3, 30, 200, 100);
+      const flow = makeFlow(30, 175, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 200, y: 100, attachedToUid: 3 },
+      ]);
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, { x: 0, y: 0 });
+      expect(newCloud.x).toBe(200);
+      expect(newFlow.x).toBe(175);
+      expect(newFlow.y).toBe(100);
+    });
+  });
+
   describe('UpdateCloudAndFlow - degenerate flow creation', () => {
     // When a flow is first created, both endpoints are at the same position.
     // The segment is both horizontal AND vertical (zero length).
@@ -2738,6 +2788,61 @@ describe('Flow routing', () => {
         expect(Number.isFinite(p.x)).toBe(true);
         expect(Number.isFinite(p.y)).toBe(true);
       }
+    });
+  });
+
+  describe('slightly-diagonal legacy flows classify by their dominant axis', () => {
+    // Real specimen: pre-fix flow creation persisted visually-horizontal flows
+    // whose endpoint y's drift a few pixels (5.5px in the wild case); imported
+    // models can carry the same. Exact-equality orientation checks classified
+    // such a flow as VERTICAL, so routing produced a wrong-way L (down from
+    // the cloud, into the stock's left edge, valve and label stacked on the
+    // cloud) and endpoint drags constrained/updated the wrong coordinate.
+
+    it('computeFlowRoute treats a near-horizontal flow as horizontal (L via the top edge)', () => {
+      // Cloud anchor on the left, stock on the right, 5.5px of y-drift.
+      const stock = makeStock(stockUid, 565.6, 353);
+      const flow = makeFlow(flowUid, 426.5, 355.7, [
+        { x: 310, y: 358.5, attachedToUid: cloudUid },
+        { x: 543.1, y: 353, attachedToUid: stockUid },
+      ]);
+
+      // Drag the stock far downward: a horizontal flow must attach via a
+      // perpendicular (vertical) segment into the stock's TOP edge, with the
+      // corner carrying the anchor's y.
+      const newStockCy = 483;
+      const result = computeFlowRoute(flow, stock, 565.6, newStockCy);
+
+      expect(result.points.length).toBe(3);
+      const corner = result.points[1];
+      const stockPoint = result.points[2];
+      expect(stockPoint.y).toBeCloseTo(newStockCy - StockHeight / 2);
+      expect(corner.x).toBeCloseTo(stockPoint.x);
+      expect(corner.y).toBeCloseTo(358.5);
+    });
+
+    it('UpdateCloudAndFlow slides a near-horizontal cloud drag along x (no bogus L, endpoint follows)', () => {
+      // Same drift, cloud end being dragged 50px leftward along the VISUAL
+      // axis. As "vertical", this parallel drag read as perpendicular: it
+      // rerouted into an L and never updated the endpoint's x (the cloud
+      // detached visually from its own flow).
+      const cloud = makeCloud(cloudUid, flowUid, 310, 358.5);
+      const flow = makeFlow(flowUid, 426.5, 355.7, [
+        { x: 310, y: 358.5, attachedToUid: cloudUid },
+        { x: 543.1, y: 353, attachedToUid: 99 },
+      ]);
+
+      const [movedCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, { x: 50, y: 0 });
+
+      // Still straight, constrained to the flow's (horizontal) axis.
+      expect(newFlow.points.length).toBe(2);
+      expect(movedCloud.x).toBeCloseTo(260);
+      expect(movedCloud.y).toBeCloseTo(358.5);
+      // The dragged endpoint follows the cloud on x.
+      expect(newFlow.points[0].x).toBeCloseTo(260);
+      // The far endpoint is untouched.
+      expect(newFlow.points[1].x).toBeCloseTo(543.1);
+      expect(newFlow.points[1].y).toBeCloseTo(353);
     });
   });
 });

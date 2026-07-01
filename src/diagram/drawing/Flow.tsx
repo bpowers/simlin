@@ -30,6 +30,22 @@ import styles from './Flow.module.css';
 type Side = 'left' | 'right' | 'top' | 'bottom';
 
 /**
+ * Classify a segment's working orientation for ROUTING decisions by its
+ * dominant axis. Exact coordinate equality stays the definition of
+ * "orthogonal" for rendering and normalization, but routing must also handle
+ * slightly-diagonal data -- pre-fix creation bugs persisted flows with a few
+ * pixels of cross-axis drift, and imported models can carry the same. Under
+ * exact-equality checks such a visually-horizontal flow classified as
+ * VERTICAL: stock drags routed a wrong-way L (valve and label stacked on the
+ * source cloud) and endpoint drags constrained/updated the wrong coordinate.
+ * Ties (a perfect 45-degree diagonal, only possible cloud-to-cloud) count as
+ * horizontal.
+ */
+function isDominantlyHorizontal(p1: IPoint, p2: IPoint): boolean {
+  return Math.abs(p2.y - p1.y) <= Math.abs(p2.x - p1.x);
+}
+
+/**
  * Returns a point on the edge of a stock.
  *
  * @param stockCx - X center of the stock
@@ -140,7 +156,7 @@ function getFlowAttachmentInfo(
   const anchor = stockIsFirst ? lastPoint : firstPoint;
   const adjacentPoint = getStockAdjacentPoint(points, stockIsFirst);
   const anchorAdjacentPoint = getAnchorAdjacentPoint(points, stockIsFirst);
-  const originalFlowIsHorizontal = anchor.y === anchorAdjacentPoint.y;
+  const originalFlowIsHorizontal = isDominantlyHorizontal(anchorAdjacentPoint, anchor);
 
   let side: Side;
   let isStraight = false;
@@ -148,7 +164,7 @@ function getFlowAttachmentInfo(
   // For 4+ point flows, use the existing segment orientation
   if (points.length >= 4) {
     const currentStockPoint = stockIsFirst ? firstPoint : lastPoint;
-    const isHorizontalSegment = currentStockPoint.y === adjacentPoint.y;
+    const isHorizontalSegment = isDominantlyHorizontal(currentStockPoint, adjacentPoint);
 
     if (isHorizontalSegment) {
       side = adjacentPoint.x > newStockCx ? 'right' : 'left';
@@ -299,7 +315,7 @@ export function computeFlowRoute(
   // This works for both 2-point (straight) and 3+ point (L-shaped) flows.
   // For L-shaped flows, the anchor-side segment preserves the original direction.
   const anchorAdjacentPoint = getAnchorAdjacentPoint(points, stockIsFirst);
-  const originalFlowIsHorizontal = anchor.y === anchorAdjacentPoint.y;
+  const originalFlowIsHorizontal = isDominantlyHorizontal(anchorAdjacentPoint, anchor);
 
   // For flows with 4+ points (imported or manually-edited multi-segment flows),
   // update both the attached endpoint and the adjacent corner to preserve
@@ -313,7 +329,7 @@ export function computeFlowRoute(
     // We must preserve this orientation to avoid creating diagonal segments between
     // corner1 and corner2 when the stock moves far perpendicular to the segment.
     const currentStockPoint = stockIsFirst ? firstPoint : lastPoint;
-    const isHorizontalSegment = currentStockPoint.y === adjacentPoint.y;
+    const isHorizontalSegment = isDominantlyHorizontal(currentStockPoint, adjacentPoint);
 
     // Choose the attachment side based on the preserved orientation
     let side: Side;
@@ -478,9 +494,7 @@ export function computeFlowRoute(
 
   // Preserve valve position by clamping to the closest segment of the new L-shape
   const currentValve: IPoint = { x: flow.x, y: flow.y };
-  const newSegments = getSegments(newPoints);
-  const closestSegment = findClosestSegment(currentValve, newSegments);
-  const clampedValve = clampToSegment(currentValve, closestSegment);
+  const clampedValve = clampValveToClosestSegment(currentValve, newPoints);
 
   return {
     ...flow,
@@ -500,6 +514,13 @@ function adjustFlows(
     let horizontal = isHorizontal(flow);
     const vertical = isVertical(flow);
     const inCreation = horizontal && vertical;
+    if (!inCreation && !horizontal && !vertical && flow.points.length === 2) {
+      // Slightly-diagonal legacy data: neither exact test matched, so classify
+      // by the dominant axis (see isDominantlyHorizontal). Without this, a
+      // visually-horizontal drifted flow snapped the dragged endpoint's y but
+      // never updated its x, detaching the flow from its own endpoint.
+      horizontal = isDominantlyHorizontal(first(flow.points), last(flow.points));
+    }
 
     let otherEnd: IPoint | undefined;
     const points = flow.points.map((point, i) => {
@@ -529,7 +550,13 @@ function adjustFlows(
       };
 
       if (inCreation) {
-        horizontal = d.x > d.y;
+        // The flow is degenerate (all points coincide), so its own orientation
+        // can't pick the axis -- recover it from the larger-magnitude component
+        // of the source->target delta. A signed `d.x > d.y` here silently left
+        // leftward/upward creations degenerate: the perpendicular component is
+        // zeroed upstream, so the signed test collapsed to `d.x > 0` / `0 > d.y`,
+        // which is wrong for the negative direction on each axis.
+        horizontal = Math.abs(d.x) > Math.abs(d.y);
       }
 
       const adjust = {
@@ -601,13 +628,25 @@ function adjustFlows(
       };
     }
 
-    // FIXME: reduce this duplication
+    // The isCloud and non-cloud branches deliberately compute the valve
+    // differently and must NOT be unified. isCloud mirrors the valve around the
+    // segment: base = min(otherEnd, moved end) plus the ABSOLUTE scaled offset,
+    // so an off-center valve stays between the two ends even when the drag flips
+    // the segment orientation (the moved end crossing past otherEnd). The
+    // non-cloud branch offsets by the SIGNED scaled distance from otherEnd --
+    // correct for a stock endpoint that keeps its side, but divergent from the
+    // cloud formula for off-center / sign-flip cases. The shared arithmetic (the
+    // raw fraction, `d`) is too small and entangled with these differing
+    // combinators to factor out without obscuring both formulas.
+    //
+    // NOTE: the non-cloud branch is currently unreachable -- adjustFlows' sole
+    // caller (UpdateCloudAndFlow, straight-flow parallel drag) always passes
+    // isCloud=true. It is retained as the general signed formula.
     if (isCloud) {
       // Guard the denominators against zero: for a vertical flow origStock.x ===
       // otherEnd.x (and likewise y for a horizontal flow), which without the
       // `|| 1` divides by zero and yields a NaN/Infinity valve -- serialized to
-      // JSON null, that bricks the model (#818). The non-cloud branch below
-      // already guards this; the duplication kept the fix out of this copy.
+      // JSON null, that bricks the model (#818).
       const fraction = {
         x: flow.x === otherEnd.x ? 0.5 : (stock.x - otherEnd.x) / (origStock.x - otherEnd.x || 1),
         y: flow.y === otherEnd.y ? 0.5 : (stock.y - otherEnd.y) / (origStock.y - otherEnd.y || 1),
@@ -643,6 +682,37 @@ function adjustFlows(
 
     return { ...flow, points };
   });
+}
+
+/**
+ * Pin a flow's stock-attached SOURCE endpoint onto the stock edge facing the
+ * sink, preserving the flow's orientation (the perpendicular coordinate is
+ * untouched, so a straight flow stays straight) and re-clamping the valve to
+ * the resulting path. Used at flow-creation commit: the flow tool stages the
+ * source point at the press-time stock CENTER and only routes the sink, so
+ * without this the persisted source endpoint sits hidden under the stock body
+ * (violating the edge-attachment rule) until the next stock drag re-pins it.
+ */
+export function pinSourceToStockEdge(flow: FlowViewElement, stock: StockViewElement): FlowViewElement {
+  if (flow.points.length < 2) {
+    return flow;
+  }
+  const srcPt = first(flow.points);
+  const sinkPt = last(flow.points);
+  if (srcPt.attachedToUid !== stock.uid) {
+    return flow;
+  }
+
+  const horizontal = isDominantlyHorizontal(srcPt, sinkPt);
+  const side: Side = horizontal ? (sinkPt.x >= stock.x ? 'right' : 'left') : sinkPt.y >= stock.y ? 'bottom' : 'top';
+  const edge = getStockEdgePoint(stock.x, stock.y, side);
+  const newSrc: Point = horizontal ? { ...srcPt, x: edge.x } : { ...srcPt, y: edge.y };
+  const points: readonly Point[] = [newSrc, ...flow.points.slice(1)];
+
+  const currentValve: IPoint = { x: flow.x, y: flow.y };
+  const segments = getSegments(points);
+  const valve = clampToSegment(currentValve, findClosestSegment(currentValve, segments));
+  return { ...flow, x: valve.x, y: valve.y, points };
 }
 
 export function UpdateStockAndFlows(
@@ -713,9 +783,14 @@ export function UpdateCloudAndFlow(
     // Use the drag direction to determine the intended axis.
     const isDegenerate = seg.isHorizontal && seg.isVertical;
 
-    // For degenerate segments, determine axis from drag direction.
-    // For non-degenerate segments, use the existing segment orientation.
-    const treatAsHorizontal = isDegenerate ? Math.abs(moveDelta.x) > Math.abs(moveDelta.y) : seg.isHorizontal;
+    // For degenerate segments, determine axis from drag direction. For
+    // non-degenerate segments, use the segment's DOMINANT orientation (see
+    // isDominantlyHorizontal): an exact check misread a parallel drag of a
+    // slightly-diagonal legacy flow as perpendicular and rerouted it into a
+    // bogus L.
+    const treatAsHorizontal = isDegenerate
+      ? Math.abs(moveDelta.x) > Math.abs(moveDelta.y)
+      : isDominantlyHorizontal(seg.p1, seg.p2);
 
     const perpDelta = treatAsHorizontal ? moveDelta.y : moveDelta.x;
     const parDelta = treatAsHorizontal ? moveDelta.x : moveDelta.y;
@@ -772,9 +847,7 @@ export function UpdateCloudAndFlow(
       };
 
       // Clamp valve to closest segment of new shape
-      const newSegments = getSegments(points);
-      const closestSeg = findClosestSegment(currentValve, newSegments);
-      const newValve = clampToSegment(currentValve, closestSeg);
+      const newValve = clampValveToClosestSegment(currentValve, points);
 
       flow = {
         ...flow,
@@ -1190,6 +1263,18 @@ const VALVE_HIT_TOLERANCE = 5;
 const VALVE_CLAMP_MARGIN = 10;
 
 /**
+ * Snap a valve onto the closest segment of a flow path -- the recurring
+ * getSegments -> findClosestSegment -> clampToSegment chain run wherever a
+ * flow's geometry changes (stock/cloud moves, segment drags, L-shape
+ * conversions). Assumes `points` has at least two points, which every caller
+ * guarantees, so `findClosestSegment` always has a segment to return.
+ */
+function clampValveToClosestSegment(valve: IPoint, points: readonly Point[]): IPoint {
+  const segments = getSegments(points);
+  return clampToSegment(valve, findClosestSegment(valve, segments));
+}
+
+/**
  * Preserves the valve's fractional position when a segment changes.
  *
  * When a stock moves along the flow axis, the segment gets longer or shorter.
@@ -1396,9 +1481,7 @@ export function UpdateFlow(
     // Dragging any segment can affect adjacent segments via shared corners,
     // so the valve's segment may have changed shape even if it wasn't the
     // segment being dragged.
-    const newSegments = getSegments(points);
-    const closestSeg = findClosestSegment(currentValve, newSegments);
-    const newValve = clampToSegment(currentValve, closestSeg);
+    const newValve = clampValveToClosestSegment(currentValve, points);
     flowEl = {
       ...flowEl,
       x: newValve.x,
@@ -1505,9 +1588,7 @@ export function UpdateFlow(
       });
 
       // Clamp valve to the closest segment of the new shape
-      const newSegments = getSegments(points);
-      const closestSeg = findClosestSegment(currentValve, newSegments);
-      const newValve = clampToSegment(currentValve, closestSeg);
+      const newValve = clampValveToClosestSegment(currentValve, points);
 
       flowEl = {
         ...flowEl,

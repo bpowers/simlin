@@ -17,6 +17,7 @@ import type { JsonModelOperation } from '@simlin/engine';
 import {
   computeFlowAttachment,
   fauxCloudTargetUid,
+  growInCreationFlow,
   inCreationCloudUid,
   inCreationUid,
   type FlowAttachParams,
@@ -26,6 +27,12 @@ import {
   inCreationCloudUid as canvasInCreationCloudUid,
   inCreationUid as canvasInCreationUid,
 } from '../drawing/Canvas';
+import {
+  fauxCloudTargetUid as sharedFauxCloudTargetUid,
+  inCreationCloudUid as sharedInCreationCloudUid,
+  inCreationUid as sharedInCreationUid,
+} from '../drawing/creation-sentinels';
+import { StockWidth, StockHeight } from '../drawing/default';
 
 // ----- fixture helpers (mirroring flow-routing.test.ts patterns) -----
 
@@ -149,12 +156,17 @@ function payloadOf(op: JsonModelOperation): { ident: string; inflows: string[]; 
 }
 
 describe('computeFlowAttachment', () => {
-  // The flow-attach module re-declares the Canvas creation sentinels to stay
-  // free of React/DOM imports. Guard that the duplicates never drift.
-  it('keeps creation sentinel constants in sync with Canvas', () => {
-    expect(inCreationUid).toBe(canvasInCreationUid);
-    expect(inCreationCloudUid).toBe(canvasInCreationCloudUid);
-    expect(fauxCloudTargetUid).toBe(canvasFauxCloudTargetUid);
+  // The creation sentinels are defined once in drawing/creation-sentinels and
+  // re-exported by both flow-attach and Canvas. This guards that every import
+  // path stays wired to that single source (a trivial identity now, but it
+  // keeps the compatibility of both re-export paths under test).
+  it('keeps creation sentinel constants in sync across import paths', () => {
+    expect(inCreationUid).toBe(sharedInCreationUid);
+    expect(inCreationCloudUid).toBe(sharedInCreationCloudUid);
+    expect(fauxCloudTargetUid).toBe(sharedFauxCloudTargetUid);
+    expect(canvasInCreationUid).toBe(sharedInCreationUid);
+    expect(canvasInCreationCloudUid).toBe(sharedInCreationCloudUid);
+    expect(canvasFauxCloudTargetUid).toBe(sharedFauxCloudTargetUid);
   });
 
   describe('sink reattach', () => {
@@ -422,13 +434,19 @@ describe('computeFlowAttachment', () => {
       expect(snkOp.inflows).toEqual([flowIdent]);
     });
 
-    it('cloud source to target stock: sink attaches to the stock, no sink cloud created', () => {
-      // The exact UI scenario: flow tool, press on empty space (source cloud),
-      // drag the sink onto a stock, release. targetUid is the stock.
+    it('cloud source to target stock: sink pins to the stock EDGE, flow horizontal, valve on the segment', () => {
+      // The exact UI scenario, faithful to runtime: the flow tool stages a
+      // DEGENERATE in-creation flow (both points AND the valve at the press
+      // point, since the drag offset is applied only at render time and never
+      // committed back to the element); the user drags the sink onto a stock and
+      // releases (targetUid = the stock). The sink must land on the stock's EDGE
+      // (not its center -- the center put the arrowhead behind the stock, the
+      // 71752f3b regression), the flow must be orthogonal, and the valve must sit
+      // ON the source->sink segment (not at/behind the stock center).
       const sinkStock = makeStockEl(1, 'snk', 300, 100);
-      const flow = makeFlowEl(inCreationUid, 'new_flow', 150, 100, [
+      const flow = makeFlowEl(inCreationUid, 'new_flow', 50, 100, [
         { x: 50, y: 100, attachedToUid: inCreationCloudUid },
-        { x: 280, y: 100, attachedToUid: fauxCloudTargetUid },
+        { x: 50, y: 100, attachedToUid: fauxCloudTargetUid },
       ]);
       const view = makeView([sinkStock], 5);
       const variables = varsOf(makeStockVar('snk'));
@@ -436,18 +454,132 @@ describe('computeFlowAttachment', () => {
       const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 1, inCreation: true }));
 
       const realFlow = result.elements.find((e) => e.type === 'flow') as FlowViewElement;
+      const sourcePt = realFlow.points[0];
       const sinkPt = realFlow.points[realFlow.points.length - 1];
       // the sink point attaches to the stock (uid 1), not a freshly-created cloud
       expect(sinkPt.attachedToUid).toBe(1);
-      // ...and its coordinates land on the stock so the flow renders connected,
-      // rather than collapsing back onto the source/press point.
-      expect(sinkPt.x).toBe(300);
-      expect(sinkPt.y).toBe(100);
+      // ...landing on the stock's LEFT edge (center.x - StockWidth/2), NOT its
+      // center: the source is to the left, so the flow enters the left face.
+      expect(sinkPt.x).toBeCloseTo(300 - StockWidth / 2);
+      expect(sinkPt.x).not.toBe(300);
+      // ...and the flow is horizontal: the sink shares the source's y.
+      expect(sinkPt.y).toBe(sourcePt.y);
+      // a straight (2-point) orthogonal segment
+      expect(realFlow.points.length).toBe(2);
+      // the valve sits strictly between the source and the (edge-clipped) sink,
+      // i.e. on the visible segment -- never at/behind the stock center.
+      expect(realFlow.x).toBeGreaterThan(sourcePt.x);
+      expect(realFlow.x).toBeLessThan(sinkPt.x);
+      expect(realFlow.y).toBe(sourcePt.y);
       // only the source cloud is materialized; no sink cloud
       expect(result.elements.filter((e) => e.type === 'cloud').length).toBe(1);
       // the stock gains the flow as an inflow
       const snkOp = payloadOf(stockFlowsOpFor(result.ops, 'snk'));
       expect(snkOp.inflows).toEqual([realFlow.ident]);
+    });
+
+    it('cloud source above a target stock: sink pins to the TOP edge and the flow is vertical', () => {
+      // Press above the stock, drag straight down onto it: the flow must route
+      // vertically and pin to the stock's top edge (center.y - StockHeight/2).
+      const sinkStock = makeStockEl(1, 'snk', 300, 200);
+      const flow = makeFlowEl(inCreationUid, 'new_flow', 300, 120, [
+        { x: 300, y: 50, attachedToUid: inCreationCloudUid },
+        { x: 300, y: 180, attachedToUid: fauxCloudTargetUid },
+      ]);
+      const view = makeView([sinkStock], 5);
+      const variables = varsOf(makeStockVar('snk'));
+
+      const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 1, inCreation: true }));
+
+      const realFlow = result.elements.find((e) => e.type === 'flow') as FlowViewElement;
+      const sourcePt = realFlow.points[0];
+      const sinkPt = realFlow.points[realFlow.points.length - 1];
+      expect(sinkPt.attachedToUid).toBe(1);
+      expect(sinkPt.y).toBeCloseTo(200 - StockHeight / 2); // top edge, not center
+      expect(sinkPt.y).not.toBe(200);
+      expect(sinkPt.x).toBe(sourcePt.x); // vertical
+    });
+
+    it('degenerate creation onto a stock to the LEFT: edge-pinned, not degenerate', () => {
+      // Faithful to runtime: the in-creation flow is degenerate (both points at
+      // the press point). Releasing on a stock to the LEFT of the press must pin
+      // the sink to the stock's RIGHT edge -- a signed axis comparison in
+      // adjustFlows previously left this (and upward) degenerate on the commit
+      // path, not just the preview.
+      const sinkStock = makeStockEl(1, 'snk', 40, 200); // stock to the left of the press
+      const flow = makeFlowEl(inCreationUid, 'new_flow', 100, 200, [
+        { x: 100, y: 200, attachedToUid: inCreationCloudUid },
+        { x: 100, y: 200, attachedToUid: fauxCloudTargetUid },
+      ]);
+      const view = makeView([sinkStock], 5);
+      const variables = varsOf(makeStockVar('snk'));
+
+      const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 1, inCreation: true }));
+
+      const realFlow = result.elements.find((e) => e.type === 'flow') as FlowViewElement;
+      const sourcePt = realFlow.points[0];
+      const sinkPt = realFlow.points[realFlow.points.length - 1];
+      expect(sinkPt.attachedToUid).toBe(1);
+      expect(sinkPt.x).toBeCloseTo(40 + StockWidth / 2); // 62.5: right edge
+      expect(sinkPt.x).not.toBe(100); // not degenerate / stuck at the press point
+      expect(sinkPt.y).toBe(sourcePt.y); // horizontal
+    });
+
+    it('stock source: the source endpoint pins to the stock EDGE facing the sink, not its center', () => {
+      // Faithful to runtime: pressing the flow tool ON a stock stages the
+      // source point at the stock's CENTER, and only the sink is routed at
+      // commit -- so the persisted source endpoint hid under the stock body
+      // (violating the edge-attachment rule) until the next stock drag
+      // re-pinned it. The commit must pin the source to the facing edge.
+      const srcStock = makeStockEl(1, 'src', 100, 100);
+      const sinkStock = makeStockEl(2, 'snk', 400, 100);
+      const flow = makeFlowEl(inCreationUid, 'new_flow', 100, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 100, y: 100, attachedToUid: fauxCloudTargetUid },
+      ]);
+      const view = makeView([srcStock, sinkStock], 5);
+      const variables = varsOf(makeStockVar('src'), makeStockVar('snk'));
+
+      const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 2, inCreation: true }));
+
+      const realFlow = result.elements.find((e) => e.type === 'flow') as FlowViewElement;
+      const sourcePt = realFlow.points[0];
+      const sinkPt = realFlow.points[realFlow.points.length - 1];
+      // Source on the RIGHT edge of the source stock (the sink is to the right).
+      expect(sourcePt.attachedToUid).toBe(1);
+      expect(sourcePt.x).toBeCloseTo(100 + StockWidth / 2);
+      expect(sourcePt.x).not.toBe(100);
+      // Sink on the LEFT edge of the target stock; flow horizontal and straight.
+      expect(sinkPt.x).toBeCloseTo(400 - StockWidth / 2);
+      expect(sinkPt.y).toBe(sourcePt.y);
+      expect(realFlow.points.length).toBe(2);
+      // The valve sits on the visible segment between the two edges.
+      expect(realFlow.x).toBeGreaterThan(sourcePt.x);
+      expect(realFlow.x).toBeLessThan(sinkPt.x);
+    });
+
+    it('stock source dragged UP to empty space: the source pins to the TOP edge', () => {
+      const srcStock = makeStockEl(1, 'src', 100, 300);
+      const flow = makeFlowEl(inCreationUid, 'new_flow', 100, 300, [
+        { x: 100, y: 300, attachedToUid: 1 },
+        { x: 100, y: 300, attachedToUid: fauxCloudTargetUid },
+      ]);
+      const view = makeView([srcStock], 5);
+      const variables = varsOf(makeStockVar('src'));
+
+      // Release 150px above the press: the sink cloud materializes there.
+      const result = computeFlowAttachment(
+        view,
+        variables,
+        params({ flow, inCreation: true, fauxTargetCenter: { x: 100, y: 150 }, cursorMoveDelta: { x: 0, y: 150 } }),
+      );
+
+      const realFlow = result.elements.find((e) => e.type === 'flow') as FlowViewElement;
+      const sourcePt = realFlow.points[0];
+      const sinkPt = realFlow.points[realFlow.points.length - 1];
+      expect(sourcePt.attachedToUid).toBe(1);
+      expect(sourcePt.y).toBeCloseTo(300 - StockHeight / 2); // top edge, not center
+      expect(sourcePt.x).toBe(sinkPt.x); // vertical
     });
 
     it('stock source to empty space: faux target becomes a new cloud at fauxTargetCenter', () => {
@@ -716,5 +848,110 @@ describe('computeFlowAttachment', () => {
         { x: 180, y: 300, attachedToUid: 2 },
       ]);
     });
+  });
+});
+
+describe('growInCreationFlow (live drag preview)', () => {
+  // The in-creation flow is degenerate while dragging: both points sit at the
+  // press point, and the drag is recorded only as moveDelta (= press - cursor).
+  function degenerateFlow(px: number, py: number): FlowViewElement {
+    return makeFlowEl(inCreationUid, 'new_flow', px, py, [
+      { x: px, y: py, attachedToUid: inCreationCloudUid },
+      { x: px, y: py, attachedToUid: fauxCloudTargetUid },
+    ]);
+  }
+
+  it('over empty space: the sink follows the cursor along a horizontal segment', () => {
+    const flow = degenerateFlow(100, 200);
+    // cursor 80px to the right of the press point -> moveDelta = press - cursor.
+    const grown = growInCreationFlow(flow, { x: -80, y: 0 }, undefined);
+
+    expect(grown.points.length).toBe(2);
+    const src = grown.points[0];
+    const sink = grown.points[grown.points.length - 1];
+    // source stays at the press point
+    expect(src.x).toBe(100);
+    expect(src.y).toBe(200);
+    // sink reaches the cursor; flow is horizontal (sink shares source y)
+    expect(sink.x).toBeCloseTo(180);
+    expect(sink.y).toBe(200);
+    // the sink still references the faux cursor target during the preview
+    expect(sink.attachedToUid).toBe(fauxCloudTargetUid);
+  });
+
+  it('over empty space: a dominant vertical drag grows a vertical segment', () => {
+    const flow = degenerateFlow(100, 200);
+    // cursor 80px below -> dominant y component picks the vertical axis.
+    const grown = growInCreationFlow(flow, { x: 0, y: -80 }, undefined);
+
+    const src = grown.points[0];
+    const sink = grown.points[grown.points.length - 1];
+    expect(sink.x).toBe(src.x); // vertical
+    expect(sink.y).toBeCloseTo(280);
+  });
+
+  it('over a stock: the sink snaps to the stock EDGE (not the cursor or center)', () => {
+    const flow = degenerateFlow(100, 200);
+    const stock = makeStockEl(1, 'snk', 300, 200);
+    // moveDelta is irrelevant once a target is hovered; the sink pins to the edge.
+    const grown = growInCreationFlow(flow, { x: -200, y: 0 }, stock);
+
+    const src = grown.points[0];
+    const sink = grown.points[grown.points.length - 1];
+    expect(sink.attachedToUid).toBe(1);
+    expect(sink.x).toBeCloseTo(300 - StockWidth / 2); // left edge, not center (300)
+    expect(sink.x).not.toBe(300);
+    expect(sink.y).toBe(src.y); // horizontal
+    expect(src.x).toBe(100); // source unchanged
+  });
+
+  // The degenerate axis-recovery in adjustFlows must work in BOTH directions on
+  // each axis; a signed comparison there silently left LEFT/UP drags degenerate.
+  it('over empty space: the sink follows a LEFTWARD cursor (not degenerate)', () => {
+    const flow = degenerateFlow(100, 200);
+    // cursor 80px to the LEFT -> moveDelta = press - cursor = +80.
+    const grown = growInCreationFlow(flow, { x: 80, y: 0 }, undefined);
+
+    const src = grown.points[0];
+    const sink = grown.points[grown.points.length - 1];
+    expect(sink.x).toBeCloseTo(20); // reached the cursor to the left
+    expect(sink.x).not.toBe(100); // not stuck at the press point
+    expect(sink.y).toBe(src.y); // horizontal
+  });
+
+  it('over empty space: the sink follows an UPWARD cursor (not degenerate)', () => {
+    const flow = degenerateFlow(100, 200);
+    // cursor 80px ABOVE -> moveDelta = press - cursor = +80 in y.
+    const grown = growInCreationFlow(flow, { x: 0, y: 80 }, undefined);
+
+    const src = grown.points[0];
+    const sink = grown.points[grown.points.length - 1];
+    expect(sink.x).toBe(src.x); // vertical
+    expect(sink.y).toBeCloseTo(120); // reached the cursor above
+    expect(sink.y).not.toBe(200); // not stuck at the press point
+  });
+
+  it('over a stock to the LEFT: the sink snaps to the stock RIGHT edge', () => {
+    const flow = degenerateFlow(100, 200);
+    const stock = makeStockEl(1, 'snk', 40, 200); // stock to the left of the press
+    const grown = growInCreationFlow(flow, { x: 0, y: 0 }, stock);
+
+    const sink = grown.points[grown.points.length - 1];
+    expect(sink.attachedToUid).toBe(1);
+    expect(sink.x).toBeCloseTo(40 + StockWidth / 2); // 62.5: right edge, not the center
+    expect(sink.x).not.toBe(100); // not stuck at the press point
+    expect(sink.y).toBe(200);
+  });
+
+  it('over a stock ABOVE: the sink snaps to the stock BOTTOM edge', () => {
+    const flow = degenerateFlow(100, 200);
+    const stock = makeStockEl(1, 'snk', 100, 40); // stock above the press
+    const grown = growInCreationFlow(flow, { x: 0, y: 0 }, stock);
+
+    const sink = grown.points[grown.points.length - 1];
+    expect(sink.attachedToUid).toBe(1);
+    expect(sink.y).toBeCloseTo(40 + StockHeight / 2); // bottom edge, not the center
+    expect(sink.y).not.toBe(200); // not stuck at the press point
+    expect(sink.x).toBe(100);
   });
 });

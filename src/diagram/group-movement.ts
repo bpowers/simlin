@@ -49,15 +49,27 @@ export interface MovementDelta {
 }
 
 /**
- * @deprecated Use MovementDelta instead. Kept for backwards compatibility.
+ * Move a selected flow's valve by the drag delta and clamp it back onto the
+ * flow's (already re-routed) path.
+ *
+ * A dragged flow's valve should track the pointer -- flow.x/y shifted by the
+ * drag delta -- and then snap to the closest segment of the new geometry. The
+ * routing helpers (computeFlowRoute, the pre-processed pass) instead preserve
+ * the valve's OLD fractional position, which lags behind the drag; this
+ * re-clamps it. Returns undefined when the path has no segments (fewer than two
+ * points) so each caller keeps its own fallback for that unreachable case.
  */
-export type Point2D = MovementDelta;
-
-export interface GroupMovementResult {
-  /** Map from element UID to updated element (for elements that changed) */
-  updatedElements: Map<UID, ViewElement>;
-  /** Additional elements to update (clouds updated via flow routing, etc.) */
-  sideEffects: ViewElement[];
+function clampDraggedValve(
+  flow: FlowViewElement,
+  delta: MovementDelta,
+  points: readonly Point[],
+): { x: number; y: number } | undefined {
+  const proposedValve = { x: flow.x - delta.x, y: flow.y - delta.y };
+  const segments = getSegments(points);
+  if (segments.length === 0) {
+    return undefined;
+  }
+  return clampToSegment(proposedValve, findClosestSegment(proposedValve, segments));
 }
 
 /**
@@ -151,7 +163,7 @@ function routeCloudEndpointFlow(
 export function computePreRoutedOffsets(
   elements: Iterable<ViewElement>,
   selectedStockUids: Set<UID>,
-  delta: Point2D,
+  delta: MovementDelta,
   isInSelection: (uid: UID | undefined) => boolean,
 ): Map<UID, number> {
   const preComputedOffsets = new Map<UID, number>();
@@ -225,12 +237,11 @@ export function preProcessSelectedFlows(
   elements: Iterable<ViewElement>,
   selectedFlowUids: Set<UID>,
   preComputedOffsets: Map<UID, number>,
-  delta: Point2D,
+  delta: MovementDelta,
   isInSelection: (uid: UID | undefined) => boolean,
   getElementByUid: (uid: UID) => ViewElement | undefined,
-): [Map<UID, FlowViewElement>, ViewElement[]] {
+): Map<UID, FlowViewElement> {
   const preProcessedFlows = new Map<UID, FlowViewElement>();
-  const sideEffects: ViewElement[] = [];
 
   for (const element of elements) {
     if (element.type !== 'flow') continue;
@@ -266,7 +277,7 @@ export function preProcessSelectedFlows(
     }
   }
 
-  return [preProcessedFlows, sideEffects];
+  return preProcessedFlows;
 }
 
 /**
@@ -281,7 +292,7 @@ export function preProcessSelectedFlows(
  */
 export function processSelectedFlow(
   flow: FlowViewElement,
-  delta: Point2D,
+  delta: MovementDelta,
   isInSelection: (uid: UID | undefined) => boolean,
   preProcessedFlows: Map<UID, FlowViewElement>,
   getElementByUid: (uid: UID) => ViewElement | undefined,
@@ -319,20 +330,10 @@ export function processSelectedFlow(
     // Check if this flow was pre-processed (for multi-flow spacing preservation)
     const preProcessed = preProcessedFlows.get(flow.uid);
     if (preProcessed) {
-      // When the flow is selected, the valve should move with the drag delta,
-      // then be clamped to the new flow path. The pre-processed flow has the
-      // valve's fractional position preserved, which is wrong when selected.
-      const proposedValve = {
-        x: flow.x - delta.x,
-        y: flow.y - delta.y,
-      };
-      const segments = getSegments(preProcessed.points);
-      if (segments.length > 0) {
-        const closestSegment = findClosestSegment(proposedValve, segments);
-        const clampedValve = clampToSegment(proposedValve, closestSegment);
-        return [{ ...preProcessed, x: clampedValve.x, y: clampedValve.y }, sideEffects];
-      }
-      return [preProcessed, sideEffects];
+      // The pre-processed flow preserved the valve's fractional position, which
+      // lags the drag when the flow itself is selected; re-clamp it to the path.
+      const clampedValve = clampDraggedValve(flow, delta, preProcessed.points);
+      return [clampedValve ? { ...preProcessed, x: clampedValve.x, y: clampedValve.y } : preProcessed, sideEffects];
     }
 
     // Handle different endpoint types: stocks need computeFlowRoute, clouds need UpdateCloudAndFlow
@@ -345,17 +346,10 @@ export function processSelectedFlow(
         // Use default offset of 0.5 (center) for selected flows
         let updatedFlow = computeFlowRoute(flow, sourceEndpoint, newStockCx, newStockCy, 0.5);
 
-        // When the flow is selected, the valve should move with the drag delta,
-        // then be clamped to the new flow path. computeFlowRoute preserves the
-        // valve's fractional position which is wrong when the flow is selected.
-        const proposedValve = {
-          x: flow.x - delta.x,
-          y: flow.y - delta.y,
-        };
-        const segments = getSegments(updatedFlow.points);
-        if (segments.length > 0) {
-          const closestSegment = findClosestSegment(proposedValve, segments);
-          const clampedValve = clampToSegment(proposedValve, closestSegment);
+        // computeFlowRoute preserves the valve's fractional position, which lags
+        // the drag when the flow is selected; re-clamp it to the new path.
+        const clampedValve = clampDraggedValve(flow, delta, updatedFlow.points);
+        if (clampedValve) {
           updatedFlow = { ...updatedFlow, x: clampedValve.x, y: clampedValve.y };
         }
         return [updatedFlow, sideEffects];
@@ -373,17 +367,10 @@ export function processSelectedFlow(
         // Use default offset of 0.5 (center) for selected flows
         let updatedFlow = computeFlowRoute(flow, sinkEndpoint, newStockCx, newStockCy, 0.5);
 
-        // When the flow is selected, the valve should move with the drag delta,
-        // then be clamped to the new flow path. computeFlowRoute preserves the
-        // valve's fractional position which is wrong when the flow is selected.
-        const proposedValve = {
-          x: flow.x - delta.x,
-          y: flow.y - delta.y,
-        };
-        const segments = getSegments(updatedFlow.points);
-        if (segments.length > 0) {
-          const closestSegment = findClosestSegment(proposedValve, segments);
-          const clampedValve = clampToSegment(proposedValve, closestSegment);
+        // computeFlowRoute preserves the valve's fractional position, which lags
+        // the drag when the flow is selected; re-clamp it to the new path.
+        const clampedValve = clampDraggedValve(flow, delta, updatedFlow.points);
+        if (clampedValve) {
           updatedFlow = { ...updatedFlow, x: clampedValve.x, y: clampedValve.y };
         }
         return [updatedFlow, sideEffects];
@@ -458,39 +445,24 @@ export function processSelectedFlow(
     }
 
     // Stock-to-stock flows: move valve but clamp to flow path
-    const proposedValve = {
-      x: flow.x - delta.x,
-      y: flow.y - delta.y,
-    };
-    const segments = getSegments(pts);
-    if (segments.length > 0) {
-      const closestSegment = findClosestSegment(proposedValve, segments);
-      const clampedValve = clampToSegment(proposedValve, closestSegment);
-      return [
-        {
-          ...flow,
-          x: clampedValve.x,
-          y: clampedValve.y,
-        },
-        sideEffects,
-      ];
-    }
-    return [
-      {
-        ...flow,
-        x: proposedValve.x,
-        y: proposedValve.y,
-      },
-      sideEffects,
-    ];
+    const valve = clampDraggedValve(flow, delta, pts) ?? { x: flow.x - delta.x, y: flow.y - delta.y };
+    return [{ ...flow, x: valve.x, y: valve.y }, sideEffects];
   }
 }
 
 /**
  * Route unselected flows attached to selected endpoints.
  *
- * @param elements All view elements (after pass 1 updates)
- * @param originalElements Original view elements (before movement)
+ * Called after the selected elements have moved (pass 1). Each unselected flow
+ * whose source and/or sink endpoint is in the selection is re-routed to follow
+ * the moved endpoint(s): a flow with BOTH ends selected translates uniformly;
+ * otherwise the flow routes to its single moved endpoint -- stocks via
+ * `computeFlowRoute` (honoring the pre-computed spacing offset) and clouds via
+ * `routeCloudEndpointFlow`.
+ *
+ * @param elements All view elements at their ORIGINAL (pre-movement) positions.
+ *   The routing helpers derive the endpoints' new positions from `delta`, so
+ *   they need the originals rather than the already-moved copies.
  * @param selection Selected UIDs
  * @param preComputedOffsets Pre-computed offsets
  * @param delta The movement delta
@@ -498,25 +470,18 @@ export function processSelectedFlow(
  */
 export function routeUnselectedFlows(
   elements: Iterable<ViewElement>,
-  originalElements: Iterable<ViewElement>,
   selection: ReadonlySet<UID>,
   preComputedOffsets: Map<UID, number>,
-  delta: Point2D,
+  delta: MovementDelta,
 ): ViewElement[] {
   const updatedFlows: ViewElement[] = [];
 
-  // Build maps FIRST so we can reuse them (iterators can only be consumed once)
   const elementsMap = new Map<UID, ViewElement>();
   for (const el of elements) {
     elementsMap.set(el.uid, el);
   }
-  const originalElementsMap = new Map<UID, ViewElement>();
-  for (const el of originalElements) {
-    originalElementsMap.set(el.uid, el);
-  }
-  const getOriginalElement = (uid: UID) => originalElementsMap.get(uid);
 
-  // Collect flows grouped by their attached endpoint
+  // Collect flows grouped by whichever attached endpoint is selected.
   const flowsBySourceEndpoint = new Map<UID, FlowViewElement[]>();
   const flowsBySinkEndpoint = new Map<UID, FlowViewElement[]>();
   const bothEndsSelectedFlows: FlowViewElement[] = [];
@@ -546,7 +511,7 @@ export function routeUnselectedFlows(
     }
   }
 
-  // Handle flows where both ends are selected: translate uniformly
+  // Flows with both ends selected translate uniformly.
   for (const element of bothEndsSelectedFlows) {
     const pts = element.points;
     const newPoints = pts.map((p) => ({
@@ -562,147 +527,31 @@ export function routeUnselectedFlows(
     });
   }
 
-  // Update flows grouped by source endpoint using pre-computed offsets
-  for (const [endpointUid, flows] of flowsBySourceEndpoint) {
-    const movedEndpoint = elementsMap.get(endpointUid);
-
-    if (movedEndpoint && movedEndpoint.type === 'stock') {
-      const originalStock = getOriginalElement(endpointUid) as StockViewElement;
-      const newStockCx = originalStock.x - delta.x;
-      const newStockCy = originalStock.y - delta.y;
-      for (const flow of flows) {
-        const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
-        const updatedFlow = computeFlowRoute(flow, originalStock, newStockCx, newStockCy, offset);
-        updatedFlows.push(updatedFlow);
-      }
-    } else if (movedEndpoint && movedEndpoint.type === 'cloud') {
-      // For clouds, use UpdateCloudAndFlow for routing but honor full delta if cloud is selected
-      const originalCloud = getOriginalElement(endpointUid) as CloudViewElement | undefined;
-      if (originalCloud) {
-        const cloudIsSelected = selection.has(endpointUid);
-        const newCloudX = originalCloud.x - delta.x;
-        const newCloudY = originalCloud.y - delta.y;
+  // Route flows anchored to a single moved endpoint. `isSource` records which
+  // end of the flow the grouped endpoint is (source = first point, sink = last).
+  // Because the maps are keyed only by endpoints that ARE selected, the cloud
+  // path always honors the full delta -- the former per-endpoint `cloudIsSelected`
+  // guard was true by construction and has been removed.
+  const routeForEndpoint = (flowsByEndpoint: Map<UID, FlowViewElement[]>, isSource: boolean): void => {
+    for (const [endpointUid, flows] of flowsByEndpoint) {
+      const endpoint = elementsMap.get(endpointUid);
+      if (endpoint?.type === 'stock') {
+        const newStockCx = endpoint.x - delta.x;
+        const newStockCy = endpoint.y - delta.y;
         for (const flow of flows) {
-          let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
-          // If cloud is selected, ensure flow matches full delta position with proper orthogonal geometry
-          if (cloudIsSelected) {
-            const cloudPointIndex =
-              first(updatedFlow.points).attachedToUid === endpointUid ? 0 : updatedFlow.points.length - 1;
-            const cloudPoint = updatedFlow.points[cloudPointIndex];
-            const otherPointIndex = cloudPointIndex === 0 ? updatedFlow.points.length - 1 : 0;
-            const otherPoint = updatedFlow.points[otherPointIndex];
-            if (cloudPoint && otherPoint) {
-              // Check if the flow is 2-point straight and we'd create a diagonal
-              const needsLShape =
-                updatedFlow.points.length === 2 &&
-                Math.abs(newCloudX - otherPoint.x) > MIN_DIAGONAL_DISTANCE &&
-                Math.abs(newCloudY - otherPoint.y) > MIN_DIAGONAL_DISTANCE;
-              if (needsLShape) {
-                // Add intermediate point to create L-shape (horizontal then vertical)
-                const intermediateX = newCloudX;
-                const intermediateY = otherPoint.y;
-                const intermediatePoint: Point = { x: intermediateX, y: intermediateY, attachedToUid: undefined };
-                const newCloudPoint: Point = { ...cloudPoint, x: newCloudX, y: newCloudY };
-                // Cloud is source (index 0): cloud -> intermediate -> other
-                // Cloud is sink (index size-1): other -> intermediate -> cloud
-                const newPoints: readonly Point[] =
-                  cloudPointIndex === 0
-                    ? [newCloudPoint, intermediatePoint, otherPoint]
-                    : [otherPoint, intermediatePoint, newCloudPoint];
-                updatedFlow = { ...updatedFlow, points: newPoints };
-                // Re-clamp valve to the new path
-                const segments = getSegments(newPoints);
-                if (segments.length > 0) {
-                  const closestSegment = findClosestSegment({ x: updatedFlow.x, y: updatedFlow.y }, segments);
-                  const clampedValve = clampToSegment({ x: updatedFlow.x, y: updatedFlow.y }, closestSegment);
-                  updatedFlow = { ...updatedFlow, x: clampedValve.x, y: clampedValve.y };
-                }
-              } else {
-                const updatedPoints = arrayWith(updatedFlow.points, cloudPointIndex, {
-                  ...cloudPoint,
-                  x: newCloudX,
-                  y: newCloudY,
-                });
-                updatedFlow = { ...updatedFlow, points: updatedPoints };
-              }
-            }
-          }
-          updatedFlows.push(updatedFlow);
+          const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
+          updatedFlows.push(computeFlowRoute(flow, endpoint, newStockCx, newStockCy, offset));
+        }
+      } else if (endpoint?.type === 'cloud') {
+        for (const flow of flows) {
+          updatedFlows.push(routeCloudEndpointFlow(endpoint, flow, delta, isSource).updatedFlow);
         }
       }
     }
-  }
+  };
 
-  // Update flows grouped by sink endpoint using pre-computed offsets
-  for (const [endpointUid, flows] of flowsBySinkEndpoint) {
-    const movedEndpoint = elementsMap.get(endpointUid);
-
-    if (movedEndpoint && movedEndpoint.type === 'stock') {
-      const originalStock = getOriginalElement(endpointUid) as StockViewElement;
-      const newStockCx = originalStock.x - delta.x;
-      const newStockCy = originalStock.y - delta.y;
-      for (const flow of flows) {
-        const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
-        const updatedFlow = computeFlowRoute(flow, originalStock, newStockCx, newStockCy, offset);
-        updatedFlows.push(updatedFlow);
-      }
-    } else if (movedEndpoint && movedEndpoint.type === 'cloud') {
-      // For clouds, use UpdateCloudAndFlow for routing but honor full delta if cloud is selected
-      const originalCloud = getOriginalElement(endpointUid) as CloudViewElement | undefined;
-      if (originalCloud) {
-        const cloudIsSelected = selection.has(endpointUid);
-        const newCloudX = originalCloud.x - delta.x;
-        const newCloudY = originalCloud.y - delta.y;
-        for (const flow of flows) {
-          let [, updatedFlow] = UpdateCloudAndFlow(originalCloud, flow, delta);
-          // If cloud is selected, ensure flow matches full delta position with proper orthogonal geometry
-          if (cloudIsSelected) {
-            const cloudPointIndex =
-              last(updatedFlow.points).attachedToUid === endpointUid ? updatedFlow.points.length - 1 : 0;
-            const cloudPoint = updatedFlow.points[cloudPointIndex];
-            const otherPointIndex = cloudPointIndex === 0 ? updatedFlow.points.length - 1 : 0;
-            const otherPoint = updatedFlow.points[otherPointIndex];
-            if (cloudPoint && otherPoint) {
-              // Check if the flow is 2-point straight and we'd create a diagonal
-              const needsLShape =
-                updatedFlow.points.length === 2 &&
-                Math.abs(newCloudX - otherPoint.x) > MIN_DIAGONAL_DISTANCE &&
-                Math.abs(newCloudY - otherPoint.y) > MIN_DIAGONAL_DISTANCE;
-              if (needsLShape) {
-                // Add intermediate point to create L-shape (horizontal then vertical)
-                const intermediateX = newCloudX;
-                const intermediateY = otherPoint.y;
-                const intermediatePoint: Point = { x: intermediateX, y: intermediateY, attachedToUid: undefined };
-                const newCloudPoint: Point = { ...cloudPoint, x: newCloudX, y: newCloudY };
-                // Cloud is source (index 0): cloud -> intermediate -> other
-                // Cloud is sink (index size-1): other -> intermediate -> cloud
-                const newPoints: readonly Point[] =
-                  cloudPointIndex === 0
-                    ? [newCloudPoint, intermediatePoint, otherPoint]
-                    : [otherPoint, intermediatePoint, newCloudPoint];
-                updatedFlow = { ...updatedFlow, points: newPoints };
-                // Re-clamp valve to the new path
-                const segments = getSegments(newPoints);
-                if (segments.length > 0) {
-                  const closestSegment = findClosestSegment({ x: updatedFlow.x, y: updatedFlow.y }, segments);
-                  const clampedValve = clampToSegment({ x: updatedFlow.x, y: updatedFlow.y }, closestSegment);
-                  updatedFlow = { ...updatedFlow, x: clampedValve.x, y: clampedValve.y };
-                }
-              } else {
-                const updatedPoints = arrayWith(updatedFlow.points, cloudPointIndex, {
-                  ...cloudPoint,
-                  x: newCloudX,
-                  y: newCloudY,
-                });
-                updatedFlow = { ...updatedFlow, points: updatedPoints };
-              }
-            }
-          }
-          updatedFlows.push(updatedFlow);
-        }
-      }
-    }
-  }
+  routeForEndpoint(flowsBySourceEndpoint, true);
+  routeForEndpoint(flowsBySinkEndpoint, false);
 
   return updatedFlows;
 }
@@ -756,8 +605,8 @@ export function processLinks(
   originalElements: Map<UID, ViewElement>,
   updatedElements: Map<UID, ViewElement>,
   selection: ReadonlySet<UID>,
-  delta: Point2D,
-  arcPoint?: Point2D,
+  delta: MovementDelta,
+  arcPoint?: MovementDelta,
 ): Map<UID, LinkViewElement> {
   const result = new Map<UID, LinkViewElement>();
 
@@ -919,7 +768,7 @@ export function applyGroupMovement(input: GroupMovementInput): GroupMovementOutp
       : new Map<UID, number>();
 
   // Pre-process selected flows with one endpoint selected (stock endpoint only)
-  const [preProcessedFlows] =
+  const preProcessedFlows =
     selection.size > 1
       ? preProcessSelectedFlows(
           originalElements.values(),
@@ -929,7 +778,7 @@ export function applyGroupMovement(input: GroupMovementInput): GroupMovementOutp
           isInSelection,
           (uid) => originalElements.get(uid),
         )
-      : [new Map<UID, FlowViewElement>()];
+      : new Map<UID, FlowViewElement>();
 
   // Process selected flows
   for (const uid of selection) {
@@ -1003,18 +852,12 @@ export function applyGroupMovement(input: GroupMovementInput): GroupMovementOutp
 
   // Route unselected flows attached to selected endpoints.
   // This applies even for single-element selection (e.g., moving a single stock
-  // should route its attached flows).
-  // Note: We use originalElements.values() here because the input `elements` iterator
-  // was already consumed when building originalElements.
-  const hasSelectedEndpoints = selectedStockUids.size > 0 || selection.size > 0;
-  if (hasSelectedEndpoints) {
-    const routedFlows = routeUnselectedFlows(
-      originalElements.values(),
-      originalElements.values(),
-      selection,
-      preComputedOffsets,
-      delta,
-    );
+  // should route its attached flows). routeUnselectedFlows needs the ORIGINAL
+  // endpoint positions (it derives the new ones from `delta`), so we pass
+  // originalElements.values() -- the input `elements` iterator was already
+  // consumed when building originalElements.
+  if (selection.size > 0) {
+    const routedFlows = routeUnselectedFlows(originalElements.values(), selection, preComputedOffsets, delta);
     for (const flow of routedFlows) {
       updatedElements.set(flow.uid, flow);
     }

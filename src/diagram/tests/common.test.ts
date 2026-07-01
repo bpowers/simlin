@@ -2,7 +2,14 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { calcViewBox, mergeBounds, Rect, searchableName } from '../drawing/common';
+import {
+  calcViewBox,
+  encodeNameNewlines,
+  mergeBounds,
+  Rect,
+  sanitizeLabelInput,
+  searchableName,
+} from '../drawing/common';
 
 describe('common', () => {
   describe('mergeBounds', () => {
@@ -115,6 +122,39 @@ describe('common', () => {
 
     it('should handle empty strings', () => {
       expect(searchableName('')).toBe('');
+    });
+  });
+
+  describe('sanitizeLabelInput', () => {
+    it('trims surrounding whitespace on a single-line name', () => {
+      expect(sanitizeLabelInput('  births  ')).toBe('births');
+    });
+
+    it('drops a trailing newline left by an accidental line break', () => {
+      expect(sanitizeLabelInput('drain\n')).toBe('drain');
+    });
+
+    it('drops leading and interior blank lines but keeps intentional breaks', () => {
+      expect(sanitizeLabelInput('\nfraction of\n\n  carrying capacity  \n')).toBe('fraction of\ncarrying capacity');
+    });
+
+    it('collapses all-whitespace input to the empty string (treated as cancel)', () => {
+      expect(sanitizeLabelInput('  \n \n\t')).toBe('');
+      expect(sanitizeLabelInput('')).toBe('');
+    });
+  });
+
+  describe('encodeNameNewlines', () => {
+    it('encodes a single newline to a literal backslash-n', () => {
+      expect(encodeNameNewlines('a\nb')).toBe('a\\nb');
+    });
+
+    it('encodes EVERY newline (the old single-occurrence replace missed the rest)', () => {
+      expect(encodeNameNewlines('a\nb\nc')).toBe('a\\nb\\nc');
+    });
+
+    it('leaves names without newlines unchanged', () => {
+      expect(encodeNameNewlines('plain name')).toBe('plain name');
     });
   });
 });

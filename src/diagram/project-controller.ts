@@ -35,6 +35,7 @@ import {
   projectFromJson,
   projectAttachData,
   findNonFiniteViewCoord,
+  stockFlowViewFromJson,
 } from '@simlin/core/datamodel';
 import { defined, mapSet, setsEqual, toInt, uint8ArraysEqual, type Series } from '@simlin/core/common';
 import { first, getOrThrow } from '@simlin/core/collections';
@@ -591,7 +592,43 @@ export class ProjectController {
       this.reportError(err.message ?? `Unknown error during ${label}`);
       return false;
     }
+    this.adoptPatchedViews(patch);
     return true;
+  }
+
+  /**
+   * Mirror any primary-view upsert carried by a just-applied patch into the
+   * live project, exactly as updateView's optimistic step does.
+   *
+   * Why: preserveLiveView (see updateProject) always keeps the ACTIVE model's
+   * live view on refresh, protecting newer optimistic pans/moves from older
+   * engine snapshots. But a view arriving in an explicit upsertView op (e.g.
+   * a rename patching the variable and its view together) is newer user intent
+   * than the live view by construction -- without this mirror, the stale live
+   * view clobbers the patched one on refresh, the edit looks like a silent
+   * no-op, and the next geometry edit round-trips the stale view back into the
+   * engine, persisting a model/view divergence.
+   *
+   * Elements are re-linked against the CURRENT (pre-patch) variables; refs to
+   * variables the patch introduced resolve as undefined until the follow-up
+   * refreshFromEngine re-links them (same transient the optimistic paths
+   * already tolerate).
+   */
+  private adoptPatchedViews(patch: JsonProjectPatch): void {
+    const variables = this.project?.models.get(this.modelName)?.variables;
+    if (!variables) {
+      return;
+    }
+    for (const model of patch.models ?? []) {
+      if (model.name !== this.modelName) {
+        continue;
+      }
+      for (const op of model.ops ?? []) {
+        if (op.type === 'upsertView' && op.payload.index === 0) {
+          this.applyOptimisticView(stockFlowViewFromJson(op.payload.view, variables));
+        }
+      }
+    }
   }
 
   /** Round-trip the engine's serialized state back into `project` and schedule

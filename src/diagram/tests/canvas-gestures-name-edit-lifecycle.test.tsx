@@ -106,8 +106,10 @@ describe('Canvas name-edit lifecycle: just-created flow', () => {
     const editable = createFlowAndEnterNameEdit(h);
 
     act(() => {
-      // EditableLabel commits on Enter held with a modifier.
-      fireEvent.keyUp(editable, { code: 'Enter', shiftKey: true });
+      // EditableLabel commits on plain Enter (keyDown is prevented so Slate
+      // doesn't insert a line break; keyUp performs the commit).
+      fireEvent.keyDown(editable, { code: 'Enter' });
+      fireEvent.keyUp(editable, { code: 'Enter' });
     });
 
     // Committing renames the flow (uid 50 != inCreationUid, so it is an existing
@@ -128,7 +130,8 @@ describe('Canvas name-edit lifecycle: just-created flow', () => {
     // 1. Create a flow and COMMIT its name. This clears the creatingFlow latch.
     const flowEditable = createFlowAndEnterNameEdit(h);
     act(() => {
-      fireEvent.keyUp(flowEditable, { code: 'Enter', shiftKey: true });
+      fireEvent.keyDown(flowEditable, { code: 'Enter' });
+      fireEvent.keyUp(flowEditable, { code: 'Enter' });
     });
     expect(h.callbacks.onRenameVariable).toHaveBeenCalledTimes(1);
     expect(h.callbacks.onDeleteSelection).not.toHaveBeenCalled();
@@ -154,5 +157,23 @@ describe('Canvas name-edit lifecycle: just-created flow', () => {
 
     expect(h.callbacks.onDeleteSelection).not.toHaveBeenCalled();
     expect(h.callbacks.onRenameVariable).toHaveBeenCalledTimes(1); // only the flow commit
+  });
+
+  it('shift+Enter does NOT commit (it inserts a line break instead)', () => {
+    const h = renderCanvas({ elements: [], selectedTool: 'flow' });
+    installFlowMaterializer(h);
+    h.clearMountCalls();
+
+    const editable = createFlowAndEnterNameEdit(h);
+
+    act(() => {
+      fireEvent.keyDown(editable, { code: 'Enter', shiftKey: true });
+      fireEvent.keyUp(editable, { code: 'Enter', shiftKey: true });
+    });
+
+    // No commit, no delete: the editor stays open for the second line.
+    expect(h.callbacks.onRenameVariable).not.toHaveBeenCalled();
+    expect(h.callbacks.onDeleteSelection).not.toHaveBeenCalled();
+    expect(h.query('[contenteditable]')).not.toBeNull();
   });
 });

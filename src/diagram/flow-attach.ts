@@ -42,19 +42,18 @@ import {
 } from '@simlin/core/datamodel';
 import type { JsonModelOperation } from '@simlin/engine';
 
-import { UpdateCloudAndFlow } from './drawing/Flow';
+import { pinSourceToStockEdge, UpdateCloudAndFlow } from './drawing/Flow';
 // The drawing-layer Point is a bare {x, y} (no attachedToUid). cursorMoveDelta
 // and fauxTargetCenter are screen-space positions/deltas, not flow points, so
 // they use this type -- matching what Canvas passes to onMoveFlow.
 import type { Point as CanvasPoint } from './drawing/common';
 
-// Sentinel UIDs used by Canvas during flow creation. Duplicated here (rather
-// than imported from Canvas.tsx) so this functional-core module stays free of
-// React/DOM dependencies. They must stay in sync with the exports in
-// drawing/Canvas.tsx.
-export const inCreationUid = -2;
-export const inCreationCloudUid = -4;
-export const fauxCloudTargetUid = -5;
+// Sentinel UIDs used by Canvas during flow creation, defined once in
+// drawing/creation-sentinels and re-exported here so this functional-core
+// module stays free of React/DOM dependencies while callers that import them
+// from `../flow-attach` keep resolving.
+export { inCreationUid, inCreationCloudUid, fauxCloudTargetUid } from './drawing/creation-sentinels';
+import { inCreationUid, inCreationCloudUid, fauxCloudTargetUid } from './drawing/creation-sentinels';
 
 /**
  * Inputs to `computeFlowAttachment`, mirroring the arguments Canvas passes to
@@ -341,28 +340,36 @@ export function computeFlowAttachment(
     const lastPt = last(flow.points);
     if (lastPt.attachedToUid === fauxCloudTargetUid) {
       if (targetUid) {
-        // Attaching the new flow's sink to an existing stock/cloud. The
+        // Attaching the new flow's sink to an existing stock. Route it exactly
+        // the way an existing flow's endpoint reattaches (see reattachEndpoint):
+        // pin the sink to the stock's EDGE and keep the flow orthogonal. The
         // in-creation flow's points are degenerate -- both sit at the press
         // point, since the drag offset is applied only at render time and never
-        // committed back to the element. Routing that degenerate flow through
-        // UpdateCloudAndFlow with a zero delta collapses the sink onto the
-        // source's column (the zero-delta branch defaults to a vertical axis and
-        // sets sink.x = source.x), leaving the flow attached to the target by
-        // uid but drawn back at the press point. Instead snap the sink point's
-        // coordinates onto the target's center -- matching the element-centered
-        // point convention used everywhere else -- and re-center the valve so
-        // the created flow renders connected.
+        // committed back to the element -- so we drive UpdateCloudAndFlow from
+        // the current sink point: place the target at the old sink position, then
+        // move it to the stock by the resulting delta. UpdateCloudAndFlow picks
+        // the axis from that delta, aligns the sink to the source's axis, and
+        // clips it to the stock face (a degenerate flow stays straight). This
+        // replaces an earlier snap-to-center that drew the arrowhead behind the
+        // stock; a prior zero-delta route had instead collapsed the sink onto the
+        // source column, which is why the center snap was tried.
         const to = getUid(targetUid) as StockViewElement | CloudViewElement;
-        state.stockAttachingIdent = defined(to.ident);
-        const src = first(flow.points);
+        if (to.type === 'stock') {
+          state.stockAttachingIdent = defined(to.ident);
+        }
+        const oldSink = last(flow.points);
         flow = {
           ...flow,
           points: flow.points.map((pt) =>
-            pt.attachedToUid === fauxCloudTargetUid ? { ...pt, x: to.x, y: to.y, attachedToUid: to.uid } : pt,
+            pt.attachedToUid === fauxCloudTargetUid ? { ...pt, attachedToUid: to.uid } : pt,
           ),
-          x: (src.x + to.x) / 2,
-          y: (src.y + to.y) / 2,
         };
+        const sinkDelta = { x: oldSink.x - to.x, y: oldSink.y - to.y };
+        const targetAtOldSink = { ...to, x: oldSink.x, y: oldSink.y } as StockViewElement | CloudViewElement;
+        // A flow sink only ever attaches to a stock (isValidTarget gates the
+        // canvas to stock targets), and a stock keeps its position in the view --
+        // so we discard the routed endpoint and keep only the re-routed flow.
+        [, flow] = UpdateCloudAndFlow(targetAtOldSink, flow, sinkDelta);
       } else {
         let to: StockViewElement | CloudViewElement = {
           type: 'cloud' as const,
@@ -386,6 +393,16 @@ export function computeFlowAttachment(
         // delta moves it (and the flow's sink) out to the release position.
         [to, flow] = UpdateCloudAndFlow(to, flow, cursorMoveDelta);
         elements = [...elements, to];
+      }
+    }
+    // A flow drawn OUT of a stock stages its source point at the stock's
+    // CENTER; now that the sink is routed, pin the source onto the facing
+    // edge so the persisted endpoint honors the edge-attachment rule (it
+    // otherwise hides under the stock body until the next stock drag).
+    if (sourceUid !== undefined && sourceUid !== inCreationCloudUid) {
+      const sourceEl = getUid(sourceUid);
+      if (sourceEl.type === 'stock') {
+        flow = pinSourceToStockEdge(flow, sourceEl);
       }
     }
     elements = [...elements, flow];
@@ -459,4 +476,52 @@ export function computeFlowAttachment(
     selection,
     isCreatingNew,
   };
+}
+
+/**
+ * Compute the GROWN geometry of the in-creation flow for the live drag preview.
+ *
+ * The flow tool stages a degenerate flow (both points at the press point) and
+ * records the drag only as `moveDelta` (= press - cursor, the Canvas
+ * convention); it never rewrites the staged flow's points. So the preview has
+ * to be derived here: route the sink toward the cursor (over empty space) or
+ * onto a hovered stock's edge, keeping the SOURCE fixed and the flow
+ * orthogonal. This mirrors what `computeFlowAttachment` produces on release, so
+ * the live preview matches the committed result.
+ *
+ * `target` is the valid stock under the cursor (or undefined over empty space).
+ * Pure: returns a new flow element; the caller swaps it into the render.
+ */
+export function growInCreationFlow(
+  flow: FlowViewElement,
+  moveDelta: CanvasPoint,
+  target: StockViewElement | CloudViewElement | undefined,
+): FlowViewElement {
+  const sinkPt = last(flow.points);
+  if (target !== undefined) {
+    // Hovering a valid stock: pin the sink to its edge -- the same routing the
+    // commit (computeFlowAttachment) and reattachEndpoint use. Temporarily
+    // attach the sink to the target so UpdateCloudAndFlow can route and clip it;
+    // the real attachment is (re)computed on release.
+    const attached: FlowViewElement = {
+      ...flow,
+      points: flow.points.map((pt, i) => (i === flow.points.length - 1 ? { ...pt, attachedToUid: target.uid } : pt)),
+    };
+    const sinkDelta = { x: sinkPt.x - target.x, y: sinkPt.y - target.y };
+    const targetAtOldSink = { ...target, x: sinkPt.x, y: sinkPt.y } as StockViewElement | CloudViewElement;
+    return UpdateCloudAndFlow(targetAtOldSink, attached, sinkDelta)[1];
+  }
+  // Over empty space: the sink follows the cursor. Move the faux sink cloud (the
+  // sink point's current attachment) from the press point by moveDelta;
+  // UpdateCloudAndFlow picks the axis from moveDelta and keeps the source fixed.
+  const sinkCloud: CloudViewElement = {
+    type: 'cloud',
+    uid: sinkPt.attachedToUid ?? fauxCloudTargetUid,
+    flowUid: flow.uid,
+    x: sinkPt.x,
+    y: sinkPt.y,
+    isZeroRadius: false,
+    ident: undefined,
+  };
+  return UpdateCloudAndFlow(sinkCloud, flow, moveDelta)[1];
 }

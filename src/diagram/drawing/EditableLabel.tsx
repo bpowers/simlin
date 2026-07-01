@@ -49,8 +49,22 @@ export const EditableLabel = React.memo(function EditableLabel(props: EditingLab
     e.stopPropagation();
   };
 
+  const isEnter = (code: string): boolean => code === 'Enter' || code === 'NumpadEnter';
+
+  // Standard editor convention: plain Enter commits, shift+Enter inserts a
+  // line break (labels are multi-line capable), Escape cancels. The commit
+  // fires on keyUp; keyDown must block Slate's default insertBreak for the
+  // commit case, otherwise the committed name picks up a trailing newline --
+  // which canonicalized into garbage idents like `drain_` and made renames
+  // appear to silently fail.
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (isEnter(e.code) && !e.shiftKey) {
+      e.preventDefault();
+    }
+  };
+
   const handleKeyPress = (e: React.KeyboardEvent<HTMLDivElement>): void => {
-    if (e.code === 'Enter' && (e.ctrlKey || e.shiftKey || e.altKey)) {
+    if (isEnter(e.code) && !e.shiftKey) {
       e.stopPropagation();
       onDone(false);
     } else if (e.code === 'Escape') {
@@ -129,7 +143,7 @@ export const EditableLabel = React.memo(function EditableLabel(props: EditingLab
       onPointerUp={handlePointerUpDown}
     >
       <Slate editor={editor} initialValue={value} onChange={handleChange}>
-        <Editable autoFocus={true} onKeyUp={handleKeyPress} />
+        <Editable autoFocus={true} onKeyDown={handleKeyDown} onKeyUp={handleKeyPress} />
       </Slate>
     </div>
   );

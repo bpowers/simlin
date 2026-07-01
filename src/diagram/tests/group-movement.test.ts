@@ -15,7 +15,7 @@ import {
   UID,
 } from '@simlin/core/datamodel';
 
-import { StockWidth } from '../drawing/Stock';
+import { StockHeight, StockWidth } from '../drawing/Stock';
 import { applyGroupMovement } from '../group-movement';
 
 // Helper functions to create test elements
@@ -454,9 +454,14 @@ describe('Group Movement', () => {
       expect(newFlow1.points[0].x).toBe(150 + StockWidth / 2);
       expect(newFlow1.points[newFlow1.points.length - 1].x).toBe(250 - StockWidth / 2);
 
-      // Flow 2 should be routed (one endpoint moved, one fixed)
+      // Flow 2 should be routed (one endpoint moved, one fixed). It runs
+      // 77.5px right and 50px down, so it classifies as dominantly HORIZONTAL
+      // and its L attaches perpendicular to that: via the stock's bottom edge.
+      // (Before dominant-axis classification the exact-equality check misread
+      // this diagonal as vertical and attached via the right edge.)
       const newFlow2 = result.get(3) as FlowViewElement;
-      expect(newFlow2.points[0].x).toBe(150 + StockWidth / 2); // at new stock position
+      expect(newFlow2.points[0].x).toBe(150); // bottom-edge attach at new stock x
+      expect(newFlow2.points[0].y).toBe(100 + StockHeight / 2);
       expect(newFlow2.points[newFlow2.points.length - 1].x).toBe(200); // cloud unchanged
 
       // Both flows should have different y-coordinates on Stock A's edge
@@ -1309,6 +1314,95 @@ describe('Group Movement', () => {
       expect(firstPt.y).toBe(middlePt.y);
       // Segment 2: (175, 130) -> (175, 100) is vertical
       expect(middlePt.x).toBe(lastPt.x);
+    });
+  });
+
+  describe('Sink cloud endpoint selected, attached flow not in selection', () => {
+    // Characterization of routeUnselectedFlows' sink-endpoint loop: the mirror
+    // of the "Cloud in selection" source-endpoint cases above, exercising a flow
+    // whose LAST point is the selected cloud. Pins the sink loop's L-shape and
+    // straight-through behavior before the two loops are unified.
+    it('should adjust flow when sink cloud moves parallel to flow direction', () => {
+      const stock = makeStock(1, 100, 100, [], [2]);
+      const cloud = makeCloud(3, 2, 200, 100);
+      const flow = makeFlow(2, 150, 100, [
+        { x: 100 + StockWidth / 2, y: 100, attachedToUid: 1 },
+        { x: 200, y: 100, attachedToUid: 3 },
+      ]);
+
+      const elements = new Map<UID, ViewElement>([
+        [1, stock],
+        [2, flow],
+        [3, cloud],
+      ]);
+
+      // Only select the sink cloud, move it right 50 (parallel to flow)
+      const selection = new Set<UID>([3]);
+      const delta = { x: -50, y: 0 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Cloud should move right
+      expect((result.get(3) as CloudViewElement).x).toBe(250);
+
+      // Flow stays 2-point straight, sink follows the cloud
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.points.length).toBe(2);
+      expect(newFlow.points[0].x).toBe(100 + StockWidth / 2);
+      expect(newFlow.points[newFlow.points.length - 1].attachedToUid).toBe(3);
+      expect(newFlow.points[newFlow.points.length - 1].x).toBe(250);
+      expect(newFlow.points[newFlow.points.length - 1].y).toBe(100);
+    });
+
+    it('should create L-shaped flow when sink cloud moves perpendicular to flow direction', () => {
+      const stock = makeStock(1, 100, 100, [], [2]);
+      const cloud = makeCloud(3, 2, 200, 100);
+      const flow = makeFlow(2, 150, 100, [
+        { x: 100 + StockWidth / 2, y: 100, attachedToUid: 1 },
+        { x: 200, y: 100, attachedToUid: 3 },
+      ]);
+
+      const elements = new Map<UID, ViewElement>([
+        [1, stock],
+        [2, flow],
+        [3, cloud],
+      ]);
+
+      // Only select the sink cloud, move it down 30 (perpendicular)
+      const selection = new Set<UID>([3]);
+      const delta = { x: 0, y: -30 };
+
+      const result = testApplyGroupMovement(elements, selection, delta);
+
+      // Cloud should move down
+      const newCloud = result.get(3) as CloudViewElement;
+      expect(newCloud.x).toBe(200);
+      expect(newCloud.y).toBe(130);
+
+      // Flow becomes L-shaped (3 points), staying orthogonal
+      const newFlow = result.get(2) as FlowViewElement;
+      expect(newFlow.points.length).toBe(3);
+
+      // First point stays at the stock edge
+      expect(newFlow.points[0].attachedToUid).toBe(1);
+      expect(newFlow.points[0].x).toBe(100 + StockWidth / 2);
+      expect(newFlow.points[0].y).toBe(100);
+
+      // Corner turns the L (at stock edge x, cloud's new y)
+      const corner = newFlow.points[1];
+      expect(corner.attachedToUid).toBeUndefined();
+      expect(corner.x).toBe(100 + StockWidth / 2);
+      expect(corner.y).toBe(130);
+
+      // Last point at the cloud's new position
+      const lastPt = newFlow.points[2];
+      expect(lastPt.attachedToUid).toBe(3);
+      expect(lastPt.x).toBe(200);
+      expect(lastPt.y).toBe(130);
+
+      // Orthogonal segments: vertical then horizontal
+      expect(newFlow.points[0].x).toBe(corner.x);
+      expect(corner.y).toBe(lastPt.y);
     });
   });
 });
