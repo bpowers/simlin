@@ -674,6 +674,37 @@ function adjustFlows(
   });
 }
 
+/**
+ * Pin a flow's stock-attached SOURCE endpoint onto the stock edge facing the
+ * sink, preserving the flow's orientation (the perpendicular coordinate is
+ * untouched, so a straight flow stays straight) and re-clamping the valve to
+ * the resulting path. Used at flow-creation commit: the flow tool stages the
+ * source point at the press-time stock CENTER and only routes the sink, so
+ * without this the persisted source endpoint sits hidden under the stock body
+ * (violating the edge-attachment rule) until the next stock drag re-pins it.
+ */
+export function pinSourceToStockEdge(flow: FlowViewElement, stock: StockViewElement): FlowViewElement {
+  if (flow.points.length < 2) {
+    return flow;
+  }
+  const srcPt = first(flow.points);
+  const sinkPt = last(flow.points);
+  if (srcPt.attachedToUid !== stock.uid) {
+    return flow;
+  }
+
+  const horizontal = isDominantlyHorizontal(srcPt, sinkPt);
+  const side: Side = horizontal ? (sinkPt.x >= stock.x ? 'right' : 'left') : sinkPt.y >= stock.y ? 'bottom' : 'top';
+  const edge = getStockEdgePoint(stock.x, stock.y, side);
+  const newSrc: Point = horizontal ? { ...srcPt, x: edge.x } : { ...srcPt, y: edge.y };
+  const points: readonly Point[] = [newSrc, ...flow.points.slice(1)];
+
+  const currentValve: IPoint = { x: flow.x, y: flow.y };
+  const segments = getSegments(points);
+  const valve = clampToSegment(currentValve, findClosestSegment(currentValve, segments));
+  return { ...flow, x: valve.x, y: valve.y, points };
+}
+
 export function UpdateStockAndFlows(
   stockEl: StockViewElement,
   flows: readonly FlowViewElement[],

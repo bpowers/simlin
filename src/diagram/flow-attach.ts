@@ -42,7 +42,7 @@ import {
 } from '@simlin/core/datamodel';
 import type { JsonModelOperation } from '@simlin/engine';
 
-import { UpdateCloudAndFlow } from './drawing/Flow';
+import { pinSourceToStockEdge, UpdateCloudAndFlow } from './drawing/Flow';
 // The drawing-layer Point is a bare {x, y} (no attachedToUid). cursorMoveDelta
 // and fauxTargetCenter are screen-space positions/deltas, not flow points, so
 // they use this type -- matching what Canvas passes to onMoveFlow.
@@ -394,6 +394,16 @@ export function computeFlowAttachment(
         // delta moves it (and the flow's sink) out to the release position.
         [to, flow] = UpdateCloudAndFlow(to, flow, cursorMoveDelta);
         elements = [...elements, to];
+      }
+    }
+    // A flow drawn OUT of a stock stages its source point at the stock's
+    // CENTER; now that the sink is routed, pin the source onto the facing
+    // edge so the persisted endpoint honors the edge-attachment rule (it
+    // otherwise hides under the stock body until the next stock drag).
+    if (sourceUid !== undefined && sourceUid !== inCreationCloudUid) {
+      const sourceEl = getUid(sourceUid);
+      if (sourceEl.type === 'stock') {
+        flow = pinSourceToStockEdge(flow, sourceEl);
       }
     }
     elements = [...elements, flow];

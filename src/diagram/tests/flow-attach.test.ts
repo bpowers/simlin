@@ -515,6 +515,63 @@ describe('computeFlowAttachment', () => {
       expect(sinkPt.y).toBe(sourcePt.y); // horizontal
     });
 
+    it('stock source: the source endpoint pins to the stock EDGE facing the sink, not its center', () => {
+      // Faithful to runtime: pressing the flow tool ON a stock stages the
+      // source point at the stock's CENTER, and only the sink is routed at
+      // commit -- so the persisted source endpoint hid under the stock body
+      // (violating the edge-attachment rule) until the next stock drag
+      // re-pinned it. The commit must pin the source to the facing edge.
+      const srcStock = makeStockEl(1, 'src', 100, 100);
+      const sinkStock = makeStockEl(2, 'snk', 400, 100);
+      const flow = makeFlowEl(inCreationUid, 'new_flow', 100, 100, [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 100, y: 100, attachedToUid: fauxCloudTargetUid },
+      ]);
+      const view = makeView([srcStock, sinkStock], 5);
+      const variables = varsOf(makeStockVar('src'), makeStockVar('snk'));
+
+      const result = computeFlowAttachment(view, variables, params({ flow, targetUid: 2, inCreation: true }));
+
+      const realFlow = result.elements.find((e) => e.type === 'flow') as FlowViewElement;
+      const sourcePt = realFlow.points[0];
+      const sinkPt = realFlow.points[realFlow.points.length - 1];
+      // Source on the RIGHT edge of the source stock (the sink is to the right).
+      expect(sourcePt.attachedToUid).toBe(1);
+      expect(sourcePt.x).toBeCloseTo(100 + StockWidth / 2);
+      expect(sourcePt.x).not.toBe(100);
+      // Sink on the LEFT edge of the target stock; flow horizontal and straight.
+      expect(sinkPt.x).toBeCloseTo(400 - StockWidth / 2);
+      expect(sinkPt.y).toBe(sourcePt.y);
+      expect(realFlow.points.length).toBe(2);
+      // The valve sits on the visible segment between the two edges.
+      expect(realFlow.x).toBeGreaterThan(sourcePt.x);
+      expect(realFlow.x).toBeLessThan(sinkPt.x);
+    });
+
+    it('stock source dragged UP to empty space: the source pins to the TOP edge', () => {
+      const srcStock = makeStockEl(1, 'src', 100, 300);
+      const flow = makeFlowEl(inCreationUid, 'new_flow', 100, 300, [
+        { x: 100, y: 300, attachedToUid: 1 },
+        { x: 100, y: 300, attachedToUid: fauxCloudTargetUid },
+      ]);
+      const view = makeView([srcStock], 5);
+      const variables = varsOf(makeStockVar('src'));
+
+      // Release 150px above the press: the sink cloud materializes there.
+      const result = computeFlowAttachment(
+        view,
+        variables,
+        params({ flow, inCreation: true, fauxTargetCenter: { x: 100, y: 150 }, cursorMoveDelta: { x: 0, y: 150 } }),
+      );
+
+      const realFlow = result.elements.find((e) => e.type === 'flow') as FlowViewElement;
+      const sourcePt = realFlow.points[0];
+      const sinkPt = realFlow.points[realFlow.points.length - 1];
+      expect(sourcePt.attachedToUid).toBe(1);
+      expect(sourcePt.y).toBeCloseTo(300 - StockHeight / 2); // top edge, not center
+      expect(sourcePt.x).toBe(sinkPt.x); // vertical
+    });
+
     it('stock source to empty space: faux target becomes a new cloud at fauxTargetCenter', () => {
       const srcStock = makeStockEl(1, 'src', 0, 100);
       const flow = makeFlowEl(inCreationUid, 'new_flow', 150, 100, [
