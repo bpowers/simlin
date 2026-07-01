@@ -297,7 +297,8 @@ describe('Canvas gestures: creation tools (checklist 12)', () => {
       expect(editable).not.toBeNull();
 
       act(() => {
-        fireEvent.keyUp(editable!, { code: 'Enter', shiftKey: true });
+        fireEvent.keyDown(editable!, { code: 'Enter' });
+        fireEvent.keyUp(editable!, { code: 'Enter' });
       });
       expect(h.callbacks.onCreateVariable).toHaveBeenCalledTimes(1);
       const created = h.callbacks.onCreateVariable.mock.calls[0][0];
@@ -551,7 +552,8 @@ describe('Canvas gestures: name editing (checklist 15)', () => {
     const editable = enterEditing(h);
     act(() => {
       // EditableLabel commits on Enter held with a modifier.
-      fireEvent.keyUp(editable, { code: 'Enter', shiftKey: true });
+      fireEvent.keyDown(editable, { code: 'Enter' });
+      fireEvent.keyUp(editable, { code: 'Enter' });
     });
 
     expect(h.callbacks.onRenameVariable).toHaveBeenCalledTimes(1);

@@ -42,8 +42,10 @@ import {
   calcViewBox,
   displayName,
   labelRadii,
+  encodeNameNewlines,
   plainDeserialize,
   plainSerialize,
+  sanitizeLabelInput,
   Point,
   Rect,
   screenToCanvasPoint,
@@ -2047,13 +2049,23 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       return;
     }
 
+    // A commit whose sanitized name is empty (all whitespace/blank lines) is a
+    // cancel, not a rename to "": for a just-created flow the recursive cancel
+    // path also deletes the flow, matching Escape.
+    const newName = sanitizeLabelInput(plainSerialize(defined(latest.current.editingName)));
+    if (newName === '') {
+      handleEditingNameDone(true);
+      return;
+    }
+
     const uid = only(latest.current.props.selection);
     const element = getElementByUid(uid);
     const oldName = displayName(defined((element as NamedViewElement).name));
-    const newName = plainSerialize(defined(latest.current.editingName));
 
     if (uid === inCreationUid) {
-      latest.current.props.onCreateVariable({ ...element, name: newName } as ViewElement);
+      // Names persist line breaks as literal backslash-n (see displayName);
+      // the rename path encodes in Editor.handleRename, the create path here.
+      latest.current.props.onCreateVariable({ ...element, name: encodeNameNewlines(newName) } as ViewElement);
     } else {
       latest.current.props.onRenameVariable(oldName, newName);
     }

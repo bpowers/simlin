@@ -40,7 +40,7 @@ import {
   type ModuleReference,
 } from '@simlin/core/datamodel';
 import { defined, exists, setsEqual } from '@simlin/core/common';
-import { getOrThrow, only } from '@simlin/core/collections';
+import { only } from '@simlin/core/collections';
 
 import { AuxIcon } from './AuxIcon';
 import { Toast } from './ErrorToast';
@@ -57,7 +57,7 @@ import { ModuleDetails } from './ModuleDetails';
 import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
 import { Canvas, inCreationUid } from './drawing/Canvas';
-import { Point, searchableName } from './drawing/common';
+import { encodeNameNewlines, Point, searchableName } from './drawing/common';
 import { computeFlowAttachment } from './flow-attach';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
@@ -557,21 +557,45 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // `latest`/`r`, never a stale render closure, so empty deps is correct.
 
   const handleKeyDown = React.useCallback((e: KeyboardEvent): void => {
-    const { props: p } = latest.current;
-    // Don't handle shortcuts in embedded mode or editable fields
+    const { props: p, state } = latest.current;
+    // Don't handle shortcuts in embedded mode or editable fields (text
+    // inputs, the equation editor, and the canvas's inline name editor are
+    // all contenteditable/inputs, so typing there never triggers these).
     if (p.embedded || isEditableElement(e.target)) {
       return;
     }
 
     const action = detectUndoRedo(e);
-    if (!action) {
+    if (action) {
+      const isEnabled = action === 'undo' ? isUndoEnabled() : isRedoEnabled();
+      if (isEnabled) {
+        e.preventDefault();
+        handleUndoRedo(action);
+      }
       return;
     }
 
-    const isEnabled = action === 'undo' ? isUndoEnabled() : isRedoEnabled();
-    if (isEnabled) {
-      e.preventDefault();
-      handleUndoRedo(action);
+    // Escape: disarm the active creation tool first; with no tool armed,
+    // clear the selection (which also closes the details panel).
+    if (e.key === 'Escape') {
+      if (state.selectedTool !== undefined) {
+        setState({ selectedTool: undefined });
+      } else if (state.selection.size > 0) {
+        handleSelection(new Set<UID>());
+      }
+      return;
+    }
+
+    // Delete/Backspace: delete the current selection. This is the only
+    // delete affordance for unnamed elements (clouds) and for elements whose
+    // details panel cannot open, so it must not depend on the panel.
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      const readOnly = p.readOnlyMode || isStdlibModel(modelName());
+      if (!readOnly && state.selection.size > 0) {
+        e.preventDefault();
+        void handleSelectionDelete();
+      }
+      return;
     }
   }, []);
 
@@ -691,7 +715,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
 
     const view = defined(getView());
     const oldIdent = canonicalize(oldName);
-    newName = newName.replace('\n', '\\n');
+    // Encode ALL line breaks to the stored backslash-n form -- the previous
+    // single-occurrence replace left raw newlines in multi-line names, which
+    // canonicalized into malformed idents.
+    newName = encodeNameNewlines(newName);
 
     const elements = view.elements.map((element: ViewElement) => {
       if (!isNamedViewElement(element)) {
@@ -2023,7 +2050,17 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     const model = defined(getModel());
 
     const ident = defined(namedElement.ident);
-    const variable = getOrThrow(model.variables, ident);
+    // A view element whose variable is missing means the model and view have
+    // diverged (corrupted data, or a transient during multi-step updates).
+    // Throwing here took the WHOLE editor down via the ErrorBoundary during
+    // render -- and since this panel is also the delete affordance, the
+    // corrupt element became unremovable. Degrade to no panel instead; the
+    // element stays selectable and keyboard-deletable.
+    const variable = model.variables.get(ident);
+    if (variable === undefined) {
+      console.warn(`variable details unavailable: no variable '${ident}' in model '${modelName()}'`);
+      return;
+    }
 
     if (variable.type === 'module') {
       return (

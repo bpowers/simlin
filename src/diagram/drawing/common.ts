@@ -77,6 +77,27 @@ export const displayName = (name: string): string => {
   return name.replace(/\\n/g, '\n').replace(/_/g, ' ');
 };
 
+// Normalize a user-entered label before committing it as a variable name:
+// trim each line, drop blank lines (leading, trailing, or interior), and keep
+// intentional interior line breaks. An all-whitespace input collapses to ''
+// -- callers treat an empty result as a cancelled edit rather than committing
+// a nameless variable.
+export const sanitizeLabelInput = (raw: string): string => {
+  return raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join('\n');
+};
+
+// Encode a display-form name for storage: variable names persist line breaks
+// as a literal backslash-n (displayName above decodes them). Every newline is
+// encoded -- a single-occurrence replace here once produced idents containing
+// raw newlines for multi-line names.
+export const encodeNameNewlines = (name: string): string => {
+  return name.replace(/\n/g, '\\n');
+};
+
 // Convert a display name to a single-line searchable format.
 // Handles both actual newlines (from XMILE parsing) and escaped newlines (from edits).
 export const searchableName = (name: string): string => {
