@@ -30,6 +30,22 @@ import styles from './Flow.module.css';
 type Side = 'left' | 'right' | 'top' | 'bottom';
 
 /**
+ * Classify a segment's working orientation for ROUTING decisions by its
+ * dominant axis. Exact coordinate equality stays the definition of
+ * "orthogonal" for rendering and normalization, but routing must also handle
+ * slightly-diagonal data -- pre-fix creation bugs persisted flows with a few
+ * pixels of cross-axis drift, and imported models can carry the same. Under
+ * exact-equality checks such a visually-horizontal flow classified as
+ * VERTICAL: stock drags routed a wrong-way L (valve and label stacked on the
+ * source cloud) and endpoint drags constrained/updated the wrong coordinate.
+ * Ties (a perfect 45-degree diagonal, only possible cloud-to-cloud) count as
+ * horizontal.
+ */
+function isDominantlyHorizontal(p1: IPoint, p2: IPoint): boolean {
+  return Math.abs(p2.y - p1.y) <= Math.abs(p2.x - p1.x);
+}
+
+/**
  * Returns a point on the edge of a stock.
  *
  * @param stockCx - X center of the stock
@@ -140,7 +156,7 @@ function getFlowAttachmentInfo(
   const anchor = stockIsFirst ? lastPoint : firstPoint;
   const adjacentPoint = getStockAdjacentPoint(points, stockIsFirst);
   const anchorAdjacentPoint = getAnchorAdjacentPoint(points, stockIsFirst);
-  const originalFlowIsHorizontal = anchor.y === anchorAdjacentPoint.y;
+  const originalFlowIsHorizontal = isDominantlyHorizontal(anchorAdjacentPoint, anchor);
 
   let side: Side;
   let isStraight = false;
@@ -148,7 +164,7 @@ function getFlowAttachmentInfo(
   // For 4+ point flows, use the existing segment orientation
   if (points.length >= 4) {
     const currentStockPoint = stockIsFirst ? firstPoint : lastPoint;
-    const isHorizontalSegment = currentStockPoint.y === adjacentPoint.y;
+    const isHorizontalSegment = isDominantlyHorizontal(currentStockPoint, adjacentPoint);
 
     if (isHorizontalSegment) {
       side = adjacentPoint.x > newStockCx ? 'right' : 'left';
@@ -299,7 +315,7 @@ export function computeFlowRoute(
   // This works for both 2-point (straight) and 3+ point (L-shaped) flows.
   // For L-shaped flows, the anchor-side segment preserves the original direction.
   const anchorAdjacentPoint = getAnchorAdjacentPoint(points, stockIsFirst);
-  const originalFlowIsHorizontal = anchor.y === anchorAdjacentPoint.y;
+  const originalFlowIsHorizontal = isDominantlyHorizontal(anchorAdjacentPoint, anchor);
 
   // For flows with 4+ points (imported or manually-edited multi-segment flows),
   // update both the attached endpoint and the adjacent corner to preserve
@@ -313,7 +329,7 @@ export function computeFlowRoute(
     // We must preserve this orientation to avoid creating diagonal segments between
     // corner1 and corner2 when the stock moves far perpendicular to the segment.
     const currentStockPoint = stockIsFirst ? firstPoint : lastPoint;
-    const isHorizontalSegment = currentStockPoint.y === adjacentPoint.y;
+    const isHorizontalSegment = isDominantlyHorizontal(currentStockPoint, adjacentPoint);
 
     // Choose the attachment side based on the preserved orientation
     let side: Side;
@@ -500,6 +516,13 @@ function adjustFlows(
     let horizontal = isHorizontal(flow);
     const vertical = isVertical(flow);
     const inCreation = horizontal && vertical;
+    if (!inCreation && !horizontal && !vertical && flow.points.length === 2) {
+      // Slightly-diagonal legacy data: neither exact test matched, so classify
+      // by the dominant axis (see isDominantlyHorizontal). Without this, a
+      // visually-horizontal drifted flow snapped the dragged endpoint's y but
+      // never updated its x, detaching the flow from its own endpoint.
+      horizontal = isDominantlyHorizontal(first(flow.points), last(flow.points));
+    }
 
     let otherEnd: IPoint | undefined;
     const points = flow.points.map((point, i) => {
@@ -719,9 +742,14 @@ export function UpdateCloudAndFlow(
     // Use the drag direction to determine the intended axis.
     const isDegenerate = seg.isHorizontal && seg.isVertical;
 
-    // For degenerate segments, determine axis from drag direction.
-    // For non-degenerate segments, use the existing segment orientation.
-    const treatAsHorizontal = isDegenerate ? Math.abs(moveDelta.x) > Math.abs(moveDelta.y) : seg.isHorizontal;
+    // For degenerate segments, determine axis from drag direction. For
+    // non-degenerate segments, use the segment's DOMINANT orientation (see
+    // isDominantlyHorizontal): an exact check misread a parallel drag of a
+    // slightly-diagonal legacy flow as perpendicular and rerouted it into a
+    // bogus L.
+    const treatAsHorizontal = isDegenerate
+      ? Math.abs(moveDelta.x) > Math.abs(moveDelta.y)
+      : isDominantlyHorizontal(seg.p1, seg.p2);
 
     const perpDelta = treatAsHorizontal ? moveDelta.y : moveDelta.x;
     const parDelta = treatAsHorizontal ? moveDelta.x : moveDelta.y;

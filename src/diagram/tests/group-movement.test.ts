@@ -15,7 +15,7 @@ import {
   UID,
 } from '@simlin/core/datamodel';
 
-import { StockWidth } from '../drawing/Stock';
+import { StockHeight, StockWidth } from '../drawing/Stock';
 import { applyGroupMovement } from '../group-movement';
 
 // Helper functions to create test elements
@@ -454,9 +454,14 @@ describe('Group Movement', () => {
       expect(newFlow1.points[0].x).toBe(150 + StockWidth / 2);
       expect(newFlow1.points[newFlow1.points.length - 1].x).toBe(250 - StockWidth / 2);
 
-      // Flow 2 should be routed (one endpoint moved, one fixed)
+      // Flow 2 should be routed (one endpoint moved, one fixed). It runs
+      // 77.5px right and 50px down, so it classifies as dominantly HORIZONTAL
+      // and its L attaches perpendicular to that: via the stock's bottom edge.
+      // (Before dominant-axis classification the exact-equality check misread
+      // this diagonal as vertical and attached via the right edge.)
       const newFlow2 = result.get(3) as FlowViewElement;
-      expect(newFlow2.points[0].x).toBe(150 + StockWidth / 2); // at new stock position
+      expect(newFlow2.points[0].x).toBe(150); // bottom-edge attach at new stock x
+      expect(newFlow2.points[0].y).toBe(100 + StockHeight / 2);
       expect(newFlow2.points[newFlow2.points.length - 1].x).toBe(200); // cloud unchanged
 
       // Both flows should have different y-coordinates on Stock A's edge

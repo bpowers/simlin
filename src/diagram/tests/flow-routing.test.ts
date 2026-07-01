@@ -2740,4 +2740,59 @@ describe('Flow routing', () => {
       }
     });
   });
+
+  describe('slightly-diagonal legacy flows classify by their dominant axis', () => {
+    // Real specimen: pre-fix flow creation persisted visually-horizontal flows
+    // whose endpoint y's drift a few pixels (5.5px in the wild case); imported
+    // models can carry the same. Exact-equality orientation checks classified
+    // such a flow as VERTICAL, so routing produced a wrong-way L (down from
+    // the cloud, into the stock's left edge, valve and label stacked on the
+    // cloud) and endpoint drags constrained/updated the wrong coordinate.
+
+    it('computeFlowRoute treats a near-horizontal flow as horizontal (L via the top edge)', () => {
+      // Cloud anchor on the left, stock on the right, 5.5px of y-drift.
+      const stock = makeStock(stockUid, 565.6, 353);
+      const flow = makeFlow(flowUid, 426.5, 355.7, [
+        { x: 310, y: 358.5, attachedToUid: cloudUid },
+        { x: 543.1, y: 353, attachedToUid: stockUid },
+      ]);
+
+      // Drag the stock far downward: a horizontal flow must attach via a
+      // perpendicular (vertical) segment into the stock's TOP edge, with the
+      // corner carrying the anchor's y.
+      const newStockCy = 483;
+      const result = computeFlowRoute(flow, stock, 565.6, newStockCy);
+
+      expect(result.points.length).toBe(3);
+      const corner = result.points[1];
+      const stockPoint = result.points[2];
+      expect(stockPoint.y).toBeCloseTo(newStockCy - StockHeight / 2);
+      expect(corner.x).toBeCloseTo(stockPoint.x);
+      expect(corner.y).toBeCloseTo(358.5);
+    });
+
+    it('UpdateCloudAndFlow slides a near-horizontal cloud drag along x (no bogus L, endpoint follows)', () => {
+      // Same drift, cloud end being dragged 50px leftward along the VISUAL
+      // axis. As "vertical", this parallel drag read as perpendicular: it
+      // rerouted into an L and never updated the endpoint's x (the cloud
+      // detached visually from its own flow).
+      const cloud = makeCloud(cloudUid, flowUid, 310, 358.5);
+      const flow = makeFlow(flowUid, 426.5, 355.7, [
+        { x: 310, y: 358.5, attachedToUid: cloudUid },
+        { x: 543.1, y: 353, attachedToUid: 99 },
+      ]);
+
+      const [movedCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, { x: 50, y: 0 });
+
+      // Still straight, constrained to the flow's (horizontal) axis.
+      expect(newFlow.points.length).toBe(2);
+      expect(movedCloud.x).toBeCloseTo(260);
+      expect(movedCloud.y).toBeCloseTo(358.5);
+      // The dragged endpoint follows the cloud on x.
+      expect(newFlow.points[0].x).toBeCloseTo(260);
+      // The far endpoint is untouched.
+      expect(newFlow.points[1].x).toBeCloseTo(543.1);
+      expect(newFlow.points[1].y).toBeCloseTo(353);
+    });
+  });
 });
