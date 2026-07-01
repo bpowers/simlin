@@ -84,6 +84,76 @@ function getStockEdgePoint(stockCx: number, stockCy: number, side: Side, offsetF
   }
 }
 
+/**
+ * Which stock edge a flow endpoint currently occupies relative to a given stock
+ * center, or undefined if the point is not on an edge (within tolerance).
+ *
+ * Used to preserve the attachment edge across a stock move when the
+ * stock-adjacent segment runs PARALLEL to that edge -- a Z-shaped flow's riser
+ * hugs a left/right edge with a vertical segment (or a top/bottom edge with a
+ * horizontal one). Classifying by segment orientation alone would misread that
+ * as the perpendicular edge and jump the endpoint on a mere nudge (#819
+ * follow-up). Endpoints are pinned exactly onto edges, so a small tolerance is
+ * safe and avoids float noise.
+ */
+function classifyStockEdge(point: IPoint, center: IPoint): Side | undefined {
+  const EPS = 0.5;
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+  const onLeftRightEdge = Math.abs(Math.abs(dx) - StockWidth / 2) <= EPS && Math.abs(dy) <= StockHeight / 2 + EPS;
+  const onTopBottomEdge = Math.abs(Math.abs(dy) - StockHeight / 2) <= EPS && Math.abs(dx) <= StockWidth / 2 + EPS;
+  if (onLeftRightEdge) {
+    return dx >= 0 ? 'right' : 'left';
+  }
+  if (onTopBottomEdge) {
+    return dy >= 0 ? 'bottom' : 'top';
+  }
+  return undefined;
+}
+
+/**
+ * Determine which stock edge a multi-segment (3+ point) flow's stock endpoint
+ * attaches to after a stock move, plus whether the stock-adjacent segment is
+ * horizontal. Shared by computeFlowRoute (which re-pins the endpoint) and
+ * getFlowAttachmentInfo (which groups flows for spread spacing) so the two
+ * ALWAYS agree on a Z-shaped flow's occupied edge -- otherwise a Z and a
+ * straight flow on the same stock edge land in different spread groups and both
+ * center at 0.5, overlapping their endpoints.
+ *
+ * Normally the segment orientation implies the edge (a horizontal segment
+ * leaves a left/right edge). A Z-riser runs PARALLEL to its edge, so when we
+ * know the prior stock center and the endpoint sits on an edge whose axis is
+ * parallel to the segment, preserve that occupied edge instead.
+ */
+function resolveStockAdjacentSide(
+  currentStockPoint: IPoint,
+  adjacentPoint: IPoint,
+  newStockCx: number,
+  newStockCy: number,
+  prevStockCenter: IPoint | undefined,
+): { side: Side; isHorizontalSegment: boolean } {
+  const isHorizontalSegment = isDominantlyHorizontal(currentStockPoint, adjacentPoint);
+
+  if (prevStockCenter) {
+    const occupiedEdge = classifyStockEdge(currentStockPoint, prevStockCenter);
+    if (occupiedEdge) {
+      const edgeIsLeftRight = occupiedEdge === 'left' || occupiedEdge === 'right';
+      if (edgeIsLeftRight !== isHorizontalSegment) {
+        return { side: occupiedEdge, isHorizontalSegment };
+      }
+    }
+  }
+
+  const side: Side = isHorizontalSegment
+    ? adjacentPoint.x > newStockCx
+      ? 'right'
+      : 'left'
+    : adjacentPoint.y > newStockCy
+      ? 'bottom'
+      : 'top';
+  return { side, isHorizontalSegment };
+}
+
 interface FlowAttachmentInfo {
   flow: FlowViewElement;
   side: Side;
@@ -137,6 +207,7 @@ function getFlowAttachmentInfo(
   stockUid: number,
   newStockCx: number,
   newStockCy: number,
+  prevStockCenter?: IPoint,
 ): FlowAttachmentInfo | undefined {
   const points = flow.points;
   if (points.length < 2) {
@@ -161,16 +232,12 @@ function getFlowAttachmentInfo(
   let side: Side;
   let isStraight = false;
 
-  // For 4+ point flows, use the existing segment orientation
+  // For 4+ point flows, use the existing segment orientation (preserving a
+  // Z-riser's occupied edge -- see resolveStockAdjacentSide -- so this agrees
+  // with computeFlowRoute and Z flows spread alongside straight ones).
   if (points.length >= 4) {
     const currentStockPoint = stockIsFirst ? firstPoint : lastPoint;
-    const isHorizontalSegment = isDominantlyHorizontal(currentStockPoint, adjacentPoint);
-
-    if (isHorizontalSegment) {
-      side = adjacentPoint.x > newStockCx ? 'right' : 'left';
-    } else {
-      side = adjacentPoint.y > newStockCy ? 'bottom' : 'top';
-    }
+    ({ side } = resolveStockAdjacentSide(currentStockPoint, adjacentPoint, newStockCx, newStockCy, prevStockCenter));
   } else if (canFlowBeStraight(newStockCx, newStockCy, anchor.x, anchor.y, originalFlowIsHorizontal)) {
     // Straight flow - these naturally separate based on anchor position
     isStraight = true;
@@ -218,11 +285,12 @@ export function computeFlowOffsets(
   stockUid: number,
   newStockCx: number,
   newStockCy: number,
+  prevStockCenter?: IPoint,
 ): Map<number, number> {
   // Get attachment info for all flows
   const attachmentInfos: FlowAttachmentInfo[] = [];
   for (const flow of flows) {
-    const info = getFlowAttachmentInfo(flow, stockUid, newStockCx, newStockCy);
+    const info = getFlowAttachmentInfo(flow, stockUid, newStockCx, newStockCy, prevStockCenter);
     if (info) {
       attachmentInfos.push(info);
     }
@@ -293,6 +361,7 @@ export function computeFlowRoute(
   newStockCx: number,
   newStockCy: number,
   offsetFraction: number = 0.5,
+  prevStockCenter?: IPoint,
 ): FlowViewElement {
   const points = flow.points;
   if (points.length < 2) {
@@ -325,21 +394,19 @@ export function computeFlowRoute(
     const adjacentPointIndex = stockIsFirst ? 1 : points.length - 2;
     const adjacentPoint = at(points, adjacentPointIndex);
 
-    // Determine the ORIGINAL first segment's orientation from the existing geometry.
-    // We must preserve this orientation to avoid creating diagonal segments between
-    // corner1 and corner2 when the stock moves far perpendicular to the segment.
+    // Determine the ORIGINAL first segment's orientation from the existing
+    // geometry (preserved to avoid diagonal segments between corner1 and corner2
+    // when the stock moves far perpendicular to the segment) and the attachment
+    // side, which also preserves a Z-riser's occupied edge to avoid an
+    // endpoint jump on a nudge (see resolveStockAdjacentSide).
     const currentStockPoint = stockIsFirst ? firstPoint : lastPoint;
-    const isHorizontalSegment = isDominantlyHorizontal(currentStockPoint, adjacentPoint);
-
-    // Choose the attachment side based on the preserved orientation
-    let side: Side;
-    if (isHorizontalSegment) {
-      // Horizontal segment: attach left or right based on adjacent point's X
-      side = adjacentPoint.x > newStockCx ? 'right' : 'left';
-    } else {
-      // Vertical segment: attach top or bottom based on adjacent point's Y
-      side = adjacentPoint.y > newStockCy ? 'bottom' : 'top';
-    }
+    const { side, isHorizontalSegment } = resolveStockAdjacentSide(
+      currentStockPoint,
+      adjacentPoint,
+      newStockCx,
+      newStockCy,
+      prevStockCenter,
+    );
 
     // Keep the endpoint on the stock's actual edge
     const stockEdge = getStockEdgePoint(newStockCx, newStockCy, side, offsetFraction);
@@ -723,6 +790,11 @@ export function UpdateStockAndFlows(
   const newStockCx = stockEl.x - moveDelta.x;
   const newStockCy = stockEl.y - moveDelta.y;
 
+  // The stock's center before this move, used to classify which edge each flow
+  // endpoint currently occupies so computeFlowRoute can preserve it (see the
+  // Z-riser edge-preservation there).
+  const prevStockCenter: IPoint = { x: stockEl.x, y: stockEl.y };
+
   stockEl = {
     ...stockEl,
     x: newStockCx,
@@ -730,11 +802,11 @@ export function UpdateStockAndFlows(
   };
 
   // Compute offset fractions to spread multiple flows on the same side
-  const offsets = computeFlowOffsets(flows, stockEl.uid, newStockCx, newStockCy);
+  const offsets = computeFlowOffsets(flows, stockEl.uid, newStockCx, newStockCy, prevStockCenter);
 
   flows = flows.map((flow) => {
     const offset = offsets.get(flow.uid) ?? 0.5;
-    return computeFlowRoute(flow, stockEl, newStockCx, newStockCy, offset);
+    return computeFlowRoute(flow, stockEl, newStockCx, newStockCy, offset, prevStockCenter);
   });
 
   return [stockEl, flows];
@@ -1492,23 +1564,32 @@ export function UpdateFlow(
     return [flowEl, []];
   }
 
-  // For 2-point (straight) flows with at least one cloud, allow perpendicular offset.
-  // This converts the flow to an L-shape, letting users offset flows to avoid overlap
-  // without moving the stocks themselves.
-  if (segments.length === 1 && clouds.length > 0) {
+  // For 2-point (straight) flows, allow a perpendicular valve drag to offset the
+  // route. A flow with a cloud endpoint bends into an L (the cloud moves); a flow
+  // pinned between two stocks -- where neither endpoint can move -- inserts two
+  // corners to form a Z whose middle segment runs parallel to the original axis,
+  // displaced by the perpendicular drag (#819). Once either shape exists, its
+  // middle/bent segment is interior, so the normal segment-drag machinery takes
+  // over and dragging it back onto the axis collapses (via normalizeFlowPoints)
+  // to the straight flow.
+  if (segments.length === 1) {
     const seg = segments[0];
-    const perpDelta = seg.isHorizontal ? moveDelta.y : moveDelta.x;
-    const parDelta = seg.isHorizontal ? moveDelta.x : moveDelta.y;
+    // Classify by the dominant axis rather than exact equality so a
+    // slightly-diagonal legacy flow is offset along the axis it visually runs
+    // (audit finding 5); for exact orthogonal flows this matches seg.isHorizontal.
+    const treatAsHorizontal = isDominantlyHorizontal(seg.p1, seg.p2);
+    const perpDelta = treatAsHorizontal ? moveDelta.y : moveDelta.x;
+    const parDelta = treatAsHorizontal ? moveDelta.x : moveDelta.y;
 
     // Require a significant and dominant perpendicular component to trigger reroute.
-    // This prevents accidental L-shape conversion during normal valve dragging,
-    // since pointer movement often has small perpendicular noise.
+    // This prevents accidental reroute during normal valve dragging, since pointer
+    // movement often has small perpendicular noise.
     const PERP_THRESHOLD = 5;
     const perpAbs = Math.abs(perpDelta);
     const parAbs = Math.abs(parDelta);
     const shouldReroute = perpAbs >= PERP_THRESHOLD && perpAbs > parAbs;
 
-    if (shouldReroute) {
+    if (shouldReroute && clouds.length > 0) {
       const firstPoint = first(points);
       const lastPoint = last(points);
 
@@ -1520,7 +1601,7 @@ export function UpdateFlow(
       let newFirstPoint = firstPoint;
       let newLastPoint = lastPoint;
 
-      if (seg.isHorizontal) {
+      if (treatAsHorizontal) {
         // Horizontal segment: perpendicular movement is vertical (Y changes)
         if (firstIsCloud) {
           newFirstPoint = { ...firstPoint, y: firstPoint.y - moveDelta.y };
@@ -1598,6 +1679,55 @@ export function UpdateFlow(
       };
 
       return [flowEl, updatedClouds];
+    }
+
+    if (shouldReroute && clouds.length === 0) {
+      // Both endpoints are attached stocks, so neither can move to absorb the
+      // offset. Keep both endpoints on their current stock edges and insert two
+      // corners at the displaced perpendicular coordinate (the dragged valve's
+      // position), forming a Z: two perpendicular risers bracketing a middle
+      // segment parallel to the original axis. The endpoints are untouched, so
+      // corner clearance is preserved and dragging the middle back onto the axis
+      // collapses the risers to zero length (normalizeFlowPoints) -> straight.
+      const firstPoint = first(points);
+      const lastPoint = last(points);
+
+      let corner1: Point;
+      let corner2: Point;
+      if (treatAsHorizontal) {
+        // Horizontal flow: risers are vertical (on each endpoint's X), the
+        // middle segment is horizontal at the dragged valve's Y.
+        const midY = proposedValve.y;
+        corner1 = { x: firstPoint.x, y: midY, attachedToUid: undefined };
+        corner2 = { x: lastPoint.x, y: midY, attachedToUid: undefined };
+      } else {
+        // Vertical flow: risers are horizontal (on each endpoint's Y), the
+        // middle segment is vertical at the dragged valve's X.
+        const midX = proposedValve.x;
+        corner1 = { x: midX, y: firstPoint.y, attachedToUid: undefined };
+        corner2 = { x: midX, y: lastPoint.y, attachedToUid: undefined };
+      }
+
+      // Normalize like every other mutation path so the orthogonality invariant
+      // doesn't silently rely on the perpendicular threshold keeping the risers
+      // non-degenerate.
+      points = normalizeFlowPoints([firstPoint, corner1, corner2, lastPoint]);
+
+      // Land the valve on the interior (middle) segment the drag created, not
+      // merely the closest segment: a perpendicular-dominant drag can still
+      // carry a large parallel component, which can leave a riser closer to the
+      // dragged position and strand the valve off the offset the user just made.
+      const zSegments = getSegments(points);
+      const middleSeg = zSegments.length === 3 ? zSegments[1] : findClosestSegment(proposedValve, zSegments);
+      const newValve = clampToSegment(proposedValve, middleSeg);
+      flowEl = {
+        ...flowEl,
+        x: newValve.x,
+        y: newValve.y,
+        points,
+      };
+
+      return [flowEl, []];
     }
   }
 

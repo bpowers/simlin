@@ -444,7 +444,7 @@ Flows connect stocks and clouds with specific constraints:
    - Maintain axis alignment
    - Constrain valve position within valid range
 3. Update cloud positions to follow flow movement
-4. Keep minimum 20px clearance from flow endpoints
+4. Keep minimum 10px clearance from flow endpoints (`VALVE_CLAMP_MARGIN`)
 
 ### Connector Rules
 
@@ -652,7 +652,7 @@ Each element type has specific hit testing:
 1. **Spacing**: Minimum 20px between element edges
 2. **Grid alignment**: Snap to 5px or 10px grid for cleaner layouts
 3. **Label clearance**: Account for label bounds when positioning
-4. **Flow clearance**: Keep valve at least 20px from connected elements
+4. **Flow clearance**: The valve clamps at least 10px (`VALVE_CLAMP_MARGIN`) from flow endpoints
 
 ### Layout Strategies
 1. **Hierarchical**: Arrange in levels (sources → stocks → sinks)

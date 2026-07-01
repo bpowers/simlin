@@ -315,6 +315,86 @@ describe('Group Movement', () => {
       expect(newFlow.points[newFlow.points.length - 1].attachedToUid).toBe(3);
       expect(newFlow.points[newFlow.points.length - 1].x).toBe(200);
     });
+
+    it('should not jump a Z flow endpoint to a different edge when its stock is nudged', () => {
+      // Z-shaped stock-to-stock flow: endpoint on A's RIGHT edge with a vertical
+      // riser. Nudging A must keep the endpoint on the right edge (translate),
+      // not jump it to the top edge (#819 follow-up). This exercises the real
+      // interactive path (applyGroupMovement -> computeFlowRoute), not
+      // UpdateStockAndFlows.
+      const stockA = makeStock(1, 100, 100, [], [2]);
+      const stockB = makeStock(3, 250, 100, [2], []);
+      const zFlow = makeFlow(2, 175, 70, [
+        { x: 122.5, y: 100, attachedToUid: 1 },
+        { x: 122.5, y: 70 },
+        { x: 227.5, y: 70 },
+        { x: 227.5, y: 100, attachedToUid: 3 },
+      ]);
+
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, zFlow],
+        [3, stockB],
+      ]);
+
+      // Select only stock A and nudge it left by 20 (delta +20 => new center 80)
+      const result = testApplyGroupMovement(elements, new Set<UID>([1]), { x: 20, y: 0 });
+
+      const newStock = result.get(1) as StockViewElement;
+      expect(newStock.x).toBe(80);
+
+      const newFlow = result.get(2) as FlowViewElement;
+      // Endpoint stays on A's RIGHT edge (80 + 22.5), y unchanged -- no jump to
+      // the top edge (which would be y=82.5).
+      expect(newFlow.points[0].attachedToUid).toBe(1);
+      expect(newFlow.points[0].x).toBe(80 + StockWidth / 2);
+      expect(newFlow.points[0].y).toBe(100);
+      // Riser stays aligned; middle segment preserved at y=70; still a Z.
+      expect(newFlow.points.length).toBe(4);
+      expect(newFlow.points[1].x).toBe(80 + StockWidth / 2);
+      expect(newFlow.points[1].y).toBe(70);
+      expect(newFlow.points[2].y).toBe(70);
+    });
+
+    it('should spread a Z and a straight flow sharing a stock edge through the interactive path', () => {
+      // Same probe as the flow-routing spread test, but via applyGroupMovement's
+      // computePreRoutedOffsets path (the interactive stock drag). A straight and
+      // a Z outflow both occupy A's right edge; nudging A must spread them, not
+      // stack both endpoints at the edge center.
+      const stockA = makeStock(1, 100, 100, [], [2, 5]);
+      const stockB = makeStock(3, 250, 100, [2], []);
+      const stockC = makeStock(6, 300, 250, [5], []);
+      const straight = makeFlow(2, 175, 100, [
+        { x: 122.5, y: 100, attachedToUid: 1 },
+        { x: 227.5, y: 100, attachedToUid: 3 },
+      ]);
+      const zFlow = makeFlow(5, 200, 60, [
+        { x: 122.5, y: 100, attachedToUid: 1 },
+        { x: 122.5, y: 60 },
+        { x: 300, y: 60 },
+        { x: 300, y: 100, attachedToUid: 6 },
+      ]);
+
+      const elements = new Map<UID, ViewElement>([
+        [1, stockA],
+        [2, straight],
+        [3, stockB],
+        [5, zFlow],
+        [6, stockC],
+      ]);
+
+      const result = testApplyGroupMovement(elements, new Set<UID>([1]), { x: 5, y: 0 });
+
+      const straightEnd = (result.get(2) as FlowViewElement).points[0];
+      const zEnd = (result.get(5) as FlowViewElement).points[0];
+      // Both on A's right edge (x = 95 + 22.5), but NOT at the same point.
+      expect(straightEnd.x).toBe(95 + StockWidth / 2);
+      expect(zEnd.x).toBe(95 + StockWidth / 2);
+      expect(zEnd.y).not.toBe(straightEnd.y);
+      // Z stays a valid 4-point flow with its middle preserved.
+      expect((result.get(5) as FlowViewElement).points.length).toBe(4);
+      expect((result.get(5) as FlowViewElement).points[1].y).toBe(60);
+    });
   });
 
   describe('Offset preservation with translated and routed flows', () => {
@@ -774,10 +854,10 @@ describe('Group Movement', () => {
       expect(newFlow.points[newFlow.points.length - 1].x).toBe(200 - StockWidth / 2);
     });
 
-    it('should clamp valve to flow path when moving perpendicular to flow direction', () => {
+    it('should offset a stock-to-stock flow into a Z when dragged perpendicular', () => {
       // Setup: Stock A -> horizontal Flow -> Stock B
-      // When we select only the flow (not the stocks) and move it perpendicular,
-      // the valve should stay on the flow path, not move off into empty space
+      // Selecting only the flow and dragging it perpendicular offsets the route
+      // into a Z (two corners), since neither stock endpoint can move (#819).
       const stockA = makeStock(1, 100, 100, [], [2]);
       const stockB = makeStock(3, 200, 100, [2], []);
       const flow = makeFlow(2, 150, 100, [
@@ -793,7 +873,7 @@ describe('Group Movement', () => {
 
       // Only select the flow, move UP (perpendicular to the horizontal flow)
       const selection = new Set<UID>([2]);
-      const delta = { x: 0, y: 50 }; // Move up 50
+      const delta = { x: 0, y: 50 }; // Move up 50 => middle segment at y=50
 
       const result = testApplyGroupMovement(elements, selection, delta);
 
@@ -801,13 +881,16 @@ describe('Group Movement', () => {
       expect((result.get(1) as StockViewElement).y).toBe(100);
       expect((result.get(3) as StockViewElement).y).toBe(100);
 
-      // Flow valve should be clamped to stay on the horizontal flow path (y=100)
+      // Flow becomes a Z (four points); endpoints stay pinned on the stock edges
       const newFlow = result.get(2) as FlowViewElement;
-      expect(newFlow.y).toBe(100); // Should stay on the flow path
-
-      // Flow endpoints should stay fixed
+      expect(newFlow.points.length).toBe(4);
       expect(newFlow.points[0].y).toBe(100);
       expect(newFlow.points[newFlow.points.length - 1].y).toBe(100);
+      // Middle segment (the two corners) sits at the displaced Y
+      expect(newFlow.points[1].y).toBe(50);
+      expect(newFlow.points[2].y).toBe(50);
+      // Valve rides the offset middle segment
+      expect(newFlow.y).toBe(50);
     });
   });
 
