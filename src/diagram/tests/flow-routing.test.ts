@@ -2661,13 +2661,12 @@ describe('Flow routing', () => {
     });
   });
 
-  describe('UpdateCloudAndFlow - valve fraction on parallel cloud drag (adjustFlows isCloud branch)', () => {
+  describe('UpdateCloudAndFlow - valve fraction on parallel cloud drag (adjustFlows valve formula)', () => {
     // A parallel drag of a straight cloud flow constrains the cloud to the flow
-    // axis and re-places the valve via adjustFlows' isCloud branch, which
-    // preserves the valve's fractional position between the fixed other end and
-    // the moved cloud using base=min(otherEnd, cloud) + abs(fraction*d). These
-    // pin that formula's output (the ONLY reachable adjustFlows branch: its sole
-    // caller passes isCloud=true).
+    // axis and re-places the valve via adjustFlows, which preserves the valve's
+    // fractional position between the fixed other end and the moved cloud using
+    // base=min(otherEnd, cloud) + abs(fraction*d). These pin that formula's
+    // output.
     // Fixture: source point at x=100 (uid 1), cloud sink at x=200 (uid 3), flow
     // horizontal at y=100; drag the cloud right by 20 (cloud -> x=220).
     const makeParallelCase = (valveX: number) => {
@@ -3076,10 +3075,9 @@ describe('Flow routing', () => {
     // adjustFlows computes the valve's fractional position by dividing by
     // (origStock.x - otherEnd.x) / (origStock.y - otherEnd.y). For a flow whose
     // attached endpoint and other end share an axis (a vertical or horizontal
-    // flow) that denominator is zero. The non-cloud branch guarded it with
-    // `|| 1`, but the cloud branch did not -- so dragging a cloud on such a flow
-    // produced a NaN/Infinity valve coordinate, which serialized to JSON null and
-    // bricked the model. Moving must always yield finite coordinates.
+    // flow) that denominator is zero. Before the `|| 1` guard, dragging a cloud
+    // on such a flow produced a NaN/Infinity valve coordinate, which serialized to
+    // JSON null and bricked the model. Moving must always yield finite coordinates.
     it('keeps the valve finite for a vertical cloud flow with an off-axis valve', () => {
       // Vertical flow: cloud (uid 1) and the other end (uid 2) share x = 100.
       // The valve sits off that axis (x = 150), as can happen with the degenerate

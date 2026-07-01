@@ -575,7 +575,6 @@ function adjustFlows(
   origStock: StockViewElement | CloudViewElement,
   stock: StockViewElement | CloudViewElement,
   flows: readonly FlowViewElement[],
-  isCloud?: boolean,
 ): readonly FlowViewElement[] {
   return flows.map((flow: FlowViewElement) => {
     let horizontal = isHorizontal(flow);
@@ -695,57 +694,32 @@ function adjustFlows(
       };
     }
 
-    // The isCloud and non-cloud branches deliberately compute the valve
-    // differently and must NOT be unified. isCloud mirrors the valve around the
-    // segment: base = min(otherEnd, moved end) plus the ABSOLUTE scaled offset,
-    // so an off-center valve stays between the two ends even when the drag flips
-    // the segment orientation (the moved end crossing past otherEnd). The
-    // non-cloud branch offsets by the SIGNED scaled distance from otherEnd --
-    // correct for a stock endpoint that keeps its side, but divergent from the
-    // cloud formula for off-center / sign-flip cases. The shared arithmetic (the
-    // raw fraction, `d`) is too small and entangled with these differing
-    // combinators to factor out without obscuring both formulas.
+    // Re-place the valve by mirroring it around the segment: base =
+    // min(otherEnd, moved end) plus the ABSOLUTE scaled offset, so an off-center
+    // valve stays between the two ends even when the drag flips the segment
+    // orientation (the moved end crossing past otherEnd).
     //
-    // NOTE: the non-cloud branch is currently unreachable -- adjustFlows' sole
-    // caller (UpdateCloudAndFlow, straight-flow parallel drag) always passes
-    // isCloud=true. It is retained as the general signed formula.
-    if (isCloud) {
-      // Guard the denominators against zero: for a vertical flow origStock.x ===
-      // otherEnd.x (and likewise y for a horizontal flow), which without the
-      // `|| 1` divides by zero and yields a NaN/Infinity valve -- serialized to
-      // JSON null, that bricks the model (#818).
-      const fraction = {
-        x: flow.x === otherEnd.x ? 0.5 : (stock.x - otherEnd.x) / (origStock.x - otherEnd.x || 1),
-        y: flow.y === otherEnd.y ? 0.5 : (stock.y - otherEnd.y) / (origStock.y - otherEnd.y || 1),
-      };
-      const d = {
-        x: flow.x === otherEnd.x ? stock.x - otherEnd.x : flow.x - otherEnd.x,
-        y: flow.y === otherEnd.y ? stock.y - otherEnd.y : flow.y - otherEnd.y,
-      };
-      const base = {
-        x: Math.min(otherEnd.x, stock.x),
-        y: Math.min(otherEnd.y, stock.y),
-      };
-      flow = {
-        ...flow,
-        x: base.x + Math.abs(fraction.x * d.x),
-        y: base.y + Math.abs(fraction.y * d.y),
-      };
-    } else {
-      const fraction = {
-        x: (stock.x - otherEnd.x) / (origStock.x - otherEnd.x || 1),
-        y: (stock.y - otherEnd.y) / (origStock.y - otherEnd.y || 1),
-      };
-      const d = {
-        x: flow.x - otherEnd.x,
-        y: flow.y - otherEnd.y,
-      };
-      flow = {
-        ...flow,
-        x: otherEnd.x + fraction.x * d.x,
-        y: otherEnd.y + fraction.y * d.y,
-      };
-    }
+    // Guard the denominators against zero: for a vertical flow origStock.x ===
+    // otherEnd.x (and likewise y for a horizontal flow), which without the `|| 1`
+    // divides by zero and yields a NaN/Infinity valve -- serialized to JSON null,
+    // that bricks the model (#818).
+    const fraction = {
+      x: flow.x === otherEnd.x ? 0.5 : (stock.x - otherEnd.x) / (origStock.x - otherEnd.x || 1),
+      y: flow.y === otherEnd.y ? 0.5 : (stock.y - otherEnd.y) / (origStock.y - otherEnd.y || 1),
+    };
+    const d = {
+      x: flow.x === otherEnd.x ? stock.x - otherEnd.x : flow.x - otherEnd.x,
+      y: flow.y === otherEnd.y ? stock.y - otherEnd.y : flow.y - otherEnd.y,
+    };
+    const base = {
+      x: Math.min(otherEnd.x, stock.x),
+      y: Math.min(otherEnd.y, stock.y),
+    };
+    flow = {
+      ...flow,
+      x: base.x + Math.abs(fraction.x * d.x),
+      y: base.y + Math.abs(fraction.y * d.y),
+    };
 
     return { ...flow, points };
   });
@@ -951,7 +925,7 @@ export function UpdateCloudAndFlow(
       y: proposed.y,
     };
 
-    flow = first(adjustFlows(origCloud, cloud, [flow], true));
+    flow = first(adjustFlows(origCloud, cloud, [flow]));
     return [cloud, flow];
   }
 
