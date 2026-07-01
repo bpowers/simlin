@@ -27,6 +27,7 @@ export NODE_ENV=production
 pnpm clean                                       # cargo clean + each package's clean script
 pnpm build                                       # pnpm -r run build: Rust+WASM, then every TS package
 pnpm --filter @simlin/app run deploy:assemble    # copy build/ and build-component/ into public/; drop symlinks
+scripts/check-upload-file-count.sh .             # abort if the upload set would trip GAE's 10,000-file cap
 gcloud app deploy ./.app.prod.yaml               # upload the repo minus .gcloudignore, switch traffic
 # A bash trap runs the cleanup below on EXIT/INT/TERM, even if any step above fails:
 pnpm --filter @simlin/app run deploy:clean       # git checkout the symlinks and index.html; rm build artifacts
@@ -124,7 +125,7 @@ The server loads `config/default.json`, then `config/production.json` when `NODE
 ## Pre-deploy checklist
 
 - [ ] CI is green on the commit you're deploying.
-- [ ] `git status` is clean.
+- [ ] `git status` is clean. Note this only makes the tracked-`public/` mutation and cleanup reliable -- it does NOT bound what gets uploaded. The upload set is whatever `.gcloudignore` leaves in, so gitignored/untracked junk (venvs, nested cargo `target/` dirs, scratch checkouts) still counts toward GAE Standard's hard 10,000-file cap (issue #695). Both deploy scripts run [`scripts/check-upload-file-count.sh`](/scripts/check-upload-file-count.sh) immediately before `gcloud app deploy` and abort with a per-top-level-directory breakdown if the cap would be hit; fix by deleting the offending dirs or adding them to `.gcloudignore`.
 - [ ] `gcloud config get-value project` is the production project.
 - [ ] `gcloud app versions list --service=default` shows a known-good current version -- note its ID, that's your rollback target. (If GAE has garbage-collected it, there is no rollback; see below.)
 - [ ] `.app.prod.yaml` reconciled against `app.yaml` (`runtime: nodejs24`, `build_env_variables.GOOGLE_NODE_RUN_SCRIPTS: ''`, `automatic_scaling.max_instances: 8`, handlers including the `/static` `Access-Control-Allow-Origin: "*"` header, `authentication__seshcookie__key` set to the value already in use).
