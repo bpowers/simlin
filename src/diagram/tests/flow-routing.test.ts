@@ -6,6 +6,7 @@ import { type Point, type FlowViewElement, type StockViewElement, type CloudView
 
 import {
   computeFlowRoute,
+  computeFlowOffsets,
   UpdateStockAndFlows,
   UpdateCloudAndFlow,
   UpdateFlow,
@@ -1542,6 +1543,333 @@ describe('Flow routing', () => {
     });
   });
 
+  describe('UpdateFlow - Z-shape offset for stock-to-stock flows', () => {
+    // Both endpoints are stocks, so neither can move to absorb an offset. A
+    // perpendicular valve drag must insert two corners to form a Z whose middle
+    // segment runs parallel to the original axis, displaced by the drag.
+    const stockAUid = 1;
+    const stockBUid = 4;
+
+    // A horizontal straight flow between two stocks: A(100,100) -> B(250,100).
+    function makeHorizontalStockFlow(): {
+      flow: FlowViewElement;
+      stockA: StockViewElement;
+      stockB: StockViewElement;
+    } {
+      const stockA = makeStock(stockAUid, 100, 100, [], [flowUid]);
+      const stockB = makeStock(stockBUid, 250, 100, [flowUid], []);
+      const flow = makeFlow(flowUid, 175, 100, [
+        { x: 100 + StockWidth / 2, y: 100, attachedToUid: stockAUid }, // A right edge = 122.5
+        { x: 250 - StockWidth / 2, y: 100, attachedToUid: stockBUid }, // B left edge = 227.5
+      ]);
+      return { flow, stockA, stockB };
+    }
+
+    // A vertical straight flow between two stocks: A(100,100) -> B(100,250).
+    function makeVerticalStockFlow(): {
+      flow: FlowViewElement;
+      stockA: StockViewElement;
+      stockB: StockViewElement;
+    } {
+      const stockA = makeStock(stockAUid, 100, 100, [], [flowUid]);
+      const stockB = makeStock(stockBUid, 100, 250, [flowUid], []);
+      const flow = makeFlow(flowUid, 100, 175, [
+        { x: 100, y: 100 + StockHeight / 2, attachedToUid: stockAUid }, // A bottom edge = 117.5
+        { x: 100, y: 250 - StockHeight / 2, attachedToUid: stockBUid }, // B top edge = 232.5
+      ]);
+      return { flow, stockA, stockB };
+    }
+
+    it('should form a Z when dragging a horizontal flow perpendicular (up)', () => {
+      const { flow, stockA, stockB } = makeHorizontalStockFlow();
+
+      // Drag valve up by 30 (moveDelta.y = 30 => middle segment at y = 100 - 30 = 70)
+      const [newFlow, updatedClouds] = UpdateFlow(flow, [stockA, stockB], { x: 0, y: 30 });
+
+      // Two corners inserted -> four points
+      expect(newFlow.points.length).toBe(4);
+      // No clouds involved
+      expect(updatedClouds.length).toBe(0);
+
+      // Endpoints stay pinned on their stock edges, still attached
+      expect(newFlow.points[0].x).toBe(122.5);
+      expect(newFlow.points[0].y).toBe(100);
+      expect(newFlow.points[0].attachedToUid).toBe(stockAUid);
+      expect(newFlow.points[3].x).toBe(227.5);
+      expect(newFlow.points[3].y).toBe(100);
+      expect(newFlow.points[3].attachedToUid).toBe(stockBUid);
+
+      // Corners are unattached and sit at the displaced Y, forming a horizontal
+      // middle segment parallel to the original axis.
+      expect(newFlow.points[1].attachedToUid).toBeUndefined();
+      expect(newFlow.points[2].attachedToUid).toBeUndefined();
+      expect(newFlow.points[1].x).toBe(122.5); // riser stays on A's edge X
+      expect(newFlow.points[1].y).toBe(70);
+      expect(newFlow.points[2].x).toBe(227.5); // riser stays on B's edge X
+      expect(newFlow.points[2].y).toBe(70);
+
+      // Valve lands on the displaced middle segment
+      expect(newFlow.y).toBe(70);
+    });
+
+    it('should form a Z when dragging a horizontal flow perpendicular (down)', () => {
+      const { flow, stockA, stockB } = makeHorizontalStockFlow();
+
+      // Drag valve down by 40 (moveDelta.y = -40 => middle segment at y = 140)
+      const [newFlow] = UpdateFlow(flow, [stockA, stockB], { x: 0, y: -40 });
+
+      expect(newFlow.points.length).toBe(4);
+      expect(newFlow.points[1].y).toBe(140);
+      expect(newFlow.points[2].y).toBe(140);
+      // Middle segment is horizontal (parallel to the original horizontal axis)
+      expect(newFlow.points[1].y).toBe(newFlow.points[2].y);
+      expect(newFlow.y).toBe(140);
+    });
+
+    it('should form a Z when dragging a vertical flow perpendicular (right)', () => {
+      const { flow, stockA, stockB } = makeVerticalStockFlow();
+
+      // Drag valve right by 30 (moveDelta.x = -30 => middle segment at x = 130)
+      const [newFlow, updatedClouds] = UpdateFlow(flow, [stockA, stockB], { x: -30, y: 0 });
+
+      expect(newFlow.points.length).toBe(4);
+      expect(updatedClouds.length).toBe(0);
+
+      // Endpoints pinned to their stock edges (top/bottom), still attached
+      expect(newFlow.points[0].x).toBe(100);
+      expect(newFlow.points[0].y).toBe(117.5);
+      expect(newFlow.points[0].attachedToUid).toBe(stockAUid);
+      expect(newFlow.points[3].x).toBe(100);
+      expect(newFlow.points[3].y).toBe(232.5);
+      expect(newFlow.points[3].attachedToUid).toBe(stockBUid);
+
+      // Corners at displaced X, forming a vertical middle segment
+      expect(newFlow.points[1].x).toBe(130);
+      expect(newFlow.points[1].y).toBe(117.5);
+      expect(newFlow.points[2].x).toBe(130);
+      expect(newFlow.points[2].y).toBe(232.5);
+      expect(newFlow.points[1].x).toBe(newFlow.points[2].x); // middle is vertical
+
+      // Valve lands on the displaced middle segment
+      expect(newFlow.x).toBe(130);
+    });
+
+    it('should not form a Z on a parallel (along-axis) drag', () => {
+      const { flow, stockA, stockB } = makeHorizontalStockFlow();
+
+      // Purely parallel drag: valve slides along the flow, no reroute
+      const [newFlow, updatedClouds] = UpdateFlow(flow, [stockA, stockB], { x: -20, y: 0 });
+
+      expect(newFlow.points.length).toBe(2);
+      expect(updatedClouds.length).toBe(0);
+      expect(newFlow.y).toBe(100);
+      // Valve slid along the segment (proposed 195, within [132.5, 217.5])
+      expect(newFlow.x).toBe(195);
+    });
+
+    it('should not form a Z when perpendicular movement is below threshold', () => {
+      const { flow, stockA, stockB } = makeHorizontalStockFlow();
+
+      // Perpendicular component (3) is below the 5px threshold
+      const [newFlow] = UpdateFlow(flow, [stockA, stockB], { x: -20, y: 3 });
+
+      expect(newFlow.points.length).toBe(2);
+      expect(newFlow.y).toBe(100);
+    });
+
+    it('should not form a Z when parallel movement dominates', () => {
+      const { flow, stockA, stockB } = makeHorizontalStockFlow();
+
+      // Perpendicular (20) present but parallel (30) is larger
+      const [newFlow] = UpdateFlow(flow, [stockA, stockB], { x: -30, y: 20 });
+
+      expect(newFlow.points.length).toBe(2);
+    });
+
+    it('should form a horizontal-middle Z for a slightly-diagonal (near-horizontal) flow', () => {
+      // Near-horizontal legacy flow: endpoints drift 5px in Y but the run is
+      // dominantly horizontal, so the offset must be along Y with a horizontal
+      // middle segment (audit finding 5 dominant-axis classification).
+      const stockA = makeStock(stockAUid, 100, 100, [], [flowUid]);
+      const stockB = makeStock(stockBUid, 250, 105, [flowUid], []);
+      const flow = makeFlow(flowUid, 175, 102, [
+        { x: 122.5, y: 100, attachedToUid: stockAUid },
+        { x: 227.5, y: 105, attachedToUid: stockBUid },
+      ]);
+
+      // Drag up by 30 (proposedValve.y = 102 - 30 = 72)
+      const [newFlow] = UpdateFlow(flow, [stockA, stockB], { x: 0, y: 30 });
+
+      expect(newFlow.points.length).toBe(4);
+      // Middle segment is horizontal at the displaced Y
+      expect(newFlow.points[1].y).toBe(72);
+      expect(newFlow.points[2].y).toBe(72);
+      // Risers stay on the endpoints' X, so each is vertical despite the drift
+      expect(newFlow.points[1].x).toBe(122.5);
+      expect(newFlow.points[2].x).toBe(227.5);
+      // Endpoints keep their (drifted) positions
+      expect(newFlow.points[0].y).toBe(100);
+      expect(newFlow.points[3].y).toBe(105);
+    });
+
+    it('should collapse a Z back to a straight flow when the middle drags onto the axis', () => {
+      // Freshly-formed Z: middle segment offset to y=70.
+      const zFlow = makeFlow(flowUid, 175, 70, [
+        { x: 122.5, y: 100, attachedToUid: stockAUid },
+        { x: 122.5, y: 70 },
+        { x: 227.5, y: 70 },
+        { x: 227.5, y: 100, attachedToUid: stockBUid },
+      ]);
+      const stockA = makeStock(stockAUid, 100, 100, [], [flowUid]);
+      const stockB = makeStock(stockBUid, 250, 100, [flowUid], []);
+
+      // Drag the middle segment (index 1) back down onto the original axis (y=100).
+      // moveDelta.y = -30 moves the corners down by 30 -> y=100, collapsing.
+      const [newFlow] = UpdateFlow(zFlow, [stockA, stockB], { x: 0, y: -30 }, 1);
+
+      // The colinear/zero-length cleanup in normalizeFlowPoints restores a straight flow
+      expect(newFlow.points.length).toBe(2);
+      expect(newFlow.points[0].x).toBe(122.5);
+      expect(newFlow.points[0].y).toBe(100);
+      expect(newFlow.points[1].x).toBe(227.5);
+      expect(newFlow.points[1].y).toBe(100);
+    });
+
+    it('should keep a Z valid when an attached stock is moved (UpdateStockAndFlows)', () => {
+      // Z flow with middle segment at y=70, between A(100,100) and B(250,100).
+      const zFlow = makeFlow(flowUid, 175, 70, [
+        { x: 122.5, y: 100, attachedToUid: stockAUid },
+        { x: 122.5, y: 70 },
+        { x: 227.5, y: 70 },
+        { x: 227.5, y: 100, attachedToUid: stockBUid },
+      ]);
+      const stockA = makeStock(stockAUid, 100, 100, [], [flowUid]);
+
+      // Move stock A left by 20 (moveDelta inverted: +20 => new center x = 80)
+      const [newStock, newFlows] = UpdateStockAndFlows(stockA, [zFlow], { x: 20, y: 0 });
+
+      expect(newStock.x).toBe(80);
+      const routed = newFlows[0];
+      // Still a valid Z (four points), not corrupted into a diagonal or a stub
+      expect(routed.points.length).toBe(4);
+      // The middle segment is still horizontal at its displaced Y
+      expect(routed.points[1].y).toBe(70);
+      expect(routed.points[2].y).toBe(70);
+      // Endpoints remain attached to their stocks
+      expect(routed.points[0].attachedToUid).toBe(stockAUid);
+      expect(routed.points[3].attachedToUid).toBe(stockBUid);
+      // The moved endpoint stays on stock A's RIGHT edge (it must not jump to
+      // the top/bottom edge just because the riser is vertical): new center
+      // x=80 => right edge x=102.5, y unchanged.
+      expect(routed.points[0].x).toBe(80 + StockWidth / 2);
+      expect(routed.points[0].y).toBe(100);
+      // The riser stays aligned with the moved endpoint (vertical at x=102.5)
+      expect(routed.points[1].x).toBe(80 + StockWidth / 2);
+      // Segments strictly alternate orientation (orthogonal path preserved)
+      const segs = getSegments(routed.points);
+      expect(segs.length).toBe(3);
+      for (let i = 0; i < segs.length - 1; i++) {
+        expect(segs[i].isHorizontal).not.toBe(segs[i + 1].isHorizontal);
+      }
+    });
+
+    it('should not jump the endpoint edge across a repeated stock-nudge sequence', () => {
+      // Repeatedly nudging a stock on a Z must keep the endpoint on the SAME
+      // edge each time (no oscillation/jump between right and top).
+      let flow: FlowViewElement = makeFlow(flowUid, 175, 70, [
+        { x: 122.5, y: 100, attachedToUid: stockAUid },
+        { x: 122.5, y: 70 },
+        { x: 227.5, y: 70 },
+        { x: 227.5, y: 100, attachedToUid: stockBUid },
+      ]);
+      let cx = 100;
+      for (let i = 0; i < 4; i++) {
+        const stockA = makeStock(stockAUid, cx, 100, [], [flowUid]);
+        // Nudge stock A left by 10 each iteration (moveDelta +10 => cx - 10)
+        const [newStock, newFlows] = UpdateStockAndFlows(stockA, [flow], { x: 10, y: 0 });
+        cx = newStock.x;
+        flow = newFlows[0];
+        // Endpoint stays pinned to the RIGHT edge of the (moved) stock, never
+        // jumping to the top edge; middle segment preserved at y=70.
+        expect(flow.points.length).toBe(4);
+        expect(flow.points[0].attachedToUid).toBe(stockAUid);
+        expect(flow.points[0].x).toBe(cx + StockWidth / 2);
+        expect(flow.points[0].y).toBe(100);
+        expect(flow.points[1].y).toBe(70);
+        expect(flow.points[2].y).toBe(70);
+      }
+      expect(cx).toBe(60); // 100 - 4*10
+    });
+
+    it('should spread a Z and a straight flow that share a stock edge (no endpoint overlap)', () => {
+      // Probe: stock A has two right-edge outflows -- one straight (A->B) and one
+      // Z (A->C, vertical riser off the right edge). getFlowAttachmentInfo must
+      // classify the Z as 'right' (its occupied edge), matching computeFlowRoute,
+      // so the two land in the same spread group and their endpoints don't
+      // collide at the edge center.
+      const stockCUid = 6;
+      const straight = makeFlow(2, 175, 100, [
+        { x: 122.5, y: 100, attachedToUid: stockAUid },
+        { x: 227.5, y: 100, attachedToUid: stockBUid },
+      ]);
+      const zFlow = makeFlow(5, 200, 60, [
+        { x: 122.5, y: 100, attachedToUid: stockAUid },
+        { x: 122.5, y: 60 },
+        { x: 300, y: 60 },
+        { x: 300, y: 100, attachedToUid: stockCUid },
+      ]);
+      const stockA = makeStock(stockAUid, 100, 100, [], [2, 5]);
+
+      // Offsets: both flows are on the 'right' side, so they spread. The straight
+      // flow is pinned to 0.5; the Z takes a non-center slot.
+      const offsets = computeFlowOffsets([straight, zFlow], stockAUid, 95, 100, { x: 100, y: 100 });
+      expect(offsets.get(2)).toBe(0.5);
+      expect(offsets.get(5)).not.toBe(0.5);
+      expect(offsets.get(5)).toBeCloseTo(2 / 3, 5);
+
+      // End to end: nudge A right by 5 (delta +5 => new center x=95). Both
+      // endpoints stay on the right edge (x=117.5) but at DIFFERENT y -- before
+      // the fix both landed at (117.5, 100).
+      const [newStock, newFlows] = UpdateStockAndFlows(stockA, [straight, zFlow], { x: 5, y: 0 });
+      expect(newStock.x).toBe(95);
+      const straightEnd = newFlows[0].points[0];
+      const zEnd = newFlows[1].points[0];
+      expect(straightEnd.x).toBe(95 + StockWidth / 2);
+      expect(zEnd.x).toBe(95 + StockWidth / 2);
+      expect(straightEnd.y).toBe(100);
+      // The Z endpoint must not coincide with the straight endpoint.
+      expect(zEnd.y).not.toBe(straightEnd.y);
+      // The Z is still a valid 4-point flow with its middle preserved at y=60.
+      expect(newFlows[1].points.length).toBe(4);
+      expect(newFlows[1].points[1].y).toBe(60);
+      expect(newFlows[1].points[2].y).toBe(60);
+    });
+
+    it('should clamp the valve to the middle segment on a perpendicular-dominant drag with large parallel component', () => {
+      // Probe from review: perpendicular dominates (82 > 80) so a Z forms, but
+      // the large parallel component would put the CLOSEST segment on a riser.
+      // The valve must land on the offset middle segment, not a riser.
+      const stockA = makeStock(stockAUid, 100, 100, [], [flowUid]);
+      const stockB = makeStock(stockBUid, 250, 100, [flowUid], []);
+      const flow = makeFlow(flowUid, 175, 100, [
+        { x: 122.5, y: 100, attachedToUid: stockAUid },
+        { x: 227.5, y: 100, attachedToUid: stockBUid },
+      ]);
+
+      const [newFlow] = UpdateFlow(flow, [stockA, stockB], { x: 80, y: 82 });
+
+      // Z formed at the displaced Y (100 - 82 = 18)
+      expect(newFlow.points.length).toBe(4);
+      expect(newFlow.points[1].y).toBe(18);
+      expect(newFlow.points[2].y).toBe(18);
+      // Valve is on the horizontal MIDDLE segment (y=18), not stranded on a
+      // vertical riser at x=122.5 / x=227.5.
+      expect(newFlow.y).toBe(18);
+      expect(newFlow.x).toBeGreaterThan(122.5);
+      expect(newFlow.x).toBeLessThan(227.5);
+    });
+  });
+
   describe('moveSegment', () => {
     it('should move horizontal segment up/down', () => {
       // L-shaped flow with horizontal middle concept:
@@ -2333,13 +2661,12 @@ describe('Flow routing', () => {
     });
   });
 
-  describe('UpdateCloudAndFlow - valve fraction on parallel cloud drag (adjustFlows isCloud branch)', () => {
+  describe('UpdateCloudAndFlow - valve fraction on parallel cloud drag (adjustFlows valve formula)', () => {
     // A parallel drag of a straight cloud flow constrains the cloud to the flow
-    // axis and re-places the valve via adjustFlows' isCloud branch, which
-    // preserves the valve's fractional position between the fixed other end and
-    // the moved cloud using base=min(otherEnd, cloud) + abs(fraction*d). These
-    // pin that formula's output (the ONLY reachable adjustFlows branch: its sole
-    // caller passes isCloud=true).
+    // axis and re-places the valve via adjustFlows, which preserves the valve's
+    // fractional position between the fixed other end and the moved cloud using
+    // base=min(otherEnd, cloud) + abs(fraction*d). These pin that formula's
+    // output.
     // Fixture: source point at x=100 (uid 1), cloud sink at x=200 (uid 3), flow
     // horizontal at y=100; drag the cloud right by 20 (cloud -> x=220).
     const makeParallelCase = (valveX: number) => {
@@ -2748,10 +3075,9 @@ describe('Flow routing', () => {
     // adjustFlows computes the valve's fractional position by dividing by
     // (origStock.x - otherEnd.x) / (origStock.y - otherEnd.y). For a flow whose
     // attached endpoint and other end share an axis (a vertical or horizontal
-    // flow) that denominator is zero. The non-cloud branch guarded it with
-    // `|| 1`, but the cloud branch did not -- so dragging a cloud on such a flow
-    // produced a NaN/Infinity valve coordinate, which serialized to JSON null and
-    // bricked the model. Moving must always yield finite coordinates.
+    // flow) that denominator is zero. Before the `|| 1` guard, dragging a cloud
+    // on such a flow produced a NaN/Infinity valve coordinate, which serialized to
+    // JSON null and bricked the model. Moving must always yield finite coordinates.
     it('keeps the valve finite for a vertical cloud flow with an off-axis valve', () => {
       // Vertical flow: cloud (uid 1) and the other end (uid 2) share x = 100.
       // The valve sits off that axis (x = 150), as can happen with the degenerate

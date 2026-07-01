@@ -12,12 +12,16 @@
 // error cache, navigation, and snapshot immutability/coalescing -- all against
 // the FakeEngineProject helper, with no jsdom or real WASM.
 
-import { projectFromJson, type StockFlowView, type StockViewElement } from '@simlin/core/datamodel';
+import {
+  projectFromJson,
+  stockFlowViewToJson,
+  type StockFlowView,
+  type StockViewElement,
+} from '@simlin/core/datamodel';
 import type { JsonProject, ErrorDetail } from '@simlin/engine';
 import { SimlinErrorKind } from '@simlin/engine';
 
 import { ProjectController, MaxUndoSize, type ProjectSnapshot } from '../project-controller';
-import { stockFlowViewToJson } from '../view-conversion';
 import {
   makeFakeEngine,
   makeControllerConfig,

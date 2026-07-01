@@ -15,7 +15,6 @@ import { canonicalize } from '@simlin/core/canonicalize';
 
 import { Project as EngineProject } from '@simlin/engine';
 import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs, JsonArrayedEquation } from '@simlin/engine';
-import { stockFlowViewToJson } from './view-conversion';
 import {
   Project,
   Model,
@@ -37,6 +36,7 @@ import {
   auxToJson,
   moduleToJson,
   arrayedEquationToJson,
+  stockFlowViewToJson,
   type ModuleReference,
 } from '@simlin/core/datamodel';
 import { defined, exists, setsEqual } from '@simlin/core/common';
@@ -937,12 +937,14 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         const patch: JsonProjectPatch = {
           models: [{ name: modelName(), ops: [...result.ops] }],
         };
-        // On patch failure, commit the selection/creation flag but DO NOT
-        // update the view -- preserving the original behavior exactly.
-        if (!(await applyPatchOrReportError(patch, 'flow attach'))) {
-          setState({ selection, flowStillBeingCreated: inCreation });
-          return;
-        }
+        // Apply the model-level ops but do NOT bail on failure: the drawn flow
+        // must still be committed to the view (issue #820). The controller
+        // reports any failure via onError (the toast); the view update below
+        // runs regardless, matching handleCreateVariable/handleSelectionDelete.
+        // Discarding it here previously both lost the user's work AND left the
+        // just-created-flow name edit selecting a flow that was never committed
+        // to the view -- the handleEditingNameDone getElementByUid crash.
+        await applyPatchOrReportError(patch, 'flow attach');
       }
 
       await updateView({ ...view, nextUid: result.nextUid, elements: [...result.elements] }, { recordHistory: true });

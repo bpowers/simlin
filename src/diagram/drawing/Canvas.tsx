@@ -2059,8 +2059,20 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       return;
     }
 
-    const uid = only(latest.current.props.selection);
-    const element = getElementByUid(uid);
+    // Resolve the element being named through the NON-throwing lookup, mirroring
+    // the render-time guard (see the editingElement resolution). A failed
+    // flow-attach can leave the selection referencing a flow that was never
+    // committed to the view (issue #820); dereferencing it with the throwing
+    // getElementByUid wedged the editor in a repeated-exception loop. When the
+    // selection is not a single resolvable element there is nothing to commit --
+    // tear the editor down cleanly instead of crashing.
+    const selection = latest.current.props.selection;
+    const uid = selection.size === 1 ? only(selection) : undefined;
+    const element = uid !== undefined ? tryGetElementByUid(uid) : undefined;
+    if (uid === undefined || element === undefined) {
+      clearPointerState();
+      return;
+    }
     const oldName = displayName(defined((element as NamedViewElement).name));
 
     if (uid === inCreationUid) {

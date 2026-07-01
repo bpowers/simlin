@@ -207,10 +207,16 @@ export function computePreRoutedOffsets(
       }
     }
 
-    // Compute offsets at the new stock position
+    // Compute offsets at the new stock position. `element` still holds the
+    // pre-move center, which computeFlowOffsets needs to classify a Z-riser's
+    // occupied edge (so a Z and a straight flow on the same edge spread instead
+    // of overlapping).
     const newStockCx = element.x - delta.x;
     const newStockCy = element.y - delta.y;
-    const offsets = computeFlowOffsets(allFlows, element.uid, newStockCx, newStockCy);
+    const offsets = computeFlowOffsets(allFlows, element.uid, newStockCx, newStockCy, {
+      x: element.x,
+      y: element.y,
+    });
 
     // Store offsets for flows
     for (const [flowUid, offset] of offsets) {
@@ -262,7 +268,10 @@ export function preProcessSelectedFlows(
         const newStockCx = endpoint.x - delta.x;
         const newStockCy = endpoint.y - delta.y;
         const offset = preComputedOffsets.get(element.uid) ?? 0.5;
-        const updatedFlow = computeFlowRoute(element, endpoint, newStockCx, newStockCy, offset);
+        const updatedFlow = computeFlowRoute(element, endpoint, newStockCx, newStockCy, offset, {
+          x: endpoint.x,
+          y: endpoint.y,
+        });
         preProcessedFlows.set(element.uid, updatedFlow);
       }
     } else if (!sourceInSel && sinkInSel && sinkUid !== undefined) {
@@ -271,7 +280,10 @@ export function preProcessSelectedFlows(
         const newStockCx = endpoint.x - delta.x;
         const newStockCy = endpoint.y - delta.y;
         const offset = preComputedOffsets.get(element.uid) ?? 0.5;
-        const updatedFlow = computeFlowRoute(element, endpoint, newStockCx, newStockCy, offset);
+        const updatedFlow = computeFlowRoute(element, endpoint, newStockCx, newStockCy, offset, {
+          x: endpoint.x,
+          y: endpoint.y,
+        });
         preProcessedFlows.set(element.uid, updatedFlow);
       }
     }
@@ -344,7 +356,10 @@ export function processSelectedFlow(
         const newStockCx = sourceEndpoint.x - delta.x;
         const newStockCy = sourceEndpoint.y - delta.y;
         // Use default offset of 0.5 (center) for selected flows
-        let updatedFlow = computeFlowRoute(flow, sourceEndpoint, newStockCx, newStockCy, 0.5);
+        let updatedFlow = computeFlowRoute(flow, sourceEndpoint, newStockCx, newStockCy, 0.5, {
+          x: sourceEndpoint.x,
+          y: sourceEndpoint.y,
+        });
 
         // computeFlowRoute preserves the valve's fractional position, which lags
         // the drag when the flow is selected; re-clamp it to the new path.
@@ -365,7 +380,10 @@ export function processSelectedFlow(
         const newStockCx = sinkEndpoint.x - delta.x;
         const newStockCy = sinkEndpoint.y - delta.y;
         // Use default offset of 0.5 (center) for selected flows
-        let updatedFlow = computeFlowRoute(flow, sinkEndpoint, newStockCx, newStockCy, 0.5);
+        let updatedFlow = computeFlowRoute(flow, sinkEndpoint, newStockCx, newStockCy, 0.5, {
+          x: sinkEndpoint.x,
+          y: sinkEndpoint.y,
+        });
 
         // computeFlowRoute preserves the valve's fractional position, which lags
         // the drag when the flow is selected; re-clamp it to the new path.
@@ -540,7 +558,9 @@ export function routeUnselectedFlows(
         const newStockCy = endpoint.y - delta.y;
         for (const flow of flows) {
           const offset = preComputedOffsets.get(flow.uid) ?? 0.5;
-          updatedFlows.push(computeFlowRoute(flow, endpoint, newStockCx, newStockCy, offset));
+          updatedFlows.push(
+            computeFlowRoute(flow, endpoint, newStockCx, newStockCy, offset, { x: endpoint.x, y: endpoint.y }),
+          );
         }
       } else if (endpoint?.type === 'cloud') {
         for (const flow of flows) {
@@ -811,8 +831,11 @@ export function applyGroupMovement(input: GroupMovementInput): GroupMovementOutp
       continue;
     }
 
-    // Single-flow selection without segmentIndex: delegate to UpdateFlow for flows
-    // with cloud endpoints to preserve perpendicular drag L-shape behavior
+    // Single-flow selection without segmentIndex: delegate to UpdateFlow so a
+    // perpendicular valve drag can reroute. Cloud-ended flows bend into an L;
+    // stock-to-stock flows offset into a Z (#819). UpdateFlow also handles the
+    // plain along-axis valve slide, so this subsumes the old stock-to-stock
+    // clamp path for single-flow selections.
     if (selection.size === 1) {
       const pts = el.points;
       if (pts.length >= 2) {
@@ -820,11 +843,8 @@ export function applyGroupMovement(input: GroupMovementInput): GroupMovementOutp
         const sinkId = last(pts).attachedToUid;
         const source = sourceId !== undefined ? originalElements.get(sourceId) : undefined;
         const sink = sinkId !== undefined ? originalElements.get(sinkId) : undefined;
-        const hasCloud =
-          (source !== undefined && source.type === 'cloud') || (sink !== undefined && sink.type === 'cloud');
 
         if (
-          hasCloud &&
           source &&
           sink &&
           (source.type === 'stock' || source.type === 'cloud') &&
