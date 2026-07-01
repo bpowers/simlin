@@ -16,6 +16,15 @@ handlers:
 - url: /static
   static_dir: public/static
   secure: always
+  http_headers:
+    # The embeddable web component (sd-component.js) is hotlinked from
+    # third-party origins (issue #688); its engine worker's WASM fetch (and
+    # any @font-face/CSS asset loads) are cross-origin CORS requests against
+    # these assets. They are public, immutable, content-hashed files served
+    # without credentials, so a wildcard origin is appropriate and adds no
+    # risk. Mirror this into .app.prod.yaml --
+    # scripts/validate-app-prod-config.mjs enforces it there.
+    Access-Control-Allow-Origin: "*"
 
 - url: /$
   static_files: public/index.html

@@ -72,6 +72,22 @@ export function validateAppProdConfig(source, filename = '.app.prod.yaml') {
     });
   }
 
+  // Cross-origin embed contract (issue #688): third-party pages hotlink
+  // sd-component.js, and its engine worker/WASM loads are cross-origin
+  // requests against /static. Without the wildcard ACAO header the embed
+  // silently fails to initialize the engine -- a regression no same-origin
+  // smoke check can catch, so enforce the committed app.yaml's header here.
+  const handlers = Array.isArray(config.handlers) ? config.handlers : [];
+  const staticHandler = handlers.find((handler) => isRecord(handler) && handler.url === '/static');
+  const headers = isRecord(staticHandler) ? staticHandler.http_headers : undefined;
+  const allowOrigin = isRecord(headers) ? headers['Access-Control-Allow-Origin'] : undefined;
+  if (allowOrigin !== '*') {
+    errors.push({
+      message:
+        'handlers must include a /static handler with http_headers.Access-Control-Allow-Origin set to "*" (cross-origin embeds, issue #688; mirror the committed app.yaml)',
+    });
+  }
+
   return errors;
 }
 

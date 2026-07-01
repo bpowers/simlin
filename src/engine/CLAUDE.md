@@ -29,6 +29,7 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 - `src/patch.ts` -- Model patching logic
 - `src/worker-protocol.ts` -- Worker message protocol
 - `src/backend-factory.ts` / `.browser.ts` / `.node.ts` -- Platform-specific backend factories
+- `src/worker-trampoline.ts` -- Cross-origin embed support (issue #688): pure decision/construction functions plus an injectable spawn shell that boots the engine worker through a same-origin blob: trampoline when the resolved chunk URL is cross-origin (third-party pages hotlinking sd-component.js). The bundler-facing constraints (inline `new Worker(new URL(...))` pattern, classic-worker downgrade under UMD, `publicPath: 'auto'` deriving from `self.location` in classic worker chunks) are documented in the module header; `backend-factory.browser.ts` and `engine-worker.ts` are the two consumers
 - `src/internal/` -- Internal modules (project, model, memory, error, import-export)
 - `src/internal/wasmgen.ts` -- `simlin_model_compile_to_wasm` FFI wrapper + the pure `parseWasmLayout` / `readStridedSeries` decoders for the per-model wasm blob (re-exported via `@simlin/engine/internal`)
 - `src/internal/canonicalize.ts` -- pure `canonicalizeIdent`, a faithful port of the Rust canonicalizer (used to resolve caller names to wasm-layout slots); not re-exported from the `internal` barrel
@@ -54,6 +55,7 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 - `tests/race.test.ts` -- Concurrency tests
 - `tests/cleanup.test.ts` -- Resource cleanup tests
 - `tests/wasmgen.test.ts`, `tests/canonicalize.test.ts` -- Unit tests for the pure layout decoders and `canonicalizeIdent`
+- `tests/worker-trampoline.test.ts` -- Unit tests for the cross-origin worker trampoline (origin decision, trampoline source, spawn interception with fake Worker/URL)
 - `tests/wasm-backend.test.ts`, `tests/wasm-model.test.ts`, `tests/worker-wasm.test.ts` -- wasm-vs-VM parity through `DirectBackend`, the `Model`/`Sim` facade, and the Web Worker
 - `tests/wasm-ltm.test.ts` -- LTM-on-wasm parity through the TypeScript surface: drives `Model.simulate({ engine: 'wasm', enableLtm: true })` end-to-end and asserts the resulting `Run.links` match the VM (link set, polarities, per-step scores). Includes a `WorkerBackend` twin and an Unsupported-LTM case that surfaces as a rejection without falling back to the VM
 - `tests/ltm-test-helpers.ts` -- shared helpers for the LTM tests (`linksByKey`, `expectScoresClose`); kept separate from the test files so the wasm and worker LTM suites compare links the same way

@@ -104,6 +104,7 @@ On the instance GAE runs `pnpm install`, then the root `start` script: `node src
 - `runtime`: `nodejs24`. (`nodejs18` is EOL on GAE; `nodejs16`, the runtime of the last deploy before May 2026, is gone entirely -- which is why there's no "redeploy the old commit" rollback.)
 - `build_env_variables.GOOGLE_NODE_RUN_SCRIPTS`: `''`. The local deploy script already runs the monorepo build and stages the exact artifact to upload; this prevents App Engine's Node buildpack from running the root `build` script again during staging.
 - `automatic_scaling.max_instances`: `8`. Cost cap so a render storm or crash loop can't fan out F4 instances without bound (issue #694). **Mirror this into `.app.prod.yaml`** -- both deploy scripts run `scripts/validate-app-prod-config.mjs`, which fails the deploy if it's missing or not a positive integer. Raise it deliberately if organic traffic ever needs more instances.
+- The `/static` handler's `http_headers` with `Access-Control-Allow-Origin: "*"`. Third-party pages hotlink `sd-component.js`, and its engine worker's WASM fetch (plus fonts/CSS assets) are cross-origin CORS requests against `/static` (issue #688); without this header embeds load their data but the engine never initializes. The assets are public, immutable, and served without credentials, so the wildcard adds no risk. **Mirror this into `.app.prod.yaml`** -- `scripts/validate-app-prod-config.mjs` fails the deploy if the header is missing.
 - The handler list: `/static`, `/`, `/new`, `/legal*`, `/privacy`, `robots.txt`, `ads.txt`, favicon, `manifest.json`, then `/.*` -> `script: auto`. The `/` and `/new` static HTML handlers carry CSP/HSTS headers because they bypass Express Helmet. The SPA's dynamic routes like `/:username/:projectName` fall through to `/.*`, i.e. the Express server.
 - `env_variables`: the committed `app.yaml` has none; the server needs a couple (next section). They live in `.app.prod.yaml`.
 
@@ -126,7 +127,7 @@ The server loads `config/default.json`, then `config/production.json` when `NODE
 - [ ] `git status` is clean.
 - [ ] `gcloud config get-value project` is the production project.
 - [ ] `gcloud app versions list --service=default` shows a known-good current version -- note its ID, that's your rollback target. (If GAE has garbage-collected it, there is no rollback; see below.)
-- [ ] `.app.prod.yaml` reconciled against `app.yaml` (`runtime: nodejs24`, `build_env_variables.GOOGLE_NODE_RUN_SCRIPTS: ''`, `automatic_scaling.max_instances: 8`, handlers, `authentication__seshcookie__key` set to the value already in use).
+- [ ] `.app.prod.yaml` reconciled against `app.yaml` (`runtime: nodejs24`, `build_env_variables.GOOGLE_NODE_RUN_SCRIPTS: ''`, `automatic_scaling.max_instances: 8`, handlers including the `/static` `Access-Control-Allow-Origin: "*"` header, `authentication__seshcookie__key` set to the value already in use).
 - [ ] `wasm-opt --version` works; `rustup show` lists the `wasm32-unknown-unknown` target.
 
 ## Post-deploy smoke test
@@ -136,7 +137,9 @@ Against the `--no-promote` version URL, then again on production:
 - `curl -sI https://<host>/` -> 200 HTML. View source: it links a hashed `/static/js/index.<hash>.js` (literal `<%= PUBLIC_URL %>` means the build was skipped) and `/static/css/index.<hash>.css`.
 - `curl -s https://<host>/healthz` -> 200 `ok`. This is the only check that exercises the Node server: `/` is a GAE static handler and stays green even when every Express instance is crash-looping (e.g. `ServerInitError`). A WASM preload failure aborts boot before the route mounts, so it shows up as a non-responding instance (connection failure / GAE 5xx), not a 503 -- treat any non-200 here as down. (The route's 503 branch is defense-in-depth, not the expected failure signal.)
 - `curl -sI https://<host>/static/js/sd-component.js` -> 200 -- the embeddable web component; external sites `<script src>` this exact path.
+- `curl -H "Origin: https://example.com" -sI https://<host>/static/js/sd-component.js` -> response includes `access-control-allow-origin: *`. Cross-origin embeds need this on everything under `/static` (worker chunk, WASM -- issue #688). GAE emits `http_headers` unconditionally (the request `Origin` header doesn't matter), so any curl shows it; the earlier smoke checks missed its absence only because they never asserted on response headers. Without it, embeds load data but never initialize the engine.
 - `curl -sI https://<host>/static/wasm/<hash>.module.wasm` -> 200, `content-type: application/wasm`.
+- Full embed check (the header curl only proves CORS, not the blob-trampoline worker boot): serve `<script src="https://<host>/static/js/sd-component.js"></script><sd-model username="..." projectName="..."></sd-model>` from a different origin (e.g. `python3 -m http.server` on localhost) and confirm the diagram renders and simulates with no console errors.
 - `curl -sI` on `/robots.txt`, `/manifest.json`, `/favicon.ico`, `/legal/`, `/privacy/` -> 200; `curl -I http://<host>/` -> 301 to https.
 - Browser: log in with Google, land on Home, no console errors.
 - New-user flow: sign in with a fresh account, claim a username, confirm the example projects appear and one opens and simulates.
