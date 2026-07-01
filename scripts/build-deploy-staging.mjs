@@ -240,6 +240,12 @@ function verify(stagingDir) {
   };
 
   check(fs.existsSync(path.join(stagingDir, 'lib/index.js')), 'lib/index.js missing');
+  // render.ts spawns this sibling via __dirname at runtime (issue #694); a
+  // deploy without it 500s every preview while everything else looks healthy.
+  check(
+    fs.existsSync(path.join(stagingDir, 'lib/render-worker.js')),
+    'lib/render-worker.js missing (preview renders would 500 at runtime)',
+  );
   check(fs.existsSync(path.join(stagingDir, 'config/production.json')), 'config/production.json missing');
   check(
     fs.existsSync(path.join(stagingDir, 'default_projects')) &&

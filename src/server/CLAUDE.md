@@ -21,6 +21,8 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 - `new-user.ts` -- New user handling
 - `server-init.ts` -- Server initialization
 - `route-handlers.ts` -- Route handler utilities
-- `render.ts` -- Server-side PNG rendering (delegates to the engine WASM)
+- `render.ts` -- Server-side PNG preview orchestration: spawns a per-request `worker_threads` worker under a total wall-clock budget (`RENDER_TIMEOUT_MS`, queue wait included) and a small FIFO concurrency cap, so a slow/pathological model can't pin the Express event loop (issue #694)
+- `render-worker.ts` -- Worker entry that runs the actual render pipeline (protobuf -> SVG -> PNG) on its own engine WASM instance; `renderProjectToPng` is exported for in-process tests
+- `preview-geometry.ts` -- Pure preview sizing/viewBox helpers shared by render.ts (re-exported) and the worker
 - `models/` -- Database interfaces (Firestore, etc.)
 - `schemas/` -- Data validation schemas

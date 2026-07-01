@@ -60,6 +60,18 @@ export function validateAppProdConfig(source, filename = '.app.prod.yaml') {
     });
   }
 
+  // Cost cap: without max_instances a render storm or crash loop can fan out
+  // F4 instances without bound (issue #694). The committed app.yaml carries
+  // the reference value; the operator must mirror it here.
+  const scaling = config.automatic_scaling;
+  const maxInstances = isRecord(scaling) ? scaling.max_instances : undefined;
+  if (!Number.isInteger(maxInstances) || maxInstances <= 0) {
+    errors.push({
+      message:
+        'automatic_scaling.max_instances must be set to a positive integer (cost cap; mirror the committed app.yaml)',
+    });
+  }
+
   return errors;
 }
 

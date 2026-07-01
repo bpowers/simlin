@@ -6,6 +6,11 @@ build_env_variables:
 instance_class: F4
 automatic_scaling:
   max_concurrent_requests: 100
+  # Cost cap: bounds worst-case fan-out if a render storm or crash loop drives
+  # autoscaling (issue #694). 8 F4 instances is far above routine load; raise
+  # deliberately if organic traffic ever needs it. Mirror this into
+  # .app.prod.yaml -- scripts/validate-app-prod-config.mjs enforces it there.
+  max_instances: 8
 
 handlers:
 - url: /static

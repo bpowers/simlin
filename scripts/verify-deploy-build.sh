@@ -182,6 +182,16 @@ else
     pass "src/server/lib/index.js exists"
 fi
 
+# 9. The preview render worker entry ships next to the compiled server.
+#    render.ts spawns lib/render-worker.js via __dirname at runtime
+#    (issue #694); if it's missing, every preview request 500s while the
+#    rest of the server looks healthy.
+if [ ! -f src/server/lib/render-worker.js ]; then
+    fail "src/server/lib/render-worker.js missing (preview renders would 500 at runtime)"
+else
+    pass "src/server/lib/render-worker.js exists"
+fi
+
 echo ""
 if [ "$errors" -gt 0 ]; then
     echo "verify-deploy-build: FAILED ($errors error(s))" >&2
