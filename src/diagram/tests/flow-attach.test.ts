@@ -27,6 +27,11 @@ import {
   inCreationCloudUid as canvasInCreationCloudUid,
   inCreationUid as canvasInCreationUid,
 } from '../drawing/Canvas';
+import {
+  fauxCloudTargetUid as sharedFauxCloudTargetUid,
+  inCreationCloudUid as sharedInCreationCloudUid,
+  inCreationUid as sharedInCreationUid,
+} from '../drawing/creation-sentinels';
 import { StockWidth, StockHeight } from '../drawing/default';
 
 // ----- fixture helpers (mirroring flow-routing.test.ts patterns) -----
@@ -151,12 +156,17 @@ function payloadOf(op: JsonModelOperation): { ident: string; inflows: string[]; 
 }
 
 describe('computeFlowAttachment', () => {
-  // The flow-attach module re-declares the Canvas creation sentinels to stay
-  // free of React/DOM imports. Guard that the duplicates never drift.
-  it('keeps creation sentinel constants in sync with Canvas', () => {
-    expect(inCreationUid).toBe(canvasInCreationUid);
-    expect(inCreationCloudUid).toBe(canvasInCreationCloudUid);
-    expect(fauxCloudTargetUid).toBe(canvasFauxCloudTargetUid);
+  // The creation sentinels are defined once in drawing/creation-sentinels and
+  // re-exported by both flow-attach and Canvas. This guards that every import
+  // path stays wired to that single source (a trivial identity now, but it
+  // keeps the compatibility of both re-export paths under test).
+  it('keeps creation sentinel constants in sync across import paths', () => {
+    expect(inCreationUid).toBe(sharedInCreationUid);
+    expect(inCreationCloudUid).toBe(sharedInCreationCloudUid);
+    expect(fauxCloudTargetUid).toBe(sharedFauxCloudTargetUid);
+    expect(canvasInCreationUid).toBe(sharedInCreationUid);
+    expect(canvasInCreationCloudUid).toBe(sharedInCreationCloudUid);
+    expect(canvasFauxCloudTargetUid).toBe(sharedFauxCloudTargetUid);
   });
 
   describe('sink reattach', () => {

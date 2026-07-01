@@ -48,13 +48,12 @@ import { pinSourceToStockEdge, UpdateCloudAndFlow } from './drawing/Flow';
 // they use this type -- matching what Canvas passes to onMoveFlow.
 import type { Point as CanvasPoint } from './drawing/common';
 
-// Sentinel UIDs used by Canvas during flow creation. Duplicated here (rather
-// than imported from Canvas.tsx) so this functional-core module stays free of
-// React/DOM dependencies. They must stay in sync with the exports in
-// drawing/Canvas.tsx.
-export const inCreationUid = -2;
-export const inCreationCloudUid = -4;
-export const fauxCloudTargetUid = -5;
+// Sentinel UIDs used by Canvas during flow creation, defined once in
+// drawing/creation-sentinels and re-exported here so this functional-core
+// module stays free of React/DOM dependencies while callers that import them
+// from `../flow-attach` keep resolving.
+export { inCreationUid, inCreationCloudUid, fauxCloudTargetUid } from './drawing/creation-sentinels';
+import { inCreationUid, inCreationCloudUid, fauxCloudTargetUid } from './drawing/creation-sentinels';
 
 /**
  * Inputs to `computeFlowAttachment`, mirroring the arguments Canvas passes to

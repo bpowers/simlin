@@ -494,9 +494,7 @@ export function computeFlowRoute(
 
   // Preserve valve position by clamping to the closest segment of the new L-shape
   const currentValve: IPoint = { x: flow.x, y: flow.y };
-  const newSegments = getSegments(newPoints);
-  const closestSegment = findClosestSegment(currentValve, newSegments);
-  const clampedValve = clampToSegment(currentValve, closestSegment);
+  const clampedValve = clampValveToClosestSegment(currentValve, newPoints);
 
   return {
     ...flow,
@@ -630,13 +628,25 @@ function adjustFlows(
       };
     }
 
-    // FIXME: reduce this duplication
+    // The isCloud and non-cloud branches deliberately compute the valve
+    // differently and must NOT be unified. isCloud mirrors the valve around the
+    // segment: base = min(otherEnd, moved end) plus the ABSOLUTE scaled offset,
+    // so an off-center valve stays between the two ends even when the drag flips
+    // the segment orientation (the moved end crossing past otherEnd). The
+    // non-cloud branch offsets by the SIGNED scaled distance from otherEnd --
+    // correct for a stock endpoint that keeps its side, but divergent from the
+    // cloud formula for off-center / sign-flip cases. The shared arithmetic (the
+    // raw fraction, `d`) is too small and entangled with these differing
+    // combinators to factor out without obscuring both formulas.
+    //
+    // NOTE: the non-cloud branch is currently unreachable -- adjustFlows' sole
+    // caller (UpdateCloudAndFlow, straight-flow parallel drag) always passes
+    // isCloud=true. It is retained as the general signed formula.
     if (isCloud) {
       // Guard the denominators against zero: for a vertical flow origStock.x ===
       // otherEnd.x (and likewise y for a horizontal flow), which without the
       // `|| 1` divides by zero and yields a NaN/Infinity valve -- serialized to
-      // JSON null, that bricks the model (#818). The non-cloud branch below
-      // already guards this; the duplication kept the fix out of this copy.
+      // JSON null, that bricks the model (#818).
       const fraction = {
         x: flow.x === otherEnd.x ? 0.5 : (stock.x - otherEnd.x) / (origStock.x - otherEnd.x || 1),
         y: flow.y === otherEnd.y ? 0.5 : (stock.y - otherEnd.y) / (origStock.y - otherEnd.y || 1),
@@ -837,9 +847,7 @@ export function UpdateCloudAndFlow(
       };
 
       // Clamp valve to closest segment of new shape
-      const newSegments = getSegments(points);
-      const closestSeg = findClosestSegment(currentValve, newSegments);
-      const newValve = clampToSegment(currentValve, closestSeg);
+      const newValve = clampValveToClosestSegment(currentValve, points);
 
       flow = {
         ...flow,
@@ -1255,6 +1263,18 @@ const VALVE_HIT_TOLERANCE = 5;
 const VALVE_CLAMP_MARGIN = 10;
 
 /**
+ * Snap a valve onto the closest segment of a flow path -- the recurring
+ * getSegments -> findClosestSegment -> clampToSegment chain run wherever a
+ * flow's geometry changes (stock/cloud moves, segment drags, L-shape
+ * conversions). Assumes `points` has at least two points, which every caller
+ * guarantees, so `findClosestSegment` always has a segment to return.
+ */
+function clampValveToClosestSegment(valve: IPoint, points: readonly Point[]): IPoint {
+  const segments = getSegments(points);
+  return clampToSegment(valve, findClosestSegment(valve, segments));
+}
+
+/**
  * Preserves the valve's fractional position when a segment changes.
  *
  * When a stock moves along the flow axis, the segment gets longer or shorter.
@@ -1461,9 +1481,7 @@ export function UpdateFlow(
     // Dragging any segment can affect adjacent segments via shared corners,
     // so the valve's segment may have changed shape even if it wasn't the
     // segment being dragged.
-    const newSegments = getSegments(points);
-    const closestSeg = findClosestSegment(currentValve, newSegments);
-    const newValve = clampToSegment(currentValve, closestSeg);
+    const newValve = clampValveToClosestSegment(currentValve, points);
     flowEl = {
       ...flowEl,
       x: newValve.x,
@@ -1570,9 +1588,7 @@ export function UpdateFlow(
       });
 
       // Clamp valve to the closest segment of the new shape
-      const newSegments = getSegments(points);
-      const closestSeg = findClosestSegment(currentValve, newSegments);
-      const newValve = clampToSegment(currentValve, closestSeg);
+      const newValve = clampValveToClosestSegment(currentValve, points);
 
       flowEl = {
         ...flowEl,

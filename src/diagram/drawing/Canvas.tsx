@@ -89,10 +89,11 @@ import {
 
 import styles from './Canvas.module.css';
 
-export const inCreationUid = -2;
-export const fauxTargetUid = -3;
-export const inCreationCloudUid = -4;
-export const fauxCloudTargetUid = -5;
+// The creation sentinel UIDs live in one module (drawing/creation-sentinels)
+// and are re-exported here so existing `from '../drawing/Canvas'` imports keep
+// resolving. See creation-sentinels.ts for what each marks.
+export { inCreationUid, fauxTargetUid, inCreationCloudUid, fauxCloudTargetUid } from './creation-sentinels';
+import { inCreationUid, fauxTargetUid, inCreationCloudUid, fauxCloudTargetUid } from './creation-sentinels';
 
 const fauxTarget: AuxViewElement = {
   type: 'aux',
