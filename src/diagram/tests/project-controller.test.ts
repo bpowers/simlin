@@ -17,6 +17,7 @@ import type { JsonProject, ErrorDetail } from '@simlin/engine';
 import { SimlinErrorKind } from '@simlin/engine';
 
 import { ProjectController, MaxUndoSize, type ProjectSnapshot } from '../project-controller';
+import { stockFlowViewToJson } from '../view-conversion';
 import {
   makeFakeEngine,
   makeControllerConfig,
@@ -201,6 +202,61 @@ describe('ProjectController optimistic view updates', () => {
     // No history recorded, no generation bump (details panels must not remount).
     expect(controller.getSnapshot().projectGeneration).toBe(beforeGen);
     expect(controller.canUndo()).toBe(false);
+    await controller.dispose();
+  });
+
+  it('adopts a view carried by a content patch instead of preserving the stale live view', async () => {
+    // Mirrors Editor.handleRename: one patch both renames the variable AND
+    // upserts the renamed view. preserveLiveView exists to protect newer
+    // OPTIMISTIC views from older engine snapshots, but a view arriving in an
+    // explicit upsertView op is newer user intent than the live view by
+    // construction. Before the fix, the live (pre-rename) view clobbered the
+    // patched one on refresh: the rename looked like a silent no-op, and the
+    // next geometry edit round-tripped the stale view back into the engine,
+    // persisting a model/view divergence (a view element whose variable no
+    // longer exists -- observed live as an editor-crashing corrupted project).
+    const auxEl = { type: 'aux', name: 'x', uid: 1, x: 10, y: 20, labelSide: 'right' };
+    let currentJson = validProjectJson({ mainViewElements: [auxEl] });
+    const engine = makeFakeEngine({ json: () => currentJson });
+    const { config } = makeControllerConfig({ engine });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+
+    const view = controller.getView() as StockFlowView;
+    const renamedView: StockFlowView = {
+      ...view,
+      elements: view.elements.map((el) => (el.uid === 1 && el.type === 'aux' ? { ...el, name: 'y' } : el)),
+    };
+
+    const patch = {
+      models: [
+        {
+          name: 'main',
+          ops: [
+            { type: 'renameVariable' as const, payload: { from: 'x', to: 'y' } },
+            { type: 'upsertView' as const, payload: { index: 0, view: stockFlowViewToJson(renamedView) } },
+          ],
+        },
+      ],
+    };
+    // After the patch, the engine's serialized state carries the rename.
+    currentJson = validProjectJson({ mainViewElements: [{ ...auxEl, name: 'y' }] });
+
+    expect(await controller.applyPatchOrReportError(patch, 'rename')).toBe(true);
+
+    // The optimistic mirror lands synchronously, before any refresh: the UI
+    // must show the rename immediately.
+    const optimistic = controller.getView() as StockFlowView;
+    const optimisticNames = optimistic.elements.map((el) => ('name' in el ? el.name : undefined));
+    expect(optimisticNames).toContain('y');
+    expect(optimisticNames).not.toContain('x');
+
+    await controller.refreshFromEngine();
+
+    const after = controller.getView() as StockFlowView;
+    const names = after.elements.map((el) => ('name' in el ? el.name : undefined));
+    expect(names).toContain('y');
+    expect(names).not.toContain('x');
     await controller.dispose();
   });
 
