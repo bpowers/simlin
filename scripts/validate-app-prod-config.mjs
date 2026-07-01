@@ -60,6 +60,34 @@ export function validateAppProdConfig(source, filename = '.app.prod.yaml') {
     });
   }
 
+  // Cost cap: without max_instances a render storm or crash loop can fan out
+  // F4 instances without bound (issue #694). The committed app.yaml carries
+  // the reference value; the operator must mirror it here.
+  const scaling = config.automatic_scaling;
+  const maxInstances = isRecord(scaling) ? scaling.max_instances : undefined;
+  if (!Number.isInteger(maxInstances) || maxInstances <= 0) {
+    errors.push({
+      message:
+        'automatic_scaling.max_instances must be set to a positive integer (cost cap; mirror the committed app.yaml)',
+    });
+  }
+
+  // Cross-origin embed contract (issue #688): third-party pages hotlink
+  // sd-component.js, and its engine worker/WASM loads are cross-origin
+  // requests against /static. Without the wildcard ACAO header the embed
+  // silently fails to initialize the engine -- a regression no same-origin
+  // smoke check can catch, so enforce the committed app.yaml's header here.
+  const handlers = Array.isArray(config.handlers) ? config.handlers : [];
+  const staticHandler = handlers.find((handler) => isRecord(handler) && handler.url === '/static');
+  const headers = isRecord(staticHandler) ? staticHandler.http_headers : undefined;
+  const allowOrigin = isRecord(headers) ? headers['Access-Control-Allow-Origin'] : undefined;
+  if (allowOrigin !== '*') {
+    errors.push({
+      message:
+        'handlers must include a /static handler with http_headers.Access-Control-Allow-Origin set to "*" (cross-origin embeds, issue #688; mirror the committed app.yaml)',
+    });
+  }
+
   return errors;
 }
 

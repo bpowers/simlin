@@ -77,6 +77,13 @@ bash "$REPO_ROOT/scripts/verify-deploy-build.sh"
 echo "==> Assembling self-contained server staging dir (scripts/build-deploy-staging.mjs)"
 node "$REPO_ROOT/scripts/build-deploy-staging.mjs" "$STAGING_DIR" "$REPO_ROOT/.app.prod.yaml"
 
+# The staging dir is bounded by construction (build-deploy-staging.mjs copies
+# an explicit file list), so this gate is cheap here -- it exists to catch a
+# regression in the staging assembly (e.g. accidentally vendoring a
+# node_modules tree) before the upload starts. See issue #695.
+echo "==> Checking upload file count against the GAE 10k cap (scripts/check-upload-file-count.sh)"
+bash "$REPO_ROOT/scripts/check-upload-file-count.sh" "$STAGING_DIR"
+
 echo "==> gcloud app deploy $STAGING_DIR/app.yaml"
 gcloud app deploy "$STAGING_DIR/app.yaml" "$@"
 

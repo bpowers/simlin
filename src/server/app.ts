@@ -10,6 +10,7 @@ import * as admin from 'firebase-admin';
 import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
+import { isReady } from '@simlin/engine';
 import { seshcookie } from './seshcookie/seshcookie';
 
 import { apiRouter } from './api';
@@ -18,6 +19,7 @@ import { Application } from './application';
 import { authn } from './authn';
 import authz from './authz';
 import { favicon } from './favicon';
+import { healthz } from './healthz';
 import { validateRuntimeConfig } from './config-validation';
 import * as logger from './logger';
 import { createDatabase } from './models/db';
@@ -125,6 +127,17 @@ class App {
     this.app.db = await createDatabase({
       backend: 'firestore',
     });
+
+    // /healthz comes first: uptime checks poll it constantly, so keep it
+    // out of the request log and outside the session/auth middleware.
+    // (GAE's edge 301s plain-http before Express ever sees it, so sitting
+    // ahead of redirectToHttps only matters when running off-GAE.)
+    // Because initializeServerDependencies() above throws on preload
+    // failure -- aborting boot before this route mounts -- a broken WASM
+    // preload surfaces as an instance that never listens (connection
+    // failure / GAE 5xx), not as a 503 here; the isReady() probe is
+    // cheap defense-in-depth, not the expected failure signal.
+    this.app.get('/healthz', healthz(isReady));
 
     // put the redirect before the request logger to remove noise
     this.app.use(redirectToHttps);

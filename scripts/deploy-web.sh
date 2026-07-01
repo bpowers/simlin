@@ -70,6 +70,14 @@ pnpm build
 echo "==> Staging app build into public/ (pnpm --filter @simlin/app run deploy:assemble)"
 pnpm --filter @simlin/app run deploy:assemble
 
+# Gate on the real upload set right before the deploy: this deploy uploads
+# from the repo root, where the upload set is whatever .gcloudignore leaves
+# in -- independent of git status, and including files the build steps above
+# just created. Failing here (instead of inside gcloud app deploy) names the
+# offending directories and still runs the cleanup trap. See issue #695.
+echo "==> Checking upload file count against the GAE 10k cap (scripts/check-upload-file-count.sh)"
+bash "$REPO_ROOT/scripts/check-upload-file-count.sh" "$REPO_ROOT"
+
 echo "==> gcloud app deploy ./.app.prod.yaml"
 gcloud app deploy "$REPO_ROOT/.app.prod.yaml" "$@"
 

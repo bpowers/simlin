@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { Project as EngineProject } from '@simlin/engine';
-import { previewDimensions, parseSvgDimensions } from '../render';
+import { renderProjectToPng } from '../render-worker';
 
 const MAX_PREVIEW_SIZE = 800;
 
@@ -29,8 +29,10 @@ function readPngDimensions(png: Uint8Array): { width: number; height: number } {
   };
 }
 
-// Simulate the server's preview generation pipeline:
-// XMILE -> engine -> protobuf -> engine -> SVG (for dims) -> PNG
+// Drive the server's preview generation pipeline:
+// XMILE -> engine -> protobuf, then the worker's real pipeline function
+// (renderProjectToPng) run in-process so ts-jest tests the current source
+// rather than a compiled copy or an inline duplicate of the pipeline.
 async function generatePreview(modelName: string): Promise<Uint8Array> {
   const xmile = loadDefaultProject(modelName);
 
@@ -39,16 +41,8 @@ async function generatePreview(modelName: string): Promise<Uint8Array> {
   const protobuf = await importProject.serializeProtobuf();
   await importProject.dispose();
 
-  // Step 2: Load from protobuf, get SVG dimensions, render PNG (same as render.ts)
-  const engineProject = await EngineProject.openProtobuf(protobuf);
-  try {
-    const svg = await engineProject.renderSvgString('main');
-    const intrinsic = parseSvgDimensions(svg);
-    const dims = previewDimensions(intrinsic.width, intrinsic.height, MAX_PREVIEW_SIZE);
-    return await engineProject.renderPng('main', dims.width, dims.height);
-  } finally {
-    await engineProject.dispose();
-  }
+  // Step 2: the exact code the render worker executes
+  return renderProjectToPng(protobuf);
 }
 
 describe('model preview rendering', () => {

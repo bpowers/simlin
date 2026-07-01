@@ -22,6 +22,13 @@
  */
 
 import type { WorkerResponse } from './worker-protocol';
+import { ENGINE_PUBLIC_PATH_GLOBAL } from './worker-trampoline';
+
+// Rewritten by rspack/webpack to the runtime publicPath slot. Under bundlers
+// without webpack module variables (vite) the identifier stays undeclared,
+// which is still safe: `typeof` never throws on unresolvable references, it
+// yields 'undefined' and the guarded assignment below is skipped.
+declare let __webpack_public_path__: string;
 
 // Worker global scope interface for postMessage with Transferable support.
 // We define this locally rather than adding the webworker lib (which conflicts
@@ -33,6 +40,20 @@ interface WorkerGlobalScope {
 }
 
 const workerSelf = self as unknown as WorkerGlobalScope;
+
+// Cross-origin embed support (issue #688): when the blob trampoline in
+// backend-factory.browser.ts boots this worker, the bundler's
+// `publicPath: 'auto'` runtime derives the asset base from `self.location`
+// -- the blob URL, i.e. the *embedding* page's origin -- so the WASM fetch
+// below would target the wrong host. The trampoline records the correct
+// asset root under a well-known global before loading this chunk; apply it
+// here, which runs after the bundler runtime computed its (wrong) value and
+// before the dynamic import below triggers the WASM load. Directly-loaded
+// workers never see the global, so their behavior is unchanged.
+const publicPathOverride = (self as unknown as Record<string, unknown>)[ENGINE_PUBLIC_PATH_GLOBAL];
+if (typeof publicPathOverride === 'string' && typeof __webpack_public_path__ === 'string') {
+  __webpack_public_path__ = publicPathOverride;
+}
 
 // Buffer for messages that arrive before the dynamic import resolves.
 let pendingMessages: unknown[] | null = [];

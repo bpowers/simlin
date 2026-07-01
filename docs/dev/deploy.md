@@ -1,6 +1,6 @@
 # Deploying to production
 
-**Last reviewed:** 2026-05-08
+**Last reviewed:** 2026-07-01
 
 The web app at `app.simlin.com` runs on Google App Engine standard. GAE serves the static React SPA built from `src/app` and runs the Express backend in `src/server` (Firebase Auth, models persisted in Firestore as protobuf). `@simlin/mcp`, `@simlin/serve`, `pysimlin`, and `simlin-cli` are released separately to npm/PyPI -- they aren't part of this deploy.
 
@@ -27,6 +27,7 @@ export NODE_ENV=production
 pnpm clean                                       # cargo clean + each package's clean script
 pnpm build                                       # pnpm -r run build: Rust+WASM, then every TS package
 pnpm --filter @simlin/app run deploy:assemble    # copy build/ and build-component/ into public/; drop symlinks
+scripts/check-upload-file-count.sh .             # abort if the upload set would trip GAE's 10,000-file cap
 gcloud app deploy ./.app.prod.yaml               # upload the repo minus .gcloudignore, switch traffic
 # A bash trap runs the cleanup below on EXIT/INT/TERM, even if any step above fails:
 pnpm --filter @simlin/app run deploy:clean       # git checkout the symlinks and index.html; rm build artifacts
@@ -103,6 +104,8 @@ On the instance GAE runs `pnpm install`, then the root `start` script: `node src
 
 - `runtime`: `nodejs24`. (`nodejs18` is EOL on GAE; `nodejs16`, the runtime of the last deploy before May 2026, is gone entirely -- which is why there's no "redeploy the old commit" rollback.)
 - `build_env_variables.GOOGLE_NODE_RUN_SCRIPTS`: `''`. The local deploy script already runs the monorepo build and stages the exact artifact to upload; this prevents App Engine's Node buildpack from running the root `build` script again during staging.
+- `automatic_scaling.max_instances`: `8`. Cost cap so a render storm or crash loop can't fan out F4 instances without bound (issue #694). **Mirror this into `.app.prod.yaml`** -- both deploy scripts run `scripts/validate-app-prod-config.mjs`, which fails the deploy if it's missing or not a positive integer. Raise it deliberately if organic traffic ever needs more instances.
+- The `/static` handler's `http_headers` with `Access-Control-Allow-Origin: "*"`. Third-party pages hotlink `sd-component.js`, and its engine worker's WASM fetch (plus fonts/CSS assets) are cross-origin CORS requests against `/static` (issue #688); without this header embeds load their data but the engine never initializes. The assets are public, immutable, and served without credentials, so the wildcard adds no risk. **Mirror this into `.app.prod.yaml`** -- `scripts/validate-app-prod-config.mjs` fails the deploy if the header is missing.
 - The handler list: `/static`, `/`, `/new`, `/legal*`, `/privacy`, `robots.txt`, `ads.txt`, favicon, `manifest.json`, then `/.*` -> `script: auto`. The `/` and `/new` static HTML handlers carry CSP/HSTS headers because they bypass Express Helmet. The SPA's dynamic routes like `/:username/:projectName` fall through to `/.*`, i.e. the Express server.
 - `env_variables`: the committed `app.yaml` has none; the server needs a couple (next section). They live in `.app.prod.yaml`.
 
@@ -122,10 +125,10 @@ The server loads `config/default.json`, then `config/production.json` when `NODE
 ## Pre-deploy checklist
 
 - [ ] CI is green on the commit you're deploying.
-- [ ] `git status` is clean.
+- [ ] `git status` is clean. Note this only makes the tracked-`public/` mutation and cleanup reliable -- it does NOT bound what gets uploaded. The upload set is whatever `.gcloudignore` leaves in, so gitignored/untracked junk (venvs, nested cargo `target/` dirs, scratch checkouts) still counts toward GAE Standard's hard 10,000-file cap (issue #695). Both deploy scripts run [`scripts/check-upload-file-count.sh`](/scripts/check-upload-file-count.sh) immediately before `gcloud app deploy` and abort with a per-top-level-directory breakdown if the cap would be hit; fix by deleting the offending dirs or adding them to `.gcloudignore`.
 - [ ] `gcloud config get-value project` is the production project.
 - [ ] `gcloud app versions list --service=default` shows a known-good current version -- note its ID, that's your rollback target. (If GAE has garbage-collected it, there is no rollback; see below.)
-- [ ] `.app.prod.yaml` reconciled against `app.yaml` (`runtime: nodejs24`, `build_env_variables.GOOGLE_NODE_RUN_SCRIPTS: ''`, handlers, `authentication__seshcookie__key` set to the value already in use).
+- [ ] `.app.prod.yaml` reconciled against `app.yaml` (`runtime: nodejs24`, `build_env_variables.GOOGLE_NODE_RUN_SCRIPTS: ''`, `automatic_scaling.max_instances: 8`, handlers including the `/static` `Access-Control-Allow-Origin: "*"` header, `authentication__seshcookie__key` set to the value already in use).
 - [ ] `wasm-opt --version` works; `rustup show` lists the `wasm32-unknown-unknown` target.
 
 ## Post-deploy smoke test
@@ -133,8 +136,11 @@ The server loads `config/default.json`, then `config/production.json` when `NODE
 Against the `--no-promote` version URL, then again on production:
 
 - `curl -sI https://<host>/` -> 200 HTML. View source: it links a hashed `/static/js/index.<hash>.js` (literal `<%= PUBLIC_URL %>` means the build was skipped) and `/static/css/index.<hash>.css`.
+- `curl -s https://<host>/healthz` -> 200 `ok`. This is the only check that exercises the Node server: `/` is a GAE static handler and stays green even when every Express instance is crash-looping (e.g. `ServerInitError`). A WASM preload failure aborts boot before the route mounts, so it shows up as a non-responding instance (connection failure / GAE 5xx), not a 503 -- treat any non-200 here as down. (The route's 503 branch is defense-in-depth, not the expected failure signal.)
 - `curl -sI https://<host>/static/js/sd-component.js` -> 200 -- the embeddable web component; external sites `<script src>` this exact path.
+- `curl -H "Origin: https://example.com" -sI https://<host>/static/js/sd-component.js` -> response includes `access-control-allow-origin: *`. Cross-origin embeds need this on everything under `/static` (worker chunk, WASM -- issue #688). GAE emits `http_headers` unconditionally (the request `Origin` header doesn't matter), so any curl shows it; the earlier smoke checks missed its absence only because they never asserted on response headers. Without it, embeds load data but never initialize the engine.
 - `curl -sI https://<host>/static/wasm/<hash>.module.wasm` -> 200, `content-type: application/wasm`.
+- Full embed check (the header curl only proves CORS, not the blob-trampoline worker boot): serve `<script src="https://<host>/static/js/sd-component.js"></script><sd-model username="..." projectName="..."></sd-model>` from a different origin (e.g. `python3 -m http.server` on localhost) and confirm the diagram renders and simulates with no console errors.
 - `curl -sI` on `/robots.txt`, `/manifest.json`, `/favicon.ico`, `/legal/`, `/privacy/` -> 200; `curl -I http://<host>/` -> 301 to https.
 - Browser: log in with Google, land on Home, no console errors.
 - New-user flow: sign in with a fresh account, claim a username, confirm the example projects appear and one opens and simulates.
@@ -161,5 +167,5 @@ The `frontend` job in [`.github/workflows/ci.yaml`](/.github/workflows/ci.yaml) 
 Things to know that don't have a clean fix yet:
 
 - `pnpm deploy:web` deploys from the workspace root, so GAE's Node buildpack installs the *whole workspace's* dependency set on the instance -- `@rsbuild/*`, `jest`, `slate`, `radix`, rspress, vite, and every other package's deps (~590 MB / 1171 packages), none needed by the server at runtime. App Engine standard always reinstalls from the deployed `package.json` + lockfile and has no vendored-`node_modules` escape hatch, so the only lever is the deployed manifest. The smaller-deploy fix is implemented as **`pnpm deploy:web:staged`** (see below); it is locally proven but still pending a real `gcloud --no-promote` test, so `deploy:web` remains the default. Tracked in [docs/tech-debt.md](/docs/tech-debt.md) "Web deploy uploads the whole monorepo and GAE installs the full dep set".
-- Server-side PNG preview (`src/server/render.ts`) parses and rasterizes user-uploaded models in-process with no size cap beyond the 10 MB request body limit and no timeout.
-- There's no error reporting or alerting. Cloud Logging and the GAE metrics dashboard are it.
+- Server-side PNG preview (`src/server/render.ts`) renders user-uploaded models in per-request `worker_threads` workers (each with its own WASM instance) with a 10 s total wall-clock budget per request (queue wait included) and at most 2 concurrent renders -- restoring the isolation the 2022 deploy had (issue #694). What remains rough: there's no model-complexity cap below the 10 MB request body limit, so a pathological model still costs a bounded 10 s worker per attempt before failing with a 500.
+- There's no error reporting or alerting. Cloud Logging and the GAE metrics dashboard are it. The Express `/healthz` route exists as an uptime-check target (see the smoke test above), but no Cloud Monitoring notification channel, uptime check, or alerting policy points at it yet -- that ops-side setup is tracked in [issue #693](https://github.com/bpowers/simlin/issues/693).
