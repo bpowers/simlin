@@ -16,6 +16,7 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 - `seshcookie/` -- Vendored copy of the seshcookie encrypted-cookie-session library (github.com/bpowers/seshcookie-js, relicensed to Apache-2.0 with its author's permission). simlin is its only consumer, so it lives in-tree instead of going through npm publishes; keep diffs against upstream minimal
 - `logger.ts` -- Minimal structured logger (one `{level, message, timestamp}` JSON line per entry on stdout)
 - `favicon.ts` -- In-memory favicon middleware
+- `healthz.ts` -- Unauthenticated healthz GET route for uptime checks (200 when the WASM engine is ready; never touches Firestore). A preload failure aborts boot before the route mounts, so a broken instance surfaces as a connection failure, not a 503 -- the 503 branch is defense-in-depth
 - `project-creation.ts` -- Project creation logic
 - `new-user.ts` -- New user handling
 - `server-init.ts` -- Server initialization

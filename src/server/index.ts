@@ -17,4 +17,15 @@ async function main(): Promise<void> {
   app.listen();
 }
 
-setImmediate(main);
+// A failed boot (e.g. ServerInitError when the engine WASM is missing)
+// must take the process down: logging alone would leave a zombie that
+// never binds the port, and on GAE such an instance hangs until the
+// port-bind timeout instead of recycling immediately with a clear error
+// in the logs.
+setImmediate(() => {
+  main().catch((err: unknown) => {
+    const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    logger.error(`server startup failed, exiting: ${detail}`);
+    process.exit(1);
+  });
+});

@@ -133,6 +133,7 @@ The server loads `config/default.json`, then `config/production.json` when `NODE
 Against the `--no-promote` version URL, then again on production:
 
 - `curl -sI https://<host>/` -> 200 HTML. View source: it links a hashed `/static/js/index.<hash>.js` (literal `<%= PUBLIC_URL %>` means the build was skipped) and `/static/css/index.<hash>.css`.
+- `curl -s https://<host>/healthz` -> 200 `ok`. This is the only check that exercises the Node server: `/` is a GAE static handler and stays green even when every Express instance is crash-looping (e.g. `ServerInitError`). A WASM preload failure aborts boot before the route mounts, so it shows up as a non-responding instance (connection failure / GAE 5xx), not a 503 -- treat any non-200 here as down. (The route's 503 branch is defense-in-depth, not the expected failure signal.)
 - `curl -sI https://<host>/static/js/sd-component.js` -> 200 -- the embeddable web component; external sites `<script src>` this exact path.
 - `curl -sI https://<host>/static/wasm/<hash>.module.wasm` -> 200, `content-type: application/wasm`.
 - `curl -sI` on `/robots.txt`, `/manifest.json`, `/favicon.ico`, `/legal/`, `/privacy/` -> 200; `curl -I http://<host>/` -> 301 to https.
@@ -162,4 +163,4 @@ Things to know that don't have a clean fix yet:
 
 - `pnpm deploy:web` deploys from the workspace root, so GAE's Node buildpack installs the *whole workspace's* dependency set on the instance -- `@rsbuild/*`, `jest`, `slate`, `radix`, rspress, vite, and every other package's deps (~590 MB / 1171 packages), none needed by the server at runtime. App Engine standard always reinstalls from the deployed `package.json` + lockfile and has no vendored-`node_modules` escape hatch, so the only lever is the deployed manifest. The smaller-deploy fix is implemented as **`pnpm deploy:web:staged`** (see below); it is locally proven but still pending a real `gcloud --no-promote` test, so `deploy:web` remains the default. Tracked in [docs/tech-debt.md](/docs/tech-debt.md) "Web deploy uploads the whole monorepo and GAE installs the full dep set".
 - Server-side PNG preview (`src/server/render.ts`) parses and rasterizes user-uploaded models in-process with no size cap beyond the 10 MB request body limit and no timeout.
-- There's no error reporting or alerting. Cloud Logging and the GAE metrics dashboard are it.
+- There's no error reporting or alerting. Cloud Logging and the GAE metrics dashboard are it. The Express `/healthz` route exists as an uptime-check target (see the smoke test above), but no Cloud Monitoring notification channel, uptime check, or alerting policy points at it yet -- that ops-side setup is tracked in [issue #693](https://github.com/bpowers/simlin/issues/693).
