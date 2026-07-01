@@ -47,7 +47,7 @@ The main container for a system dynamics diagram with these properties:
 ```typescript
 {
   nextUid: number,              // Next available UID for new elements
-  elements: List<ViewElement>,  // All visual elements in the view
+  elements: readonly ViewElement[],  // All visual elements in the view
   viewBox: Rect,                // Bounding box of the view
   zoom: number                   // Zoom factor (negative means auto-fit)
 }
@@ -91,8 +91,8 @@ StockViewElement {
   y: number,                // Center Y coordinate
   labelSide: LabelSide,     // 'top'|'bottom'|'left'|'right'|'center'
   isZeroRadius: boolean,    // Always false for stocks
-  inflows: List<UID>,       // UIDs of inflowing flows (computed)
-  outflows: List<UID>       // UIDs of outflowing flows (computed)
+  inflows: readonly UID[],       // UIDs of inflowing flows (computed)
+  outflows: readonly UID[]       // UIDs of outflowing flows (computed)
 }
 ```
 
@@ -128,7 +128,7 @@ FlowViewElement {
   x: number,                // Valve center X
   y: number,                // Valve center Y
   labelSide: LabelSide,
-  points: List<Point>,      // Path points defining the flow
+  points: readonly Point[],      // Path points defining the flow
   isZeroRadius: boolean     // Always false for flows
 }
 
@@ -143,13 +143,23 @@ Point {
 1. **Must have at least 2 points** (source and destination)
 2. **First point** connects to source (stock or cloud)
 3. **Last point** connects to sink (stock or cloud)
-4. **Intermediate points** define the path shape (currently only 2-point flows supported)
+4. **Intermediate points** define the path shape. Multi-segment (L- and
+   Z-shaped) flows are fully supported: stocks moving off-axis produce a
+   corner point, endpoint drags with a dominant perpendicular component
+   convert a straight flow to an L, and interior segments of 3+ point flows
+   can be dragged perpendicular to their direction. `normalizeFlowPoints`
+   removes zero-length and colinear interior segments after every mutation so
+   segments strictly alternate horizontal/vertical.
 5. **Flows are constrained** to horizontal or vertical segments when connected to stocks
 6. **Stock connections**:
    - Endpoints snap to stock edges (±width/2 or ±height/2)
    - Must be at least 3px from corners
+   - Multiple flows attaching to the same stock side spread evenly along the
+     edge (n flows sit at i/(n+1) fractions; straight flows keep their
+     anchor-determined position but still reserve a slot)
 7. **Cloud connections**:
-   - Attach at CloudRadius (13.5px) distance from cloud center
+   - The endpoint sits at the cloud center; the rendered path is retracted by
+     CloudRadius (13.5px) so the arrowhead lands on the cloud's edge
    - Clouds adjust position when dragged
 
 **Path Rendering**:
@@ -272,7 +282,7 @@ LinkViewElement {
   toUid: number,            // Destination element UID
   arc?: number,             // Takeoff angle in radians (undefined = straight)
   isStraight: boolean,      // Force straight line
-  multiPoint?: List<Point>  // Multi-segment connectors (future/not implemented)
+  multiPoint?: readonly Point[]  // Multi-segment connectors (future/not implemented)
 }
 ```
 

@@ -19,6 +19,7 @@
 - [dev/python.md](dev/python.md) -- Python (pysimlin) development standards
 - [dev/workflow.md](dev/workflow.md) -- Problem-solving philosophy and TDD workflow
 - [dev/frontend-audit-2026-06.md](dev/frontend-audit-2026-06.md) -- June 2026 frontend bug audit of src/app and src/diagram: findings, fix status, tracked follow-ups
+- [dev/flow-editing-audit-2026-06.md](dev/flow-editing-audit-2026-06.md) -- June 2026 deep audit of interactive flow editing: rename/stale-view corruption chain, name-editor UX, routing robustness, group-movement dedup
 
 ## Project Management
 
