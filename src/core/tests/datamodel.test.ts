@@ -932,6 +932,126 @@ describe('StockFlowView', () => {
   });
 });
 
+// These pin the fields the (now-deleted) diagram-local stockFlowViewToJson copy
+// silently dropped, so unifying every diagram caller onto this implementation
+// cannot regress them (issue #821, an #811-class field-drop cluster).
+describe('StockFlowView serialization completeness (#821)', () => {
+  it('preserves link polarity through a round-trip', () => {
+    for (const polarity of ['+', '-'] as const) {
+      const link: LinkViewElement = {
+        type: 'link',
+        uid: 4,
+        fromUid: 1,
+        toUid: 2,
+        arc: 30,
+        isStraight: false,
+        multiPoint: undefined,
+        polarity,
+        x: NaN,
+        y: NaN,
+        isZeroRadius: false,
+        ident: undefined,
+      };
+      const json = stockFlowViewToJson({
+        nextUid: 5,
+        elements: [link],
+        viewBox: { x: 0, y: 0, width: 0, height: 0 },
+        zoom: -1,
+        useLetteredPolarity: false,
+      });
+      const linkJson = json.elements[0] as JsonLinkViewElement;
+      expect(linkJson.polarity).toBe(polarity);
+      expect(linkViewElementFromJson(linkJson).polarity).toBe(polarity);
+    }
+  });
+
+  it('treats arc and multiPoint as mutually exclusive (arc wins, matching fromJson)', () => {
+    const link: LinkViewElement = {
+      type: 'link',
+      uid: 4,
+      fromUid: 1,
+      toUid: 2,
+      arc: 45,
+      isStraight: false,
+      multiPoint: [{ x: 1, y: 2, attachedToUid: undefined }],
+      polarity: undefined,
+      x: NaN,
+      y: NaN,
+      isZeroRadius: false,
+      ident: undefined,
+    };
+    const json = stockFlowViewToJson({
+      nextUid: 5,
+      elements: [link],
+      viewBox: { x: 0, y: 0, width: 0, height: 0 },
+      zoom: -1,
+      useLetteredPolarity: false,
+    });
+    const linkJson = json.elements[0] as JsonLinkViewElement;
+    expect(linkJson.arc).toBe(45);
+    expect(linkJson.multiPoints).toBeUndefined();
+  });
+
+  it('preserves useLetteredPolarity when set', () => {
+    const json = stockFlowViewToJson({
+      nextUid: 1,
+      elements: [],
+      viewBox: { x: 0, y: 0, width: 0, height: 0 },
+      zoom: -1,
+      useLetteredPolarity: true,
+    });
+    expect(json.useLetteredPolarity).toBe(true);
+    const restored = stockFlowViewFromJson(json, new Map());
+    expect(restored.useLetteredPolarity).toBe(true);
+  });
+
+  it('keeps a viewBox with a single non-zero dimension (OR, not AND)', () => {
+    const json = stockFlowViewToJson({
+      nextUid: 1,
+      elements: [],
+      viewBox: { x: 0, y: 0, width: 800, height: 0 },
+      zoom: -1,
+      useLetteredPolarity: false,
+    });
+    expect(json.viewBox).toEqual({ x: 0, y: 0, width: 800, height: 0 });
+  });
+
+  it('round-trips a Z-shape flow whose corner points are unattached (#819)', () => {
+    const flow: FlowViewElement = {
+      type: 'flow',
+      uid: 10,
+      name: 'Births',
+      ident: 'births',
+      var: undefined,
+      x: 50,
+      y: 200,
+      labelSide: 'center',
+      points: [
+        { x: 0, y: 200, attachedToUid: undefined },
+        { x: 50, y: 200, attachedToUid: undefined },
+        { x: 50, y: 100, attachedToUid: undefined },
+        { x: 100, y: 100, attachedToUid: 1 },
+      ],
+      isZeroRadius: false,
+    };
+    const json = stockFlowViewToJson({
+      nextUid: 11,
+      elements: [flow],
+      viewBox: { x: 0, y: 0, width: 0, height: 0 },
+      zoom: -1,
+      useLetteredPolarity: false,
+    });
+    const flowJson = json.elements[0] as JsonFlowViewElement;
+    // Unattached corners omit attachedToUid entirely; the attached corner keeps it.
+    expect(flowJson.points.map((p) => p.attachedToUid)).toEqual([undefined, undefined, undefined, 1]);
+    for (const p of flowJson.points.slice(0, 3)) {
+      expect('attachedToUid' in p).toBe(false);
+    }
+    const restored = flowViewElementFromJson(flowJson);
+    expect(restored.points.map((p) => p.attachedToUid)).toEqual([undefined, undefined, undefined, 1]);
+  });
+});
+
 describe('canBeModuleInput and isPublic', () => {
   it('should default canBeModuleInput and isPublic to false for Stock', () => {
     const json = { name: 'pop', inflows: [], outflows: [] };

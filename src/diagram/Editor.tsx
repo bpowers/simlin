@@ -15,7 +15,6 @@ import { canonicalize } from '@simlin/core/canonicalize';
 
 import { Project as EngineProject } from '@simlin/engine';
 import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs, JsonArrayedEquation } from '@simlin/engine';
-import { stockFlowViewToJson } from './view-conversion';
 import {
   Project,
   Model,
@@ -37,6 +36,7 @@ import {
   auxToJson,
   moduleToJson,
   arrayedEquationToJson,
+  stockFlowViewToJson,
   type ModuleReference,
 } from '@simlin/core/datamodel';
 import { defined, exists, setsEqual } from '@simlin/core/common';

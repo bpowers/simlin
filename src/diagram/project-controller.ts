@@ -36,13 +36,13 @@ import {
   projectAttachData,
   findNonFiniteViewCoord,
   stockFlowViewFromJson,
+  stockFlowViewToJson,
 } from '@simlin/core/datamodel';
 import { defined, mapSet, setsEqual, toInt, uint8ArraysEqual, type Series } from '@simlin/core/common';
 import { first, getOrThrow } from '@simlin/core/collections';
 import type { JsonProjectPatch, JsonModelOperation, ErrorDetail, JsonProject } from '@simlin/engine';
 import { SimlinErrorKind, SimlinUnitErrorKind } from '@simlin/engine';
 
-import { stockFlowViewToJson } from './view-conversion';
 import { preserveLiveView } from './merge-live-view';
 import { advanceProjectHistory } from './project-history';
 import { type ModuleStackEntry, currentModelName, pushModule, popModule, navigateToLevel } from './module-navigation';
