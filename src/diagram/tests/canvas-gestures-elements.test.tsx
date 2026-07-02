@@ -260,6 +260,152 @@ describe('Canvas gestures: flow endpoint drag (checklist 11)', () => {
   });
 });
 
+describe('Canvas gestures: existing cloud endpoint drag live preview', () => {
+  // Regression: dragging an existing flow's cloud endpoint used to move only the
+  // valve (UpdateFlow's valve-slide fallback), leaving the flow line/arrowhead
+  // stale until pointer-up. It must now track the cursor DURING the drag, the
+  // same as flow creation (both route through growEndpointDrag ->
+  // UpdateCloudAndFlow). Assertions are made BEFORE pointer-up.
+
+  it('sink cloud, along-axis drag: the flow line + arrowhead track the cursor mid-drag', () => {
+    const h = stockToCloudFlow(); // stock(100,100) -> cloud(300,100), valve(200,100)
+    h.clearMountCalls();
+
+    const arrowhead = h.query('.simlin-arrowhead-flow')!;
+    pointerDown(arrowhead, 300, 100);
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([3]);
+
+    // Drag 100px further right along the axis; do NOT release.
+    pointerMove(h.svg, 400, 100, { buttons: 1 });
+
+    const head = arrowheadPoint(h);
+    // Pre-fix the arrowhead stayed at the original cloud (300); now it follows
+    // the cursor to 400 (the arrowhead sits at the true endpoint).
+    expect(head[0]).toBeGreaterThan(360);
+    expect(head[0]).toBeCloseTo(400);
+    expect(head[1]).toBeCloseTo(100); // stayed horizontal
+    // The rendered flow line grew to the moved endpoint (pulled back by the
+    // finalAdjust arrowhead inset to ~392.5), not stuck at 300.
+    const pts = flowPoints(h);
+    expect(pts[pts.length - 1][0]).toBeGreaterThan(360);
+  });
+
+  it('sink cloud, vertical flow, along-axis drag: the arrowhead tracks down mid-drag', () => {
+    const stock = makeStock(1, 'stock', 100, 100);
+    const cloud = makeCloud(2, 3, 100, 300);
+    const flow = makeFlow(
+      3,
+      'flow',
+      [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 100, y: 300, attachedToUid: 2 },
+      ],
+      { x: 100, y: 200 },
+    );
+    const h = renderCanvas({ elements: [{ ...stock, outflows: [3] }, cloud, flow] });
+    h.clearMountCalls();
+
+    const arrowhead = h.query('.simlin-arrowhead-flow')!;
+    pointerDown(arrowhead, 100, 300);
+    pointerMove(h.svg, 100, 400, { buttons: 1 });
+
+    const head = arrowheadPoint(h);
+    expect(head[1]).toBeGreaterThan(360); // tracked downward
+    expect(head[1]).toBeCloseTo(400);
+    expect(head[0]).toBeCloseTo(100); // stayed vertical
+  });
+
+  it('source cloud, along-axis drag: the flow source tracks the cursor mid-drag', () => {
+    const cloud = makeCloud(2, 3, 100, 100); // source
+    const stock = makeStock(1, 'stock', 300, 100); // sink
+    const flow = makeFlow(
+      3,
+      'flow',
+      [
+        { x: 100, y: 100, attachedToUid: 2 },
+        { x: 300, y: 100, attachedToUid: 1 },
+      ],
+      { x: 200, y: 100 },
+    );
+    const h = renderCanvas({ elements: [{ ...stock, inflows: [3] }, cloud, flow] });
+    h.clearMountCalls();
+
+    const sourceHit = h.query('.simlin-flow rect[fill="transparent"]')!;
+    pointerDown(sourceHit, 110, 100);
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([3]);
+
+    // Drag the source 60px to the left; do NOT release.
+    pointerMove(h.svg, 50, 100, { buttons: 1 });
+
+    const pts = flowPoints(h);
+    // Pre-fix the source point stayed at x=100; now it follows the cursor to 40.
+    expect(pts[0][0]).toBeLessThan(80);
+    expect(pts[0][0]).toBeCloseTo(40);
+    expect(pts[0][1]).toBeCloseTo(100); // stayed horizontal
+  });
+
+  it('sink cloud dragged over a stock: the flow line snaps to the stock EDGE mid-drag', () => {
+    const stock = makeStock(1, 'stock', 100, 100);
+    const cloud = makeCloud(2, 3, 300, 100);
+    const target = makeStock(4, 'target', 400, 100);
+    const flow = makeFlow(
+      3,
+      'flow',
+      [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 300, y: 100, attachedToUid: 2 },
+      ],
+      { x: 200, y: 100 },
+    );
+    const h = renderCanvas({ elements: [{ ...stock, outflows: [3] }, cloud, target, flow] });
+    h.clearMountCalls();
+
+    const arrowhead = h.query('.simlin-arrowhead-flow')!;
+    pointerDown(arrowhead, 300, 100);
+    // Move onto the target stock's center; do NOT release.
+    pointerMove(h.svg, 400, 100, { buttons: 1 });
+
+    const head = arrowheadPoint(h);
+    // Pinned to the target's LEFT edge (400 - StockWidth/2 = 377.5), pulled back
+    // by the arrowhead inset -- not the stock center (400) and not stuck at 300.
+    expect(head[0]).toBeGreaterThan(355);
+    expect(head[0]).toBeLessThan(378);
+    expect(head[1]).toBeCloseTo(100);
+  });
+
+  it('cloud-to-cloud flow, sink drag: the non-dragged source cloud stays put mid-drag', () => {
+    // Both endpoints are clouds. applyGroupMovement's UpdateFlow cloud-to-cloud
+    // path would translate BOTH clouds by the delta; the fix holds the source
+    // fixed and restores its cloud, so it stays attached to the fixed endpoint.
+    const source = makeCloud(1, 3, 100, 100);
+    const sink = makeCloud(2, 3, 300, 100);
+    const flow = makeFlow(
+      3,
+      'flow',
+      [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 300, y: 100, attachedToUid: 2 },
+      ],
+      { x: 200, y: 100 },
+    );
+    const h = renderCanvas({ elements: [source, sink, flow] });
+    h.clearMountCalls();
+
+    const arrowhead = h.query('.simlin-arrowhead-flow')!;
+    pointerDown(arrowhead, 300, 100);
+    pointerMove(h.svg, 350, 100, { buttons: 1 }); // delta = {x:-50}; do NOT release
+
+    // The flow's source endpoint stays fixed at (100,100)...
+    const pts = flowPoints(h);
+    expect(pts[0][0]).toBeCloseTo(100);
+    expect(pts[0][1]).toBeCloseTo(100);
+    // ...and the source cloud stays there too (pre-fix it drifted to x=150).
+    const centers = cloudCenters(h);
+    expect(centers.some(([cx, cy]) => Math.abs(cx - 100) < 0.5 && Math.abs(cy - 100) < 0.5)).toBe(true);
+    expect(centers.some(([cx]) => Math.abs(cx - 150) < 0.5)).toBe(false);
+  });
+});
+
 describe('Canvas gestures: creation tools (checklist 12)', () => {
   it.each([
     ['aux', 'aux', 'New Variable'],
