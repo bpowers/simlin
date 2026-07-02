@@ -45,7 +45,16 @@ import { SimlinErrorKind, SimlinUnitErrorKind } from '@simlin/engine';
 
 import { preserveLiveView } from './merge-live-view';
 import { advanceProjectHistory } from './project-history';
-import { type ModuleStackEntry, currentModelName, pushModule, popModule, navigateToLevel } from './module-navigation';
+import {
+  type ModuleStackEntry,
+  currentModelName,
+  pushModule,
+  popModule,
+  navigateToLevel,
+  isStdlibModel,
+  isMacroModel,
+} from './module-navigation';
+import { computeConnectorErrors } from './connector-sync';
 
 /**
  * The maximum number of undo snapshots kept. A small buffer is intentional:
@@ -105,12 +114,15 @@ export interface EngineApi {
   getErrors(): Promise<ErrorDetail[]>;
   isSimulatable(modelName?: string | null): Promise<boolean>;
   mainModel(): Promise<EngineModelApi>;
+  getModel(modelName: string | null): Promise<EngineModelApi>;
   dispose(): Promise<void>;
 }
 
-/** The subset of the engine `Model` API the controller depends on (sim runs). */
+/** The subset of the engine `Model` API the controller depends on (sim runs
+ * plus the per-variable equation-dependency query used for connector-sync). */
 export interface EngineModelApi {
   run(overrides?: Record<string, number>, options?: { analyzeLtm?: boolean }): Promise<EngineRunApi>;
+  getIncomingLinks(varName: string): Promise<readonly string[]>;
 }
 
 /** The subset of an engine `Run` the controller depends on. */
@@ -428,7 +440,9 @@ export class ProjectController {
 
       const serializedProject = await engine.serializeProtobuf();
       const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
-      const project = await this.updateVariableErrors(projectFromJson(json));
+      // No live view exists on first open, so the engine-serialized view IS the
+      // rendered view -- compute connector annotations directly against it.
+      const project = await this.attachConnectorErrors(await this.updateVariableErrors(projectFromJson(json)));
 
       if (this.disposed) {
         this.engine = undefined;
@@ -492,7 +506,9 @@ export class ProjectController {
         void this.queueViewUpdate(queuedView);
       }
 
-      const withErrors = await this.updateVariableErrors(project);
+      // The rendered view here is `project`'s view -- either the engine snapshot
+      // or the queued view spliced in above -- so annotate directly against it.
+      const withErrors = await this.attachConnectorErrors(await this.updateVariableErrors(project));
 
       if (this.disposed) {
         this.engine = undefined;
@@ -681,6 +697,11 @@ export class ProjectController {
       activeProject = projectAttachData(activeProject, this.data, 'main');
     }
     activeProject = preserveLiveView(activeProject, this.project, this.modelName);
+    // Connector annotations must reflect the RENDERED view, so compute them only
+    // after preserveLiveView has swapped in the (possibly newer) live view --
+    // see attachConnectorErrors. Runs after projectAttachData too, so it
+    // preserves the attached series when it rewrites the active model's vars.
+    activeProject = await this.attachConnectorErrors(activeProject);
 
     if (this.disposed) {
       return;
@@ -1169,6 +1190,149 @@ export class ProjectController {
     return project;
   }
 
+  /**
+   * Annotate the active model's aux/flow/stock variables with sketch-connector
+   * drift (connectors out of sync with equations; see diagram/connector-sync.ts).
+   * Equation dependencies come from the engine's per-variable `getIncomingLinks`
+   * (authoritative: excludes builtins/TIME, structural flow<->stock edges, and
+   * dotted module-output refs), so the check resolves arrayed/apply-to-all
+   * dependencies correctly. Returns a new Project; does not mutate `this.project`.
+   *
+   * ORDERING: this MUST run on the view that will actually be rendered, so it is
+   * called by each rebuild path AFTER that path has settled on its final view --
+   * NOT tail-called from updateVariableErrors. In updateProject the rendered view
+   * is the live optimistic view that `preserveLiveView` swaps in, which can be
+   * NEWER than the engine-serialized snapshot (e.g. a connector the user just
+   * drew but that has not round-tripped yet); computing against the stale engine
+   * view would flag a "missing" connector that is actually present on screen (or
+   * miss a stale one). The open/undo-reopen paths have no newer live view -- the
+   * engine (or queued) view IS the rendered view -- so they call this directly on
+   * that project.
+   *
+   * Best-effort and non-fatal: any engine failure (a raced rename, a missing
+   * model) leaves the project without connector annotations rather than aborting
+   * the rebuild. Skipped for stdlib/macro models (not user-edited sketches).
+   */
+  async attachConnectorErrors(project: Project): Promise<Project> {
+    const engine = this.engine;
+    const modelName = this.modelName;
+    if (!engine || isStdlibModel(modelName)) {
+      return project;
+    }
+    const model = project.models.get(modelName);
+    const view = model?.views[0];
+    if (!model || !view || isMacroModel(model)) {
+      return project;
+    }
+
+    // Only aux/flow/stock with a primary node on this view are checkable targets.
+    const targetIdents: string[] = [];
+    const seen = new Set<string>();
+    for (const el of view.elements) {
+      if (el.type !== 'aux' && el.type !== 'stock' && el.type !== 'flow') {
+        continue;
+      }
+      const variable = model.variables.get(el.ident);
+      if (!variable || variable.type === 'module' || seen.has(el.ident)) {
+        continue;
+      }
+      seen.add(el.ident);
+      targetIdents.push(el.ident);
+    }
+    if (targetIdents.length === 0) {
+      return project;
+    }
+
+    let engineModel: EngineModelApi;
+    try {
+      engineModel = await engine.getModel(modelName);
+    } catch {
+      return project;
+    }
+    if (this.disposed) {
+      return project;
+    }
+
+    // Fetch each target's equation dependencies. A per-variable failure (e.g. a
+    // transient rename mismatch) drops only that variable from the check.
+    const dependencies = new Map<string, readonly string[]>();
+    const fetched = await Promise.all(
+      targetIdents.map(async (ident): Promise<readonly string[] | undefined> => {
+        try {
+          return await engineModel.getIncomingLinks(ident);
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+    if (this.disposed) {
+      return project;
+    }
+    for (let i = 0; i < targetIdents.length; i++) {
+      const deps = fetched[i];
+      if (deps) {
+        dependencies.set(targetIdents[i], deps);
+      }
+    }
+    if (dependencies.size === 0) {
+      return project;
+    }
+
+    const issuesByIdent = computeConnectorErrors({
+      elements: view.elements,
+      variables: model.variables,
+      dependencies,
+    });
+    if (issuesByIdent.size === 0) {
+      return project;
+    }
+
+    const mutableVars = new Map(model.variables);
+    for (const [ident, issues] of issuesByIdent) {
+      const variable = mutableVars.get(ident);
+      if (variable) {
+        mutableVars.set(ident, { ...variable, connectorErrors: issues });
+      }
+    }
+    const updatedModel = { ...model, variables: mutableVars as ReadonlyMap<string, Variable> };
+    return { ...project, models: mapSet(project.models, modelName, updatedModel) };
+  }
+
+  /**
+   * Re-annotate the ACTIVE model's variables with equation/unit errors AND
+   * connector drift after a model switch that did NOT rebuild the project.
+   *
+   * `updateVariableErrors` and `attachConnectorErrors` are model-scoped and are
+   * otherwise reached only from the rebuild/open paths (which run `projectFromJson`
+   * and reset every model's annotations). Drilling into a module (drillIntoModule)
+   * only flips `modelName` -- no rebuild -- so without this the newly-active child
+   * model's variables would show neither error dots nor connector warnings on
+   * first navigation, even though the error PANEL (refreshCachedErrors) re-scopes.
+   * This subsumes the bare refreshCachedErrors those paths used to call, since
+   * updateVariableErrors refreshes the panel cache too.
+   *
+   * Commit guard: the two engine round-trips (getErrors, getIncomingLinks) can
+   * race a rebuild or a further navigation that lands first; committing our stale
+   * result would clobber the fresher (or differently model-scoped) project. So we
+   * commit ONLY when neither `this.project` nor `this.modelName` moved while we
+   * were in flight. The panel cache was still refreshed above (it is model-scoped
+   * and self-correcting), so skipping the commit loses nothing.
+   */
+  async refreshActiveModelAnnotations(): Promise<void> {
+    const project = this.project;
+    const modelName = this.modelName;
+    if (!this.engine || !project) {
+      return;
+    }
+    let annotated = await this.updateVariableErrors(project);
+    annotated = await this.attachConnectorErrors(annotated);
+    if (this.disposed || this.project !== project || this.modelName !== modelName) {
+      return;
+    }
+    this.project = annotated;
+    this.notify();
+  }
+
   // --- active-model navigation ---
 
   /**
@@ -1207,9 +1371,12 @@ export class ProjectController {
       this.modelName = newModelName;
       this.notify();
     });
-    // The error refresh for the newly active model is driven here (the active
-    // model changed). Fire-and-forget: the snapshot updates when it resolves.
-    void this.refreshCachedErrors();
+    // Drill-in does NOT rebuild the project (only modelName flips), so annotate
+    // the newly-active child model's variables directly -- error dots AND
+    // connector warnings, not just the error panel. Fire-and-forget: the
+    // snapshot updates when it resolves. (refreshActiveModelAnnotations refreshes
+    // the panel cache too, subsuming the old bare refreshCachedErrors call.)
+    void this.refreshActiveModelAnnotations();
     return { restoredSelection: new Set<UID>() };
   }
 
@@ -1254,9 +1421,18 @@ export class ProjectController {
     // no setState-callback deferral is needed. Fire-and-forget round-trip.
     const view = this.getView();
     if (view) {
+      // queueViewUpdate round-trips through updateProject, which re-annotates the
+      // restored active model's variables (error dots + connector warnings) as a
+      // side effect -- so back-navigation is covered without a separate pass.
       void this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
+    } else {
+      // No stored view means no rebuild will run, so annotate the restored
+      // model's variables directly (mirrors drillIntoModule).
+      void this.refreshActiveModelAnnotations();
     }
-    // The active model changed -- refresh its cached errors.
+    // Refresh the model-scoped error PANEL promptly. The annotation paths above
+    // also refresh it (via updateVariableErrors), but this keeps the panel snappy
+    // and covers a queueViewUpdate that bails on a non-finite restored viewport.
     void this.refreshCachedErrors();
     return { restoredSelection: result.restoredSelection };
   }

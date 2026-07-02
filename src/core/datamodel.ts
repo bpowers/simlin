@@ -65,6 +65,21 @@ export interface SimError {
   readonly details: string | undefined;
 }
 
+// A sketch-hygiene issue: the sketch connectors for a variable have drifted out
+// of sync with its equation. `missingConnector` -- the equation references
+// `ident` but no connector is drawn from it; `staleConnector` -- a connector is
+// drawn from `ident` but the equation does not reference it. `name` is the
+// other variable's display (original-case) name for the details panel. Computed
+// in the diagram layer (see diagram/connector-sync.ts) and attached to
+// variables like `errors`/`unitErrors`; never serialized.
+export type ConnectorErrorKind = 'missingConnector' | 'staleConnector';
+
+export interface ConnectorError {
+  readonly kind: ConnectorErrorKind;
+  readonly ident: string;
+  readonly name: string;
+}
+
 export interface ModelError {
   readonly code: ErrorCode;
   readonly details: string | undefined;
@@ -401,6 +416,10 @@ export interface Stock {
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
+  // Sketch-connector drift, attached by the diagram layer (connector-sync.ts).
+  // Optional so the many Variable literals that predate this feature stay valid;
+  // absent and undefined are equivalent ("no connector issues").
+  readonly connectorErrors?: readonly ConnectorError[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -419,6 +438,10 @@ export interface Flow {
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
+  // Sketch-connector drift, attached by the diagram layer (connector-sync.ts).
+  // Optional so the many Variable literals that predate this feature stay valid;
+  // absent and undefined are equivalent ("no connector issues").
+  readonly connectorErrors?: readonly ConnectorError[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -436,6 +459,10 @@ export interface Aux {
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
+  // Sketch-connector drift, attached by the diagram layer (connector-sync.ts).
+  // Optional so the many Variable literals that predate this feature stay valid;
+  // absent and undefined are equivalent ("no connector issues").
+  readonly connectorErrors?: readonly ConnectorError[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -468,6 +495,10 @@ export interface Module {
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
+  // Sketch-connector drift, attached by the diagram layer (connector-sync.ts).
+  // Optional so the many Variable literals that predate this feature stay valid;
+  // absent and undefined are equivalent ("no connector issues").
+  readonly connectorErrors?: readonly ConnectorError[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -479,7 +510,11 @@ export function variableIsArrayed(v: Variable): boolean {
 }
 
 export function variableHasError(v: Variable): boolean {
-  return v.errors !== undefined || v.unitErrors !== undefined;
+  // Includes non-fatal warnings (unit errors, sketch-connector drift), matching
+  // how the diagram surfaces every variable problem with the same indicator.
+  // Simulatability is decided separately (engine.isSimulatable), so a
+  // connector-only warning never blocks a run.
+  return v.errors !== undefined || v.unitErrors !== undefined || v.connectorErrors !== undefined;
 }
 
 export function variableGf(v: Variable): GraphicalFunction | undefined {
@@ -514,6 +549,7 @@ export function stockFromJson(json: JsonStock): Stock {
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
+    connectorErrors: undefined,
     uid: json.uid,
   };
 }
@@ -601,6 +637,7 @@ export function flowFromJson(json: JsonFlow): Flow {
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
+    connectorErrors: undefined,
     uid: json.uid,
   };
 }
@@ -685,6 +722,7 @@ export function auxFromJson(json: JsonAuxiliary): Aux {
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
+    connectorErrors: undefined,
     uid: json.uid,
   };
 }
@@ -755,6 +793,7 @@ export function moduleFromJson(json: JsonModule): Module {
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
+    connectorErrors: undefined,
     uid: json.uid,
   };
 }

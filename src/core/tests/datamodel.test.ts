@@ -37,6 +37,8 @@ import {
   projectFromJson,
   projectToJson,
   projectAttachData,
+  variableHasError,
+  ErrorCode,
 } from '../datamodel';
 
 import type {
@@ -2069,5 +2071,61 @@ describe('stockFlowViewFromJson coordinate sanitization (#818)', () => {
     expect(Number.isFinite(view.viewBox.width)).toBe(true);
     expect(Number.isFinite(view.zoom)).toBe(true);
     expect(findNonFiniteViewCoord(view)).toBeUndefined();
+  });
+});
+
+describe('variableHasError', () => {
+  const base = auxFromJson({ name: 'x', equation: '1' });
+
+  it('is false for a clean variable', () => {
+    expect(variableHasError(base)).toBe(false);
+  });
+
+  it('is true when equation errors are present', () => {
+    expect(variableHasError({ ...base, errors: [{ code: ErrorCode.EmptyEquation, start: 0, end: 0 }] })).toBe(true);
+  });
+
+  it('is true when unit errors are present', () => {
+    expect(
+      variableHasError({
+        ...base,
+        unitErrors: [{ code: ErrorCode.UnitMismatch, start: 0, end: 0, isConsistencyError: true, details: undefined }],
+      }),
+    ).toBe(true);
+  });
+
+  it('is true when connector errors are present (non-fatal sketch drift)', () => {
+    expect(variableHasError({ ...base, connectorErrors: [{ kind: 'missingConnector', ident: 'a', name: 'a' }] })).toBe(
+      true,
+    );
+  });
+});
+
+describe('display-only annotations never serialize', () => {
+  // errors/unitErrors/connectorErrors are UI annotations attached after the
+  // engine round-trip; if one ever leaked into toJson output it would be
+  // persisted into saved projects. Pin the exclusion.
+  const annotations = {
+    errors: [{ code: ErrorCode.EmptyEquation, start: 0, end: 0 }],
+    unitErrors: [{ code: ErrorCode.UnitMismatch, start: 0, end: 0, isConsistencyError: true, details: undefined }],
+    connectorErrors: [{ kind: 'missingConnector' as const, ident: 'a', name: 'a' }],
+  };
+
+  const expectNoAnnotationKeys = (json: object): void => {
+    expect(json).not.toHaveProperty('errors');
+    expect(json).not.toHaveProperty('unitErrors');
+    expect(json).not.toHaveProperty('connectorErrors');
+  };
+
+  it('excludes annotations from aux JSON', () => {
+    expectNoAnnotationKeys(auxToJson({ ...auxFromJson({ name: 'x', equation: '1' }), ...annotations }));
+  });
+
+  it('excludes annotations from stock JSON', () => {
+    expectNoAnnotationKeys(stockToJson({ ...stockFromJson({ name: 's', initialEquation: '1' }), ...annotations }));
+  });
+
+  it('excludes annotations from flow JSON', () => {
+    expectNoAnnotationKeys(flowToJson({ ...flowFromJson({ name: 'f', equation: '1' }), ...annotations }));
   });
 });

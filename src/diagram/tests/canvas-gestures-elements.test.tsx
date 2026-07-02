@@ -260,6 +260,152 @@ describe('Canvas gestures: flow endpoint drag (checklist 11)', () => {
   });
 });
 
+describe('Canvas gestures: existing cloud endpoint drag live preview', () => {
+  // Regression: dragging an existing flow's cloud endpoint used to move only the
+  // valve (UpdateFlow's valve-slide fallback), leaving the flow line/arrowhead
+  // stale until pointer-up. It must now track the cursor DURING the drag, the
+  // same as flow creation (both route through growEndpointDrag ->
+  // UpdateCloudAndFlow). Assertions are made BEFORE pointer-up.
+
+  it('sink cloud, along-axis drag: the flow line + arrowhead track the cursor mid-drag', () => {
+    const h = stockToCloudFlow(); // stock(100,100) -> cloud(300,100), valve(200,100)
+    h.clearMountCalls();
+
+    const arrowhead = h.query('.simlin-arrowhead-flow')!;
+    pointerDown(arrowhead, 300, 100);
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([3]);
+
+    // Drag 100px further right along the axis; do NOT release.
+    pointerMove(h.svg, 400, 100, { buttons: 1 });
+
+    const head = arrowheadPoint(h);
+    // Pre-fix the arrowhead stayed at the original cloud (300); now it follows
+    // the cursor to 400 (the arrowhead sits at the true endpoint).
+    expect(head[0]).toBeGreaterThan(360);
+    expect(head[0]).toBeCloseTo(400);
+    expect(head[1]).toBeCloseTo(100); // stayed horizontal
+    // The rendered flow line grew to the moved endpoint (pulled back by the
+    // finalAdjust arrowhead inset to ~392.5), not stuck at 300.
+    const pts = flowPoints(h);
+    expect(pts[pts.length - 1][0]).toBeGreaterThan(360);
+  });
+
+  it('sink cloud, vertical flow, along-axis drag: the arrowhead tracks down mid-drag', () => {
+    const stock = makeStock(1, 'stock', 100, 100);
+    const cloud = makeCloud(2, 3, 100, 300);
+    const flow = makeFlow(
+      3,
+      'flow',
+      [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 100, y: 300, attachedToUid: 2 },
+      ],
+      { x: 100, y: 200 },
+    );
+    const h = renderCanvas({ elements: [{ ...stock, outflows: [3] }, cloud, flow] });
+    h.clearMountCalls();
+
+    const arrowhead = h.query('.simlin-arrowhead-flow')!;
+    pointerDown(arrowhead, 100, 300);
+    pointerMove(h.svg, 100, 400, { buttons: 1 });
+
+    const head = arrowheadPoint(h);
+    expect(head[1]).toBeGreaterThan(360); // tracked downward
+    expect(head[1]).toBeCloseTo(400);
+    expect(head[0]).toBeCloseTo(100); // stayed vertical
+  });
+
+  it('source cloud, along-axis drag: the flow source tracks the cursor mid-drag', () => {
+    const cloud = makeCloud(2, 3, 100, 100); // source
+    const stock = makeStock(1, 'stock', 300, 100); // sink
+    const flow = makeFlow(
+      3,
+      'flow',
+      [
+        { x: 100, y: 100, attachedToUid: 2 },
+        { x: 300, y: 100, attachedToUid: 1 },
+      ],
+      { x: 200, y: 100 },
+    );
+    const h = renderCanvas({ elements: [{ ...stock, inflows: [3] }, cloud, flow] });
+    h.clearMountCalls();
+
+    const sourceHit = h.query('.simlin-flow rect[fill="transparent"]')!;
+    pointerDown(sourceHit, 110, 100);
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([3]);
+
+    // Drag the source 60px to the left; do NOT release.
+    pointerMove(h.svg, 50, 100, { buttons: 1 });
+
+    const pts = flowPoints(h);
+    // Pre-fix the source point stayed at x=100; now it follows the cursor to 40.
+    expect(pts[0][0]).toBeLessThan(80);
+    expect(pts[0][0]).toBeCloseTo(40);
+    expect(pts[0][1]).toBeCloseTo(100); // stayed horizontal
+  });
+
+  it('sink cloud dragged over a stock: the flow line snaps to the stock EDGE mid-drag', () => {
+    const stock = makeStock(1, 'stock', 100, 100);
+    const cloud = makeCloud(2, 3, 300, 100);
+    const target = makeStock(4, 'target', 400, 100);
+    const flow = makeFlow(
+      3,
+      'flow',
+      [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 300, y: 100, attachedToUid: 2 },
+      ],
+      { x: 200, y: 100 },
+    );
+    const h = renderCanvas({ elements: [{ ...stock, outflows: [3] }, cloud, target, flow] });
+    h.clearMountCalls();
+
+    const arrowhead = h.query('.simlin-arrowhead-flow')!;
+    pointerDown(arrowhead, 300, 100);
+    // Move onto the target stock's center; do NOT release.
+    pointerMove(h.svg, 400, 100, { buttons: 1 });
+
+    const head = arrowheadPoint(h);
+    // Pinned to the target's LEFT edge (400 - StockWidth/2 = 377.5), pulled back
+    // by the arrowhead inset -- not the stock center (400) and not stuck at 300.
+    expect(head[0]).toBeGreaterThan(355);
+    expect(head[0]).toBeLessThan(378);
+    expect(head[1]).toBeCloseTo(100);
+  });
+
+  it('cloud-to-cloud flow, sink drag: the non-dragged source cloud stays put mid-drag', () => {
+    // Both endpoints are clouds. applyGroupMovement's UpdateFlow cloud-to-cloud
+    // path would translate BOTH clouds by the delta; the fix holds the source
+    // fixed and restores its cloud, so it stays attached to the fixed endpoint.
+    const source = makeCloud(1, 3, 100, 100);
+    const sink = makeCloud(2, 3, 300, 100);
+    const flow = makeFlow(
+      3,
+      'flow',
+      [
+        { x: 100, y: 100, attachedToUid: 1 },
+        { x: 300, y: 100, attachedToUid: 2 },
+      ],
+      { x: 200, y: 100 },
+    );
+    const h = renderCanvas({ elements: [source, sink, flow] });
+    h.clearMountCalls();
+
+    const arrowhead = h.query('.simlin-arrowhead-flow')!;
+    pointerDown(arrowhead, 300, 100);
+    pointerMove(h.svg, 350, 100, { buttons: 1 }); // delta = {x:-50}; do NOT release
+
+    // The flow's source endpoint stays fixed at (100,100)...
+    const pts = flowPoints(h);
+    expect(pts[0][0]).toBeCloseTo(100);
+    expect(pts[0][1]).toBeCloseTo(100);
+    // ...and the source cloud stays there too (pre-fix it drifted to x=150).
+    const centers = cloudCenters(h);
+    expect(centers.some(([cx, cy]) => Math.abs(cx - 100) < 0.5 && Math.abs(cy - 100) < 0.5)).toBe(true);
+    expect(centers.some(([cx]) => Math.abs(cx - 150) < 0.5)).toBe(false);
+  });
+});
+
 describe('Canvas gestures: creation tools (checklist 12)', () => {
   it.each([
     ['aux', 'aux', 'New Variable'],
@@ -592,6 +738,109 @@ describe('Canvas gestures: name editing (checklist 15)', () => {
     });
 
     expect(h.callbacks.onRenameVariable).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Regression coverage for "double-clicking a var name doesn't reliably open the
+// name editor". Two independent unreliability sources are pinned here:
+//
+//  1. An ALREADY-SELECTED element's name-edit request was routed through the
+//     deferred-single-select dance (computeMouseDownSelection returns
+//     deferSingleSelect when a modifier-less press lands on a selected element).
+//     That path only opens the editor on the *pointer-up* that resolves the
+//     defer -- but a double-click's terminal event is `dblclick`, whose
+//     pointer-up already fired, so the editor never appeared. It worked when the
+//     element was unselected (that path selects + edits synchronously), so the
+//     bug surfaced as "sometimes works, sometimes doesn't".
+//
+//  2. The name label started a label-drag on ANY pointer movement (no
+//     click-vs-drag threshold), so the incidental 1-2px wobble of a physical
+//     double-click was treated as a drag -- selecting the element and moving its
+//     label instead of editing.
+describe('Canvas gestures: double-click name-edit reliability', () => {
+  it('opens the editor when double-clicking the name of an ALREADY-SELECTED variable', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)], selection: new Set([10]) });
+    h.clearMountCalls();
+
+    expect(h.query('[contenteditable]')).toBeNull();
+
+    const text = h.query('.simlin-aux text')!;
+    act(() => {
+      fireEvent.doubleClick(text, { clientX: 130, clientY: 100 });
+    });
+    // Mirror the host committing the selection the double-click requested.
+    h.setProps({ selection: new Set([10]) });
+
+    expect(h.query('[contenteditable]')).not.toBeNull();
+    expect(h.callbacks.onRenameVariable).not.toHaveBeenCalled();
+  });
+
+  it('opens the editor when double-clicking the name of an UNSELECTED variable', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const text = h.query('.simlin-aux text')!;
+    act(() => {
+      fireEvent.doubleClick(text, { clientX: 130, clientY: 100 });
+    });
+    h.setProps({ selection: new Set([10]) });
+
+    expect(h.query('[contenteditable]')).not.toBeNull();
+  });
+
+  it('a sub-threshold wobble on the name label does not start a label drag', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const text = h.query('.simlin-aux text')!;
+    pointerDown(text, 130, 100);
+    pointerMove(text, 132, 101); // ~2px, below the 5px click/drag threshold
+    pointerUp(text, 132, 101);
+
+    // No drag => no label move and no drag-driven selection.
+    expect(h.callbacks.onMoveLabel).not.toHaveBeenCalled();
+    expect(h.callbacks.onSetSelection).not.toHaveBeenCalled();
+  });
+
+  it('a supra-threshold drag on the name label still moves the label', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const text = h.query('.simlin-aux text')!;
+    pointerDown(text, 130, 100);
+    pointerMove(text, 60, 100); // 70px to the left, well past the threshold
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([10]);
+
+    pointerUp(h.svg, 60, 100);
+    expect(h.callbacks.onMoveLabel).toHaveBeenCalledWith(10, 'left');
+  });
+
+  it('captures the pointer on press (so an edge grip that leaves the label sub-threshold can still drag)', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const text = h.query('.simlin-aux text') as SVGElement;
+    // Spy on the text node's setPointerCapture (the harness polyfills it as a
+    // no-op on Element.prototype); the component captures on `e.currentTarget`,
+    // which is this <text> node.
+    const captureSpy = jest.spyOn(text, 'setPointerCapture');
+
+    // Capture must happen at press time, not once the drag starts: a short
+    // label's tiny hit box means an edge grip can leave the bbox while still
+    // sub-threshold, and only an already-captured pointer keeps delivering moves.
+    pointerDown(text, 130, 100, { pointerId: 7 });
+    expect(captureSpy).toHaveBeenCalledWith(7);
+
+    // The drag is still gated on the threshold: a sub-threshold move starts no
+    // drag (no selection churn between the two clicks of a double-click)...
+    pointerMove(text, 132, 101, { pointerId: 7 });
+    expect(h.callbacks.onSetSelection).not.toHaveBeenCalled();
+
+    // ...and crossing the threshold begins the drag and selects the element.
+    pointerMove(text, 150, 130, { pointerId: 7 });
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([10]);
+
+    captureSpy.mockRestore();
   });
 });
 

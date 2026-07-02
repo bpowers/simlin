@@ -621,3 +621,13 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Owner**: unassigned
 - **Discovered**: Phase 3 Canvas refactor (diagram-react-refactor branch)
 - **Last reviewed**: 2026-06-07
+
+### 67. Connector-error recompute fires on viewport-only project rebuilds
+
+- **Component**: diagram (`src/diagram/project-controller.ts` `attachConnectorErrors` / `updateVariableErrors`, called from `updateProject`)
+- **Severity**: low
+- **Description**: A sketch-connector/equation consistency check (`ProjectController.attachConnectorErrors`) runs from `updateVariableErrors`, which executes on EVERY project rebuild in `updateProject`. It fetches per-variable equation dependencies via the engine's `Model.getIncomingLinks(varName)` -- one async engine call per on-view aux/flow/stock variable (batched with `Promise.all`). Because viewport-only settles (pan/zoom) route through `queueViewUpdate` -> `updateProject` -> `updateVariableErrors`, this recompute also fires when connectors cannot possibly have changed. For large models (e.g. World3, hundreds of variables) on the Web Worker backend that is N `postMessage` round-trips per pan/zoom settle, adding avoidable latency to the settle's save. The feature is correct as-is; this is purely an efficiency refinement.
+- **Suggested fix**: (a) Skip the connector recompute on non-content updates by distinguishing viewport-only rebuilds from content/structure edits, or (b) memoize per-variable incoming-links keyed on the serialized model content so pan/zoom settles reuse the prior result.
+- **Owner**: unassigned
+- **Discovered**: sketch-connector/equation consistency-check work on branch `editor-bug-burndown-2026-07`
+- **Last reviewed**: 2026-07-02

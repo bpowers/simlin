@@ -17,6 +17,7 @@ import type { JsonModelOperation } from '@simlin/engine';
 import {
   computeFlowAttachment,
   fauxCloudTargetUid,
+  growEndpointDrag,
   growInCreationFlow,
   inCreationCloudUid,
   inCreationUid,
@@ -953,5 +954,117 @@ describe('growInCreationFlow (live drag preview)', () => {
     expect(sink.y).toBeCloseTo(40 + StockHeight / 2); // bottom edge, not the center
     expect(sink.y).not.toBe(200); // not stuck at the press point
     expect(sink.x).toBe(100);
+  });
+});
+
+describe('growEndpointDrag (existing cloud endpoint drag)', () => {
+  // A straight, already-attached flow: stock (uid 1) on the left, cloud (uid 2)
+  // on the right, valve in the middle. This is the geometry the reported bug is
+  // about -- dragging the cloud along the flow axis previously moved only the
+  // valve, leaving the path/arrowhead stale.
+  function stockToCloudFlow(): FlowViewElement {
+    return makeFlowEl(10, 'f', 200, 200, [
+      { x: 122.5, y: 200, attachedToUid: 1 }, // stock right edge (100 + StockWidth/2)
+      { x: 300, y: 200, attachedToUid: 2 }, // cloud center
+    ]);
+  }
+  // The mirror: cloud (uid 2) on the left is the SOURCE, stock (uid 1) the sink.
+  function cloudToStockFlow(): FlowViewElement {
+    return makeFlowEl(10, 'f', 200, 200, [
+      { x: 100, y: 200, attachedToUid: 2 }, // cloud center (source)
+      { x: 277.5, y: 200, attachedToUid: 1 }, // stock left edge (300 - StockWidth/2)
+    ]);
+  }
+
+  it('sink cloud, along-axis drag: the sink endpoint follows the cursor (not just the valve)', () => {
+    const flow = stockToCloudFlow();
+    // cursor 50px further right -> moveDelta = press - cursor = -50 in x.
+    const grown = growEndpointDrag(flow, false, { x: -50, y: 0 }, undefined);
+
+    expect(grown.points.length).toBe(2);
+    const src = grown.points[0];
+    const sink = grown.points[1];
+    // sink tracked the cursor; flow stayed horizontal; source fixed on its edge
+    expect(sink.x).toBeCloseTo(350);
+    expect(sink.y).toBe(200);
+    expect(sink.attachedToUid).toBe(2);
+    expect(src.x).toBeCloseTo(122.5);
+    expect(src.y).toBe(200);
+    // the valve stayed between the two ends (no longer stuck lagging behind)
+    expect(grown.x).toBeGreaterThan(src.x);
+    expect(grown.x).toBeLessThan(sink.x);
+  });
+
+  it('sink cloud, along-axis drag TOWARD the source: the sink still tracks the cursor', () => {
+    const flow = stockToCloudFlow();
+    // cursor 120px to the LEFT -> moveDelta = press - cursor = +120 in x.
+    const grown = growEndpointDrag(flow, false, { x: 120, y: 0 }, undefined);
+
+    const sink = grown.points[grown.points.length - 1];
+    expect(sink.x).toBeCloseTo(180);
+    expect(sink.x).not.toBeCloseTo(300); // not stuck at the original cloud position
+    expect(sink.y).toBe(200);
+  });
+
+  it('source cloud, along-axis drag: the source endpoint follows the cursor', () => {
+    const flow = cloudToStockFlow();
+    // cursor 50px to the LEFT -> moveDelta = press - cursor = +50 in x.
+    const grown = growEndpointDrag(flow, true, { x: 50, y: 0 }, undefined);
+
+    const src = grown.points[0];
+    const sink = grown.points[grown.points.length - 1];
+    expect(src.x).toBeCloseTo(50); // source cloud followed the cursor left
+    expect(src.x).not.toBeCloseTo(100); // not stuck at the original position
+    expect(src.y).toBe(200);
+    expect(sink.x).toBeCloseTo(277.5); // stock endpoint fixed on its edge
+    expect(sink.attachedToUid).toBe(1);
+  });
+
+  it('vertical flow, sink cloud along-axis drag: the sink tracks the cursor vertically', () => {
+    const flow = makeFlowEl(10, 'f', 200, 200, [
+      { x: 200, y: 122.5, attachedToUid: 1 }, // stock bottom edge
+      { x: 200, y: 300, attachedToUid: 2 }, // cloud below
+    ]);
+    // cursor 40px further down -> moveDelta = press - cursor = -40 in y.
+    const grown = growEndpointDrag(flow, false, { x: 0, y: -40 }, undefined);
+
+    const sink = grown.points[grown.points.length - 1];
+    expect(sink.y).toBeCloseTo(340);
+    expect(sink.x).toBe(200); // stayed vertical
+  });
+
+  it('sink cloud, perpendicular drag: bends into an L and the cloud moves perpendicular', () => {
+    const flow = stockToCloudFlow();
+    // cursor 60px DOWN -> moveDelta = press - cursor = -60 in y (perpendicular).
+    const grown = growEndpointDrag(flow, false, { x: 0, y: -60 }, undefined);
+
+    expect(grown.points.length).toBe(3);
+    const sink = grown.points[grown.points.length - 1];
+    expect(sink.y).toBeCloseTo(260); // cloud descended with the drag
+    expect(sink.attachedToUid).toBe(2);
+  });
+
+  it('sink cloud dragged onto a stock: the sink pins to the stock EDGE (matches the commit)', () => {
+    const flow = stockToCloudFlow();
+    const target = makeStockEl(3, 'snk', 500, 200);
+    const grown = growEndpointDrag(flow, false, { x: -200, y: 0 }, target);
+
+    const sink = grown.points[grown.points.length - 1];
+    expect(sink.attachedToUid).toBe(3);
+    expect(sink.x).toBeCloseTo(500 - StockWidth / 2); // left edge, not the center
+    expect(sink.x).not.toBe(500);
+    expect(sink.y).toBe(200); // horizontal
+  });
+
+  it('source cloud dragged onto a stock: the source pins to the stock EDGE', () => {
+    const flow = cloudToStockFlow();
+    const target = makeStockEl(3, 'src', 0, 200); // stock to the left
+    const grown = growEndpointDrag(flow, true, { x: 100, y: 0 }, target);
+
+    const src = grown.points[0];
+    expect(src.attachedToUid).toBe(3);
+    expect(src.x).toBeCloseTo(0 + StockWidth / 2); // right edge of the left-hand stock
+    expect(src.x).not.toBe(0);
+    expect(src.y).toBe(200);
   });
 });

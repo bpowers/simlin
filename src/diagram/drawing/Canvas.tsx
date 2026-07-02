@@ -54,7 +54,7 @@ import { Connector, ConnectorProps, computeLinkCreationArc } from './Connector';
 import { EditableLabel } from './EditableLabel';
 import { Flow, flowBounds } from './Flow';
 import { applyGroupMovement } from '../group-movement';
-import { growInCreationFlow } from '../flow-attach';
+import { growEndpointDrag, growInCreationFlow } from '../flow-attach';
 import { Group, groupBounds, GroupProps } from './Group';
 import { Module, moduleBounds, moduleContains, ModuleProps } from './Module';
 import { anyModuleHasModelReference } from '../module-warning';
@@ -507,8 +507,8 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
   // Apply the PointerStateReset bag (formerly `setState(pointerStateReset())`)
   // by calling the per-field setters. React batches them into one render. The
-  // former loose instance fields (deferredSingleSelectUid, deferredIsText,
-  // dragPointerType) now live inside the interaction union, reset by
+  // former loose instance fields (deferredSingleSelectUid, dragPointerType)
+  // now live inside the interaction union, reset by
   // pointerStateReset()'s `interaction: idle`.
   const applyPointerStateReset = (): void => {
     const reset = pointerStateReset();
@@ -921,6 +921,56 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       }
     }
 
+    // Live-route an EXISTING flow's cloud endpoint drag the same way flow
+    // creation does (growEndpointDrag -> UpdateCloudAndFlow, the routing the
+    // commit computeFlowAttachment also uses), so the flow line, arrowhead, and
+    // valve all track the dragged cloud. applyGroupMovement's single-flow path
+    // (UpdateFlow) instead treats an along-axis endpoint drag as a valve slide
+    // and leaves the path stale -- the reported "valve moves live but the flow
+    // doesn't". Only fires for a cloud endpoint; a stock-endpoint (detach) drag
+    // keeps its existing applyGroupMovement behavior.
+    const draggingEndpoint =
+      isDraggingArrowhead(latest.current.interaction) || isDraggingSource(latest.current.interaction);
+    if (!inCreationNow && latest.current.moveDelta && draggingEndpoint && p.selection.size === 1) {
+      const flowUid = only(p.selection);
+      const flowEl = r.elements.get(flowUid);
+      if (flowEl?.type === 'flow' && flowEl.points.length >= 2) {
+        const isSource = isDraggingSource(latest.current.interaction);
+        const endPt = isSource ? first(flowEl.points) : last(flowEl.points);
+        const endpointEl = endPt.attachedToUid !== undefined ? r.elements.get(endPt.attachedToUid) : undefined;
+        if (endpointEl?.type === 'cloud') {
+          let previewTarget: StockViewElement | undefined;
+          for (const el of displayElements) {
+            if (el.type === 'stock' && isValidTarget(el)) {
+              previewTarget = el;
+              break;
+            }
+          }
+          const grown = growEndpointDrag(flowEl, isSource, defined(latest.current.moveDelta), previewTarget);
+          selectionUpdates = new Map(selectionUpdates);
+          selectionUpdates.set(flowUid, grown);
+          // Keep the (hidden-during-drag) cloud coherent with the rerouted flow:
+          // over empty space its center coincides with the moved endpoint. When
+          // snapped to a stock the cloud is being replaced, so leave it be.
+          if (previewTarget === undefined) {
+            const newEndPt = isSource ? first(grown.points) : last(grown.points);
+            selectionUpdates.set(endpointEl.uid, { ...endpointEl, x: newEndPt.x, y: newEndPt.y });
+          }
+          // Cloud-to-cloud flow: applyGroupMovement's single-flow UpdateFlow
+          // path translates BOTH clouds by the drag delta, but growEndpointDrag
+          // holds the opposite endpoint FIXED. Restore the non-dragged cloud to
+          // its original position (it isn't hidden during the drag, unlike the
+          // dragged one) so it stays attached to the flow's fixed endpoint,
+          // matching the commit.
+          const otherPt = isSource ? last(flowEl.points) : first(flowEl.points);
+          const otherEl = otherPt.attachedToUid !== undefined ? r.elements.get(otherPt.attachedToUid) : undefined;
+          if (otherEl?.type === 'cloud') {
+            selectionUpdates.set(otherEl.uid, otherEl);
+          }
+        }
+      }
+    }
+
     const derived: RenderDerivation = {
       displayElements,
       elementsByUid: r.elements,
@@ -1265,27 +1315,12 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     if (interactionNow.mode === 'movingSelection' && interactionNow.deferredSingleSelectUid !== undefined) {
       const didDrag = isDrag(latest.current.moveDelta, latest.current.props.view.zoom);
       const newSel = resolveDeferredSelection(interactionNow.deferredSingleSelectUid, didDrag);
-      const wasDeferredText = interactionNow.deferredIsText;
-      // Drop the deferred fields by collapsing the movingSelection variant to a
-      // plain one (segmentIndex stays so a drag still moves the right segment).
+      // Collapse the group selection to the pressed element on a no-drag
+      // pointer-up (Figma-style). Name editing is NOT entered from here: a
+      // double-click on a label is a terminal `dblclick` and enters editing
+      // synchronously in handleSetSelection, never via this deferred pointer-up.
       if (newSel) {
         latest.current.props.onSetSelection(newSel);
-        if (wasDeferredText && newSel.size === 1) {
-          const uid = only(newSel);
-          const el = getElementByUid(uid);
-          if (!isNamedViewElement(el)) {
-            // Clouds and other non-named elements can't enter text editing
-            r.selectionCenterOffset = undefined;
-            applyPointerStateReset();
-            return;
-          }
-          const nextEditingName = plainDeserialize('label', displayName(defined((el as NamedViewElement).name)));
-          setInteraction({ mode: 'editingName', onPointerUp: false, creatingFlow: false });
-          setEditingName(nextEditingName);
-          setMoveDelta(undefined);
-          r.selectionCenterOffset = undefined;
-          return;
-        }
       }
     }
 
@@ -1927,6 +1962,25 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       // Not a link/flow tool action -- compute selection and handle clouds
       latest.current.props.onClearSelectedTool();
 
+      // A name-edit request (double-click on the label) opens the inline editor
+      // immediately, whether or not the element is already selected. It must NOT
+      // go through the deferred-single-select dance below: that path only
+      // resolves into editing on the pointer-UP that follows a modifier-less
+      // press on a selected element, but a name-edit request arrives as a
+      // terminal `dblclick` whose pointer-up already fired -- so deferring would
+      // silently drop the edit for any already-selected variable (the reported
+      // "doesn't reliably open" bug). Only named elements render a label, so
+      // `element` is nameable here; collapse the selection to it and edit now.
+      if (isEditingName && isNamedViewElement(element)) {
+        nextEditingName = plainDeserialize('label', displayName(defined(element.name)));
+        latest.current.props.onSetSelection(new Set<UID>([element.uid]));
+        setInteraction({ mode: 'editingName', onPointerUp: false, creatingFlow: false });
+        setEditingName(nextEditingName);
+        setInCreation(undefined);
+        setMoveDelta(undefined);
+        return;
+      }
+
       const isMultiSelect = e.ctrlKey || e.metaKey || e.shiftKey;
       const { newSelection, deferSingleSelect } = decideMouseDownSelection(
         latest.current.props.selection,
@@ -1941,7 +1995,6 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         setInteraction({
           mode: 'movingSelection',
           deferredSingleSelectUid: deferSingleSelect,
-          deferredIsText: !!isText,
           segmentIndex,
         });
         setEditingName(nextEditingName);
@@ -2009,7 +2062,6 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       nextInteraction = {
         mode: 'movingSelection',
         deferredSingleSelectUid: undefined,
-        deferredIsText: false,
         segmentIndex,
       };
     }

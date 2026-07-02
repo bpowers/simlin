@@ -42,7 +42,14 @@ describe('variableDetailsView', () => {
       showChart: true,
       equationErrors: [],
       unitWarnings: [],
+      connectorWarnings: [],
     });
+  });
+
+  it('surfaces connector-sync drift as non-fatal warnings (chart stays)', () => {
+    const view = variableDetailsView(aux({ connectorErrors: [{ kind: 'missingConnector', ident: 'a', name: 'a' }] }));
+    expect(view.showChart).toBe(true);
+    expect(view.connectorWarnings).toEqual([{ kind: 'missingConnector', ident: 'a', name: 'a' }]);
   });
 
   it('keeps the chart and surfaces unit errors as warnings (not fatal)', () => {

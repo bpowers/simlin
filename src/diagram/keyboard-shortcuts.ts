@@ -26,6 +26,39 @@ export function isEditableElement(element: EventTarget | null): boolean {
   return false;
 }
 
+/**
+ * Does this key event request a line break inside a multi-line text editor?
+ *
+ * Slate already inserts a break for Enter and Shift+Enter, but Cmd+Enter
+ * (macOS "Apple enter") and Ctrl+Enter fall through both of its paths: on
+ * modern browsers a modifier+Enter chord produces no `beforeinput` event at
+ * all (so the insertParagraph/insertLineBreak path never fires), and the
+ * legacy keydown fallback uses `is-hotkey`, which requires every modifier not
+ * named in a binding to be absent, so metaKey/ctrlKey+Enter matches neither
+ * `enter` (split block) nor `shift+enter` (soft break). Users reach for
+ * Cmd+Enter to add a line to an equation, so editors that want it call this
+ * and insert the break themselves.
+ *
+ * Ctrl+Enter is included so the gesture is consistent on non-mac keyboards. It
+ * is safe: the global editor shortcuts (`detectUndoRedo`) bail out on editable
+ * targets, and the equation/documentation fields carry no other Ctrl+Enter or
+ * Cmd+Enter binding. Alt is excluded so Option/Alt combinations stay free for
+ * platform text-navigation shortcuts.
+ */
+export function isNewlineChord(e: {
+  key?: string;
+  code?: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+}): boolean {
+  const isEnter = e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter';
+  if (!isEnter || e.altKey) {
+    return false;
+  }
+  return e.metaKey || e.ctrlKey;
+}
+
 export function detectUndoRedo(e: {
   key: string;
   metaKey: boolean;
