@@ -443,6 +443,17 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
       );
     });
 
+    // Sketch-connector drift is a non-fatal warning: the variable still
+    // simulates, so it renders beside the chart like unit warnings rather than
+    // replacing the results.
+    const connectorWarnings = detailsView.connectorWarnings.map((warning, i) => (
+      <div key={`connector-${i}`} className={styles.errorList}>
+        {warning.kind === 'missingConnector'
+          ? `equation uses ${warning.name} but no connector is drawn from it`
+          : `connector from ${warning.name} is not used in the equation`}
+      </div>
+    ));
+
     let chartOrErrors;
     if (!detailsView.showChart) {
       // Equation/compile errors mean the variable produced no valid data, so
@@ -452,12 +463,13 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
           error: {errorCodeDescription(error.code)}
         </div>
       ));
-      chartOrErrors = [...errorList, ...unitWarnings];
+      chartOrErrors = [...errorList, ...unitWarnings, ...connectorWarnings];
     } else {
       chartOrErrors = (
         <>
           <LineChart height={300} series={chartSeries} yDomain={[yMin, yMax]} tooltipFormatter={formatValue} />
           {unitWarnings}
+          {connectorWarnings}
         </>
       );
     }

@@ -45,7 +45,16 @@ import { SimlinErrorKind, SimlinUnitErrorKind } from '@simlin/engine';
 
 import { preserveLiveView } from './merge-live-view';
 import { advanceProjectHistory } from './project-history';
-import { type ModuleStackEntry, currentModelName, pushModule, popModule, navigateToLevel } from './module-navigation';
+import {
+  type ModuleStackEntry,
+  currentModelName,
+  pushModule,
+  popModule,
+  navigateToLevel,
+  isStdlibModel,
+  isMacroModel,
+} from './module-navigation';
+import { computeConnectorErrors } from './connector-sync';
 
 /**
  * The maximum number of undo snapshots kept. A small buffer is intentional:
@@ -105,12 +114,15 @@ export interface EngineApi {
   getErrors(): Promise<ErrorDetail[]>;
   isSimulatable(modelName?: string | null): Promise<boolean>;
   mainModel(): Promise<EngineModelApi>;
+  getModel(modelName: string | null): Promise<EngineModelApi>;
   dispose(): Promise<void>;
 }
 
-/** The subset of the engine `Model` API the controller depends on (sim runs). */
+/** The subset of the engine `Model` API the controller depends on (sim runs
+ * plus the per-variable equation-dependency query used for connector-sync). */
 export interface EngineModelApi {
   run(overrides?: Record<string, number>, options?: { analyzeLtm?: boolean }): Promise<EngineRunApi>;
+  getIncomingLinks(varName: string): Promise<readonly string[]>;
 }
 
 /** The subset of an engine `Run` the controller depends on. */
@@ -1166,7 +1178,104 @@ export class ProjectController {
       project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
     }
 
-    return project;
+    return this.attachConnectorErrors(project);
+  }
+
+  /**
+   * Annotate the active model's aux/flow/stock variables with sketch-connector
+   * drift (connectors out of sync with equations; see diagram/connector-sync.ts).
+   * Equation dependencies come from the engine's per-variable `getIncomingLinks`
+   * (authoritative: excludes builtins/TIME, structural flow<->stock edges, and
+   * dotted module-output refs), so the check resolves arrayed/apply-to-all
+   * dependencies correctly. Returns a new Project; does not mutate `this.project`.
+   *
+   * Best-effort and non-fatal: any engine failure (a raced rename, a missing
+   * model) leaves the project without connector annotations rather than aborting
+   * the rebuild. Skipped for stdlib/macro models (not user-edited sketches).
+   */
+  async attachConnectorErrors(project: Project): Promise<Project> {
+    const engine = this.engine;
+    const modelName = this.modelName;
+    if (!engine || isStdlibModel(modelName)) {
+      return project;
+    }
+    const model = project.models.get(modelName);
+    const view = model?.views[0];
+    if (!model || !view || isMacroModel(model)) {
+      return project;
+    }
+
+    // Only aux/flow/stock with a primary node on this view are checkable targets.
+    const targetIdents: string[] = [];
+    const seen = new Set<string>();
+    for (const el of view.elements) {
+      if (el.type !== 'aux' && el.type !== 'stock' && el.type !== 'flow') {
+        continue;
+      }
+      const variable = model.variables.get(el.ident);
+      if (!variable || variable.type === 'module' || seen.has(el.ident)) {
+        continue;
+      }
+      seen.add(el.ident);
+      targetIdents.push(el.ident);
+    }
+    if (targetIdents.length === 0) {
+      return project;
+    }
+
+    let engineModel: EngineModelApi;
+    try {
+      engineModel = await engine.getModel(modelName);
+    } catch {
+      return project;
+    }
+    if (this.disposed) {
+      return project;
+    }
+
+    // Fetch each target's equation dependencies. A per-variable failure (e.g. a
+    // transient rename mismatch) drops only that variable from the check.
+    const dependencies = new Map<string, readonly string[]>();
+    const fetched = await Promise.all(
+      targetIdents.map(async (ident): Promise<readonly string[] | undefined> => {
+        try {
+          return await engineModel.getIncomingLinks(ident);
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+    if (this.disposed) {
+      return project;
+    }
+    for (let i = 0; i < targetIdents.length; i++) {
+      const deps = fetched[i];
+      if (deps) {
+        dependencies.set(targetIdents[i], deps);
+      }
+    }
+    if (dependencies.size === 0) {
+      return project;
+    }
+
+    const issuesByIdent = computeConnectorErrors({
+      elements: view.elements,
+      variables: model.variables,
+      dependencies,
+    });
+    if (issuesByIdent.size === 0) {
+      return project;
+    }
+
+    const mutableVars = new Map(model.variables);
+    for (const [ident, issues] of issuesByIdent) {
+      const variable = mutableVars.get(ident);
+      if (variable) {
+        mutableVars.set(ident, { ...variable, connectorErrors: issues });
+      }
+    }
+    const updatedModel = { ...model, variables: mutableVars as ReadonlyMap<string, Variable> };
+    return { ...project, models: mapSet(project.models, modelName, updatedModel) };
   }
 
   // --- active-model navigation ---
