@@ -814,6 +814,34 @@ describe('Canvas gestures: double-click name-edit reliability', () => {
     pointerUp(h.svg, 60, 100);
     expect(h.callbacks.onMoveLabel).toHaveBeenCalledWith(10, 'left');
   });
+
+  it('captures the pointer on press (so an edge grip that leaves the label sub-threshold can still drag)', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const text = h.query('.simlin-aux text') as SVGElement;
+    // Spy on the text node's setPointerCapture (the harness polyfills it as a
+    // no-op on Element.prototype); the component captures on `e.currentTarget`,
+    // which is this <text> node.
+    const captureSpy = jest.spyOn(text, 'setPointerCapture');
+
+    // Capture must happen at press time, not once the drag starts: a short
+    // label's tiny hit box means an edge grip can leave the bbox while still
+    // sub-threshold, and only an already-captured pointer keeps delivering moves.
+    pointerDown(text, 130, 100, { pointerId: 7 });
+    expect(captureSpy).toHaveBeenCalledWith(7);
+
+    // The drag is still gated on the threshold: a sub-threshold move starts no
+    // drag (no selection churn between the two clicks of a double-click)...
+    pointerMove(text, 132, 101, { pointerId: 7 });
+    expect(h.callbacks.onSetSelection).not.toHaveBeenCalled();
+
+    // ...and crossing the threshold begins the drag and selects the element.
+    pointerMove(text, 150, 130, { pointerId: 7 });
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([10]);
+
+    captureSpy.mockRestore();
+  });
 });
 
 // A flow or link whose endpoint UID points at an element that is not present in

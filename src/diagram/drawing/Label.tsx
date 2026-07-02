@@ -167,6 +167,17 @@ export const Label = React.memo(function Label(props: LabelPropsFull): React.Rea
 
     pointerId.current = e.pointerId;
     downPoint.current = { x: e.clientX, y: e.clientY };
+    // Capture on press (not once the drag starts): a short label has a tiny
+    // hit box, so a grip near its edge can leave the <text> bbox while still
+    // sub-threshold -- without capture those moves would never reach us and the
+    // label could not be dragged from that point. Capture on `currentTarget`
+    // (the <text> the handler is bound to), not `e.target` (which may be a child
+    // <tspan> the press landed on). Because it is the SAME node the dblclick
+    // handler lives on, capturing here does not change click/dblclick targeting;
+    // the load-bearing part of the double-click fix is purely that a
+    // sub-threshold wobble fires no onLabelDrag (no selection / node churn
+    // between the two clicks), which the threshold gate below still guarantees.
+    e.currentTarget.setPointerCapture(e.pointerId);
   };
 
   const handlePointerMove = (e: React.PointerEvent<SVGElement>): void => {
@@ -183,7 +194,6 @@ export const Label = React.memo(function Label(props: LabelPropsFull): React.Rea
         return;
       }
       inMove.current = true;
-      (e.target as Element).setPointerCapture(e.pointerId);
     }
 
     onLabelDrag?.(uid, e);
