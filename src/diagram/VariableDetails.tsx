@@ -5,7 +5,7 @@
 import * as React from 'react';
 
 import { LineChart, ChartSeries } from './LineChart';
-import { createEditor, Descendant, Transforms } from 'slate';
+import { createEditor, Descendant, Editor, Transforms } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
 import Button from './components/Button';
@@ -35,6 +35,7 @@ import {
 } from './equation-highlight';
 import { LookupEditor } from './LookupEditor';
 import { variableDetailsView } from './variable-details-display';
+import { isNewlineChord } from './keyboard-shortcuts';
 import { errorCodeDescription } from '@simlin/engine';
 
 import styles from './VariableDetails.module.css';
@@ -516,6 +517,14 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
               onKeyDown={(e) => {
                 if (e.key === 'Escape') {
                   setEditingEquation(false);
+                  return;
+                }
+                // Cmd/Ctrl+Enter inserts a line break, matching Shift+Enter
+                // (which Slate handles for us); see isNewlineChord for why the
+                // default key map misses these chords.
+                if (isNewlineChord(e)) {
+                  e.preventDefault();
+                  Editor.insertSoftBreak(equationEditor);
                 }
               }}
             />
@@ -523,6 +532,10 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
         )}
 
         <Slate editor={unitsEditor} initialValue={unitsContents} onChange={handleUnitsChange}>
+          {/* Deliberately no Cmd/Ctrl+Enter newline chord here: units are
+              semantically a single line, so we don't want to invite line
+              breaks. (Plain Enter does still insert one today -- a
+              pre-existing gap in this field, tracked separately.) */}
           <Editable
             className={styles.unitsEditor}
             renderLeaf={renderLeaf}
@@ -539,6 +552,14 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
             placeholder="Documentation"
             spellCheck={false}
             onBlur={handleEquationSave}
+            onKeyDown={(e) => {
+              // Documentation is multi-line like the equation; accept the same
+              // Cmd/Ctrl+Enter line-break chord Shift+Enter already provides.
+              if (isNewlineChord(e)) {
+                e.preventDefault();
+                Editor.insertSoftBreak(notesEditor);
+              }
+            }}
           />
         </Slate>
 
