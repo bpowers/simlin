@@ -440,7 +440,9 @@ export class ProjectController {
 
       const serializedProject = await engine.serializeProtobuf();
       const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
-      const project = await this.updateVariableErrors(projectFromJson(json));
+      // No live view exists on first open, so the engine-serialized view IS the
+      // rendered view -- compute connector annotations directly against it.
+      const project = await this.attachConnectorErrors(await this.updateVariableErrors(projectFromJson(json)));
 
       if (this.disposed) {
         this.engine = undefined;
@@ -504,7 +506,9 @@ export class ProjectController {
         void this.queueViewUpdate(queuedView);
       }
 
-      const withErrors = await this.updateVariableErrors(project);
+      // The rendered view here is `project`'s view -- either the engine snapshot
+      // or the queued view spliced in above -- so annotate directly against it.
+      const withErrors = await this.attachConnectorErrors(await this.updateVariableErrors(project));
 
       if (this.disposed) {
         this.engine = undefined;
@@ -693,6 +697,11 @@ export class ProjectController {
       activeProject = projectAttachData(activeProject, this.data, 'main');
     }
     activeProject = preserveLiveView(activeProject, this.project, this.modelName);
+    // Connector annotations must reflect the RENDERED view, so compute them only
+    // after preserveLiveView has swapped in the (possibly newer) live view --
+    // see attachConnectorErrors. Runs after projectAttachData too, so it
+    // preserves the attached series when it rewrites the active model's vars.
+    activeProject = await this.attachConnectorErrors(activeProject);
 
     if (this.disposed) {
       return;
@@ -1178,7 +1187,7 @@ export class ProjectController {
       project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
     }
 
-    return this.attachConnectorErrors(project);
+    return project;
   }
 
   /**
@@ -1188,6 +1197,17 @@ export class ProjectController {
    * (authoritative: excludes builtins/TIME, structural flow<->stock edges, and
    * dotted module-output refs), so the check resolves arrayed/apply-to-all
    * dependencies correctly. Returns a new Project; does not mutate `this.project`.
+   *
+   * ORDERING: this MUST run on the view that will actually be rendered, so it is
+   * called by each rebuild path AFTER that path has settled on its final view --
+   * NOT tail-called from updateVariableErrors. In updateProject the rendered view
+   * is the live optimistic view that `preserveLiveView` swaps in, which can be
+   * NEWER than the engine-serialized snapshot (e.g. a connector the user just
+   * drew but that has not round-tripped yet); computing against the stale engine
+   * view would flag a "missing" connector that is actually present on screen (or
+   * miss a stale one). The open/undo-reopen paths have no newer live view -- the
+   * engine (or queued) view IS the rendered view -- so they call this directly on
+   * that project.
    *
    * Best-effort and non-fatal: any engine failure (a raced rename, a missing
    * model) leaves the project without connector annotations rather than aborting

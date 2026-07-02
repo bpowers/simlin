@@ -11,6 +11,9 @@
 // getIncomingLinks and the sketch connectors, and engine failures degrade
 // gracefully.
 
+import type { LinkViewElement, StockFlowView } from '@simlin/core/datamodel';
+import { defined } from '@simlin/core/common';
+
 import { ProjectController } from '../project-controller';
 import { makeFakeEngine, makeControllerConfig } from './fake-engine';
 
@@ -124,6 +127,50 @@ describe('ProjectController connector-sync', () => {
     await controller.openInitialProject();
 
     // b's deps could not be fetched, so it is not checked -- no error attached.
+    expect(bConnectorErrors(controller)).toBeUndefined();
+    await controller.dispose();
+  });
+
+  it('computes warnings against the rendered live view, not the stale engine snapshot', async () => {
+    // The fake engine always serializes the connector-less view, so after an
+    // optimistic view update that ADDS the a -> b connector the live view is
+    // newer than what the engine returns. attachConnectorErrors must run on the
+    // preserved live view, so b's dependency on a is satisfied and NOT flagged.
+    // Pre-fix (annotations computed inside updateVariableErrors on the engine
+    // snapshot) this asserted the missing warning was present -> this fails.
+    const engine = makeFakeEngine({
+      json: () => projectJson(false),
+      incomingLinks: { b: ['a'], a: [] },
+    });
+    const { config } = makeControllerConfig({ engine });
+    const controller = new ProjectController(config);
+
+    await controller.openInitialProject();
+    // Sanity: with no connector drawn yet, b is flagged missing.
+    expect(bConnectorErrors(controller)).toEqual([{ kind: 'missingConnector', ident: 'a', name: 'a' }]);
+
+    const view = defined(controller.getView());
+    const connector: LinkViewElement = {
+      type: 'link',
+      uid: view.nextUid,
+      fromUid: 1,
+      toUid: 2,
+      arc: undefined,
+      isStraight: true,
+      multiPoint: undefined,
+      polarity: undefined,
+      x: NaN,
+      y: NaN,
+      isZeroRadius: false,
+      ident: undefined,
+    };
+    const liveView: StockFlowView = {
+      ...view,
+      elements: [...view.elements, connector],
+      nextUid: view.nextUid + 1,
+    };
+    await controller.updateView(liveView, { recordHistory: true });
+
     expect(bConnectorErrors(controller)).toBeUndefined();
     await controller.dispose();
   });
