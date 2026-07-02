@@ -66,13 +66,13 @@ export type InteractionState =
   // Moving the current selection. `deferredSingleSelectUid` is set when the
   // user pressed an already-selected element without a modifier: on pointer-up
   // with no drag, selection collapses to that element (Figma-style); with a
-  // drag, the group selection is preserved. `deferredIsText` records that the
-  // press was a double-click candidate for name editing. `segmentIndex` is the
-  // flow segment being dragged (undefined = valve / whole element).
+  // drag, the group selection is preserved. `segmentIndex` is the flow segment
+  // being dragged (undefined = valve / whole element). Name editing is never
+  // deferred here -- a double-click on a label is a terminal `dblclick` and
+  // enters `editingName` synchronously in the shell's handleSetSelection.
   | {
       readonly mode: 'movingSelection';
       readonly deferredSingleSelectUid: UID | undefined;
-      readonly deferredIsText: boolean;
       readonly segmentIndex: number | undefined;
     }
   // Dragging a link or flow endpoint. `endpoint` distinguishes the arrowhead

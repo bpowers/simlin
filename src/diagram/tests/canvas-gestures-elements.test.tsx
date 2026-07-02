@@ -595,6 +595,81 @@ describe('Canvas gestures: name editing (checklist 15)', () => {
   });
 });
 
+// Regression coverage for "double-clicking a var name doesn't reliably open the
+// name editor". Two independent unreliability sources are pinned here:
+//
+//  1. An ALREADY-SELECTED element's name-edit request was routed through the
+//     deferred-single-select dance (computeMouseDownSelection returns
+//     deferSingleSelect when a modifier-less press lands on a selected element).
+//     That path only opens the editor on the *pointer-up* that resolves the
+//     defer -- but a double-click's terminal event is `dblclick`, whose
+//     pointer-up already fired, so the editor never appeared. It worked when the
+//     element was unselected (that path selects + edits synchronously), so the
+//     bug surfaced as "sometimes works, sometimes doesn't".
+//
+//  2. The name label started a label-drag on ANY pointer movement (no
+//     click-vs-drag threshold), so the incidental 1-2px wobble of a physical
+//     double-click was treated as a drag -- selecting the element and moving its
+//     label instead of editing.
+describe('Canvas gestures: double-click name-edit reliability', () => {
+  it('opens the editor when double-clicking the name of an ALREADY-SELECTED variable', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)], selection: new Set([10]) });
+    h.clearMountCalls();
+
+    expect(h.query('[contenteditable]')).toBeNull();
+
+    const text = h.query('.simlin-aux text')!;
+    act(() => {
+      fireEvent.doubleClick(text, { clientX: 130, clientY: 100 });
+    });
+    // Mirror the host committing the selection the double-click requested.
+    h.setProps({ selection: new Set([10]) });
+
+    expect(h.query('[contenteditable]')).not.toBeNull();
+    expect(h.callbacks.onRenameVariable).not.toHaveBeenCalled();
+  });
+
+  it('opens the editor when double-clicking the name of an UNSELECTED variable', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const text = h.query('.simlin-aux text')!;
+    act(() => {
+      fireEvent.doubleClick(text, { clientX: 130, clientY: 100 });
+    });
+    h.setProps({ selection: new Set([10]) });
+
+    expect(h.query('[contenteditable]')).not.toBeNull();
+  });
+
+  it('a sub-threshold wobble on the name label does not start a label drag', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const text = h.query('.simlin-aux text')!;
+    pointerDown(text, 130, 100);
+    pointerMove(text, 132, 101); // ~2px, below the 5px click/drag threshold
+    pointerUp(text, 132, 101);
+
+    // No drag => no label move and no drag-driven selection.
+    expect(h.callbacks.onMoveLabel).not.toHaveBeenCalled();
+    expect(h.callbacks.onSetSelection).not.toHaveBeenCalled();
+  });
+
+  it('a supra-threshold drag on the name label still moves the label', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
+    h.clearMountCalls();
+
+    const text = h.query('.simlin-aux text')!;
+    pointerDown(text, 130, 100);
+    pointerMove(text, 60, 100); // 70px to the left, well past the threshold
+    expect(lastSelection(h.callbacks.onSetSelection)).toEqual([10]);
+
+    pointerUp(h.svg, 60, 100);
+    expect(h.callbacks.onMoveLabel).toHaveBeenCalledWith(10, 'left');
+  });
+});
+
 // A flow or link whose endpoint UID points at an element that is not present in
 // the view is a corrupt/dangling reference. It can arise transiently (an undo
 // rebuild that renders before the project swaps, issue #817) or be persisted in
