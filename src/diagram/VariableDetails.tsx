@@ -19,7 +19,13 @@ import { defined, Series } from '@simlin/core/common';
 import { at } from '@simlin/core/collections';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { CustomElement, FormattedText, CustomEditor } from './drawing/SlateEditor';
-import { caretOffsetForClick, caretOffsetWithinSpan, RenderedGlyph } from './equation-caret';
+import {
+  caretOffsetForClick,
+  caretOffsetWithinSpan,
+  chooseSpanForClick,
+  RenderedGlyph,
+  SpanBox,
+} from './equation-caret';
 import {
   HighlightRange,
   applyToAllPrefix,
@@ -152,33 +158,68 @@ function parseLocAttr(value: string | undefined): readonly [number, number] | un
 }
 
 // Map a click on the equation preview to a caret offset in `equationStr`.
-// Primary path: find the innermost source-annotated span the click landed in
-// (`data-eqnloc` for a syntax node, `data-oploc` for an operator gap) and
-// resolve the click within it. Fallback: the rendered LaTeX has no annotations
-// (engine produced none; preview shows raw text), so reconstruct from the
-// glyph boxes -- or, if KaTeX rendered nothing measurable, a coarse
-// proportional mapping over the preview's content box.
-function caretOffsetForPreviewClick(
-  host: HTMLElement,
-  clicked: Element | null,
-  clientX: number,
-  clientY: number,
-  equationStr: string,
-): number {
-  const annotated = clicked?.closest('[data-eqnloc],[data-oploc]') ?? null;
-  if (annotated instanceof HTMLElement && host.contains(annotated)) {
-    const isOperatorGap = annotated.dataset.oploc !== undefined;
-    const range = parseLocAttr(isOperatorGap ? annotated.dataset.oploc : annotated.dataset.eqnloc);
-    if (range) {
-      // eqnloc/oploc carry byte offsets into the raw equation; convert to
-      // UTF-16 indices in the displayed string (which may be prefixed for
-      // apply-to-all equations) before mapping the click.
-      const rawStart = rawEquationStart(equationStr, false);
-      const raw = equationStr.slice(rawStart);
-      const spanStart = rawStart + byteOffsetToUtf16(raw, range[0]);
-      const spanEnd = rawStart + byteOffsetToUtf16(raw, range[1]);
-      const glyphs = collectRenderedGlyphs(annotated);
-      return caretOffsetWithinSpan(glyphs, clientX, clientY, equationStr, spanStart, spanEnd, isOperatorGap);
+// Primary path: gather every source-annotated span under the preview
+// (`data-eqnloc` for a syntax node, `data-oploc` for an operator gap) and pick
+// the one the click belongs to by geometry (`chooseSpanForClick` -- the
+// smallest box containing the point), then resolve within it. Geometry rather
+// than DOM ancestry (`Element.closest`) is deliberate: a click on KaTeX layout
+// chrome that carries no annotation of its own -- a fraction bar, or the
+// `\frac` v-list wrapper that overlays the denominator row -- has only the
+// whole composite (`a/b`) as an annotated ancestor, so ancestry-based lookup
+// would map the click by a coarse interpolation across the entire equation
+// instead of into the operand the pixel sits in. Note the consequence: when
+// any annotation exists, every click -- even one in padding outside all
+// annotated boxes -- resolves via the nearest annotated span, so the
+// glyph-box fallback below only runs for annotation-free renders (the engine
+// produced no LaTeX; the preview shows raw text) -- or, if KaTeX rendered
+// nothing measurable, a coarse proportional mapping over the preview's
+// content box.
+function caretOffsetForPreviewClick(host: HTMLElement, clientX: number, clientY: number, equationStr: string): number {
+  // eqnloc/oploc carry byte offsets into the raw equation; convert to UTF-16
+  // indices in the displayed string (which may be prefixed for apply-to-all
+  // equations) before mapping the click.
+  const rawStart = rawEquationStart(equationStr, false);
+  const raw = equationStr.slice(rawStart);
+  const candidates: Array<{
+    el: HTMLElement;
+    spanStart: number;
+    spanEnd: number;
+    isOperatorGap: boolean;
+    box: SpanBox;
+  }> = [];
+  for (const el of host.querySelectorAll<HTMLElement>('[data-eqnloc],[data-oploc]')) {
+    const isOperatorGap = el.dataset.oploc !== undefined;
+    const range = parseLocAttr(isOperatorGap ? el.dataset.oploc : el.dataset.eqnloc);
+    if (!range) {
+      continue;
+    }
+    const r = el.getBoundingClientRect();
+    candidates.push({
+      el,
+      spanStart: rawStart + byteOffsetToUtf16(raw, range[0]),
+      spanEnd: rawStart + byteOffsetToUtf16(raw, range[1]),
+      isOperatorGap,
+      box: { left: r.left, right: r.right, top: r.top, bottom: r.bottom },
+    });
+  }
+  if (candidates.length > 0) {
+    const idx = chooseSpanForClick(
+      candidates.map((c) => c.box),
+      clientX,
+      clientY,
+    );
+    if (idx >= 0) {
+      const chosen = candidates[idx];
+      const glyphs = collectRenderedGlyphs(chosen.el);
+      return caretOffsetWithinSpan(
+        glyphs,
+        clientX,
+        clientY,
+        equationStr,
+        chosen.spanStart,
+        chosen.spanEnd,
+        chosen.isOperatorGap,
+      );
     }
   }
   const glyphs = collectRenderedGlyphs(host);
@@ -523,8 +564,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
 
   const handlePreviewClick = (e: React.MouseEvent<HTMLDivElement>, equationStr: string): void => {
     const target = e.currentTarget as HTMLElement;
-    const clicked = e.target instanceof Element ? e.target : null;
-    const offset = caretOffsetForPreviewClick(target, clicked, e.clientX, e.clientY, equationStr);
+    const offset = caretOffsetForPreviewClick(target, e.clientX, e.clientY, equationStr);
 
     // Enter editing mode, then focus and place the caret once the editable
     // equation editor has rendered. The class used a setState callback to defer

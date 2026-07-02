@@ -6,9 +6,11 @@ import {
   alignGlyphsToSource,
   caretOffsetForClick,
   caretOffsetWithinSpan,
+  chooseSpanForClick,
   glyphToAscii,
   nearestGlyphBoundary,
   RenderedGlyph,
+  SpanBox,
 } from '../equation-caret';
 
 // Build a single-line run of glyphs from a list of [char, left, width] tuples.
@@ -370,6 +372,137 @@ describe('caretOffsetWithinSpan', () => {
       const off = caretOffsetWithinSpan(glyphs, x, 6, src, 0, 9, false);
       expect(off).toBeGreaterThanOrEqual(0);
       expect(off).toBeLessThanOrEqual(9);
+    }
+  });
+});
+
+describe('chooseSpanForClick', () => {
+  it('returns -1 when there are no spans', () => {
+    expect(chooseSpanForClick([], 10, 10)).toBe(-1);
+  });
+
+  it('picks the smallest box containing the point (the most specific node)', () => {
+    // A composite [0,100] wrapping a leaf [10,40]; both share the same band.
+    const boxes: SpanBox[] = [
+      { left: 0, right: 100, top: 0, bottom: 20 },
+      { left: 10, right: 40, top: 0, bottom: 20 },
+    ];
+    expect(chooseSpanForClick(boxes, 20, 10)).toBe(1); // inside both -> the leaf
+    expect(chooseSpanForClick(boxes, 60, 10)).toBe(0); // only the composite here
+  });
+
+  it('prefers a small operator-gap box over the enclosing expression', () => {
+    // `a * b`: leaf `a`, the operator gap around `*`, leaf `b`, and the whole
+    // expression. A click on the operator must resolve to the gap, not the
+    // expression that also contains it.
+    const boxes: SpanBox[] = [
+      { left: 0, right: 60, top: 0, bottom: 12 }, // whole `a * b`
+      { left: 0, right: 10, top: 0, bottom: 12 }, // leaf a
+      { left: 24, right: 36, top: 0, bottom: 12 }, // gap around *
+      { left: 50, right: 60, top: 0, bottom: 12 }, // leaf b
+    ];
+    expect(chooseSpanForClick(boxes, 30, 6)).toBe(2); // on the `*` -> the gap
+    expect(chooseSpanForClick(boxes, 5, 6)).toBe(1); // on `a`
+    expect(chooseSpanForClick(boxes, 55, 6)).toBe(3); // on `b`
+  });
+
+  it('falls back to the nearest box when the point is outside every box', () => {
+    const boxes: SpanBox[] = [
+      { left: 0, right: 10, top: 0, bottom: 10 },
+      { left: 100, right: 110, top: 0, bottom: 10 },
+    ];
+    expect(chooseSpanForClick(boxes, 200, 5)).toBe(1); // nearer the right box
+    expect(chooseSpanForClick(boxes, -50, 5)).toBe(0); // nearer the left box
+  });
+
+  // The `population/average_lifespan` regression (issue: clicking the fraction
+  // bar or the denominator placed the caret inside the numerator). These boxes
+  // are the real KaTeX client rects measured in the browser; the annotated
+  // spans are the whole fraction (`0_27`), the denominator (`11_27`), and the
+  // numerator (`0_10`), in DOM order. A click on the fraction bar / v-list
+  // lands on layout chrome whose only annotated ancestor is `0_27`, so an
+  // ancestry walk mis-mapped it -- geometry resolves it to the operand row.
+  describe('fraction: population/average_lifespan', () => {
+    const OUTER = 0;
+    const DENOM = 1;
+    const NUMER = 2;
+    const boxes: SpanBox[] = [
+      { left: 48, right: 200, top: 49, bottom: 83 }, // 0_27 whole fraction
+      { left: 51, right: 196, top: 67, bottom: 91 }, // 11_27 denominator
+      { left: 76, right: 171, top: 44, bottom: 68 }, // 0_10 numerator
+    ];
+
+    it('resolves a click in the denominator to the denominator span', () => {
+      expect(chooseSpanForClick(boxes, 124, 79)).toBe(DENOM); // middle
+      expect(chooseSpanForClick(boxes, 55, 79)).toBe(DENOM); // near the start
+      expect(chooseSpanForClick(boxes, 192, 79)).toBe(DENOM); // near the end
+    });
+
+    it('resolves a click in the numerator to the numerator span', () => {
+      expect(chooseSpanForClick(boxes, 124, 56)).toBe(NUMER);
+      expect(chooseSpanForClick(boxes, 80, 56)).toBe(NUMER);
+    });
+
+    it('resolves a click on the fraction bar to an operand row, never the whole fraction', () => {
+      // The bar sits in the numerator/denominator overlap band; either operand
+      // is acceptable, but it must not fall through to the whole-fraction span
+      // (which would map the click by interpolation across the entire eqn).
+      expect(chooseSpanForClick(boxes, 124, 67)).not.toBe(OUTER);
+      expect(chooseSpanForClick(boxes, 60, 67)).not.toBe(OUTER);
+    });
+  });
+});
+
+// End-to-end of the annotation path: choose the span geometrically, then map
+// the click within it. This is the composition VariableDetails.tsx performs;
+// it pins the fraction regression at the boundary the user actually sees --
+// the caret offset -- not just the span index.
+describe('span selection + within-span mapping (annotation path)', () => {
+  const eq = 'population/average_lifespan'; // population [0,10), `/` [10,11), average_lifespan [11,27)
+  // KaTeX rects (from the browser): numerator over a bar over the denominator.
+  const numerBox: SpanBox = { left: 76, right: 171, top: 44, bottom: 68 };
+  const denomBox: SpanBox = { left: 51, right: 196, top: 67, bottom: 91 };
+  const outerBox: SpanBox = { left: 48, right: 200, top: 49, bottom: 83 };
+  const boxes = [outerBox, denomBox, numerBox];
+
+  // One glyph per source character, laid out left-to-right across a box.
+  const glyphsAcross = (box: SpanBox, chars: string): RenderedGlyph[] => {
+    const w = (box.right - box.left) / chars.length;
+    return Array.from(chars, (ch, i) => ({
+      char: ch,
+      left: box.left + i * w,
+      right: box.left + (i + 1) * w,
+      top: box.top,
+      bottom: box.bottom,
+    }));
+  };
+
+  const mapClick = (clickX: number, clickY: number): number => {
+    const idx = chooseSpanForClick(boxes, clickX, clickY);
+    if (idx === 0) {
+      return caretOffsetWithinSpan(glyphsAcross(outerBox, eq), clickX, clickY, eq, 0, 27, false);
+    }
+    if (idx === 1) {
+      return caretOffsetWithinSpan(glyphsAcross(denomBox, 'average_lifespan'), clickX, clickY, eq, 11, 27, false);
+    }
+    return caretOffsetWithinSpan(glyphsAcross(numerBox, 'population'), clickX, clickY, eq, 0, 10, false);
+  };
+
+  it('places the caret inside the denominator when clicking average_lifespan', () => {
+    // Every click across the denominator maps into [11, 27] -- never the
+    // numerator range the ancestry-based lookup produced.
+    for (const x of [55, 90, 124, 160, 192]) {
+      const off = mapClick(x, 79);
+      expect(off).toBeGreaterThanOrEqual(11);
+      expect(off).toBeLessThanOrEqual(27);
+    }
+  });
+
+  it('places the caret inside the numerator when clicking population', () => {
+    for (const x of [80, 110, 124, 160]) {
+      const off = mapClick(x, 56);
+      expect(off).toBeGreaterThanOrEqual(0);
+      expect(off).toBeLessThanOrEqual(10);
     }
   });
 });
