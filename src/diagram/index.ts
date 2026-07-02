@@ -2,7 +2,20 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// Global stylesheets ride on the package root because it is the one module
+// every consumer executes. theme.css defines the var(--*) tokens every
+// component stylesheet resolves against — without it, declarations like
+// `fill: var(--color-white)` are invalid at computed-value time and SVG
+// shapes render with the initial fill (black).
+//
+// These imports only survive a consumer's production build because
+// package.json `sideEffects` lists the compiled entry (lib*/index.js) in
+// addition to the CSS globs: the array means "ONLY these files have side
+// effects", so an unlisted entry is declared pure and bundlers re-export
+// from it without including its body — silently dropping bare CSS imports
+// like these (tests/theme-tokens.test.ts pins both halves of this contract).
 import './reset.css';
+import './theme.css';
 
 export { Editor } from './Editor';
 export type { ProtobufProjectData, JsonProjectData, ProjectData } from './Editor';

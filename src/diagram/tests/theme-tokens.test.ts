@@ -41,6 +41,40 @@ describe('component library uses theme tokens, not color literals', () => {
   });
 });
 
+describe('package entry loads the global stylesheets', () => {
+  // Every component stylesheet resolves its colors/geometry through
+  // var(--*) tokens that only theme.css defines. If a consumer's bundle
+  // ends up without theme.css, `fill: var(--color-white)` is invalid at
+  // computed-value time and SVG shapes render with the initial fill
+  // (black). The package root is the one module every consumer of
+  // '@simlin/diagram' executes, so it must carry the global stylesheets.
+  it('index.ts side-effect-imports reset.css and theme.css', () => {
+    const entry = fs.readFileSync(path.join(__dirname, '..', 'index.ts'), 'utf-8');
+    expect(entry).toMatch(/^import '\.\/reset\.css';$/m);
+    expect(entry).toMatch(/^import '\.\/theme\.css';$/m);
+  });
+
+  // The import alone is not enough. package.json's `sideEffects` array
+  // means "ONLY these files have side effects": every JS module — the
+  // package entry included — is declared pure. A bundler then re-exports
+  // Editor without ever *including* index.js, so its bare CSS imports are
+  // never walked and reset/theme silently vanish from the consumer's
+  // bundle (this is exactly how simlin-serve shipped black diagrams; the
+  // CSS-module styles survive only because their default-export bindings
+  // are used). Any module whose side-effect-only CSS import is
+  // load-bearing must therefore be listed in `sideEffects` itself, for
+  // both build outputs.
+  it('package.json sideEffects lists the modules that carry bare CSS imports', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')) as {
+      sideEffects: string[];
+    };
+    for (const out of ['lib', 'lib.browser']) {
+      expect(pkg.sideEffects).toContain(`${out}/index.js`);
+      expect(pkg.sideEffects).toContain(`${out}/StaticDiagram.js`);
+    }
+  });
+});
+
 describe('theme.css token contracts', () => {
   const theme = readCss('theme.css');
 

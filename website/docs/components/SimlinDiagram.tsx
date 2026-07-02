@@ -7,6 +7,10 @@ import { defined, type Series } from '@simlin/core/common';
 import { type UID, type ViewElement, type Project, projectFromJson, projectAttachData } from '@simlin/core/datamodel';
 import { type Point } from '@simlin/diagram/drawing/common';
 import { Canvas } from '@simlin/diagram/drawing/Canvas';
+// Deep-importing Canvas bypasses the package root, which is what carries
+// theme.css; without the tokens the canvas SVG renders with black fills
+// (`fill: var(--color-white)` is invalid when the var is undefined).
+import '@simlin/diagram/theme.css';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const logisticGrowthProjectJson = {

@@ -8,6 +8,39 @@
  * later phases can replace it without untangling layout rules.
  */
 
+/* Self-hosted fonts: the diagram's canvas labels and equation editors ask
+ * for Roboto / Roboto Mono, and simlin-serve must work with no network
+ * access once launched, so the faces are bundled (relative url() so Vite
+ * hashes the files and the SPA stays relocatable under any base path).
+ * Same subset files src/app ships. */
+@font-face {
+  font-family: 'Roboto';
+  font-style: normal;
+  font-weight: 300;
+  src: url('./fonts/roboto-v20-latin-300.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Roboto';
+  font-style: normal;
+  font-weight: 400;
+  src: url('./fonts/roboto-v20-latin-regular.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Roboto';
+  font-style: normal;
+  font-weight: 500;
+  src: url('./fonts/roboto-v20-latin-500.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Roboto Mono';
+  font-style: normal;
+  font-weight: 400;
+  src: url('./fonts/roboto-mono-v12-latin-regular.woff2') format('woff2');
+}
+
 :root {
   --serve-primary: #1976d2;
   --serve-success: #2e7d32;

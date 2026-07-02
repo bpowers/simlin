@@ -5,6 +5,13 @@ React components for model visualization and editing. Designed as a general-purp
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
 For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 
+## Hosting Requirements (CSS and fonts)
+
+- `reset.css` and `theme.css` load automatically when a browser host imports the package root (`@simlin/diagram`). This only works because BOTH halves of a contract hold: `index.ts` bare-imports them, AND `package.json`'s `sideEffects` array lists the compiled entries (`lib*/index.js`, `lib*/StaticDiagram.js`) alongside the CSS globs. The array means "ONLY these files have side effects" -- an unlisted JS module is declared pure and bundlers re-export from it without including its body, silently dropping its CSS imports (this shipped black-on-transparent diagrams in simlin-serve). `tests/theme-tokens.test.ts` pins the contract.
+- Hosts that deep-import components (e.g. `@simlin/diagram/drawing/Canvas`) bypass the package root and must import `@simlin/diagram/theme.css` themselves.
+- Browser hosts must import katex's stylesheet (`katex.min.css`, from the katex package's dist directory) at their entry (see `src/app/index.tsx`, `src/simlin-serve/web/src/main.tsx`). The package cannot carry it: the Node build stubs only its *own* CSS files (`build-css.sh`), so a third-party CSS import would crash Node consumers of `lib/`.
+- Hosts should provide the `Roboto` (300/400/500) and `Roboto Mono` faces the stylesheets and canvas labels reference; text falls back to Helvetica otherwise. `src/app`'s main page and `simlin-serve` self-host the woff2 subsets; the `sd-model` embed (`src/app/index-component.tsx`) instead links Google Fonts inside its shadow root.
+
 ## Key Files
 
 ### Editor and Core Logic

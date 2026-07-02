@@ -14,7 +14,11 @@
   },
   "sideEffects": [
     "*.css",
-    "**/*.css"
+    "**/*.css",
+    "lib/index.js",
+    "lib.browser/index.js",
+    "lib/StaticDiagram.js",
+    "lib.browser/StaticDiagram.js"
   ],
   "browser": "lib.browser",
   "main": "lib",
