@@ -1298,6 +1298,41 @@ export class ProjectController {
     return { ...project, models: mapSet(project.models, modelName, updatedModel) };
   }
 
+  /**
+   * Re-annotate the ACTIVE model's variables with equation/unit errors AND
+   * connector drift after a model switch that did NOT rebuild the project.
+   *
+   * `updateVariableErrors` and `attachConnectorErrors` are model-scoped and are
+   * otherwise reached only from the rebuild/open paths (which run `projectFromJson`
+   * and reset every model's annotations). Drilling into a module (drillIntoModule)
+   * only flips `modelName` -- no rebuild -- so without this the newly-active child
+   * model's variables would show neither error dots nor connector warnings on
+   * first navigation, even though the error PANEL (refreshCachedErrors) re-scopes.
+   * This subsumes the bare refreshCachedErrors those paths used to call, since
+   * updateVariableErrors refreshes the panel cache too.
+   *
+   * Commit guard: the two engine round-trips (getErrors, getIncomingLinks) can
+   * race a rebuild or a further navigation that lands first; committing our stale
+   * result would clobber the fresher (or differently model-scoped) project. So we
+   * commit ONLY when neither `this.project` nor `this.modelName` moved while we
+   * were in flight. The panel cache was still refreshed above (it is model-scoped
+   * and self-correcting), so skipping the commit loses nothing.
+   */
+  async refreshActiveModelAnnotations(): Promise<void> {
+    const project = this.project;
+    const modelName = this.modelName;
+    if (!this.engine || !project) {
+      return;
+    }
+    let annotated = await this.updateVariableErrors(project);
+    annotated = await this.attachConnectorErrors(annotated);
+    if (this.disposed || this.project !== project || this.modelName !== modelName) {
+      return;
+    }
+    this.project = annotated;
+    this.notify();
+  }
+
   // --- active-model navigation ---
 
   /**
@@ -1336,9 +1371,12 @@ export class ProjectController {
       this.modelName = newModelName;
       this.notify();
     });
-    // The error refresh for the newly active model is driven here (the active
-    // model changed). Fire-and-forget: the snapshot updates when it resolves.
-    void this.refreshCachedErrors();
+    // Drill-in does NOT rebuild the project (only modelName flips), so annotate
+    // the newly-active child model's variables directly -- error dots AND
+    // connector warnings, not just the error panel. Fire-and-forget: the
+    // snapshot updates when it resolves. (refreshActiveModelAnnotations refreshes
+    // the panel cache too, subsuming the old bare refreshCachedErrors call.)
+    void this.refreshActiveModelAnnotations();
     return { restoredSelection: new Set<UID>() };
   }
 
@@ -1383,9 +1421,18 @@ export class ProjectController {
     // no setState-callback deferral is needed. Fire-and-forget round-trip.
     const view = this.getView();
     if (view) {
+      // queueViewUpdate round-trips through updateProject, which re-annotates the
+      // restored active model's variables (error dots + connector warnings) as a
+      // side effect -- so back-navigation is covered without a separate pass.
       void this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
+    } else {
+      // No stored view means no rebuild will run, so annotate the restored
+      // model's variables directly (mirrors drillIntoModule).
+      void this.refreshActiveModelAnnotations();
     }
-    // The active model changed -- refresh its cached errors.
+    // Refresh the model-scoped error PANEL promptly. The annotation paths above
+    // also refresh it (via updateVariableErrors), but this keeps the panel snappy
+    // and covers a queueViewUpdate that bails on a non-finite restored viewport.
     void this.refreshCachedErrors();
     return { restoredSelection: result.restoredSelection };
   }
