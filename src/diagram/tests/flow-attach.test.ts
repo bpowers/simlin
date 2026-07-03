@@ -1245,4 +1245,35 @@ describe('growEndpointDrag (existing cloud endpoint drag)', () => {
       expect(finalFlow.y).toBeCloseTo(200, 5);
     });
   });
+
+  it('diagonal drag: along-axis travel is preserved when the flow bends into an L (no cloud snap-back)', () => {
+    // The cloud has already been dragged 100px ALONG the axis; now the drag pushes
+    // perpendicular past the point where it dominates and the flow bends. The
+    // parallel (x) coordinate of the cloud must stay put across the bend -- the bug
+    // rebuilt the L from the ORIGINAL flow and discarded the 100px of along-axis
+    // travel, snapping the cloud back ~100px in one frame. (The perpendicular
+    // coordinate legitimately appears only at the bend: a straight flow is pinned
+    // to its axis until it reroutes, so only the PARALLEL axis is asserted here.)
+    const flow = stockToCloudFlow(); // stock edge x=122.5, cloud at (300,200)
+    const PARALLEL = -100; // cursor 100px right -> cloud x target 400
+    const frames: FlowViewElement[] = [];
+    for (let dy = 0; dy >= -200; dy -= 8) {
+      frames.push(growEndpointDrag(flow, false, { x: PARALLEL, y: dy }, undefined));
+    }
+
+    // Parallel-axis (x) continuity of the cloud endpoint across the bend: the
+    // buggy reroute jumped it 100px in a single frame.
+    for (let i = 1; i < frames.length; i++) {
+      const prevCloud = frames[i - 1].points[frames[i - 1].points.length - 1];
+      const curCloud = frames[i].points[frames[i].points.length - 1];
+      expect(Math.abs(curCloud.x - prevCloud.x)).toBeLessThan(20);
+    }
+
+    // End state: bent into an L with the cloud at the FULL dragged position.
+    const finalFlow = frames[frames.length - 1];
+    expect(finalFlow.points.length).toBe(3);
+    const finalCloud = finalFlow.points[finalFlow.points.length - 1];
+    expect(finalCloud.x).toBeCloseTo(400, 5); // 300 + 100 along-axis, not snapped to 300
+    expect(finalCloud.y).toBeCloseTo(400, 5); // 200 + 200 perpendicular
+  });
 });

@@ -857,49 +857,40 @@ export function UpdateCloudAndFlow(
     const shouldReroute = !isDegenerate && perpAbs >= PERP_THRESHOLD && perpAbs > parAbs;
 
     if (shouldReroute) {
-      // Create L-shape by adding a corner point
-      let newCloudPoint: Point;
-      let newOtherPoint: Point;
-      let corner: Point;
+      // Bend the straight flow into an L by inserting a corner. The dragged cloud
+      // moves by the FULL accumulated delta -- BOTH the perpendicular component
+      // (which forms the bend) AND the parallel component. An earlier version
+      // applied only the perpendicular delta and kept the cloud's ORIGINAL
+      // parallel coordinate; because the live drag re-routes from the original
+      // 2-point flow each pointermove, a drag that had already traveled
+      // along-axis snapped the cloud back to its starting parallel position the
+      // instant it crossed the perpendicular threshold (a one-frame teleport).
+      const base = cloudIsFirst ? firstPoint : lastPoint;
+      const otherPoint = cloudIsFirst ? lastPoint : firstPoint;
+      const newCloudPoint: Point = { ...base, x: base.x - moveDelta.x, y: base.y - moveDelta.y };
 
-      if (treatAsHorizontal) {
-        // Horizontal segment: perpendicular movement is vertical (Y changes)
-        if (cloudIsFirst) {
-          newCloudPoint = { ...firstPoint, y: firstPoint.y - moveDelta.y };
-          newOtherPoint = lastPoint;
-          // Corner at (otherEnd.x, newCloud.y)
-          corner = { x: lastPoint.x, y: newCloudPoint.y, attachedToUid: undefined };
-          points = [newCloudPoint, corner, newOtherPoint];
-        } else {
-          newOtherPoint = firstPoint;
-          newCloudPoint = { ...lastPoint, y: lastPoint.y - moveDelta.y };
-          // Corner at (otherEnd.x, newCloud.y)
-          corner = { x: firstPoint.x, y: newCloudPoint.y, attachedToUid: undefined };
-          points = [newOtherPoint, corner, newCloudPoint];
-        }
-      } else {
-        // Vertical segment: perpendicular movement is horizontal (X changes)
-        if (cloudIsFirst) {
-          newCloudPoint = { ...firstPoint, x: firstPoint.x - moveDelta.x };
-          newOtherPoint = lastPoint;
-          // Corner at (newCloud.x, otherEnd.y)
-          corner = { x: newCloudPoint.x, y: lastPoint.y, attachedToUid: undefined };
-          points = [newCloudPoint, corner, newOtherPoint];
-        } else {
-          newOtherPoint = firstPoint;
-          newCloudPoint = { ...lastPoint, x: lastPoint.x - moveDelta.x };
-          // Corner at (newCloud.x, otherEnd.y)
-          corner = { x: newCloudPoint.x, y: firstPoint.y, attachedToUid: undefined };
-          points = [newOtherPoint, corner, newCloudPoint];
-        }
-      }
+      // The corner keeps the two segments orthogonal: a riser on the FIXED end's
+      // coordinate, then a run out to the cloud. For a (dominantly) horizontal
+      // flow the riser is vertical at otherPoint.x; for a vertical flow it is
+      // horizontal at otherPoint.y.
+      const corner: Point = treatAsHorizontal
+        ? { x: otherPoint.x, y: newCloudPoint.y, attachedToUid: undefined }
+        : { x: newCloudPoint.x, y: otherPoint.y, attachedToUid: undefined };
 
-      // Update cloud position
+      points = cloudIsFirst ? [newCloudPoint, corner, otherPoint] : [otherPoint, corner, newCloudPoint];
+
+      // Update cloud position to the full dragged position.
       cloud = {
         ...cloud,
         x: newCloudPoint.x,
         y: newCloudPoint.y,
       };
+
+      // Normalize before placing the valve: if the cloud was dragged onto the
+      // fixed end's axis the run collapses to zero length and the L degenerates
+      // to a straight flow -- normalizeFlowPoints drops the redundant corner so
+      // the valve lands on a real segment.
+      points = normalizeFlowPoints(points);
 
       // Land the valve on the segment adjacent to the dragged cloud -- the bent
       // segment the drag is actively growing -- at an interior position. Picking
@@ -907,11 +898,8 @@ export function UpdateCloudAndFlow(
       // valve's closest segment flip from this bent segment onto the
       // perpendicular riser as the L deepened, teleporting the valve (and its
       // label) to the riser's stock-adjacent end, flush against the stock body
-      // (#53). Because the live drag re-routes from the original 2-point flow
-      // each pointermove, that flip recurred every frame past a threshold; the
-      // committed reroute inherited the same degenerate position. Anchoring to
-      // the cloud-adjacent segment tracks the cursor continuously, and
-      // clampToSegment keeps the valve off the segment ends.
+      // (#53). Anchoring to the cloud-adjacent segment tracks the cursor
+      // continuously, and clampToSegment keeps the valve off the segment ends.
       const rerouteSegments = getSegments(points);
       const cloudAdjacentSegment = cloudIsFirst ? rerouteSegments[0] : rerouteSegments[rerouteSegments.length - 1];
       const newValve = clampToSegment(currentValve, cloudAdjacentSegment);

@@ -2784,6 +2784,77 @@ describe('Flow routing', () => {
     });
   });
 
+  describe('UpdateCloudAndFlow - reroute preserves along-axis cloud travel (diagonal teleport)', () => {
+    // When a cloud drag has traveled ALONG the flow axis and then crosses the
+    // perpendicular threshold, the reroute rebuilds the L from the ORIGINAL
+    // 2-point flow (the live drag re-routes from the committed flow every frame).
+    // The reroute must apply BOTH the perpendicular AND the parallel component of
+    // the accumulated moveDelta to the cloud endpoint; applying only the
+    // perpendicular one snapped the cloud back to its original along-axis
+    // position -- a one-frame teleport. The reroute condition (perp > par) still
+    // holds while the parallel travel is large in absolute terms.
+
+    it('applies both deltas to a horizontal sink-cloud reroute (no along-axis snap-back)', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockEdgeX = 100 + StockWidth / 2; // 122.5
+      const flow = makeFlow(flowUid, 200, 200, [
+        { x: stockEdgeX, y: 200, attachedToUid: stockUid },
+        { x: 300, y: 200, attachedToUid: cloudUid },
+      ]);
+      const cloud = makeCloud(cloudUid, flowUid, 300, 200);
+
+      // Cloud dragged RIGHT by 150 (parallel) and DOWN by 160 (perpendicular,
+      // dominant so it reroutes). moveDelta is inverted (press - cursor).
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, { x: -150, y: -160 });
+
+      expect(newFlow.points.length).toBe(3);
+      const sink = newFlow.points[2];
+      // sink lands at the FULL dragged position, not snapped back to x=300
+      expect(sink.x).toBe(450);
+      expect(sink.y).toBe(360);
+      expect(newCloud.x).toBe(450);
+      expect(newCloud.y).toBe(360);
+      // corner keeps the L orthogonal: vertical riser at the stock's x, then
+      // horizontal out to the cloud's new x.
+      const corner = newFlow.points[1];
+      expect(corner.x).toBe(stockEdgeX);
+      expect(corner.y).toBe(360);
+      // valve stays interior on the cloud-adjacent (horizontal) segment
+      expect(newFlow.y).toBe(360);
+      expect(newFlow.x).toBeGreaterThan(stockEdgeX);
+      expect(newFlow.x).toBeLessThan(450);
+    });
+
+    it('applies both deltas to a vertical source-cloud reroute (no along-axis snap-back)', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockEdgeY = 200 - StockHeight / 2; // 182.5 (top edge, stock below)
+      const flow = makeFlow(flowUid, 100, 150, [
+        { x: 100, y: 100, attachedToUid: cloudUid }, // source cloud at top
+        { x: 100, y: stockEdgeY, attachedToUid: stockUid },
+      ]);
+      const cloud = makeCloud(cloudUid, flowUid, 100, 100);
+
+      // Vertical flow: parallel axis is Y, perpendicular is X. Drag the source
+      // cloud DOWN by 150 (parallel) and RIGHT by 160 (perpendicular, dominant).
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, { x: -160, y: -150 });
+
+      expect(newFlow.points.length).toBe(3);
+      const source = newFlow.points[0];
+      // source lands at the FULL dragged position, not snapped back to y=100
+      expect(source.x).toBe(260);
+      expect(source.y).toBe(250);
+      expect(newCloud.x).toBe(260);
+      expect(newCloud.y).toBe(250);
+      // corner: vertical run from the cloud down to the fixed end's y, then
+      // horizontal across to the stock.
+      const corner = newFlow.points[1];
+      expect(corner.x).toBe(260);
+      expect(corner.y).toBe(stockEdgeY);
+    });
+  });
+
   describe('UpdateCloudAndFlow - degenerate flow creation', () => {
     // When a flow is first created, both endpoints are at the same position.
     // The segment is both horizontal AND vertical (zero length).
