@@ -167,6 +167,52 @@ interface EditorState {
   variableDetailsActiveTab: number;
 }
 
+// Enforces the Editor's selection invariant for the element-mutation paths
+// (delete, create, flow/link attach): when such a path leaves the selection
+// EMPTY, the selection-tied variable-details panel must close and the
+// variable-details tab must reset. Every one of those setState sites composes
+// this (spread into its patch) so the rule holds uniformly instead of each call
+// site re-deriving it and drifting apart.
+//
+// The errors panel is EXEMPT. showDetails is a single field that is either
+// 'variable' (a panel bound to the selected variable), 'errors' (the
+// model-level error list, independent of any selection), or undefined. Only the
+// 'variable' case is tied to the selection, so an emptied selection clears
+// showDetails ONLY when it is currently 'variable' -- deleting a variable while
+// triaging the error list must not dismiss that list. currentShowDetails is
+// therefore an input.
+//
+// A non-empty selection is returned unchanged: the caller keeps ownership of
+// showDetails for the paths that intentionally open a panel. handleSelection's
+// empty-click/Escape dismiss and the navigation handlers deliberately close
+// EVERYTHING (variable AND errors), so they do NOT route through here.
+//
+// The bug this closes: the delete/create/attach handlers mutated `selection`
+// directly and skipped the variable-panel reset, leaving showDetails at
+// 'variable' with nothing selected -- masked only because getDetails() also
+// guards on a named selected element, but fragile (a later single-select would
+// pop the stale panel open, and any change to that render guard would surface a
+// broken panel over an empty selection).
+export function selectionStatePatch(
+  selection: ReadonlySet<UID>,
+  currentShowDetails: 'variable' | 'errors' | undefined,
+): {
+  selection: ReadonlySet<UID>;
+  showDetails?: 'variable' | 'errors' | undefined;
+  variableDetailsActiveTab?: number;
+} {
+  if (selection.size === 0) {
+    // Close the variable panel only if it is the one showing; leave an open
+    // errors panel (or an already-closed panel) untouched. Reset the tab
+    // regardless so the next variable panel opens on its first tab.
+    if (currentShowDetails === 'variable') {
+      return { selection, showDetails: undefined, variableDetailsActiveTab: 0 };
+    }
+    return { selection, variableDetailsActiveTab: 0 };
+  }
+  return { selection };
+}
+
 // Discriminated union types for project data formats
 export type ProtobufProjectData = {
   format: 'protobuf';
@@ -541,6 +587,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   React.useEffect(() => {
     if (navResetSeq !== r.lastNavResetSeq) {
       r.lastNavResetSeq = navResetSeq;
+      // An undo-driven navigation reset (the viewed model vanished) is a
+      // full reset, not an element mutation: close EVERYTHING explicitly rather
+      // than routing through selectionStatePatch (which would preserve an open
+      // errors panel).
       setState({
         selection: new Set<UID>(),
         showDetails: undefined,
@@ -770,6 +820,12 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       flowStillBeingCreated: false,
       variableDetailsActiveTab: 0,
     });
+    // An empty selection here is a deliberate dismiss gesture (clicking empty
+    // canvas, Escape, clearing the search box), so close EVERYTHING -- the
+    // variable panel AND the model-level errors panel. This is intentionally
+    // broader than selectionStatePatch (which the element-mutation paths use so
+    // an emptied selection preserves an open errors panel); the two behaviors
+    // are deliberately distinct, so this path does NOT route through the helper.
     if (selection.size === 0) {
       setState({ showDetails: undefined });
     }
@@ -861,10 +917,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     // dropped the deleted element but props.selection still pointed at it --
     // Canvas's buildSelectionMap now tolerates that, but the state transition
     // should still be atomic.) The deleteOps above were computed from the
-    // pre-clear selection.
-    setState({
-      selection: new Set<number>(),
-    });
+    // pre-clear selection. selectionStatePatch also closes the variable panel
+    // (but not an open errors panel) and resets the tab in this same block so
+    // the emptied selection can't strand a variable panel over nothing.
+    setState(selectionStatePatch(new Set<number>(), latest.current.state.showDetails));
 
     if (deleteOps.length > 0) {
       const patch: JsonProjectPatch = {
@@ -948,8 +1004,12 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       }
 
       await updateView({ ...view, nextUid: result.nextUid, elements: [...result.elements] }, { recordHistory: true });
+      // Creation assigns the new flow (non-empty) and arms flowStillBeingCreated
+      // (which suppresses the panel until the flow is named); a reattach
+      // preserves the prior selection. selectionStatePatch keeps the
+      // empty-selection invariant should either ever resolve to no selection.
       setState({
-        selection,
+        ...selectionStatePatch(selection, latest.current.state.showDetails),
         flowStillBeingCreated: inCreation,
       });
       scheduleSimRun();
@@ -995,7 +1055,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     view = { ...view, nextUid, elements };
 
     await updateView(view, { recordHistory: true });
-    setState({ selection });
+    setState(selectionStatePatch(selection, latest.current.state.showDetails));
   }, []);
 
   const handleCreateVariable = React.useCallback(async (element: ViewElement): Promise<void> => {
@@ -1071,9 +1131,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     await applyPatchOrReportError(patch, 'variable creation');
 
     await updateView({ ...view, nextUid, elements }, { recordHistory: true });
-    setState({
-      selection: new Set<number>(),
-    });
+    setState(selectionStatePatch(new Set<number>(), latest.current.state.showDetails));
   }, []);
 
   const handleSelectionMove = React.useCallback(
@@ -1453,6 +1511,8 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       return;
     }
     const newModelName = controller.getModelName();
+    // Navigation is a full context switch: close EVERYTHING (variable AND
+    // errors) explicitly rather than routing through selectionStatePatch.
     setState({
       selection: outcome.restoredSelection,
       showDetails: undefined,
@@ -1474,6 +1534,8 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     if (!outcome.restoredSelection) {
       return;
     }
+    // Navigation is a full context switch: close EVERYTHING explicitly (the
+    // restored parent selection may be non-empty), not via selectionStatePatch.
     setState({
       selection: outcome.restoredSelection,
       showDetails: undefined,
@@ -1489,6 +1551,8 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     if (!outcome.restoredSelection) {
       return;
     }
+    // Same as navigateBack: a full context switch that closes EVERYTHING
+    // explicitly, not via selectionStatePatch.
     setState({
       selection: outcome.restoredSelection,
       showDetails: undefined,
@@ -1503,14 +1567,19 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       }
       const element = getNamedElement(canonicalize(newValue));
       handleSelection(element ? new Set([element.uid]) : new Set());
-      // Don't open the mutation-capable details panel for read-only
-      // models (stdlib models, embedded mode). The Canvas-level guard
-      // at line ~1480 handles double-click, but search bypasses it.
-      const readOnly = latest.current.props.embedded || isStdlibModel(modelName());
-      setState({
-        showDetails: readOnly ? undefined : 'variable',
-      });
       if (element) {
+        // Don't open the mutation-capable details panel for read-only
+        // models (stdlib models, embedded mode). The Canvas-level guard
+        // at line ~1480 handles double-click, but search bypasses it.
+        //
+        // Only open the panel when the search resolved to an element. When it
+        // did not, handleSelection already cleared the selection (and, via its
+        // own empty-selection close-all, showDetails); setting showDetails here
+        // would strand a 'variable' panel over an empty selection.
+        const readOnly = latest.current.props.embedded || isStdlibModel(modelName());
+        setState({
+          showDetails: readOnly ? undefined : 'variable',
+        });
         await centerVariable(element);
       }
     },
