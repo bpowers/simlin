@@ -479,49 +479,74 @@ export function computeFlowAttachment(
 }
 
 /**
- * Compute the GROWN geometry of the in-creation flow for the live drag preview.
+ * Compute the GROWN geometry of a flow whose cloud-terminated endpoint is being
+ * dragged, for the live drag preview.
  *
- * The flow tool stages a degenerate flow (both points at the press point) and
- * records the drag only as `moveDelta` (= press - cursor, the Canvas
- * convention); it never rewrites the staged flow's points. So the preview has
- * to be derived here: route the sink toward the cursor (over empty space) or
- * onto a hovered stock's edge, keeping the SOURCE fixed and the flow
- * orthogonal. This mirrors what `computeFlowAttachment` produces on release, so
- * the live preview matches the committed result.
+ * This is the shared routing behind two visually-identical interactions:
+ *   - flow CREATION (the flow tool stages a degenerate flow and records the drag
+ *     only as `moveDelta`; the sink follows the cursor), and
+ *   - dragging an EXISTING flow's cloud endpoint (source or sink) to move or
+ *     reattach it.
+ * In both cases the dragged endpoint follows the cursor over empty space, or
+ * pins to a hovered stock's edge, while the OTHER endpoint stays fixed and the
+ * flow stays orthogonal. Routing both previews through `UpdateCloudAndFlow` --
+ * the same function the commit (`computeFlowAttachment`/`reattachEndpoint`)
+ * uses -- keeps the preview identical to the committed result and makes an
+ * existing-cloud drag feel the same as creation (the flow line, arrowhead, and
+ * valve all track the cursor, not just the valve).
  *
+ * `isSource` selects which endpoint moves (source = first point, sink = last).
  * `target` is the valid stock under the cursor (or undefined over empty space).
- * Pure: returns a new flow element; the caller swaps it into the render.
+ * `moveDelta` is the Canvas convention (= press - cursor). Pure: returns a new
+ * flow element; the caller swaps it into the render.
+ */
+export function growEndpointDrag(
+  flow: FlowViewElement,
+  isSource: boolean,
+  moveDelta: CanvasPoint,
+  target: StockViewElement | CloudViewElement | undefined,
+): FlowViewElement {
+  const endIndex = isSource ? 0 : flow.points.length - 1;
+  const endPt = isSource ? first(flow.points) : last(flow.points);
+  if (target !== undefined) {
+    // Hovering a valid stock: pin the endpoint to its edge -- the same routing
+    // the commit (computeFlowAttachment) and reattachEndpoint use. Temporarily
+    // attach the endpoint to the target so UpdateCloudAndFlow can route and clip
+    // it; the real attachment is (re)computed on release.
+    const attached: FlowViewElement = {
+      ...flow,
+      points: flow.points.map((pt, i) => (i === endIndex ? { ...pt, attachedToUid: target.uid } : pt)),
+    };
+    const endDelta = { x: endPt.x - target.x, y: endPt.y - target.y };
+    const targetAtOldEnd = { ...target, x: endPt.x, y: endPt.y } as StockViewElement | CloudViewElement;
+    return UpdateCloudAndFlow(targetAtOldEnd, attached, endDelta)[1];
+  }
+  // Over empty space: the endpoint follows the cursor. Move the cloud (the
+  // endpoint's current attachment, real or faux) from its current position by
+  // moveDelta; UpdateCloudAndFlow picks the axis from moveDelta and keeps the
+  // opposite endpoint fixed.
+  const endCloud: CloudViewElement = {
+    type: 'cloud',
+    uid: endPt.attachedToUid ?? fauxCloudTargetUid,
+    flowUid: flow.uid,
+    x: endPt.x,
+    y: endPt.y,
+    isZeroRadius: false,
+    ident: undefined,
+  };
+  return UpdateCloudAndFlow(endCloud, flow, moveDelta)[1];
+}
+
+/**
+ * Live drag preview for flow CREATION: the sink follows the cursor (or snaps to
+ * a hovered stock's edge) with the source fixed. A thin wrapper over
+ * `growEndpointDrag` (the sink is the last point, so `isSource: false`) kept as
+ * a named entry point for the creation call site and its tests.
  */
 export function growInCreationFlow(
   flow: FlowViewElement,
   moveDelta: CanvasPoint,
   target: StockViewElement | CloudViewElement | undefined,
 ): FlowViewElement {
-  const sinkPt = last(flow.points);
-  if (target !== undefined) {
-    // Hovering a valid stock: pin the sink to its edge -- the same routing the
-    // commit (computeFlowAttachment) and reattachEndpoint use. Temporarily
-    // attach the sink to the target so UpdateCloudAndFlow can route and clip it;
-    // the real attachment is (re)computed on release.
-    const attached: FlowViewElement = {
-      ...flow,
-      points: flow.points.map((pt, i) => (i === flow.points.length - 1 ? { ...pt, attachedToUid: target.uid } : pt)),
-    };
-    const sinkDelta = { x: sinkPt.x - target.x, y: sinkPt.y - target.y };
-    const targetAtOldSink = { ...target, x: sinkPt.x, y: sinkPt.y } as StockViewElement | CloudViewElement;
-    return UpdateCloudAndFlow(targetAtOldSink, attached, sinkDelta)[1];
-  }
-  // Over empty space: the sink follows the cursor. Move the faux sink cloud (the
-  // sink point's current attachment) from the press point by moveDelta;
-  // UpdateCloudAndFlow picks the axis from moveDelta and keeps the source fixed.
-  const sinkCloud: CloudViewElement = {
-    type: 'cloud',
-    uid: sinkPt.attachedToUid ?? fauxCloudTargetUid,
-    flowUid: flow.uid,
-    x: sinkPt.x,
-    y: sinkPt.y,
-    isZeroRadius: false,
-    ident: undefined,
-  };
-  return UpdateCloudAndFlow(sinkCloud, flow, moveDelta)[1];
+  return growEndpointDrag(flow, false, moveDelta, target);
 }

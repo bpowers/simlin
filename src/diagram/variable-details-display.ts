@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import type { EquationError, UnitError, Variable } from '@simlin/core/datamodel';
+import type { ConnectorError, EquationError, UnitError, Variable } from '@simlin/core/datamodel';
 
 export interface VariableDetailsView {
   /**
@@ -15,6 +15,11 @@ export interface VariableDetailsView {
   readonly equationErrors: readonly EquationError[];
   /** Non-fatal unit errors; surfaced as warnings beside the chart. */
   readonly unitWarnings: readonly UnitError[];
+  /**
+   * Non-fatal sketch-connector drift (connectors out of sync with the
+   * equation); surfaced as warnings beside the chart, like unit warnings.
+   */
+  readonly connectorWarnings: readonly ConnectorError[];
 }
 
 /**
@@ -26,9 +31,11 @@ export interface VariableDetailsView {
 export function variableDetailsView(variable: Variable): VariableDetailsView {
   const equationErrors = variable.errors ?? [];
   const unitWarnings = variable.unitErrors ?? [];
+  const connectorWarnings = variable.connectorErrors ?? [];
   return {
     showChart: equationErrors.length === 0,
     equationErrors,
     unitWarnings,
+    connectorWarnings,
   };
 }

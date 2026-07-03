@@ -76,6 +76,12 @@ export interface FakeEngineOptions {
   run?: (overrides: Record<string, number>, options: { analyzeLtm?: boolean }) => EngineRunApi;
   // Forces applyPatch to reject (the patch-failure path).
   applyPatchThrows?: boolean | Error;
+  // Scripts getModel().getIncomingLinks(varName) for the connector-sync check:
+  // a per-ident dependency map, or a function. Unlisted idents yield []. When a
+  // function throws, that variable is dropped from the connector check.
+  incomingLinks?: Record<string, readonly string[]> | ((varName: string) => readonly string[]);
+  // Forces getModel() to reject (the connector-sync skip path).
+  getModelThrows?: boolean | Error;
 }
 
 export interface FakeEngine extends EngineApi {
@@ -132,6 +138,13 @@ export function makeFakeEngine(options: FakeEngineOptions = {}): FakeEngine {
   const resolveSimulatable = (): boolean =>
     typeof options.simulatable === 'function' ? options.simulatable() : (options.simulatable ?? true);
 
+  const resolveIncomingLinks = (varName: string): readonly string[] => {
+    if (typeof options.incomingLinks === 'function') {
+      return options.incomingLinks(varName);
+    }
+    return options.incomingLinks?.[varName] ?? [];
+  };
+
   const model: EngineModelApi = {
     async run(
       overrides: Record<string, number> = {},
@@ -142,6 +155,9 @@ export function makeFakeEngine(options: FakeEngineOptions = {}): FakeEngine {
         return options.run(overrides, runOptions);
       }
       return fakeRun({ time: [0, 1, 2], output: [1, 2, 3] });
+    },
+    async getIncomingLinks(varName: string): Promise<readonly string[]> {
+      return resolveIncomingLinks(varName);
     },
   };
 
@@ -175,6 +191,12 @@ export function makeFakeEngine(options: FakeEngineOptions = {}): FakeEngine {
       return resolveSimulatable();
     },
     async mainModel(): Promise<EngineModelApi> {
+      return model;
+    },
+    async getModel(_modelName: string | null): Promise<EngineModelApi> {
+      if (options.getModelThrows) {
+        throw options.getModelThrows instanceof Error ? options.getModelThrows : new Error('getModel failed');
+      }
       return model;
     },
     async dispose(): Promise<void> {

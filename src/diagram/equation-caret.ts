@@ -8,9 +8,13 @@
 // Primary path: the engine's `Ast::to_latex` (used by the FFI) wraps every
 // node in a `\htmlData{eqnloc=START_END}` annotation carrying the source byte
 // range it covers, so KaTeX renders each atom inside a span with a
-// `data-eqnloc` attribute. The click handler finds the innermost annotated
-// span under the cursor and maps the click within it (`caretOffsetWithinSpan`)
-// -- this is exact rather than heuristic.
+// `data-eqnloc` attribute. The click handler picks the most specific annotated
+// span for the click point geometrically (`chooseSpanForClick` -- the smallest
+// box containing it) and maps the click within it (`caretOffsetWithinSpan`) --
+// this is exact rather than heuristic. Geometry rather than DOM ancestry is
+// what lets a click on layout chrome that has no annotation of its own (a
+// fraction bar, the `\frac` v-list wrapper) resolve to the operand it visually
+// sits in instead of the composite span that merely encloses it.
 //
 // Fallback path: when the rendered LaTeX has no annotations (e.g. the engine
 // couldn't produce LaTeX and the UI rendered the raw equation text instead),
@@ -194,6 +198,72 @@ export function caretOffsetForClick(
   const k = nearestGlyphBoundary(glyphs, clickX, clickY);
   const mapping = alignGlyphsToSource(glyphs, equationStr);
   return Math.max(0, Math.min(len, mapping[k]));
+}
+
+/** The on-screen bounding box of a source-annotated span, in client
+ *  (viewport) coordinates -- the same space as a `MouseEvent`'s
+ *  `clientX`/`clientY`. `VariableDetails.tsx` collects one per
+ *  `data-eqnloc`/`data-oploc` element under the preview. */
+export interface SpanBox {
+  readonly left: number;
+  readonly right: number;
+  readonly top: number;
+  readonly bottom: number;
+}
+
+/**
+ * Pick which source-annotated span a click belongs to, returning its index in
+ * `boxes` (or -1 when `boxes` is empty).
+ *
+ * Annotated spans nest -- a composite node (a fraction, a function call, an
+ * operator expression) wraps its operands, each of which is itself annotated --
+ * so a click point is typically inside several boxes at once. We want the
+ * *most specific* one, so among the boxes that contain the point we take the
+ * smallest by area: a click inside `average_lifespan` picks that leaf, not the
+ * whole `population/average_lifespan` fraction that also contains it.
+ *
+ * This is what fixes clicks that land on KaTeX layout chrome rather than a
+ * glyph -- the fraction bar, or the `\frac` v-list wrapper that overlays the
+ * denominator row. Walking DOM *ancestors* (`Element.closest`) from such a
+ * target stops at the composite fraction span (the bar and the wrapper are not
+ * inside either operand), which then maps the click by a coarse interpolation
+ * across the entire equation. Selecting by geometry instead reaches the operand
+ * the pixel actually sits in.
+ *
+ * When the point is inside no box (padding, or slightly outside the rendered
+ * math) we fall back to the nearest box by squared distance to its rect, so a
+ * near-miss still resolves to a sensible span rather than nothing.
+ */
+export function chooseSpanForClick(boxes: readonly SpanBox[], clickX: number, clickY: number): number {
+  let best = -1;
+  let bestArea = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < boxes.length; i++) {
+    const b = boxes[i];
+    if (clickX >= b.left && clickX <= b.right && clickY >= b.top && clickY <= b.bottom) {
+      const area = (b.right - b.left) * (b.bottom - b.top);
+      // Strictly-smaller keeps the earliest (outermost-listed) box on an exact
+      // area tie, which is deterministic and never matters in practice.
+      if (area < bestArea) {
+        bestArea = area;
+        best = i;
+      }
+    }
+  }
+  if (best >= 0) {
+    return best;
+  }
+  let bestDistSq = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < boxes.length; i++) {
+    const b = boxes[i];
+    const dx = clickX < b.left ? b.left - clickX : clickX > b.right ? clickX - b.right : 0;
+    const dy = clickY < b.top ? b.top - clickY : clickY > b.bottom ? clickY - b.bottom : 0;
+    const d = dx * dx + dy * dy;
+    if (d < bestDistSq) {
+      bestDistSq = d;
+      best = i;
+    }
+  }
+  return best;
 }
 
 // A parenthesis. Trimmed off the ends of an *operator-gap* span (in addition

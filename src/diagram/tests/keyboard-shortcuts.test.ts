@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { detectUndoRedo, isEditableElement } from '../keyboard-shortcuts';
+import { detectUndoRedo, isEditableElement, isNewlineChord } from '../keyboard-shortcuts';
 
 describe('keyboard-shortcuts', () => {
   describe('detectUndoRedo', () => {
@@ -176,6 +176,47 @@ describe('keyboard-shortcuts', () => {
         div.contentEditable = 'false';
         expect(isEditableElement(div)).toBe(false);
       });
+    });
+  });
+
+  describe('isNewlineChord', () => {
+    const base = { key: 'Enter', metaKey: false, ctrlKey: false, altKey: false };
+
+    it('detects Cmd+Enter (macOS "Apple enter")', () => {
+      expect(isNewlineChord({ ...base, metaKey: true })).toBe(true);
+    });
+
+    it('detects Ctrl+Enter for non-mac keyboards', () => {
+      expect(isNewlineChord({ ...base, ctrlKey: true })).toBe(true);
+    });
+
+    it('detects the chord on the numpad Enter key (by code)', () => {
+      expect(isNewlineChord({ code: 'NumpadEnter', metaKey: true, ctrlKey: false, altKey: false })).toBe(true);
+    });
+
+    it('detects the chord when only the code is Enter', () => {
+      expect(isNewlineChord({ code: 'Enter', metaKey: false, ctrlKey: true, altKey: false })).toBe(true);
+    });
+
+    it('ignores plain Enter (Slate splits the block itself)', () => {
+      expect(isNewlineChord(base)).toBe(false);
+    });
+
+    it('ignores Shift+Enter (Slate inserts the soft break itself)', () => {
+      // Shift is not one of the chord modifiers; without meta/ctrl this is not
+      // our gesture. The event carries no shiftKey field because the helper
+      // does not consult it.
+      expect(isNewlineChord(base)).toBe(false);
+    });
+
+    it('ignores Alt/Option+Enter so text-navigation shortcuts stay free', () => {
+      expect(isNewlineChord({ ...base, metaKey: true, altKey: true })).toBe(false);
+      expect(isNewlineChord({ ...base, ctrlKey: true, altKey: true })).toBe(false);
+    });
+
+    it('ignores modifier chords on non-Enter keys', () => {
+      expect(isNewlineChord({ key: 'a', metaKey: true, ctrlKey: false, altKey: false })).toBe(false);
+      expect(isNewlineChord({ key: ' ', metaKey: false, ctrlKey: true, altKey: false })).toBe(false);
     });
   });
 });

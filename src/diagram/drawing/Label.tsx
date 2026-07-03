@@ -6,6 +6,7 @@ import * as React from 'react';
 
 import { Rect } from './common';
 import { AuxRadius } from './default';
+import { ClickDragThresholdPx } from './pointer-utils';
 
 import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel';
 
@@ -150,6 +151,12 @@ export const Label = React.memo(function Label(props: LabelPropsFull): React.Rea
   // drag-in-progress must not trigger re-renders of the label itself.
   const pointerId = React.useRef<number | undefined>(undefined);
   const inMove = React.useRef(false);
+  // Screen-pixel position of the press, so a label drag only begins once the
+  // pointer has moved past the click/drag threshold. Without this, the
+  // incidental 1-2px wobble of a physical double-click on the name started a
+  // label drag (selecting + moving the label) instead of opening the name
+  // editor, which is one reason double-click-to-rename was unreliable.
+  const downPoint = React.useRef<{ x: number; y: number } | undefined>(undefined);
 
   const handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
     if (!e.isPrimary) {
@@ -159,15 +166,36 @@ export const Label = React.memo(function Label(props: LabelPropsFull): React.Rea
     e.stopPropagation();
 
     pointerId.current = e.pointerId;
+    downPoint.current = { x: e.clientX, y: e.clientY };
+    // Capture on press (not once the drag starts): a short label has a tiny
+    // hit box, so a grip near its edge can leave the <text> bbox while still
+    // sub-threshold -- without capture those moves would never reach us and the
+    // label could not be dragged from that point. Capture on `currentTarget`
+    // (the <text> the handler is bound to), not `e.target` (which may be a child
+    // <tspan> the press landed on). Because it is the SAME node the dblclick
+    // handler lives on, capturing here does not change click/dblclick targeting;
+    // the load-bearing part of the double-click fix is purely that a
+    // sub-threshold wobble fires no onLabelDrag (no selection / node churn
+    // between the two clicks), which the threshold gate below still guarantees.
+    e.currentTarget.setPointerCapture(e.pointerId);
   };
 
   const handlePointerMove = (e: React.PointerEvent<SVGElement>): void => {
     if (pointerId.current !== e.pointerId) {
       return;
     }
-    inMove.current = true;
+    // Ignore sub-threshold jitter until it clearly becomes a drag. Pointer
+    // coords are already in screen pixels, so compare directly against the
+    // screen-pixel threshold (no zoom conversion needed). Once a drag has
+    // started, every subsequent move keeps feeding onLabelDrag.
+    if (!inMove.current) {
+      const start = downPoint.current;
+      if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) < ClickDragThresholdPx) {
+        return;
+      }
+      inMove.current = true;
+    }
 
-    (e.target as Element).setPointerCapture(e.pointerId);
     onLabelDrag?.(uid, e);
   };
 
@@ -177,6 +205,7 @@ export const Label = React.memo(function Label(props: LabelPropsFull): React.Rea
     }
     pointerId.current = undefined;
     inMove.current = false;
+    downPoint.current = undefined;
   };
 
   const handleDoubleClick = (e: React.MouseEvent<SVGElement>): void => {
