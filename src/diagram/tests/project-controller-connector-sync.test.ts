@@ -98,6 +98,10 @@ function projectJson(withConnector: boolean): string {
   });
 }
 
+function mainVar(controller: ProjectController, ident: string): Variable | undefined {
+  return controller.getSnapshot().project?.models.get('main')?.variables.get(ident);
+}
+
 function bConnectorErrors(controller: ProjectController) {
   const project = controller.getSnapshot().project;
   return project?.models.get('main')?.variables.get('b')?.connectorErrors;
@@ -314,6 +318,125 @@ describe('ProjectController connector-sync on module drill-in', () => {
     await flushTimers();
 
     expect(childVar(controller, 'cb')?.connectorErrors).toBeUndefined();
+    await controller.dispose();
+  });
+});
+
+describe('ProjectController connector-sync skips errored-equation targets', () => {
+  const eqnError = (variableName: string): ErrorDetail =>
+    ({
+      modelName: 'main',
+      variableName,
+      kind: SimlinErrorKind.Variable,
+      code: 1,
+      startOffset: 0,
+      endOffset: 1,
+    }) as unknown as ErrorDetail;
+
+  const unitError = (variableName: string): ErrorDetail =>
+    ({
+      modelName: 'main',
+      variableName,
+      kind: SimlinErrorKind.Units,
+      code: 44,
+      startOffset: 0,
+      endOffset: 1,
+    }) as unknown as ErrorDetail;
+
+  it('does not flag a stale connector on a variable with a fatal equation error', async () => {
+    // b has a parse error (engine reports no deps) and an inbound connector a->b.
+    // Without the skip that connector reads as stale; with it, only the real
+    // equation error is shown.
+    const engine = makeFakeEngine({
+      json: () => projectJson(true),
+      incomingLinks: { a: [], b: [] },
+      errors: [eqnError('b')],
+    });
+    const { config } = makeControllerConfig({ engine });
+    const controller = new ProjectController(config);
+
+    await controller.openInitialProject();
+
+    expect(bConnectorErrors(controller)).toBeUndefined();
+    expect(mainVar(controller, 'b')?.errors).toEqual([{ start: 0, end: 1, code: 1 }]);
+    await controller.dispose();
+  });
+
+  it('does not flag a missing connector on a variable with a fatal equation error', async () => {
+    // b's (broken) equation would reference a, but the target is skipped, so no
+    // missing-connector warning is produced.
+    const engine = makeFakeEngine({
+      json: () => projectJson(false),
+      incomingLinks: { a: [], b: ['a'] },
+      errors: [eqnError('b')],
+    });
+    const { config } = makeControllerConfig({ engine });
+    const controller = new ProjectController(config);
+
+    await controller.openInitialProject();
+
+    expect(bConnectorErrors(controller)).toBeUndefined();
+    await controller.dispose();
+  });
+
+  it('still checks a healthy sibling variable in the same view', async () => {
+    // Model: a (const), b (errored, inbound connector a->b), c (healthy, uses a
+    // with no connector). b is skipped; c must still get its missing warning.
+    const json = JSON.stringify({
+      name: 'test',
+      simSpecs: { startTime: 0, endTime: 10, dt: '1' },
+      models: [
+        {
+          name: 'main',
+          stocks: [],
+          flows: [],
+          auxiliaries: [
+            { name: 'a', equation: '1' },
+            { name: 'b', equation: '@' },
+            { name: 'c', equation: 'a' },
+          ],
+          views: [
+            {
+              elements: [
+                { type: 'aux', uid: 1, name: 'a', x: 0, y: 0 },
+                { type: 'aux', uid: 2, name: 'b', x: 100, y: 0 },
+                { type: 'aux', uid: 3, name: 'c', x: 200, y: 0 },
+                { type: 'link', uid: 4, fromUid: 1, toUid: 2 },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const engine = makeFakeEngine({
+      json: () => json,
+      incomingLinks: { a: [], b: [], c: ['a'] },
+      errors: [eqnError('b')],
+    });
+    const { config } = makeControllerConfig({ engine });
+    const controller = new ProjectController(config);
+
+    await controller.openInitialProject();
+
+    expect(mainVar(controller, 'b')?.connectorErrors).toBeUndefined();
+    expect(mainVar(controller, 'c')?.connectorErrors).toEqual([{ kind: 'missingConnector', ident: 'a', name: 'a' }]);
+    await controller.dispose();
+  });
+
+  it('still checks a variable that has only unit errors (AST is valid)', async () => {
+    // b has a unit error but a valid equation, so its deps are authoritative --
+    // the unused inbound connector a->b is correctly flagged stale.
+    const engine = makeFakeEngine({
+      json: () => projectJson(true),
+      incomingLinks: { a: [], b: [] },
+      errors: [unitError('b')],
+    });
+    const { config } = makeControllerConfig({ engine });
+    const controller = new ProjectController(config);
+
+    await controller.openInitialProject();
+
+    expect(bConnectorErrors(controller)).toEqual([{ kind: 'staleConnector', ident: 'a', name: 'a' }]);
     await controller.dispose();
   });
 });

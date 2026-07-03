@@ -1236,6 +1236,20 @@ export class ProjectController {
       if (!variable || variable.type === 'module' || seen.has(el.ident)) {
         continue;
       }
+      // Skip targets with fatal equation/compile errors: their AST did not parse,
+      // so the engine reports no dependencies and every inbound connector would be
+      // surfaced as stale (and every real dep as missing) -- bogus noise while the
+      // user is already seeing the real equation error. This relies on
+      // updateVariableErrors having annotated `errors` first, which every caller
+      // guarantees by running it before attachConnectorErrors on the same project
+      // (an empty-equation variable carries an EmptyEquation error, so an inbound
+      // connector to a not-yet-written variable reads as a legitimate forward
+      // declaration, not stale). Unit errors do NOT gate: the AST is fine there,
+      // so dependencies stay authoritative. (The all-empty blank-sketch case is
+      // already handled by the project.hasNoEquations early return above.)
+      if (variable.errors && variable.errors.length > 0) {
+        continue;
+      }
       seen.add(el.ident);
       targetIdents.push(el.ident);
     }
