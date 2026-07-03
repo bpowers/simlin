@@ -892,8 +892,20 @@ export function UpdateCloudAndFlow(
         y: newCloudPoint.y,
       };
 
-      // Clamp valve to closest segment of new shape
-      const newValve = clampValveToClosestSegment(currentValve, points);
+      // Land the valve on the segment adjacent to the dragged cloud -- the bent
+      // segment the drag is actively growing -- at an interior position. Picking
+      // the merely-CLOSEST segment here (clampValveToClosestSegment) let the
+      // valve's closest segment flip from this bent segment onto the
+      // perpendicular riser as the L deepened, teleporting the valve (and its
+      // label) to the riser's stock-adjacent end, flush against the stock body
+      // (#53). Because the live drag re-routes from the original 2-point flow
+      // each pointermove, that flip recurred every frame past a threshold; the
+      // committed reroute inherited the same degenerate position. Anchoring to
+      // the cloud-adjacent segment tracks the cursor continuously, and
+      // clampToSegment keeps the valve off the segment ends.
+      const rerouteSegments = getSegments(points);
+      const cloudAdjacentSegment = cloudIsFirst ? rerouteSegments[0] : rerouteSegments[rerouteSegments.length - 1];
+      const newValve = clampToSegment(currentValve, cloudAdjacentSegment);
 
       flow = {
         ...flow,
