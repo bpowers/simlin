@@ -1069,6 +1069,22 @@ describe('growEndpointDrag (existing cloud endpoint drag)', () => {
     expect(src.y).toBe(200);
   });
 
+  it('grabbing a source cloud (zero delta) leaves an OFF-CENTER valve unmoved (issue #832)', () => {
+    // Source cloud (uid 2) on the left, stock sink edge on the right, valve
+    // deliberately OFF-CENTER (x=160, nearer the source). The instant the source
+    // cloud is grabbed -- before any real movement -- adjustFlows must not reflect
+    // the valve across the segment midpoint. Regression for the first-frame jump.
+    const flow = makeFlowEl(10, 'f', 160, 200, [
+      { x: 100, y: 200, attachedToUid: 2 }, // source cloud (min coord)
+      { x: 277.5, y: 200, attachedToUid: 1 }, // stock sink edge (max coord)
+    ]);
+    const grown = growEndpointDrag(flow, true, { x: 0, y: 0 }, undefined);
+
+    expect(grown.points.length).toBe(2);
+    expect(grown.x).toBeCloseTo(160, 5); // unchanged, not reflected to ~217.5
+    expect(grown.y).toBe(200);
+  });
+
   // Regression for issue #53: "when moving a cloud, the flow label jumps around".
   // The live drag re-routes from the ORIGINAL flow each pointermove with an
   // accumulating moveDelta (that is what Canvas does -- r.elements holds the
@@ -1090,9 +1106,8 @@ describe('growEndpointDrag (existing cloud endpoint drag)', () => {
     // step where the point count changes (straight <-> L) is the "single
     // unavoidable relocation" the requirements exempt; it must still be a
     // sensible interior hop, not a jump to the stock corner. The measured
-    // topology hop is ~8px for a sink cloud (default bound leaves margin); the
-    // source-cloud case is inflated by the separate adjustFlows valve-reflection
-    // bug (#832) and passes its own looser bound, documented at its call site.
+    // topology hop is ~8px for both sink and source clouds (default bound leaves
+    // margin); `topologyBound` stays overridable for any future looser case.
     function expectContinuous(frames: FlowViewElement[], topologyBound = 15): void {
       let sawTopologyChange = false;
       for (let i = 1; i < frames.length; i++) {
@@ -1166,12 +1181,9 @@ describe('growEndpointDrag (existing cloud endpoint drag)', () => {
       const flow = cloudToStockFlow();
       const frames = sweep(flow, true, 'y', -200, 4);
 
-      // Looser topology-hop bound here: the straight->L hop is ~24px, inflated by
-      // the pre-existing adjustFlows valve-reflection bug (#832), which shifts a
-      // source cloud's STRAIGHT-mode valve to its mirror position. That is a
-      // separate defect; the #53 fix guarantees the same-topology steps stay
-      // tight (no teleport), which the <12px bound still enforces.
-      expectContinuous(frames, 30);
+      // Default (15px) topology-hop bound: with the source-cloud valve reflection
+      // fixed (#832), the straight->L hop is ~8px here, same as the sink case.
+      expectContinuous(frames);
 
       const finalFlow = frames[frames.length - 1];
       const finalSource = finalFlow.points[0];

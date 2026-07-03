@@ -2710,6 +2710,80 @@ describe('Flow routing', () => {
     });
   });
 
+  describe('UpdateCloudAndFlow - source cloud valve is not reflected (issue #832)', () => {
+    // The mirror above happens to be idempotent only when the fixed otherEnd is
+    // the SMALLER coordinate (a sink cloud on the right). When the DRAGGED cloud
+    // is the smaller-coordinate end (a SOURCE cloud on the left), the old formula
+    // `base = min(otherEnd, cloud) + abs(fraction*d)` measured the valve's offset
+    // from the wrong reference and reflected an off-center valve across the
+    // segment midpoint on the very first drag frame (#832). The fix preserves the
+    // valve's fractional position anchored to otherEnd, so a zero/sub-threshold
+    // move leaves the valve put and a real drag scales it correctly.
+    //
+    // Fixture: SOURCE cloud (uid 3) at x=100 (first point), fixed other end (uid
+    // 1) at x=200, flow horizontal at y=100, valve off-center at x=175 (fraction
+    // 0.25 from otherEnd toward the cloud).
+    const makeSourceCase = (valveX: number, delta: { x: number; y: number }) => {
+      const cloud = makeCloud(3, 30, 100, 100);
+      const flow = makeFlow(30, valveX, 100, [
+        { x: 100, y: 100, attachedToUid: 3 },
+        { x: 200, y: 100, attachedToUid: 1 },
+      ]);
+      return UpdateCloudAndFlow(cloud, flow, delta);
+    };
+
+    it('leaves an off-center valve unmoved on a zero-delta source-cloud grab', () => {
+      // The reported bug: grabbing the source cloud (no movement yet) reflected
+      // the valve 175 -> 125. It must stay at 175.
+      const [newCloud, newFlow] = makeSourceCase(175, { x: 0, y: 0 });
+      expect(newCloud.x).toBe(100);
+      expect(newFlow.x).toBe(175);
+      expect(newFlow.y).toBe(100);
+    });
+
+    it('leaves an off-center valve unmoved on a sub-threshold perpendicular grab', () => {
+      // A 3px perpendicular twitch (below the 5px reroute threshold) still runs
+      // the axis-constrain path; the valve must not reflect.
+      const [, newFlow] = makeSourceCase(175, { x: 0, y: 3 });
+      expect(newFlow.points.length).toBe(2);
+      expect(newFlow.x).toBe(175);
+    });
+
+    it('preserves the valve fraction when the source cloud is dragged along-axis', () => {
+      // Drag the source cloud LEFT by 20 (cloud 100 -> 80). The valve was at
+      // fraction 0.25 from otherEnd(200): new x = 200 + 0.25*(80-200) = 170.
+      // The old mirror teleported it to 110.
+      const [newCloud, newFlow] = makeSourceCase(175, { x: 20, y: 0 });
+      expect(newCloud.x).toBe(80);
+      expect(newFlow.x).toBeCloseTo(170, 5);
+      expect(newFlow.y).toBe(100);
+    });
+
+    it('keeps the valve between the ends when the source cloud crosses past otherEnd', () => {
+      // Drag the source cloud RIGHT past the fixed end: cloud 100 -> 250, so the
+      // segment flips (cloud now to the right of otherEnd=200). The valve stays
+      // between them: 200 + 0.25*(250-200) = 212.5.
+      const [newCloud, newFlow] = makeSourceCase(175, { x: -150, y: 0 });
+      expect(newCloud.x).toBe(250);
+      expect(newFlow.x).toBeCloseTo(212.5, 5);
+      expect(newFlow.x).toBeGreaterThan(200);
+      expect(newFlow.x).toBeLessThan(250);
+    });
+
+    it('leaves an off-center valve unmoved on a zero-delta vertical (top) source grab', () => {
+      // Vertical flow: source cloud (uid 3) at the TOP (y=100, min), fixed end at
+      // y=200. Off-center valve at y=175. A zero-delta grab must not reflect it.
+      const cloud = makeCloud(3, 30, 100, 100);
+      const flow = makeFlow(30, 100, 175, [
+        { x: 100, y: 100, attachedToUid: 3 },
+        { x: 100, y: 200, attachedToUid: 1 },
+      ]);
+      const [, newFlow] = UpdateCloudAndFlow(cloud, flow, { x: 0, y: 0 });
+      expect(newFlow.x).toBe(100);
+      expect(newFlow.y).toBe(175);
+    });
+  });
+
   describe('UpdateCloudAndFlow - degenerate flow creation', () => {
     // When a flow is first created, both endpoints are at the same position.
     // The segment is both horizontal AND vertical (zero length).

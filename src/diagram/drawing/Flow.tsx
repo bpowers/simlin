@@ -694,31 +694,40 @@ function adjustFlows(
       };
     }
 
-    // Re-place the valve by mirroring it around the segment: base =
-    // min(otherEnd, moved end) plus the ABSOLUTE scaled offset, so an off-center
-    // valve stays between the two ends even when the drag flips the segment
-    // orientation (the moved end crossing past otherEnd).
+    // Re-place the valve by preserving its FRACTIONAL position along the segment,
+    // anchored to the fixed `otherEnd`. The earlier form -- base = min(otherEnd,
+    // moved end) plus the ABSOLUTE scaled offset -- happened to be idempotent only
+    // when otherEnd was the SMALLER coordinate (a sink cloud on the right). When
+    // the dragged end was the smaller coordinate (a SOURCE cloud on the left),
+    // `base` landed on the moved end and the offset-from-otherEnd was applied from
+    // the wrong reference, reflecting an off-center valve across the segment
+    // midpoint on the very first drag frame (#832). Anchoring to otherEnd with a
+    // SIGNED new length keeps the valve between the two ends even when the moved
+    // end crosses past otherEnd (the flip case the mirror form was chasing), and
+    // clamping the fraction to [0, 1] keeps it on the segment. This mirrors what
+    // `preserveValveFraction` already does for multi-segment flows.
     //
-    // Guard the denominators against zero: for a vertical flow origStock.x ===
-    // otherEnd.x (and likewise y for a horizontal flow), which without the `|| 1`
-    // divides by zero and yields a NaN/Infinity valve -- serialized to JSON null,
-    // that bricks the model (#818).
-    const fraction = {
-      x: flow.x === otherEnd.x ? 0.5 : (stock.x - otherEnd.x) / (origStock.x - otherEnd.x || 1),
-      y: flow.y === otherEnd.y ? 0.5 : (stock.y - otherEnd.y) / (origStock.y - otherEnd.y || 1),
-    };
-    const d = {
-      x: flow.x === otherEnd.x ? stock.x - otherEnd.x : flow.x - otherEnd.x,
-      y: flow.y === otherEnd.y ? stock.y - otherEnd.y : flow.y - otherEnd.y,
-    };
-    const base = {
-      x: Math.min(otherEnd.x, stock.x),
-      y: Math.min(otherEnd.y, stock.y),
+    // The `oldLen === 0` branch preserves the #818 divide-by-zero guard and has
+    // two sub-cases distinguished by the NEW length:
+    //   - newLen === 0: the axis is perpendicular to the flow (x for a vertical
+    //     flow, y for a horizontal one) -- origStock and otherEnd share a
+    //     coordinate and still do, so there is no length to take a fraction of and
+    //     the valve stays on otherEnd's coordinate (frac 0).
+    //   - newLen !== 0: the OLD flow was DEGENERATE (a creation flow whose points
+    //     all coincided at the press point) and this end has now expanded out;
+    //     center the valve on the freshly-created segment (frac 0.5), matching the
+    //     prior formula's degenerate fallback so creation keeps its mid-segment
+    //     valve.
+    const preserveAxis = (valve: number, other: number, origMoved: number, newMoved: number): number => {
+      const oldLen = origMoved - other;
+      const newLen = newMoved - other;
+      const frac = oldLen === 0 ? (newLen === 0 ? 0 : 0.5) : Math.max(0, Math.min(1, (valve - other) / oldLen));
+      return other + frac * newLen;
     };
     flow = {
       ...flow,
-      x: base.x + Math.abs(fraction.x * d.x),
-      y: base.y + Math.abs(fraction.y * d.y),
+      x: preserveAxis(flow.x, otherEnd.x, origStock.x, stock.x),
+      y: preserveAxis(flow.y, otherEnd.y, origStock.y, stock.y),
     };
 
     return { ...flow, points };
