@@ -64,6 +64,33 @@ function descendantsFromString(equation: string): CustomElement[] {
   return plainDeserialize('equation', equation);
 }
 
+// Replace a Slate editor's entire document. `<Slate initialValue>` is
+// uncontrolled after mount, so resetting the React state that seeded it does
+// NOT revert the visible content -- the editor must be mutated directly. Used
+// by the discard (Cancel/Escape) path so the on-screen text snaps back to the
+// original. Deselect first so a caret sitting at a now-out-of-range path cannot
+// throw while the old nodes are removed, then swap the document wholesale inside
+// a single non-normalizing batch.
+//
+// Then clear the undo/redo history. The editors are `withHistory`, so the
+// discard's own transforms -- and the keystrokes they undo -- are otherwise
+// recorded as ordinary history; a single Cmd+Z would invert the revert and
+// resurrect the abandoned text (which a later blur would then commit).
+// `withoutSaving` is not enough: it would keep the discard out of history but
+// leave the original keystrokes in `undos`, so undo would still bring the text
+// partway back. Resetting `history` wholesale is safe -- after a discard the
+// document equals the original, so there is nothing meaningful left to undo.
+function resetEditorDocument(editor: CustomEditor, nodes: CustomElement[]): void {
+  Editor.withoutNormalizing(editor, () => {
+    Transforms.deselect(editor);
+    for (let i = editor.children.length - 1; i >= 0; i--) {
+      Transforms.removeNodes(editor, { at: [i] });
+    }
+    Transforms.insertNodes(editor, nodes, { at: [0] });
+  });
+  editor.history = { undos: [], redos: [] };
+}
+
 function scalarEquationFor(variable: Variable): string {
   if (variable.type === 'module') return '';
   if (variable.equation.type === 'scalar') {
@@ -239,6 +266,16 @@ function caretOffsetForPreviewClick(host: HTMLElement, clientX: number, clientY:
 export function VariableDetails(props: VariableDetailsProps): React.ReactElement {
   const { variable, viewElement, getLatexEquation, onDelete, onEquationChange, onTableChange, activeTab } = props;
 
+  // The original (props-derived) document for each field. These seed the editors
+  // on mount and are what the discard path (Cancel/Escape) restores, so the
+  // seeding and the revert stay in lockstep -- including the error/warning
+  // highlight the equation and units fields carry.
+  const initialEquationContents = (): CustomElement[] =>
+    highlightErrors(scalarEquationFor(variable), variable.errors, variable.unitErrors, false);
+  const initialUnitsContents = (): CustomElement[] =>
+    highlightErrors(variable.units, variable.errors, variable.unitErrors, true);
+  const initialNotesContents = (): CustomElement[] => descendantsFromString(variable.documentation);
+
   // Seed the Slate editors and their contents from props exactly once per mount
   // (lazy useState initializers), mirroring the old constructor. The Editor keys
   // this panel on projectGeneration, so a content change remounts the panel and
@@ -250,21 +287,15 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   const [equationEditor] = React.useState<CustomEditor>(
     () => withHistory(withReact(createEditor())) as unknown as CustomEditor,
   );
-  const [equationContents, setEquationContents] = React.useState<Descendant[]>(() =>
-    highlightErrors(scalarEquationFor(variable), variable.errors, variable.unitErrors, false),
-  );
+  const [equationContents, setEquationContents] = React.useState<Descendant[]>(initialEquationContents);
   const [unitsEditor] = React.useState<CustomEditor>(
     () => withHistory(withReact(createEditor())) as unknown as CustomEditor,
   );
-  const [unitsContents, setUnitsContents] = React.useState<Descendant[]>(() =>
-    highlightErrors(variable.units, variable.errors, variable.unitErrors, true),
-  );
+  const [unitsContents, setUnitsContents] = React.useState<Descendant[]>(initialUnitsContents);
   const [notesEditor] = React.useState<CustomEditor>(
     () => withHistory(withReact(createEditor())) as unknown as CustomEditor,
   );
-  const [notesContents, setNotesContents] = React.useState<Descendant[]>(() =>
-    descendantsFromString(variable.documentation),
-  );
+  const [notesContents, setNotesContents] = React.useState<Descendant[]>(initialNotesContents);
   const [editingEquation, setEditingEquation] = React.useState<boolean>(
     () => !!(variable.errors && variable.errors.length > 0),
   );
@@ -275,6 +306,11 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   // because they gate async continuations and must never themselves re-render.
   const latexRequestId = React.useRef(0);
   const mounted = React.useRef(false);
+
+  // The outer panel element, used to tell an intra-panel focus move (tabbing to
+  // another field or to the Cancel/Save buttons) from focus genuinely leaving
+  // the panel. Only the latter commits the in-progress edit on blur.
+  const cardRef = React.useRef<HTMLDivElement>(null);
 
   // Stable references for the load effect so it depends only on viewElement.ident
   // (the class's componentDidMount + componentDidUpdate prev-ident comparison),
@@ -335,11 +371,43 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
     setNotesContents(equation);
   };
 
+  // Discard every in-progress edit and restore the original documents. Both the
+  // React state (which drives the preview and the Save/Cancel enabled state) and
+  // the live Slate documents (uncontrolled after mount) must be reset, or the
+  // visible editors would keep showing the abandoned text. Shared by the Cancel
+  // button and the Escape key.
   const handleEquationCancel = (): void => {
-    setEquationContents(descendantsFromString(scalarEquationFor(variable)));
-    setUnitsContents(descendantsFromString(variable.units));
-    setNotesContents(descendantsFromString(variable.documentation));
+    const equation = initialEquationContents();
+    const units = initialUnitsContents();
+    const notes = initialNotesContents();
+    resetEditorDocument(equationEditor, equation);
+    resetEditorDocument(unitsEditor, units);
+    resetEditorDocument(notesEditor, notes);
+    setEquationContents(equation);
+    setUnitsContents(units);
+    setNotesContents(notes);
     setEditingEquation(false);
+  };
+
+  // Blur commits the in-progress edit only when focus actually leaves the panel
+  // (to the canvas, another variable, or nowhere). This is load-bearing: a
+  // canvas-driven edit first blurs the side-panel editor, and that blur must
+  // commit the pending text (see diagram/CLAUDE.md, "Details panels are keyed by
+  // projectGeneration"). But a blur toward the panel's own Cancel/Save buttons
+  // or another field must NOT commit -- otherwise clicking or tabbing to Cancel
+  // would save the very edit the user is discarding, and the button's own
+  // pointerdown-preventDefault (which keeps focus on the editor for mouse/touch)
+  // is not available on the keyboard path.
+  const focusLeftPanel = (e: React.FocusEvent): boolean => {
+    const next = e.relatedTarget as Node | null;
+    const card = cardRef.current;
+    return !next || !card || !card.contains(next);
+  };
+
+  const handleFieldBlur = (e: React.FocusEvent): void => {
+    if (focusLeftPanel(e)) {
+      handleEquationSave();
+    }
   };
 
   const handleEquationSave = (): void => {
@@ -517,18 +585,31 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
               placeholder="Enter an equation..."
               spellCheck={false}
               autoFocus
-              onBlur={() => {
+              onBlur={(e) => {
+                // An intra-panel focus move (to another field or the action
+                // buttons) neither commits nor collapses the raw editor: the
+                // edit is still pending, so leaving the editor mounted keeps it
+                // visible instead of snapping back to the last-committed preview.
+                if (!focusLeftPanel(e)) {
+                  return;
+                }
                 handleEquationSave();
-                // Stay in editing mode only for genuine equation errors --
-                // the same gating as showPreview; unit warnings render under
-                // the chart and shouldn't pin the raw editor open.
+                // Collapse back to the preview on the way out, except when a
+                // genuine equation error pins the raw editor open (same gating
+                // as showPreview; unit warnings render under the chart and
+                // shouldn't pin it open).
                 if (!variable.errors || variable.errors.length === 0) {
                   setEditingEquation(false);
                 }
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Escape') {
-                  setEditingEquation(false);
+                  // Escape discards the in-progress edit (revert + exit), the
+                  // same as the Cancel button. Without this the field would only
+                  // exit editing and the ensuing blur would commit the abandoned
+                  // text.
+                  e.preventDefault();
+                  handleEquationCancel();
                   return;
                 }
                 // Cmd/Ctrl+Enter inserts a line break, matching Shift+Enter
@@ -553,7 +634,15 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
             renderLeaf={renderLeaf}
             placeholder="Enter units..."
             spellCheck={false}
-            onBlur={handleEquationSave}
+            onBlur={handleFieldBlur}
+            onKeyDown={(e) => {
+              // Escape discards, matching the equation field and the Cancel
+              // button. (Still no newline chord here -- units are single-line.)
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                handleEquationCancel();
+              }
+            }}
           />
         </Slate>
 
@@ -563,8 +652,15 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
             renderLeaf={renderLeaf}
             placeholder="Documentation"
             spellCheck={false}
-            onBlur={handleEquationSave}
+            onBlur={handleFieldBlur}
             onKeyDown={(e) => {
+              // Escape discards, matching the equation field and the Cancel
+              // button.
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                handleEquationCancel();
+                return;
+              }
               // Documentation is multi-line like the equation; accept the same
               // Cmd/Ctrl+Enter line-break chord Shift+Enter already provides.
               if (isNewlineChord(e)) {
@@ -576,14 +672,38 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
         </Slate>
 
         <div className={styles.cardActions}>
-          <Button size="small" color="error" onClick={handleVariableDelete} className={styles.buttonLeft}>
+          {/* preventDefault on pointer-down keeps focus on the editor for
+              mouse/touch, so pressing an action button does not blur-commit the
+              field before the click runs (macOS in particular does not focus a
+              button on click, so a plain blur would otherwise fire). The keyboard
+              path is handled by focusLeftPanel above. Delete gets it too so a
+              pending edit is not committed on the way to deleting the variable. */}
+          <Button
+            size="small"
+            color="error"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={handleVariableDelete}
+            className={styles.buttonLeft}
+          >
             Delete
           </Button>
           <div className={styles.buttonRight}>
-            <Button size="small" color="primary" disabled={!equationActionsEnabled} onClick={handleEquationCancel}>
+            <Button
+              size="small"
+              color="primary"
+              disabled={!equationActionsEnabled}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={handleEquationCancel}
+            >
               Cancel
             </Button>
-            <Button size="small" color="primary" disabled={!equationActionsEnabled} onClick={handleEquationSave}>
+            <Button
+              size="small"
+              color="primary"
+              disabled={!equationActionsEnabled}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={handleEquationSave}
+            >
               Save
             </Button>
           </div>
@@ -658,7 +778,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   const lookupTab = viewElement.type === 'stock' ? undefined : <Tab label="Lookup Function" />;
 
   return (
-    <div className={styles.card}>
+    <div className={styles.card} ref={cardRef}>
       <Tabs
         className={styles.inner}
         variant="fullWidth"

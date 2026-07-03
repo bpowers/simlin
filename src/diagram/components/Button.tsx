@@ -14,6 +14,7 @@ interface ButtonProps {
   size?: 'small' | 'medium' | 'large';
   disabled?: boolean;
   onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  onMouseDown?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   className?: string;
   style?: React.CSSProperties;
   startIcon?: React.ReactNode;
@@ -32,6 +33,7 @@ export default function Button(props: ButtonProps): React.ReactElement {
     size = 'medium',
     disabled,
     onClick,
+    onMouseDown,
     className,
     style,
     startIcon,
@@ -94,6 +96,7 @@ export default function Button(props: ButtonProps): React.ReactElement {
       style={style}
       disabled={disabled}
       onClick={onClick}
+      onMouseDown={onMouseDown}
       type={type}
       aria-label={ariaLabel}
       aria-owns={ariaOwns}
