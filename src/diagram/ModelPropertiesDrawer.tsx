@@ -13,6 +13,7 @@ import { ArrowBackIcon, ClearIcon, CloudDownloadIcon } from './components/icons'
 
 import { DeleteProjectButton } from './DeleteProjectButton';
 import { ModelIcon } from './ModelIcon';
+import { formatSimSpecValue, resolveSimSpecDraft, type SimSpecField } from './sim-spec-draft';
 
 import styles from './ModelPropertiesDrawer.module.css';
 
@@ -24,15 +25,137 @@ interface ModelPropertiesDrawerProps {
   stopTime: number;
   dt: number;
   timeUnits: string;
-  onStartTimeChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
-  onStopTimeChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
-  onDtChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
-  onTimeUnitsChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  // Fired once when a sim-specs field settles (blur/Enter) with a value that
+  // actually changed and passed validation -- NOT per keystroke. Each call is
+  // one engine patch / one undo entry. Replaces the old per-`onChange`
+  // handlers, which recorded an undo entry and scheduled a save on every
+  // character typed (issue #55).
+  onSimSpecCommit: (field: SimSpecField, value: number | string) => void;
   onDownloadXmile: () => void;
   // When provided, a destructive "Delete project" action is shown. Hosts that
   // can't (or shouldn't) delete -- read-only viewers, embeds, the local
   // file-backed viewer -- simply leave this undefined.
   onDelete?: () => Promise<void>;
+}
+
+interface SimSpecDraftFieldProps {
+  field: SimSpecField;
+  label: string;
+  value: number | string;
+  type?: string;
+  onCommit: (field: SimSpecField, value: number | string) => void;
+}
+
+// A single sim-specs field: controlled from `value` (the model) when idle, but
+// holding a local draft string while focused so typing does not touch the
+// model. It commits ONCE on settle (blur/Enter, via the pure
+// `resolveSimSpecDraft`), reverts on Escape, and never clobbers an in-progress
+// draft when new props arrive mid-edit. Keeping the draft state per-field (one
+// component instance each) makes those semantics fall out structurally: an
+// engine refresh only releases the drafts of fields that are not focused.
+function SimSpecDraftField(props: SimSpecDraftFieldProps): React.ReactElement {
+  const { field, label, value, type, onCommit } = props;
+
+  // `undefined` means "not editing -- show the model value". A string means an
+  // edit is in flight (or a just-committed value awaiting the model catching up).
+  const [draft, setDraft] = React.useState<string | undefined>(undefined);
+  const focusedRef = React.useRef(false);
+  // Set synchronously by Escape so the blur it triggers skips the commit. A ref
+  // (not state) because the blur handler runs in the same tick, before a state
+  // update would be visible.
+  const skipNextCommitRef = React.useRef(false);
+  // The exact draft text of the most recent commit, held until the model prop
+  // catches up. It makes commit idempotent under prop lag: a second blur of the
+  // same retained draft (e.g. focus moving to a sibling field re-blurs this
+  // one) must not fire a duplicate patch/undo entry, because `value` is still
+  // the stale pre-commit model value the decision compares against. Cleared on
+  // any fresh keystroke and when the draft releases.
+  const committedDraftRef = React.useRef<string | undefined>(undefined);
+
+  // While unfocused, the model value is the source of truth: a new prop (engine
+  // refresh, undo, external edit) releases any lingering draft so the field
+  // shows the model. Guarded on focus so a refresh mid-edit never clobbers what
+  // the user is typing. This also clears the "committed, awaiting model" draft
+  // once the model reflects the commit -- so a valid commit shows the typed
+  // value continuously, with no flash of the pre-edit value.
+  React.useEffect(() => {
+    if (!focusedRef.current) {
+      setDraft(undefined);
+      committedDraftRef.current = undefined;
+    }
+  }, [value]);
+
+  const display = draft ?? formatSimSpecValue(value);
+
+  const commit = (): void => {
+    // `draft` is read from the current render's closure. Every keystroke
+    // re-renders (onChange -> setDraft), so by the time a blur/Enter fires this
+    // closure has the latest text.
+    if (draft === undefined || committedDraftRef.current === draft) {
+      return;
+    }
+    const decision = resolveSimSpecDraft(field, draft, value);
+    if (decision.shouldCommit && decision.value !== undefined) {
+      committedDraftRef.current = draft;
+      onCommit(field, decision.value);
+      // Keep the committed text visible; the [value] effect releases the draft
+      // when the model prop catches up.
+    } else {
+      // Unchanged / invalid / empty: discard the draft and show the model.
+      setDraft(undefined);
+    }
+  };
+
+  return (
+    <TextField
+      label={label}
+      value={display}
+      type={type}
+      margin="normal"
+      fullWidth
+      onChange={(e) => {
+        // A fresh keystroke supersedes any retained committed text.
+        committedDraftRef.current = undefined;
+        setDraft(e.target.value);
+      }}
+      inputProps={{
+        onFocus: () => {
+          focusedRef.current = true;
+          // Seed from the current display so refocusing before the model
+          // catches up preserves a just-committed value.
+          setDraft((d) => d ?? formatSimSpecValue(value));
+        },
+        onBlur: () => {
+          focusedRef.current = false;
+          if (skipNextCommitRef.current) {
+            skipNextCommitRef.current = false;
+            setDraft(undefined);
+            return;
+          }
+          commit();
+        },
+        onKeyDown: (e) => {
+          if (e.key === 'Enter') {
+            // Blur drives the single commit (avoids a double commit from
+            // committing here and again on the ensuing blur).
+            e.preventDefault();
+            e.currentTarget.blur();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            // Escape here means "revert this field", not "dismiss the drawer":
+            // stop propagation so the Drawer's own document-level Escape-close
+            // listener doesn't also fire and yank the whole panel away.
+            e.stopPropagation();
+            // Discard the draft (revert to the model) and skip the commit the
+            // ensuing blur would otherwise run against the pre-Escape draft.
+            skipNextCommitRef.current = true;
+            setDraft(undefined);
+            e.currentTarget.blur();
+          }
+        },
+      }}
+    />
+  );
 }
 
 export function ModelPropertiesDrawer(props: ModelPropertiesDrawerProps): React.ReactElement {
@@ -44,10 +167,7 @@ export function ModelPropertiesDrawer(props: ModelPropertiesDrawerProps): React.
     stopTime,
     dt,
     timeUnits,
-    onStartTimeChange,
-    onStopTimeChange,
-    onDtChange,
-    onTimeUnitsChange,
+    onSimSpecCommit,
     onDownloadXmile,
     onDelete,
   } = props;
@@ -82,24 +202,22 @@ export function ModelPropertiesDrawer(props: ModelPropertiesDrawerProps): React.
 
         <div className={styles.propsForm}>
           <h2>{modelName}</h2>
-          <TextField
+          <SimSpecDraftField
+            field="startTime"
             label="Start Time"
             value={startTime}
-            onChange={onStartTimeChange}
             type="number"
-            margin="normal"
-            fullWidth
+            onCommit={onSimSpecCommit}
           />
-          <TextField
+          <SimSpecDraftField
+            field="stopTime"
             label="Stop Time"
             value={stopTime}
-            onChange={onStopTimeChange}
             type="number"
-            margin="normal"
-            fullWidth
+            onCommit={onSimSpecCommit}
           />
-          <TextField label="dt" value={dt} onChange={onDtChange} type="number" margin="normal" fullWidth />
-          <TextField label="Time Units" value={timeUnits} onChange={onTimeUnitsChange} margin="normal" fullWidth />
+          <SimSpecDraftField field="dt" label="dt" value={dt} type="number" onCommit={onSimSpecCommit} />
+          <SimSpecDraftField field="timeUnits" label="Time Units" value={timeUnits} onCommit={onSimSpecCommit} />
           <br />
           <br />
           <Button

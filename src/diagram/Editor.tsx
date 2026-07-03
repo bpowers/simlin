@@ -48,6 +48,7 @@ import { FlowIcon } from './FlowIcon';
 import { LinkIcon } from './LinkIcon';
 import { ModuleIcon } from './ModuleIcon';
 import { ModelPropertiesDrawer } from './ModelPropertiesDrawer';
+import type { SimSpecField } from './sim-spec-draft';
 import { renderSvgToString } from './render-common';
 import { Status } from './Status';
 import { StockIcon } from './StockIcon';
@@ -1197,24 +1198,26 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     await applyPatchAndRefresh(patch, 'sim specs');
   };
 
-  const handleStartTimeChange = React.useCallback(async (event: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
-    const value = Number(event.target.value);
-    await applySimSpecChange({ startTime: value });
-  }, []);
-
-  const handleStopTimeChange = React.useCallback(async (event: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
-    const value = Number(event.target.value);
-    await applySimSpecChange({ endTime: value });
-  }, []);
-
-  const handleDtChange = React.useCallback(async (event: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
-    const value = Number(event.target.value);
-    await applySimSpecChange({ dt: `${value}` });
-  }, []);
-
-  const handleTimeUnitsChange = React.useCallback(async (event: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
-    const value = event.target.value;
-    await applySimSpecChange({ timeUnits: value });
+  // The drawer holds a draft while a sim-specs field is focused and calls this
+  // exactly once when the field settles (blur/Enter) with a validated, changed
+  // value -- so a single edit is one engine patch and one undo entry, instead
+  // of one per keystroke (issue #55). The drawer already rejected garbage/empty
+  // input, so we only route the field to its `applySimSpecChange` update.
+  const handleSimSpecCommit = React.useCallback((field: SimSpecField, value: number | string): void => {
+    switch (field) {
+      case 'startTime':
+        void applySimSpecChange({ startTime: value as number });
+        break;
+      case 'stopTime':
+        void applySimSpecChange({ endTime: value as number });
+        break;
+      case 'dt':
+        void applySimSpecChange({ dt: `${value as number}` });
+        break;
+      case 'timeUnits':
+        void applySimSpecChange({ timeUnits: value as string });
+        break;
+    }
   }, []);
 
   const handleDownloadXmile = React.useCallback(async (): Promise<void> => {
@@ -1276,10 +1279,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         stopTime={simSpec.stop}
         dt={dt}
         timeUnits={simSpec.timeUnits || ''}
-        onStartTimeChange={handleStartTimeChange}
-        onStopTimeChange={handleStopTimeChange}
-        onDtChange={handleDtChange}
-        onTimeUnitsChange={handleTimeUnitsChange}
+        onSimSpecCommit={handleSimSpecCommit}
         onDownloadXmile={handleDownloadXmile}
         onDelete={onDelete}
       />
