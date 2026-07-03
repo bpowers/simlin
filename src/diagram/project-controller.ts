@@ -1216,7 +1216,14 @@ export class ProjectController {
   async attachConnectorErrors(project: Project): Promise<Project> {
     const engine = this.engine;
     const modelName = this.modelName;
-    if (!engine || isStdlibModel(modelName)) {
+    // hasNoEquations is the brand-new starter model: every variable is empty, so
+    // updateVariableErrors sets the flag and DELIBERATELY skips annotating
+    // `variable.errors` (blank-sketch suppression). Without this guard the
+    // per-variable errors skip below never triggers, and getIncomingLinks would
+    // report no deps for every (empty-equation) variable -- surfacing every
+    // connector drawn while sketching as stale, the wall of warnings the editor
+    // suppresses during initial layout (cf. module-warning.ts).
+    if (!engine || isStdlibModel(modelName) || project.hasNoEquations) {
       return project;
     }
     const model = project.models.get(modelName);
@@ -1241,12 +1248,15 @@ export class ProjectController {
       // surfaced as stale (and every real dep as missing) -- bogus noise while the
       // user is already seeing the real equation error. This relies on
       // updateVariableErrors having annotated `errors` first, which every caller
-      // guarantees by running it before attachConnectorErrors on the same project
-      // (an empty-equation variable carries an EmptyEquation error, so an inbound
-      // connector to a not-yet-written variable reads as a legitimate forward
-      // declaration, not stale). Unit errors do NOT gate: the AST is fine there,
-      // so dependencies stay authoritative. (The all-empty blank-sketch case is
-      // already handled by the project.hasNoEquations early return above.)
+      // guarantees by running it before attachConnectorErrors on the same project.
+      // In a MIXED model a single not-yet-written variable carries an EmptyEquation
+      // error and is skipped here, so an inbound connector to it reads as a
+      // legitimate forward declaration rather than stale. This skip does NOT cover
+      // the ALL-empty starter model: there updateVariableErrors takes its
+      // hasNoEquations branch and skips annotating `errors` entirely, so `errors`
+      // is empty on every variable -- that case is handled by the hasNoEquations
+      // early return at the top of this method. Unit errors do NOT gate: the AST
+      // is fine there, so dependencies stay authoritative.
       if (variable.errors && variable.errors.length > 0) {
         continue;
       }

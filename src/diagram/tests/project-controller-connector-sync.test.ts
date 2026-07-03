@@ -12,6 +12,7 @@
 // gracefully.
 
 import type { LinkViewElement, StockFlowView, Variable } from '@simlin/core/datamodel';
+import { ErrorCode } from '@simlin/core/datamodel';
 import { defined } from '@simlin/core/common';
 import type { ErrorDetail } from '@simlin/engine';
 import { SimlinErrorKind } from '@simlin/engine';
@@ -420,6 +421,60 @@ describe('ProjectController connector-sync skips errored-equation targets', () =
 
     expect(mainVar(controller, 'b')?.connectorErrors).toBeUndefined();
     expect(mainVar(controller, 'c')?.connectorErrors).toEqual([{ kind: 'missingConnector', ident: 'a', name: 'a' }]);
+    await controller.dispose();
+  });
+
+  it('suppresses all connector warnings in an all-empty starter model (hasNoEquations)', async () => {
+    // Brand-new sketch: two auxes with empty equations and a drawn connector
+    // a -> b. Every variable reports EmptyEquation, so updateVariableErrors takes
+    // its hasNoEquations branch and does NOT annotate variable.errors -- meaning
+    // the per-variable errors skip cannot catch this. Without the hasNoEquations
+    // early return, getIncomingLinks reports no deps and the connector reads as
+    // stale. Fails before the guard was added.
+    const emptyErr = (variableName: string): ErrorDetail =>
+      ({
+        modelName: 'main',
+        variableName,
+        kind: SimlinErrorKind.Variable,
+        code: ErrorCode.EmptyEquation,
+        startOffset: 0,
+        endOffset: 0,
+      }) as unknown as ErrorDetail;
+    const json = JSON.stringify({
+      name: 'test',
+      simSpecs: { startTime: 0, endTime: 10, dt: '1' },
+      models: [
+        {
+          name: 'main',
+          stocks: [],
+          flows: [],
+          auxiliaries: [{ name: 'a' }, { name: 'b' }],
+          views: [
+            {
+              elements: [
+                { type: 'aux', uid: 1, name: 'a', x: 0, y: 0 },
+                { type: 'aux', uid: 2, name: 'b', x: 100, y: 0 },
+                { type: 'link', uid: 3, fromUid: 1, toUid: 2 },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const engine = makeFakeEngine({
+      json: () => json,
+      incomingLinks: { a: [], b: [] },
+      errors: [emptyErr('a'), emptyErr('b')],
+    });
+    const { config } = makeControllerConfig({ engine });
+    const controller = new ProjectController(config);
+
+    await controller.openInitialProject();
+
+    // Sanity: the starter-model flag is set, and nothing is flagged.
+    expect(controller.getSnapshot().project?.hasNoEquations).toBe(true);
+    expect(mainVar(controller, 'a')?.connectorErrors).toBeUndefined();
+    expect(mainVar(controller, 'b')?.connectorErrors).toBeUndefined();
     await controller.dispose();
   });
 
