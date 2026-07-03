@@ -15,7 +15,7 @@
  * testable without jsdom and keeps the shell focused on wiring and lifecycle.
  */
 
-import type { Point } from './common';
+import type { Point, Rect } from './common';
 import type { Rect as ViewRect } from '@simlin/core/datamodel';
 
 // --- physics / interaction constants -------------------------------------
@@ -234,5 +234,108 @@ export function resizeViewBox(offset: Point, dWidth: number, dHeight: number, wi
     y: offset.y + dHeight / 4,
     width,
     height,
+  };
+}
+
+// --- offscreen detection / recenter (issue #52) --------------------------
+
+// A diagram whose visible fraction falls below this on mount is treated as
+// "offscreen(ish)" and re-centered, so a saved viewBox/zoom that stranded the
+// model outside the canvas doesn't greet the user with a blank surface.
+export const OFFSCREEN_VISIBLE_FRACTION = 0.1;
+
+/**
+ * The fraction (0..1) of the diagram's bounding box that is currently visible
+ * on the canvas, given the model-space `bounds`, the current `offset`/`zoom`,
+ * and the measured `svgSize`. The render transform maps a model point (mx,my)
+ * to screen ((mx+offset.x)*zoom, (my+offset.y)*zoom) and the visible region is
+ * [0,width] x [0,height], so this intersects the box's screen rect with the
+ * viewport. It is intentionally computed in screen space (not model space): the
+ * viewport is a fixed pixel rectangle, so how much of the box is clipped depends
+ * on zoom -- a model box occupies more of the screen when zoomed in and is more
+ * likely to fall (partly) out of view.
+ *
+ * The intersection is normalized by the SMALLER of the box's screen area and
+ * the viewport area, not by the box area alone. That distinction is the whole
+ * point of the metric: the question is "does the user see enough diagram?", not
+ * "what fraction of the diagram is on screen?". For a box smaller than the
+ * viewport the two coincide (min = box area -> "fraction of the diagram
+ * visible"). For a box LARGER than the viewport, box-area normalization would
+ * report a large-but-well-framed model as mostly hidden -- a 3500x3000 model
+ * perfectly centered in a 1200x800 viewport shows the entire viewport full of
+ * diagram yet only ~9% of its own bbox, and would be needlessly yanked to
+ * bbox-center on every open. Normalizing by the viewport area instead makes a
+ * viewport full of diagram read 1.0 regardless of bbox size (min = viewport
+ * area -> "fraction of the viewport filled by diagram").
+ *
+ * A degenerate box (zero or negative area -- e.g. an empty model) has no
+ * meaningful "visible fraction", so this returns 1 (fully visible) to signal
+ * "nothing to re-center"; `isDiagramOffscreen` relies on that to never trigger
+ * on empty models.
+ */
+export function visibleDiagramFraction(
+  bounds: Rect,
+  offset: Point,
+  zoom: number,
+  svgSize: { width: number; height: number },
+): number {
+  const boxWidth = bounds.right - bounds.left;
+  const boxHeight = bounds.bottom - bounds.top;
+  if (boxWidth <= 0 || boxHeight <= 0) {
+    return 1;
+  }
+
+  const screenLeft = (bounds.left + offset.x) * zoom;
+  const screenTop = (bounds.top + offset.y) * zoom;
+  const screenRight = (bounds.right + offset.x) * zoom;
+  const screenBottom = (bounds.bottom + offset.y) * zoom;
+
+  const interWidth = Math.min(screenRight, svgSize.width) - Math.max(screenLeft, 0);
+  const interHeight = Math.min(screenBottom, svgSize.height) - Math.max(screenTop, 0);
+  if (interWidth <= 0 || interHeight <= 0) {
+    return 0;
+  }
+
+  const boxScreenArea = (screenRight - screenLeft) * (screenBottom - screenTop);
+  const viewportArea = svgSize.width * svgSize.height;
+  return (interWidth * interHeight) / Math.min(boxScreenArea, viewportArea);
+}
+
+/**
+ * True when the diagram is (mostly) offscreen and should be re-centered:
+ * either it does not intersect the viewport at all or its visible fraction is
+ * below `threshold`. Empty models (zero-area bounds) and an unmeasured canvas
+ * (zero-size viewport) never qualify -- there is nothing to center against.
+ */
+export function isDiagramOffscreen(
+  bounds: Rect,
+  offset: Point,
+  zoom: number,
+  svgSize: { width: number; height: number },
+  threshold: number = OFFSCREEN_VISIBLE_FRACTION,
+): boolean {
+  const boxWidth = bounds.right - bounds.left;
+  const boxHeight = bounds.bottom - bounds.top;
+  if (boxWidth <= 0 || boxHeight <= 0) {
+    return false;
+  }
+  if (svgSize.width <= 0 || svgSize.height <= 0) {
+    return false;
+  }
+  return visibleDiagramFraction(bounds, offset, zoom, svgSize) < threshold;
+}
+
+/**
+ * The offset that centers the diagram bounding box in the canvas at the CURRENT
+ * zoom (zoom is intentionally left unchanged -- centering keeps the scope
+ * tight). Solves (boxCenter + offset) * zoom = svgSize / 2 for `offset`, so the
+ * box center lands at the middle of the viewport.
+ */
+export function centerOffsetForBounds(bounds: Rect, zoom: number, svgSize: { width: number; height: number }): Point {
+  const centerX = (bounds.left + bounds.right) / 2;
+  const centerY = (bounds.top + bounds.bottom) / 2;
+  return {
+    x: svgSize.width / (2 * zoom) - centerX,
+    y: svgSize.height / (2 * zoom) - centerY,
   };
 }

@@ -34,6 +34,7 @@ import {
   inCreationUid as sharedInCreationUid,
 } from '../drawing/creation-sentinels';
 import { StockWidth, StockHeight } from '../drawing/default';
+import { getSegments, findClosestSegment } from '../drawing/Flow';
 
 // ----- fixture helpers (mirroring flow-routing.test.ts patterns) -----
 
@@ -1066,5 +1067,213 @@ describe('growEndpointDrag (existing cloud endpoint drag)', () => {
     expect(src.x).toBeCloseTo(0 + StockWidth / 2); // right edge of the left-hand stock
     expect(src.x).not.toBe(0);
     expect(src.y).toBe(200);
+  });
+
+  it('grabbing a source cloud (zero delta) leaves an OFF-CENTER valve unmoved (issue #832)', () => {
+    // Source cloud (uid 2) on the left, stock sink edge on the right, valve
+    // deliberately OFF-CENTER (x=160, nearer the source). The instant the source
+    // cloud is grabbed -- before any real movement -- adjustFlows must not reflect
+    // the valve across the segment midpoint. Regression for the first-frame jump.
+    const flow = makeFlowEl(10, 'f', 160, 200, [
+      { x: 100, y: 200, attachedToUid: 2 }, // source cloud (min coord)
+      { x: 277.5, y: 200, attachedToUid: 1 }, // stock sink edge (max coord)
+    ]);
+    const grown = growEndpointDrag(flow, true, { x: 0, y: 0 }, undefined);
+
+    expect(grown.points.length).toBe(2);
+    expect(grown.x).toBeCloseTo(160, 5); // unchanged, not reflected to ~217.5
+    expect(grown.y).toBe(200);
+  });
+
+  // Regression for issue #53: "when moving a cloud, the flow label jumps around".
+  // The live drag re-routes from the ORIGINAL flow each pointermove with an
+  // accumulating moveDelta (that is what Canvas does -- r.elements holds the
+  // committed flow and moveDelta = press - cursor). As a perpendicular drag
+  // deepens the L, the valve (rendered at flow.x/y, the label anchors to it)
+  // must move CONTINUOUSLY with the cursor and never teleport onto the vertical
+  // riser flush against the stock. Sweeping the drag as small steps and
+  // measuring per-step valve displacement catches the segment flip-flop.
+  describe('perpendicular cloud drag keeps the valve continuous (issue #53)', () => {
+    // Index of the segment the valve currently sits on (closest to flow.x/y).
+    function valveSegmentIndex(flow: FlowViewElement): number {
+      const segs = getSegments(flow.points);
+      return findClosestSegment({ x: flow.x, y: flow.y }, segs).index;
+    }
+
+    // Assert per-step valve continuity across a swept drag. Consecutive frames
+    // with the SAME point count (same route topology) must move the valve only a
+    // little -- the teleport bug jumped it ~100px between two L frames. The ONE
+    // step where the point count changes (straight <-> L) is the "single
+    // unavoidable relocation" the requirements exempt; it must still be a
+    // sensible interior hop, not a jump to the stock corner. The measured
+    // topology hop is ~8px for both sink and source clouds (default bound leaves
+    // margin); `topologyBound` stays overridable for any future looser case.
+    function expectContinuous(frames: FlowViewElement[], topologyBound = 15): void {
+      let sawTopologyChange = false;
+      for (let i = 1; i < frames.length; i++) {
+        const prev = frames[i - 1];
+        const cur = frames[i];
+        const disp = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+        if (cur.points.length !== prev.points.length) {
+          expect(sawTopologyChange).toBe(false); // exactly one transition
+          sawTopologyChange = true;
+          expect(disp).toBeLessThan(topologyBound);
+        } else {
+          expect(disp).toBeLessThan(12);
+        }
+      }
+    }
+
+    // Sweep a perpendicular drag in small cursor steps, re-routing from the
+    // ORIGINAL flow each step (the live-drag contract), and return the sequence
+    // of grown flows. `fromTotal` defaults to 0 (start straight and deepen);
+    // pass a nonzero `fromTotal` with `total` = 0 to REVERSE the drag -- start
+    // from a formed L and collapse it back to straight.
+    function sweep(
+      original: FlowViewElement,
+      isSource: boolean,
+      perAxis: 'x' | 'y',
+      total: number,
+      step: number,
+      fromTotal = 0,
+    ): FlowViewElement[] {
+      const out: FlowViewElement[] = [];
+      const sign = Math.sign(total - fromTotal) || 1;
+      for (let d = fromTotal; sign > 0 ? d <= total : d >= total; d += sign * step) {
+        const moveDelta = perAxis === 'y' ? { x: 0, y: d } : { x: d, y: 0 };
+        out.push(growEndpointDrag(original, isSource, moveDelta, undefined));
+      }
+      return out;
+    }
+
+    it('sink cloud dragged straight down: valve tracks the cursor, no teleport to the stock corner', () => {
+      // stock edge at x=122.5, cloud sink at x=300, valve mid at x=200, y=200.
+      const flow = stockToCloudFlow();
+      // moveDelta.y negative drags the cloud DOWN. Sweep to a deep offset so we
+      // pass the point where the buggy "closest segment" flips onto the riser.
+      const frames = sweep(flow, false, 'y', -200, 4);
+
+      // Continuity: every same-topology step moves the valve only a little. The
+      // bug jumped the valve ~100px (onto the riser near the stock) at one step.
+      expectContinuous(frames);
+
+      // No segment flip-flop: after the L forms the valve stays on one segment.
+      const lFrames = frames.filter((f) => f.points.length === 3);
+      const firstL = valveSegmentIndex(lFrames[0]);
+      for (const f of lFrames) {
+        expect(valveSegmentIndex(f)).toBe(firstL);
+      }
+
+      // Final valve is interior to the cloud-adjacent (bottom, horizontal)
+      // segment -- tracking the cursor -- not pinned at the stock corner.
+      const finalFlow = frames[frames.length - 1];
+      const finalSink = finalFlow.points[finalFlow.points.length - 1];
+      expect(finalFlow.points.length).toBe(3);
+      // valve sits on the horizontal bottom segment (same Y as the descended sink)
+      expect(finalFlow.y).toBeCloseTo(finalSink.y, 5);
+      // ...and well away from the stock edge (x=122.5), roughly under its old x.
+      expect(finalFlow.x).toBeGreaterThan(150);
+      expect(finalFlow.x).toBeLessThan(finalSink.x);
+    });
+
+    it('source cloud dragged straight down: same continuity, valve never pins to the stock', () => {
+      // cloud source at x=100, stock sink edge at x=277.5, valve mid at x=200.
+      const flow = cloudToStockFlow();
+      const frames = sweep(flow, true, 'y', -200, 4);
+
+      // Default (15px) topology-hop bound: with the source-cloud valve reflection
+      // fixed (#832), the straight->L hop is ~8px here, same as the sink case.
+      expectContinuous(frames);
+
+      const finalFlow = frames[frames.length - 1];
+      const finalSource = finalFlow.points[0];
+      expect(finalFlow.points.length).toBe(3);
+      // valve on the cloud-adjacent (bottom, horizontal) segment, tracking the cloud
+      expect(finalFlow.y).toBeCloseTo(finalSource.y, 5);
+      expect(finalFlow.x).toBeGreaterThan(finalSource.x);
+      expect(finalFlow.x).toBeLessThan(250);
+    });
+
+    it('vertical flow, sink cloud dragged sideways: valve stays interior on the bent segment', () => {
+      const flow = makeFlowEl(10, 'f', 200, 200, [
+        { x: 200, y: 122.5, attachedToUid: 1 }, // stock bottom edge
+        { x: 200, y: 300, attachedToUid: 2 }, // cloud below
+      ]);
+      // Drag cloud to the RIGHT (perpendicular to the vertical flow).
+      const frames = sweep(flow, false, 'x', -200, 4);
+
+      expectContinuous(frames);
+
+      const finalFlow = frames[frames.length - 1];
+      const finalSink = finalFlow.points[finalFlow.points.length - 1];
+      expect(finalFlow.points.length).toBe(3);
+      // valve on the cloud-adjacent (bent, vertical) segment: same X as the sink,
+      // interior between the corner and the cloud (not flush at the corner).
+      expect(finalFlow.x).toBeCloseTo(finalSink.x, 5);
+      expect(finalFlow.y).toBeGreaterThan(150);
+      expect(finalFlow.y).toBeLessThan(finalSink.y);
+    });
+
+    it('reverse drag: an L collapsed back to straight keeps the valve continuous', () => {
+      // The user drags a sink cloud DOWN to form the L, then drags back UP so the
+      // L collapses to straight. Because the live drag re-routes from the ORIGINAL
+      // flow each frame, this is moveDelta.y sweeping from -200 back to 0. The
+      // valve must stay continuous the whole way and end interior on the restored
+      // straight segment -- no teleport as the riser shrinks to zero.
+      const flow = stockToCloudFlow();
+      const frames = sweep(flow, false, 'y', 0, 4, -200);
+
+      // Same continuity guarantees as the forward drag: tight within a topology,
+      // one bounded straight<->L hop (~8px for a sink cloud).
+      expectContinuous(frames);
+
+      // While the L exists the valve stays on a single segment (no flip-flop).
+      const lFrames = frames.filter((f) => f.points.length === 3);
+      const firstL = valveSegmentIndex(lFrames[0]);
+      for (const f of lFrames) {
+        expect(valveSegmentIndex(f)).toBe(firstL);
+      }
+
+      // The drag ended back at zero offset: the flow is straight again and the
+      // valve sits interior between the stock edge and the cloud, not pinned.
+      const finalFlow = frames[frames.length - 1];
+      expect(finalFlow.points.length).toBe(2);
+      const src = finalFlow.points[0];
+      const sink = finalFlow.points[1];
+      expect(finalFlow.x).toBeGreaterThan(src.x);
+      expect(finalFlow.x).toBeLessThan(sink.x);
+      expect(finalFlow.y).toBeCloseTo(200, 5);
+    });
+  });
+
+  it('diagonal drag: along-axis travel is preserved when the flow bends into an L (no cloud snap-back)', () => {
+    // The cloud has already been dragged 100px ALONG the axis; now the drag pushes
+    // perpendicular past the point where it dominates and the flow bends. The
+    // parallel (x) coordinate of the cloud must stay put across the bend -- the bug
+    // rebuilt the L from the ORIGINAL flow and discarded the 100px of along-axis
+    // travel, snapping the cloud back ~100px in one frame. (The perpendicular
+    // coordinate legitimately appears only at the bend: a straight flow is pinned
+    // to its axis until it reroutes, so only the PARALLEL axis is asserted here.)
+    const flow = stockToCloudFlow(); // stock edge x=122.5, cloud at (300,200)
+    const PARALLEL = -100; // cursor 100px right -> cloud x target 400
+    const frames: FlowViewElement[] = [];
+    for (let dy = 0; dy >= -200; dy -= 8) {
+      frames.push(growEndpointDrag(flow, false, { x: PARALLEL, y: dy }, undefined));
+    }
+
+    // Parallel-axis (x) continuity of the cloud endpoint across the bend: the
+    // buggy reroute jumped it 100px in a single frame.
+    for (let i = 1; i < frames.length; i++) {
+      const prevCloud = frames[i - 1].points[frames[i - 1].points.length - 1];
+      const curCloud = frames[i].points[frames[i].points.length - 1];
+      expect(Math.abs(curCloud.x - prevCloud.x)).toBeLessThan(20);
+    }
+
+    // End state: bent into an L with the cloud at the FULL dragged position.
+    const finalFlow = frames[frames.length - 1];
+    expect(finalFlow.points.length).toBe(3);
+    const finalCloud = finalFlow.points[finalFlow.points.length - 1];
+    expect(finalCloud.x).toBeCloseTo(400, 5); // 300 + 100 along-axis, not snapped to 300
+    expect(finalCloud.y).toBeCloseTo(400, 5); // 200 + 200 perpendicular
   });
 });

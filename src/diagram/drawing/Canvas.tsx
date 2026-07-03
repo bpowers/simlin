@@ -64,6 +64,8 @@ import { isDragMovement, shouldShowVariableDetails } from './pointer-utils';
 import {
   VELOCITY_THRESHOLD,
   calculateVelocity as computeVelocity,
+  centerOffsetForBounds,
+  isDiagramOffscreen,
   isMomentumDone,
   momentumOffsetAt,
   pinchOffset,
@@ -336,6 +338,14 @@ interface CanvasRefs {
   momentumStartTime: number | undefined;
   momentumInitialVelocity: Point | undefined;
   momentumStartOffset: Point | undefined;
+
+  // One-shot latch for the mount-time offscreen re-center (issue #52). Set the
+  // first time we can evaluate the check (real svgSize, idle, non-embedded) so
+  // it runs at most once per Canvas instance and never re-triggers on later
+  // prop churn. Because the Editor renders Canvas without a `key`, module
+  // navigation reuses the same instance and the latch persists across drill-in
+  // -- intentional: navigation restores/seeds its own viewport.
+  offscreenChecked: boolean;
 }
 
 // The local "live viewport" the canvas owns DURING a gesture (pan, momentum,
@@ -421,6 +431,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       momentumStartTime: undefined,
       momentumInitialVelocity: undefined,
       momentumStartOffset: undefined,
+      offscreenChecked: false,
     };
     // Seed the empty derivation's elementsByUid to the same map instance, as the
     // class constructor did (derived.elementsByUid === this.elements).
@@ -2663,6 +2674,65 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     // closes over stale values. (The repo lint config does not enable
     // react-hooks/exhaustive-deps, so no disable directive is needed.)
   }, []);
+
+  // ---- Offscreen re-center on mount (issue #52) ---------------------------
+  // A saved viewBox/zoom can leave the whole diagram outside the visible canvas
+  // (e.g. it was panned far away, or the window is a very different size than
+  // when it was saved and the mount-time proportional refit preserved the
+  // offscreen framing). The user then opens the model to a blank surface with
+  // no idea where it went. Once we know both the element bounds and the real
+  // svg size, check the visible fraction and, if the diagram is (mostly)
+  // offscreen, center it at the current zoom.
+  //
+  // This runs at most once per mount (the `offscreenChecked` latch): it must not
+  // fight a later user pan or an external viewport change, and module drill-in
+  // (same Canvas instance -- see the latch's comment) manages its own viewport.
+  // "Idle" here matches the resize handler's convention (`!liveViewport`): while
+  // a gesture owns the live viewport the check waits, so it never yanks the view
+  // out from under an in-flight pan/pinch/coast. The commit goes through
+  // `onViewBoxChange` directly -- the same view-only, non-undo path the idle
+  // resize uses -- so the host persists it once with no history entry. Zoom is
+  // deliberately left unchanged (scope kept tight to re-centering).
+  React.useEffect(() => {
+    if (r.offscreenChecked || props.embedded || liveViewport) {
+      return;
+    }
+    if (!svgSize || svgSize.width <= 0 || svgSize.height <= 0) {
+      // No real measurement yet: wait for the first ResizeObserver delivery
+      // (or the mount effect's initial fit) without burning our one shot.
+      return;
+    }
+    // This is the one measured, idle, non-embedded opportunity.
+    r.offscreenChecked = true;
+
+    // Bounds come from the derivation the just-committed render produced (same
+    // pure pass the mount effect uses), so this reflects what is actually drawn.
+    const derived = r.derived;
+    const bounds = calcViewBox(computeElementBounds(derived.displayElements, derived.selectionUpdates));
+    if (!bounds) {
+      // Empty model: nothing to center against.
+      return;
+    }
+
+    const offset = props.view.viewBox;
+    const zoom = props.view.zoom;
+    if (!isDiagramOffscreen(bounds, offset, zoom, svgSize)) {
+      return;
+    }
+
+    const centered = centerOffsetForBounds(bounds, zoom, svgSize);
+    const newViewBox: ViewRect = {
+      x: centered.x,
+      y: centered.y,
+      width: svgSize.width,
+      height: svgSize.height,
+    };
+    props.onViewBoxChange(newViewBox, zoom);
+    // Deps: svgSize (the gating first measurement), props.view (re-evaluate if
+    // the view changes before we get a measured shot), and liveViewport (defer
+    // while a gesture is live, re-check when it settles). The latch makes the
+    // effect a no-op after its single run, so extra runs are harmless.
+  }, [svgSize, props.view, liveViewport]);
 
   // ---- Render -------------------------------------------------------------
 

@@ -694,31 +694,40 @@ function adjustFlows(
       };
     }
 
-    // Re-place the valve by mirroring it around the segment: base =
-    // min(otherEnd, moved end) plus the ABSOLUTE scaled offset, so an off-center
-    // valve stays between the two ends even when the drag flips the segment
-    // orientation (the moved end crossing past otherEnd).
+    // Re-place the valve by preserving its FRACTIONAL position along the segment,
+    // anchored to the fixed `otherEnd`. The earlier form -- base = min(otherEnd,
+    // moved end) plus the ABSOLUTE scaled offset -- happened to be idempotent only
+    // when otherEnd was the SMALLER coordinate (a sink cloud on the right). When
+    // the dragged end was the smaller coordinate (a SOURCE cloud on the left),
+    // `base` landed on the moved end and the offset-from-otherEnd was applied from
+    // the wrong reference, reflecting an off-center valve across the segment
+    // midpoint on the very first drag frame (#832). Anchoring to otherEnd with a
+    // SIGNED new length keeps the valve between the two ends even when the moved
+    // end crosses past otherEnd (the flip case the mirror form was chasing), and
+    // clamping the fraction to [0, 1] keeps it on the segment. This mirrors what
+    // `preserveValveFraction` already does for multi-segment flows.
     //
-    // Guard the denominators against zero: for a vertical flow origStock.x ===
-    // otherEnd.x (and likewise y for a horizontal flow), which without the `|| 1`
-    // divides by zero and yields a NaN/Infinity valve -- serialized to JSON null,
-    // that bricks the model (#818).
-    const fraction = {
-      x: flow.x === otherEnd.x ? 0.5 : (stock.x - otherEnd.x) / (origStock.x - otherEnd.x || 1),
-      y: flow.y === otherEnd.y ? 0.5 : (stock.y - otherEnd.y) / (origStock.y - otherEnd.y || 1),
-    };
-    const d = {
-      x: flow.x === otherEnd.x ? stock.x - otherEnd.x : flow.x - otherEnd.x,
-      y: flow.y === otherEnd.y ? stock.y - otherEnd.y : flow.y - otherEnd.y,
-    };
-    const base = {
-      x: Math.min(otherEnd.x, stock.x),
-      y: Math.min(otherEnd.y, stock.y),
+    // The `oldLen === 0` branch preserves the #818 divide-by-zero guard and has
+    // two sub-cases distinguished by the NEW length:
+    //   - newLen === 0: the axis is perpendicular to the flow (x for a vertical
+    //     flow, y for a horizontal one) -- origStock and otherEnd share a
+    //     coordinate and still do, so there is no length to take a fraction of and
+    //     the valve stays on otherEnd's coordinate (frac 0).
+    //   - newLen !== 0: the OLD flow was DEGENERATE (a creation flow whose points
+    //     all coincided at the press point) and this end has now expanded out;
+    //     center the valve on the freshly-created segment (frac 0.5), matching the
+    //     prior formula's degenerate fallback so creation keeps its mid-segment
+    //     valve.
+    const preserveAxis = (valve: number, other: number, origMoved: number, newMoved: number): number => {
+      const oldLen = origMoved - other;
+      const newLen = newMoved - other;
+      const frac = oldLen === 0 ? (newLen === 0 ? 0 : 0.5) : Math.max(0, Math.min(1, (valve - other) / oldLen));
+      return other + frac * newLen;
     };
     flow = {
       ...flow,
-      x: base.x + Math.abs(fraction.x * d.x),
-      y: base.y + Math.abs(fraction.y * d.y),
+      x: preserveAxis(flow.x, otherEnd.x, origStock.x, stock.x),
+      y: preserveAxis(flow.y, otherEnd.y, origStock.y, stock.y),
     };
 
     return { ...flow, points };
@@ -848,52 +857,52 @@ export function UpdateCloudAndFlow(
     const shouldReroute = !isDegenerate && perpAbs >= PERP_THRESHOLD && perpAbs > parAbs;
 
     if (shouldReroute) {
-      // Create L-shape by adding a corner point
-      let newCloudPoint: Point;
-      let newOtherPoint: Point;
-      let corner: Point;
+      // Bend the straight flow into an L by inserting a corner. The dragged cloud
+      // moves by the FULL accumulated delta -- BOTH the perpendicular component
+      // (which forms the bend) AND the parallel component. An earlier version
+      // applied only the perpendicular delta and kept the cloud's ORIGINAL
+      // parallel coordinate; because the live drag re-routes from the original
+      // 2-point flow each pointermove, a drag that had already traveled
+      // along-axis snapped the cloud back to its starting parallel position the
+      // instant it crossed the perpendicular threshold (a one-frame teleport).
+      const base = cloudIsFirst ? firstPoint : lastPoint;
+      const otherPoint = cloudIsFirst ? lastPoint : firstPoint;
+      const newCloudPoint: Point = { ...base, x: base.x - moveDelta.x, y: base.y - moveDelta.y };
 
-      if (treatAsHorizontal) {
-        // Horizontal segment: perpendicular movement is vertical (Y changes)
-        if (cloudIsFirst) {
-          newCloudPoint = { ...firstPoint, y: firstPoint.y - moveDelta.y };
-          newOtherPoint = lastPoint;
-          // Corner at (otherEnd.x, newCloud.y)
-          corner = { x: lastPoint.x, y: newCloudPoint.y, attachedToUid: undefined };
-          points = [newCloudPoint, corner, newOtherPoint];
-        } else {
-          newOtherPoint = firstPoint;
-          newCloudPoint = { ...lastPoint, y: lastPoint.y - moveDelta.y };
-          // Corner at (otherEnd.x, newCloud.y)
-          corner = { x: firstPoint.x, y: newCloudPoint.y, attachedToUid: undefined };
-          points = [newOtherPoint, corner, newCloudPoint];
-        }
-      } else {
-        // Vertical segment: perpendicular movement is horizontal (X changes)
-        if (cloudIsFirst) {
-          newCloudPoint = { ...firstPoint, x: firstPoint.x - moveDelta.x };
-          newOtherPoint = lastPoint;
-          // Corner at (newCloud.x, otherEnd.y)
-          corner = { x: newCloudPoint.x, y: lastPoint.y, attachedToUid: undefined };
-          points = [newCloudPoint, corner, newOtherPoint];
-        } else {
-          newOtherPoint = firstPoint;
-          newCloudPoint = { ...lastPoint, x: lastPoint.x - moveDelta.x };
-          // Corner at (newCloud.x, otherEnd.y)
-          corner = { x: newCloudPoint.x, y: firstPoint.y, attachedToUid: undefined };
-          points = [newOtherPoint, corner, newCloudPoint];
-        }
-      }
+      // The corner keeps the two segments orthogonal: a riser on the FIXED end's
+      // coordinate, then a run out to the cloud. For a (dominantly) horizontal
+      // flow the riser is vertical at otherPoint.x; for a vertical flow it is
+      // horizontal at otherPoint.y.
+      const corner: Point = treatAsHorizontal
+        ? { x: otherPoint.x, y: newCloudPoint.y, attachedToUid: undefined }
+        : { x: newCloudPoint.x, y: otherPoint.y, attachedToUid: undefined };
 
-      // Update cloud position
+      points = cloudIsFirst ? [newCloudPoint, corner, otherPoint] : [otherPoint, corner, newCloudPoint];
+
+      // Update cloud position to the full dragged position.
       cloud = {
         ...cloud,
         x: newCloudPoint.x,
         y: newCloudPoint.y,
       };
 
-      // Clamp valve to closest segment of new shape
-      const newValve = clampValveToClosestSegment(currentValve, points);
+      // Normalize before placing the valve: if the cloud was dragged onto the
+      // fixed end's axis the run collapses to zero length and the L degenerates
+      // to a straight flow -- normalizeFlowPoints drops the redundant corner so
+      // the valve lands on a real segment.
+      points = normalizeFlowPoints(points);
+
+      // Land the valve on the segment adjacent to the dragged cloud -- the bent
+      // segment the drag is actively growing -- at an interior position. Picking
+      // the merely-CLOSEST segment here (clampValveToClosestSegment) let the
+      // valve's closest segment flip from this bent segment onto the
+      // perpendicular riser as the L deepened, teleporting the valve (and its
+      // label) to the riser's stock-adjacent end, flush against the stock body
+      // (#53). Anchoring to the cloud-adjacent segment tracks the cursor
+      // continuously, and clampToSegment keeps the valve off the segment ends.
+      const rerouteSegments = getSegments(points);
+      const cloudAdjacentSegment = cloudIsFirst ? rerouteSegments[0] : rerouteSegments[rerouteSegments.length - 1];
+      const newValve = clampToSegment(currentValve, cloudAdjacentSegment);
 
       flow = {
         ...flow,

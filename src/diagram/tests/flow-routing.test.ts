@@ -2710,6 +2710,151 @@ describe('Flow routing', () => {
     });
   });
 
+  describe('UpdateCloudAndFlow - source cloud valve is not reflected (issue #832)', () => {
+    // The mirror above happens to be idempotent only when the fixed otherEnd is
+    // the SMALLER coordinate (a sink cloud on the right). When the DRAGGED cloud
+    // is the smaller-coordinate end (a SOURCE cloud on the left), the old formula
+    // `base = min(otherEnd, cloud) + abs(fraction*d)` measured the valve's offset
+    // from the wrong reference and reflected an off-center valve across the
+    // segment midpoint on the very first drag frame (#832). The fix preserves the
+    // valve's fractional position anchored to otherEnd, so a zero/sub-threshold
+    // move leaves the valve put and a real drag scales it correctly.
+    //
+    // Fixture: SOURCE cloud (uid 3) at x=100 (first point), fixed other end (uid
+    // 1) at x=200, flow horizontal at y=100, valve off-center at x=175 (fraction
+    // 0.25 from otherEnd toward the cloud).
+    const makeSourceCase = (valveX: number, delta: { x: number; y: number }) => {
+      const cloud = makeCloud(3, 30, 100, 100);
+      const flow = makeFlow(30, valveX, 100, [
+        { x: 100, y: 100, attachedToUid: 3 },
+        { x: 200, y: 100, attachedToUid: 1 },
+      ]);
+      return UpdateCloudAndFlow(cloud, flow, delta);
+    };
+
+    it('leaves an off-center valve unmoved on a zero-delta source-cloud grab', () => {
+      // The reported bug: grabbing the source cloud (no movement yet) reflected
+      // the valve 175 -> 125. It must stay at 175.
+      const [newCloud, newFlow] = makeSourceCase(175, { x: 0, y: 0 });
+      expect(newCloud.x).toBe(100);
+      expect(newFlow.x).toBe(175);
+      expect(newFlow.y).toBe(100);
+    });
+
+    it('leaves an off-center valve unmoved on a sub-threshold perpendicular grab', () => {
+      // A 3px perpendicular twitch (below the 5px reroute threshold) still runs
+      // the axis-constrain path; the valve must not reflect.
+      const [, newFlow] = makeSourceCase(175, { x: 0, y: 3 });
+      expect(newFlow.points.length).toBe(2);
+      expect(newFlow.x).toBe(175);
+    });
+
+    it('preserves the valve fraction when the source cloud is dragged along-axis', () => {
+      // Drag the source cloud LEFT by 20 (cloud 100 -> 80). The valve was at
+      // fraction 0.25 from otherEnd(200): new x = 200 + 0.25*(80-200) = 170.
+      // The old mirror teleported it to 110.
+      const [newCloud, newFlow] = makeSourceCase(175, { x: 20, y: 0 });
+      expect(newCloud.x).toBe(80);
+      expect(newFlow.x).toBeCloseTo(170, 5);
+      expect(newFlow.y).toBe(100);
+    });
+
+    it('keeps the valve between the ends when the source cloud crosses past otherEnd', () => {
+      // Drag the source cloud RIGHT past the fixed end: cloud 100 -> 250, so the
+      // segment flips (cloud now to the right of otherEnd=200). The valve stays
+      // between them: 200 + 0.25*(250-200) = 212.5.
+      const [newCloud, newFlow] = makeSourceCase(175, { x: -150, y: 0 });
+      expect(newCloud.x).toBe(250);
+      expect(newFlow.x).toBeCloseTo(212.5, 5);
+      expect(newFlow.x).toBeGreaterThan(200);
+      expect(newFlow.x).toBeLessThan(250);
+    });
+
+    it('leaves an off-center valve unmoved on a zero-delta vertical (top) source grab', () => {
+      // Vertical flow: source cloud (uid 3) at the TOP (y=100, min), fixed end at
+      // y=200. Off-center valve at y=175. A zero-delta grab must not reflect it.
+      const cloud = makeCloud(3, 30, 100, 100);
+      const flow = makeFlow(30, 100, 175, [
+        { x: 100, y: 100, attachedToUid: 3 },
+        { x: 100, y: 200, attachedToUid: 1 },
+      ]);
+      const [, newFlow] = UpdateCloudAndFlow(cloud, flow, { x: 0, y: 0 });
+      expect(newFlow.x).toBe(100);
+      expect(newFlow.y).toBe(175);
+    });
+  });
+
+  describe('UpdateCloudAndFlow - reroute preserves along-axis cloud travel (diagonal teleport)', () => {
+    // When a cloud drag has traveled ALONG the flow axis and then crosses the
+    // perpendicular threshold, the reroute rebuilds the L from the ORIGINAL
+    // 2-point flow (the live drag re-routes from the committed flow every frame).
+    // The reroute must apply BOTH the perpendicular AND the parallel component of
+    // the accumulated moveDelta to the cloud endpoint; applying only the
+    // perpendicular one snapped the cloud back to its original along-axis
+    // position -- a one-frame teleport. The reroute condition (perp > par) still
+    // holds while the parallel travel is large in absolute terms.
+
+    it('applies both deltas to a horizontal sink-cloud reroute (no along-axis snap-back)', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockEdgeX = 100 + StockWidth / 2; // 122.5
+      const flow = makeFlow(flowUid, 200, 200, [
+        { x: stockEdgeX, y: 200, attachedToUid: stockUid },
+        { x: 300, y: 200, attachedToUid: cloudUid },
+      ]);
+      const cloud = makeCloud(cloudUid, flowUid, 300, 200);
+
+      // Cloud dragged RIGHT by 150 (parallel) and DOWN by 160 (perpendicular,
+      // dominant so it reroutes). moveDelta is inverted (press - cursor).
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, { x: -150, y: -160 });
+
+      expect(newFlow.points.length).toBe(3);
+      const sink = newFlow.points[2];
+      // sink lands at the FULL dragged position, not snapped back to x=300
+      expect(sink.x).toBe(450);
+      expect(sink.y).toBe(360);
+      expect(newCloud.x).toBe(450);
+      expect(newCloud.y).toBe(360);
+      // corner keeps the L orthogonal: vertical riser at the stock's x, then
+      // horizontal out to the cloud's new x.
+      const corner = newFlow.points[1];
+      expect(corner.x).toBe(stockEdgeX);
+      expect(corner.y).toBe(360);
+      // valve stays interior on the cloud-adjacent (horizontal) segment
+      expect(newFlow.y).toBe(360);
+      expect(newFlow.x).toBeGreaterThan(stockEdgeX);
+      expect(newFlow.x).toBeLessThan(450);
+    });
+
+    it('applies both deltas to a vertical source-cloud reroute (no along-axis snap-back)', () => {
+      const stockUid = 1;
+      const cloudUid = 3;
+      const stockEdgeY = 200 - StockHeight / 2; // 182.5 (top edge, stock below)
+      const flow = makeFlow(flowUid, 100, 150, [
+        { x: 100, y: 100, attachedToUid: cloudUid }, // source cloud at top
+        { x: 100, y: stockEdgeY, attachedToUid: stockUid },
+      ]);
+      const cloud = makeCloud(cloudUid, flowUid, 100, 100);
+
+      // Vertical flow: parallel axis is Y, perpendicular is X. Drag the source
+      // cloud DOWN by 150 (parallel) and RIGHT by 160 (perpendicular, dominant).
+      const [newCloud, newFlow] = UpdateCloudAndFlow(cloud, flow, { x: -160, y: -150 });
+
+      expect(newFlow.points.length).toBe(3);
+      const source = newFlow.points[0];
+      // source lands at the FULL dragged position, not snapped back to y=100
+      expect(source.x).toBe(260);
+      expect(source.y).toBe(250);
+      expect(newCloud.x).toBe(260);
+      expect(newCloud.y).toBe(250);
+      // corner: vertical run from the cloud down to the fixed end's y, then
+      // horizontal across to the stock.
+      const corner = newFlow.points[1];
+      expect(corner.x).toBe(260);
+      expect(corner.y).toBe(stockEdgeY);
+    });
+  });
+
   describe('UpdateCloudAndFlow - degenerate flow creation', () => {
     // When a flow is first created, both endpoints are at the same position.
     // The segment is both horizontal AND vertical (zero length).
