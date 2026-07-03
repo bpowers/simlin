@@ -431,6 +431,17 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   };
 
   const handleTabChange = (_event: React.SyntheticEvent, newValue: number): void => {
+    // Switching tabs is a leave-the-editing-context action and must commit any
+    // pending equation/units/notes edit, exactly like blur-away. The blur that
+    // precedes this click is intra-panel (the tab strip is inside the card), so
+    // the focusLeftPanel gate deliberately skipped it -- but the tab switch
+    // unmounts the editors and the Lookup tab renders no Save/Cancel, so
+    // without a commit here the pending edit would sit stranded and invisible
+    // until the next keyed remount silently dropped it.
+    handleEquationSave();
+    if (!variable.errors || variable.errors.length === 0) {
+      setEditingEquation(false);
+    }
     props.onActiveTabChange(newValue);
   };
 

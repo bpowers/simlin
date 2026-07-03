@@ -236,6 +236,29 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
     expect((editable as HTMLElement).textContent).toBe('a + b');
   });
 
+  it('switching to the Lookup Function tab commits a pending edit', async () => {
+    // The tab strip sits inside the card, so the blur toward it is an
+    // intra-panel blur the focusLeftPanel gate deliberately skips -- but the
+    // tab switch hides the equation editors (and the Lookup tab renders no
+    // Save/Cancel), so a pending edit would be stranded invisibly and dropped
+    // by the next keyed remount. Changing tabs must commit, like blur-away.
+    const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b', { errors: forceEditorOpen }));
+    const editor = editorFor(container, '.eqnEditor');
+    await appendText(editor, 'Z');
+
+    const editable = container.querySelector('.eqnEditor') as HTMLElement;
+    const lookupTab = buttonByText(container, 'Lookup Function');
+    await act(async () => {
+      fireEvent.mouseDown(lookupTab);
+      fireEvent.blur(editable, { relatedTarget: lookupTab });
+      fireEvent.click(lookupTab);
+      await Promise.resolve();
+    });
+
+    expect(onEquationChange).toHaveBeenCalledTimes(1);
+    expect(onEquationChange).toHaveBeenCalledWith('x', 'a + bZ', undefined, undefined);
+  });
+
   it('blur to the canvas (focus leaves the panel) still commits the edit', async () => {
     const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b', { errors: forceEditorOpen }));
     const editor = editorFor(container, '.eqnEditor');
