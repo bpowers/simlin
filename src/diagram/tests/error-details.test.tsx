@@ -79,5 +79,24 @@ describe('ErrorDetails', () => {
     );
     expect(screen.getByText(/variable "flow" unit error:/i)).not.toBeNull();
     expect(screen.getByText(/m vs s/)).not.toBeNull();
+    // The bare details replace the code description rather than prefixing it.
+    expect(screen.queryByText(/unit mismatch/i)).toBeNull();
+  });
+
+  test('falls back to the code description for unit errors without details', () => {
+    render(
+      <ErrorDetails
+        {...noErrors}
+        varUnitErrors={
+          new Map([
+            [
+              'flow',
+              [{ code: ErrorCode.UnitMismatch, start: 0, end: 1, isConsistencyError: true, details: undefined }],
+            ],
+          ])
+        }
+      />,
+    );
+    expect(screen.getByText(/unit error: unit mismatch/i)).not.toBeNull();
   });
 });

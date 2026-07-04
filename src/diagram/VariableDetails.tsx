@@ -16,7 +16,6 @@ import { Dark2 } from './colors';
 import { ViewElement, Variable, GraphicalFunction, EquationError, UnitError, variableGf } from '@simlin/core/datamodel';
 
 import { defined, Series } from '@simlin/core/common';
-import { at } from '@simlin/core/collections';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { CustomElement, FormattedText, CustomEditor } from './drawing/SlateEditor';
 import {
@@ -27,9 +26,9 @@ import {
   SpanBox,
 } from './equation-caret';
 import {
-  HighlightRange,
   applyToAllPrefix,
   byteOffsetToUtf16,
+  highlightRangeForField,
   highlightSpansForLines,
   slatePointForOffset,
 } from './equation-highlight';
@@ -115,28 +114,7 @@ function highlightErrors(
   isUnits: boolean,
 ): CustomElement[] {
   const rawStart = rawEquationStart(s, isUnits);
-
-  let range: HighlightRange | undefined;
-  if (!isUnits && errors && errors.length > 0) {
-    const err = at(errors, 0);
-    if (err.end > 0) {
-      range = { startByte: err.start, endByte: err.end, kind: 'error' };
-    }
-  } else if (unitErrors && unitErrors.length > 0) {
-    for (const err of unitErrors) {
-      // Consistency errors point into the equation; definition errors point
-      // into the units string. Only apply the range to the field it targets.
-      if (isUnits === err.isConsistencyError) {
-        continue;
-      }
-      // end === 0 is the engine's "to the end of the text" convention;
-      // byteOffsetToUtf16 clamps, so any large value reads as "the end".
-      const endByte = err.end === 0 ? Number.MAX_SAFE_INTEGER : err.end;
-      range = { startByte: err.start, endByte, kind: isUnits ? 'error' : 'warning' };
-      break;
-    }
-  }
-
+  const range = highlightRangeForField(s.slice(rawStart), errors, unitErrors, isUnits);
   return highlightSpansForLines(s, rawStart, range).map((children): CustomElement => ({ type: 'equation', children }));
 }
 
@@ -512,15 +490,14 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
     // Unit errors are non-fatal warnings: the variable still simulates and has
     // data. They are rendered beneath the chart (or alongside equation errors)
     // rather than replacing the results.
-    const unitWarnings = detailsView.unitWarnings.map((error, i) => {
-      const details = error.details;
-      return (
-        <div key={`unit-${i}`} className={styles.errorList}>
-          unit error: {errorCodeDescription(error.code)}
-          {details ? `: ${details}` : undefined}
-        </div>
-      );
-    });
+    // The bare details string ("computed units 'x' don't match specified
+    // units") already says what went wrong; the code description is the
+    // fallback for errors that carry no details.
+    const unitWarnings = detailsView.unitWarnings.map((error, i) => (
+      <div key={`unit-${i}`} className={styles.errorList}>
+        unit error: {error.details ?? errorCodeDescription(error.code)}
+      </div>
+    ));
 
     // Sketch-connector drift is a non-fatal warning: the variable still
     // simulates, so it renders beside the chart like unit warnings rather than

@@ -50,6 +50,18 @@ export enum SimlinErrorCode {
   UnitDefinitionErrors = 31,
   Generic = 32,
   UnitMismatch = 33,
+  BadOverride = 34,
+  NoAppInUnits = 35,
+  NoSubscriptInUnits = 36,
+  NoIfInUnits = 37,
+  NoUnaryOpInUnits = 38,
+  BadBinaryOpInUnits = 39,
+  NoConstInUnits = 40,
+  ExpectedInteger = 41,
+  ExpectedIntegerOne = 42,
+  DuplicateUnit = 43,
+  ExpectedModule = 44,
+  ExpectedIdent = 45,
 }
 
 // Error kind categorizing where in the project the error originates
@@ -112,6 +124,11 @@ export interface ErrorDetail {
   kind: SimlinErrorKind;
   unitErrorKind: SimlinUnitErrorKind;
   severity: SimlinErrorSeverity;
+  // The bare human-readable reason without the source snippet or the
+  // model/variable summary line that `message` carries (e.g. "computed units
+  // 'people' don't match specified units"). Null when the error has no
+  // separate reason string.
+  details: string | null;
 }
 
 // Link structure - matches SimlinLink in simlin.h

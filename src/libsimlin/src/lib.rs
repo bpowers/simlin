@@ -130,6 +130,21 @@ pub enum SimlinErrorCode {
     Generic = 32,
     UnitMismatch = 33,
     BadOverride = 34,
+    // Unit-definition parse errors (appended additively; the C ABI requires
+    // existing discriminants stay stable). These carry the same meaning as
+    // the engine `ErrorCode` variants of the same name, so GUI consumers can
+    // show a precise reason for a malformed units string instead of Generic.
+    NoAppInUnits = 35,
+    NoSubscriptInUnits = 36,
+    NoIfInUnits = 37,
+    NoUnaryOpInUnits = 38,
+    BadBinaryOpInUnits = 39,
+    NoConstInUnits = 40,
+    ExpectedInteger = 41,
+    ExpectedIntegerOne = 42,
+    DuplicateUnit = 43,
+    ExpectedModule = 44,
+    ExpectedIdent = 45,
 }
 
 impl TryFrom<u32> for SimlinErrorCode {
@@ -172,6 +187,17 @@ impl TryFrom<u32> for SimlinErrorCode {
             32 => Ok(SimlinErrorCode::Generic),
             33 => Ok(SimlinErrorCode::UnitMismatch),
             34 => Ok(SimlinErrorCode::BadOverride),
+            35 => Ok(SimlinErrorCode::NoAppInUnits),
+            36 => Ok(SimlinErrorCode::NoSubscriptInUnits),
+            37 => Ok(SimlinErrorCode::NoIfInUnits),
+            38 => Ok(SimlinErrorCode::NoUnaryOpInUnits),
+            39 => Ok(SimlinErrorCode::BadBinaryOpInUnits),
+            40 => Ok(SimlinErrorCode::NoConstInUnits),
+            41 => Ok(SimlinErrorCode::ExpectedInteger),
+            42 => Ok(SimlinErrorCode::ExpectedIntegerOne),
+            43 => Ok(SimlinErrorCode::DuplicateUnit),
+            44 => Ok(SimlinErrorCode::ExpectedModule),
+            45 => Ok(SimlinErrorCode::ExpectedIdent),
             _ => Err(()),
         }
     }
@@ -224,17 +250,17 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::VariablesHaveErrors => SimlinErrorCode::VariablesHaveErrors,
             engine::ErrorCode::UnitDefinitionErrors => SimlinErrorCode::UnitDefinitionErrors,
             engine::ErrorCode::Generic => SimlinErrorCode::Generic,
-            engine::ErrorCode::NoAppInUnits => SimlinErrorCode::Generic,
-            engine::ErrorCode::NoSubscriptInUnits => SimlinErrorCode::Generic,
-            engine::ErrorCode::NoIfInUnits => SimlinErrorCode::Generic,
-            engine::ErrorCode::NoUnaryOpInUnits => SimlinErrorCode::Generic,
-            engine::ErrorCode::BadBinaryOpInUnits => SimlinErrorCode::Generic,
-            engine::ErrorCode::NoConstInUnits => SimlinErrorCode::Generic,
-            engine::ErrorCode::ExpectedInteger => SimlinErrorCode::Generic,
-            engine::ErrorCode::ExpectedIntegerOne => SimlinErrorCode::Generic,
-            engine::ErrorCode::DuplicateUnit => SimlinErrorCode::Generic,
-            engine::ErrorCode::ExpectedModule => SimlinErrorCode::Generic,
-            engine::ErrorCode::ExpectedIdent => SimlinErrorCode::Generic,
+            engine::ErrorCode::NoAppInUnits => SimlinErrorCode::NoAppInUnits,
+            engine::ErrorCode::NoSubscriptInUnits => SimlinErrorCode::NoSubscriptInUnits,
+            engine::ErrorCode::NoIfInUnits => SimlinErrorCode::NoIfInUnits,
+            engine::ErrorCode::NoUnaryOpInUnits => SimlinErrorCode::NoUnaryOpInUnits,
+            engine::ErrorCode::BadBinaryOpInUnits => SimlinErrorCode::BadBinaryOpInUnits,
+            engine::ErrorCode::NoConstInUnits => SimlinErrorCode::NoConstInUnits,
+            engine::ErrorCode::ExpectedInteger => SimlinErrorCode::ExpectedInteger,
+            engine::ErrorCode::ExpectedIntegerOne => SimlinErrorCode::ExpectedIntegerOne,
+            engine::ErrorCode::DuplicateUnit => SimlinErrorCode::DuplicateUnit,
+            engine::ErrorCode::ExpectedModule => SimlinErrorCode::ExpectedModule,
+            engine::ErrorCode::ExpectedIdent => SimlinErrorCode::ExpectedIdent,
             engine::ErrorCode::UnitMismatch => SimlinErrorCode::UnitMismatch,
             engine::ErrorCode::TodoWildcard => SimlinErrorCode::Generic,
             engine::ErrorCode::TodoStarRange => SimlinErrorCode::Generic,
@@ -316,6 +342,12 @@ pub struct SimlinErrorDetail {
     pub kind: SimlinErrorKind,
     pub unit_error_kind: SimlinUnitErrorKind,
     pub severity: SimlinErrorSeverity,
+    /// The bare human-readable reason without the source snippet or the
+    /// model/variable summary line that `message` carries (e.g. "computed
+    /// units 'people' don't match specified units"). NULL when the error has
+    /// no separate reason string. Appended additively: existing field offsets
+    /// are unchanged.
+    pub details: *const c_char,
 }
 
 /// Opaque project structure

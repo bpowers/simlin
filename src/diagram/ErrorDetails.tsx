@@ -62,11 +62,12 @@ export function ErrorDetails({
   }
   for (const [ident, errs] of varUnitErrors) {
     for (const err of errs) {
-      const details = err.details;
+      // Unit errors carry the bare reason in `details` (e.g. "computed units
+      // 'x' don't match specified units"); the code description is only the
+      // fallback for errors without one.
       errors.push(
         <div key={`unit-${ident}-${err.code}-${err.start}`} className={styles.list}>
-          variable "{ident}" unit error: {errorCodeDescription(err.code)}
-          {details ? `: ${details}` : undefined}
+          variable "{ident}" unit error: {err.details ?? errorCodeDescription(err.code)}
         </div>,
       );
     }

@@ -63,6 +63,17 @@ pub extern "C" fn simlin_error_str(err: u32) -> *const c_char {
         Ok(SimlinErrorCode::Generic) => "generic\0",
         Ok(SimlinErrorCode::UnitMismatch) => "unit_mismatch\0",
         Ok(SimlinErrorCode::BadOverride) => "bad_override\0",
+        Ok(SimlinErrorCode::NoAppInUnits) => "no_app_in_units\0",
+        Ok(SimlinErrorCode::NoSubscriptInUnits) => "no_subscript_in_units\0",
+        Ok(SimlinErrorCode::NoIfInUnits) => "no_if_in_units\0",
+        Ok(SimlinErrorCode::NoUnaryOpInUnits) => "no_unary_op_in_units\0",
+        Ok(SimlinErrorCode::BadBinaryOpInUnits) => "bad_binary_op_in_units\0",
+        Ok(SimlinErrorCode::NoConstInUnits) => "no_const_in_units\0",
+        Ok(SimlinErrorCode::ExpectedInteger) => "expected_integer\0",
+        Ok(SimlinErrorCode::ExpectedIntegerOne) => "expected_integer_one\0",
+        Ok(SimlinErrorCode::DuplicateUnit) => "duplicate_unit\0",
+        Ok(SimlinErrorCode::ExpectedModule) => "expected_module\0",
+        Ok(SimlinErrorCode::ExpectedIdent) => "expected_ident\0",
         Err(()) => "unknown_error\0",
     };
     s.as_ptr() as *const c_char

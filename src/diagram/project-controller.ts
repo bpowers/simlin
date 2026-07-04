@@ -205,7 +205,11 @@ export function convertErrorDetails(
         end: err.endOffset ?? 0,
         code: err.code as unknown as ErrorCode,
         isConsistencyError: err.unitErrorKind === SimlinUnitErrorKind.Consistency,
-        details: err.message ?? undefined,
+        // The bare reason ("computed units 'x' don't match specified units"),
+        // NOT `err.message`: the message is terminal-formatted with a source
+        // snippet + `~~~` underline + summary line, which renders as garbage
+        // in the details panel.
+        details: err.details ?? undefined,
       };
       let existing = unitErrors.get(ident);
       if (!existing) {

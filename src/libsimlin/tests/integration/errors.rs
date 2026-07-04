@@ -273,6 +273,36 @@ fn test_error_kind_unit_consistency_error() {
             "unit mismatch should also produce an Inference error from the constraint solver"
         );
 
+        // The consistency detail must arrive with the wire code UnitMismatch
+        // (not an engine-numbered discriminant) and carry the bare reason in
+        // `details`, separate from the snippet-formatted `message`.
+        let consistency = error_slice
+            .iter()
+            .find(|e| {
+                e.kind == SimlinErrorKind::Units
+                    && e.unit_error_kind == SimlinUnitErrorKind::Consistency
+            })
+            .unwrap();
+        assert_eq!(consistency.code, SimlinErrorCode::UnitMismatch);
+        assert!(
+            !consistency.details.is_null(),
+            "consistency error should carry bare details"
+        );
+        let details = CStr::from_ptr(consistency.details).to_str().unwrap();
+        assert!(
+            details.starts_with("computed units"),
+            "details should be the bare reason: {details}"
+        );
+        assert!(
+            !details.contains('~') && !details.contains("units error in model"),
+            "details must not carry snippet/summary formatting: {details}"
+        );
+        let message = CStr::from_ptr(consistency.message).to_str().unwrap();
+        assert!(
+            message.contains('~'),
+            "message keeps the terminal-formatted snippet: {message}"
+        );
+
         simlin_error_free(all_errors);
         simlin_project_unref(proj);
     }

@@ -101,6 +101,17 @@ typedef enum {
   SIMLIN_ERROR_CODE_GENERIC = 32,
   SIMLIN_ERROR_CODE_UNIT_MISMATCH = 33,
   SIMLIN_ERROR_CODE_BAD_OVERRIDE = 34,
+  SIMLIN_ERROR_CODE_NO_APP_IN_UNITS = 35,
+  SIMLIN_ERROR_CODE_NO_SUBSCRIPT_IN_UNITS = 36,
+  SIMLIN_ERROR_CODE_NO_IF_IN_UNITS = 37,
+  SIMLIN_ERROR_CODE_NO_UNARY_OP_IN_UNITS = 38,
+  SIMLIN_ERROR_CODE_BAD_BINARY_OP_IN_UNITS = 39,
+  SIMLIN_ERROR_CODE_NO_CONST_IN_UNITS = 40,
+  SIMLIN_ERROR_CODE_EXPECTED_INTEGER = 41,
+  SIMLIN_ERROR_CODE_EXPECTED_INTEGER_ONE = 42,
+  SIMLIN_ERROR_CODE_DUPLICATE_UNIT = 43,
+  SIMLIN_ERROR_CODE_EXPECTED_MODULE = 44,
+  SIMLIN_ERROR_CODE_EXPECTED_IDENT = 45,
 } SimlinErrorCode;
 
 // Error kind categorizing where in the project the error originates.
@@ -353,6 +364,12 @@ typedef struct {
   SimlinErrorKind kind;
   SimlinUnitErrorKind unit_error_kind;
   SimlinErrorSeverity severity;
+  // The bare human-readable reason without the source snippet or the
+  // model/variable summary line that `message` carries (e.g. "computed
+  // units 'people' don't match specified units"). NULL when the error has
+  // no separate reason string. Appended additively: existing field offsets
+  // are unchanged.
+  const char *details;
 } SimlinErrorDetail;
 
 // Opaque project structure

@@ -31,6 +31,9 @@ pub struct ErrorDetail {
     pub kind: SimlinErrorKind,
     pub unit_error_kind: SimlinUnitErrorKind,
     pub severity: SimlinErrorSeverity,
+    /// Bare reason string without snippet/summary formatting (see
+    /// `SimlinErrorDetail::details`).
+    pub details: Option<String>,
 }
 
 impl ErrorDetail {
@@ -45,6 +48,7 @@ impl ErrorDetail {
             kind: SimlinErrorKind::default(),
             unit_error_kind: SimlinUnitErrorKind::default(),
             severity: SimlinErrorSeverity::default(),
+            details: None,
         }
     }
 }
@@ -60,6 +64,7 @@ struct OwnedDetail {
     kind: SimlinErrorKind,
     unit_error_kind: SimlinUnitErrorKind,
     severity: SimlinErrorSeverity,
+    details: Option<CString>,
 }
 
 impl OwnedDetail {
@@ -74,6 +79,7 @@ impl OwnedDetail {
             kind: detail.kind,
             unit_error_kind: detail.unit_error_kind,
             severity: detail.severity,
+            details: detail.details.map(sanitize_for_c),
         }
     }
 
@@ -97,6 +103,10 @@ impl OwnedDetail {
             kind: self.kind,
             unit_error_kind: self.unit_error_kind,
             severity: self.severity,
+            details: self
+                .details
+                .as_ref()
+                .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
         }
     }
 }

@@ -110,6 +110,7 @@ def extract_error_details(err_ptr: Any) -> list[Any]:
                         UnitErrorKind.NOT_APPLICABLE,
                     ),
                     severity=coerce_int_enum(ErrorSeverity, c_detail.severity, ErrorSeverity.ERROR),
+                    details=c_to_string(c_detail.details),
                 )
             )
     return details

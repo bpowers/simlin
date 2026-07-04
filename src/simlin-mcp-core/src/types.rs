@@ -437,6 +437,7 @@ mod tests {
             end_offset: 9,
             kind: FormattedErrorKind::Variable,
             unit_error_kind: None,
+            details: None,
         };
         let output = ErrorOutput::from(&fe);
         assert_eq!(output.code, "unknown_dependency");
@@ -496,6 +497,7 @@ mod tests {
                 end_offset: 0,
                 kind: FormattedErrorKind::Variable,
                 unit_error_kind: None,
+                details: None,
             };
             let output = ErrorOutput::from(&fe);
             assert_eq!(

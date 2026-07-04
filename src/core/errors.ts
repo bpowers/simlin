@@ -2,6 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// This enum MUST mirror libsimlin's `SimlinErrorCode` (the C ABI wire
+// format in src/libsimlin/src/lib.rs) value-for-value: error codes reach
+// TypeScript as raw integers from that enum, NOT from the engine's internal
+// `ErrorCode` (which numbers some variants differently). Engine codes that
+// libsimlin collapses (e.g. the `Todo*` family) arrive as `Generic`.
+// An identical copy lives in src/engine/src/errors.ts (the packages don't
+// depend on each other); keep the two in sync.
 export enum ErrorCode {
   NoError = 0,
   DoesNotExist = 1,
@@ -36,24 +43,19 @@ export enum ErrorCode {
   VariablesHaveErrors = 30,
   UnitDefinitionErrors = 31,
   Generic = 32,
-  NoAppInUnits = 33,
-  NoSubscriptInUnits = 34,
-  NoIfInUnits = 35,
-  NoUnaryOpInUnits = 36,
-  BadBinaryOpInUnits = 37,
-  NoConstInUnits = 38,
-  ExpectedInteger = 39,
-  ExpectedIntegerOne = 40,
-  DuplicateUnit = 41,
-  ExpectedModule = 42,
-  ExpectedIdent = 43,
-  UnitMismatch = 44,
-  TodoWildcard = 45,
-  TodoStarRange = 46,
-  TodoRange = 47,
-  TodoArrayBuiltin = 48,
-  CantSubscriptScalar = 49,
-  DimensionInScalarContext = 50,
+  UnitMismatch = 33,
+  BadOverride = 34,
+  NoAppInUnits = 35,
+  NoSubscriptInUnits = 36,
+  NoIfInUnits = 37,
+  NoUnaryOpInUnits = 38,
+  BadBinaryOpInUnits = 39,
+  NoConstInUnits = 40,
+  ExpectedInteger = 41,
+  ExpectedIntegerOne = 42,
+  DuplicateUnit = 43,
+  ExpectedModule = 44,
+  ExpectedIdent = 45,
 }
 
 export function errorCodeDescription(code: ErrorCode): string {
@@ -124,6 +126,10 @@ export function errorCodeDescription(code: ErrorCode): string {
       return "The project's unit definitions have errors";
     case ErrorCode.Generic:
       return 'Generic error from core engine';
+    case ErrorCode.UnitMismatch:
+      return 'Unit mismatch';
+    case ErrorCode.BadOverride:
+      return 'Invalid value override';
     case ErrorCode.NoAppInUnits:
       return 'Function calls are not allowed in unit definition';
     case ErrorCode.NoSubscriptInUnits:
@@ -146,20 +152,6 @@ export function errorCodeDescription(code: ErrorCode): string {
       return 'Expected a module, found a non-module';
     case ErrorCode.ExpectedIdent:
       return 'Expected an identifier';
-    case ErrorCode.UnitMismatch:
-      return 'Unit mismatch';
-    case ErrorCode.TodoWildcard:
-      return 'Wildcard subscripts not yet implemented';
-    case ErrorCode.TodoStarRange:
-      return 'Star range subscripts not yet implemented';
-    case ErrorCode.TodoRange:
-      return 'Range subscripts not yet implemented';
-    case ErrorCode.TodoArrayBuiltin:
-      return 'Array builtin not yet implemented';
-    case ErrorCode.CantSubscriptScalar:
-      return 'Cannot subscript a scalar variable';
-    case ErrorCode.DimensionInScalarContext:
-      return 'Dimension used in scalar context';
   }
   return 'Unknown error from core engine';
 }

@@ -16,6 +16,8 @@
 //     its position in the displayed string, which may span multiple lines
 //     (one Slate element per line).
 
+import type { EquationError, UnitError } from '@simlin/core/datamodel';
+
 import type { FormattedText } from './drawing/SlateEditor';
 
 /** Displayed-string prefix for apply-to-all arrayed equations. Engine offsets
@@ -94,6 +96,64 @@ export function highlightSpansForLines(
     lineStart = lineEnd + 1; // skip the newline
   }
   return result;
+}
+
+/**
+ * Pick the error/warning underline for one details-panel field (the equation
+ * editor or the units editor) from the variable's errors. `raw` is the raw
+ * field text (the displayed string minus any apply-to-all prefix).
+ *
+ * Equation field: a fatal equation error wins outright (and suppresses unit
+ * underlines even when its own range is empty). Otherwise a unit consistency
+ * error marks the sub-expression whose computed units conflict as a warning --
+ * unless it spans the whole equation, where it localizes nothing (the units
+ * field carries the underline for "the equation as a whole doesn't match the
+ * declaration").
+ *
+ * Units field: a definition error's offsets point into the units string and
+ * are used directly; a consistency error's offsets point into the *equation*,
+ * so the entire declaration is underlined instead. Unit errors are non-fatal
+ * project-wide, but within this field they are the error, hence 'error' red.
+ *
+ * An `end` of 0 is the engine's "to the end of the text" convention;
+ * byteOffsetToUtf16 clamps, so any large value reads as "the end".
+ */
+export function highlightRangeForField(
+  raw: string,
+  errors: readonly EquationError[] | undefined,
+  unitErrors: readonly UnitError[] | undefined,
+  isUnits: boolean,
+): HighlightRange | undefined {
+  if (!isUnits && errors && errors.length > 0) {
+    const err = errors[0];
+    if (err.end > 0) {
+      return { startByte: err.start, endByte: err.end, kind: 'error' };
+    }
+    return undefined;
+  }
+
+  if (!unitErrors || unitErrors.length === 0) {
+    return undefined;
+  }
+
+  if (isUnits) {
+    const definition = unitErrors.find((err) => !err.isConsistencyError);
+    if (definition) {
+      const endByte = definition.end === 0 ? Number.MAX_SAFE_INTEGER : definition.end;
+      return { startByte: definition.start, endByte, kind: 'error' };
+    }
+    return { startByte: 0, endByte: Number.MAX_SAFE_INTEGER, kind: 'error' };
+  }
+
+  const consistency = unitErrors.find((err) => err.isConsistencyError);
+  if (!consistency) {
+    return undefined;
+  }
+  const endByte = consistency.end === 0 ? Number.MAX_SAFE_INTEGER : consistency.end;
+  if (consistency.start === 0 && byteOffsetToUtf16(raw, endByte) >= raw.length) {
+    return undefined;
+  }
+  return { startByte: consistency.start, endByte, kind: 'warning' };
 }
 
 export interface SlatePoint {

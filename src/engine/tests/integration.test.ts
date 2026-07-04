@@ -489,10 +489,11 @@ describe('WASM Integration Tests', () => {
       //   offset 20: kind (u32)
       //   offset 24: unit_error_kind (u32)
       //   offset 28: severity (u32)
-      // Total size: 32 bytes
+      //   offset 32: details (ptr)
+      // Total size: 36 bytes
 
       // Use the malloc/free from our memory module
-      const structPtr = malloc(32);
+      const structPtr = malloc(36);
       const memory = getMemory();
       const view = new DataView(memory.buffer);
 
@@ -506,6 +507,7 @@ describe('WASM Integration Tests', () => {
       view.setUint32(structPtr + 20, 2, true); // kind (Variable)
       view.setUint32(structPtr + 24, 1, true); // unit_error_kind (Definition)
       view.setUint32(structPtr + 28, 1, true); // severity (Warning)
+      view.setUint32(structPtr + 32, 0, true); // details (null)
 
       // Read it back using our function
       const detail = readErrorDetail(structPtr);
@@ -519,14 +521,15 @@ describe('WASM Integration Tests', () => {
       expect(detail.kind).toBe(2);
       expect(detail.unitErrorKind).toBe(1);
       expect(detail.severity).toBe(1);
+      expect(detail.details).toBeNull();
 
       free(structPtr);
     });
 
     it('should have SimlinErrorDetail size match Rust-reported size', () => {
-      // Verify the TypeScript size (32 bytes) matches what Rust reports
+      // Verify the TypeScript size (36 bytes) matches what Rust reports
       const rustSizes = getRustStructSizes();
-      expect(rustSizes.errorDetailSize).toBe(32);
+      expect(rustSizes.errorDetailSize).toBe(36);
     });
 
     it('should read actual error details from Rust-generated errors', () => {

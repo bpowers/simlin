@@ -2,9 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { EquationError, UnitError, ErrorCode } from '@simlin/core/datamodel';
+
 import {
   applyToAllPrefix,
   byteOffsetToUtf16,
+  highlightRangeForField,
   highlightSpansForLines,
   slatePointForOffset,
 } from '../equation-highlight';
@@ -87,6 +90,86 @@ describe('highlightSpansForLines', () => {
     // (c=1,a=2,f=3,é=5,' '=6,+=7 ... offsets: after 'café + ' is byte 8).
     const spans = highlightSpansForLines('café + b', 0, { startByte: 8, endByte: 9, kind: 'error' });
     expect(spans).toEqual([[{ text: 'café + ' }, { text: 'b', error: true }]]);
+  });
+});
+
+describe('highlightRangeForField', () => {
+  const eqError = (start: number, end: number): EquationError => ({
+    code: ErrorCode.UnknownDependency,
+    start,
+    end,
+  });
+  const unitError = (isConsistencyError: boolean, start: number, end: number): UnitError => ({
+    code: isConsistencyError ? ErrorCode.UnitMismatch : ErrorCode.NoAppInUnits,
+    start,
+    end,
+    isConsistencyError,
+    details: undefined,
+  });
+
+  it('marks an equation error range in the equation field', () => {
+    const range = highlightRangeForField('a + bad', [eqError(4, 7)], undefined, false);
+    expect(range).toEqual({ startByte: 4, endByte: 7, kind: 'error' });
+  });
+
+  it('returns no range for a zero-length equation error', () => {
+    expect(highlightRangeForField('a + b', [eqError(0, 0)], undefined, false)).toBeUndefined();
+  });
+
+  it('equation errors take precedence over unit errors in the equation field', () => {
+    const range = highlightRangeForField('a + bad', [eqError(4, 7)], [unitError(true, 0, 7)], false);
+    expect(range).toEqual({ startByte: 4, endByte: 7, kind: 'error' });
+  });
+
+  it('underlines the whole units declaration for a consistency error', () => {
+    // The consistency error's offsets point into the *equation*; the units
+    // field underlines its entire declaration instead.
+    const range = highlightRangeForField('blerz/second', undefined, [unitError(true, 0, 6)], true);
+    expect(range).toEqual({ startByte: 0, endByte: Number.MAX_SAFE_INTEGER, kind: 'error' });
+  });
+
+  it('uses definition-error offsets in the units field', () => {
+    const range = highlightRangeForField('bad(units)', undefined, [unitError(false, 0, 3)], true);
+    expect(range).toEqual({ startByte: 0, endByte: 3, kind: 'error' });
+  });
+
+  it('treats a definition error end of 0 as to-the-end', () => {
+    const range = highlightRangeForField('bad', undefined, [unitError(false, 1, 0)], true);
+    expect(range).toEqual({ startByte: 1, endByte: Number.MAX_SAFE_INTEGER, kind: 'error' });
+  });
+
+  it('prefers definition offsets over a consistency underline in the units field', () => {
+    const range = highlightRangeForField(
+      'bad(units)',
+      undefined,
+      [unitError(true, 0, 6), unitError(false, 0, 3)],
+      true,
+    );
+    expect(range).toEqual({ startByte: 0, endByte: 3, kind: 'error' });
+  });
+
+  it('warns on the conflicting sub-expression in the equation field', () => {
+    const range = highlightRangeForField('a + b*c', undefined, [unitError(true, 4, 7)], false);
+    expect(range).toEqual({ startByte: 4, endByte: 7, kind: 'warning' });
+  });
+
+  it('suppresses a whole-equation consistency warning in the equation field', () => {
+    // When the conflicting span is the entire equation the warning localizes
+    // nothing; the units field carries the error underline instead.
+    expect(highlightRangeForField('2*aux1', undefined, [unitError(true, 0, 6)], false)).toBeUndefined();
+  });
+
+  it('suppresses a to-the-end consistency warning that starts at 0', () => {
+    expect(highlightRangeForField('2*aux1', undefined, [unitError(true, 0, 0)], false)).toBeUndefined();
+  });
+
+  it('ignores definition errors in the equation field', () => {
+    expect(highlightRangeForField('a + b', undefined, [unitError(false, 0, 3)], false)).toBeUndefined();
+  });
+
+  it('returns undefined when there are no errors', () => {
+    expect(highlightRangeForField('a + b', undefined, undefined, false)).toBeUndefined();
+    expect(highlightRangeForField('units', [], [], true)).toBeUndefined();
   });
 });
 

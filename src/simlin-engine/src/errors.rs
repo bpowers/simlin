@@ -42,6 +42,13 @@ pub struct FormattedError {
     /// For unit errors, indicates the specific type of unit error.
     /// None for non-unit errors.
     pub unit_error_kind: Option<UnitErrorKind>,
+    /// The bare human-readable reason, without the source snippet or the
+    /// model/variable summary line that `message` carries (e.g. "computed
+    /// units 'people' don't match specified units"). `message` is formatted
+    /// for terminal output; GUI consumers that already show the variable in
+    /// context render this instead. Populated for unit errors that carry a
+    /// details string; None elsewhere.
+    pub details: Option<String>,
 }
 
 /// Collection of formatted errors plus bookkeeping flags that mirror previous CLI output
@@ -65,6 +72,7 @@ pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedErro
         end_offset: 0,
         kind: FormattedErrorKind::Simulation,
         unit_error_kind: None,
+        details: None,
     }
 }
 
@@ -91,6 +99,7 @@ fn format_equation_error(
         end_offset: error.end,
         kind: FormattedErrorKind::Variable,
         unit_error_kind: None,
+        details: None,
     }
 }
 
@@ -124,6 +133,7 @@ fn format_unit_error(
                 end_offset: eq_error.end,
                 kind: FormattedErrorKind::Units,
                 unit_error_kind: Some(UnitErrorKind::Definition),
+                details: details.clone(),
             }
         }
         UnitError::ConsistencyError(code, loc, details) => {
@@ -147,6 +157,7 @@ fn format_unit_error(
                 end_offset: loc.end,
                 kind: FormattedErrorKind::Units,
                 unit_error_kind: Some(UnitErrorKind::Consistency),
+                details: details.clone(),
             }
         }
         UnitError::InferenceError {
@@ -188,6 +199,7 @@ fn format_unit_error(
                 end_offset: end,
                 kind: FormattedErrorKind::Units,
                 unit_error_kind: Some(UnitErrorKind::Inference),
+                details: details.clone(),
             }
         }
     }
@@ -217,6 +229,7 @@ pub fn format_diagnostic(diag: &db::Diagnostic) -> FormattedError {
                 end_offset: err.end,
                 kind: FormattedErrorKind::Variable,
                 unit_error_kind: None,
+                details: None,
             }
         }
         DiagnosticError::Model(err) => {
@@ -234,6 +247,7 @@ pub fn format_diagnostic(diag: &db::Diagnostic) -> FormattedError {
                 end_offset: 0,
                 kind,
                 unit_error_kind,
+                details: None,
             }
         }
         DiagnosticError::Unit(err) => {
@@ -249,6 +263,7 @@ pub fn format_diagnostic(diag: &db::Diagnostic) -> FormattedError {
             end_offset: 0,
             kind: FormattedErrorKind::Simulation,
             unit_error_kind: None,
+            details: None,
         },
     }
 }
@@ -400,6 +415,19 @@ mod tests {
                 .contains("units error in model 'main' variable 'bad_units': unit_mismatch")
         );
         assert!(lines.next().is_none());
+
+        // The bare reason rides separately from the terminal-formatted
+        // message, so GUI consumers can show it without the snippet/summary.
+        let details = error.details.as_ref().expect("details missing");
+        assert!(
+            details.starts_with("computed units"),
+            "bare details should be the reason string alone: {details}"
+        );
+        assert!(!details.contains('~'), "details must not carry the snippet");
+        assert!(
+            !details.contains("units error in model"),
+            "details must not carry the summary line"
+        );
     }
 
     #[test]
@@ -429,6 +457,7 @@ mod tests {
             msg.contains("test details"),
             "should include details: {msg}"
         );
+        assert_eq!(formatted.details.as_deref(), Some("test details"));
 
         let error = UnitError::InferenceError {
             code: ErrorCode::UnitMismatch,

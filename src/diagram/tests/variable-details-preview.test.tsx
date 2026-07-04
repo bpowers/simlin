@@ -153,3 +153,68 @@ describe('VariableDetails equation preview', () => {
     expect(marked!.textContent).toBe('bad_ref');
   });
 });
+
+describe('VariableDetails unit errors', () => {
+  const mismatch = (details: string | undefined): UnitError => ({
+    start: 0,
+    end: 6,
+    code: ErrorCode.UnitMismatch,
+    isConsistencyError: true,
+    details,
+  });
+
+  it('shows the bare reason as the warning message, without snippet noise', () => {
+    const { container } = renderDetails(
+      makeAux('inflow', '2*aux1', {
+        units: 'blerz/second',
+        unitErrors: [mismatch("computed units 'blerz' don't match specified units")],
+      }),
+    );
+
+    const warning = container.querySelector('.errorList');
+    expect(warning).not.toBeNull();
+    expect(warning!.textContent).toBe("unit error: computed units 'blerz' don't match specified units");
+  });
+
+  it('falls back to the code description when the error carries no details', () => {
+    const { container } = renderDetails(
+      makeAux('inflow', '2*aux1', { units: 'blerz/second', unitErrors: [mismatch(undefined)] }),
+    );
+
+    const warning = container.querySelector('.errorList');
+    expect(warning).not.toBeNull();
+    expect(warning!.textContent).toBe('unit error: Unit mismatch');
+  });
+
+  it('red-underlines the whole units declaration for a consistency error', () => {
+    const { container } = renderDetails(
+      makeAux('inflow', '2*aux1', {
+        units: 'blerz/second',
+        unitErrors: [mismatch("computed units 'blerz' don't match specified units")],
+      }),
+    );
+
+    const marked = container.querySelector('.unitsEditor .eqnError');
+    expect(marked).not.toBeNull();
+    expect(marked!.textContent).toBe('blerz/second');
+    // The consistency offsets point into the equation; the equation preview
+    // stays (non-fatal) and gets no error/warning mark of its own for a
+    // whole-equation span.
+    expect(container.querySelector('.eqnPreview')).not.toBeNull();
+  });
+
+  it('uses definition-error offsets to underline within the units text', () => {
+    const defError: UnitError = {
+      start: 0,
+      end: 5,
+      code: ErrorCode.NoAppInUnits,
+      isConsistencyError: false,
+      details: undefined,
+    };
+    const { container } = renderDetails(makeAux('x', '1', { units: 'bad(u) * good', unitErrors: [defError] }));
+
+    const marked = container.querySelector('.unitsEditor .eqnError');
+    expect(marked).not.toBeNull();
+    expect(marked!.textContent).toBe('bad(u');
+  });
+});

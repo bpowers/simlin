@@ -21,7 +21,9 @@ import {
 import type { JsonProject, ErrorDetail } from '@simlin/engine';
 import { SimlinErrorKind } from '@simlin/engine';
 
-import { ProjectController, MaxUndoSize, type ProjectSnapshot } from '../project-controller';
+import { SimlinUnitErrorKind } from '@simlin/engine';
+
+import { ProjectController, MaxUndoSize, convertErrorDetails, type ProjectSnapshot } from '../project-controller';
 import {
   makeFakeEngine,
   makeControllerConfig,
@@ -608,6 +610,52 @@ describe('ProjectController sim runs', () => {
     expect(engine.runCalls).toHaveLength(0);
     expect(controller.getSnapshot().status).toBe('error');
     await controller.dispose();
+  });
+});
+
+describe('convertErrorDetails', () => {
+  it('maps a unit error to its bare details, not the formatted message', () => {
+    const errors: ErrorDetail[] = [
+      {
+        modelName: 'main',
+        variableName: 'inflow',
+        kind: SimlinErrorKind.Units,
+        unitErrorKind: SimlinUnitErrorKind.Consistency,
+        code: 33, // SimlinErrorCode.UnitMismatch on the wire
+        startOffset: 0,
+        endOffset: 6,
+        // The message is terminal-formatted (snippet + squiggles + summary)
+        // and must NOT leak into the UnitError the UI renders.
+        message: "    2*aux1\n    ~~~~~~\nunits error in model 'main' variable 'inflow': unit_mismatch",
+        details: "computed units 'blerz' don't match specified units",
+      } as unknown as ErrorDetail,
+    ];
+
+    const { unitErrors } = convertErrorDetails(errors, 'main');
+    const errs = unitErrors.get('inflow');
+    expect(errs).toHaveLength(1);
+    expect(errs![0].details).toBe("computed units 'blerz' don't match specified units");
+    expect(errs![0].isConsistencyError).toBe(true);
+    expect(errs![0].start).toBe(0);
+    expect(errs![0].end).toBe(6);
+  });
+
+  it('leaves details undefined when the engine provides none', () => {
+    const errors: ErrorDetail[] = [
+      {
+        modelName: 'main',
+        variableName: 'x',
+        kind: SimlinErrorKind.Units,
+        unitErrorKind: SimlinUnitErrorKind.Definition,
+        code: 35,
+        message: 'units error in model ...',
+        details: null,
+      } as unknown as ErrorDetail,
+    ];
+
+    const { unitErrors } = convertErrorDetails(errors, 'main');
+    expect(unitErrors.get('x')![0].details).toBeUndefined();
+    expect(unitErrors.get('x')![0].isConsistencyError).toBe(false);
   });
 });
 

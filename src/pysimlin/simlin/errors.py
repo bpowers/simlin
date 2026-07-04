@@ -43,6 +43,17 @@ class ErrorCode(IntEnum):
     GENERIC = 32
     UNIT_MISMATCH = 33
     BAD_OVERRIDE = 34
+    NO_APP_IN_UNITS = 35
+    NO_SUBSCRIPT_IN_UNITS = 36
+    NO_IF_IN_UNITS = 37
+    NO_UNARY_OP_IN_UNITS = 38
+    BAD_BINARY_OP_IN_UNITS = 39
+    NO_CONST_IN_UNITS = 40
+    EXPECTED_INTEGER = 41
+    EXPECTED_INTEGER_ONE = 42
+    DUPLICATE_UNIT = 43
+    EXPECTED_MODULE = 44
+    EXPECTED_IDENT = 45
 
 
 class ErrorKind(IntEnum):
@@ -102,6 +113,10 @@ class ErrorDetail:
     kind: ErrorKind = ErrorKind.VARIABLE
     unit_error_kind: UnitErrorKind = UnitErrorKind.NOT_APPLICABLE
     severity: ErrorSeverity = ErrorSeverity.ERROR
+    # The bare human-readable reason without the source snippet or summary
+    # line that `message` carries (e.g. "computed units 'people' don't match
+    # specified units"). None when the error has no separate reason string.
+    details: str | None = None
 
     def __str__(self) -> str:
         """Return a human-readable string representation."""
