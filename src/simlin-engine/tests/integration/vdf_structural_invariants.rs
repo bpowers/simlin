@@ -10,6 +10,15 @@
 //!
 //! Living in an integration-test file (not inside `src/vdf.rs`) keeps
 //! the parser module under its 6000-line cap.
+//!
+//! Scope note: every test here deliberately filters on the exact 0x52
+//! run-file magic (`VDF_FILE_MAGIC`). The invariants pinned below (section-1
+//! data-head constants, block1 word relationships, view-header existence,
+//! bact rerun stability) were characterised on ordinary run files only;
+//! 0x53 sensitivity runs share the section layout but their pre-record
+//! header words have not been surveyed, so they are exercised separately by
+//! `vdf_sensitivity.rs` (parse + final-values oracle) rather than silently
+//! folded into these corpus sweeps.
 
 use std::path::{Path, PathBuf};
 

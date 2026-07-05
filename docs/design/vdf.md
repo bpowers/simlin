@@ -15,6 +15,12 @@ This document describes that metadata and the deterministic procedure that
 reconstructs a `Results` struct (variable names -> time series) from a VDF
 alone. The implementation is in `src/simlin-engine/src/vdf.rs` and its
 submodules; `tools/vdf_xray.py` is a structural inspector for the same format.
+The two implementations are pinned together by a differential parity harness
+(`parity_python_and_rust_vdf_extraction_agree` in
+`src/simlin-engine/tests/integration/vdf_parity.rs`): it walks every run-file
+VDF under `test/`, extracts named results with both readers via the tool's
+`--extract-json` mode, and requires identical name sets and bitwise-identical
+values -- so a behavior change in one reader without the other fails CI.
 
 **Conventions.** All values are little-endian. Numeric data is 32-bit floats
 unless noted. All offsets are byte offsets.
@@ -593,6 +599,20 @@ header offsets, section-6 class/final/lookup tail, offset table, and sparse
 blocks parse with the same rules. Header word `0x68` is nonzero and points past
 the normal sparse-block run into an additional sensitivity payload that is not
 decoded -- treat any data past the normal sparse-block run as unknown.
+
+Both readers accept the magic and parse these files with the 0x52 rules: the
+Rust reader (`VDF_SENSITIVITY_FILE_MAGIC`, probed as
+`VdfKind::SensitivityRun`; `VdfFile::parse` treats it identically to a
+simulation run, since following OT offsets ignores the undecoded tail by
+construction) and the Python inspector (`VDF_ALT_RESULT_MAGIC`). The zambaqui
+0x53 fixtures are validated end-to-end against the section-6 final-values
+oracle by `sensitivity_run_files_parse_and_match_final_values_oracle` in
+`src/simlin-engine/tests/integration/vdf_sensitivity.rs`. Two 0x53-visible
+behaviors to know about: unsaved OT slots (an optimization run saves only a
+subset of variables) carry class code 0, a zero offset-table word, and the
+`:NA:` sentinel (-1.298e33) as their section-6 final value; and the zambaqui
+corpus (0x52 and 0x53 alike) contains class-0x05 exogenous-data blocks stored
+on their own short time grid, which neither reader decodes yet.
 
 
 ## Appendix: the owner/descriptor discriminator

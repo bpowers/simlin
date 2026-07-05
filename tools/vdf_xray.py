@@ -60,9 +60,12 @@ SLOT_TABLE_TERMINATOR = 0x00430000
 SLOT_COUNT_WORD_OFFSET = RECORD_PREAMBLE_BYTES + RECORD_SIZE + 7 * 4
 
 VDF_FILE_MAGIC = bytes([0x7F, 0xF7, 0x17, 0x52])
-# Observed on local zambaqui sensitivity/optimization runs. The ordinary
+# Sensitivity/optimization runs (zambaqui fixtures). The ordinary
 # eight-section result structures parse like 0x52 files, but bytes after the
 # normal sparse-block run contain additional payload we have not decoded.
+# Both this tool and the Rust reader (`VdfFile::parse`, which calls it
+# `VDF_SENSITIVITY_FILE_MAGIC`) accept the magic and parse these files with
+# the 0x52 rules, ignoring the undecoded tail.
 VDF_ALT_RESULT_MAGIC = bytes([0x7F, 0xF7, 0x17, 0x53])
 VDF_DATASET_MAGIC = bytes([0x7F, 0xF7, 0x17, 0x41])
 VDF_SECTION_MAGIC = bytes([0xA1, 0x37, 0x4C, 0xBF])
@@ -2517,6 +2520,53 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
     return results
 
 
+def _encode_series_value(value: float):
+    """
+    Encode one series value for strict JSON output.
+
+    JSON has no NaN or Infinity literals, so:
+    - NaN encodes as null (the Rust parity harness decodes null back to NaN);
+    - +/- infinity encode as the strings "Infinity" / "-Infinity".
+    Finite values pass through as JSON numbers; Python emits the shortest
+    round-trip decimal form, so a reader recovers the exact f64 bits.
+    """
+    if math.isnan(value):
+        return None
+    if math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
+    return value
+
+
+def extract_results_json_payload(paths: list[Path]) -> dict[str, list[dict]]:
+    """
+    Machine-readable extraction over multiple files: map each path string (as
+    given on the command line) to its `extract_named_results` output as
+    `[{name, ot_index, values}]`. Consumed by the Rust differential parity
+    harness (`src/simlin-engine/tests/integration/vdf_parity.rs`); accepting
+    many paths lets one interpreter launch cover a whole corpus. Raises on
+    dataset files or extraction failure rather than skipping -- the caller
+    treats a nonzero exit as fatal.
+    """
+    payload: dict[str, list[dict]] = {}
+    for path in paths:
+        data = path.read_bytes()
+        if data[:4] == VDF_DATASET_MAGIC:
+            raise ValueError(f"{path}: dataset VDF is not supported by --extract-json")
+        vdf = parse_vdf(data)
+        results = extract_named_results(vdf)
+        if results is None:
+            raise ValueError(f"{path}: named-result extraction failed")
+        payload[str(path)] = [
+            {
+                "name": r.name,
+                "ot_index": r.ot_index,
+                "values": [_encode_series_value(v) for v in r.values],
+            }
+            for r in results
+        ]
+    return payload
+
+
 # ---- Parsing ----
 
 def find_sections(data: bytes) -> list[Section]:
@@ -4233,7 +4283,10 @@ def main() -> None:
         description="VDF X-Ray: inspect Vensim VDF binary files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("path", help="Path to VDF file")
+    # `--extract-json` accepts multiple files so one interpreter launch can
+    # cover a whole corpus; every human-oriented mode still takes exactly one.
+    parser.add_argument("paths", nargs="+", metavar="path",
+                        help="Path to VDF file (multiple allowed with --extract-json)")
     parser.add_argument("--compare", metavar="OTHER_VDF",
                         help="Compare this VDF against another simulation-result VDF")
     parser.add_argument("--all", action="store_true", help="Show everything")
@@ -4257,12 +4310,27 @@ def main() -> None:
     parser.add_argument("--validate", action="store_true", help="Check structural invariants")
     parser.add_argument("--extract", action="store_true",
                         help="Extract named results via the record-derived mapping")
+    parser.add_argument("--extract-json", action="store_true",
+                        help="Extract named results for ALL given paths as one JSON "
+                             "object on stdout: path -> [{name, ot_index, values}] "
+                             "(NaN encoded as null, infinities as strings)")
     parser.add_argument("--raw-section", type=int, metavar="N", help="Full hexdump of section N")
     parser.add_argument("--json", action="store_true", help="Machine-readable JSON summary")
 
     args = parser.parse_args()
 
-    path = Path(args.path)
+    if args.extract_json:
+        payload = extract_results_json_payload([Path(p) for p in args.paths])
+        # allow_nan=False turns any non-finite value that leaked past
+        # _encode_series_value into a hard error instead of emitting the
+        # nonstandard NaN/Infinity tokens strict parsers reject.
+        print(json.dumps(payload, allow_nan=False))
+        return
+
+    if len(args.paths) != 1:
+        parser.error("multiple paths are only supported with --extract-json")
+
+    path = Path(args.paths[0])
     data = path.read_bytes()
 
     if data[:4] == VDF_DATASET_MAGIC:

@@ -108,6 +108,15 @@ fn normalize_vdf_name(name: &str) -> String {
 /// Standard simulation-result VDF file magic bytes.
 pub const VDF_FILE_MAGIC: [u8; 4] = [0x7f, 0xf7, 0x17, 0x52];
 
+/// Sensitivity/optimization-run VDF file magic bytes. These files carry the
+/// same eight-section layout as ordinary run files (header offsets, section-6
+/// class/final/lookup tail, offset table, and sparse blocks all parse with the
+/// same rules); header word 0x68 points past the normal sparse-block run at an
+/// additional sensitivity payload that is not decoded. The reader follows OT
+/// offsets, so that tail is ignored by construction. See
+/// `docs/design/vdf.md`, "Sensitivity / optimization format".
+pub const VDF_SENSITIVITY_FILE_MAGIC: [u8; 4] = [0x7f, 0xf7, 0x17, 0x53];
+
 /// Dataset VDF file magic bytes used by Vensim's imported dataset files.
 pub const VDF_DATASET_FILE_MAGIC: [u8; 4] = [0x7f, 0xf7, 0x17, 0x41];
 
@@ -116,6 +125,9 @@ pub const VDF_DATASET_FILE_MAGIC: [u8; 4] = [0x7f, 0xf7, 0x17, 0x41];
 pub enum VdfKind {
     /// Standard simulation-results VDF.
     SimulationResults,
+    /// Sensitivity/optimization-run VDF: a simulation-results container with
+    /// an extra undecoded payload past the sparse-block run.
+    SensitivityRun,
     /// Dataset/reference-mode VDF imported from external data.
     Dataset,
 }
@@ -127,6 +139,8 @@ pub fn probe_vdf_kind(data: &[u8]) -> Option<VdfKind> {
     }
     if data[0..4] == VDF_FILE_MAGIC {
         Some(VdfKind::SimulationResults)
+    } else if data[0..4] == VDF_SENSITIVITY_FILE_MAGIC {
+        Some(VdfKind::SensitivityRun)
     } else if data[0..4] == VDF_DATASET_FILE_MAGIC {
         Some(VdfKind::Dataset)
     } else {
@@ -895,11 +909,18 @@ impl VdfFile {
         if data.len() < FILE_HEADER_SIZE {
             return Err("VDF file too small".into());
         }
-        if probe_vdf_kind(&data) == Some(VdfKind::Dataset) {
-            return Err("dataset VDF file; use VdfDatasetFile::parse".into());
-        }
-        if data[0..4] != VDF_FILE_MAGIC {
-            return Err("invalid VDF magic bytes".into());
+        // Both run-file kinds share the eight-section layout; a sensitivity
+        // run only adds an undecoded payload past the sparse-block run, which
+        // this reader never touches (it follows OT offsets), so the two kinds
+        // parse identically.
+        match probe_vdf_kind(&data) {
+            Some(VdfKind::SimulationResults) | Some(VdfKind::SensitivityRun) => {}
+            Some(VdfKind::Dataset) => {
+                return Err("dataset VDF file; use VdfDatasetFile::parse".into());
+            }
+            None => {
+                return Err("invalid VDF magic bytes".into());
+            }
         }
 
         let time_point_count = read_u32(&data, 0x78) as usize;
@@ -3274,9 +3295,14 @@ mod tests {
             let data = std::fs::read(path)
                 .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
             let file_len = data.len();
-            // Some .vdf files use a different format variant (e.g. magic
-            // byte 0x41 instead of 0x52). Skip those rather than failing.
-            if data.len() >= 4 && data[0..4] != VDF_FILE_MAGIC {
+            // The intent here is "every run file must parse": skip dataset
+            // VDFs (magic 0x41, a different container) and unrecognized
+            // magics, but accept both run-file kinds (0x52 and the 0x53
+            // sensitivity variant, which parses with the same rules).
+            if !matches!(
+                probe_vdf_kind(&data),
+                Some(VdfKind::SimulationResults | VdfKind::SensitivityRun)
+            ) {
                 skipped_count += 1;
                 continue;
             }
@@ -3728,6 +3754,16 @@ mod tests {
 
         assert_eq!(probe_vdf_kind(&current), Some(VdfKind::SimulationResults));
         assert_eq!(probe_vdf_kind(&dataset), Some(VdfKind::Dataset));
+
+        // The sensitivity magic is probed from the four magic bytes alone; a
+        // synthetic prefix is enough (real 0x53 fixtures live in third_party
+        // and are exercised by the integration harness).
+        let mut sensitivity = current.clone();
+        sensitivity[0..4].copy_from_slice(&VDF_SENSITIVITY_FILE_MAGIC);
+        assert_eq!(probe_vdf_kind(&sensitivity), Some(VdfKind::SensitivityRun));
+
+        assert_eq!(probe_vdf_kind(&[0u8; 3]), None);
+        assert_eq!(probe_vdf_kind(&[0u8; 8]), None);
     }
 
     #[test]

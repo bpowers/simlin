@@ -1901,5 +1901,90 @@ class DecodedRecordSpanClassCodeGuardTests(unittest.TestCase):
                 )
 
 
+class ExtractJsonTests(unittest.TestCase):
+    """
+    Tests for the machine-readable `--extract-json` mode consumed by the Rust
+    differential parity harness (tests/integration/vdf_parity.rs).
+    """
+
+    def _payload(self, relpaths: list[str]) -> dict:
+        return vdf_xray.extract_results_json_payload(
+            [REPO_ROOT / relpath for relpath in relpaths]
+        )
+
+    def test_encode_series_value_nan_and_infinity(self) -> None:
+        # NaN encodes as null (None); infinities as strings; finite values
+        # pass through unchanged. JSON has neither NaN nor Infinity literals,
+        # and the Rust side decodes exactly these three shapes back.
+        self.assertIsNone(vdf_xray._encode_series_value(float("nan")))
+        self.assertEqual(vdf_xray._encode_series_value(float("inf")), "Infinity")
+        self.assertEqual(vdf_xray._encode_series_value(float("-inf")), "-Infinity")
+        self.assertEqual(vdf_xray._encode_series_value(1.5), 1.5)
+        self.assertEqual(vdf_xray._encode_series_value(0.0), 0.0)
+
+    def test_payload_shape_single_file(self) -> None:
+        relpath = "test/bobby/vdf/water/Current.vdf"
+        payload = self._payload([relpath])
+
+        self.assertEqual(list(payload.keys()), [str(REPO_ROOT / relpath)])
+        entries = payload[str(REPO_ROOT / relpath)]
+        self.assertGreater(len(entries), 1)
+        names = [e["name"] for e in entries]
+        self.assertEqual(names[0], "Time")
+        self.assertIn("water level", names)
+        for entry in entries:
+            self.assertEqual(sorted(entry.keys()), ["name", "ot_index", "values"])
+            self.assertIsInstance(entry["name"], str)
+            self.assertIsInstance(entry["ot_index"], int)
+            self.assertIsInstance(entry["values"], list)
+            # Every series covers the full saved grid.
+            self.assertEqual(len(entry["values"]), len(entries[0]["values"]))
+
+    def test_payload_multi_file_keys_are_paths_as_given(self) -> None:
+        relpaths = [
+            "test/bobby/vdf/water/Current.vdf",
+            "test/bobby/vdf/subscripts/subscripts.vdf",
+        ]
+        payload = self._payload(relpaths)
+        self.assertEqual(
+            list(payload.keys()),
+            [str(REPO_ROOT / relpath) for relpath in relpaths],
+        )
+        # The arrayed fixture emits element-labelled columns.
+        sub_names = [e["name"] for e in payload[str(REPO_ROOT / relpaths[1])]]
+        self.assertIn("a stock[a]", sub_names)
+
+    def test_nan_values_encode_as_null_and_payload_is_strict_json(self) -> None:
+        import json as json_mod
+        import math as math_mod
+
+        # Ref.vdf carries series with genuine missing-data NaN runs
+        # (e.g. "Annual rate of emissions to target[OECD US]").
+        relpath = "test/xmutil_test_models/Ref.vdf"
+        payload = self._payload([relpath])
+        entries = payload[str(REPO_ROOT / relpath)]
+
+        nulls = sum(
+            1 for e in entries for v in e["values"] if v is None
+        )
+        self.assertGreater(nulls, 0, "expected NaN-bearing series in Ref.vdf")
+        for entry in entries:
+            for value in entry["values"]:
+                if value is None:
+                    continue
+                self.assertIsInstance(value, float)
+                self.assertTrue(math_mod.isfinite(value))
+
+        # allow_nan=False proves no non-finite float leaked into the payload;
+        # a leak would raise ValueError here instead of emitting the
+        # nonstandard NaN/Infinity tokens strict parsers reject.
+        text = json_mod.dumps(payload, allow_nan=False)
+        self.assertEqual(json_mod.loads(text).keys(), payload.keys())
+
+    def test_dataset_vdf_is_rejected_loudly(self) -> None:
+        with self.assertRaises(ValueError):
+            self._payload(["test/bobby/vdf/econ/data.vdf"])
+
+
 if __name__ == "__main__":
     unittest.main()

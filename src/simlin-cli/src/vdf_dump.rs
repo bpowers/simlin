@@ -34,6 +34,9 @@ pub fn dump_vdf(path: &str) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    // Any run-file kind (0x52 simulation results or the 0x53 sensitivity
+    // variant) goes through `VdfFile::parse`, which accepts both; an
+    // unrecognized magic surfaces as its parse error.
     let vdf = VdfFile::parse(data)?;
 
     print_header(&vdf, file_size, path);
