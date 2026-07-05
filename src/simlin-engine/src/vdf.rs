@@ -158,10 +158,14 @@ pub const VDF_SENTINEL: u32 = 0xf6800000;
 /// Section-6 OT class code for the Time series (OT[0]) in all observed files.
 pub const VDF_SECTION6_OT_CODE_TIME: u8 = 0x0f;
 
-/// Section-6 OT class code for input/data-like blocks. Observed on
-/// `risk.vdf`/`risk2.vdf` covering names like `federal funds rate` and
-/// `inflation rate`; these slots hold real saved series with the 29-byte
-/// bitmap-width data layout.
+/// Section-6 OT class code for input/exogenous-data blocks. Observed on
+/// `risk.vdf`/`risk2.vdf` (names like `federal funds rate`) and across the
+/// zambaqui corpus (`gdp deflator`). These blocks are the loaded data file's
+/// sparse blocks embedded in the run, bitmapped over the header-0x74 data
+/// grid (which coincides with the 0x7C block grid on `risk.vdf` and is a
+/// genuinely third grid on zambaqui; GH #842). The groupon fixtures carry
+/// sibling exogenous-data class codes `0x06`/`0x0c` with the same block
+/// layout.
 pub const VDF_SECTION6_OT_CODE_INPUT: u8 = 0x05;
 
 /// Section-6 OT class code marking stock-backed OT entries in all validated
@@ -683,6 +687,39 @@ pub struct VdfDatasetSeriesBinding {
     pub record_f3: u32,
 }
 
+/// Which time grid a data block's bitmap reconciled against.
+///
+/// A block's bitmap carries one bit per grid point; the grid is decoded
+/// per block by popcount (see [`VdfFile::block_bitmap_layout`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VdfBlockGrid {
+    /// The saved time grid (header 0x78) -- the grid the Time block uses.
+    Saved,
+    /// The full block/output grid (header 0x7C), wider than the saved grid
+    /// on saved-suffix runs (`risk.vdf`).
+    Block,
+    /// The external data file's time grid (header 0x74), carried by
+    /// exogenous-data blocks (class codes 0x05/0x06/0x0c). Its time values
+    /// are stored only in the external data file, so mapping onto the saved
+    /// axis is approximate; see `data_grid_positions_for_time_values`.
+    Data,
+    /// No known grid's width popcounts to the block's value count: the
+    /// block is undecodable and extraction NaN-fills it rather than
+    /// emitting garbage values.
+    Unreconciled,
+}
+
+/// Decoded bitmap layout for one data block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockBitmapLayout {
+    /// Bitmap width in bytes preceding the f32 payload.
+    pub bitmap_size: usize,
+    /// Number of grid points the bitmap covers.
+    pub grid_count: usize,
+    /// Which grid reconciled (or [`VdfBlockGrid::Unreconciled`]).
+    pub grid: VdfBlockGrid,
+}
+
 /// Fully parsed VDF file holding all structural metadata.
 ///
 /// Created via [`VdfFile::parse`], this struct provides access to all
@@ -703,6 +740,17 @@ pub struct VdfFile {
     /// Bitmap size in bytes for full-grid blocks:
     /// ceil(block_time_point_count / 8).
     pub block_bitmap_size: usize,
+    /// Data-grid time-point count (header offset 0x74): the time-point count
+    /// of the external data file the run loaded, or 0 when the model loaded
+    /// no external data. Exogenous-data blocks (class codes 0x05/0x06/0x0c)
+    /// carry bitmaps over THIS grid -- one bit per data-file time point --
+    /// rather than the saved or block grid (GH #842). The grid's time
+    /// *values* live only in the external data file; see
+    /// `data_grid_positions_for_time_values` for the mapping approximation.
+    pub data_time_point_count: usize,
+    /// Bitmap size in bytes for data-grid blocks:
+    /// ceil(data_time_point_count / 8), or 0 when there is no data grid.
+    pub data_bitmap_size: usize,
     /// All sections found in the file.
     pub sections: Vec<Section>,
     /// All parsed variable names from the name table section's region.
@@ -931,6 +979,11 @@ impl VdfFile {
         // the saved count (never observed) cannot shrink bitmap decoding.
         let block_time_point_count = (read_u32(&data, 0x7c) as usize).max(time_point_count);
         let block_bitmap_size = block_time_point_count.div_ceil(8);
+        // Header 0x74 is the data-grid count: the loaded data file's
+        // time-point count (0 when no external data). Exogenous-data blocks
+        // store their bitmaps on this grid (GH #842).
+        let data_time_point_count = read_u32(&data, 0x74) as usize;
+        let data_bitmap_size = data_time_point_count.div_ceil(8);
 
         // Header offsets 0x58/0x5c/0x60 point directly to key section-6/7
         // data structures, eliminating the need for heuristic scanning.
@@ -1004,6 +1057,8 @@ impl VdfFile {
             bitmap_size,
             block_time_point_count,
             block_bitmap_size,
+            data_time_point_count,
+            data_bitmap_size,
             sections,
             names,
             name_section_idx,
@@ -1539,25 +1594,53 @@ impl VdfFile {
 
     /// Decode the bitmap width for a data block from its declared value count.
     ///
-    /// Edited saved-suffix runs (e.g. `risk.vdf`) mix saved-grid blocks and
-    /// full-grid blocks in the same file. The deterministic per-block
-    /// discriminator is that the block's `u16` count equals the popcount of
-    /// the bitmap bytes that precede its f32 payload. The compact saved-grid
-    /// bitmap is preferred when both widths happen to match (the wider bitmap
-    /// would then be reading past the block's real bitmap into payload bytes);
-    /// if neither width matches, fall back to the block-grid width. Returns
-    /// `(bitmap_size, grid_count)`.
-    pub fn block_bitmap_layout(&self, block_offset: usize, count: usize) -> (usize, usize) {
+    /// Files mix blocks on up to three time grids: the saved grid (header
+    /// 0x78), the block grid (header 0x7C; wider on saved-suffix runs like
+    /// `risk.vdf`), and the data grid (header 0x74; the external data file's
+    /// time axis, carried by exogenous-data blocks -- GH #842). The
+    /// deterministic per-block discriminator is that the block's `u16` count
+    /// equals the popcount of the bitmap bytes that precede its f32 payload.
+    /// Candidates are tried in that order and the first match wins. The
+    /// ordering is empirical: saved-before-block is narrower-first (a wider
+    /// match would popcount past the real bitmap into payload), but the data
+    /// width is usually the NARROWEST candidate and still must come LAST --
+    /// over a thousand ordinary saved-grid blocks across the corpora
+    /// coincidentally popcount-match it, while zero exogenous blocks match a
+    /// wider distinct width. Residual risk: an exogenous block with a small
+    /// count and zero-heavy leading payload could match the wider saved
+    /// width and silently mis-place values (no corpus file does); the
+    /// section-6 class code (0x05/0x06/0x0c) is available as a future
+    /// discriminator. Duplicate widths keep the earlier candidate: when
+    /// ceil(0x74/8) == ceil(0x78/8) with different counts (31 zambaqui
+    /// old-runs files), exogenous blocks reconcile as Saved and decode with
+    /// identity positions -- exact on that corpus, but a consequence of the
+    /// dedup, not a separate rule. If no width matches, the result carries
+    /// `VdfBlockGrid::Unreconciled` with the block-grid dimensions --
+    /// callers must treat the series as undecodable rather than decoding
+    /// garbage.
+    pub fn block_bitmap_layout(&self, block_offset: usize, count: usize) -> BlockBitmapLayout {
         let candidates = [
-            (self.bitmap_size, self.time_point_count),
-            (self.block_bitmap_size, self.block_time_point_count),
+            (self.bitmap_size, self.time_point_count, VdfBlockGrid::Saved),
+            (
+                self.block_bitmap_size,
+                self.block_time_point_count,
+                VdfBlockGrid::Block,
+            ),
+            (
+                self.data_bitmap_size,
+                self.data_time_point_count,
+                VdfBlockGrid::Data,
+            ),
         ];
-        for (i, (bitmap_size, grid_count)) in candidates.into_iter().enumerate() {
-            // In the common case both header counts are equal; skip the
-            // duplicate candidate rather than popcounting twice.
-            if i == 1 && bitmap_size == candidates[0].0 {
+        let mut seen_sizes = [usize::MAX; 3];
+        for (i, (bitmap_size, grid_count, grid)) in candidates.into_iter().enumerate() {
+            // A zero-count grid (no data grid in the file) is not a
+            // candidate; duplicate widths are skipped rather than
+            // popcounting twice (the first candidate for a width wins).
+            if grid_count == 0 || seen_sizes.contains(&bitmap_size) {
                 continue;
             }
+            seen_sizes[i] = bitmap_size;
             let bm_start = block_offset + 2;
             let bm_end = bm_start + bitmap_size;
             if bm_end > self.data.len() {
@@ -1568,35 +1651,89 @@ impl VdfFile {
                 .map(|b| b.count_ones() as usize)
                 .sum();
             if bit_count == count {
-                return (bitmap_size, grid_count);
+                return BlockBitmapLayout {
+                    bitmap_size,
+                    grid_count,
+                    grid,
+                };
             }
         }
-        (self.block_bitmap_size, self.block_time_point_count)
+        BlockBitmapLayout {
+            bitmap_size: self.block_bitmap_size,
+            grid_count: self.block_time_point_count,
+            grid: VdfBlockGrid::Unreconciled,
+        }
+    }
+
+    /// OT indices of data blocks whose bitmap reconciles with NO known time
+    /// grid (saved, block, or data). Such blocks would decode to garbage
+    /// under any assumed width, so [`Self::extract_data`] NaN-fills their
+    /// series; this list is the per-file diagnostic surface for that loud
+    /// fallback (mirrored by the Python reader's
+    /// `NamedResultsDiagnostics.bitmap_unreconciled_ots`).
+    pub fn unreconciled_data_blocks(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for ot in 0..self.offset_table_count {
+            let Some(raw) = self.offset_table_entry(ot) else {
+                continue;
+            };
+            if !self.is_data_block_offset(raw) {
+                continue;
+            }
+            let block_offset = raw as usize;
+            if block_offset + 2 > self.data.len() {
+                continue;
+            }
+            let count = read_u16(&self.data, block_offset) as usize;
+            let layout = self.block_bitmap_layout(block_offset, count);
+            if layout.grid == VdfBlockGrid::Unreconciled {
+                out.push(ot);
+            }
+        }
+        out
     }
 
     /// Extract one data block's series aligned to the saved time axis.
     ///
-    /// Decodes the per-block bitmap width via [`Self::block_bitmap_layout`];
-    /// when the block covers the full block-grid rather than the saved grid,
-    /// the full-grid series is decoded and then sampled at the positions the
-    /// saved Time values occupy on that grid (saved-suffix files save the
-    /// tail of the run). Positions outside the decoded grid yield NaN.
+    /// Decodes the per-block bitmap width via [`Self::block_bitmap_layout`].
+    /// When the block covers a grid other than the saved grid, the full-grid
+    /// series is decoded and then sampled at the positions the saved Time
+    /// values occupy on that grid: block-grid bitmaps use the saved-suffix
+    /// rule (saved-suffix files save the tail of the run), data-grid bitmaps
+    /// use the span approximation (see `data_grid_positions_for_time_values`).
+    /// Positions outside the decoded grid yield NaN.
+    ///
+    /// Returns the series plus whether the block's bitmap reconciled with a
+    /// known grid; an unreconciled block yields an all-NaN series (loud
+    /// missing data instead of garbage values decoded under a wrong width).
     fn extract_block_series_sampled(
         &self,
         block_offset: usize,
         time_values: &[f64],
-    ) -> StdResult<Vec<f64>, Box<dyn Error>> {
+    ) -> StdResult<(Vec<f64>, bool), Box<dyn Error>> {
         if block_offset + 2 > self.data.len() {
             return Err(format!("data block at 0x{block_offset:x} out of bounds").into());
         }
         let count = read_u16(&self.data, block_offset) as usize;
-        let (bitmap_size, grid_count) = self.block_bitmap_layout(block_offset, count);
-        let series = decode_block_grid(&self.data, block_offset, bitmap_size, grid_count)?;
-        if grid_count == time_values.len() {
-            return Ok(series);
+        let layout = self.block_bitmap_layout(block_offset, count);
+        if layout.grid == VdfBlockGrid::Unreconciled {
+            return Ok((vec![f64::NAN; time_values.len()], false));
         }
-        let positions = block_positions_for_time_values(time_values, grid_count);
-        Ok(positions
+        let series = decode_block_grid(
+            &self.data,
+            block_offset,
+            layout.bitmap_size,
+            layout.grid_count,
+        )?;
+        if layout.grid_count == time_values.len() {
+            return Ok((series, true));
+        }
+        let positions = if layout.grid == VdfBlockGrid::Data {
+            data_grid_positions_for_time_values(time_values, layout.grid_count)
+        } else {
+            block_positions_for_time_values(time_values, layout.grid_count)
+        };
+        let sampled = positions
             .into_iter()
             .map(|pos| {
                 if pos >= 0 && (pos as usize) < series.len() {
@@ -1605,7 +1742,8 @@ impl VdfFile {
                     f64::NAN
                 }
             })
-            .collect())
+            .collect();
+        Ok((sampled, true))
     }
 
     /// Extract all time series data from data blocks, returning a `VdfData`.
@@ -1626,13 +1764,19 @@ impl VdfFile {
         let final_values = self.section6_ot_final_values();
 
         let mut entries = Vec::with_capacity(self.offset_table_count);
+        let mut unreconciled_ots = Vec::new();
         for i in 0..self.offset_table_count {
             let raw_val = self
                 .offset_table_entry(i)
                 .ok_or("offset table entry out of bounds")?;
 
             let series = if self.is_data_block_offset(raw_val) {
-                self.extract_block_series_sampled(raw_val as usize, &time_values)?
+                let (series, reconciled) =
+                    self.extract_block_series_sampled(raw_val as usize, &time_values)?;
+                if !reconciled {
+                    unreconciled_ots.push(i);
+                }
+                series
             } else {
                 let code = class_codes.as_ref().and_then(|c| c.get(i)).copied();
                 let final_value = final_values.as_ref().and_then(|f| f.get(i)).copied();
@@ -1649,6 +1793,7 @@ impl VdfFile {
         Ok(VdfData {
             time_values,
             entries,
+            unreconciled_ots,
         })
     }
 
@@ -2136,6 +2281,11 @@ pub struct VdfData {
     /// Each entry is a time series (one f64 per time point) for one variable.
     /// Indexed by offset-table position. Entry 0 is always the time series.
     pub entries: Vec<Vec<f64>>,
+    /// OT indices whose data-block bitmap reconciled with no known time grid
+    /// (see [`VdfBlockGrid::Unreconciled`]). Their `entries` are all-NaN:
+    /// visibly missing rather than decoded under a wrong bitmap width.
+    /// Empty on every tracked corpus file.
+    pub unreconciled_ots: Vec<usize>,
 }
 
 impl VdfData {
@@ -2301,6 +2451,39 @@ fn block_positions_for_time_values(time_values: &[f64], grid_count: usize) -> Ve
     time_values
         .iter()
         .map(|&value| ((value - origin) / step).round() as i64)
+        .collect()
+}
+
+/// Map saved Time values onto positions of a `grid_count`-point DATA grid
+/// (header 0x74; the external data file's time axis).
+///
+/// The run file stores only the grid's point count -- its time values live in
+/// the external data file (a dataset VDF's Time series or a spreadsheet row)
+/// and are not recoverable from the run file alone (negative result, GH
+/// #842). This mapping therefore uses a documented approximation: the grid is
+/// assumed to span the saved run uniformly, anchored at the first saved time
+/// (`step = (t_last - t_first) / (grid_count - 1)`), with floor semantics so
+/// intermediate saved times take the preceding data point's value
+/// (zero-order hold). This is exact whenever the data file's axis spans the
+/// run horizon (the zambaqui "old runs" family, where interior placement is
+/// pinned by block tiling); for a data file that ends before the run's final
+/// time (zambaqui `baserun.vdf`'s `gdp deflator`, 1980..2005 on a 1980..2050
+/// run) the values are correct but interior placement is dilated toward the
+/// run end. First/last placement is exact in both cases, which is what the
+/// section-6 final-value oracle pins.
+fn data_grid_positions_for_time_values(time_values: &[f64], grid_count: usize) -> Vec<i64> {
+    if time_values.is_empty() {
+        return Vec::new();
+    }
+    let t_first = time_values[0];
+    let t_last = time_values[time_values.len() - 1];
+    if grid_count <= 1 || t_last <= t_first {
+        return vec![0; time_values.len()];
+    }
+    let scale = (grid_count as f64 - 1.0) / (t_last - t_first);
+    time_values
+        .iter()
+        .map(|&value| ((value - t_first) * scale + 1e-6).floor() as i64)
         .collect()
 }
 
@@ -2772,6 +2955,14 @@ mod tests {
             // class-0x05 input blocks use the wider ceil(0x7C/8) bitmap.
             ("risk", "../../test/bobby/vdf/econ/risk.vdf"),
             ("risk2", "../../test/bobby/vdf/econ/risk2.vdf"),
+            // Data-grid fixture (0x74=6 data points inside a 121-point run):
+            // its 21 exogenous blocks carry 1-byte bitmaps over the external
+            // data file's grid (GH #842); before the third candidate they
+            // misdecoded with the 16-byte run-grid width.
+            (
+                "groupon",
+                "../../test/metasd/social-network-valuation/groupon3mid.vdf",
+            ),
         ];
 
         for (label, vdf_path) in models {
@@ -2788,6 +2979,16 @@ mod tests {
             for (ot, (final_value, series)) in
                 final_values.iter().zip(data.entries.iter()).enumerate()
             {
+                // Unsaved slots carry a zero offset-table word and record the
+                // :NA:-arithmetic sentinel (~-1.298e33) as their final value.
+                // The Rule-2 missing-slot decode only recognizes the dynamic
+                // class 0x11; groupon's unsaved DATA slots carry class
+                // 0x06/0x0c/0 with the same signature and decode as the
+                // constant 0.0, so the oracle skips that exact signature
+                // rather than requiring a match against the sentinel.
+                if vdf.offset_table_entry(ot) == Some(0) && *final_value <= -1.0e33 {
+                    continue;
+                }
                 let expected = series.last().copied().unwrap_or(f64::NAN) as f32;
                 assert!(
                     (final_value - expected).abs() < 1e-5
@@ -2846,17 +3047,24 @@ mod tests {
                 }
                 let block_offset = raw as usize;
                 let count = read_u16(&vdf.data, block_offset) as usize;
-                let (bitmap_size, grid_count) = vdf.block_bitmap_layout(block_offset, count);
+                let layout = vdf.block_bitmap_layout(block_offset, count);
                 if input_ots.contains(&ot) {
+                    // risk.vdf's data grid (0x74=225) coincides with its
+                    // block grid (0x7C=225), so the block candidate wins by
+                    // order and these input blocks report Block, not Data.
                     assert_eq!(
-                        (bitmap_size, grid_count),
-                        (vdf.block_bitmap_size, vdf.block_time_point_count),
+                        (layout.bitmap_size, layout.grid_count, layout.grid),
+                        (
+                            vdf.block_bitmap_size,
+                            vdf.block_time_point_count,
+                            VdfBlockGrid::Block
+                        ),
                         "{path}: OT[{ot}] should use the wider block-grid bitmap"
                     );
                 } else {
                     assert_eq!(
-                        (bitmap_size, grid_count),
-                        (vdf.bitmap_size, vdf.time_point_count),
+                        (layout.bitmap_size, layout.grid_count, layout.grid),
+                        (vdf.bitmap_size, vdf.time_point_count, VdfBlockGrid::Saved),
                         "{path}: OT[{ot}] should use the saved-grid bitmap"
                     );
                 }
@@ -2960,6 +3168,44 @@ mod tests {
 
         // Empty saved axis: no positions.
         assert!(block_positions_for_time_values(&[], 5).is_empty());
+    }
+
+    /// The data-grid span mapping (GH #842): the grid is anchored at the
+    /// first saved time, assumed to span the run uniformly, with floor
+    /// semantics (zero-order hold -- an intermediate saved time takes the
+    /// preceding data point).
+    #[test]
+    fn test_data_grid_positions_span_mapping() {
+        // 71-point yearly grid inside an eighth-year-step run (the zambaqui
+        // "old runs" shape, where this mapping is exact): the first saved
+        // year maps to grid 0, intermediate eighth-year steps hold it, and
+        // the next whole year advances.
+        let saved: Vec<f64> = (0..561).map(|i| 1980.0 + 0.125 * i as f64).collect();
+        let pos = data_grid_positions_for_time_values(&saved, 71);
+        assert_eq!(pos[0], 0);
+        assert_eq!(pos[7], 0, "1980.875 still holds the 1980 data point");
+        assert_eq!(pos[8], 1, "1981.0 advances to the second data point");
+        assert_eq!(pos[560], 70, "the run's final time is the last data point");
+
+        // 6-point grid over a 121-point monthly run (the groupon shape).
+        let saved: Vec<f64> = (0..121).map(|i| i as f64).collect();
+        let pos = data_grid_positions_for_time_values(&saved, 6);
+        assert_eq!(pos[0], 0);
+        assert_eq!(pos[23], 0);
+        assert_eq!(pos[24], 1);
+        assert_eq!(pos[120], 5);
+
+        // Degenerate grids: a single-point grid pins everything to it, and
+        // a degenerate time span cannot be projected.
+        assert_eq!(
+            data_grid_positions_for_time_values(&[3.0, 4.0], 1),
+            vec![0, 0]
+        );
+        assert_eq!(
+            data_grid_positions_for_time_values(&[2.0, 2.0], 4),
+            vec![0, 0]
+        );
+        assert!(data_grid_positions_for_time_values(&[], 5).is_empty());
     }
 
     /// The Rule-2 missing-slot discriminator in isolation: only the exact
@@ -4097,6 +4343,8 @@ mod tests {
             bitmap_size: 0,
             block_time_point_count: 0,
             block_bitmap_size: 0,
+            data_time_point_count: 0,
+            data_bitmap_size: 0,
             sections: vec![section],
             names,
             name_section_idx: Some(0),

@@ -58,6 +58,7 @@ mod systems_roundtrip;
 mod unit_alias_module_inference;
 #[cfg(feature = "file_io")]
 mod vdf_alias_decoder;
+mod vdf_data_grid;
 mod vdf_multidim;
 // Differential parity harness: pins the Rust reader against the Python
 // tools/vdf_xray.py inspector by shelling out to python3 (no cargo feature

@@ -908,10 +908,11 @@ fn print_data_blocks(vdf: &VdfFile) {
             continue;
         }
         let count = read_u16(&vdf.data, offset) as usize;
-        // Saved-suffix files mix saved-grid and full-grid bitmaps; use the
+        // Files mix saved-grid, block-grid, and data-grid bitmaps; use the
         // per-block popcount discriminator so sizes and value offsets are
-        // right for both.
-        let (bitmap_size, grid_count) = vdf.block_bitmap_layout(offset, count);
+        // right for all three.
+        let layout = vdf.block_bitmap_layout(offset, count);
+        let (bitmap_size, grid_count) = (layout.bitmap_size, layout.grid_count);
         let block_size = 2 + bitmap_size + count * 4;
         let density = if grid_count > 0 {
             (count as f64 / grid_count as f64) * 100.0
@@ -934,7 +935,11 @@ fn print_data_blocks(vdf: &VdfFile) {
         let label = if offset == vdf.first_data_block {
             "  [TIME]"
         } else {
-            ""
+            match layout.grid {
+                simlin_engine::vdf::VdfBlockGrid::Data => "  [DATA-GRID]",
+                simlin_engine::vdf::VdfBlockGrid::Unreconciled => "  [UNRECONCILED]",
+                _ => "",
+            }
         };
         println!(
             "  {:>3}  0x{:08x}  {}/{} ({:.0}%)  {}B  first={} last={}{}",

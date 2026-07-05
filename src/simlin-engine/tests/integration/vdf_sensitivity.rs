@@ -20,38 +20,9 @@
 use std::path::{Path, PathBuf};
 
 use simlin_engine::vdf::{
-    VDF_SECTION6_OT_CODE_TIME, VDF_SENSITIVITY_FILE_MAGIC, VdfFile, VdfKind,
+    VDF_SECTION6_OT_CODE_TIME, VDF_SENSITIVITY_FILE_MAGIC, VdfBlockGrid, VdfFile, VdfKind,
     is_owner_ot_class_code, probe_vdf_kind, read_u16,
 };
-
-/// Whether the data block at `block_offset` carries a bitmap the reader can
-/// actually reconcile: its declared value count must equal the popcount of
-/// the bitmap bytes under one of the two known grid widths (saved grid or
-/// full block grid). The zambaqui corpus contains class-0x05 exogenous-data
-/// blocks stored on their OWN short time grid (`gdp deflator`: 26 points on
-/// a 71-point run), which neither reader decodes yet -- manual inspection
-/// showed both fall back to the run-grid bitmap on these files (no automated
-/// test pins 0x53 Rust-vs-Python parity; the parity harness corpus is
-/// `test/` only) -- so the final-values oracle cannot hold there. This is a
-/// pre-existing limitation on zambaqui 0x52 files too, not a 0x53 artifact;
-/// tracked as GH #842.
-fn block_bitmap_is_decodable(vdf: &VdfFile, block_offset: usize) -> bool {
-    if block_offset + 2 > vdf.data.len() {
-        return false;
-    }
-    let count = read_u16(&vdf.data, block_offset) as usize;
-    let (bitmap_size, _grid) = vdf.block_bitmap_layout(block_offset, count);
-    let bm_start = block_offset + 2;
-    let bm_end = bm_start + bitmap_size;
-    if bm_end > vdf.data.len() {
-        return false;
-    }
-    let popcount: usize = vdf.data[bm_start..bm_end]
-        .iter()
-        .map(|b| b.count_ones() as usize)
-        .sum();
-    popcount == count
-}
 
 fn collect_vdf_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -77,7 +48,9 @@ fn collect_vdf_files(dir: &Path) -> Vec<PathBuf> {
 /// must equal the file's own recorded final value (NaN-aware, mirroring
 /// `test_section6_final_values_match_extracted_last_values`'s f32
 /// tolerance). This cross-checks the whole decode chain -- offset table,
-/// per-block bitmaps, inline constants -- on the sensitivity container.
+/// per-block bitmaps (including the header-0x74 data grid these files'
+/// class-0x05 exogenous blocks live on, GH #842), inline constants -- on the
+/// sensitivity container.
 #[test]
 fn sensitivity_run_files_parse_and_match_final_values_oracle() {
     let root = Path::new("../../third_party/uib_sd/zambaqui");
@@ -121,6 +94,41 @@ fn sensitivity_run_files_parse_and_match_final_values_oracle() {
         let vdf = VdfFile::parse(data)
             .unwrap_or_else(|err| panic!("{display}: 0x53 file must parse: {err}"));
 
+        // Every data block's bitmap must reconcile with one of the three
+        // known grids (saved 0x78, block 0x7C, data 0x74). Before the
+        // data-grid candidate existed, each of these files carried one
+        // class-0x05 exogenous block (gdp deflator, 26 points on the
+        // 26-point data grid) that reconciled with nothing and had to be
+        // skipped from the oracle; that population is now decodable, so an
+        // unreconciled block here is a regression or a genuinely new layout
+        // and must fail loudly (GH #842).
+        let unreconciled = vdf.unreconciled_data_blocks();
+        assert!(
+            unreconciled.is_empty(),
+            "{display}: data blocks at OTs {unreconciled:?} reconcile with no known \
+             bitmap grid (saved/block/data); their series would be NaN-filled"
+        );
+        // The pinned gdp-deflator slot must resolve onto the data grid
+        // specifically -- the discriminator working by accident (e.g. a
+        // saved-grid popcount coincidence) would silently mis-place values.
+        if path.file_name().is_some_and(|n| n == "opt-1.vdf") {
+            let raw = vdf
+                .offset_table_entry(708)
+                .expect("opt-1.vdf: OT[708] present");
+            assert!(
+                vdf.is_data_block_offset(raw),
+                "opt-1.vdf: OT[708] is a block"
+            );
+            let count = read_u16(&vdf.data, raw as usize) as usize;
+            let layout = vdf.block_bitmap_layout(raw as usize, count);
+            assert_eq!(
+                layout.grid,
+                VdfBlockGrid::Data,
+                "opt-1.vdf: OT[708] (gdp deflator) must decode on the header-0x74 data grid"
+            );
+            assert_eq!(layout.grid_count, 26, "opt-1.vdf: data grid count");
+        }
+
         let final_values = vdf
             .section6_ot_final_values()
             .unwrap_or_else(|| panic!("{display}: missing section-6 final values"));
@@ -130,6 +138,11 @@ fn sensitivity_run_files_parse_and_match_final_values_oracle() {
         let extracted = vdf
             .extract_data()
             .unwrap_or_else(|err| panic!("{display}: extract_data: {err}"));
+        assert!(
+            extracted.unreconciled_ots.is_empty(),
+            "{display}: extract_data NaN-filled OTs {:?}",
+            extracted.unreconciled_ots
+        );
 
         assert_eq!(
             final_values.len(),
@@ -137,7 +150,6 @@ fn sensitivity_run_files_parse_and_match_final_values_oracle() {
             "{display}: final-value vector length should match OT/data entries"
         );
         let mut checked = 0usize;
-        let mut skipped: Vec<(usize, u8)> = Vec::new();
         for (ot, (final_value, series)) in final_values
             .iter()
             .zip(extracted.entries.iter())
@@ -154,17 +166,6 @@ fn sensitivity_run_files_parse_and_match_final_values_oracle() {
             if code != VDF_SECTION6_OT_CODE_TIME && !is_owner_ot_class_code(code) {
                 continue;
             }
-            // Skip blocks whose bitmap layout the reader knowably cannot
-            // reconcile (see block_bitmap_is_decodable). This is a
-            // structural gate, not a name-based exclusion list, and it is
-            // bounded below so it cannot quietly swallow the whole oracle.
-            if let Some(raw) = vdf.offset_table_entry(ot)
-                && vdf.is_data_block_offset(raw)
-                && !block_bitmap_is_decodable(&vdf, raw as usize)
-            {
-                skipped.push((ot, code));
-                continue;
-            }
             let expected = series.last().copied().unwrap_or(f64::NAN) as f32;
             assert!(
                 (final_value - expected).abs() < 1e-5
@@ -173,48 +174,16 @@ fn sensitivity_run_files_parse_and_match_final_values_oracle() {
             );
             checked += 1;
         }
-        // Coverage floor: the real zambaqui 0x53 files check ~1,181-1,207
+        // Coverage floor: the real zambaqui 0x53 files check ~1,182-1,208
         // owner-coded slots each (opt-1.vdf: 194x0x08 stocks + 757x0x11
-        // dynamics + 6x0x16 + 249x0x17 consts + Time, minus the one skipped
-        // block). A weak `> 1` floor would let a class-code-parsing
-        // regression quietly shrink the oracle to a handful of slots.
+        // dynamics + 6x0x16 + 249x0x17 consts + the 0x05 data block + Time).
+        // A weak `> 1` floor would let a class-code-parsing regression
+        // quietly shrink the oracle to a handful of slots.
         assert!(
             checked >= 800,
             "{display}: final-values oracle only checked {checked} owner-coded \
              slots; expected at least 800"
         );
-        // The known undecodable population is the single own-grid exogenous
-        // data block (gdp deflator, class 0x05; GH #842). Bound the skips by
-        // IDENTITY, not just cardinality: every skipped slot must be a
-        // class-0x05 data block, and for the pinned fixtures the exact OT
-        // set is known -- a regression that swaps WHICH blocks are
-        // undecodable must fail loudly even if the count stays small.
-        assert!(
-            skipped.len() <= 2,
-            "{display}: {} owner-coded blocks skipped as bitmap-undecodable \
-             ({skipped:?}); expected at most 2",
-            skipped.len()
-        );
-        for &(ot, code) in &skipped {
-            assert_eq!(
-                code, 0x05,
-                "{display}: skipped OT[{ot}] has class code {code:#04x}; only \
-                 class-0x05 exogenous-data blocks are known to be undecodable"
-            );
-        }
-        let skipped_ots: Vec<usize> = skipped.iter().map(|&(ot, _)| ot).collect();
-        let expected_skips: Option<&[usize]> = match path.file_name().and_then(|n| n.to_str()) {
-            Some("opt-1.vdf") | Some("sens-train_cost.vdf") => Some(&[708]),
-            Some("sensi-1.vdf") => Some(&[696]),
-            _ => None,
-        };
-        if let Some(expected) = expected_skips {
-            assert_eq!(
-                skipped_ots, expected,
-                "{display}: bitmap-undecodable OT set drifted from the pinned \
-                 gdp-deflator slot"
-            );
-        }
 
         // The record-driven name mapping must produce real columns too (Time
         // plus at least one model variable) -- the sensitivity container is

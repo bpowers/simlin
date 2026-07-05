@@ -90,6 +90,7 @@ structural fork.
 | `0x60` | 4 | `u32` absolute file offset of the section-7 offset table |
 | `0x64` | 4 | duplicate of `0x60` |
 | `0x70` | 4 | total lookup coordinate-pair count across all graphical functions (zero when the model has none) |
+| `0x74` | 4 | `u32` data-grid time-point count: the time-point count of the external data file the run loaded (a dataset VDF or spreadsheet), or 0 when the model loaded no external data. Exogenous-data blocks carry bitmaps over THIS grid; see "Data blocks" |
 | `0x78` | 4 | `u32` saved time-point count -- the number of values stored in the Time block and returned to callers |
 | `0x7C` | 4 | `u32` block time-point grid count; usually equals `0x78`, but saved-suffix runs (`risk.vdf`) have `0x78=213`, `0x7C=225` |
 
@@ -370,7 +371,8 @@ Layout, in order:
 | Code | Meaning |
 |---|---|
 | `0x0f` | Time (OT[0] only) |
-| `0x05` | input / data-like block (uses the `ceil(0x7C/8)` bitmap width on saved-suffix files) |
+| `0x05` | input / exogenous-data block, bitmapped over the header-0x74 data grid (which coincides with the 0x7C block grid on `risk.vdf` and is a genuinely third grid on the zambaqui corpus; see "Data-grid blocks") |
+| `0x06`, `0x0c` | exogenous-data variants observed on the groupon fixtures: data-grid blocks like `0x05` (unsaved ones carry a zero offset-table word and the `:NA:` sentinel final). Not owner codes for record mapping today, so these columns are unnamed |
 | `0x08` | stock-backed variable. Contiguous at `OT[1..S]` in small/medium fixtures; scattered across several ranges in `Ref.vdf` |
 | `0x11` | dynamic non-stock; usually a per-step data block, but inline in some array-heavy files |
 | `0x16`, `0x18` | observed only in `Ref.vdf`; inline OT values |
@@ -451,19 +453,100 @@ offsets rather than assuming the referenced blocks form a gapless stream --
 files can contain padding or unreferenced bytes between blocks. A non-time
 block's value at a time point with a clear bit holds (zero-order hold).
 
-The bitmap width is decoded **per block**: most blocks use `ceil(header[0x78]
-/ 8)` bytes, but saved-suffix files (`risk.vdf`) mix that with
-`ceil(header[0x7C] / 8)`. The deterministic discriminator is local to the
-block: the `u16 count` equals the bitmap popcount for the correct width. Try
-the compact saved-grid width first and prefer it when both widths happen to
-match (the wider bitmap would be popcounting past the real bitmap into payload
-bytes); when neither width matches, fall back to the block-grid width. When a
-block uses the larger grid, decode the full grid and sample the positions
-corresponding to the saved Time values: saved-suffix files save the *tail* of
-the run, so the grid origin is derived from the last saved time
+The bitmap width is decoded **per block** against up to three grids: the
+saved grid (`ceil(header[0x78] / 8)` bytes -- most blocks), the block grid
+(`ceil(header[0x7C] / 8)`; wider on saved-suffix files like `risk.vdf`), and
+the **data grid** (`ceil(header[0x74] / 8)`; see below). The deterministic
+discriminator is local to the block: the `u16 count` equals the bitmap
+popcount for the correct width. Candidates are tried in that order and the
+first match wins.
+
+The ordering is justified empirically, not geometrically. Saved-before-block
+follows the narrower-first logic (the saved width never exceeds the block
+width, and a wider bitmap that also matched would be popcounting past the
+real bitmap into payload bytes). The data width, however, is usually the
+NARROWEST candidate, and it still must come LAST: ordinary saved-grid blocks
+dominate every file, and more than 1,100 of them across the tracked corpora
+coincidentally popcount-match the narrower data width (a small count whose
+set bits happen to fall in the first `ceil(0x74/8)` bytes), while zero
+exogenous blocks match a wider distinct width. Residual latent risk: an
+exogenous block with a small count and zero-heavy leading payload bytes
+could in principle popcount-match the wider saved width and silently decode
+with wrong placement; no corpus file does. The section-6 class code
+(`0x05`/`0x06`/`0x0c` marks exogenous blocks) is available as a future
+discriminator or mismatch diagnostic if such a file appears.
+
+When NO width matches, the block is
+undecodable: readers NaN-fill its series and report the OT on a per-file
+diagnostic list (Rust `VdfData::unreconciled_ots` /
+`VdfFile::unreconciled_data_blocks`, Python
+`NamedResultsDiagnostics.bitmap_unreconciled_ots`) -- visibly-missing data is
+strictly better than garbage decoded under an assumed width. No tracked
+corpus file has such a block.
+
+When a block uses the larger block grid, decode the full grid and sample the
+positions corresponding to the saved Time values: saved-suffix files save the
+*tail* of the run, so the grid origin is derived from the last saved time
 (`origin = time[last] - (grid_count - 1) * step`) and each saved time maps to
 `round((t - origin) / step)`; a non-uniform or degenerate-step time axis falls
 back to identity positions, and out-of-range positions decode as NaN.
+
+### Data-grid blocks (exogenous data, header `0x74`)
+
+Exogenous-data blocks -- class codes `0x05` (risk/zambaqui), `0x06`, and
+`0x0c` (groupon) -- are the loaded data file's sparse blocks embedded in the
+run file, bitmapped over the DATA FILE's time grid, whose point count is
+header word `0x74`. The zambaqui corpus proves this three ways:
+
+- `baserun.vdf`'s `gdp deflator` block is **byte-identical** (count=26,
+  4-byte dense bitmap `ff ff ff 03`, payload) to the corresponding block in
+  the sibling `Data.vdf` dataset, whose own time axis is 26 yearly points
+  1980..2005 -- matching `0x74 = 26` in every run of that family;
+- nine of the 48 "old runs" files loaded a different data file (71 yearly
+  points spanning the whole 1980..2050 run; `0x74 = 71`, saved grid 561):
+  the same deflator series appears there as 26 set bits at positions 0..25
+  of a 9-byte bitmap, and interior blocks tile exactly against the next
+  block's offset (`next - this == 2 + ceil(0x74/8) + 4*count`), pinning the
+  width. (Most old-runs files -- 31 -- are instead 28-point yearly runs
+  with `0x74 = 26`; see the same-width collision below. The remaining eight
+  share `baserun.vdf`'s 71-point-run shape.);
+- `risk.vdf`'s mixed-width story is the same phenomenon in degenerate form:
+  its `0x74` equals its `0x7C` (225), so the data grid coincides with the
+  block grid there.
+
+**Same-width collision.** When `ceil(0x74/8) == ceil(0x78/8)` with different
+counts (the 31 zambaqui old-runs files with a 26-point data grid inside a
+28-point yearly run: both widths are 4 bytes), the width-dedup in the
+discriminator drops the Data candidate and those exogenous blocks (204
+across that corpus) reconcile as Saved and decode with identity positions.
+On that corpus this is EXACT -- both axes are yearly from 1980, so grid
+point *i* IS saved point *i* -- and avoids the span approximation entirely,
+but the behavior is a consequence of dedup-by-width, not a separately chosen
+rule: a future change to the dedup would silently alter those series.
+
+The `0x74` rule reconciles every previously-undecodable block in the tracked
+corpora (122 across zambaqui 0x52/0x53 runs, 126 across the six
+`test/metasd/social-network-valuation` groupon files, whose 6-point data
+grid sits inside a 121-point monthly run).
+
+**Negative result -- the data grid's time values are not in the run file.**
+The run stores only the grid's point count; the grid's actual time stamps
+live in the external data file (a dataset VDF's Time series or a spreadsheet
+row -- groupon's is a `GET XLS DATA` workbook that is not part of the run).
+There is no companion time block, no lookup-record linkage (no section-6
+lookup record's `word[10]` points at these OTs), and no other header word
+carrying the axis. Mapping data-grid values onto the saved time axis is
+therefore an approximation: readers assume the grid spans the saved run
+uniformly, anchored at the first saved time
+(`step = (t_last - t_first) / (grid_count - 1)`), with floor semantics
+(zero-order hold). This is exact whenever the data file's axis spans the run
+horizon (the zambaqui "old runs" family -- verified against the tiled
+blocks); when the data ends early (`baserun.vdf`'s deflator, 1980..2005
+inside a 1980..2050 run) the VALUES are correct but interior placement is
+dilated toward the run end. First/last placement is exact in both cases,
+which is what the section-6 final-value oracle pins. A reader with access to
+the sibling data file could recover the exact axis; the model-guided mapping
+work tracks that direction.
 
 
 ## Name-to-OT mapping
@@ -612,7 +695,8 @@ behaviors to know about: unsaved OT slots (an optimization run saves only a
 subset of variables) carry class code 0, a zero offset-table word, and the
 `:NA:` sentinel (-1.298e33) as their section-6 final value; and the zambaqui
 corpus (0x52 and 0x53 alike) contains class-0x05 exogenous-data blocks stored
-on their own short time grid, which neither reader decodes yet.
+on the header-0x74 data grid (see "Data-grid blocks" above), fully decoded by
+both readers.
 
 
 ## Appendix: the owner/descriptor discriminator

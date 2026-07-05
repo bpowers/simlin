@@ -569,11 +569,13 @@ class VdfXrayModelEditingTests(unittest.TestCase):
                 full_grid_count = vdf_xray.u16(vdf.data, full_grid_raw)
                 self.assertEqual(
                     vdf._block_bitmap_layout(stock_raw, stock_count),
-                    (vdf.bitmap_size, vdf.time_point_count),
+                    (vdf.bitmap_size, vdf.time_point_count, "saved"),
                 )
+                # risk's data grid (0x74=225) coincides with its block grid
+                # (0x7C=225), so the block candidate wins by order.
                 self.assertEqual(
                     vdf._block_bitmap_layout(full_grid_raw, full_grid_count),
-                    (vdf.block_bitmap_size, vdf.block_time_point_count),
+                    (vdf.block_bitmap_size, vdf.block_time_point_count, "block"),
                 )
 
                 stock_series = vdf.extract_ot_series(stock_ot, time_values, codes, final_values)
@@ -1984,6 +1986,151 @@ class ExtractJsonTests(unittest.TestCase):
     def test_dataset_vdf_is_rejected_loudly(self) -> None:
         with self.assertRaises(ValueError):
             self._payload(["test/bobby/vdf/econ/data.vdf"])
+
+
+class DataGridBitmapTests(unittest.TestCase):
+    """
+    Header-0x74 data-grid bitmap coverage (GH #842), mirroring the Rust
+    `vdf_data_grid.rs` integration tests: exogenous-data blocks (class codes
+    0x05/0x06/0x0c) carry bitmaps over the external data file's time grid,
+    whose point count is header word 0x74.
+    """
+
+    GROUPON = "test/metasd/social-network-valuation/groupon3mid.vdf"
+
+    def test_data_grid_positions_span_mapping(self) -> None:
+        # 71-point yearly grid inside an eighth-year-step run (the zambaqui
+        # "old runs" shape, where the mapping is exact).
+        saved = [1980.0 + 0.125 * i for i in range(561)]
+        pos = vdf_xray.VdfFile._data_grid_positions(saved, 71)
+        self.assertEqual(pos[0], 0)
+        self.assertEqual(pos[7], 0)
+        self.assertEqual(pos[8], 1)
+        self.assertEqual(pos[560], 70)
+
+        # 6-point grid over a 121-point monthly run (the groupon shape).
+        saved = [float(i) for i in range(121)]
+        pos = vdf_xray.VdfFile._data_grid_positions(saved, 6)
+        self.assertEqual((pos[0], pos[23], pos[24], pos[120]), (0, 0, 1, 5))
+
+        # Degenerate grids and axes.
+        self.assertEqual(vdf_xray.VdfFile._data_grid_positions([3.0, 4.0], 1), [0, 0])
+        self.assertEqual(vdf_xray.VdfFile._data_grid_positions([2.0, 2.0], 4), [0, 0])
+        self.assertEqual(vdf_xray.VdfFile._data_grid_positions([], 5), [])
+
+    def test_groupon_data_grid_blocks_decode(self) -> None:
+        vdf = parse_fixture(self.GROUPON)
+        self.assertEqual(vdf.data_time_point_count, 6)
+        self.assertEqual(vdf.data_bitmap_size, 1)
+        self.assertEqual(vdf.unreconciled_data_blocks(), [])
+
+        time_values = vdf.extract_time_values()
+        codes = vdf.section6_ot_class_codes()
+        final_values = vdf.section6_final_values()
+        assert time_values is not None
+        assert codes is not None
+        assert final_values is not None
+
+        # Every data block reconciles, and every block series ends at the
+        # recorded final value; count the data-grid population.
+        data_grid_ots = []
+        for ot in range(vdf.offset_table_count):
+            raw = vdf.offset_table_entry(ot)
+            if raw is None or not vdf.is_data_block_offset(raw):
+                continue
+            count = vdf_xray.u16(vdf.data, raw)
+            _bm, _grid, kind = vdf._block_bitmap_layout(raw, count)
+            self.assertIsNotNone(kind, f"OT[{ot}] unreconciled")
+            if kind == "data":
+                data_grid_ots.append(ot)
+            series = vdf.extract_ot_series(ot, time_values, codes, final_values)
+            assert series is not None
+            self.assertAlmostEqual(
+                series[-1],
+                final_values[ot],
+                places=5,
+                msg=f"OT[{ot}] final-value oracle",
+            )
+        self.assertEqual(len(data_grid_ots), 21)
+
+        # Value-level pin: OT[53] stores 4 values at data-grid points
+        # {1,2,3,5} (bitmap 0x2e); the saved series starts NaN (no data
+        # before the first stored point), ends at the recorded final value,
+        # and surfaces exactly the four stored values.
+        raw = vdf.offset_table_entry(53)
+        assert raw is not None
+        count = vdf_xray.u16(vdf.data, raw)
+        self.assertEqual(count, 4)
+        self.assertEqual(vdf._block_bitmap_layout(raw, count), (1, 6, "data"))
+        series = vdf.extract_block_series(raw, time_values)
+        self.assertTrue(math.isnan(series[0]))
+        self.assertAlmostEqual(series[-1], 29504314.0, places=0)
+        distinct: list[float] = []
+        for value in series:
+            if not math.isnan(value) and (not distinct or distinct[-1] != value):
+                distinct.append(value)
+        self.assertEqual(len(distinct), 4)
+        self.assertAlmostEqual(distinct[0], 375099.0, places=0)
+
+    def test_named_results_diagnostics_report_no_unreconciled_blocks(self) -> None:
+        vdf = parse_fixture(self.GROUPON)
+        _results, diagnostics = vdf_xray.extract_named_results_with_diagnostics(vdf)
+        self.assertEqual(diagnostics.bitmap_unreconciled_ots, [])
+
+    def test_unreconciled_block_is_nan_filled_and_reported(self) -> None:
+        # Zero out a real dynamic block's bitmap in a small fixture: popcount
+        # 0 can never equal a nonzero count, so no candidate grid reconciles
+        # (water has no data grid, and its saved/block grids coincide).
+        data = bytearray((REPO_ROOT / "test/bobby/vdf/water/Current.vdf").read_bytes())
+        vdf = vdf_xray.parse_vdf(bytes(data))
+        self.assertEqual(vdf.data_time_point_count, 0)
+        raw = vdf.offset_table_entry(5)
+        assert raw is not None
+        self.assertTrue(vdf.is_data_block_offset(raw))
+        count = vdf_xray.u16(vdf.data, raw)
+        self.assertGreater(count, 0)
+        for i in range(vdf.bitmap_size):
+            data[raw + 2 + i] = 0
+
+        corrupted = vdf_xray.parse_vdf(bytes(data))
+        self.assertEqual(
+            corrupted._block_bitmap_layout(raw, count),
+            (corrupted.block_bitmap_size, corrupted.block_time_point_count, None),
+        )
+        self.assertEqual(corrupted.unreconciled_data_blocks(), [5])
+
+        time_values = corrupted.extract_time_values()
+        assert time_values is not None
+        series = corrupted.extract_block_series(raw, time_values)
+        self.assertTrue(all(math.isnan(v) for v in series))
+
+        _results, diagnostics = vdf_xray.extract_named_results_with_diagnostics(corrupted)
+        self.assertEqual(diagnostics.bitmap_unreconciled_ots, [5])
+
+    def test_zambaqui_gdp_deflator_decodes_on_data_grid(self) -> None:
+        # third_party corpora are optional checkouts; skip when absent
+        # (matching the Rust existence-continue convention).
+        relpath = "third_party/uib_sd/zambaqui/baserun.vdf"
+        if not (REPO_ROOT / relpath).exists():
+            self.skipTest("zambaqui corpus not checked out")
+        vdf = parse_fixture(relpath)
+        self.assertEqual(vdf.data_time_point_count, 26)
+        self.assertEqual(vdf.unreconciled_data_blocks(), [])
+
+        raw = vdf.offset_table_entry(696)
+        assert raw is not None
+        count = vdf_xray.u16(vdf.data, raw)
+        self.assertEqual(count, 26)
+        self.assertEqual(vdf._block_bitmap_layout(raw, count), (4, 26, "data"))
+
+        time_values = vdf.extract_time_values()
+        assert time_values is not None
+        series = vdf.extract_block_series(raw, time_values)
+        # Ground truth from the byte-identical block in the sibling
+        # Data.vdf dataset (gdp deflator, 1980..2005 yearly). Extraction
+        # only widens the stored f32s, so the pins are exact-equality.
+        self.assertEqual(series[0], 0.6202020049095154)
+        self.assertEqual(series[-1], 2.086980104446411)
 
 
 if __name__ == "__main__":

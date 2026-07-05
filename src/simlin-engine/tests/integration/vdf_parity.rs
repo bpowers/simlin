@@ -32,11 +32,15 @@ use std::process::Command;
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::vdf::{VdfFile, VdfKind, probe_vdf_kind};
 
-/// Directories walked for parity fixtures. `third_party/` is deliberately
-/// excluded to keep the harness hermetic and its runtime bounded; extending
-/// coverage later is a one-line addition here.
+/// Directories walked for parity fixtures. `test/` is always present; the
+/// zambaqui third_party corpus rides the existence-continue convention
+/// (optional checkout, skipped when absent) because it is the only corpus
+/// source of 0x53 sensitivity runs and of header-0x74 data-grid blocks on a
+/// genuinely third bitmap width (GH #842) -- pinning cross-reader agreement
+/// there keeps the two data-grid implementations in lockstep. The rest of
+/// `third_party/` stays excluded to bound the harness runtime.
 fn parity_corpus_roots() -> &'static [&'static str] {
-    &["../../test"]
+    &["../../test", "../../third_party/uib_sd/zambaqui"]
 }
 
 fn collect_vdf_files(dir: &Path) -> Vec<PathBuf> {

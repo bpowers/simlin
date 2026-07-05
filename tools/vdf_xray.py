@@ -369,6 +369,11 @@ class VdfFile:
     bitmap_size: int
     block_time_point_count: int
     block_bitmap_size: int
+    # Header 0x74: the external data file's time-point count ("data grid"),
+    # 0 when the model loaded no external data. Exogenous-data blocks (class
+    # codes 0x05/0x06/0x0c) carry bitmaps over THIS grid (GH #842).
+    data_time_point_count: int
+    data_bitmap_size: int
     sections: list[Section]
     names: list[str]
     name_section_idx: Optional[int]
@@ -852,10 +857,12 @@ class VdfFile:
             return None
         return [f32(self.data, data_start + i * 4) for i in range(count)]
 
-    def _block_positions_for_time_values(self, time_values: list[float]) -> list[int]:
+    def _block_positions_for_time_values(
+        self, time_values: list[float], grid_count: int,
+    ) -> list[int]:
         if not time_values:
             return []
-        if self.block_time_point_count == len(time_values):
+        if grid_count == len(time_values):
             return list(range(len(time_values)))
         if len(time_values) == 1:
             return [0]
@@ -871,29 +878,76 @@ class VdfFile:
         # block bitmaps still cover the full grid, while the Time block stores
         # only the selected save points. Derive the grid origin from the final
         # saved time so extraction samples the same absolute time positions.
-        origin = time_values[-1] - (self.block_time_point_count - 1) * step
+        origin = time_values[-1] - (grid_count - 1) * step
         positions: list[int] = []
         for value in time_values:
             pos = int(round((value - origin) / step))
             positions.append(pos)
         return positions
 
-    def _block_bitmap_layout(self, block_offset: int, count: int) -> tuple[int, int]:
+    @staticmethod
+    def _data_grid_positions(time_values: list[float], grid_count: int) -> list[int]:
+        """
+        Map saved Time values onto positions of a `grid_count`-point DATA
+        grid (header 0x74; the external data file's time axis).
+
+        The run file stores only the grid's point count -- its time values
+        live in the external data file and are not recoverable from the run
+        file alone (negative result, GH #842). Approximation, mirrored
+        bit-for-bit by the Rust reader's
+        `data_grid_positions_for_time_values`: the grid is assumed to span
+        the saved run uniformly, anchored at the first saved time, with
+        floor semantics (zero-order hold). Exact when the data file's axis
+        spans the run horizon (zambaqui "old runs"); values are correct but
+        interior placement dilated when the data ends early (zambaqui
+        baserun's gdp deflator). First/last placement is exact either way.
+        """
+        if not time_values:
+            return []
+        t_first = time_values[0]
+        t_last = time_values[-1]
+        if grid_count <= 1 or t_last <= t_first:
+            return [0] * len(time_values)
+        scale = (grid_count - 1) / (t_last - t_first)
+        return [math.floor((value - t_first) * scale + 1e-6) for value in time_values]
+
+    def _block_bitmap_layout(self, block_offset: int, count: int) -> tuple[int, int, Optional[str]]:
         """
         Decode the bitmap width for a data block from its declared value count.
 
-        Edited econ runs can mix saved-suffix blocks and full-grid blocks in
-        the same file. The C-readable invariant is that the block's u16 count
-        equals the popcount of the bitmap bytes that precede its f32 payload.
-        Prefer the compact saved-time bitmap when both widths happen to match.
+        Files mix blocks on up to three time grids: the saved grid (header
+        0x78), the block grid (0x7C; wider on saved-suffix runs), and the
+        data grid (0x74; the external data file's axis, carried by
+        exogenous-data blocks -- GH #842). The C-readable invariant is that
+        the block's u16 count equals the popcount of the bitmap bytes that
+        precede its f32 payload; candidates are tried in that order and the
+        first match wins. The ordering is empirical: saved-before-block is
+        narrower-first, but the data width is usually the NARROWEST
+        candidate and still must come LAST -- over a thousand ordinary
+        saved-grid blocks across the corpora coincidentally popcount-match
+        it, while zero exogenous blocks match a wider distinct width.
+        Residual risk: an exogenous block with a small count and zero-heavy
+        leading payload could match the wider saved width and silently
+        mis-place values (no corpus file does); the section-6 class code
+        (0x05/0x06/0x0c) is available as a future discriminator. Duplicate
+        widths keep the earlier candidate: when ceil(0x74/8) ==
+        ceil(0x78/8) with different counts (31 zambaqui old-runs files),
+        exogenous blocks reconcile as "saved" and decode with identity
+        positions -- exact on that corpus, but a consequence of the dedup,
+        not a separate rule.
+
+        Returns `(bitmap_size, grid_count, kind)` with kind one of
+        "saved"/"block"/"data", or `None` when no width reconciles -- the
+        caller must NaN-fill rather than decode garbage.
         """
-        candidates: list[tuple[int, int]] = [
-            (self.bitmap_size, self.time_point_count),
-            (self.block_bitmap_size, self.block_time_point_count),
+        candidates: list[tuple[int, int, str]] = [
+            (self.bitmap_size, self.time_point_count, "saved"),
+            (self.block_bitmap_size, self.block_time_point_count, "block"),
+            (self.data_bitmap_size, self.data_time_point_count, "data"),
         ]
         seen_sizes: set[int] = set()
-        for bitmap_size, grid_count in candidates:
-            if bitmap_size in seen_sizes:
+        for bitmap_size, grid_count, kind in candidates:
+            if grid_count == 0 or bitmap_size in seen_sizes:
                 continue
             seen_sizes.add(bitmap_size)
             bm_start = block_offset + 2
@@ -902,8 +956,27 @@ class VdfFile:
                 continue
             bit_count = sum(byte.bit_count() for byte in self.data[bm_start:bm_end])
             if bit_count == count:
-                return bitmap_size, grid_count
-        return self.block_bitmap_size, self.block_time_point_count
+                return bitmap_size, grid_count, kind
+        return self.block_bitmap_size, self.block_time_point_count, None
+
+    def unreconciled_data_blocks(self) -> list[int]:
+        """
+        OT indices of data blocks whose bitmap reconciles with NO known time
+        grid (saved, block, or data). Extraction NaN-fills these series;
+        mirrors the Rust reader's `VdfFile::unreconciled_data_blocks`.
+        """
+        out: list[int] = []
+        for ot in range(self.offset_table_count):
+            raw = self.offset_table_entry(ot)
+            if raw is None or not self.is_data_block_offset(raw):
+                continue
+            if raw + 2 > len(self.data):
+                continue
+            count = u16(self.data, raw)
+            _bm, _grid, kind = self._block_bitmap_layout(raw, count)
+            if kind is None:
+                out.append(ot)
+        return out
 
     def extract_block_series(self, block_offset: int, time_values: list[float]) -> list[float]:
         if block_offset == self.first_data_block:
@@ -913,7 +986,12 @@ class VdfFile:
             return extracted
 
         count = u16(self.data, block_offset)
-        bitmap_size, step_count = self._block_bitmap_layout(block_offset, count)
+        bitmap_size, step_count, kind = self._block_bitmap_layout(block_offset, count)
+        if kind is None:
+            # No known grid width popcounts to the declared count: the block
+            # is undecodable; NaN-fill (visibly missing) rather than decode
+            # garbage under an assumed width (GH #842).
+            return [float("nan")] * len(time_values)
         bm_start = block_offset + 2
         data_start = bm_start + bitmap_size
         if data_start > len(self.data):
@@ -936,8 +1014,10 @@ class VdfFile:
 
         if step_count == len(time_values):
             positions = list(range(len(time_values)))
+        elif kind == "data":
+            positions = self._data_grid_positions(time_values, step_count)
         else:
-            positions = self._block_positions_for_time_values(time_values)
+            positions = self._block_positions_for_time_values(time_values, step_count)
         return [
             series[pos] if 0 <= pos < len(series) else float("nan")
             for pos in positions
@@ -2396,6 +2476,12 @@ class NamedResultsDiagnostics:
     # veto is observable at the extraction surface rather than silent.
     standalone_drop_veto_fired: bool = False
     standalone_drop_vetoed_candidates: int = 0
+    # OT indices of data blocks whose bitmap reconciled with NO known time
+    # grid (saved 0x78 / block 0x7C / data 0x74): their series are NaN-filled
+    # (visibly missing) rather than decoded under a wrong width. Mirrors the
+    # Rust reader's `VdfData::unreconciled_ots`; empty on every tracked
+    # corpus file (GH #842).
+    bitmap_unreconciled_ots: list[int] = field(default_factory=list)
 
 
 def extract_named_results_with_diagnostics(
@@ -2446,6 +2532,7 @@ def extract_named_results_with_diagnostics(
     diagnostics.standalone_drop_vetoed_candidates = (
         desc_id.standalone_drop_vetoed_candidates
     )
+    diagnostics.bitmap_unreconciled_ots = vdf.unreconciled_data_blocks()
 
     owner_spans = [s for s in spans if s.rec_idx not in desc_id.descriptor_indices]
 
@@ -2764,6 +2851,10 @@ def parse_vdf(data: bytes) -> VdfFile:
     if block_time_point_count < time_point_count:
         block_time_point_count = time_point_count
     block_bitmap_size = math.ceil(block_time_point_count / 8)
+    # Header 0x74: the loaded data file's time-point count (0 when no
+    # external data). Exogenous-data blocks live on this grid (GH #842).
+    data_time_point_count = u32(data, 0x74) if len(data) >= 0x80 else 0
+    data_bitmap_size = math.ceil(data_time_point_count / 8)
 
     header_fv_off = u32(data, 0x58)
     header_lm_off = u32(data, 0x5C)
@@ -2812,6 +2903,8 @@ def parse_vdf(data: bytes) -> VdfFile:
         bitmap_size=bitmap_size,
         block_time_point_count=block_time_point_count,
         block_bitmap_size=block_bitmap_size,
+        data_time_point_count=data_time_point_count,
+        data_bitmap_size=data_bitmap_size,
         sections=sections,
         names=names,
         name_section_idx=name_section_idx,
@@ -2903,7 +2996,7 @@ def print_header(vdf: VdfFile, path: str) -> None:
     print(f"  0x68 extra/result-tail ptr?:  0x{u32(vdf.data, 0x68):08x}")
     print(f"  0x6c save/run marker?:       0x{u32(vdf.data, 0x6c):08x}")
     print(f"  0x70 lookup point pairs:     {u32(vdf.data, 0x70)}")
-    print(f"  0x74 block grid mirror?:     {u32(vdf.data, 0x74)}")
+    print(f"  0x74 data grid points:       {vdf.data_time_point_count}")
     print(f"  0x78 saved time points:      {vdf.time_point_count}")
     print(f"  0x7c block grid points:      {vdf.block_time_point_count}")
     print(f"  OT count (derived):          {vdf.offset_table_count}")
@@ -3387,8 +3480,9 @@ def print_data_blocks(vdf: VdfFile) -> None:
         if offset == vdf.first_data_block:
             bitmap_size = vdf.bitmap_size
             grid_count = vdf.time_point_count
+            kind = "saved"
         else:
-            bitmap_size, grid_count = vdf._block_bitmap_layout(offset, count)
+            bitmap_size, grid_count, kind = vdf._block_bitmap_layout(offset, count)
         if offset + 2 + bitmap_size > len(vdf.data):
             print(f"  {idx:>3}  0x{offset:08x}  (truncated)")
             continue
@@ -3399,7 +3493,14 @@ def print_data_blocks(vdf: VdfFile) -> None:
         first_val = f32(vdf.data, data_start) if count > 0 and data_start + 4 <= len(vdf.data) else float("nan")
         last_val = f32(vdf.data, data_start + (count - 1) * 4) if count > 1 and data_start + count * 4 <= len(vdf.data) else first_val
 
-        label = "  [TIME]" if offset == vdf.first_data_block else ""
+        if offset == vdf.first_data_block:
+            label = "  [TIME]"
+        elif kind == "data":
+            label = "  [DATA-GRID]"
+        elif kind is None:
+            label = "  [UNRECONCILED]"
+        else:
+            label = ""
         print(f"  {idx:>3}  0x{offset:08x}  {count}/{grid_count} "
               f"({density:.0f}%)  {block_size}B  first={first_val} last={last_val}{label}")
     print()
