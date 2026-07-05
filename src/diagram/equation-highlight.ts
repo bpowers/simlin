@@ -115,6 +115,12 @@ export function highlightSpansForLines(
  * so the entire declaration is underlined instead. Unit errors are non-fatal
  * project-wide, but within this field they are the error, hence 'error' red.
  *
+ * Inference errors underline nothing in either field: they describe a
+ * contradiction spanning several variables, so any single-field span would be
+ * arbitrary -- and their offsets point into an equation (possibly another
+ * variable's), never the units string. Their plain-language reason renders in
+ * the details panel instead.
+ *
  * An `end` of 0 is the engine's "to the end of the text" convention;
  * byteOffsetToUtf16 clamps, so any large value reads as "the end".
  */
@@ -137,15 +143,18 @@ export function highlightRangeForField(
   }
 
   if (isUnits) {
-    const definition = unitErrors.find((err) => !err.isConsistencyError);
+    const definition = unitErrors.find((err) => err.kind === 'definition');
     if (definition) {
       const endByte = definition.end === 0 ? Number.MAX_SAFE_INTEGER : definition.end;
       return { startByte: definition.start, endByte, kind: 'error' };
     }
-    return { startByte: 0, endByte: Number.MAX_SAFE_INTEGER, kind: 'error' };
+    if (unitErrors.some((err) => err.kind === 'consistency')) {
+      return { startByte: 0, endByte: Number.MAX_SAFE_INTEGER, kind: 'error' };
+    }
+    return undefined;
   }
 
-  const consistency = unitErrors.find((err) => err.isConsistencyError);
+  const consistency = unitErrors.find((err) => err.kind === 'consistency');
   if (!consistency) {
     return undefined;
   }

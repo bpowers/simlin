@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { EquationError, UnitError, ErrorCode } from '@simlin/core/datamodel';
+import { EquationError, UnitError, UnitErrorKind, ErrorCode } from '@simlin/core/datamodel';
 
 import {
   applyToAllPrefix,
@@ -99,11 +99,13 @@ describe('highlightRangeForField', () => {
     start,
     end,
   });
-  const unitError = (isConsistencyError: boolean, start: number, end: number): UnitError => ({
-    code: isConsistencyError ? ErrorCode.UnitMismatch : ErrorCode.NoAppInUnits,
+  const codeForKind = (kind: UnitErrorKind): ErrorCode =>
+    kind === 'definition' ? ErrorCode.NoAppInUnits : ErrorCode.UnitMismatch;
+  const unitError = (kind: UnitErrorKind, start: number, end: number): UnitError => ({
+    code: codeForKind(kind),
     start,
     end,
-    isConsistencyError,
+    kind,
     details: undefined,
   });
 
@@ -117,24 +119,24 @@ describe('highlightRangeForField', () => {
   });
 
   it('equation errors take precedence over unit errors in the equation field', () => {
-    const range = highlightRangeForField('a + bad', [eqError(4, 7)], [unitError(true, 0, 7)], false);
+    const range = highlightRangeForField('a + bad', [eqError(4, 7)], [unitError('consistency', 0, 7)], false);
     expect(range).toEqual({ startByte: 4, endByte: 7, kind: 'error' });
   });
 
   it('underlines the whole units declaration for a consistency error', () => {
     // The consistency error's offsets point into the *equation*; the units
     // field underlines its entire declaration instead.
-    const range = highlightRangeForField('blerz/second', undefined, [unitError(true, 0, 6)], true);
+    const range = highlightRangeForField('blerz/second', undefined, [unitError('consistency', 0, 6)], true);
     expect(range).toEqual({ startByte: 0, endByte: Number.MAX_SAFE_INTEGER, kind: 'error' });
   });
 
   it('uses definition-error offsets in the units field', () => {
-    const range = highlightRangeForField('bad(units)', undefined, [unitError(false, 0, 3)], true);
+    const range = highlightRangeForField('bad(units)', undefined, [unitError('definition', 0, 3)], true);
     expect(range).toEqual({ startByte: 0, endByte: 3, kind: 'error' });
   });
 
   it('treats a definition error end of 0 as to-the-end', () => {
-    const range = highlightRangeForField('bad', undefined, [unitError(false, 1, 0)], true);
+    const range = highlightRangeForField('bad', undefined, [unitError('definition', 1, 0)], true);
     expect(range).toEqual({ startByte: 1, endByte: Number.MAX_SAFE_INTEGER, kind: 'error' });
   });
 
@@ -142,29 +144,57 @@ describe('highlightRangeForField', () => {
     const range = highlightRangeForField(
       'bad(units)',
       undefined,
-      [unitError(true, 0, 6), unitError(false, 0, 3)],
+      [unitError('consistency', 0, 6), unitError('definition', 0, 3)],
       true,
     );
     expect(range).toEqual({ startByte: 0, endByte: 3, kind: 'error' });
   });
 
   it('warns on the conflicting sub-expression in the equation field', () => {
-    const range = highlightRangeForField('a + b*c', undefined, [unitError(true, 4, 7)], false);
+    const range = highlightRangeForField('a + b*c', undefined, [unitError('consistency', 4, 7)], false);
     expect(range).toEqual({ startByte: 4, endByte: 7, kind: 'warning' });
   });
 
   it('suppresses a whole-equation consistency warning in the equation field', () => {
     // When the conflicting span is the entire equation the warning localizes
     // nothing; the units field carries the error underline instead.
-    expect(highlightRangeForField('2*aux1', undefined, [unitError(true, 0, 6)], false)).toBeUndefined();
+    expect(highlightRangeForField('2*aux1', undefined, [unitError('consistency', 0, 6)], false)).toBeUndefined();
   });
 
   it('suppresses a to-the-end consistency warning that starts at 0', () => {
-    expect(highlightRangeForField('2*aux1', undefined, [unitError(true, 0, 0)], false)).toBeUndefined();
+    expect(highlightRangeForField('2*aux1', undefined, [unitError('consistency', 0, 0)], false)).toBeUndefined();
   });
 
   it('ignores definition errors in the equation field', () => {
-    expect(highlightRangeForField('a + b', undefined, [unitError(false, 0, 3)], false)).toBeUndefined();
+    expect(highlightRangeForField('a + b', undefined, [unitError('definition', 0, 3)], false)).toBeUndefined();
+  });
+
+  it('underlines nothing for an inference error in the units field', () => {
+    // An inference error's offsets point into an equation (possibly another
+    // variable's), never the units string; no span in this field is right.
+    expect(highlightRangeForField('people/year', undefined, [unitError('inference', 2, 7)], true)).toBeUndefined();
+  });
+
+  it('underlines nothing for an inference error in the equation field', () => {
+    expect(highlightRangeForField('a + b', undefined, [unitError('inference', 2, 5)], false)).toBeUndefined();
+  });
+
+  it('keeps the consistency underline when an inference error is also present', () => {
+    const units = highlightRangeForField(
+      'people',
+      undefined,
+      [unitError('inference', 2, 7), unitError('consistency', 0, 6)],
+      true,
+    );
+    expect(units).toEqual({ startByte: 0, endByte: Number.MAX_SAFE_INTEGER, kind: 'error' });
+
+    const eqn = highlightRangeForField(
+      'a + b*c',
+      undefined,
+      [unitError('inference', 2, 7), unitError('consistency', 4, 7)],
+      false,
+    );
+    expect(eqn).toEqual({ startByte: 4, endByte: 7, kind: 'warning' });
   });
 
   it('returns undefined when there are no errors', () => {

@@ -72,7 +72,7 @@ describe('ErrorDetails', () => {
         {...noErrors}
         varUnitErrors={
           new Map([
-            ['flow', [{ code: ErrorCode.UnitMismatch, start: 0, end: 1, isConsistencyError: true, details: 'm vs s' }]],
+            ['flow', [{ code: ErrorCode.UnitMismatch, start: 0, end: 1, kind: 'consistency', details: 'm vs s' }]],
           ])
         }
       />,
@@ -89,10 +89,7 @@ describe('ErrorDetails', () => {
         {...noErrors}
         varUnitErrors={
           new Map([
-            [
-              'flow',
-              [{ code: ErrorCode.UnitMismatch, start: 0, end: 1, isConsistencyError: true, details: undefined }],
-            ],
+            ['flow', [{ code: ErrorCode.UnitMismatch, start: 0, end: 1, kind: 'consistency', details: undefined }]],
           ])
         }
       />,

@@ -959,4 +959,39 @@ mod tests {
             "Should have simulation results for mixed_inventory"
         );
     }
+
+    #[test]
+    fn inference_umbrella_detail_is_user_facing() {
+        // The model-level unit-inference warning reaches the GUI's error
+        // panel, so its detail must be a plain-language sentence naming the
+        // involved variables -- not the raw `1 == unit-expression`
+        // constraint dump (which stays available on `InferenceResult`).
+        use crate::db::{DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel};
+
+        let datamodel = TestProject::new("inference-umbrella")
+            .unit("apples", None)
+            .unit("oranges", None)
+            .aux_with_units("apple_count", "10", Some("apples"))
+            .aux_with_units("orange_count", "20", Some("oranges"))
+            .aux_with_units("fruit_total", "apple_count + orange_count", None)
+            .build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
+        let umbrella = diagnostics.iter().find_map(|d| match &d.error {
+            DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch => {
+                Some(e.details.clone().unwrap_or_default())
+            }
+            _ => None,
+        });
+        let detail = umbrella.expect("expected a model-level unit inference warning");
+        assert!(
+            !detail.contains('\n') && !detail.contains("1 =="),
+            "detail should be plain language, not a constraint dump: {detail}"
+        );
+        assert!(
+            detail.contains('\''),
+            "detail should name the involved variables: {detail}"
+        );
+    }
 }

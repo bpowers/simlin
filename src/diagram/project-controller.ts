@@ -26,6 +26,7 @@ import {
   Variable,
   EquationError,
   UnitError,
+  UnitErrorKind,
   SimError,
   ModelError,
   ErrorCode,
@@ -173,6 +174,20 @@ function getErrorDetails(error: unknown): ErrorDetailsLike {
   return {};
 }
 
+// Every Units-kind error the engine emits carries one of the three real
+// kinds; NotApplicable only appears on non-unit errors. Mapping it to
+// 'definition' is a defensive default for a malformed detail.
+function convertUnitErrorKind(kind: SimlinUnitErrorKind): UnitErrorKind {
+  switch (kind) {
+    case SimlinUnitErrorKind.Consistency:
+      return 'consistency';
+    case SimlinUnitErrorKind.Inference:
+      return 'inference';
+    default:
+      return 'definition';
+  }
+}
+
 /**
  * Convert the engine's flat error list into the model-scoped equation/unit
  * error maps the Editor renders. Errors for other models are filtered out.
@@ -204,7 +219,7 @@ export function convertErrorDetails(
         start: err.startOffset ?? 0,
         end: err.endOffset ?? 0,
         code: err.code as unknown as ErrorCode,
-        isConsistencyError: err.unitErrorKind === SimlinUnitErrorKind.Consistency,
+        kind: convertUnitErrorKind(err.unitErrorKind),
         // The bare reason ("computed units 'x' don't match specified units"),
         // NOT `err.message`: the message is terminal-formatted with a source
         // snippet + `~~~` underline + summary line, which renders as garbage
@@ -1118,7 +1133,10 @@ export class ProjectController {
       } else if (!err.variableName) {
         modelErrors.push({
           code: err.code as unknown as ErrorCode,
-          details: err.message ?? undefined,
+          // Prefer the bare reason over the terminal-formatted message (the
+          // unit-inference umbrella carries a plain-language sentence there);
+          // most model errors have no details and keep the message.
+          details: err.details ?? err.message ?? undefined,
         });
       }
     }

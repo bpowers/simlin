@@ -2089,7 +2089,7 @@ describe('variableHasError', () => {
     expect(
       variableHasError({
         ...base,
-        unitErrors: [{ code: ErrorCode.UnitMismatch, start: 0, end: 0, isConsistencyError: true, details: undefined }],
+        unitErrors: [{ code: ErrorCode.UnitMismatch, start: 0, end: 0, kind: 'consistency', details: undefined }],
       }),
     ).toBe(true);
   });
@@ -2107,7 +2107,7 @@ describe('display-only annotations never serialize', () => {
   // persisted into saved projects. Pin the exclusion.
   const annotations = {
     errors: [{ code: ErrorCode.EmptyEquation, start: 0, end: 0 }],
-    unitErrors: [{ code: ErrorCode.UnitMismatch, start: 0, end: 0, isConsistencyError: true, details: undefined }],
+    unitErrors: [{ code: ErrorCode.UnitMismatch, start: 0, end: 0, kind: 'consistency', details: undefined }],
     connectorErrors: [{ kind: 'missingConnector' as const, ident: 'a', name: 'a' }],
   };
 

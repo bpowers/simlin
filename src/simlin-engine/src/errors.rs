@@ -4,6 +4,7 @@
 
 //! Helpers for formatting engine errors for human-readable output.
 
+use crate::builtins::Loc;
 use crate::common::{EquationError, Error, ErrorCode, UnitError};
 use crate::datamodel::{Equation, Project as DatamodelProject, Variable};
 use crate::db;
@@ -46,8 +47,9 @@ pub struct FormattedError {
     /// model/variable summary line that `message` carries (e.g. "computed
     /// units 'people' don't match specified units"). `message` is formatted
     /// for terminal output; GUI consumers that already show the variable in
-    /// context render this instead. Populated for unit errors that carry a
-    /// details string; None elsewhere.
+    /// context render this instead. Populated for unit errors (inference
+    /// errors always synthesize one via `unit_inference_reason`) and for
+    /// model-level errors whose `Error.details` is set; None elsewhere.
     pub details: Option<String>,
 }
 
@@ -100,6 +102,65 @@ fn format_equation_error(
         kind: FormattedErrorKind::Variable,
         unit_error_kind: None,
         details: None,
+    }
+}
+
+/// Join variable names for a user-facing sentence: `'a'`, `'a' and 'b'`,
+/// `'a', 'b', and 'c'`. Long lists are truncated to the first three names
+/// plus a count, so a macro-instantiated conflict with dozens of sources
+/// stays readable.
+fn join_quoted_names(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [a] => format!("'{a}'"),
+        [a, b] => format!("'{a}' and '{b}'"),
+        [a, b, c] => format!("'{a}', '{b}', and '{c}'"),
+        [a, b, c, rest @ ..] => {
+            format!("'{a}', '{b}', '{c}', and {} more", rest.len())
+        }
+    }
+}
+
+/// The bare, user-facing reason for a unit inference error.
+///
+/// Inference conflicts are contradictions in the model-wide unit-constraint
+/// system, and the raw reason on `UnitError::InferenceError` shows the
+/// conflicting constraints in `1 == unit-expression` form with `@N`
+/// metavariables -- useful in terminal output, meaningless to a modeler in
+/// the GUI. A single-line reason is already plain language (e.g. the
+/// clarified macro conflict from `units_infer::clarify_macro_conflict`) and
+/// passes through; a multi-line constraint dump (or a missing reason) is
+/// replaced with a sentence naming the involved variables so the modeler
+/// knows where to look. The full constraint text still rides in the
+/// terminal-formatted `message`.
+pub(crate) fn unit_inference_reason(
+    sources: &[(String, Option<Loc>)],
+    details: Option<&str>,
+) -> String {
+    if let Some(details) = details
+        && !details.contains('\n')
+    {
+        return details.to_string();
+    }
+    // Sources are deduped by (var, loc), so the same variable can appear at
+    // several locations; dedupe by name (order-preserving) so the sentence
+    // never reads "'x' and 'x'" and the 1-vs-many phrasing is right.
+    let mut names: Vec<&str> = Vec::new();
+    for (var, _) in sources {
+        if !names.contains(&var.as_str()) {
+            names.push(var.as_str());
+        }
+    }
+    match names.len() {
+        0 => "the units implied by the model's equations are inconsistent".to_string(),
+        1 => format!(
+            "the units in the equation for {} are inconsistent; check its equation and declared units",
+            join_quoted_names(&names)
+        ),
+        _ => format!(
+            "the units of {} are inconsistent with each other; check the equations and declared units of these variables",
+            join_quoted_names(&names)
+        ),
     }
 }
 
@@ -199,7 +260,7 @@ fn format_unit_error(
                 end_offset: end,
                 kind: FormattedErrorKind::Units,
                 unit_error_kind: Some(UnitErrorKind::Inference),
-                details: details.clone(),
+                details: Some(unit_inference_reason(sources, details.as_deref())),
             }
         }
     }
@@ -247,7 +308,11 @@ pub fn format_diagnostic(diag: &db::Diagnostic) -> FormattedError {
                 end_offset: 0,
                 kind,
                 unit_error_kind,
-                details: None,
+                // Model-level `Error.details` is a bare reason by
+                // construction (e.g. the unit-inference umbrella built in
+                // db/units.rs), so it rides in `details` for GUI consumers
+                // just like per-variable unit errors.
+                details: err.details.clone(),
             }
         }
         DiagnosticError::Unit(err) => {
@@ -484,6 +549,97 @@ mod tests {
         let formatted = format_unit_error("test_model", "no_loc_var", None, &error);
         assert_eq!(formatted.start_offset, 0);
         assert_eq!(formatted.end_offset, 0);
+    }
+
+    #[test]
+    fn inference_error_details_are_user_facing() {
+        use crate::builtins::Loc;
+        use crate::common::UnitError;
+
+        // A multi-line constraint dump (what units_infer produces) is
+        // replaced in `details` by a plain-language sentence naming the
+        // involved variables; the terminal `message` keeps the full dump.
+        let dump = "unit checking failed; inconsistent constraints:\n    1 == people*@3\u{207b}\u{b9}\n    1 == @3";
+        let error = UnitError::InferenceError {
+            code: ErrorCode::UnitMismatch,
+            sources: vec![
+                ("birth_rate".to_string(), Some(Loc::new(0, 5))),
+                ("population".to_string(), None),
+            ],
+            details: Some(dump.to_string()),
+        };
+        let formatted = format_unit_error("main", "birth_rate", None, &error);
+        let details = formatted.details.expect("details missing");
+        assert!(
+            details.contains("'birth_rate'") && details.contains("'population'"),
+            "details should name the involved variables: {details}"
+        );
+        assert!(
+            !details.contains('\n') && !details.contains("1 =="),
+            "details must not carry the constraint dump: {details}"
+        );
+        let message = formatted.message.expect("message missing");
+        assert!(
+            message.contains("1 =="),
+            "terminal message keeps the constraint dump: {message}"
+        );
+
+        // A single involved variable reads as a within-equation problem.
+        let error = UnitError::InferenceError {
+            code: ErrorCode::UnitMismatch,
+            sources: vec![("flow".to_string(), None)],
+            details: Some(dump.to_string()),
+        };
+        let formatted = format_unit_error("main", "flow", None, &error);
+        let details = formatted.details.expect("details missing");
+        assert!(
+            details.contains("'flow'") && !details.contains('\n'),
+            "single-source details should name the variable: {details}"
+        );
+
+        // No sources and no details still yields a plain-language reason.
+        let error = UnitError::InferenceError {
+            code: ErrorCode::UnitMismatch,
+            sources: vec![],
+            details: None,
+        };
+        let formatted = format_unit_error("main", "x", None, &error);
+        let details = formatted.details.expect("details missing");
+        assert!(!details.is_empty() && !details.contains('\n'));
+
+        // Sources are deduped by (var, loc), so the same variable can appear
+        // at two locations; the sentence must not read "'x' and 'x'".
+        let error = UnitError::InferenceError {
+            code: ErrorCode::UnitMismatch,
+            sources: vec![
+                ("x".to_string(), Some(Loc::new(0, 3))),
+                ("x".to_string(), Some(Loc::new(5, 8))),
+            ],
+            details: Some(dump.to_string()),
+        };
+        let formatted = format_unit_error("main", "x", None, &error);
+        let details = formatted.details.expect("details missing");
+        assert_eq!(
+            details.matches("'x'").count(),
+            1,
+            "duplicate names must collapse: {details}"
+        );
+        assert!(
+            details.contains("the units in the equation for 'x'"),
+            "single distinct variable should use the one-variable phrasing: {details}"
+        );
+    }
+
+    #[test]
+    fn join_quoted_names_truncates_long_lists() {
+        assert_eq!(join_quoted_names(&[]), "");
+        assert_eq!(join_quoted_names(&["a"]), "'a'");
+        assert_eq!(join_quoted_names(&["a", "b"]), "'a' and 'b'");
+        assert_eq!(join_quoted_names(&["a", "b", "c"]), "'a', 'b', and 'c'");
+        assert_eq!(
+            join_quoted_names(&["a", "b", "c", "d", "e"]),
+            "'a', 'b', 'c', and 2 more"
+        );
     }
 
     #[test]

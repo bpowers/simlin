@@ -115,7 +115,7 @@ describe('VariableDetails equation preview', () => {
 
   it('keeps the preview for a variable with only non-fatal unit warnings', () => {
     const unitErrors: UnitError[] = [
-      { start: 0, end: 0, code: 0 as unknown as ErrorCode, isConsistencyError: false, details: undefined },
+      { start: 0, end: 0, code: 0 as unknown as ErrorCode, kind: 'definition', details: undefined },
     ];
     const { container } = renderDetails(makeAux('rev', 'a + b', { unitErrors }));
 
@@ -159,7 +159,7 @@ describe('VariableDetails unit errors', () => {
     start: 0,
     end: 6,
     code: ErrorCode.UnitMismatch,
-    isConsistencyError: true,
+    kind: 'consistency',
     details,
   });
 
@@ -208,7 +208,7 @@ describe('VariableDetails unit errors', () => {
       start: 0,
       end: 5,
       code: ErrorCode.NoAppInUnits,
-      isConsistencyError: false,
+      kind: 'definition',
       details: undefined,
     };
     const { container } = renderDetails(makeAux('x', '1', { units: 'bad(u) * good', unitErrors: [defError] }));
