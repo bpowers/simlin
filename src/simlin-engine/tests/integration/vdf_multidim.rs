@@ -36,8 +36,11 @@ fn assert_result_column_matches_ot(results: &Results, vdf_data: &VdfData, name: 
         .unwrap_or_else(|| panic!("missing OT[{ot}]"));
     for (step, expected_value) in expected.iter().take(results.step_count).enumerate() {
         let actual = results.data[step * results.step_size + col];
+        // NaN-vs-NaN is a match: missing/not-saved OT slots decode as all-NaN
+        // (e.g. `Intensity RS target` on Ref.vdf), and the column must carry
+        // the same missing pattern as its OT entry.
         assert!(
-            (actual - expected_value).abs() <= 1e-6,
+            (actual - expected_value).abs() <= 1e-6 || (actual.is_nan() && expected_value.is_nan()),
             "{name}: step {step} actual {actual} != OT[{ot}] value {expected_value}"
         );
     }

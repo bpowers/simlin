@@ -676,10 +676,19 @@ pub struct VdfDatasetSeriesBinding {
 pub struct VdfFile {
     /// Raw file bytes.
     pub data: Vec<u8>,
-    /// Number of time points in the simulation.
+    /// Number of saved time points in the simulation (header offset 0x78).
     pub time_point_count: usize,
-    /// Bitmap size in bytes: ceil(time_point_count / 8).
+    /// Bitmap size in bytes for saved-grid blocks: ceil(time_point_count / 8).
     pub bitmap_size: usize,
+    /// Block time-point grid count (header offset 0x7C). Usually equals
+    /// `time_point_count`, but saved-suffix runs (e.g. `risk.vdf`: 0x78=213,
+    /// 0x7C=225) keep some blocks' bitmaps on this full grid while the Time
+    /// block stores only the saved suffix. Clamped to at least
+    /// `time_point_count` so a malformed header cannot shrink bitmaps.
+    pub block_time_point_count: usize,
+    /// Bitmap size in bytes for full-grid blocks:
+    /// ceil(block_time_point_count / 8).
+    pub block_bitmap_size: usize,
     /// All sections found in the file.
     pub sections: Vec<Section>,
     /// All parsed variable names from the name table section's region.
@@ -895,6 +904,12 @@ impl VdfFile {
 
         let time_point_count = read_u32(&data, 0x78) as usize;
         let bitmap_size = time_point_count.div_ceil(8);
+        // Header 0x7C is the block time-point grid count: the full output
+        // grid a block bitmap may cover. Saved-suffix files store fewer saved
+        // points (0x78) than grid points; clamp so a block-grid count below
+        // the saved count (never observed) cannot shrink bitmap decoding.
+        let block_time_point_count = (read_u32(&data, 0x7c) as usize).max(time_point_count);
+        let block_bitmap_size = block_time_point_count.div_ceil(8);
 
         // Header offsets 0x58/0x5c/0x60 point directly to key section-6/7
         // data structures, eliminating the need for heuristic scanning.
@@ -966,6 +981,8 @@ impl VdfFile {
             data,
             time_point_count,
             bitmap_size,
+            block_time_point_count,
+            block_bitmap_size,
             sections,
             names,
             name_section_idx,
@@ -1499,6 +1516,77 @@ impl VdfFile {
         out
     }
 
+    /// Decode the bitmap width for a data block from its declared value count.
+    ///
+    /// Edited saved-suffix runs (e.g. `risk.vdf`) mix saved-grid blocks and
+    /// full-grid blocks in the same file. The deterministic per-block
+    /// discriminator is that the block's `u16` count equals the popcount of
+    /// the bitmap bytes that precede its f32 payload. The compact saved-grid
+    /// bitmap is preferred when both widths happen to match (the wider bitmap
+    /// would then be reading past the block's real bitmap into payload bytes);
+    /// if neither width matches, fall back to the block-grid width. Returns
+    /// `(bitmap_size, grid_count)`.
+    pub fn block_bitmap_layout(&self, block_offset: usize, count: usize) -> (usize, usize) {
+        let candidates = [
+            (self.bitmap_size, self.time_point_count),
+            (self.block_bitmap_size, self.block_time_point_count),
+        ];
+        for (i, (bitmap_size, grid_count)) in candidates.into_iter().enumerate() {
+            // In the common case both header counts are equal; skip the
+            // duplicate candidate rather than popcounting twice.
+            if i == 1 && bitmap_size == candidates[0].0 {
+                continue;
+            }
+            let bm_start = block_offset + 2;
+            let bm_end = bm_start + bitmap_size;
+            if bm_end > self.data.len() {
+                continue;
+            }
+            let bit_count: usize = self.data[bm_start..bm_end]
+                .iter()
+                .map(|b| b.count_ones() as usize)
+                .sum();
+            if bit_count == count {
+                return (bitmap_size, grid_count);
+            }
+        }
+        (self.block_bitmap_size, self.block_time_point_count)
+    }
+
+    /// Extract one data block's series aligned to the saved time axis.
+    ///
+    /// Decodes the per-block bitmap width via [`Self::block_bitmap_layout`];
+    /// when the block covers the full block-grid rather than the saved grid,
+    /// the full-grid series is decoded and then sampled at the positions the
+    /// saved Time values occupy on that grid (saved-suffix files save the
+    /// tail of the run). Positions outside the decoded grid yield NaN.
+    fn extract_block_series_sampled(
+        &self,
+        block_offset: usize,
+        time_values: &[f64],
+    ) -> StdResult<Vec<f64>, Box<dyn Error>> {
+        if block_offset + 2 > self.data.len() {
+            return Err(format!("data block at 0x{block_offset:x} out of bounds").into());
+        }
+        let count = read_u16(&self.data, block_offset) as usize;
+        let (bitmap_size, grid_count) = self.block_bitmap_layout(block_offset, count);
+        let series = decode_block_grid(&self.data, block_offset, bitmap_size, grid_count)?;
+        if grid_count == time_values.len() {
+            return Ok(series);
+        }
+        let positions = block_positions_for_time_values(time_values, grid_count);
+        Ok(positions
+            .into_iter()
+            .map(|pos| {
+                if pos >= 0 && (pos as usize) < series.len() {
+                    series[pos as usize]
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect())
+    }
+
     /// Extract all time series data from data blocks, returning a `VdfData`.
     pub fn extract_data(&self) -> StdResult<VdfData, Box<dyn Error>> {
         let time_values = extract_time_series(
@@ -1509,6 +1597,13 @@ impl VdfFile {
         )?;
         let step_count = time_values.len();
 
+        // The class-code and final-value arrays drive the missing-slot rule
+        // for inline OT entries (see `inline_ot_entry_is_missing`). Either
+        // may be absent on malformed files; the rule then never fires and
+        // raw values decode as inline constants like before.
+        let class_codes = self.section6_ot_class_codes();
+        let final_values = self.section6_ot_final_values();
+
         let mut entries = Vec::with_capacity(self.offset_table_count);
         for i in 0..self.offset_table_count {
             let raw_val = self
@@ -1516,10 +1611,16 @@ impl VdfFile {
                 .ok_or("offset table entry out of bounds")?;
 
             let series = if self.is_data_block_offset(raw_val) {
-                extract_block_series(&self.data, raw_val as usize, self.bitmap_size, &time_values)?
+                self.extract_block_series_sampled(raw_val as usize, &time_values)?
             } else {
-                let const_val = f32::from_le_bytes(raw_val.to_le_bytes()) as f64;
-                vec![const_val; step_count]
+                let code = class_codes.as_ref().and_then(|c| c.get(i)).copied();
+                let final_value = final_values.as_ref().and_then(|f| f.get(i)).copied();
+                if inline_ot_entry_is_missing(raw_val, code, final_value) {
+                    vec![f64::NAN; step_count]
+                } else {
+                    let const_val = f32::from_le_bytes(raw_val.to_le_bytes()) as f64;
+                    vec![const_val; step_count]
+                }
             };
             entries.push(series);
         }
@@ -1974,6 +2075,14 @@ pub fn find_records(data: &[u8], search_start: usize, search_end: usize) -> Vec<
 /// Walk data blocks from the first block offset, returning (offset, count, block_size)
 /// for each block found. Used by diagnostic tools (vdf_dump) to visualize the
 /// data block layout.
+///
+/// This walk assumes every block uses the single fixed `bitmap_size` and that
+/// blocks are contiguously packed. On saved-suffix files (header 0x7C > 0x78,
+/// e.g. `risk.vdf`), some blocks carry the wider `ceil(0x7C/8)` bitmap
+/// ([`VdfFile::block_bitmap_layout`] is the per-block discriminator), so this
+/// heuristic misparses everything after the first such block and typically
+/// stops early. That is acceptable for its diagnostic gap-visualization use;
+/// follow offset-table entries (as `extract_data` does) for exact decoding.
 pub fn enumerate_data_blocks(
     data: &[u8],
     first_block_offset: usize,
@@ -2076,37 +2185,117 @@ fn extract_time_series(
     Ok(times)
 }
 
-/// Extract a full time series from a VDF data block, producing one value
-/// per time point. Uses zero-order hold for time points without stored values.
+/// Extract a full time series from a VDF data block over a fixed bitmap
+/// width, producing one value per time point. Uses zero-order hold for time
+/// points without stored values.
+///
+/// This fixed-width form is the dataset-VDF path (dataset files have a
+/// single grid); simulation-result blocks go through
+/// [`VdfFile::extract_block_series_sampled`], which additionally decodes the
+/// per-block bitmap width for saved-suffix files.
 fn extract_block_series(
     data: &[u8],
     block_offset: usize,
     bitmap_size: usize,
     time_values: &[f64],
 ) -> StdResult<Vec<f64>, Box<dyn Error>> {
-    let step_count = time_values.len();
-    let count = u16::from_le_bytes(data[block_offset..block_offset + 2].try_into()?) as usize;
+    decode_block_grid(data, block_offset, bitmap_size, time_values.len())
+}
+
+/// Decode a data block's sparse values over a `grid_count`-point time grid
+/// with a `bitmap_size`-byte bitmap, applying zero-order hold: a clear bit
+/// repeats the previous value, and grid points before the first stored value
+/// are NaN. A truncated payload leaves the remaining grid points NaN rather
+/// than erroring, mirroring the Python reference reader.
+fn decode_block_grid(
+    data: &[u8],
+    block_offset: usize,
+    bitmap_size: usize,
+    grid_count: usize,
+) -> StdResult<Vec<f64>, Box<dyn Error>> {
+    if block_offset + 2 + bitmap_size > data.len() {
+        return Err(format!("data block at 0x{block_offset:x} truncated").into());
+    }
+    let count = read_u16(data, block_offset) as usize;
     let bm = &data[block_offset + 2..block_offset + 2 + bitmap_size];
     let data_start = block_offset + 2 + bitmap_size;
 
-    let mut series = vec![f64::NAN; step_count];
+    // The bitmap carries one bit per grid point; a caller-supplied grid
+    // larger than the bitmap can describe is clamped defensively.
+    let grid_count = grid_count.min(bitmap_size * 8);
+
+    let mut series = vec![f64::NAN; grid_count];
     let mut data_idx = 0;
     let mut last_val = f64::NAN;
 
-    // time_values is the full evenly-spaced time grid from block 0, so
-    // time_idx corresponds directly to the step index.
-    for (time_idx, _) in time_values.iter().enumerate() {
+    for (time_idx, slot) in series.iter_mut().enumerate() {
         let bit_set = (bm[time_idx / 8] >> (time_idx % 8)) & 1 == 1;
         if bit_set && data_idx < count {
             let off = data_start + data_idx * 4;
-            last_val = f32::from_le_bytes(data[off..off + 4].try_into()?) as f64;
+            if off + 4 > data.len() {
+                break;
+            }
+            last_val = read_f32(data, off) as f64;
             data_idx += 1;
         }
-
-        series[time_idx] = last_val;
+        *slot = last_val;
     }
 
     Ok(series)
+}
+
+/// Map saved Time values onto positions of a `grid_count`-point block grid.
+///
+/// Saved-suffix files save the TAIL of the full output grid: the Time block
+/// stores only the saved points, while some variable blocks' bitmaps cover
+/// the whole grid. The grid origin is therefore derived from the LAST saved
+/// time (`origin = time_values[last] - (grid_count - 1) * step`), and each
+/// saved time maps to `round((t - origin) / step)`. Non-uniformly-spaced or
+/// degenerate-step time axes fall back to identity positions (there is no
+/// grid to project onto); callers must treat out-of-range positions as NaN.
+fn block_positions_for_time_values(time_values: &[f64], grid_count: usize) -> Vec<i64> {
+    if time_values.is_empty() {
+        return Vec::new();
+    }
+    let identity = || (0..time_values.len() as i64).collect::<Vec<i64>>();
+    if grid_count == time_values.len() {
+        return identity();
+    }
+    if time_values.len() == 1 {
+        return vec![0];
+    }
+
+    let step = time_values[1] - time_values[0];
+    if step.abs() < 1e-12 {
+        return identity();
+    }
+    if time_values
+        .windows(2)
+        .any(|w| ((w[1] - w[0]) - step).abs() > 1e-5)
+    {
+        return identity();
+    }
+
+    let origin = time_values[time_values.len() - 1] - (grid_count as f64 - 1.0) * step;
+    time_values
+        .iter()
+        .map(|&value| ((value - origin) / step).round() as i64)
+        .collect()
+}
+
+/// Whether an inline (non-block) offset-table entry is a missing/no-saved-data
+/// slot rather than an inline f32 constant.
+///
+/// A raw `0` normally decodes as the constant `0.0`, but `Ref.vdf` shows that
+/// raw-0 entries with the dynamic class code `0x11` and a nonzero section-6
+/// final value are slots Vensim's save configuration omitted: the variable
+/// genuinely ran (its final value is recorded, typically the `:NA:`-arithmetic
+/// sentinel ~-1.3e33) but no series was saved. Those decode as all-NaN. A NaN
+/// final value also counts as nonzero (data existed, saved as literal NaN).
+fn inline_ot_entry_is_missing(raw: u32, class_code: Option<u8>, final_value: Option<f32>) -> bool {
+    raw == 0
+        && class_code == Some(VDF_SECTION6_OT_CODE_DYNAMIC)
+        && final_value.is_some_and(|value| value != 0.0)
 }
 
 #[cfg(test)]
@@ -2557,6 +2746,11 @@ mod tests {
             ("pop", "../../test/bobby/vdf/pop/Current.vdf"),
             ("econ", "../../test/bobby/vdf/econ/base.vdf"),
             ("wrld3", "../../test/metasd/WRLD3-03/SCEN01.VDF"),
+            // Saved-suffix fixtures (0x78=213 saved points, 0x7C=225 block grid
+            // points): these catch the per-block bitmap-width rule -- their
+            // class-0x05 input blocks use the wider ceil(0x7C/8) bitmap.
+            ("risk", "../../test/bobby/vdf/econ/risk.vdf"),
+            ("risk2", "../../test/bobby/vdf/econ/risk2.vdf"),
         ];
 
         for (label, vdf_path) in models {
@@ -2581,6 +2775,199 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Rule-1 focused test: saved-suffix files (`0x78` saved count < `0x7C`
+    /// block grid count) store their class-0x05 input blocks with the wider
+    /// `ceil(0x7C/8)` bitmap, while every other block keeps the compact
+    /// `ceil(0x78/8)` saved-grid bitmap. The per-block popcount discriminator
+    /// must pick the wider layout for exactly the input blocks, and decoding
+    /// must sample the full-grid series at the saved time positions.
+    #[test]
+    fn test_saved_suffix_blocks_use_wider_bitmap_grid() {
+        let cases = [
+            // (path, class-0x05 OTs, first value of the first input block)
+            ("../../test/bobby/vdf/econ/risk.vdf", [42usize, 55]),
+            ("../../test/bobby/vdf/econ/risk2.vdf", [43, 58]),
+        ];
+
+        for (path, input_ots) in cases {
+            let vdf = vdf_file(path);
+            assert_eq!(vdf.time_point_count, 213, "{path}: saved count (0x78)");
+            assert_eq!(vdf.bitmap_size, 27, "{path}: saved bitmap width");
+            assert_eq!(
+                vdf.block_time_point_count, 225,
+                "{path}: block grid count (0x7C)"
+            );
+            assert_eq!(vdf.block_bitmap_size, 29, "{path}: block bitmap width");
+
+            let codes = vdf.section6_ot_class_codes().unwrap();
+            let class05_ots: Vec<usize> = codes
+                .iter()
+                .enumerate()
+                .filter_map(|(ot, &code)| (code == VDF_SECTION6_OT_CODE_INPUT).then_some(ot))
+                .collect();
+            assert_eq!(
+                class05_ots,
+                input_ots.to_vec(),
+                "{path}: class-0x05 input OTs"
+            );
+
+            // Every data block except the two input blocks must discriminate
+            // to the compact saved-grid bitmap; the input blocks must pick
+            // the wider block-grid bitmap.
+            for ot in 0..vdf.offset_table_count {
+                let Some(raw) = vdf.offset_table_entry(ot) else {
+                    continue;
+                };
+                if !vdf.is_data_block_offset(raw) {
+                    continue;
+                }
+                let block_offset = raw as usize;
+                let count = read_u16(&vdf.data, block_offset) as usize;
+                let (bitmap_size, grid_count) = vdf.block_bitmap_layout(block_offset, count);
+                if input_ots.contains(&ot) {
+                    assert_eq!(
+                        (bitmap_size, grid_count),
+                        (vdf.block_bitmap_size, vdf.block_time_point_count),
+                        "{path}: OT[{ot}] should use the wider block-grid bitmap"
+                    );
+                } else {
+                    assert_eq!(
+                        (bitmap_size, grid_count),
+                        (vdf.bitmap_size, vdf.time_point_count),
+                        "{path}: OT[{ot}] should use the saved-grid bitmap"
+                    );
+                }
+            }
+
+            // The decoded input series must line up with the section-6 final
+            // values ("federal funds rate" ends at 1.81, "inflation rate" at
+            // ~4.698); with a fixed saved-width bitmap they decode to garbage
+            // (e.g. 1.27e-26).
+            let data = vdf.extract_data().unwrap();
+            let ffr = &data.entries[input_ots[0]];
+            let infl = &data.entries[input_ots[1]];
+            assert!(
+                (ffr[0] - 6.909999847412109).abs() < 1e-6,
+                "{path}: federal funds rate first value, got {}",
+                ffr[0]
+            );
+            assert!(
+                (ffr.last().unwrap() - 1.809999942779541).abs() < 1e-6,
+                "{path}: federal funds rate last value, got {}",
+                ffr.last().unwrap()
+            );
+            assert!(
+                (infl.last().unwrap() - 4.698160171508789).abs() < 1e-6,
+                "{path}: inflation rate last value, got {}",
+                infl.last().unwrap()
+            );
+        }
+    }
+
+    /// Rule-2 focused test: on `Ref.vdf`, a raw-0 OT entry with dynamic class
+    /// `0x11` and a nonzero section-6 final value is a missing/no-saved-data
+    /// slot (Vensim's save configuration omitted the series) and must decode
+    /// as all-NaN -- while a raw-0 entry with a constant-like class still
+    /// decodes as the constant 0.0.
+    #[test]
+    fn test_ref_raw_zero_dynamic_ot_entries_decode_as_missing() {
+        let vdf = vdf_file("../../test/xmutil_test_models/Ref.vdf");
+        let codes = vdf.section6_ot_class_codes().unwrap();
+        let finals = vdf.section6_ot_final_values().unwrap();
+
+        let missing_ots: Vec<usize> = (0..vdf.offset_table_count)
+            .filter(|&ot| {
+                vdf.offset_table_entry(ot) == Some(0)
+                    && codes[ot] == VDF_SECTION6_OT_CODE_DYNAMIC
+                    && finals[ot] != 0.0
+            })
+            .collect();
+        assert_eq!(
+            missing_ots.len(),
+            455,
+            "Ref.vdf should pin the missing-slot count"
+        );
+        assert!(missing_ots.contains(&611));
+
+        let data = vdf.extract_data().unwrap();
+        for &ot in &[missing_ots[0], 611] {
+            assert!(
+                data.entries[ot].iter().all(|v| v.is_nan()),
+                "OT[{ot}] is a missing slot and must decode as all-NaN"
+            );
+        }
+
+        // Constant-like raw-0 entries keep decoding as the constant 0.0:
+        // OT[779] is raw 0 with class 0x17 (inline constant) on Ref.vdf.
+        assert_eq!(vdf.offset_table_entry(779), Some(0));
+        assert_eq!(codes[779], VDF_SECTION6_OT_CODE_CONST);
+        assert!(
+            data.entries[779].iter().all(|&v| v == 0.0),
+            "a raw-0 constant-class entry must decode as constant 0.0"
+        );
+    }
+
+    /// The saved-position sampling helper must fall back to identity positions
+    /// on non-uniformly-spaced or degenerate-step time axes, and out-of-range
+    /// positions must be guarded by the caller (NaN).
+    #[test]
+    fn test_block_positions_for_time_values_fallbacks() {
+        // Uniform suffix: a 5-point grid whose last saved time anchors the
+        // origin. Saved times [3, 4] on a 5-point grid of step 1 starting at
+        // origin 0 map to positions [3, 4].
+        assert_eq!(block_positions_for_time_values(&[3.0, 4.0], 5), vec![3, 4]);
+
+        // Grid count equal to the saved count: identity.
+        assert_eq!(block_positions_for_time_values(&[3.0, 4.0], 2), vec![0, 1]);
+
+        // Single saved point: position 0.
+        assert_eq!(block_positions_for_time_values(&[7.0], 5), vec![0]);
+
+        // Degenerate step: identity fallback.
+        assert_eq!(
+            block_positions_for_time_values(&[2.0, 2.0, 2.0], 5),
+            vec![0, 1, 2]
+        );
+
+        // Non-uniform spacing: identity fallback.
+        assert_eq!(
+            block_positions_for_time_values(&[0.0, 1.0, 3.0], 5),
+            vec![0, 1, 2]
+        );
+
+        // Empty saved axis: no positions.
+        assert!(block_positions_for_time_values(&[], 5).is_empty());
+    }
+
+    /// The Rule-2 missing-slot discriminator in isolation: only the exact
+    /// combination raw==0, class 0x11, and a present nonzero final value marks
+    /// a missing slot.
+    #[test]
+    fn test_inline_ot_entry_is_missing_arms() {
+        let dyn_code = Some(VDF_SECTION6_OT_CODE_DYNAMIC);
+        assert!(inline_ot_entry_is_missing(0, dyn_code, Some(-1.3e33)));
+        // A NaN final value is "nonzero" (data was saved as literal NaN).
+        assert!(inline_ot_entry_is_missing(0, dyn_code, Some(f32::NAN)));
+        // A zero final is a genuine constant 0.
+        assert!(!inline_ot_entry_is_missing(0, dyn_code, Some(0.0)));
+        // A nonzero raw is an inline f32 constant regardless of class.
+        assert!(!inline_ot_entry_is_missing(
+            1.5f32.to_bits(),
+            dyn_code,
+            Some(-1.3e33)
+        ));
+        // Constant-like class codes decode raw 0 as constant 0.0.
+        assert!(!inline_ot_entry_is_missing(
+            0,
+            Some(VDF_SECTION6_OT_CODE_CONST),
+            Some(-1.3e33)
+        ));
+        // Without class codes or final values there is no evidence of a
+        // missing slot; keep the constant decode.
+        assert!(!inline_ot_entry_is_missing(0, None, Some(-1.3e33)));
+        assert!(!inline_ot_entry_is_missing(0, dyn_code, None));
     }
 
     #[test]
@@ -3672,6 +4059,8 @@ mod tests {
             data,
             time_point_count: 0,
             bitmap_size: 0,
+            block_time_point_count: 0,
+            block_bitmap_size: 0,
             sections: vec![section],
             names,
             name_section_idx: Some(0),

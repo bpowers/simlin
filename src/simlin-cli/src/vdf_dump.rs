@@ -144,6 +144,12 @@ fn print_header(vdf: &VdfFile, file_size: usize, path: &str) {
     println!("Timestamp:    {}", timestamp);
     println!("Time points:  {}", vdf.time_point_count);
     println!("Bitmap size:  {} bytes", vdf.bitmap_size);
+    if vdf.block_time_point_count != vdf.time_point_count {
+        println!(
+            "Block grid:   {} points ({} bitmap bytes)",
+            vdf.block_time_point_count, vdf.block_bitmap_size
+        );
+    }
     println!();
 }
 
@@ -899,14 +905,18 @@ fn print_data_blocks(vdf: &VdfFile) {
             continue;
         }
         let count = read_u16(&vdf.data, offset) as usize;
-        let block_size = 2 + vdf.bitmap_size + count * 4;
-        let density = if vdf.time_point_count > 0 {
-            (count as f64 / vdf.time_point_count as f64) * 100.0
+        // Saved-suffix files mix saved-grid and full-grid bitmaps; use the
+        // per-block popcount discriminator so sizes and value offsets are
+        // right for both.
+        let (bitmap_size, grid_count) = vdf.block_bitmap_layout(offset, count);
+        let block_size = 2 + bitmap_size + count * 4;
+        let density = if grid_count > 0 {
+            (count as f64 / grid_count as f64) * 100.0
         } else {
             0.0
         };
 
-        let data_start = offset + 2 + vdf.bitmap_size;
+        let data_start = offset + 2 + bitmap_size;
         let first_val = if count > 0 && data_start + 4 <= vdf.data.len() {
             format!("{}", read_f32(&vdf.data, data_start))
         } else {
@@ -925,15 +935,7 @@ fn print_data_blocks(vdf: &VdfFile) {
         };
         println!(
             "  {:>3}  0x{:08x}  {}/{} ({:.0}%)  {}B  first={} last={}{}",
-            idx,
-            offset,
-            count,
-            vdf.time_point_count,
-            density,
-            block_size,
-            first_val,
-            last_val,
-            label
+            idx, offset, count, grid_count, density, block_size, first_val, last_val, label
         );
     }
     println!();

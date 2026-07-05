@@ -426,8 +426,11 @@ the lookup-data stream.
 `header[0x60]`. Each entry is either a **file offset to a data block** (value
 `>= first_data_block_offset`) or an **inline f32 constant** (any smaller value,
 reinterpreted as f32). A raw `0` decodes as the constant `0.0` for
-constant-like class codes, but on `Ref.vdf` raw-`0` entries with class `0x11`
-and final value `-1.3e33` are missing/no-saved-data slots, not numeric zero.
+constant-like class codes, but a raw-`0` entry with the dynamic class `0x11`
+and a *nonzero* section-6 final value is a missing/no-saved-data slot (the
+variable ran -- its final value is recorded -- but Vensim's save configuration
+omitted the series), decoded as all-NaN, not numeric zero. On `Ref.vdf` there
+are 455 such entries, carrying the `:NA:`-arithmetic final `-1.3e33`.
 
 ### Data blocks
 
@@ -445,9 +448,16 @@ block's value at a time point with a clear bit holds (zero-order hold).
 The bitmap width is decoded **per block**: most blocks use `ceil(header[0x78]
 / 8)` bytes, but saved-suffix files (`risk.vdf`) mix that with
 `ceil(header[0x7C] / 8)`. The deterministic discriminator is local to the
-block: the `u16 count` equals the bitmap popcount for the correct width. When a
+block: the `u16 count` equals the bitmap popcount for the correct width. Try
+the compact saved-grid width first and prefer it when both widths happen to
+match (the wider bitmap would be popcounting past the real bitmap into payload
+bytes); when neither width matches, fall back to the block-grid width. When a
 block uses the larger grid, decode the full grid and sample the positions
-corresponding to the saved Time values.
+corresponding to the saved Time values: saved-suffix files save the *tail* of
+the run, so the grid origin is derived from the last saved time
+(`origin = time[last] - (grid_count - 1) * step`) and each saved time maps to
+`round((t - origin) / step)`; a non-uniform or degenerate-step time axis falls
+back to identity positions, and out-of-range positions decode as NaN.
 
 
 ## Name-to-OT mapping
