@@ -377,6 +377,11 @@ typedef struct {
   uint8_t _private[0];
 } SimlinProject;
 
+// Opaque standalone results structure (e.g. an imported VDF file)
+typedef struct {
+  uint8_t _private[0];
+} SimlinResults;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -1188,6 +1193,79 @@ bool simlin_project_is_simulatable(SimlinProject *project,
 // - `project` must be a valid pointer to a SimlinProject
 // - The returned pointer must be freed with `simlin_error_free`
 SimlinError *simlin_project_get_errors(SimlinProject *project, SimlinError **out_error);
+
+// Opens a Vensim VDF (binary simulation data) file from a byte buffer.
+//
+// Auto-detects the container kind from the file magic: simulation-run files
+// (`0x52`), sensitivity-run files (`0x53`), and dataset files (`0x41`) are
+// all supported. On success returns a `SimlinResults` handle (release with
+// `simlin_results_unref`); on failure returns NULL with an error stored in
+// `out_error`.
+//
+// Malformed input reports an error rather than crashing: the engine's VDF
+// readers are total on arbitrary bytes (pinned by the engine's
+// truncation/corruption sweep test), and the `catch_unwind` here is
+// defense-in-depth for unwind builds (release builds compile with
+// panic=abort, where unwinding never starts).
+//
+// # Safety
+// - `data` must point to `len` valid bytes (may be NULL only when `len` is 0)
+SimlinResults *simlin_results_open_vdf(const uint8_t *data, uintptr_t len, SimlinError **out_error);
+
+// Increments the reference count of a results handle
+//
+// # Safety
+// - `results` must be a valid pointer to a SimlinResults
+void simlin_results_ref(SimlinResults *results);
+
+// Decrements the reference count and frees the results handle if it reaches zero
+//
+// # Safety
+// - `results` must be a valid pointer to a SimlinResults
+void simlin_results_unref(SimlinResults *results);
+
+// Gets the number of time steps in the results
+//
+// # Safety
+// - `results` must be a valid pointer to a SimlinResults
+void simlin_results_get_stepcount(SimlinResults *results,
+                                  uintptr_t *out_count,
+                                  SimlinError **out_error);
+
+// Gets the number of named series in the results (including `time`)
+//
+// # Safety
+// - `results` must be a valid pointer to a SimlinResults
+void simlin_results_get_var_count(SimlinResults *results,
+                                  uintptr_t *out_count,
+                                  SimlinError **out_error);
+
+// Gets the (sorted) names of the series in the results.
+//
+// Call with `max == 0` to query the count without copying names.
+//
+// # Safety
+// - `results` must be a valid pointer to a SimlinResults
+// - `result` must be a valid pointer to an array of at least `max` char pointers
+// - The returned strings are owned by the caller and must be freed with simlin_free_string
+void simlin_results_get_var_names(SimlinResults *results,
+                                  char **result,
+                                  uintptr_t max,
+                                  uintptr_t *out_written,
+                                  SimlinError **out_error);
+
+// Gets the time series for a named variable in the results
+//
+// # Safety
+// - `results` must be a valid pointer to a SimlinResults
+// - `name` must be a valid C string
+// - `results_ptr` must point to allocated memory of at least `len` doubles
+void simlin_results_get_series(SimlinResults *results,
+                               const char *name,
+                               double *results_ptr,
+                               uintptr_t len,
+                               uintptr_t *out_written,
+                               SimlinError **out_error);
 
 // Serialize a project to binary protobuf format
 //

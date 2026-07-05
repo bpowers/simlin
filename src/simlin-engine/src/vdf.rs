@@ -108,6 +108,15 @@ fn normalize_vdf_name(name: &str) -> String {
 /// Standard simulation-result VDF file magic bytes.
 pub const VDF_FILE_MAGIC: [u8; 4] = [0x7f, 0xf7, 0x17, 0x52];
 
+/// Sensitivity/optimization-run VDF file magic bytes. These files carry the
+/// same eight-section layout as ordinary run files (header offsets, section-6
+/// class/final/lookup tail, offset table, and sparse blocks all parse with the
+/// same rules); header word 0x68 points past the normal sparse-block run at an
+/// additional sensitivity payload that is not decoded. The reader follows OT
+/// offsets, so that tail is ignored by construction. See
+/// `docs/design/vdf.md`, "Sensitivity / optimization format".
+pub const VDF_SENSITIVITY_FILE_MAGIC: [u8; 4] = [0x7f, 0xf7, 0x17, 0x53];
+
 /// Dataset VDF file magic bytes used by Vensim's imported dataset files.
 pub const VDF_DATASET_FILE_MAGIC: [u8; 4] = [0x7f, 0xf7, 0x17, 0x41];
 
@@ -116,6 +125,9 @@ pub const VDF_DATASET_FILE_MAGIC: [u8; 4] = [0x7f, 0xf7, 0x17, 0x41];
 pub enum VdfKind {
     /// Standard simulation-results VDF.
     SimulationResults,
+    /// Sensitivity/optimization-run VDF: a simulation-results container with
+    /// an extra undecoded payload past the sparse-block run.
+    SensitivityRun,
     /// Dataset/reference-mode VDF imported from external data.
     Dataset,
 }
@@ -127,6 +139,8 @@ pub fn probe_vdf_kind(data: &[u8]) -> Option<VdfKind> {
     }
     if data[0..4] == VDF_FILE_MAGIC {
         Some(VdfKind::SimulationResults)
+    } else if data[0..4] == VDF_SENSITIVITY_FILE_MAGIC {
+        Some(VdfKind::SensitivityRun)
     } else if data[0..4] == VDF_DATASET_FILE_MAGIC {
         Some(VdfKind::Dataset)
     } else {
@@ -144,10 +158,14 @@ pub const VDF_SENTINEL: u32 = 0xf6800000;
 /// Section-6 OT class code for the Time series (OT[0]) in all observed files.
 pub const VDF_SECTION6_OT_CODE_TIME: u8 = 0x0f;
 
-/// Section-6 OT class code for input/data-like blocks. Observed on
-/// `risk.vdf`/`risk2.vdf` covering names like `federal funds rate` and
-/// `inflation rate`; these slots hold real saved series with the 29-byte
-/// bitmap-width data layout.
+/// Section-6 OT class code for input/exogenous-data blocks. Observed on
+/// `risk.vdf`/`risk2.vdf` (names like `federal funds rate`) and across the
+/// zambaqui corpus (`gdp deflator`). These blocks are the loaded data file's
+/// sparse blocks embedded in the run, bitmapped over the header-0x74 data
+/// grid (which coincides with the 0x7C block grid on `risk.vdf` and is a
+/// genuinely third grid on zambaqui; GH #842). The groupon fixtures carry
+/// sibling exogenous-data class codes `0x06`/`0x0c` with the same block
+/// layout.
 pub const VDF_SECTION6_OT_CODE_INPUT: u8 = 0x05;
 
 /// Section-6 OT class code marking stock-backed OT entries in all validated
@@ -255,20 +273,37 @@ pub const VENSIM_BUILTINS: [&str; 28] = [
 ];
 
 // ---- Low-level readers ----
+//
+// The readers are TOTAL: an out-of-range read returns 0 instead of
+// panicking. VDF input is untrusted (arbitrary caller-supplied bytes cross
+// the libsimlin FFI, and release builds compile with panic = "abort", where
+// any panic aborts the host process), and 0 is a value every downstream
+// structural guard already rejects or treats as "absent". Well-formed files
+// never take the fallback because their header/section guards keep every
+// derived offset in bounds.
 
-/// Read a little-endian u32 from the given byte offset.
+/// Read a little-endian u32 from the given byte offset (0 if out of range).
 pub fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+    match data.get(offset..offset + 4) {
+        Some(bytes) => u32::from_le_bytes(bytes.try_into().unwrap()),
+        None => 0,
+    }
 }
 
-/// Read a little-endian u16 from the given byte offset.
+/// Read a little-endian u16 from the given byte offset (0 if out of range).
 pub fn read_u16(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap())
+    match data.get(offset..offset + 2) {
+        Some(bytes) => u16::from_le_bytes(bytes.try_into().unwrap()),
+        None => 0,
+    }
 }
 
-/// Read a little-endian f32 from the given byte offset.
+/// Read a little-endian f32 from the given byte offset (0.0 if out of range).
 pub fn read_f32(data: &[u8], offset: usize) -> f32 {
-    f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+    match data.get(offset..offset + 4) {
+        Some(bytes) => f32::from_le_bytes(bytes.try_into().unwrap()),
+        None => 0.0,
+    }
 }
 
 // ---- Parsed structures ----
@@ -648,6 +683,67 @@ impl VdfDatasetData {
     pub fn series(&self, name: &str) -> Option<&[f64]> {
         self.series.get(name).map(|series| series.as_slice())
     }
+
+    /// Convert the extracted dataset series into an engine [`Results`] table.
+    ///
+    /// This gives dataset VDFs the same consumption surface as simulation-run
+    /// VDFs (`VdfFile::to_results_via_records`), so FFI callers can expose one
+    /// results type for both container kinds. Column keys are the display
+    /// names canonicalized through `Ident::new` -- the same keying rule the
+    /// run-file path applies -- with `time` at offset 0 sourced from the
+    /// recovered decimal-year axis. If two display names canonicalize to the
+    /// same ident (not observed in practice; Vensim dataset names are unique),
+    /// the later series keeps the offsets entry.
+    pub fn to_results(&self) -> Results {
+        let step_count = self.time_values.len();
+        let step_size = 1 + self.series_order.len();
+        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        let mut data = vec![f64::NAN; step_count * step_size];
+
+        offsets.insert(Ident::<Canonical>::from_str_unchecked("time"), 0);
+        for (step, &t) in self.time_values.iter().enumerate() {
+            data[step * step_size] = t;
+        }
+
+        for (i, name) in self.series_order.iter().enumerate() {
+            let col = 1 + i;
+            offsets.insert(Ident::<Canonical>::new(name), col);
+            if let Some(series) = self.series.get(name) {
+                for (step, &v) in series.iter().take(step_count).enumerate() {
+                    data[step * step_size + col] = v;
+                }
+            }
+        }
+
+        // The dataset's time axis is a saved-output grid, not an integration
+        // grid, so dt/save_step are the observed first-interval spacing (or a
+        // defensive 1.0 for single-point axes; a repeated first timestamp
+        // yields 0.0, which nothing downstream reads today) and the method is
+        // a placeholder.
+        let start = self.time_values.first().copied().unwrap_or(0.0);
+        let stop = self.time_values.last().copied().unwrap_or(start);
+        let saveper = if step_count > 1 {
+            self.time_values[1] - self.time_values[0]
+        } else {
+            1.0
+        };
+
+        Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: Specs {
+                start,
+                stop,
+                dt: saveper,
+                save_step: saveper,
+                method: Method::Euler,
+                n_chunks: step_count,
+            },
+            is_vensim: true,
+        }
+    }
 }
 
 /// Dataset-series binding recovered from the dataset record stream.
@@ -669,6 +765,39 @@ pub struct VdfDatasetSeriesBinding {
     pub record_f3: u32,
 }
 
+/// Which time grid a data block's bitmap reconciled against.
+///
+/// A block's bitmap carries one bit per grid point; the grid is decoded
+/// per block by popcount (see [`VdfFile::block_bitmap_layout`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VdfBlockGrid {
+    /// The saved time grid (header 0x78) -- the grid the Time block uses.
+    Saved,
+    /// The full block/output grid (header 0x7C), wider than the saved grid
+    /// on saved-suffix runs (`risk.vdf`).
+    Block,
+    /// The external data file's time grid (header 0x74), carried by
+    /// exogenous-data blocks (class codes 0x05/0x06/0x0c). Its time values
+    /// are stored only in the external data file, so mapping onto the saved
+    /// axis is approximate; see `data_grid_positions_for_time_values`.
+    Data,
+    /// No known grid's width popcounts to the block's value count: the
+    /// block is undecodable and extraction NaN-fills it rather than
+    /// emitting garbage values.
+    Unreconciled,
+}
+
+/// Decoded bitmap layout for one data block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockBitmapLayout {
+    /// Bitmap width in bytes preceding the f32 payload.
+    pub bitmap_size: usize,
+    /// Number of grid points the bitmap covers.
+    pub grid_count: usize,
+    /// Which grid reconciled (or [`VdfBlockGrid::Unreconciled`]).
+    pub grid: VdfBlockGrid,
+}
+
 /// Fully parsed VDF file holding all structural metadata.
 ///
 /// Created via [`VdfFile::parse`], this struct provides access to all
@@ -676,10 +805,30 @@ pub struct VdfDatasetSeriesBinding {
 pub struct VdfFile {
     /// Raw file bytes.
     pub data: Vec<u8>,
-    /// Number of time points in the simulation.
+    /// Number of saved time points in the simulation (header offset 0x78).
     pub time_point_count: usize,
-    /// Bitmap size in bytes: ceil(time_point_count / 8).
+    /// Bitmap size in bytes for saved-grid blocks: ceil(time_point_count / 8).
     pub bitmap_size: usize,
+    /// Block time-point grid count (header offset 0x7C). Usually equals
+    /// `time_point_count`, but saved-suffix runs (e.g. `risk.vdf`: 0x78=213,
+    /// 0x7C=225) keep some blocks' bitmaps on this full grid while the Time
+    /// block stores only the saved suffix. Clamped to at least
+    /// `time_point_count` so a malformed header cannot shrink bitmaps.
+    pub block_time_point_count: usize,
+    /// Bitmap size in bytes for full-grid blocks:
+    /// ceil(block_time_point_count / 8).
+    pub block_bitmap_size: usize,
+    /// Data-grid time-point count (header offset 0x74): the time-point count
+    /// of the external data file the run loaded, or 0 when the model loaded
+    /// no external data. Exogenous-data blocks (class codes 0x05/0x06/0x0c)
+    /// carry bitmaps over THIS grid -- one bit per data-file time point --
+    /// rather than the saved or block grid (GH #842). The grid's time
+    /// *values* live only in the external data file; see
+    /// `data_grid_positions_for_time_values` for the mapping approximation.
+    pub data_time_point_count: usize,
+    /// Bitmap size in bytes for data-grid blocks:
+    /// ceil(data_time_point_count / 8), or 0 when there is no data grid.
+    pub data_bitmap_size: usize,
     /// All sections found in the file.
     pub sections: Vec<Section>,
     /// All parsed variable names from the name table section's region.
@@ -727,6 +876,20 @@ impl VdfDatasetFile {
         let time_point_count =
             dataset_header_time_point_count(&data).ok_or("missing dataset time-point count")?;
         let bitmap_size = time_point_count.div_ceil(8);
+        // Bound the header count against the file before anything downstream
+        // sizes an allocation from it: every data block carries a
+        // one-bit-per-point bitmap, so a count whose bitmap cannot fit in the
+        // file is structurally bogus. A one-byte corruption of the count
+        // header would otherwise request a multi-gigabyte time axis in
+        // extract_data -- an allocation-failure abort that catch_unwind
+        // cannot intercept (found by Codex review of the FFI import path).
+        if bitmap_size.saturating_add(2) > data.len() {
+            return Err(format!(
+                "dataset time-point count {time_point_count} cannot fit in a {}-byte file",
+                data.len()
+            )
+            .into());
+        }
         let sections = find_sections(&data);
         if sections.len() != 5 {
             return Err(
@@ -852,11 +1015,15 @@ impl VdfDatasetFile {
                 (normalize_vdf_name(&binding.name) == "decimalyear").then_some(binding.block_index)
             })
             .ok_or("dataset VDF missing decimal year series")?;
-        let time_values = extract_block_series(
+        // Only the grid LENGTH matters for decoding the time block itself, so
+        // go straight to decode_block_grid rather than materializing a dummy
+        // time axis (which would be a count-sized allocation made before any
+        // block-level validation runs).
+        let time_values = decode_block_grid(
             &self.data,
             self.data_block_offsets[time_block_index],
             self.bitmap_size,
-            &vec![0.0; self.time_point_count],
+            self.time_point_count,
         )?;
 
         let mut series = HashMap::new();
@@ -886,15 +1053,33 @@ impl VdfFile {
         if data.len() < FILE_HEADER_SIZE {
             return Err("VDF file too small".into());
         }
-        if probe_vdf_kind(&data) == Some(VdfKind::Dataset) {
-            return Err("dataset VDF file; use VdfDatasetFile::parse".into());
-        }
-        if data[0..4] != VDF_FILE_MAGIC {
-            return Err("invalid VDF magic bytes".into());
+        // Both run-file kinds share the eight-section layout; a sensitivity
+        // run only adds an undecoded payload past the sparse-block run, which
+        // this reader never touches (it follows OT offsets), so the two kinds
+        // parse identically.
+        match probe_vdf_kind(&data) {
+            Some(VdfKind::SimulationResults) | Some(VdfKind::SensitivityRun) => {}
+            Some(VdfKind::Dataset) => {
+                return Err("dataset VDF file; use VdfDatasetFile::parse".into());
+            }
+            None => {
+                return Err("invalid VDF magic bytes".into());
+            }
         }
 
         let time_point_count = read_u32(&data, 0x78) as usize;
         let bitmap_size = time_point_count.div_ceil(8);
+        // Header 0x7C is the block time-point grid count: the full output
+        // grid a block bitmap may cover. Saved-suffix files store fewer saved
+        // points (0x78) than grid points; clamp so a block-grid count below
+        // the saved count (never observed) cannot shrink bitmap decoding.
+        let block_time_point_count = (read_u32(&data, 0x7c) as usize).max(time_point_count);
+        let block_bitmap_size = block_time_point_count.div_ceil(8);
+        // Header 0x74 is the data-grid count: the loaded data file's
+        // time-point count (0 when no external data). Exogenous-data blocks
+        // store their bitmaps on this grid (GH #842).
+        let data_time_point_count = read_u32(&data, 0x74) as usize;
+        let data_bitmap_size = data_time_point_count.div_ceil(8);
 
         // Header offsets 0x58/0x5c/0x60 point directly to key section-6/7
         // data structures, eliminating the need for heuristic scanning.
@@ -966,6 +1151,10 @@ impl VdfFile {
             data,
             time_point_count,
             bitmap_size,
+            block_time_point_count,
+            block_bitmap_size,
+            data_time_point_count,
+            data_bitmap_size,
             sections,
             names,
             name_section_idx,
@@ -1462,9 +1651,16 @@ impl VdfFile {
     /// Map record `field[2]` name keys to section-2 name-table indices.
     ///
     /// The key is the 4-byte word offset of the printable name within the
-    /// section-2 data region, plus seven words. The first name (`Time`) has no
-    /// length prefix; every following name's key points at the first character
-    /// after its u16 length prefix.
+    /// section-2 data region, plus seven words: `(string_offset -
+    /// section_data_start) / 4 + 7`. The first name (`Time`) has no length
+    /// prefix, so its key is always 7; every following name's key points at
+    /// the first character after its u16 length prefix. Names whose string
+    /// start is not 4-byte aligned receive no key.
+    ///
+    /// Derived from [`parse_name_table_entries`] -- the same parse that
+    /// builds `self.names` -- so stale/deleted entries (which yield no name)
+    /// also consume no index here, keeping the keyed indices aligned with
+    /// `names` on edited files (GH #839).
     fn record_name_key_to_name_index(&self) -> HashMap<u32, usize> {
         let Some(name_section_idx) = self.name_section_idx else {
             return HashMap::new();
@@ -1472,42 +1668,178 @@ impl VdfFile {
         let Some(section) = self.sections.get(name_section_idx) else {
             return HashMap::new();
         };
-        if self.names.is_empty() {
-            return HashMap::new();
-        }
 
         let data_start = section.data_offset();
-        let parse_end = section.region_end.min(self.data.len());
-        let first_len = (section.field5 >> 16) as usize;
-        if first_len == 0 || data_start + first_len > self.data.len() {
-            return HashMap::new();
-        }
-
         let mut out = HashMap::new();
-        out.insert(7, 0);
-
-        let mut pos = data_start + first_len;
-        let mut name_idx = 1usize;
-        while name_idx < self.names.len() && pos + 2 <= parse_end {
-            let len = read_u16(&self.data, pos) as usize;
-            pos += 2;
-            if len == 0 {
-                continue;
-            }
-            if pos + len > parse_end || len > 256 {
+        for (name_idx, entry) in parse_name_table_entries(&self.data, section, section.region_end)
+            .iter()
+            .enumerate()
+        {
+            // `names` comes from the same parse, but guard the zip anyway so
+            // a divergence can only drop keys, never index out of bounds.
+            if name_idx >= self.names.len() {
                 break;
             }
-
-            let start_rel = pos - data_start;
+            let start_rel = entry.string_offset - data_start;
             if start_rel.is_multiple_of(4) {
                 out.insert((start_rel / 4 + 7) as u32, name_idx);
             }
-
-            pos += len;
-            name_idx += 1;
         }
-
         out
+    }
+
+    /// Decode the bitmap width for a data block from its declared value count.
+    ///
+    /// Files mix blocks on up to three time grids: the saved grid (header
+    /// 0x78), the block grid (header 0x7C; wider on saved-suffix runs like
+    /// `risk.vdf`), and the data grid (header 0x74; the external data file's
+    /// time axis, carried by exogenous-data blocks -- GH #842). The
+    /// deterministic per-block discriminator is that the block's `u16` count
+    /// equals the popcount of the bitmap bytes that precede its f32 payload.
+    /// Candidates are tried in that order and the first match wins. The
+    /// ordering is empirical: saved-before-block is narrower-first (a wider
+    /// match would popcount past the real bitmap into payload), but the data
+    /// width is usually the NARROWEST candidate and still must come LAST --
+    /// over a thousand ordinary saved-grid blocks across the corpora
+    /// coincidentally popcount-match it, while zero exogenous blocks match a
+    /// wider distinct width. Residual risk: an exogenous block with a small
+    /// count and zero-heavy leading payload could match the wider saved
+    /// width and silently mis-place values (no corpus file does); the
+    /// section-6 class code (0x05/0x06/0x0c) is available as a future
+    /// discriminator. Duplicate widths keep the earlier candidate: when
+    /// ceil(0x74/8) == ceil(0x78/8) with different counts (31 zambaqui
+    /// old-runs files), exogenous blocks reconcile as Saved and decode with
+    /// identity positions -- exact on that corpus, but a consequence of the
+    /// dedup, not a separate rule. If no width matches, the result carries
+    /// `VdfBlockGrid::Unreconciled` with the block-grid dimensions --
+    /// callers must treat the series as undecodable rather than decoding
+    /// garbage.
+    pub fn block_bitmap_layout(&self, block_offset: usize, count: usize) -> BlockBitmapLayout {
+        let candidates = [
+            (self.bitmap_size, self.time_point_count, VdfBlockGrid::Saved),
+            (
+                self.block_bitmap_size,
+                self.block_time_point_count,
+                VdfBlockGrid::Block,
+            ),
+            (
+                self.data_bitmap_size,
+                self.data_time_point_count,
+                VdfBlockGrid::Data,
+            ),
+        ];
+        let mut seen_sizes = [usize::MAX; 3];
+        for (i, (bitmap_size, grid_count, grid)) in candidates.into_iter().enumerate() {
+            // A zero-count grid (no data grid in the file) is not a
+            // candidate; duplicate widths are skipped rather than
+            // popcounting twice (the first candidate for a width wins).
+            if grid_count == 0 || seen_sizes.contains(&bitmap_size) {
+                continue;
+            }
+            seen_sizes[i] = bitmap_size;
+            let bm_start = block_offset + 2;
+            let bm_end = bm_start + bitmap_size;
+            if bm_end > self.data.len() {
+                continue;
+            }
+            let bit_count: usize = self.data[bm_start..bm_end]
+                .iter()
+                .map(|b| b.count_ones() as usize)
+                .sum();
+            if bit_count == count {
+                return BlockBitmapLayout {
+                    bitmap_size,
+                    grid_count,
+                    grid,
+                };
+            }
+        }
+        BlockBitmapLayout {
+            bitmap_size: self.block_bitmap_size,
+            grid_count: self.block_time_point_count,
+            grid: VdfBlockGrid::Unreconciled,
+        }
+    }
+
+    /// OT indices of data blocks whose bitmap reconciles with NO known time
+    /// grid (saved, block, or data). Such blocks would decode to garbage
+    /// under any assumed width, so [`Self::extract_data`] NaN-fills their
+    /// series; this list is the per-file diagnostic surface for that loud
+    /// fallback (mirrored by the Python reader's
+    /// `NamedResultsDiagnostics.bitmap_unreconciled_ots`).
+    pub fn unreconciled_data_blocks(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for ot in 0..self.offset_table_count {
+            let Some(raw) = self.offset_table_entry(ot) else {
+                continue;
+            };
+            if !self.is_data_block_offset(raw) {
+                continue;
+            }
+            let block_offset = raw as usize;
+            if block_offset + 2 > self.data.len() {
+                continue;
+            }
+            let count = read_u16(&self.data, block_offset) as usize;
+            let layout = self.block_bitmap_layout(block_offset, count);
+            if layout.grid == VdfBlockGrid::Unreconciled {
+                out.push(ot);
+            }
+        }
+        out
+    }
+
+    /// Extract one data block's series aligned to the saved time axis.
+    ///
+    /// Decodes the per-block bitmap width via [`Self::block_bitmap_layout`].
+    /// When the block covers a grid other than the saved grid, the full-grid
+    /// series is decoded and then sampled at the positions the saved Time
+    /// values occupy on that grid: block-grid bitmaps use the saved-suffix
+    /// rule (saved-suffix files save the tail of the run), data-grid bitmaps
+    /// use the span approximation (see `data_grid_positions_for_time_values`).
+    /// Positions outside the decoded grid yield NaN.
+    ///
+    /// Returns the series plus whether the block's bitmap reconciled with a
+    /// known grid; an unreconciled block yields an all-NaN series (loud
+    /// missing data instead of garbage values decoded under a wrong width).
+    fn extract_block_series_sampled(
+        &self,
+        block_offset: usize,
+        time_values: &[f64],
+    ) -> StdResult<(Vec<f64>, bool), Box<dyn Error>> {
+        if block_offset + 2 > self.data.len() {
+            return Err(format!("data block at 0x{block_offset:x} out of bounds").into());
+        }
+        let count = read_u16(&self.data, block_offset) as usize;
+        let layout = self.block_bitmap_layout(block_offset, count);
+        if layout.grid == VdfBlockGrid::Unreconciled {
+            return Ok((vec![f64::NAN; time_values.len()], false));
+        }
+        let series = decode_block_grid(
+            &self.data,
+            block_offset,
+            layout.bitmap_size,
+            layout.grid_count,
+        )?;
+        if layout.grid_count == time_values.len() {
+            return Ok((series, true));
+        }
+        let positions = if layout.grid == VdfBlockGrid::Data {
+            data_grid_positions_for_time_values(time_values, layout.grid_count)
+        } else {
+            block_positions_for_time_values(time_values, layout.grid_count)
+        };
+        let sampled = positions
+            .into_iter()
+            .map(|pos| {
+                if pos >= 0 && (pos as usize) < series.len() {
+                    series[pos as usize]
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect();
+        Ok((sampled, true))
     }
 
     /// Extract all time series data from data blocks, returning a `VdfData`.
@@ -1520,17 +1852,36 @@ impl VdfFile {
         )?;
         let step_count = time_values.len();
 
+        // The class-code and final-value arrays drive the missing-slot rule
+        // for inline OT entries (see `inline_ot_entry_is_missing`). Either
+        // may be absent on malformed files; the rule then never fires and
+        // raw values decode as inline constants like before.
+        let class_codes = self.section6_ot_class_codes();
+        let final_values = self.section6_ot_final_values();
+
         let mut entries = Vec::with_capacity(self.offset_table_count);
+        let mut unreconciled_ots = Vec::new();
         for i in 0..self.offset_table_count {
             let raw_val = self
                 .offset_table_entry(i)
                 .ok_or("offset table entry out of bounds")?;
 
             let series = if self.is_data_block_offset(raw_val) {
-                extract_block_series(&self.data, raw_val as usize, self.bitmap_size, &time_values)?
+                let (series, reconciled) =
+                    self.extract_block_series_sampled(raw_val as usize, &time_values)?;
+                if !reconciled {
+                    unreconciled_ots.push(i);
+                }
+                series
             } else {
-                let const_val = f32::from_le_bytes(raw_val.to_le_bytes()) as f64;
-                vec![const_val; step_count]
+                let code = class_codes.as_ref().and_then(|c| c.get(i)).copied();
+                let final_value = final_values.as_ref().and_then(|f| f.get(i)).copied();
+                if inline_ot_entry_is_missing(raw_val, code, final_value) {
+                    vec![f64::NAN; step_count]
+                } else {
+                    let const_val = f32::from_le_bytes(raw_val.to_le_bytes()) as f64;
+                    vec![const_val; step_count]
+                }
             };
             entries.push(series);
         }
@@ -1538,6 +1889,7 @@ impl VdfFile {
         Ok(VdfData {
             time_values,
             entries,
+            unreconciled_ots,
         })
     }
 
@@ -1717,31 +2069,52 @@ pub fn find_sections(data: &[u8]) -> Vec<Section> {
     sections
 }
 
-/// Parse the name table up to `parse_end`. The name table may extend past
-/// the section header's size field within its region. `parse_end` should
-/// be the section's `region_end`.
+/// One printable section-2 name-table entry paired with the file offset of
+/// its first string byte (past any u16 length prefix). The offset is what
+/// record `f[2]` keys are computed from, so every consumer of the name table
+/// derives from this single parse -- see [`parse_name_table_entries`].
+pub(crate) struct VdfNameTableEntry {
+    pub(crate) name: String,
+    /// Absolute file offset of the name's first character.
+    pub(crate) string_offset: usize,
+}
+
+/// Single-pass parse of the section-2 name table into printable entries.
 ///
 /// The first entry has no u16 length prefix; its length comes from field5's
 /// high 16 bits. Subsequent entries are u16-length-prefixed. u16=0 entries
-/// are group separators (skipped).
+/// are group separators (skipped). An out-of-bounds or implausibly long
+/// (> 256 byte) length terminates the table.
 ///
-/// Validates each entry (max 256 bytes, printable ASCII) and stops when it
-/// encounters data that doesn't look like a name entry.
-pub fn parse_name_table_extended(data: &[u8], section: &Section, parse_end: usize) -> Vec<String> {
-    let mut names = Vec::new();
+/// Edited Vensim files leave stale/deleted entries: a valid u16 length
+/// prefix over non-printable binary payload. Vensim's reader skips them by
+/// the declared byte count and keeps going -- the table does not end at the
+/// first such entry, and a stale entry consumes NO name index (it yields no
+/// entry here). Deriving both `VdfFile::names` and the record `f[2]` key
+/// maps from this one function is what keeps their indices aligned across
+/// stale entries (GH #839). (See docs/design/vdf.md, section 2.)
+pub(crate) fn parse_name_table_entries(
+    data: &[u8],
+    section: &Section,
+    parse_end: usize,
+) -> Vec<VdfNameTableEntry> {
+    let mut entries = Vec::new();
     let data_start = section.data_offset();
     let parse_end = parse_end.min(data.len());
 
     let first_len = (section.field5 >> 16) as usize;
     if first_len == 0 || data_start + first_len > data.len() {
-        return names;
+        return entries;
     }
     let s: String = data[data_start..data_start + first_len]
         .iter()
         .take_while(|&&b| b != 0)
         .map(|&b| b as char)
         .collect();
-    names.push(s);
+    entries.push(VdfNameTableEntry {
+        name: s,
+        string_offset: data_start,
+    });
 
     let mut pos = data_start + first_len;
 
@@ -1771,18 +2144,30 @@ pub fn parse_name_table_extended(data: &[u8], section: &Section, parse_end: usiz
             .map(|&b| b as char)
             .collect();
 
-        // Edited Vensim files leave stale/deleted entries: a valid u16 length
-        // prefix over non-printable binary payload. Vensim's reader skips them
-        // by the declared length and keeps going -- the table does not end at
-        // the first such entry. Only the out-of-bounds and implausible-length
-        // guards above stop the table. (See docs/design/vdf.md, section 2.)
         if !s.is_empty() && s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-            names.push(s);
+            entries.push(VdfNameTableEntry {
+                name: s,
+                string_offset: pos,
+            });
         }
         pos += len;
     }
 
-    names
+    entries
+}
+
+/// Parse the name table up to `parse_end`. The name table may extend past
+/// the section header's size field within its region. `parse_end` should
+/// be the section's `region_end`.
+///
+/// Thin wrapper over [`parse_name_table_entries`] that drops the string
+/// offsets; see that function for the entry format and the stale-entry
+/// skipping rule.
+pub fn parse_name_table_extended(data: &[u8], section: &Section, parse_end: usize) -> Vec<String> {
+    parse_name_table_entries(data, section, parse_end)
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect()
 }
 
 /// Find the name table section index. Heuristic: it's the section where
@@ -1952,6 +2337,14 @@ pub fn find_records(data: &[u8], search_start: usize, search_end: usize) -> Vec<
 /// Walk data blocks from the first block offset, returning (offset, count, block_size)
 /// for each block found. Used by diagnostic tools (vdf_dump) to visualize the
 /// data block layout.
+///
+/// This walk assumes every block uses the single fixed `bitmap_size` and that
+/// blocks are contiguously packed. On saved-suffix files (header 0x7C > 0x78,
+/// e.g. `risk.vdf`), some blocks carry the wider `ceil(0x7C/8)` bitmap
+/// ([`VdfFile::block_bitmap_layout`] is the per-block discriminator), so this
+/// heuristic misparses everything after the first such block and typically
+/// stops early. That is acceptable for its diagnostic gap-visualization use;
+/// follow offset-table entries (as `extract_data` does) for exact decoding.
 pub fn enumerate_data_blocks(
     data: &[u8],
     first_block_offset: usize,
@@ -1984,6 +2377,11 @@ pub struct VdfData {
     /// Each entry is a time series (one f64 per time point) for one variable.
     /// Indexed by offset-table position. Entry 0 is always the time series.
     pub entries: Vec<Vec<f64>>,
+    /// OT indices whose data-block bitmap reconciled with no known time grid
+    /// (see [`VdfBlockGrid::Unreconciled`]). Their `entries` are all-NaN:
+    /// visibly missing rather than decoded under a wrong bitmap width.
+    /// Empty on every tracked corpus file.
+    pub unreconciled_ots: Vec<usize>,
 }
 
 impl VdfData {
@@ -2007,6 +2405,9 @@ impl VdfData {
             }
         }
 
+        // Invariant: `time_values` is non-empty -- `extract_time_series`
+        // rejects a zero-count Time block, and the dataset path requires a
+        // positive header time-point count.
         let initial_time = self.time_values[0];
         let final_time = self.time_values[step_count - 1];
         let saveper = if step_count > 1 {
@@ -2040,51 +2441,179 @@ fn extract_time_series(
     time_point_count: usize,
     bitmap_size: usize,
 ) -> StdResult<Vec<f64>, Box<dyn Error>> {
-    let count = u16::from_le_bytes(data[block_offset..block_offset + 2].try_into()?) as usize;
+    if block_offset + 2 > data.len() {
+        return Err(format!("time block at 0x{block_offset:x} truncated").into());
+    }
+    let count = read_u16(data, block_offset) as usize;
     if count != time_point_count {
         return Err(format!("time block count {count} != expected {time_point_count}").into());
+    }
+    // A run with zero saved time points is not decodable: `build_results`
+    // derives start/stop from the first and last Time values, so an empty
+    // axis would panic downstream -- and the workspace ships panic=abort,
+    // which would take the whole host process with it at the FFI boundary.
+    // Reachable only via coordinated corruption (header 0x78 AND the Time
+    // block's u16 count both zeroed), which the single-mutation sweep test
+    // cannot produce; rejected here at the source instead.
+    if count == 0 {
+        return Err("VDF time block has zero saved time points".into());
     }
     let data_start = block_offset + 2 + bitmap_size;
     let mut times = Vec::with_capacity(count);
     for i in 0..count {
         let off = data_start + i * 4;
-        let val = f32::from_le_bytes(data[off..off + 4].try_into()?) as f64;
-        times.push(val);
+        if off + 4 > data.len() {
+            return Err(format!("time block at 0x{block_offset:x} truncated").into());
+        }
+        times.push(read_f32(data, off) as f64);
     }
     Ok(times)
 }
 
-/// Extract a full time series from a VDF data block, producing one value
-/// per time point. Uses zero-order hold for time points without stored values.
+/// Extract a full time series from a VDF data block over a fixed bitmap
+/// width, producing one value per time point. Uses zero-order hold for time
+/// points without stored values.
+///
+/// This fixed-width form is the dataset-VDF path (dataset files have a
+/// single grid); simulation-result blocks go through
+/// [`VdfFile::extract_block_series_sampled`], which additionally decodes the
+/// per-block bitmap width for saved-suffix files.
 fn extract_block_series(
     data: &[u8],
     block_offset: usize,
     bitmap_size: usize,
     time_values: &[f64],
 ) -> StdResult<Vec<f64>, Box<dyn Error>> {
-    let step_count = time_values.len();
-    let count = u16::from_le_bytes(data[block_offset..block_offset + 2].try_into()?) as usize;
+    decode_block_grid(data, block_offset, bitmap_size, time_values.len())
+}
+
+/// Decode a data block's sparse values over a `grid_count`-point time grid
+/// with a `bitmap_size`-byte bitmap, applying zero-order hold: a clear bit
+/// repeats the previous value, and grid points before the first stored value
+/// are NaN. A truncated payload leaves the remaining grid points NaN rather
+/// than erroring, mirroring the Python reference reader.
+fn decode_block_grid(
+    data: &[u8],
+    block_offset: usize,
+    bitmap_size: usize,
+    grid_count: usize,
+) -> StdResult<Vec<f64>, Box<dyn Error>> {
+    if block_offset + 2 + bitmap_size > data.len() {
+        return Err(format!("data block at 0x{block_offset:x} truncated").into());
+    }
+    let count = read_u16(data, block_offset) as usize;
     let bm = &data[block_offset + 2..block_offset + 2 + bitmap_size];
     let data_start = block_offset + 2 + bitmap_size;
 
-    let mut series = vec![f64::NAN; step_count];
+    // The bitmap carries one bit per grid point; a caller-supplied grid
+    // larger than the bitmap can describe is clamped defensively.
+    let grid_count = grid_count.min(bitmap_size * 8);
+
+    let mut series = vec![f64::NAN; grid_count];
     let mut data_idx = 0;
     let mut last_val = f64::NAN;
 
-    // time_values is the full evenly-spaced time grid from block 0, so
-    // time_idx corresponds directly to the step index.
-    for (time_idx, _) in time_values.iter().enumerate() {
+    for (time_idx, slot) in series.iter_mut().enumerate() {
         let bit_set = (bm[time_idx / 8] >> (time_idx % 8)) & 1 == 1;
         if bit_set && data_idx < count {
             let off = data_start + data_idx * 4;
-            last_val = f32::from_le_bytes(data[off..off + 4].try_into()?) as f64;
+            if off + 4 > data.len() {
+                break;
+            }
+            last_val = read_f32(data, off) as f64;
             data_idx += 1;
         }
-
-        series[time_idx] = last_val;
+        *slot = last_val;
     }
 
     Ok(series)
+}
+
+/// Map saved Time values onto positions of a `grid_count`-point block grid.
+///
+/// Saved-suffix files save the TAIL of the full output grid: the Time block
+/// stores only the saved points, while some variable blocks' bitmaps cover
+/// the whole grid. The grid origin is therefore derived from the LAST saved
+/// time (`origin = time_values[last] - (grid_count - 1) * step`), and each
+/// saved time maps to `round((t - origin) / step)`. Non-uniformly-spaced or
+/// degenerate-step time axes fall back to identity positions (there is no
+/// grid to project onto); callers must treat out-of-range positions as NaN.
+fn block_positions_for_time_values(time_values: &[f64], grid_count: usize) -> Vec<i64> {
+    if time_values.is_empty() {
+        return Vec::new();
+    }
+    let identity = || (0..time_values.len() as i64).collect::<Vec<i64>>();
+    if grid_count == time_values.len() {
+        return identity();
+    }
+    if time_values.len() == 1 {
+        return vec![0];
+    }
+
+    let step = time_values[1] - time_values[0];
+    if step.abs() < 1e-12 {
+        return identity();
+    }
+    if time_values
+        .windows(2)
+        .any(|w| ((w[1] - w[0]) - step).abs() > 1e-5)
+    {
+        return identity();
+    }
+
+    let origin = time_values[time_values.len() - 1] - (grid_count as f64 - 1.0) * step;
+    time_values
+        .iter()
+        .map(|&value| ((value - origin) / step).round() as i64)
+        .collect()
+}
+
+/// Map saved Time values onto positions of a `grid_count`-point DATA grid
+/// (header 0x74; the external data file's time axis).
+///
+/// The run file stores only the grid's point count -- its time values live in
+/// the external data file (a dataset VDF's Time series or a spreadsheet row)
+/// and are not recoverable from the run file alone (negative result, GH
+/// #842). This mapping therefore uses a documented approximation: the grid is
+/// assumed to span the saved run uniformly, anchored at the first saved time
+/// (`step = (t_last - t_first) / (grid_count - 1)`), with floor semantics so
+/// intermediate saved times take the preceding data point's value
+/// (zero-order hold). This is exact whenever the data file's axis spans the
+/// run horizon (the zambaqui "old runs" family, where interior placement is
+/// pinned by block tiling); for a data file that ends before the run's final
+/// time (zambaqui `baserun.vdf`'s `gdp deflator`, 1980..2005 on a 1980..2050
+/// run) the values are correct but interior placement is dilated toward the
+/// run end. First/last placement is exact in both cases, which is what the
+/// section-6 final-value oracle pins.
+fn data_grid_positions_for_time_values(time_values: &[f64], grid_count: usize) -> Vec<i64> {
+    if time_values.is_empty() {
+        return Vec::new();
+    }
+    let t_first = time_values[0];
+    let t_last = time_values[time_values.len() - 1];
+    if grid_count <= 1 || t_last <= t_first {
+        return vec![0; time_values.len()];
+    }
+    let scale = (grid_count as f64 - 1.0) / (t_last - t_first);
+    time_values
+        .iter()
+        .map(|&value| ((value - t_first) * scale + 1e-6).floor() as i64)
+        .collect()
+}
+
+/// Whether an inline (non-block) offset-table entry is a missing/no-saved-data
+/// slot rather than an inline f32 constant.
+///
+/// A raw `0` normally decodes as the constant `0.0`, but `Ref.vdf` shows that
+/// raw-0 entries with the dynamic class code `0x11` and a nonzero section-6
+/// final value are slots Vensim's save configuration omitted: the variable
+/// genuinely ran (its final value is recorded, typically the `:NA:`-arithmetic
+/// sentinel ~-1.3e33) but no series was saved. Those decode as all-NaN. A NaN
+/// final value also counts as nonzero (data existed, saved as literal NaN).
+fn inline_ot_entry_is_missing(raw: u32, class_code: Option<u8>, final_value: Option<f32>) -> bool {
+    raw == 0
+        && class_code == Some(VDF_SECTION6_OT_CODE_DYNAMIC)
+        && final_value.is_some_and(|value| value != 0.0)
 }
 
 #[cfg(test)]
@@ -2535,6 +3064,19 @@ mod tests {
             ("pop", "../../test/bobby/vdf/pop/Current.vdf"),
             ("econ", "../../test/bobby/vdf/econ/base.vdf"),
             ("wrld3", "../../test/metasd/WRLD3-03/SCEN01.VDF"),
+            // Saved-suffix fixtures (0x78=213 saved points, 0x7C=225 block grid
+            // points): these catch the per-block bitmap-width rule -- their
+            // class-0x05 input blocks use the wider ceil(0x7C/8) bitmap.
+            ("risk", "../../test/bobby/vdf/econ/risk.vdf"),
+            ("risk2", "../../test/bobby/vdf/econ/risk2.vdf"),
+            // Data-grid fixture (0x74=6 data points inside a 121-point run):
+            // its 21 exogenous blocks carry 1-byte bitmaps over the external
+            // data file's grid (GH #842); before the third candidate they
+            // misdecoded with the 16-byte run-grid width.
+            (
+                "groupon",
+                "../../test/metasd/social-network-valuation/groupon3mid.vdf",
+            ),
         ];
 
         for (label, vdf_path) in models {
@@ -2551,6 +3093,16 @@ mod tests {
             for (ot, (final_value, series)) in
                 final_values.iter().zip(data.entries.iter()).enumerate()
             {
+                // Unsaved slots carry a zero offset-table word and record the
+                // :NA:-arithmetic sentinel (~-1.298e33) as their final value.
+                // The Rule-2 missing-slot decode only recognizes the dynamic
+                // class 0x11; groupon's unsaved DATA slots carry class
+                // 0x06/0x0c/0 with the same signature and decode as the
+                // constant 0.0, so the oracle skips that exact signature
+                // rather than requiring a match against the sentinel.
+                if vdf.offset_table_entry(ot) == Some(0) && *final_value <= -1.0e33 {
+                    continue;
+                }
                 let expected = series.last().copied().unwrap_or(f64::NAN) as f32;
                 assert!(
                     (final_value - expected).abs() < 1e-5
@@ -2559,6 +3111,244 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Rule-1 focused test: saved-suffix files (`0x78` saved count < `0x7C`
+    /// block grid count) store their class-0x05 input blocks with the wider
+    /// `ceil(0x7C/8)` bitmap, while every other block keeps the compact
+    /// `ceil(0x78/8)` saved-grid bitmap. The per-block popcount discriminator
+    /// must pick the wider layout for exactly the input blocks, and decoding
+    /// must sample the full-grid series at the saved time positions.
+    #[test]
+    fn test_saved_suffix_blocks_use_wider_bitmap_grid() {
+        let cases = [
+            // (path, class-0x05 OTs, first value of the first input block)
+            ("../../test/bobby/vdf/econ/risk.vdf", [42usize, 55]),
+            ("../../test/bobby/vdf/econ/risk2.vdf", [43, 58]),
+        ];
+
+        for (path, input_ots) in cases {
+            let vdf = vdf_file(path);
+            assert_eq!(vdf.time_point_count, 213, "{path}: saved count (0x78)");
+            assert_eq!(vdf.bitmap_size, 27, "{path}: saved bitmap width");
+            assert_eq!(
+                vdf.block_time_point_count, 225,
+                "{path}: block grid count (0x7C)"
+            );
+            assert_eq!(vdf.block_bitmap_size, 29, "{path}: block bitmap width");
+
+            let codes = vdf.section6_ot_class_codes().unwrap();
+            let class05_ots: Vec<usize> = codes
+                .iter()
+                .enumerate()
+                .filter_map(|(ot, &code)| (code == VDF_SECTION6_OT_CODE_INPUT).then_some(ot))
+                .collect();
+            assert_eq!(
+                class05_ots,
+                input_ots.to_vec(),
+                "{path}: class-0x05 input OTs"
+            );
+
+            // Every data block except the two input blocks must discriminate
+            // to the compact saved-grid bitmap; the input blocks must pick
+            // the wider block-grid bitmap.
+            for ot in 0..vdf.offset_table_count {
+                let Some(raw) = vdf.offset_table_entry(ot) else {
+                    continue;
+                };
+                if !vdf.is_data_block_offset(raw) {
+                    continue;
+                }
+                let block_offset = raw as usize;
+                let count = read_u16(&vdf.data, block_offset) as usize;
+                let layout = vdf.block_bitmap_layout(block_offset, count);
+                if input_ots.contains(&ot) {
+                    // risk.vdf's data grid (0x74=225) coincides with its
+                    // block grid (0x7C=225), so the block candidate wins by
+                    // order and these input blocks report Block, not Data.
+                    assert_eq!(
+                        (layout.bitmap_size, layout.grid_count, layout.grid),
+                        (
+                            vdf.block_bitmap_size,
+                            vdf.block_time_point_count,
+                            VdfBlockGrid::Block
+                        ),
+                        "{path}: OT[{ot}] should use the wider block-grid bitmap"
+                    );
+                } else {
+                    assert_eq!(
+                        (layout.bitmap_size, layout.grid_count, layout.grid),
+                        (vdf.bitmap_size, vdf.time_point_count, VdfBlockGrid::Saved),
+                        "{path}: OT[{ot}] should use the saved-grid bitmap"
+                    );
+                }
+            }
+
+            // The decoded input series must line up with the section-6 final
+            // values ("federal funds rate" ends at 1.81, "inflation rate" at
+            // ~4.698); with a fixed saved-width bitmap they decode to garbage
+            // (e.g. 1.27e-26).
+            let data = vdf.extract_data().unwrap();
+            let ffr = &data.entries[input_ots[0]];
+            let infl = &data.entries[input_ots[1]];
+            assert!(
+                (ffr[0] - 6.909999847412109).abs() < 1e-6,
+                "{path}: federal funds rate first value, got {}",
+                ffr[0]
+            );
+            assert!(
+                (ffr.last().unwrap() - 1.809999942779541).abs() < 1e-6,
+                "{path}: federal funds rate last value, got {}",
+                ffr.last().unwrap()
+            );
+            assert!(
+                (infl.last().unwrap() - 4.698160171508789).abs() < 1e-6,
+                "{path}: inflation rate last value, got {}",
+                infl.last().unwrap()
+            );
+        }
+    }
+
+    /// Rule-2 focused test: on `Ref.vdf`, a raw-0 OT entry with dynamic class
+    /// `0x11` and a nonzero section-6 final value is a missing/no-saved-data
+    /// slot (Vensim's save configuration omitted the series) and must decode
+    /// as all-NaN -- while a raw-0 entry with a constant-like class still
+    /// decodes as the constant 0.0.
+    #[test]
+    fn test_ref_raw_zero_dynamic_ot_entries_decode_as_missing() {
+        let vdf = vdf_file("../../test/xmutil_test_models/Ref.vdf");
+        let codes = vdf.section6_ot_class_codes().unwrap();
+        let finals = vdf.section6_ot_final_values().unwrap();
+
+        let missing_ots: Vec<usize> = (0..vdf.offset_table_count)
+            .filter(|&ot| {
+                vdf.offset_table_entry(ot) == Some(0)
+                    && codes[ot] == VDF_SECTION6_OT_CODE_DYNAMIC
+                    && finals[ot] != 0.0
+            })
+            .collect();
+        assert_eq!(
+            missing_ots.len(),
+            455,
+            "Ref.vdf should pin the missing-slot count"
+        );
+        assert!(missing_ots.contains(&611));
+
+        let data = vdf.extract_data().unwrap();
+        for &ot in &[missing_ots[0], 611] {
+            assert!(
+                data.entries[ot].iter().all(|v| v.is_nan()),
+                "OT[{ot}] is a missing slot and must decode as all-NaN"
+            );
+        }
+
+        // Constant-like raw-0 entries keep decoding as the constant 0.0:
+        // OT[779] is raw 0 with class 0x17 (inline constant) on Ref.vdf.
+        assert_eq!(vdf.offset_table_entry(779), Some(0));
+        assert_eq!(codes[779], VDF_SECTION6_OT_CODE_CONST);
+        assert!(
+            data.entries[779].iter().all(|&v| v == 0.0),
+            "a raw-0 constant-class entry must decode as constant 0.0"
+        );
+    }
+
+    /// The saved-position sampling helper must fall back to identity positions
+    /// on non-uniformly-spaced or degenerate-step time axes, and out-of-range
+    /// positions must be guarded by the caller (NaN).
+    #[test]
+    fn test_block_positions_for_time_values_fallbacks() {
+        // Uniform suffix: a 5-point grid whose last saved time anchors the
+        // origin. Saved times [3, 4] on a 5-point grid of step 1 starting at
+        // origin 0 map to positions [3, 4].
+        assert_eq!(block_positions_for_time_values(&[3.0, 4.0], 5), vec![3, 4]);
+
+        // Grid count equal to the saved count: identity.
+        assert_eq!(block_positions_for_time_values(&[3.0, 4.0], 2), vec![0, 1]);
+
+        // Single saved point: position 0.
+        assert_eq!(block_positions_for_time_values(&[7.0], 5), vec![0]);
+
+        // Degenerate step: identity fallback.
+        assert_eq!(
+            block_positions_for_time_values(&[2.0, 2.0, 2.0], 5),
+            vec![0, 1, 2]
+        );
+
+        // Non-uniform spacing: identity fallback.
+        assert_eq!(
+            block_positions_for_time_values(&[0.0, 1.0, 3.0], 5),
+            vec![0, 1, 2]
+        );
+
+        // Empty saved axis: no positions.
+        assert!(block_positions_for_time_values(&[], 5).is_empty());
+    }
+
+    /// The data-grid span mapping (GH #842): the grid is anchored at the
+    /// first saved time, assumed to span the run uniformly, with floor
+    /// semantics (zero-order hold -- an intermediate saved time takes the
+    /// preceding data point).
+    #[test]
+    fn test_data_grid_positions_span_mapping() {
+        // 71-point yearly grid inside an eighth-year-step run (the zambaqui
+        // "old runs" shape, where this mapping is exact): the first saved
+        // year maps to grid 0, intermediate eighth-year steps hold it, and
+        // the next whole year advances.
+        let saved: Vec<f64> = (0..561).map(|i| 1980.0 + 0.125 * i as f64).collect();
+        let pos = data_grid_positions_for_time_values(&saved, 71);
+        assert_eq!(pos[0], 0);
+        assert_eq!(pos[7], 0, "1980.875 still holds the 1980 data point");
+        assert_eq!(pos[8], 1, "1981.0 advances to the second data point");
+        assert_eq!(pos[560], 70, "the run's final time is the last data point");
+
+        // 6-point grid over a 121-point monthly run (the groupon shape).
+        let saved: Vec<f64> = (0..121).map(|i| i as f64).collect();
+        let pos = data_grid_positions_for_time_values(&saved, 6);
+        assert_eq!(pos[0], 0);
+        assert_eq!(pos[23], 0);
+        assert_eq!(pos[24], 1);
+        assert_eq!(pos[120], 5);
+
+        // Degenerate grids: a single-point grid pins everything to it, and
+        // a degenerate time span cannot be projected.
+        assert_eq!(
+            data_grid_positions_for_time_values(&[3.0, 4.0], 1),
+            vec![0, 0]
+        );
+        assert_eq!(
+            data_grid_positions_for_time_values(&[2.0, 2.0], 4),
+            vec![0, 0]
+        );
+        assert!(data_grid_positions_for_time_values(&[], 5).is_empty());
+    }
+
+    /// The Rule-2 missing-slot discriminator in isolation: only the exact
+    /// combination raw==0, class 0x11, and a present nonzero final value marks
+    /// a missing slot.
+    #[test]
+    fn test_inline_ot_entry_is_missing_arms() {
+        let dyn_code = Some(VDF_SECTION6_OT_CODE_DYNAMIC);
+        assert!(inline_ot_entry_is_missing(0, dyn_code, Some(-1.3e33)));
+        // A NaN final value is "nonzero" (data was saved as literal NaN).
+        assert!(inline_ot_entry_is_missing(0, dyn_code, Some(f32::NAN)));
+        // A zero final is a genuine constant 0.
+        assert!(!inline_ot_entry_is_missing(0, dyn_code, Some(0.0)));
+        // A nonzero raw is an inline f32 constant regardless of class.
+        assert!(!inline_ot_entry_is_missing(
+            1.5f32.to_bits(),
+            dyn_code,
+            Some(-1.3e33)
+        ));
+        // Constant-like class codes decode raw 0 as constant 0.0.
+        assert!(!inline_ot_entry_is_missing(
+            0,
+            Some(VDF_SECTION6_OT_CODE_CONST),
+            Some(-1.3e33)
+        ));
+        // Without class codes or final values there is no evidence of a
+        // missing slot; keep the constant decode.
+        assert!(!inline_ot_entry_is_missing(0, None, Some(-1.3e33)));
+        assert!(!inline_ot_entry_is_missing(0, dyn_code, None));
     }
 
     #[test]
@@ -2865,9 +3655,14 @@ mod tests {
             let data = std::fs::read(path)
                 .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
             let file_len = data.len();
-            // Some .vdf files use a different format variant (e.g. magic
-            // byte 0x41 instead of 0x52). Skip those rather than failing.
-            if data.len() >= 4 && data[0..4] != VDF_FILE_MAGIC {
+            // The intent here is "every run file must parse": skip dataset
+            // VDFs (magic 0x41, a different container) and unrecognized
+            // magics, but accept both run-file kinds (0x52 and the 0x53
+            // sensitivity variant, which parses with the same rules).
+            if !matches!(
+                probe_vdf_kind(&data),
+                Some(VdfKind::SimulationResults | VdfKind::SensitivityRun)
+            ) {
                 skipped_count += 1;
                 continue;
             }
@@ -3319,6 +4114,16 @@ mod tests {
 
         assert_eq!(probe_vdf_kind(&current), Some(VdfKind::SimulationResults));
         assert_eq!(probe_vdf_kind(&dataset), Some(VdfKind::Dataset));
+
+        // The sensitivity magic is probed from the four magic bytes alone; a
+        // synthetic prefix is enough (real 0x53 fixtures live in third_party
+        // and are exercised by the integration harness).
+        let mut sensitivity = current.clone();
+        sensitivity[0..4].copy_from_slice(&VDF_SENSITIVITY_FILE_MAGIC);
+        assert_eq!(probe_vdf_kind(&sensitivity), Some(VdfKind::SensitivityRun));
+
+        assert_eq!(probe_vdf_kind(&[0u8; 3]), None);
+        assert_eq!(probe_vdf_kind(&[0u8; 8]), None);
     }
 
     #[test]
@@ -3426,6 +4231,195 @@ mod tests {
         assert!(delta_hpi[0].is_nan());
         assert!((delta_hpi[1] - -0.14000000059604645).abs() < 1e-6);
         assert!((delta_hpi[delta_hpi.len() - 1] - -176.60000610351563).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dataset_vdf_to_results_matches_extracted_series() {
+        let dataset =
+            VdfDatasetFile::parse(std::fs::read("../../test/bobby/vdf/econ/data.vdf").unwrap())
+                .unwrap();
+        let data = dataset.extract_data().unwrap();
+        let results = data.to_results();
+
+        assert_eq!(results.step_count, 225);
+        assert_eq!(results.step_size, 11); // time + 10 series
+        assert!((results.specs.start - 1990.0).abs() < 1e-6);
+        assert!((results.specs.stop - 2008.6700439453125).abs() < 1e-6);
+
+        let col = |name: &str| -> Vec<f64> {
+            let off = *results
+                .offsets
+                .get(&Ident::<Canonical>::new(name))
+                .unwrap_or_else(|| panic!("missing column {name}"));
+            results.iter().map(|row| row[off]).collect()
+        };
+
+        let time = col("time");
+        assert!((time[0] - 1990.0).abs() < 1e-6);
+        assert!((time[224] - 2008.6700439453125).abs() < 1e-6);
+
+        // Pinned from test_dataset_vdf_extracts_reference_series: the Results
+        // projection must carry the identical values under canonical keys.
+        let cpi = col("Consumer Price Index");
+        assert!((cpi[0] - 127.4000015258789).abs() < 1e-6);
+        assert!((cpi[224] - 218.7830047607422).abs() < 1e-6);
+
+        let fed_funds = col("Federal Funds Rate");
+        assert!((fed_funds[0] - 8.229999542236328).abs() < 1e-6);
+        assert!((fed_funds[224] - 1.809999942779541).abs() < 1e-6);
+
+        let inflation = col("Inflation Rate");
+        assert!(inflation[0].is_nan());
+        assert!((inflation[12] - 5.38116979598999).abs() < 1e-6);
+    }
+
+    /// Exercise every reader entry point the FFI import path uses on a byte
+    /// buffer, returning instead of panicking on malformed input.
+    fn exercise_vdf_readers(bytes: &[u8]) {
+        match probe_vdf_kind(bytes) {
+            Some(VdfKind::SimulationResults) | Some(VdfKind::SensitivityRun) => {
+                if let Ok(vdf) = VdfFile::parse(bytes.to_vec()) {
+                    let _ = vdf.to_results_via_records();
+                }
+            }
+            Some(VdfKind::Dataset) => {
+                if let Ok(dataset) = VdfDatasetFile::parse(bytes.to_vec())
+                    && let Ok(data) = dataset.extract_data()
+                {
+                    let _ = data.to_results();
+                }
+            }
+            None => {}
+        }
+    }
+
+    #[test]
+    fn test_readers_are_total_on_truncated_and_mutated_input() {
+        // Malformed input must produce Err (or a degraded-but-valid Results),
+        // never panic: libsimlin release builds compile with panic = "abort",
+        // so a panic in this code aborts the whole host process (e.g. a
+        // Python interpreter importing a corrupt VDF). This sweep is the real
+        // enforcement of that contract -- the FFI-level catch_unwind is only
+        // defense-in-depth for unwind builds.
+        let fixtures = [
+            "../../test/bobby/vdf/water/Current.vdf",
+            "../../test/bobby/vdf/subscripts/subscripts.vdf",
+            "../../test/bobby/vdf/econ/data.vdf",
+            // Larger fixtures cover the lookup-record, exogenous-data-block,
+            // and stale-name-table paths.
+            "../../test/bobby/vdf/econ/risk2.vdf",
+            "../../test/bobby/vdf/lookups/lookup_ex.vdf",
+        ];
+        for path in fixtures {
+            let data = std::fs::read(path).unwrap();
+
+            // Every truncation length for small files; a coarser stride
+            // (plus the final 128 lengths) for larger ones to stay inside
+            // the test time budget.
+            let stride = data.len().div_ceil(2_048);
+            let mut lengths: Vec<usize> = (0..data.len()).step_by(stride).collect();
+            lengths.extend(data.len().saturating_sub(128)..=data.len());
+            for len in lengths {
+                exercise_vdf_readers(&data[..len]);
+            }
+
+            // Deterministic single-byte corruptions across the whole file,
+            // plus a burst of corruptions in the header region (where offsets
+            // and counts live).
+            let mut rng: u64 = 0x9e3779b97f4a7c15;
+            let mut next = move || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                rng
+            };
+            // Larger fixtures cost more per parse, so scale the corruption
+            // rounds down to keep the whole sweep inside the time budget.
+            let rounds = if data.len() > 16_384 { 64 } else { 512 };
+            for _ in 0..rounds {
+                let mut mutated = data.clone();
+                let pos = (next() as usize) % mutated.len();
+                mutated[pos] ^= (next() as u8) | 1;
+                exercise_vdf_readers(&mutated);
+            }
+            for _ in 0..rounds {
+                let mut mutated = data.clone();
+                let pos = (next() as usize) % FILE_HEADER_SIZE.min(mutated.len());
+                mutated[pos] = next() as u8;
+                exercise_vdf_readers(&mutated);
+            }
+
+            // Deterministic worst-case pokes of the grid-count header words
+            // (0x74 data grid, 0x78 saved grid, 0x7C block grid): setting a
+            // high byte to 0xFF requests a multi-gigabyte grid. The random
+            // rounds above cannot reliably prove this class safe -- on Linux,
+            // overcommit lets a lazily-zeroed oversized allocation "succeed"
+            // locally while aborting in constrained environments -- so the
+            // readers must reject these structurally (count bounds), not
+            // survive them by allocator luck.
+            for pos in 0x74..0x80usize {
+                let mut mutated = data.clone();
+                mutated[pos] = 0xFF;
+                exercise_vdf_readers(&mutated);
+            }
+        }
+    }
+
+    /// A corrupt run file whose header time-point count (0x78) AND Time
+    /// block u16 count are BOTH zero must fail extraction with Err, never
+    /// panic: `build_results` indexes the first/last Time values, and the
+    /// coordinated two-byte corruption slips past the single-mutation sweep
+    /// above (zeroing only 0x78 trips the count-mismatch check instead).
+    /// Found by external review of the FFI import path.
+    #[test]
+    fn test_zero_time_point_run_file_errs_instead_of_panicking() {
+        let pristine = std::fs::read("../../test/bobby/vdf/water/Current.vdf").unwrap();
+        let parsed = VdfFile::parse(pristine.clone()).unwrap();
+        let time_block = parsed.first_data_block;
+
+        let mut patched = pristine;
+        patched[0x78..0x7C].copy_from_slice(&0u32.to_le_bytes());
+        patched[time_block..time_block + 2].copy_from_slice(&0u16.to_le_bytes());
+
+        // The header gates do not read the time axis, so parse still
+        // succeeds; the zero-step rejection must come from extraction.
+        let vdf = VdfFile::parse(patched).expect("header gates unaffected by the patch");
+        assert_eq!(vdf.time_point_count, 0);
+        let err = match vdf.extract_data() {
+            Ok(_) => panic!("zero-step run file must fail extraction"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("zero saved time points"),
+            "unexpected error: {err}"
+        );
+        assert!(vdf.to_results_via_records().is_err());
+    }
+
+    /// A corrupted dataset time-point count header must be rejected at parse
+    /// time, before extract_data sizes any allocation from it: byte 0x7F is
+    /// the high byte of data.vdf's count word (0x7C = 225), and setting it to
+    /// 0xFF requests a ~4.3e9-point time axis (~34 GB) whose allocation
+    /// failure would abort the process -- catch_unwind cannot intercept an
+    /// allocator abort, and Linux overcommit is why the random-mutation sweep
+    /// never caught it locally. Found by Codex review of the FFI import path.
+    #[test]
+    fn test_oversized_dataset_count_errs_at_parse() {
+        let mut patched = std::fs::read("../../test/bobby/vdf/econ/data.vdf").unwrap();
+        assert_eq!(
+            read_u32(&patched, 0x7C),
+            225,
+            "fixture layout changed; update the corruption offset"
+        );
+        patched[0x7F] = 0xFF;
+        let err = match VdfDatasetFile::parse(patched) {
+            Ok(_) => panic!("oversized dataset count must fail parse"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("cannot fit"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -3561,6 +4555,128 @@ mod tests {
     }
 
     #[test]
+    fn test_record_name_key_map_skips_stale_entries_on_risk_fixtures() {
+        // GH #839: risk.vdf and risk2.vdf carry stale/deleted name-table
+        // entries (a valid u16 length prefix over non-printable payload).
+        // `VdfFile::names` skips them, so the key map must too -- otherwise
+        // every key after a stale entry resolves to the wrong (shifted-by-one)
+        // name and the trailing names lose their keys entirely.
+        let risk = vdf_file("../../test/bobby/vdf/econ/risk.vdf");
+        let keys = risk.record_name_key_to_name_index();
+        assert_eq!(
+            risk.names[*keys.get(&767).unwrap()],
+            "desired risk taking behavior"
+        );
+        assert_eq!(
+            risk.names[*keys.get(&775).unwrap()],
+            "time to change risk taking behavior"
+        );
+        assert_eq!(
+            risk.names[*keys.get(&785).unwrap()],
+            "#SMOOTH(interestearnedfromderivatives-investmentslostinderivitivedefaults,\
+             timedelayininvestmentearnings)#"
+        );
+
+        let risk2 = vdf_file("../../test/bobby/vdf/econ/risk2.vdf");
+        let keys2 = risk2.record_name_key_to_name_index();
+        assert_eq!(
+            risk2.names[*keys2.get(&289).unwrap()],
+            "perceived inflation rate"
+        );
+        assert_eq!(
+            risk2.names[*keys2.get(&296).unwrap()],
+            "inflation elasticity of risky behavior"
+        );
+        assert_eq!(
+            risk2.names[*keys2.get(&307).unwrap()],
+            "effect of risk taking on loan standards"
+        );
+        assert_eq!(
+            risk2.names[*keys2.get(&318).unwrap()],
+            "risk elasticity of standards"
+        );
+        assert_eq!(risk2.names[*keys2.get(&326).unwrap()], "federal funds rate");
+        // Key 286 is the string offset of a stale entry; it names nothing.
+        assert!(
+            !keys2.contains_key(&286),
+            "stale-entry offset 286 must not receive a key"
+        );
+    }
+
+    #[test]
+    fn test_record_name_key_map_stays_aligned_after_synthetic_stale_entry() {
+        // Same fixture shape as
+        // `test_parse_name_table_extended_skips_stale_nonprintable_entries`:
+        // a stale entry between "abc" and "def". The stale entry consumes no
+        // name index, so "def" keeps both its index (2) and its own string-
+        // offset key; the stale entry's aligned offset gets no key at all.
+        let mut data = vec![0u8; 256];
+        data[0..4].copy_from_slice(&VDF_SECTION_MAGIC);
+        data[20..24].copy_from_slice(&(6u32 << 16).to_le_bytes());
+
+        // First name at 24 (rel 0, key 7): "Time\0\0" (len 6, no u16 prefix).
+        data[24..28].copy_from_slice(b"Time");
+
+        // Name 2: u16 at 30, string at 32 (rel 8, key 9): "abc".
+        data[30..32].copy_from_slice(&6u16.to_le_bytes());
+        data[32..35].copy_from_slice(b"abc");
+
+        // STALE entry: u16 at 38, payload at 40 (rel 16, would-be key 11).
+        data[38..40].copy_from_slice(&10u16.to_le_bytes());
+        data[40..50].copy_from_slice(&[0x91, 0x01, 0x00, 0x00, b'c', b'y', b' ', b'0', 0, 0]);
+
+        // Name 3: u16 at 50, string at 52 (rel 28, key 14): "def".
+        data[50..52].copy_from_slice(&6u16.to_le_bytes());
+        data[52..55].copy_from_slice(b"def");
+
+        let section = Section {
+            file_offset: 0,
+            field1: 0,
+            region_end: 80,
+            field3: 500,
+            field4: 0,
+            field5: 6u32 << 16,
+        };
+        let names = parse_name_table_extended(&data, &section, 80);
+        assert_eq!(names, vec!["Time", "abc", "def"]);
+
+        let vdf = VdfFile {
+            data,
+            time_point_count: 0,
+            bitmap_size: 0,
+            block_time_point_count: 0,
+            block_bitmap_size: 0,
+            data_time_point_count: 0,
+            data_bitmap_size: 0,
+            sections: vec![section],
+            names,
+            name_section_idx: Some(0),
+            slot_table: Vec::new(),
+            slot_table_offset: 0,
+            records: Vec::new(),
+            offset_table_start: 0,
+            offset_table_count: 0,
+            first_data_block: 0,
+            header_final_values_offset: 0,
+            header_lookup_mapping_offset: 0,
+        };
+        let keys = vdf.record_name_key_to_name_index();
+
+        assert_eq!(keys.get(&7), Some(&0), "first name key is always 7");
+        assert_eq!(keys.get(&9), Some(&1), "abc keeps its key");
+        assert_eq!(
+            keys.get(&14),
+            Some(&2),
+            "def must map from its own string offset, not lose its key"
+        );
+        assert!(
+            !keys.contains_key(&11),
+            "the stale entry's offset must not receive a key"
+        );
+        assert_eq!(keys.len(), 3);
+    }
+
+    #[test]
     fn test_to_results_via_records_edited_run_5_recovers_visible_variables() {
         // model_editing/run_5.vdf: an incrementally edited fixture where
         // the original conservative `to_results` returns an ambiguity
@@ -3685,6 +4801,50 @@ mod tests {
     }
 
     #[test]
+    fn test_standalone_drop_veto_diagnostics_on_fixtures() {
+        // The per-file coherence veto must be observable, not silent:
+        // Ref.vdf's ten standalone candidates all corroborate (no veto),
+        // while SimService's four coincidental stock candidates trip it.
+        // The SimService half follows the third_party fixture-availability
+        // convention (skip when the checkout has no third_party).
+        use super::record_results::{decoded_record_spans, identify_descriptor_records};
+
+        let ref_vdf = vdf_file("../../test/xmutil_test_models/Ref.vdf");
+        let key_map = ref_vdf.record_name_key_to_name_index();
+        let dir = ref_vdf.parse_section3_directory();
+        let spans = decoded_record_spans(&ref_vdf, &key_map, dir.as_ref());
+        let id = identify_descriptor_records(&ref_vdf, &spans);
+        assert!(
+            !id.standalone_drop_veto_fired,
+            "Ref.vdf standalone candidates all corroborate; the veto must not fire"
+        );
+        assert_eq!(id.standalone_drop_vetoed_candidates, 0);
+
+        let fixtures = [
+            "../../third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/Base.vdf",
+            "../../third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/ctxt0001/Base.vdf",
+        ];
+        if !std::path::Path::new(fixtures[0]).exists() {
+            return;
+        }
+        for path in fixtures {
+            let sim = vdf_file(path);
+            let key_map = sim.record_name_key_to_name_index();
+            let dir = sim.parse_section3_directory();
+            let spans = decoded_record_spans(&sim, &key_map, dir.as_ref());
+            let id = identify_descriptor_records(&sim, &spans);
+            assert!(
+                id.standalone_drop_veto_fired,
+                "{path}: the coherence veto must fire for the coincidental stock candidates"
+            );
+            assert_eq!(
+                id.standalone_drop_vetoed_candidates, 4,
+                "{path}: the four coincidental stocks are the withheld candidates"
+            );
+        }
+    }
+
+    #[test]
     fn test_to_results_via_records_lookup_ex_separates_lookup_definition_from_output() {
         let vdf = vdf_file("../../test/bobby/vdf/lookups/lookup_ex.vdf");
         let results = vdf
@@ -3804,6 +4964,27 @@ mod tests {
                 "{label}: expected more than just Time"
             );
         }
+    }
+
+    #[test]
+    fn test_to_results_via_records_resolves_correct_names_past_stale_entries() {
+        // GH #839: risk2.vdf's name table has stale entries, so before the
+        // key-map fix the record with f[2]=289 / f[11]=80 resolved to the
+        // shifted-by-one name "inflation elasticity of risky behavior"
+        // instead of "perceived inflation rate". Pin the correct binding at
+        // the Results level, not just in the key map.
+        let vdf = vdf_file("../../test/bobby/vdf/econ/risk2.vdf");
+        let results = vdf
+            .to_results_via_records()
+            .expect("risk2: record-based mapping should succeed");
+        let vdf_data = vdf.extract_data().unwrap();
+        assert_result_column_matches_ot(
+            "econ/risk2",
+            &results,
+            &vdf_data,
+            "perceived inflation rate",
+            80,
+        );
     }
 
     #[test]

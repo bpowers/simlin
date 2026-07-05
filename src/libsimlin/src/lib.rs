@@ -15,6 +15,7 @@
 //! | `project`       | Project lifecycle (open, ref/unref, query models)   |
 //! | `model`         | Model queries (variables, links, LaTeX equations)   |
 //! | `simulation`    | Simulation lifecycle (create, run, set values, reset) |
+//! | `results`       | Standalone results handles (Vensim VDF import)      |
 //! | `serialization` | Serialize to protobuf, JSON, XMILE, SVG             |
 //! | `analysis`      | Feedback-loop / causal-link analysis, LTM scores    |
 //! | `patch`         | JSON patch application and error collection          |
@@ -62,6 +63,7 @@ mod model;
 mod panic_hook;
 mod patch;
 pub mod project;
+mod results;
 mod serialization;
 mod simulation;
 
@@ -78,6 +80,7 @@ pub use model::*;
 pub use panic_hook::*;
 pub use patch::simlin_project_apply_patch;
 pub use project::*;
+pub use results::*;
 pub use serialization::*;
 pub use simulation::*;
 
@@ -462,6 +465,17 @@ pub struct SimlinSim {
     pub ref_count: AtomicUsize,
 }
 
+/// Opaque standalone results structure.
+///
+/// A named-time-series table (an `engine::Results`) that is not tied to any
+/// project/model/sim. Produced today by `simlin_results_open_vdf` (Vensim VDF
+/// import). The table is immutable after construction, so the accessors need
+/// no lock -- only the refcount is shared mutable state.
+pub struct SimlinResults {
+    pub(crate) results: engine::Results,
+    pub ref_count: AtomicUsize,
+}
+
 // ── shared helpers (pub(crate)) ────────────────────────────────────────
 
 pub(crate) fn new_synced_db(datamodel: &engine::datamodel::Project) -> engine::db::SimlinDb {
@@ -655,6 +669,16 @@ pub(crate) unsafe fn require_sim<'a>(sim: *mut SimlinSim) -> Result<&'a SimlinSi
     }
 }
 
+pub(crate) unsafe fn require_results<'a>(results: *mut SimlinResults) -> Result<&'a SimlinResults> {
+    if results.is_null() {
+        Err(FfiError::new(SimlinErrorCode::Generic)
+            .with_message("results pointer must not be NULL")
+            .into())
+    } else {
+        Ok(&*results)
+    }
+}
+
 pub(crate) fn ffi_error_from_engine(error: &engine::Error) -> FfiError {
     FfiError::new(SimlinErrorCode::from(error.code)).with_message(error.to_string())
 }
@@ -709,6 +733,29 @@ pub(crate) unsafe fn model_unref(model: *mut SimlinModel) {
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         let model = Box::from_raw(model);
         project_unref(model.project as *mut SimlinProject);
+    }
+}
+
+/// Increment the results reference count.
+pub(crate) unsafe fn results_ref(results: *mut SimlinResults) {
+    if !results.is_null() {
+        (*results)
+            .ref_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Decrement the results reference count, freeing the handle when it reaches zero.
+pub(crate) unsafe fn results_unref(results: *mut SimlinResults) {
+    if results.is_null() {
+        return;
+    }
+    let prev_count = (*results)
+        .ref_count
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    if prev_count == 1 {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        let _ = Box::from_raw(results);
     }
 }
 

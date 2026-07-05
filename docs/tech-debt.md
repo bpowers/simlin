@@ -162,21 +162,8 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 ### 19. Rust VDF Parser Boundary Parity
 
 - **Component**: simlin-engine (src/simlin-engine/src/vdf.rs)
-- **Severity**: high
-- **Description**: `tools/vdf_xray.py` now handles several VDF boundary cases that the Rust parser still needs to adopt: section-6 empty ref streams must not advance past the section end, `SCEN01.VDF` slot-table detection should prefer the referenced prefix at `0x6b28` over the later candidate at `0x6b34`, non-Time sparse blocks can require `ceil(header[0x7c] / 8)` bitmap bytes while the Time block uses `ceil(header[0x78] / 8)` (`risk.vdf`, `risk2.vdf`), and raw-zero OT entries with class `0x11` plus missing final sentinel in `Ref.vdf` should decode as missing data rather than numeric zero constants.
-- **Measure**: Port the Python assertions in `tools/test_vdf_xray.py` for `risk.vdf`, `risk2.vdf`, `run_1.vdf`, `run_2.vdf`, and `Ref.vdf` into Rust VDF tests.
-- **Owner**: unassigned
-- **Last reviewed**: 2026-04-24
-
-### 19. Flaky Hypothesis Tests in pysimlin Due to Slow Input Generation
-
-- **Component**: pysimlin (src/pysimlin/tests/test_json_types.py)
-- **Severity**: medium
-- **Description**: Several Hypothesis property-based tests intermittently fail with `FailedHealthCheck` because input generation is too slow. The affected tests are `TestJsonRoundtrip::test_stock_roundtrip`, `TestSchemaCompliance::test_flow_validates_against_schema`, and `TestPatchRoundtrip::test_upsert_stock_roundtrip`. The root cause is deeply nested composite strategies: `flow_strategy` and `auxiliary_strategy` conditionally invoke `graphical_function_strategy`, which itself draws from two `graphical_function_scale_strategy` instances plus variable-length point lists with constrained floats. The `stock_strategy` draws multiple `ident_strategy` lists. When Hypothesis explores complex branches (e.g., graphical functions with many points and both scales), generation time can exceed the default health check deadline, causing intermittent failures that are environment-dependent (slower in CI, under load, or in sandboxed environments). Possible fixes include: (1) adding `suppress_health_check=[HealthCheck.too_slow]` to the `@settings` decorator on affected tests, (2) simplifying strategies by reducing `max_size` parameters or using `st.builds` instead of `@st.composite` where possible, (3) caching or flattening nested composite strategies to reduce draw overhead, or (4) increasing the `deadline` setting. Option 2 is preferred as it addresses the root cause rather than suppressing the symptom.
-- **Measure**: Run `cd src/pysimlin && uv run pytest tests/test_json_types.py -x --count=10` (with pytest-repeat) to observe intermittent failures
-- **Count**: 3 affected tests (as of 2026-02-24)
-- **Owner**: unassigned
-- **Last reviewed**: 2026-02-24
+- **Severity**: RESOLVED (2026-07-05)
+- **Description**: (**Resolved** on branch `vdf-parity-fixes`.) `tools/vdf_xray.py` handled several VDF boundary cases the Rust parser had not adopted. The two decode rules were ported to Rust `extract_data`: (1) per-block bitmap width -- `VdfFile::parse` now reads header `0x7C` (block time-point grid count) alongside `0x78` (saved count), and `VdfFile::block_bitmap_layout` discriminates each block by "u16 count == bitmap popcount" (preferring the compact saved-grid width when both match), with full-grid blocks decoded over the whole grid and sampled at the saved Time positions (`block_positions_for_time_values`, origin from the last saved time) -- fixing the garbage decode of the class-0x05 input blocks on the saved-suffix `risk.vdf`/`risk2.vdf` fixtures; (2) raw-zero OT entries with dynamic class `0x11` and a nonzero section-6 final value now decode as all-NaN missing data (`inline_ot_entry_is_missing`; 455 such slots on `Ref.vdf`) instead of constant 0.0, and the C-LEARN comparator skips such reference-missing columns (`vdf_reference_is_missing` in `tests/integration/simulate.rs`). The other two boundary cases the entry listed were already moot in Rust: the slot table and section-6 arrays are decoded from exact header/section-header pointers (`slot_table_from_header`, header `0x58`/`0x5C`/`0x60`), so the `SCEN01.VDF` candidate-scan preference and the empty-ref-stream overrun do not arise. Covered by `test_saved_suffix_blocks_use_wider_bitmap_grid`, `test_ref_raw_zero_dynamic_ot_entries_decode_as_missing`, and the `risk.vdf`/`risk2.vdf` extension of `test_section6_final_values_match_extracted_last_values`.
 
 ### 20. LTM FixedIndex References Expand to N-squared Edges
 
@@ -631,3 +618,14 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Owner**: unassigned
 - **Discovered**: sketch-connector/equation consistency-check work on branch `editor-bug-burndown-2026-07`
 - **Last reviewed**: 2026-07-02
+
+### 68. Flaky Hypothesis Tests in pysimlin Due to Slow Input Generation
+
+- **Component**: pysimlin (src/pysimlin/tests/test_json_types.py)
+- **Severity**: medium
+- **Description**: Several Hypothesis property-based tests intermittently fail with `FailedHealthCheck` because input generation is too slow. The affected tests are `TestJsonRoundtrip::test_stock_roundtrip`, `TestSchemaCompliance::test_flow_validates_against_schema`, and `TestPatchRoundtrip::test_upsert_stock_roundtrip`. The root cause is deeply nested composite strategies: `flow_strategy` and `auxiliary_strategy` conditionally invoke `graphical_function_strategy`, which itself draws from two `graphical_function_scale_strategy` instances plus variable-length point lists with constrained floats. The `stock_strategy` draws multiple `ident_strategy` lists. When Hypothesis explores complex branches (e.g., graphical functions with many points and both scales), generation time can exceed the default health check deadline, causing intermittent failures that are environment-dependent (slower in CI, under load, or in sandboxed environments). Possible fixes include: (1) adding `suppress_health_check=[HealthCheck.too_slow]` to the `@settings` decorator on affected tests, (2) simplifying strategies by reducing `max_size` parameters or using `st.builds` instead of `@st.composite` where possible, (3) caching or flattening nested composite strategies to reduce draw overhead, or (4) increasing the `deadline` setting. Option 2 is preferred as it addresses the root cause rather than suppressing the symptom.
+- **Measure**: Run `cd src/pysimlin && uv run pytest tests/test_json_types.py -x --count=10` (with pytest-repeat) to observe intermittent failures
+- **Count**: 3 affected tests (as of 2026-02-24)
+- **Owner**: unassigned
+- **Last reviewed**: 2026-02-24
+- **Note**: Originally filed as a duplicate "### 19"; renumbered to 68 when the other 19 (Rust VDF Parser Boundary Parity) was resolved. Entry numbers 20-67 are cross-referenced elsewhere and were left untouched.

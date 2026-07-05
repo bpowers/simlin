@@ -69,6 +69,12 @@ rayon = "1"
 [dev-dependencies]
 csv = "1"
 rand = "0.9"
+# The VDF parity harness (tests/integration/vdf_parity.rs) requires
+# bitwise-exact f64 decoding of tools/vdf_xray.py's JSON output. Without
+# float_roundtrip, serde_json's fast float parser can be off by one ULP,
+# which reads as a phantom Rust-vs-Python divergence. Dev-only: production
+# builds of the crate keep the default fast parser.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 proptest = "1.5"
 jsonschema = { version = "0.26", default-features = false }
 # default features pull in the plotters HTML-report stack (plotters,

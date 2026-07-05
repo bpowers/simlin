@@ -86,12 +86,16 @@ class VdfXrayModelEditingTests(unittest.TestCase):
                 )
 
     def test_section1_records_start_at_fixed_offset_with_short_trailer(self) -> None:
+        # Residuals are measured against the deterministic slot-table start
+        # (sec1 field1), so files where the old backward-scan heuristic
+        # swallowed 1-2 leading words into its table now show those words in
+        # the trailer instead.
         cases = {
             "test/bobby/vdf/model_editing/run_8.vdf": (8, [32, 131]),
-            "test/bobby/vdf/econ/base.vdf": (4, [13352]),
+            "test/bobby/vdf/econ/base.vdf": (8, [13352, 8]),
             "test/xmutil_test_models/Ref.vdf": (24, [124, 0, 0, 0, 12320, 26]),
-            "test/metasd/WRLD3-03/experiment.vdf": (0, []),
-            "test/metasd/WRLD3-03/SCEN01.VDF": (4, [12328]),
+            "test/metasd/WRLD3-03/experiment.vdf": (8, [12328, 8]),
+            "test/metasd/WRLD3-03/SCEN01.VDF": (8, [12328, 8]),
             "test/bobby/vdf/lookups/lookup_ex.vdf": (8, [12320, 26]),
         }
         for relpath, (residual_bytes, residual_words) in cases.items():
@@ -146,6 +150,58 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             self.assertEqual(layout.base, 44, relpath)
             self.assertEqual(layout.distinct_strides, [16], relpath)
             self.assertEqual(layout.missing_16_slots, 0, relpath)
+
+    def test_slot_table_deterministic_decode_matches_header(self) -> None:
+        # The slot table is decoded deterministically from the section-1
+        # header: it starts at the field1 1-based word pointer, has block1[7]
+        # entries, and is followed by a single 0x00430000 terminator word
+        # before the name table. The deleted backward-scan heuristic
+        # under-counted on edited files and over-counted by one elsewhere;
+        # these fixtures are the ones it used to mishandle (mirrors the Rust
+        # test_slot_table_deterministic_matches_header).
+        for relpath in [
+            "test/bobby/vdf/econ/risk2.vdf",
+            "test/metasd/WRLD3-03/SCEN01.VDF",
+            "test/metasd/social-network-valuation/optimistic.vdf",
+            "test/bobby/vdf/econ/risk.vdf",
+            "test/bobby/vdf/water/Current.vdf",
+        ]:
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                sec1 = vdf.sections[1]
+
+                block1_word7 = vdf_xray.u32(
+                    vdf.data, sec1.data_offset() + vdf_xray.SLOT_COUNT_WORD_OFFSET)
+                field1_start = sec1.file_offset + 4 * (sec1.field1 - 1)
+
+                self.assertEqual(len(vdf.slot_table), block1_word7)
+                self.assertEqual(vdf.slot_table_offset, field1_start)
+                terminator = vdf_xray.u32(
+                    vdf.data, field1_start + len(vdf.slot_table) * 4)
+                self.assertEqual(terminator, vdf_xray.SLOT_TABLE_TERMINATOR)
+                # The terminator word is the last word before the name table.
+                name_sec = vdf.sections[vdf.name_section_idx]
+                self.assertEqual(
+                    field1_start + (len(vdf.slot_table) + 1) * 4,
+                    name_sec.file_offset,
+                )
+
+    def test_slot_table_decode_returns_empty_on_cross_check_mismatch(self) -> None:
+        # Corrupt block1[7] so the count no longer lands the terminator just
+        # before the name table: the decode must bail to (0, []) rather than
+        # emit a mis-decoded table.
+        path = REPO_ROOT / "test/bobby/vdf/water/Current.vdf"
+        data = bytearray(path.read_bytes())
+        vdf = vdf_xray.parse_vdf(bytes(data))
+        sec1 = vdf.sections[1]
+        count_off = sec1.data_offset() + vdf_xray.SLOT_COUNT_WORD_OFFSET
+        original_count = vdf_xray.u32(vdf.data, count_off)
+        data[count_off:count_off + 4] = (original_count + 1).to_bytes(4, "little")
+
+        corrupted = vdf_xray.parse_vdf(bytes(data))
+
+        self.assertEqual(corrupted.slot_table_offset, 0)
+        self.assertEqual(corrupted.slot_table, [])
 
     def test_name_table_skips_declared_deleted_entries_and_resumes(self) -> None:
         risk2 = parse_fixture("test/bobby/vdf/econ/risk2.vdf")
@@ -380,214 +436,75 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         fingerprint = vdf_xray.ref_signature_fingerprint(run6, sec6[1][2].refs)
         self.assertEqual(fingerprint, [[32, 23, 17, 55], [140, 0, 0, 0]])
 
-    def test_run6_field6_zero_uses_active_sec3_index0_shape(self) -> None:
-        run6 = parse_fixture("test/bobby/vdf/model_editing/run_6.vdf")
-        rec = next(rec for rec in run6.records if rec.ot_index() == 1 and rec.fields[10] == 11)
+    def test_field6_zero_records_have_no_decoded_shape(self) -> None:
+        # f[6]=0 records (dimension anchors, elements, builtins, descriptors)
+        # never carry a decoded shape span, even when a section-3 entry with
+        # index_word=0 is active (run_6) or a placeholder (run_8).
+        for relpath in [
+            "test/bobby/vdf/model_editing/run_6.vdf",
+            "test/bobby/vdf/model_editing/run_8.vdf",
+        ]:
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                rec = next(
+                    rec for rec in vdf.records
+                    if rec.ot_index() == 1 and rec.fields[10] == 11
+                )
 
-        self.assertEqual(rec.shape_code(), 0)
-        self.assertEqual(vdf_xray.record_shape_length(run6, rec), 2)
+                self.assertEqual(rec.shape_code(), 0)
+                self.assertIsNone(vdf_xray.decoded_record_shape_length(vdf, rec))
 
-    def test_run8_field6_zero_does_not_use_placeholder_sec3_index0_shape(self) -> None:
-        run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
-        rec = next(rec for rec in run8.records if rec.ot_index() == 1 and rec.fields[10] == 11)
-
-        self.assertEqual(rec.shape_code(), 0)
-        self.assertIsNone(vdf_xray.record_shape_length(run8, rec))
-
-    def test_run7_record_shape_blocks_expose_overlapping_idx0_candidates(self) -> None:
-        run7 = parse_fixture("test/bobby/vdf/model_editing/run_7.vdf")
-        blocks = vdf_xray.build_record_shape_blocks(run7)
-
-        stock_block = next(block for block in blocks if block.start == 1 and block.end == 3)
-        overlap_block = next(block for block in blocks if block.start == 2 and block.end == 4)
-
-        self.assertEqual(stock_block.ot_codes, [vdf_xray.OT_CODE_STOCK, vdf_xray.OT_CODE_STOCK])
-        self.assertEqual(stock_block.sort_keys, [])
-        self.assertIn(13, stock_block.shape_record_indices)
-
-        self.assertEqual(
-            overlap_block.ot_codes,
-            [vdf_xray.OT_CODE_STOCK, 0x17],
-        )
-        self.assertEqual(overlap_block.sort_keys, [11])
-
-
-    def test_run9_record_shape_blocks_split_hidden_and_visible_stock_regions(self) -> None:
-        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
-        blocks = vdf_xray.build_record_shape_blocks(run9)
-
-        hidden_block = next(block for block in blocks if block.start == 1 and block.end == 2)
-        visible_stock_block = next(block for block in blocks if block.start == 2 and block.end == 4)
-
-        self.assertEqual(hidden_block.ot_codes, [vdf_xray.OT_CODE_STOCK])
-        self.assertIn(412, hidden_block.slot_refs)
-        self.assertEqual(hidden_block.sort_keys, [5, 13])
-
-        self.assertEqual(
-            visible_stock_block.ot_codes,
-            [vdf_xray.OT_CODE_STOCK, vdf_xray.OT_CODE_STOCK],
-        )
-        self.assertEqual(visible_stock_block.sort_keys, [])
-
-
-    def test_run7_owner_blocks_drop_overlapping_non_sentinel_stock_candidate(self) -> None:
-        run7 = parse_fixture("test/bobby/vdf/model_editing/run_7.vdf")
-        blocks = vdf_xray.build_owner_record_blocks(run7)
-
-        self.assertEqual([(block.start, block.end) for block in blocks], [
-            (1, 3),
-            (3, 4),
-            (5, 7),
-            (10, 11),
-        ])
-
-        stock_block = blocks[0]
-        self.assertFalse(stock_block.hidden)
-        # Record indices shifted by +3 after the record-region fix exposed
-        # the three previously-missed header-region records; sort_anchors
-        # moved from [8] to [11] for the same reason.
-        self.assertEqual(stock_block.sentinel_record_indices, [16])
-        self.assertEqual(stock_block.direct_sort_keys, [])
-        self.assertEqual(stock_block.attached_sort_keys, [11])
-        self.assertEqual(stock_block.sort_anchor_record_indices, [11])
-
-    def test_run9_owner_blocks_separate_hidden_helper_and_transfer_visible_stock_sort(self) -> None:
-        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
-        blocks = vdf_xray.build_owner_record_blocks(run9)
-
-        self.assertEqual([(block.start, block.end, block.hidden) for block in blocks], [
-            (1, 2, True),
-            (2, 4, False),
-            (4, 5, False),
-            (6, 8, False),
-            (11, 12, False),
-        ])
-
-        # Record indices shifted by +4 after the record-region fix exposed
-        # four previously-missed leading records (INITIAL TIME sentinel
-        # plus three header-region blocks).
-        hidden_block = blocks[0]
-        self.assertEqual(hidden_block.sentinel_record_indices, [22])
-        self.assertEqual(hidden_block.direct_sort_keys, [5])
-        self.assertEqual(hidden_block.attached_sort_keys, [5])
-        self.assertEqual(hidden_block.slot_refs, [412])
-        self.assertEqual(hidden_block.hidden_slot_refs, [412])
-
-        visible_stock_block = blocks[1]
-        self.assertEqual(visible_stock_block.sentinel_record_indices, [16])
-        self.assertEqual(visible_stock_block.direct_sort_keys, [])
-        self.assertEqual(visible_stock_block.attached_sort_keys, [13])
-        self.assertEqual(visible_stock_block.sort_anchor_record_indices, [18])
-
-
-    def test_water_owner_blocks_drop_system_records_at_source(self) -> None:
+    def test_water_extraction_recovers_model_and_system_series(self) -> None:
+        # Replaces the deleted owner-block test for water/Current.vdf at the
+        # extraction level: the five visible model variables map onto their
+        # record-decoded OT slots and the system records land on their own
+        # slots -- system sentinel records never masquerade as model owners.
         water = parse_fixture("test/bobby/vdf/water/Current.vdf")
-        blocks = vdf_xray.build_owner_record_blocks(water)
 
-        # INITIAL TIME (f[2]=9) and FINAL TIME (f[2]=13) records carry
-        # sentinels but point at system OT slots (OT[7] and OT[4] here).
-        # `sentinel_model_record_indices` filters them out by f[2] so the
-        # owner-block set contains only the five visible model variables:
-        # water_level (stock), two dynamics, two consts. The system OT
-        # slots they would have anchored are still reachable through
-        # other VDF-native paths (section-6 class codes, name-table
-        # filtering), so there is no loss of information.
+        results = vdf_xray.extract_named_results(water)
+
+        self.assertIsNotNone(results)
+        assert results is not None
+        by_name = {result.name: result.ot_index for result in results}
         self.assertEqual(
-            [(block.start, block.end, block.hidden) for block in blocks],
-            [
-                (1, 2, False),
-                (2, 3, False),
-                (3, 4, False),
-                (5, 6, False),
-                (6, 7, False),
-            ],
+            by_name,
+            {
+                "Time": 0,
+                "water level": 1,
+                "adjustment time": 2,
+                "desired water level": 3,
+                "FINAL TIME": 4,
+                "gap": 5,
+                "inflow": 6,
+                "INITIAL TIME": 7,
+                "SAVEPER": 8,
+                "TIME STEP": 9,
+            },
         )
-        visible = [b for b in blocks if not b.hidden]
-        self.assertEqual([(b.start, b.end) for b in visible], [
-            (1, 2),
-            (2, 3),
-            (3, 4),
-            (5, 6),
-            (6, 7),
-        ])
 
-    def test_run10_owner_blocks_keep_visible_blocks_and_hide_helper_structurally(self) -> None:
-        run10 = parse_fixture("test/bobby/vdf/model_editing/run_10.vdf")
-        blocks = vdf_xray.build_owner_record_blocks(run10)
-        key_to_name_idx = vdf_xray.build_record_name_key_to_name_index(run10)
-
-        self.assertEqual([(block.start, block.end, block.hidden) for block in blocks], [
-            (1, 2, True),
-            (2, 4, False),
-            (4, 5, False),
-            (6, 8, False),
-            (11, 12, False),
-        ])
-
-        hidden_block = blocks[0]
-        hidden_record = run10.records[hidden_block.sentinel_record_indices[0]]
-        hidden_name_idx = key_to_name_idx[hidden_record.fields[2]]
-        self.assertEqual(run10.names[hidden_name_idx], "#v>SMOOTH#")
-        self.assertEqual(hidden_block.direct_sort_keys, [5])
-        self.assertEqual(hidden_block.attached_sort_keys, [5, 13])
-
-        visible_stock_block = blocks[1]
-        self.assertEqual(visible_stock_block.direct_sort_keys, [])
-        self.assertEqual(visible_stock_block.attached_sort_keys, [13])
-        # Record index shifted by +4 after the record-region fix exposed the
-        # three previously-missed header-region records plus the leading
-        # INITIAL TIME sentinel record.
-        self.assertEqual(visible_stock_block.sort_anchor_record_indices, [7])
-
-        self.assertEqual(blocks[2].attached_sort_keys, [7])
-        self.assertEqual(blocks[3].attached_sort_keys, [9])
-        self.assertEqual(blocks[4].attached_sort_keys, [18])
-
-
-    def test_run9_best_slot_alignment_prefers_display_shift_for_leading_helpers(self) -> None:
+    def test_run9_slot_table_keeps_stale_leading_entry_from_edit_chain(self) -> None:
+        # run_9 is an edited fixture whose actively-written slot table retains
+        # a stale leading helper entry (412), so the naive slot_table[i] ->
+        # names[i] pairing is shifted by one on this file. That is a fact
+        # about the file, not a decode error: the deterministic header decode
+        # (field1 + block1[7] + terminator) pins exactly this table.
+        # Extraction does not depend on the slot/name pairing.
         run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
 
-        default_alignment = vdf_xray.score_slot_name_alignment(run9, 0)
-        best_alignment = vdf_xray.best_slot_name_alignment(run9)
+        self.assertEqual(len(run9.slot_table), 24)
+        self.assertEqual(run9.slot_table[:5], [412, 156, 124, 140, 188])
 
-        self.assertEqual(best_alignment.leading_extra_slots, 2)
-        self.assertEqual(best_alignment.hidden_slots, [8, 412])
-        self.assertGreater(best_alignment.score, default_alignment.score)
-
-    def test_run9_display_alignment_restores_time_and_sec5_metadata_refs(self) -> None:
-        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
-        slot_to_names = vdf_xray.build_display_slot_to_names(run9)
-
-        self.assertEqual(slot_to_names[156], ["Time"])
-        self.assertEqual(slot_to_names[188], ["TIME STEP"])
-        self.assertEqual(slot_to_names[204], ["SAVEPER"])
-        self.assertEqual(slot_to_names[220], ["sub1"])
-
-    def test_ref_direct_slot_mapping_is_structural_even_when_display_alignment_shifts(self) -> None:
+    def test_ref_direct_slot_mapping_pairs_dimension_names(self) -> None:
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
 
-        alignment = vdf_xray.preferred_slot_name_alignment(ref)
         direct = vdf_xray.build_direct_slot_to_names(ref)
-        display = vdf_xray.build_display_slot_to_names(ref)
 
-        self.assertEqual(alignment.leading_extra_slots, 1)
-        self.assertEqual(alignment.hidden_slots, [17552])
         self.assertEqual(direct[1724], ["Aggregated Regions"])
         self.assertEqual(direct[316], ["COP"])
         self.assertEqual(direct[16784], ["HFC type"])
         self.assertEqual(direct[5164], ["layers"])
         self.assertEqual(direct[13868], ["Semi Agg"])
         self.assertEqual(direct[1052], ["Target"])
-        self.assertNotEqual(display[5164], ["layers"])
-
-    def test_decoded_record_shape_length_excludes_ambiguous_zero_shape(self) -> None:
-        run6 = parse_fixture("test/bobby/vdf/model_editing/run_6.vdf")
-        rec = next(rec for rec in run6.records if rec.ot_index() == 1 and rec.fields[10] == 11)
-
-        self.assertEqual(rec.shape_code(), 0)
-        self.assertEqual(vdf_xray.record_shape_length(run6, rec), 2)
-        self.assertIsNone(vdf_xray.decoded_record_shape_length(run6, rec))
-
 
     def test_risk_sparse_blocks_use_full_bitmap_grid_but_saved_time_suffix(self) -> None:
         risk = parse_fixture("test/bobby/vdf/econ/risk.vdf")
@@ -652,11 +569,13 @@ class VdfXrayModelEditingTests(unittest.TestCase):
                 full_grid_count = vdf_xray.u16(vdf.data, full_grid_raw)
                 self.assertEqual(
                     vdf._block_bitmap_layout(stock_raw, stock_count),
-                    (vdf.bitmap_size, vdf.time_point_count),
+                    (vdf.bitmap_size, vdf.time_point_count, "saved"),
                 )
+                # risk's data grid (0x74=225) coincides with its block grid
+                # (0x7C=225), so the block candidate wins by order.
                 self.assertEqual(
                     vdf._block_bitmap_layout(full_grid_raw, full_grid_count),
-                    (vdf.block_bitmap_size, vdf.block_time_point_count),
+                    (vdf.block_bitmap_size, vdf.block_time_point_count, "block"),
                 )
 
                 stock_series = vdf.extract_ot_series(stock_ot, time_values, codes, final_values)
@@ -799,66 +718,22 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertIn("lookup?=1", text)
 
 
-    def test_run2_name_mapping_emits_empty_mapping_when_no_model_records(self) -> None:
+    def test_run2_extraction_emits_only_time_and_system_series(self) -> None:
+        # run_2 has only system and padding records: the two sentinel system
+        # records (INITIAL TIME, FINAL TIME) decode to system names via f[2],
+        # and the remaining records all have f[6]=0, so no model-variable
+        # spans survive. Extraction must emit exactly Time plus the four
+        # system variables.
         run2 = parse_fixture("test/bobby/vdf/model_editing/run_2.vdf")
 
-        mapping = vdf_xray.map_names_to_owner_blocks(run2)
+        results = vdf_xray.extract_named_results(run2)
 
-        # run_2 has only system and padding records; after the record-region
-        # fix the two sentinel system records (INITIAL TIME, FINAL TIME) are
-        # filtered out of `sentinel_model_record_indices` after decoding f[2]
-        # to system names, and the remaining records all have f[6]=0 so no
-        # model-variable owner blocks survive.
-        self.assertIsNotNone(mapping)
-        assert mapping is not None
-        self.assertEqual(mapping.variable_names, [])
-        self.assertEqual(mapping.system_ot_indices, set())
-        self.assertEqual(mapping.unmapped_blocks, [])
-
-    def test_run3_name_mapping_uses_record_name_key_and_recovers_v(self) -> None:
-        run3 = parse_fixture("test/bobby/vdf/model_editing/run_3.vdf")
-
-        mapping = vdf_xray.map_names_to_owner_blocks(run3)
-
-        # `v` still maps to OT[5..6). The previous expectation
-        # `system_ot_indices == {1}` came from a visible FINAL TIME block
-        # at OT[1..2) that is now filtered out of owner blocks at source
-        # (decoded system records never become model-variable
-        # owners after the record-region fix).
-        self.assertIsNotNone(mapping)
-        assert mapping is not None
-        self.assertEqual(mapping.variable_names, ["v"])
-        self.assertEqual(mapping.name_to_block["v"].start, 5)
-        self.assertEqual(mapping.system_ot_indices, set())
-
-    def test_mark2_name_mapping_uses_record_name_keys_and_leaves_inner_lookup_wiring_unresolved(self) -> None:
-        # The direct f[2] string key recovers the large contiguous block of
-        # visible model variables in mark2, but record ownership still leaves
-        # some lookup/alias wiring to the model-guided path. This checks the
-        # broad coverage and one known block without pinning every alias edge.
-        mark2 = parse_fixture("test/bobby/vdf/econ/mark2.vdf")
-
-        mapping = vdf_xray.map_names_to_owner_blocks(mark2)
-
-        self.assertIsNotNone(mapping)
-        assert mapping is not None
-        self.assertGreaterEqual(len(mapping.variable_names), 55)
-        self.assertIn("perceived mortgage balance", mapping.name_to_block)
-
-    def test_lookup_ex_name_mapping_keeps_inline_lookup_variable_and_excludes_definition(self) -> None:
-        # The direct f[2] string key lets the stock and evaluated inline
-        # lookup variable claim their own OT blocks. The graphical-function
-        # definition should not steal the evaluated output's block.
-        lookup_ex = parse_fixture("test/bobby/vdf/lookups/lookup_ex.vdf")
-
-        mapping = vdf_xray.map_names_to_owner_blocks(lookup_ex)
-
-        self.assertIsNotNone(mapping)
-        assert mapping is not None
-        self.assertIn("stock", mapping.name_to_block)
-        self.assertIn("inline lookup table", mapping.name_to_block)
-        self.assertIn("net change", mapping.name_to_block)
-        self.assertNotIn("lookup table 1", mapping.name_to_block)
+        self.assertIsNotNone(results)
+        assert results is not None
+        self.assertEqual(
+            [result.name for result in results],
+            ["Time", "FINAL TIME", "INITIAL TIME", "SAVEPER", "TIME STEP"],
+        )
 
     def test_run3_extract_named_results_assigns_system_slots_from_records(self) -> None:
         run3 = parse_fixture("test/bobby/vdf/model_editing/run_3.vdf")
@@ -943,6 +818,10 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertIn("inflation rate", names)
         self.assertNotIn("federal funds rate lookup", names)
         self.assertNotIn("inflation rate lookup", names)
+        # Broad-coverage floor: the direct record map recovers the large
+        # contiguous block of visible model variables.
+        self.assertGreaterEqual(len(names), 55)
+        self.assertIn("perceived mortgage balance", names)
 
     def test_subscripts_extract_named_results_uses_dimension_element_names(self) -> None:
         subscripts = parse_fixture("test/bobby/vdf/subscripts/subscripts.vdf")
@@ -1146,15 +1025,11 @@ class VdfXrayModelEditingTests(unittest.TestCase):
 
     def test_ref_multidim_labels_use_unique_record_group_cardinalities(self) -> None:
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
-        block = vdf_xray.OwnerRecordBlock(
-            start=0,
-            end=63,
-            ot_codes=[],
-            shape_codes=[221],
-        )
-        labels = vdf_xray._array_element_labels_for_block(
+        span = _span(0, "Proportion of COP to global HFC134a eq", 0, 63)
+        span.shape_code = 221
+        labels = vdf_xray._array_element_labels_for_span(
             ref,
-            block,
+            span,
             vdf_xray._recover_dimension_sets(ref),
         )
 
@@ -1167,13 +1042,16 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         )
         self.assertEqual(labels[-1], "COP Developing B,HFC4310mee")
 
-    def test_ref_dimension_anchors_are_not_mapped_as_series_owners(self) -> None:
+    def test_ref_dimension_anchors_are_not_extracted_as_series_owners(self) -> None:
+        # Dimension-anchor records have f[6]=0, so they never yield a decoded
+        # span; no dimension name may appear as an extracted series (bare or
+        # element-subscripted).
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
 
-        mapping = vdf_xray.map_names_to_owner_blocks(ref)
+        results = vdf_xray.extract_named_results(ref)
 
-        self.assertIsNotNone(mapping)
-        assert mapping is not None
+        self.assertIsNotNone(results)
+        assert results is not None
         for name in [
             "Aggregated Regions",
             "COP",
@@ -1182,25 +1060,29 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             "Semi Agg",
             "Target",
         ]:
-            self.assertNotIn(name, mapping.name_to_block)
+            for result in results:
+                self.assertFalse(
+                    result.name == name or result.name.startswith(name + "["),
+                    f"dimension {name!r} emitted as series {result.name!r}",
+                )
 
-    def test_ref_owner_mapping_is_non_overlapping_but_not_owner_proven(self) -> None:
+    def test_ref_owner_spans_are_non_overlapping_after_descriptor_pruning(self) -> None:
         # Several Ref graphical-function descriptor records carry owner-looking
-        # fields and overlap real saved variables. The current xray mapping is
-        # a non-overlap diagnostic partition, not a decoded owner/descriptor
-        # rule; pin both the no-duplicate invariant and a known wrong-side
-        # selection so callers keep treating Ref as not-proven.
+        # fields and overlap real saved variables. After descriptor
+        # identification (overlap peeling + the standalone drop) the remaining
+        # owner spans must partition their OT slots with no duplicates, and
+        # the known descriptor names must be on the descriptor side.
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
 
-        mapping = vdf_xray.map_names_to_owner_blocks(ref)
+        spans = vdf_xray.decoded_record_spans(ref)
+        descriptor_indices = vdf_xray.identify_descriptor_records(
+            ref, spans).descriptor_indices
+        owner_spans = [s for s in spans if s.rec_idx not in descriptor_indices]
 
-        self.assertIsNotNone(mapping)
-        assert mapping is not None
         ot_to_names: dict[int, list[str]] = {}
-        for name, block in mapping.name_to_block.items():
-            for ot_idx in range(block.start, block.end):
-                ot_to_names.setdefault(ot_idx, []).append(name)
-
+        for span in owner_spans:
+            for ot_idx in range(span.start, span.end):
+                ot_to_names.setdefault(ot_idx, []).append(span.name)
         duplicates = {
             ot_idx: names
             for ot_idx, names in ot_to_names.items()
@@ -1208,15 +1090,12 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         }
         self.assertEqual(duplicates, {})
 
-        self.assertEqual(mapping.name_to_block["C in Mixed Layer"].start, 137)
-        self.assertEqual(mapping.name_to_block["C in Mixed Layer"].length(), 3)
-        self.assertEqual(mapping.name_to_block["Cum CO2 at start"].start, 146)
-        self.assertEqual(mapping.name_to_block["Cum CO2eq at start"].start, 153)
-        self.assertEqual(mapping.name_to_block["Cumulative CO2"].start, 160)
-        self.assertNotIn("CH4 in Atm", mapping.name_to_block)
-        self.assertEqual(mapping.name_to_block["Specified Global HFC134a eq"].start, 140)
-        self.assertEqual(mapping.name_to_block["Specified Global N2O"].start, 141)
-        self.assertEqual(mapping.name_to_block["Specified Global PFC"].start, 142)
+        owner_by_name = {span.name: span for span in owner_spans}
+        self.assertEqual(owner_by_name["C in Mixed Layer"].start, 137)
+        self.assertEqual(owner_by_name["C in Mixed Layer"].length(), 3)
+        self.assertEqual(owner_by_name["Cum CO2 at start"].start, 146)
+        self.assertEqual(owner_by_name["Cum CO2eq at start"].start, 153)
+        self.assertEqual(owner_by_name["Cumulative CO2"].start, 160)
 
         for descriptor_name in [
             "RS N2O",
@@ -1231,7 +1110,7 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             "Specified Developing B CO2eq emissions",
             "Specified Global CH4",
         ]:
-            self.assertNotIn(descriptor_name, mapping.name_to_block)
+            self.assertNotIn(descriptor_name, owner_by_name)
 
     def test_ref_explicit_shape_codes_use_following_section3_entry(self) -> None:
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
@@ -1256,7 +1135,7 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         for name, expected_length in expected_lengths.items():
             with self.subTest(name=name):
                 self.assertEqual(
-                    vdf_xray.record_shape_length(ref, records_by_name[name]),
+                    vdf_xray.decoded_record_shape_length(ref, records_by_name[name]),
                     expected_length,
                 )
 
@@ -1315,8 +1194,10 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(lookup.names[lookup_keys[43]], "stock")
         self.assertEqual(lookup.names[lookup_keys[46]], "net change")
 
-    def test_direct_record_name_key_mapping_recovers_edited_array_owners(self) -> None:
-        expected_blocks = {
+    def test_decoded_record_spans_recover_edited_array_owners(self) -> None:
+        # The direct record map (f[2] name key, f[11] OT start, f[6] shape)
+        # recovers the model-variable spans on the edited array fixtures.
+        expected_spans = {
             "constant": (4, 5),
             "flow": (6, 8),
             "stock": (2, 4),
@@ -1328,32 +1209,27 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             "test/bobby/vdf/model_editing/run_10.vdf",
         ]:
             vdf = parse_fixture(relpath)
-            mapping = vdf_xray.map_names_to_owner_blocks(vdf)
+            spans = vdf_xray.decoded_record_spans(vdf)
 
-            self.assertIsNotNone(mapping, relpath)
-            assert mapping is not None
-            self.assertEqual(set(mapping.name_to_block), set(expected_blocks), relpath)
-            self.assertEqual(
-                {
-                    name: (block.start, block.end)
-                    for name, block in mapping.name_to_block.items()
-                },
-                expected_blocks,
-                relpath,
-            )
+            model_spans = {
+                span.name: (span.start, span.end)
+                for span in spans
+                if span.name in expected_spans
+            }
+            self.assertEqual(model_spans, expected_spans, relpath)
 
-    def test_direct_record_name_key_mapping_recovers_single_variable_files(self) -> None:
+    def test_extraction_recovers_single_variable_files(self) -> None:
         for relpath, expected_start in [
             ("test/bobby/vdf/level_vs_aux/x_is_stock.vdf", 1),
             ("test/bobby/vdf/level_vs_aux/x_is_aux.vdf", 5),
         ]:
             vdf = parse_fixture(relpath)
-            mapping = vdf_xray.map_names_to_owner_blocks(vdf)
+            results = vdf_xray.extract_named_results(vdf)
 
-            self.assertIsNotNone(mapping, relpath)
-            assert mapping is not None
-            self.assertEqual(mapping.variable_names, ["x"], relpath)
-            self.assertEqual(mapping.name_to_block["x"].start, expected_start, relpath)
+            self.assertIsNotNone(results, relpath)
+            assert results is not None
+            by_name = {result.name: result.ot_index for result in results}
+            self.assertEqual(by_name["x"], expected_start, relpath)
 
     def test_direct_record_name_key_mapping_separates_lookup_definition_from_output(self) -> None:
         lookup = parse_fixture("test/bobby/vdf/lookups/lookup_ex.vdf")
@@ -1368,24 +1244,18 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(by_name["net change"], 5)
         self.assertNotEqual(by_name.get("lookup table 1"), 4)
 
-    def test_record_key_mapping_keeps_runtime_signature_names(self) -> None:
+    def test_extraction_keeps_runtime_signature_names(self) -> None:
         # Direct f[2] keys can point at saved runtime helper signatures. These
         # are structural time-series owners, not display metadata to filter out.
         base = parse_fixture("test/bobby/vdf/econ/base.vdf")
 
-        mapping = vdf_xray.map_names_to_owner_blocks(base)
+        results = vdf_xray.extract_named_results(base)
 
-        self.assertIsNotNone(mapping)
-        assert mapping is not None
-        self.assertEqual(mapping.unmapped_blocks, [])
-        self.assertIn(
-            "#LV1<DELAY1(insolvencyrisk,averagetimebeforedefault)#",
-            mapping.name_to_block,
-        )
+        self.assertIsNotNone(results)
+        assert results is not None
+        by_name = {result.name: result.ot_index for result in results}
         self.assertEqual(
-            mapping.name_to_block[
-                "#LV1<DELAY1(insolvencyrisk,averagetimebeforedefault)#"
-            ].start,
+            by_name["#LV1<DELAY1(insolvencyrisk,averagetimebeforedefault)#"],
             1,
         )
 
@@ -1470,6 +1340,409 @@ class VdfXrayModelEditingTests(unittest.TestCase):
                 self.assertEqual(positions, expected_positions, subrange)
 
 
+def _span(rec_idx: int, name: str, start: int, length: int = 1) -> vdf_xray.DecodedRecordSpan:
+    return vdf_xray.DecodedRecordSpan(
+        rec_idx=rec_idx,
+        name_idx=0,
+        name=name,
+        start=start,
+        end=start + length,
+        shape_code=5,
+        sort_key=0,
+        slot_ref=0,
+        group_id=0,
+        has_sentinel=True,
+        ot_codes=[],
+    )
+
+
+class StandaloneLookupOnlyDescriptorTests(unittest.TestCase):
+    """
+    Port of the Rust `standalone_descriptor_tests` module
+    (src/simlin-engine/src/vdf/record_results.rs): the pure standalone
+    lookup-only descriptor detection over synthetic inputs.
+    """
+
+    OT_TIME = vdf_xray.OT_CODE_TIME
+    OT_STOCK = vdf_xray.OT_CODE_STOCK
+    OT_DYNAMIC = vdf_xray.OT_CODE_DYNAMIC
+
+    def test_standalone_lookup_descriptor_is_dropped(self) -> None:
+        # OT layout: 0=Time, 1=dynamic owner (the real GF output the
+        # descriptor's forward link resolves to), 2=stock-coded GHOST slot the
+        # descriptor's f[11]-as-OT-start spuriously lands on.
+        class_codes = [self.OT_TIME, self.OT_DYNAMIC, self.OT_STOCK]
+        lookup_word10 = [9, 1]
+
+        # The consumer span at the forward link (OT 1) corroborates the drop;
+        # it is never a candidate itself because its slot is DYNAMIC, so the
+        # ghost-stock gate rejects it first (its f[11] of 0 would fail the
+        # forward-link gate too).
+        outcome = vdf_xray.standalone_lookup_only_descriptors(
+            spans=[
+                _span(0, "Some Forcing graph", 2),
+                _span(1, "Some Forcing consumer", 1),
+            ],
+            f11_by_span=[1, 0],
+            overlapping=set(),
+            peeled_descriptors=set(),
+            n_lookups=len(lookup_word10),
+            lookup_word10=lookup_word10,
+            lookup_word11=[1, 1],
+            class_codes=class_codes,
+            ot_count=len(class_codes),
+        )
+
+        self.assertEqual(outcome.dropped, {0})
+        self.assertFalse(outcome.veto_fired)
+
+    def test_legit_dynamic_owner_with_small_f11_is_not_dropped(self) -> None:
+        # f[11] == 1 is both the owner's OT start (dynamic, holds its data)
+        # AND coincidentally a valid lookup index. It must stay an owner.
+        class_codes = [self.OT_TIME, self.OT_DYNAMIC]
+        lookup_word10 = [9, 9]
+
+        outcome = vdf_xray.standalone_lookup_only_descriptors(
+            spans=[_span(0, "Some Concentration", 1)],
+            f11_by_span=[1],
+            overlapping=set(),
+            peeled_descriptors=set(),
+            n_lookups=len(lookup_word10),
+            lookup_word10=lookup_word10,
+            lookup_word11=[1, 1],
+            class_codes=class_codes,
+            ot_count=len(class_codes),
+        )
+
+        self.assertEqual(outcome.dropped, set())
+
+    def test_legit_dynamic_owner_blocked_only_by_stock_slot_guard(self) -> None:
+        # Every other precondition passes (non-overlapping, scalar, valid
+        # lookup index, in-range owner-coded forward link); the ONLY condition
+        # standing between the owner and a (wrong) drop is the STOCK-slot
+        # requirement: its f[11]-as-OT-start lands on a DYNAMIC slot.
+        class_codes = [self.OT_TIME, self.OT_DYNAMIC, self.OT_DYNAMIC]
+        lookup_word10 = [9, 2]
+
+        # A consumer span at the forward link (OT 2) satisfies consumer
+        # corroboration, so ONLY the STOCK-slot guard can reject.
+        outcome = vdf_xray.standalone_lookup_only_descriptors(
+            spans=[
+                _span(0, "Some Dynamic Owner", 1),
+                _span(1, "Forward Consumer", 2),
+            ],
+            f11_by_span=[1, 0],
+            overlapping=set(),
+            peeled_descriptors=set(),
+            n_lookups=len(lookup_word10),
+            lookup_word10=lookup_word10,
+            lookup_word11=[1, 1],
+            class_codes=class_codes,
+            ot_count=len(class_codes),
+        )
+
+        self.assertEqual(outcome.dropped, set())
+
+    def test_standalone_descriptor_with_time_forward_link_is_not_dropped(self) -> None:
+        # lookup record[1].word[10] == 0 -> Time, an invalid evaluated output.
+        class_codes = [self.OT_TIME, self.OT_STOCK]
+        lookup_word10 = [9, 0]
+
+        outcome = vdf_xray.standalone_lookup_only_descriptors(
+            spans=[_span(0, "Ref graph LOOKUP", 1)],
+            f11_by_span=[1],
+            overlapping=set(),
+            peeled_descriptors=set(),
+            n_lookups=len(lookup_word10),
+            lookup_word10=lookup_word10,
+            lookup_word11=[1, 1],
+            class_codes=class_codes,
+            ot_count=len(class_codes),
+        )
+
+        self.assertEqual(outcome.dropped, set())
+
+    def test_overlapping_descriptor_is_left_to_the_component_path(self) -> None:
+        class_codes = [self.OT_TIME, self.OT_STOCK]
+        lookup_word10 = [9, 1]
+
+        outcome = vdf_xray.standalone_lookup_only_descriptors(
+            spans=[_span(0, "Overlapping graph", 1)],
+            f11_by_span=[1],
+            overlapping={0},
+            peeled_descriptors=set(),
+            n_lookups=len(lookup_word10),
+            lookup_word10=lookup_word10,
+            lookup_word11=[1, 1],
+            class_codes=class_codes,
+            ot_count=len(class_codes),
+        )
+
+        self.assertEqual(outcome.dropped, set())
+
+    def test_arrayed_standalone_descriptor_is_dropped_when_width_matches(self) -> None:
+        # OT layout: 0=Time, [1,4) = 3 dynamic owners (the forward block),
+        # [4,7) = 3 stock GHOST slots the descriptor's f[11]-as-OT-start
+        # spuriously covers. Forward width word[11] == 3 == element count.
+        class_codes = [
+            self.OT_TIME,
+            self.OT_DYNAMIC, self.OT_DYNAMIC, self.OT_DYNAMIC,
+            self.OT_STOCK, self.OT_STOCK, self.OT_STOCK,
+        ]
+        lookup_word10 = [9, 1]
+        lookup_word11 = [0, 3]
+
+        # The 3-wide consumer span at the forward link (OT 1) corroborates.
+        outcome = vdf_xray.standalone_lookup_only_descriptors(
+            spans=[
+                _span(0, "RS arrayed graph", 4, 3),
+                _span(1, "RS arrayed consumer", 1, 3),
+            ],
+            f11_by_span=[1, 0],
+            overlapping=set(),
+            peeled_descriptors=set(),
+            n_lookups=len(lookup_word10),
+            lookup_word10=lookup_word10,
+            lookup_word11=lookup_word11,
+            class_codes=class_codes,
+            ot_count=len(class_codes),
+        )
+
+        self.assertEqual(outcome.dropped, {0})
+        self.assertFalse(outcome.veto_fired)
+
+    def test_arrayed_standalone_descriptor_with_wider_shared_consumer_is_not_dropped(self) -> None:
+        # Mirrors the Ref.vdf `rs_hfc*` family: eight 7-element descriptors
+        # all forward-link to one 63-wide consumer block. ONLY the width
+        # mismatch (5 != 3) rejects the drop here.
+        class_codes = [
+            self.OT_TIME,
+            self.OT_DYNAMIC, self.OT_DYNAMIC, self.OT_DYNAMIC,
+            self.OT_STOCK, self.OT_STOCK, self.OT_STOCK,
+        ]
+        lookup_word10 = [9, 1]
+        lookup_word11 = [0, 5]
+
+        # A 3-wide span at the forward link keeps consumer corroboration
+        # satisfiable; ONLY the width mismatch (5 != 3) rejects the drop.
+        outcome = vdf_xray.standalone_lookup_only_descriptors(
+            spans=[
+                _span(0, "RS HFC arrayed graph", 4, 3),
+                _span(1, "RS HFC shared consumer", 1, 3),
+            ],
+            f11_by_span=[1, 0],
+            overlapping=set(),
+            peeled_descriptors=set(),
+            n_lookups=len(lookup_word10),
+            lookup_word10=lookup_word10,
+            lookup_word11=lookup_word11,
+            class_codes=class_codes,
+            ot_count=len(class_codes),
+        )
+
+        self.assertEqual(outcome.dropped, set())
+
+    def test_plain_stock_owner_without_consumer_span_is_not_dropped(self) -> None:
+        # A real stock whose own OT start is coincidentally a valid lookup
+        # index passes every physical gate (it IS a stock; scalars have no
+        # width gate; the unrelated lookup's forward link is owner-coded) --
+        # consumer corroboration is the SOLE veto: no decoded span starts at
+        # the forward OT. Mirrors SimService/Base.vdf's Agriculture
+        # Employment, which the pre-gate code silently dropped.
+        class_codes = [self.OT_TIME, self.OT_STOCK, self.OT_DYNAMIC]
+        lookup_word10 = [9, 2]
+
+        outcome = vdf_xray.standalone_lookup_only_descriptors(
+            spans=[_span(0, "Agriculture Employment", 1)],
+            f11_by_span=[1],
+            overlapping=set(),
+            peeled_descriptors=set(),
+            n_lookups=len(lookup_word10),
+            lookup_word10=lookup_word10,
+            lookup_word11=[1, 1],
+            class_codes=class_codes,
+            ot_count=len(class_codes),
+        )
+
+        self.assertEqual(outcome.dropped, set())
+        # The veto is observable, never silent.
+        self.assertTrue(outcome.veto_fired)
+        self.assertEqual(outcome.vetoed_candidates, 1)
+
+    def test_one_uncorroborated_candidate_vetoes_all_standalone_drops(self) -> None:
+        # Per-file coherence: two candidates pass the physical gates; one
+        # corroborates (a decoded span starts at its forward link), one does
+        # not -- NEITHER is dropped. Mirrors SimService/Base.vdf, where Alaska
+        # Oil Discovered Reserves happened to corroborate off an unrelated
+        # consumer span while its three sibling stocks did not.
+        class_codes = [
+            self.OT_TIME,
+            self.OT_STOCK,    # OT 1: candidate 0's slot
+            self.OT_STOCK,    # OT 2: candidate 1's slot
+            self.OT_DYNAMIC,  # OT 3: corroborated forward link
+            self.OT_DYNAMIC,  # OT 4: uncorroborated forward link
+        ]
+        lookup_word10 = [9, 3, 4]
+
+        outcome = vdf_xray.standalone_lookup_only_descriptors(
+            spans=[
+                _span(0, "Alaska Oil Discovered Reserves", 1),
+                _span(1, "Atmos UOcean Temp", 2),
+                _span(2, "land allocated for ethanol", 3),
+            ],
+            f11_by_span=[1, 2, 0],
+            overlapping=set(),
+            peeled_descriptors=set(),
+            n_lookups=len(lookup_word10),
+            lookup_word10=lookup_word10,
+            lookup_word11=[1, 1, 1],
+            class_codes=class_codes,
+            ot_count=len(class_codes),
+        )
+
+        self.assertEqual(outcome.dropped, set())
+        # Both physically-gated candidates were withheld, observably.
+        self.assertTrue(outcome.veto_fired)
+        self.assertEqual(outcome.vetoed_candidates, 2)
+
+    def test_candidates_do_not_mutually_corroborate(self) -> None:
+        # Two candidates must not mutually corroborate each other's drop: a
+        # corroborator has to be a span that can actually be an emitted
+        # owner, and a standalone candidate might itself be dropped. Here
+        # candidate 0's forward link lands exactly on candidate 1's span and
+        # vice versa -- without the corroborator restriction both real
+        # stocks would be dropped and the veto would never fire.
+        class_codes = [self.OT_TIME, self.OT_STOCK, self.OT_STOCK]
+        lookup_word10 = [9, 2, 1]
+
+        outcome = vdf_xray.standalone_lookup_only_descriptors(
+            spans=[
+                _span(0, "Stock A", 1),
+                _span(1, "Stock B", 2),
+            ],
+            f11_by_span=[1, 2],
+            overlapping=set(),
+            peeled_descriptors=set(),
+            n_lookups=len(lookup_word10),
+            lookup_word10=lookup_word10,
+            lookup_word11=[1, 1, 1],
+            class_codes=class_codes,
+            ot_count=len(class_codes),
+        )
+
+        self.assertEqual(outcome.dropped, set())
+        self.assertTrue(outcome.veto_fired)
+        self.assertEqual(outcome.vetoed_candidates, 2)
+
+    def test_peeled_descriptor_does_not_corroborate(self) -> None:
+        # An overlap-peeled descriptor cannot corroborate a standalone drop:
+        # a peeled ghost is not an emitted owner. The forward link here lands
+        # on a span in `peeled_descriptors`, so the candidate is
+        # uncorroborated and the veto fires.
+        class_codes = [self.OT_TIME, self.OT_STOCK, self.OT_DYNAMIC]
+        lookup_word10 = [9, 2]
+
+        outcome = vdf_xray.standalone_lookup_only_descriptors(
+            spans=[
+                _span(0, "Some Stock", 1),
+                _span(7, "Peeled ghost", 2),
+            ],
+            f11_by_span=[1, 0],
+            overlapping=set(),
+            peeled_descriptors={7},
+            n_lookups=len(lookup_word10),
+            lookup_word10=lookup_word10,
+            lookup_word11=[1, 1],
+            class_codes=class_codes,
+            ot_count=len(class_codes),
+        )
+
+        self.assertEqual(outcome.dropped, set())
+        self.assertTrue(outcome.veto_fired)
+        self.assertEqual(outcome.vetoed_candidates, 1)
+
+    def test_standalone_drop_veto_diagnostics_on_fixtures(self) -> None:
+        # The coherence veto must be observable at the extraction surface:
+        # Ref.vdf's ten standalone candidates all corroborate (no veto),
+        # while SimService's four coincidental stock candidates trip it.
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+        _, diagnostics = vdf_xray.extract_named_results_with_diagnostics(ref)
+        self.assertFalse(diagnostics.standalone_drop_veto_fired)
+        self.assertEqual(diagnostics.standalone_drop_vetoed_candidates, 0)
+
+        relpath = ("third_party/uib_sd/spring_2008/SimService_BUENO/"
+                   "SimService/Model Files/Base.vdf")
+        if not (REPO_ROOT / relpath).exists():
+            self.skipTest("third_party SimService fixtures not available")
+        sim = parse_fixture(relpath)
+        _, diagnostics = vdf_xray.extract_named_results_with_diagnostics(sim)
+        self.assertTrue(diagnostics.standalone_drop_veto_fired)
+        self.assertEqual(diagnostics.standalone_drop_vetoed_candidates, 4)
+
+    def test_simservice_stocks_are_not_dropped_as_lookup_only(self) -> None:
+        # Regression for the SimService false positives: four real dynamic
+        # stocks whose OT starts collide with the lookup-index range must
+        # keep their series with sane values.
+        relpaths = [
+            "third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/Base.vdf",
+            "third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/ctxt0001/Base.vdf",
+        ]
+        if not (REPO_ROOT / relpaths[0]).exists():
+            self.skipTest("third_party SimService fixtures not available")
+
+        for relpath in relpaths:
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                results = vdf_xray.extract_named_results(vdf)
+
+                self.assertIsNotNone(results)
+                assert results is not None
+                by_name = {result.name: result for result in results}
+                for name, expected_first in [
+                    ("Agriculture Employment", 3.4e6),
+                    ("Alaska Oil Discovered Reserves", None),
+                    ("Alaska Oil Undiscovered Resources", None),
+                    ("Atmos UOcean Temp", None),
+                ]:
+                    self.assertIn(name, by_name)
+                    values = by_name[name].values
+                    self.assertTrue(values)
+                    self.assertTrue(
+                        all(not math.isnan(value) for value in values), name)
+                    if expected_first is not None:
+                        self.assertAlmostEqual(
+                            values[0], expected_first, delta=expected_first * 1e-3)
+
+    def test_ref_extraction_drops_standalone_lookup_only_series_but_keeps_consumers(self) -> None:
+        # Ref.vdf-level check: bare graphical functions (tables) no longer
+        # emit ghost stock-slot series, while their consumer variables (real
+        # owners) keep their series.
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+
+        results = vdf_xray.extract_named_results(ref)
+
+        self.assertIsNotNone(results)
+        assert results is not None
+        names = {result.name for result in results}
+        for dropped_name in [
+            "Historical GDP LOOKUP[OECD US]",
+            "Historical GDP LOOKUP[COP Developing B]",
+            "Historical forestry LOOKUP[OECD US]",
+            "RS CH4[OECD US]",
+            "RS CO2 FF[OECD US]",
+            "RS GDP in trillions[COP Developing B]",
+            "Global Emissions from graph LOOKUP",
+            "Ozone precursor forcings",
+        ]:
+            self.assertNotIn(dropped_name, names)
+        for consumer in [
+            "Historical GDP[OECD US]",
+            "Historical GDP[COP Developing B]",
+            "CH4 anthro emissions[OECD US]",
+        ]:
+            self.assertIn(consumer, names)
+
+
 class CorpusDecodedRecordSpanCoverageTests(unittest.TestCase):
     """
     Pin the corpus-wide property that motivates the direct-record-map
@@ -1477,7 +1750,8 @@ class CorpusDecodedRecordSpanCoverageTests(unittest.TestCase):
     (with the class-code guard) covers OT[1..N) exactly once and produces zero
     overlapping span-claims. The 9 `not-proven` fixtures all share one
     failure mode -- record-span overlap from the field[11] owner/descriptor
-    union (see docs/design/vdf.md appendix).
+    union (see docs/design/vdf.md "Appendix: the owner/descriptor
+    discriminator").
     """
 
     EXACT_BY_XRAY = [
@@ -1627,6 +1901,236 @@ class DecodedRecordSpanClassCodeGuardTests(unittest.TestCase):
                     f"{relpath}: class-code guard unexpectedly dropped spans "
                     f"({unguarded_count} -> {len(guarded)})",
                 )
+
+
+class ExtractJsonTests(unittest.TestCase):
+    """
+    Tests for the machine-readable `--extract-json` mode consumed by the Rust
+    differential parity harness (tests/integration/vdf_parity.rs).
+    """
+
+    def _payload(self, relpaths: list[str]) -> dict:
+        return vdf_xray.extract_results_json_payload(
+            [REPO_ROOT / relpath for relpath in relpaths]
+        )
+
+    def test_encode_series_value_nan_and_infinity(self) -> None:
+        # NaN encodes as null (None); infinities as strings; finite values
+        # pass through unchanged. JSON has neither NaN nor Infinity literals,
+        # and the Rust side decodes exactly these three shapes back.
+        self.assertIsNone(vdf_xray._encode_series_value(float("nan")))
+        self.assertEqual(vdf_xray._encode_series_value(float("inf")), "Infinity")
+        self.assertEqual(vdf_xray._encode_series_value(float("-inf")), "-Infinity")
+        self.assertEqual(vdf_xray._encode_series_value(1.5), 1.5)
+        self.assertEqual(vdf_xray._encode_series_value(0.0), 0.0)
+
+    def test_payload_shape_single_file(self) -> None:
+        relpath = "test/bobby/vdf/water/Current.vdf"
+        payload = self._payload([relpath])
+
+        self.assertEqual(list(payload.keys()), [str(REPO_ROOT / relpath)])
+        entries = payload[str(REPO_ROOT / relpath)]
+        self.assertGreater(len(entries), 1)
+        names = [e["name"] for e in entries]
+        self.assertEqual(names[0], "Time")
+        self.assertIn("water level", names)
+        for entry in entries:
+            self.assertEqual(sorted(entry.keys()), ["name", "ot_index", "values"])
+            self.assertIsInstance(entry["name"], str)
+            self.assertIsInstance(entry["ot_index"], int)
+            self.assertIsInstance(entry["values"], list)
+            # Every series covers the full saved grid.
+            self.assertEqual(len(entry["values"]), len(entries[0]["values"]))
+
+    def test_payload_multi_file_keys_are_paths_as_given(self) -> None:
+        relpaths = [
+            "test/bobby/vdf/water/Current.vdf",
+            "test/bobby/vdf/subscripts/subscripts.vdf",
+        ]
+        payload = self._payload(relpaths)
+        self.assertEqual(
+            list(payload.keys()),
+            [str(REPO_ROOT / relpath) for relpath in relpaths],
+        )
+        # The arrayed fixture emits element-labelled columns.
+        sub_names = [e["name"] for e in payload[str(REPO_ROOT / relpaths[1])]]
+        self.assertIn("a stock[a]", sub_names)
+
+    def test_nan_values_encode_as_null_and_payload_is_strict_json(self) -> None:
+        import json as json_mod
+        import math as math_mod
+
+        # Ref.vdf carries series with genuine missing-data NaN runs
+        # (e.g. "Annual rate of emissions to target[OECD US]").
+        relpath = "test/xmutil_test_models/Ref.vdf"
+        payload = self._payload([relpath])
+        entries = payload[str(REPO_ROOT / relpath)]
+
+        nulls = sum(
+            1 for e in entries for v in e["values"] if v is None
+        )
+        self.assertGreater(nulls, 0, "expected NaN-bearing series in Ref.vdf")
+        for entry in entries:
+            for value in entry["values"]:
+                if value is None:
+                    continue
+                self.assertIsInstance(value, float)
+                self.assertTrue(math_mod.isfinite(value))
+
+        # allow_nan=False proves no non-finite float leaked into the payload;
+        # a leak would raise ValueError here instead of emitting the
+        # nonstandard NaN/Infinity tokens strict parsers reject.
+        text = json_mod.dumps(payload, allow_nan=False)
+        self.assertEqual(json_mod.loads(text).keys(), payload.keys())
+
+    def test_dataset_vdf_is_rejected_loudly(self) -> None:
+        with self.assertRaises(ValueError):
+            self._payload(["test/bobby/vdf/econ/data.vdf"])
+
+
+class DataGridBitmapTests(unittest.TestCase):
+    """
+    Header-0x74 data-grid bitmap coverage (GH #842), mirroring the Rust
+    `vdf_data_grid.rs` integration tests: exogenous-data blocks (class codes
+    0x05/0x06/0x0c) carry bitmaps over the external data file's time grid,
+    whose point count is header word 0x74.
+    """
+
+    GROUPON = "test/metasd/social-network-valuation/groupon3mid.vdf"
+
+    def test_data_grid_positions_span_mapping(self) -> None:
+        # 71-point yearly grid inside an eighth-year-step run (the zambaqui
+        # "old runs" shape, where the mapping is exact).
+        saved = [1980.0 + 0.125 * i for i in range(561)]
+        pos = vdf_xray.VdfFile._data_grid_positions(saved, 71)
+        self.assertEqual(pos[0], 0)
+        self.assertEqual(pos[7], 0)
+        self.assertEqual(pos[8], 1)
+        self.assertEqual(pos[560], 70)
+
+        # 6-point grid over a 121-point monthly run (the groupon shape).
+        saved = [float(i) for i in range(121)]
+        pos = vdf_xray.VdfFile._data_grid_positions(saved, 6)
+        self.assertEqual((pos[0], pos[23], pos[24], pos[120]), (0, 0, 1, 5))
+
+        # Degenerate grids and axes.
+        self.assertEqual(vdf_xray.VdfFile._data_grid_positions([3.0, 4.0], 1), [0, 0])
+        self.assertEqual(vdf_xray.VdfFile._data_grid_positions([2.0, 2.0], 4), [0, 0])
+        self.assertEqual(vdf_xray.VdfFile._data_grid_positions([], 5), [])
+
+    def test_groupon_data_grid_blocks_decode(self) -> None:
+        vdf = parse_fixture(self.GROUPON)
+        self.assertEqual(vdf.data_time_point_count, 6)
+        self.assertEqual(vdf.data_bitmap_size, 1)
+        self.assertEqual(vdf.unreconciled_data_blocks(), [])
+
+        time_values = vdf.extract_time_values()
+        codes = vdf.section6_ot_class_codes()
+        final_values = vdf.section6_final_values()
+        assert time_values is not None
+        assert codes is not None
+        assert final_values is not None
+
+        # Every data block reconciles, and every block series ends at the
+        # recorded final value; count the data-grid population.
+        data_grid_ots = []
+        for ot in range(vdf.offset_table_count):
+            raw = vdf.offset_table_entry(ot)
+            if raw is None or not vdf.is_data_block_offset(raw):
+                continue
+            count = vdf_xray.u16(vdf.data, raw)
+            _bm, _grid, kind = vdf._block_bitmap_layout(raw, count)
+            self.assertIsNotNone(kind, f"OT[{ot}] unreconciled")
+            if kind == "data":
+                data_grid_ots.append(ot)
+            series = vdf.extract_ot_series(ot, time_values, codes, final_values)
+            assert series is not None
+            self.assertAlmostEqual(
+                series[-1],
+                final_values[ot],
+                places=5,
+                msg=f"OT[{ot}] final-value oracle",
+            )
+        self.assertEqual(len(data_grid_ots), 21)
+
+        # Value-level pin: OT[53] stores 4 values at data-grid points
+        # {1,2,3,5} (bitmap 0x2e); the saved series starts NaN (no data
+        # before the first stored point), ends at the recorded final value,
+        # and surfaces exactly the four stored values.
+        raw = vdf.offset_table_entry(53)
+        assert raw is not None
+        count = vdf_xray.u16(vdf.data, raw)
+        self.assertEqual(count, 4)
+        self.assertEqual(vdf._block_bitmap_layout(raw, count), (1, 6, "data"))
+        series = vdf.extract_block_series(raw, time_values)
+        self.assertTrue(math.isnan(series[0]))
+        self.assertAlmostEqual(series[-1], 29504314.0, places=0)
+        distinct: list[float] = []
+        for value in series:
+            if not math.isnan(value) and (not distinct or distinct[-1] != value):
+                distinct.append(value)
+        self.assertEqual(len(distinct), 4)
+        self.assertAlmostEqual(distinct[0], 375099.0, places=0)
+
+    def test_named_results_diagnostics_report_no_unreconciled_blocks(self) -> None:
+        vdf = parse_fixture(self.GROUPON)
+        _results, diagnostics = vdf_xray.extract_named_results_with_diagnostics(vdf)
+        self.assertEqual(diagnostics.bitmap_unreconciled_ots, [])
+
+    def test_unreconciled_block_is_nan_filled_and_reported(self) -> None:
+        # Zero out a real dynamic block's bitmap in a small fixture: popcount
+        # 0 can never equal a nonzero count, so no candidate grid reconciles
+        # (water has no data grid, and its saved/block grids coincide).
+        data = bytearray((REPO_ROOT / "test/bobby/vdf/water/Current.vdf").read_bytes())
+        vdf = vdf_xray.parse_vdf(bytes(data))
+        self.assertEqual(vdf.data_time_point_count, 0)
+        raw = vdf.offset_table_entry(5)
+        assert raw is not None
+        self.assertTrue(vdf.is_data_block_offset(raw))
+        count = vdf_xray.u16(vdf.data, raw)
+        self.assertGreater(count, 0)
+        for i in range(vdf.bitmap_size):
+            data[raw + 2 + i] = 0
+
+        corrupted = vdf_xray.parse_vdf(bytes(data))
+        self.assertEqual(
+            corrupted._block_bitmap_layout(raw, count),
+            (corrupted.block_bitmap_size, corrupted.block_time_point_count, None),
+        )
+        self.assertEqual(corrupted.unreconciled_data_blocks(), [5])
+
+        time_values = corrupted.extract_time_values()
+        assert time_values is not None
+        series = corrupted.extract_block_series(raw, time_values)
+        self.assertTrue(all(math.isnan(v) for v in series))
+
+        _results, diagnostics = vdf_xray.extract_named_results_with_diagnostics(corrupted)
+        self.assertEqual(diagnostics.bitmap_unreconciled_ots, [5])
+
+    def test_zambaqui_gdp_deflator_decodes_on_data_grid(self) -> None:
+        # third_party corpora are optional checkouts; skip when absent
+        # (matching the Rust existence-continue convention).
+        relpath = "third_party/uib_sd/zambaqui/baserun.vdf"
+        if not (REPO_ROOT / relpath).exists():
+            self.skipTest("zambaqui corpus not checked out")
+        vdf = parse_fixture(relpath)
+        self.assertEqual(vdf.data_time_point_count, 26)
+        self.assertEqual(vdf.unreconciled_data_blocks(), [])
+
+        raw = vdf.offset_table_entry(696)
+        assert raw is not None
+        count = vdf_xray.u16(vdf.data, raw)
+        self.assertEqual(count, 26)
+        self.assertEqual(vdf._block_bitmap_layout(raw, count), (4, 26, "data"))
+
+        time_values = vdf.extract_time_values()
+        assert time_values is not None
+        series = vdf.extract_block_series(raw, time_values)
+        # Ground truth from the byte-identical block in the sibling
+        # Data.vdf dataset (gdp deflator, 1980..2005 yearly). Extraction
+        # only widens the stored f32s, so the pins are exact-equality.
+        self.assertEqual(series[0], 0.6202020049095154)
+        self.assertEqual(series[-1], 2.086980104446411)
 
 
 if __name__ == "__main__":

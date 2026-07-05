@@ -178,9 +178,10 @@ fn load_expected_results(xmile_path: &str) -> Option<Results> {
 /// meaningless (the legacy comparator vacuously "passed" a comparison sharing
 /// 0 or 1 ident). Both broad reference models exercise this far above the
 /// floor: `simulates_wrld3_03` already asserts `offsets.len() > 200`, and
-/// C-LEARN's `Ref.vdf` has ~3484 variables, ~3482 of which match a simulation
-/// ident -- so a 10%-of-VDF floor (~348) is comfortably below the true matched
-/// count yet far above 0/1.
+/// C-LEARN's `Ref.vdf` has ~3440 variables, ~2951 of which match a simulation
+/// ident after the reference-missing skip (434 all-NaN not-saved columns; see
+/// `CLEARN_REFERENCE_MISSING_COLUMNS`) -- so a 10%-of-VDF floor (~344) is
+/// comfortably below the true matched count yet far above 0/1.
 const MIN_MATCHED_FRACTION: f64 = 0.10;
 
 /// Hard floor on matched variables, applied when the VDF reference itself is
@@ -230,6 +231,21 @@ fn vdf_ident_is_excluded(ident: &str, excluded: &[&str]) -> bool {
                 .strip_prefix(base)
                 .is_some_and(|rest| rest.starts_with('['))
     })
+}
+
+/// Whether the VDF reference series at `vdf_off` is NaN at every step -- a
+/// missing/no-saved-data column. The VDF parser decodes Vensim's raw-0
+/// dynamic-class "not saved" OT slots as all-NaN (`vdf::extract_data`; on
+/// `Ref.vdf` these are the 455 slots Vensim's save configuration omitted, 434
+/// of which surface as named columns), and `build_results` initializes
+/// unrecovered spans to NaN. Either way the column carries NO reference data,
+/// so the comparator skips it entirely -- equivalent to the variable being
+/// absent from the VDF. This is distinct from a SIM-side all-NaN series
+/// against a finite reference, which remains a hard degeneracy failure.
+fn vdf_reference_is_missing(vdf_expected: &Results, vdf_off: usize) -> bool {
+    vdf_expected.step_count > 0
+        && (0..vdf_expected.step_count)
+            .all(|step| vdf_expected.data[step * vdf_expected.step_size + vdf_off].is_nan())
 }
 
 /// The base-variable name of a (possibly arrayed) VDF results ident: `"y"` for
@@ -346,8 +362,9 @@ fn classify_vdf_ident(
 /// Compare VDF reference data against simulation results with cross-simulator
 /// tolerance. See [`ensure_vdf_results_excluding`] for the full contract; this
 /// wrapper excludes nothing (the hard 1% gate applies to every matched var).
-fn ensure_vdf_results(vdf_expected: &Results, results: &Results) {
-    ensure_vdf_results_excluding(vdf_expected, results, &[]);
+/// Returns the reference-missing (all-NaN VDF column) skip count.
+fn ensure_vdf_results(vdf_expected: &Results, results: &Results) -> usize {
+    ensure_vdf_results_excluding(vdf_expected, results, &[])
 }
 
 /// Compare VDF reference data against simulation results with cross-simulator
@@ -360,9 +377,20 @@ fn ensure_vdf_results(vdf_expected: &Results, results: &Results) {
 ///   panics. A near-empty intersection can no longer "pass" by running an empty
 ///   loop, and the exclusion set cannot create a vacuous pass by carving the
 ///   matched count below the floor.
-/// - **NaN guard:** any matched *core* series that is entirely NaN, or a global
-///   NaN-skipped fraction above `MAX_NAN_SKIPPED_FRACTION`, panics. These are
-///   *additional* failure conditions, never relaxations.
+/// - **Reference-missing columns:** a VDF column that is NaN at *every* step
+///   (a slot Vensim's save configuration omitted -- decoded as all-NaN by
+///   `vdf::extract_data` -- or an unrecovered span) is skipped before any
+///   accounting, exactly as if the ident were absent from the VDF. It counts
+///   toward neither the matched floor nor the NaN guards; missing reference
+///   data is not comparable data. The number of skipped columns is RETURNED so
+///   a caller with a known reference (C-LEARN/`Ref.vdf`) can pin it
+///   (`CLEARN_REFERENCE_MISSING_COLUMNS`) -- otherwise a block-decode
+///   regression that turned a saved column all-NaN would be silently skipped.
+/// - **NaN guard:** any matched *core* series that is entirely NaN-skipped
+///   (with the reference-missing skip above, that means the SIM side is NaN
+///   wherever the reference has data), or a global NaN-skipped fraction above
+///   `MAX_NAN_SKIPPED_FRACTION`, panics. These are *additional* failure
+///   conditions, never relaxations.
 /// - **`:NA:`-sentinel reconciliation:** Simlin keeps Vensim's `:NA:` as the
 ///   finite sentinel `crate::float::NA` (`-2^109`); Vensim renders `:NA:` as 0
 ///   in the VDF. So a SIM `:NA:` cell matches a near-zero VDF cell (counted as
@@ -386,11 +414,16 @@ fn ensure_vdf_results(vdf_expected: &Results, results: &Results) {
 ///
 /// Variables present in `results` but not in `vdf_expected` are skipped (they
 /// may be internal module variables without VDF entries).
-fn ensure_vdf_results_excluding(vdf_expected: &Results, results: &Results, excluded: &[&str]) {
+fn ensure_vdf_results_excluding(
+    vdf_expected: &Results,
+    results: &Results,
+    excluded: &[&str],
+) -> usize {
     assert_eq!(vdf_expected.step_count, results.step_count);
 
     let mut matched = 0;
     let mut excluded_matched = 0;
+    let mut reference_missing = 0;
     let mut max_rel_error: f64 = 0.0;
     let mut max_rel_ident = String::new();
     let mut failures = 0;
@@ -413,6 +446,13 @@ fn ensure_vdf_results_excluding(vdf_expected: &Results, results: &Results, exclu
             continue;
         }
         let vdf_off = vdf_expected.offsets[ident];
+        // Reference-missing columns (all-NaN VDF series: slots Vensim never
+        // saved) have nothing to compare against; skip them before matched /
+        // guard accounting, exactly as if the VDF lacked the ident.
+        if vdf_reference_is_missing(vdf_expected, vdf_off) {
+            reference_missing += 1;
+            continue;
+        }
         let sim_off = results.offsets[ident];
         matched += 1;
 
@@ -446,6 +486,9 @@ fn ensure_vdf_results_excluding(vdf_expected: &Results, results: &Results, exclu
     );
     eprintln!(
         "  excluded (known-residual, tracked in #590/#591) idents skipped: {excluded_matched}"
+    );
+    eprintln!(
+        "  reference-missing (all-NaN VDF column, not saved) idents skipped: {reference_missing}"
     );
     eprintln!(
         "  matched floor (checked AFTER exclusion) = max({MIN_MATCHED_ABSOLUTE}, {MIN_MATCHED_FRACTION} * {}) = {}",
@@ -491,6 +534,8 @@ fn ensure_vdf_results_excluding(vdf_expected: &Results, results: &Results, exclu
         eprintln!("  {failures} comparisons exceeded tolerance");
         panic!("VDF comparison failed with {failures} tolerance violations");
     }
+
+    reference_missing
 }
 
 /// The matched-variable floor for a VDF reference with `vdf_var_count`
@@ -622,11 +667,14 @@ fn classify_vdf_ident_nan_vs_na_skips_without_failing() {
     );
 
     // Boundary made executable: an ENTIRELY-NaN VDF series (Vensim literal NaN
-    // at every step) is the separately-guarded exception. With no finite cell
-    // to compare, `all_nan` is set and the SAME membership predicate flips true,
-    // so such a series WOULD enter the residual set (it is handled by the
-    // all-NaN guards in `ensure_vdf_results_excluding`, not by this finite-tail
-    // skip path). This pins exactly why the test's scope is the finite-tail case.
+    // at every step, or a missing/not-saved slot decoded as all-NaN) is the
+    // separately-handled exception. With no finite cell to compare, `all_nan`
+    // is set and the SAME membership predicate flips true -- but the comparator
+    // and `clearn_residual_exactness` skip such reference-missing columns
+    // UPFRONT (`vdf_reference_is_missing`), so it never reaches classification
+    // there; the all-NaN guard in `ensure_vdf_results_excluding` therefore
+    // catches only SIM-side all-NaN degeneracy. This pins exactly why the
+    // test's scope is the finite-tail case.
     let all_nan_vdf = synthetic_results(&[(
         "synthetic_all_nan_series",
         vec![f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN],
@@ -859,6 +907,22 @@ fn run_vacuous_comparison_scenarios() {
     expected_nz[0].1 = vec![10.0, 0.0, 5.0, 0.0];
     sim_nz[0].1 = vec![10.0, 8.0, 5.0, 0.0]; // 8.0 at a cell where VDF is 0
     asserts_panic("near-zero but meaningful divergence", &expected_nz, &sim_nz);
+
+    // (8) Reference-missing column: the VDF side is NaN at every step (a slot
+    //     Vensim's save configuration omitted, decoded as all-NaN by the
+    //     parser's missing-slot rule) while SIM has real values. There is no
+    //     reference data to compare, so the column is skipped upfront and must
+    //     neither fail nor trip the all-NaN / NaN-fraction guards. Contrast
+    //     scenario (2): a SIM-side all-NaN series against a finite reference
+    //     stays a hard degeneracy failure.
+    let mut expected_missing = many(4.0);
+    let sim_missing = many(4.0);
+    expected_missing[0].1 = vec![f64::NAN; 4];
+    asserts_ok(
+        "reference-missing (all-NaN VDF column) skipped",
+        &expected_missing,
+        &sim_missing,
+    );
 }
 
 /// Run the named model of `datamodel` through the VM and return its
@@ -2413,8 +2477,9 @@ fn simulates_wrld3_03_wasm() {
 /// Known-residual C-LEARN base-variable names excluded from the
 /// `simulates_clearn` VDF gate. C-LEARN compiles via the incremental path,
 /// runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
-/// tolerance on the overwhelming majority of its 3482 matched idents; the
-/// short, fully-attributed remainder below (21 base variables) is the proven
+/// tolerance on the overwhelming majority of its ~2951 matched idents (after
+/// the pinned 434-column reference-missing skip); the short, fully-attributed
+/// remainder below (4 base variables) is the proven
 /// genuine residual after Phases 1-3 of the C-LEARN-residual plan. Phases 1-3
 /// reconciled the bulk that earlier sat here: the inline-data graph-lookup
 /// `0+0` zeroing (#590, fixed Phase 1 -- lookup-only lowers to `gf(Time)`),
@@ -2425,8 +2490,8 @@ fn simulates_wrld3_03_wasm() {
 ///
 /// This is a TRANSPARENT, documented, tracked carve-out, NOT a tolerance
 /// loosening: the hard 1% comparison stays unconditional for every NON-excluded
-/// variable, and the matched floor is checked AFTER exclusion (3360 matched vs a
-/// 348 floor, ~9.7x -- the exclusion cannot create a vacuous pass; pinned by
+/// variable, and the matched floor is checked AFTER exclusion (~2924 matched vs
+/// a ~344 floor, ~8.5x -- the exclusion cannot create a vacuous pass; pinned by
 /// `vdf_comparator_constants_and_floor_are_pinned`). Each base below carries a
 /// one-line sourced reason under one of five categories
 /// (engine-genuine-tracked / VDF-decode-artifact / benign-near-zero /
@@ -2439,6 +2504,22 @@ fn simulates_wrld3_03_wasm() {
 /// exclusion and asserts the live failing set equals this list, failing loudly
 /// (with the symmetric difference) if the residual grew (a regression) or shrank
 /// (a fix that should prune the exclusion).
+/// The exact number of `Ref.vdf` columns the C-LEARN comparison skips as
+/// reference-missing (all-NaN VDF series). The VDF parser decodes Vensim's
+/// raw-0 dynamic-class "not saved" OT slots as all-NaN (455 such slots on
+/// `Ref.vdf`; see `vdf::extract_data` and `docs/design/vdf.md`), 434 of which
+/// surface as named result columns (22 supplementary base variables, e.g.
+/// `Target Value`, `Intensity RS target`, `sorted target value`).
+///
+/// This count is PINNED -- like `EXPECTED_VDF_RESIDUAL` it is a deliberate,
+/// documented carve-out, not an open-ended skip: a block-decode regression
+/// that turned a genuinely-saved column all-NaN would otherwise be silently
+/// absorbed by the reference-missing skip. Asserted by the C-LEARN gates
+/// (`simulates_clearn`, `simulates_clearn_wasm`) and by
+/// `clearn_residual_exactness`; the pin applies ONLY to the C-LEARN/`Ref.vdf`
+/// path, not to generic comparator uses.
+const CLEARN_REFERENCE_MISSING_COLUMNS: usize = 434;
+
 const EXPECTED_VDF_RESIDUAL: &[&str] = &[
     // ===== engine-genuine-tracked (0): NONE =====
     // The only engine-genuine divergence -- the init-runlist nondeterminism
@@ -2492,7 +2573,8 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
 // FULL end-to-end C-LEARN simulation against `Ref.vdf`. Un-stubbed (no longer a
 // permanently-skipped placeholder): C-LEARN compiles via the incremental path,
 // runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
-// tolerance on the reconciled ~94.7% of matched idents (~96.3% per-cell). Kept `#[test] #[ignore]`
+// tolerance on every matched, non-excluded ident (~2924 of ~2951 matched, after
+// the pinned 434-column reference-missing skip). Kept `#[test] #[ignore]`
 // purely for RUNTIME CLASS (C-LEARN is ~53k lines / 1.4 MB, ~5s just to parse on
 // release), so the capped default `cargo test` set stays under the 3-minute cap;
 // run it explicitly via `--ignored` (AC8.3).
@@ -2531,7 +2613,15 @@ fn simulates_clearn() {
     // EXPECTED_VDF_RESIDUAL bases (#597 reader-artifact / #591 residual) are
     // skipped. The matched floor is enforced AFTER exclusion, so this cannot
     // vacuously pass.
-    ensure_vdf_results_excluding(&vdf_results, &results, EXPECTED_VDF_RESIDUAL);
+    let reference_missing =
+        ensure_vdf_results_excluding(&vdf_results, &results, EXPECTED_VDF_RESIDUAL);
+    // Pin the reference-missing skip so a block-decode regression that turns a
+    // genuinely-saved column all-NaN cannot hide inside the skip.
+    assert_eq!(
+        reference_missing, CLEARN_REFERENCE_MISSING_COLUMNS,
+        "Ref.vdf reference-missing column count drifted from the pinned \
+         carve-out (see CLEARN_REFERENCE_MISSING_COLUMNS)"
+    );
 }
 
 /// Read and parse the C-LEARN `.mdl` into a datamodel project. Shared by the VM
@@ -2615,7 +2705,15 @@ fn simulates_clearn_wasm() {
 
     let vdf_results = clearn_vdf_results();
 
-    ensure_vdf_results_excluding(&vdf_results, &wasm_results, EXPECTED_VDF_RESIDUAL);
+    let reference_missing =
+        ensure_vdf_results_excluding(&vdf_results, &wasm_results, EXPECTED_VDF_RESIDUAL);
+    // Same pinned carve-out as `simulates_clearn`: the reference data is
+    // identical, so the reference-missing skip must be too.
+    assert_eq!(
+        reference_missing, CLEARN_REFERENCE_MISSING_COLUMNS,
+        "Ref.vdf reference-missing column count drifted from the pinned \
+         carve-out (see CLEARN_REFERENCE_MISSING_COLUMNS)"
+    );
 
     // Segmented resumable run: split at the midpoint save time and drive the same
     // blob through `run_to(mid)` then `run_to(stop)`. The full final series must
@@ -2639,8 +2737,10 @@ fn simulates_clearn_wasm() {
 /// series (`stats.all_nan`, which would trip the comparator's NaN guard). That
 /// is exactly the membership `EXPECTED_VDF_RESIDUAL` carves out (a partial-NaN
 /// series is NOT all-NaN and is NOT excluded -- see `EXPECTED_VDF_RESIDUAL`
-/// cluster 3). The global NaN-skipped-fraction guard is a separate aggregate
-/// check enforced by `simulates_clearn` itself, not a per-base membership driver.
+/// cluster 3; a reference-missing all-NaN VDF column -- a slot Vensim never
+/// saved -- is skipped here exactly as the comparator skips it). The global
+/// NaN-skipped-fraction guard is a separate aggregate check enforced by
+/// `simulates_clearn` itself, not a per-base membership driver.
 ///
 /// Asserts the live set EQUALS `EXPECTED_VDF_RESIDUAL`, failing LOUDLY with the
 /// symmetric difference if the residual GREW (a regression -- new divergence to
@@ -2663,12 +2763,20 @@ fn clearn_residual_exactness() {
     // series) -- exactly the membership EXPECTED_VDF_RESIDUAL must carve out.
     let mut live_residual: BTreeSet<String> = BTreeSet::new();
     let mut matched = 0usize;
+    let mut reference_missing = 0usize;
     for ident in vdf_expected.offsets.keys() {
         let Some(&sim_off) = results.offsets.get(ident) else {
             continue;
         };
-        matched += 1;
         let vdf_off = vdf_expected.offsets[ident];
+        // Mirror the comparator's reference-missing skip: an all-NaN VDF
+        // column (a slot Vensim never saved) has no reference data and never
+        // enters the residual set.
+        if vdf_reference_is_missing(&vdf_expected, vdf_off) {
+            reference_missing += 1;
+            continue;
+        }
+        matched += 1;
         let stats = classify_vdf_ident(&vdf_expected, &results, vdf_off, sim_off);
         if stats.failures > 0 || stats.all_nan {
             live_residual.insert(vdf_ident_base_name(ident.as_str()).to_string());
@@ -2684,9 +2792,18 @@ fn clearn_residual_exactness() {
     let shrank: Vec<&String> = expected_residual.difference(&live_residual).collect();
 
     eprintln!(
-        "clearn residual exactness: {matched} idents matched; {} live residual bases vs {} excluded",
+        "clearn residual exactness: {matched} idents matched ({reference_missing} \
+         reference-missing skipped); {} live residual bases vs {} excluded",
         live_residual.len(),
         expected_residual.len()
+    );
+    // Pin the reference-missing skip (see CLEARN_REFERENCE_MISSING_COLUMNS):
+    // a block-decode regression that turned a genuinely-saved column all-NaN
+    // must fail here, not silently join the skip.
+    assert_eq!(
+        reference_missing, CLEARN_REFERENCE_MISSING_COLUMNS,
+        "Ref.vdf reference-missing column count drifted from the pinned \
+         carve-out (see CLEARN_REFERENCE_MISSING_COLUMNS)"
     );
     assert!(
         grew.is_empty() && shrank.is_empty(),

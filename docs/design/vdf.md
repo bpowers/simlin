@@ -15,6 +15,12 @@ This document describes that metadata and the deterministic procedure that
 reconstructs a `Results` struct (variable names -> time series) from a VDF
 alone. The implementation is in `src/simlin-engine/src/vdf.rs` and its
 submodules; `tools/vdf_xray.py` is a structural inspector for the same format.
+The two implementations are pinned together by a differential parity harness
+(`parity_python_and_rust_vdf_extraction_agree` in
+`src/simlin-engine/tests/integration/vdf_parity.rs`): it walks every run-file
+VDF under `test/`, extracts named results with both readers via the tool's
+`--extract-json` mode, and requires identical name sets and bitwise-identical
+values -- so a behavior change in one reader without the other fails CI.
 
 **Conventions.** All values are little-endian. Numeric data is 32-bit floats
 unless noted. All offsets are byte offsets.
@@ -84,6 +90,7 @@ structural fork.
 | `0x60` | 4 | `u32` absolute file offset of the section-7 offset table |
 | `0x64` | 4 | duplicate of `0x60` |
 | `0x70` | 4 | total lookup coordinate-pair count across all graphical functions (zero when the model has none) |
+| `0x74` | 4 | `u32` data-grid time-point count: the time-point count of the external data file the run loaded (a dataset VDF or spreadsheet), or 0 when the model loaded no external data. Exogenous-data blocks carry bitmaps over THIS grid; see "Data blocks" |
 | `0x78` | 4 | `u32` saved time-point count -- the number of values stored in the Time block and returned to callers |
 | `0x7C` | 4 | `u32` block time-point grid count; usually equals `0x78`, but saved-suffix runs (`risk.vdf`) have `0x78=213`, `0x7C=225` |
 
@@ -226,7 +233,10 @@ in run files) has no length prefix. Every subsequent entry is a `u16`
 length-prefixed string. A `u16` value of `0` is a group separator. Some edited
 files contain length-prefixed entries whose payload is non-printable binary --
 treat these as stale/deleted entries and skip exactly the declared byte count
-rather than stopping the table.
+rather than stopping the table. A stale entry consumes **no name index**: the
+record `f[2]` key formula maps a printable name's string offset to its index
+among the *printable* entries only, so a reader that counts stale entries as
+indices mislabels every name after the first stale entry.
 
 Name categories (a classification aid, not an ownership rule -- validate a saved
 series through a record's `f[2]`/`f[11]`/`f[6]` and the section-6 class code):
@@ -361,7 +371,8 @@ Layout, in order:
 | Code | Meaning |
 |---|---|
 | `0x0f` | Time (OT[0] only) |
-| `0x05` | input / data-like block (uses the `ceil(0x7C/8)` bitmap width on saved-suffix files) |
+| `0x05` | input / exogenous-data block, bitmapped over the header-0x74 data grid (which coincides with the 0x7C block grid on `risk.vdf` and is a genuinely third grid on the zambaqui corpus; see "Data-grid blocks") |
+| `0x06`, `0x0c` | exogenous-data variants observed on the groupon fixtures: data-grid blocks like `0x05` (unsaved ones carry a zero offset-table word and the `:NA:` sentinel final). Not owner codes for record mapping today, so these columns are unnamed |
 | `0x08` | stock-backed variable. Contiguous at `OT[1..S]` in small/medium fixtures; scattered across several ranges in `Ref.vdf` |
 | `0x11` | dynamic non-stock; usually a per-step data block, but inline in some array-heavy files |
 | `0x16`, `0x18` | observed only in `Ref.vdf`; inline OT values |
@@ -423,8 +434,11 @@ the lookup-data stream.
 `header[0x60]`. Each entry is either a **file offset to a data block** (value
 `>= first_data_block_offset`) or an **inline f32 constant** (any smaller value,
 reinterpreted as f32). A raw `0` decodes as the constant `0.0` for
-constant-like class codes, but on `Ref.vdf` raw-`0` entries with class `0x11`
-and final value `-1.3e33` are missing/no-saved-data slots, not numeric zero.
+constant-like class codes, but a raw-`0` entry with the dynamic class `0x11`
+and a *nonzero* section-6 final value is a missing/no-saved-data slot (the
+variable ran -- its final value is recorded -- but Vensim's save configuration
+omitted the series), decoded as all-NaN, not numeric zero. On `Ref.vdf` there
+are 455 such entries, carrying the `:NA:`-arithmetic final `-1.3e33`.
 
 ### Data blocks
 
@@ -439,12 +453,100 @@ offsets rather than assuming the referenced blocks form a gapless stream --
 files can contain padding or unreferenced bytes between blocks. A non-time
 block's value at a time point with a clear bit holds (zero-order hold).
 
-The bitmap width is decoded **per block**: most blocks use `ceil(header[0x78]
-/ 8)` bytes, but saved-suffix files (`risk.vdf`) mix that with
-`ceil(header[0x7C] / 8)`. The deterministic discriminator is local to the
-block: the `u16 count` equals the bitmap popcount for the correct width. When a
-block uses the larger grid, decode the full grid and sample the positions
-corresponding to the saved Time values.
+The bitmap width is decoded **per block** against up to three grids: the
+saved grid (`ceil(header[0x78] / 8)` bytes -- most blocks), the block grid
+(`ceil(header[0x7C] / 8)`; wider on saved-suffix files like `risk.vdf`), and
+the **data grid** (`ceil(header[0x74] / 8)`; see below). The deterministic
+discriminator is local to the block: the `u16 count` equals the bitmap
+popcount for the correct width. Candidates are tried in that order and the
+first match wins.
+
+The ordering is justified empirically, not geometrically. Saved-before-block
+follows the narrower-first logic (the saved width never exceeds the block
+width, and a wider bitmap that also matched would be popcounting past the
+real bitmap into payload bytes). The data width, however, is usually the
+NARROWEST candidate, and it still must come LAST: ordinary saved-grid blocks
+dominate every file, and more than 1,100 of them across the tracked corpora
+coincidentally popcount-match the narrower data width (a small count whose
+set bits happen to fall in the first `ceil(0x74/8)` bytes), while zero
+exogenous blocks match a wider distinct width. Residual latent risk: an
+exogenous block with a small count and zero-heavy leading payload bytes
+could in principle popcount-match the wider saved width and silently decode
+with wrong placement; no corpus file does. The section-6 class code
+(`0x05`/`0x06`/`0x0c` marks exogenous blocks) is available as a future
+discriminator or mismatch diagnostic if such a file appears.
+
+When NO width matches, the block is
+undecodable: readers NaN-fill its series and report the OT on a per-file
+diagnostic list (Rust `VdfData::unreconciled_ots` /
+`VdfFile::unreconciled_data_blocks`, Python
+`NamedResultsDiagnostics.bitmap_unreconciled_ots`) -- visibly-missing data is
+strictly better than garbage decoded under an assumed width. No tracked
+corpus file has such a block.
+
+When a block uses the larger block grid, decode the full grid and sample the
+positions corresponding to the saved Time values: saved-suffix files save the
+*tail* of the run, so the grid origin is derived from the last saved time
+(`origin = time[last] - (grid_count - 1) * step`) and each saved time maps to
+`round((t - origin) / step)`; a non-uniform or degenerate-step time axis falls
+back to identity positions, and out-of-range positions decode as NaN.
+
+### Data-grid blocks (exogenous data, header `0x74`)
+
+Exogenous-data blocks -- class codes `0x05` (risk/zambaqui), `0x06`, and
+`0x0c` (groupon) -- are the loaded data file's sparse blocks embedded in the
+run file, bitmapped over the DATA FILE's time grid, whose point count is
+header word `0x74`. The zambaqui corpus proves this three ways:
+
+- `baserun.vdf`'s `gdp deflator` block is **byte-identical** (count=26,
+  4-byte dense bitmap `ff ff ff 03`, payload) to the corresponding block in
+  the sibling `Data.vdf` dataset, whose own time axis is 26 yearly points
+  1980..2005 -- matching `0x74 = 26` in every run of that family;
+- nine of the 48 "old runs" files loaded a different data file (71 yearly
+  points spanning the whole 1980..2050 run; `0x74 = 71`, saved grid 561):
+  the same deflator series appears there as 26 set bits at positions 0..25
+  of a 9-byte bitmap, and interior blocks tile exactly against the next
+  block's offset (`next - this == 2 + ceil(0x74/8) + 4*count`), pinning the
+  width. (Most old-runs files -- 31 -- are instead 28-point yearly runs
+  with `0x74 = 26`; see the same-width collision below. The remaining eight
+  share `baserun.vdf`'s 71-point-run shape.);
+- `risk.vdf`'s mixed-width story is the same phenomenon in degenerate form:
+  its `0x74` equals its `0x7C` (225), so the data grid coincides with the
+  block grid there.
+
+**Same-width collision.** When `ceil(0x74/8) == ceil(0x78/8)` with different
+counts (the 31 zambaqui old-runs files with a 26-point data grid inside a
+28-point yearly run: both widths are 4 bytes), the width-dedup in the
+discriminator drops the Data candidate and those exogenous blocks (204
+across that corpus) reconcile as Saved and decode with identity positions.
+On that corpus this is EXACT -- both axes are yearly from 1980, so grid
+point *i* IS saved point *i* -- and avoids the span approximation entirely,
+but the behavior is a consequence of dedup-by-width, not a separately chosen
+rule: a future change to the dedup would silently alter those series.
+
+The `0x74` rule reconciles every previously-undecodable block in the tracked
+corpora (122 across zambaqui 0x52/0x53 runs, 126 across the six
+`test/metasd/social-network-valuation` groupon files, whose 6-point data
+grid sits inside a 121-point monthly run).
+
+**Negative result -- the data grid's time values are not in the run file.**
+The run stores only the grid's point count; the grid's actual time stamps
+live in the external data file (a dataset VDF's Time series or a spreadsheet
+row -- groupon's is a `GET XLS DATA` workbook that is not part of the run).
+There is no companion time block, no lookup-record linkage (no section-6
+lookup record's `word[10]` points at these OTs), and no other header word
+carrying the axis. Mapping data-grid values onto the saved time axis is
+therefore an approximation: readers assume the grid spans the saved run
+uniformly, anchored at the first saved time
+(`step = (t_last - t_first) / (grid_count - 1)`), with floor semantics
+(zero-order hold). This is exact whenever the data file's axis spans the run
+horizon (the zambaqui "old runs" family -- verified against the tiled
+blocks); when the data ends early (`baserun.vdf`'s deflator, 1980..2005
+inside a 1980..2050 run) the VALUES are correct but interior placement is
+dilated toward the run end. First/last placement is exact in both cases,
+which is what the section-6 final-value oracle pins. A reader with access to
+the sibling data file could recover the exact axis; the model-guided mapping
+work tracks that direction.
 
 
 ## Name-to-OT mapping
@@ -464,7 +566,9 @@ Reconstructing the result set is a single pass over the section-1 records:
 2. **Descriptor pruning.** Spans that overlap in OT space form a connected
    component. Within each component, peel off the graphical-function descriptor
    record: if exactly one candidate's name is lexically lookupish (contains
-   `lookup`, `table`, or `graphical function`), it is the descriptor; otherwise
+   the space-prefixed ` lookup` or ` table`, or the phrase `graphical
+   function` -- the space prefix keeps names like `stable population` from
+   matching), it is the descriptor; otherwise
    the candidate with the highest `f[10]` is treated as the descriptor (this
    fallback fires on `Ref.vdf`, where descriptor names like `RS N2O` are domain
    abbreviations). A descriptor's `f[11]` is its index into the section-6
@@ -501,6 +605,30 @@ an overlapping descriptor (`record_results::standalone_lookup_only_descriptors`)
 The table's values, where they matter, are carried by the **consumer** variables
 that call it with a real input -- those are ordinary owners the reader emits
 under their own names.
+
+Two additional gates protect real stocks from a coincidental drop
+(`SimService/Base.vdf` is the cautionary case: stocks sort first in the OT
+and the lookup array is also alphabetical, so with 18 lookups a real stock's
+own OT start lands below `n_lookups`, the ghost-stock telltale is trivially
+true -- the variable really is a stock -- scalar spans have no width gate,
+and an unrelated lookup's forward link can complete the physical gates;
+4 of its 17 exposed stocks were silently dropped this way):
+
+- **Consumer corroboration**: the forward link must be the exact *start* of a
+  different decoded span of exactly the descriptor's length. A genuine bare
+  lookup's consumer is a real saved variable, so this always resolves
+  (10/10 on `Ref.vdf`); a stock-by-coincidence points at an arbitrary OT that
+  is usually not a span start.
+- **Per-file coherence**: if any candidate passing the physical gates fails
+  consumer corroboration, no standalone drop happens in the file at all. A
+  writer that emits standalone descriptors does so coherently; a single
+  incoherent candidate marks the population as owners-by-coincidence.
+
+No record field can substitute for these gates: the SimService
+false-positive stocks carry `f[14] == 0xf6800000` exactly like descriptors
+(they are lookup-associated stocks), while two genuine `Ref.vdf` descriptors
+(`Ozone precursor forcings`, `"OC, BC, and bio aerosol forcings"`) carry
+graph-metadata floats in `f[8]`/`f[9]`/`f[14]` instead of sentinels.
 
 This is why the reader does not (and should not) reconstruct a series for a
 lookup-only variable: the variable's value is `lookup(input)` for whatever input
@@ -554,3 +682,50 @@ header offsets, section-6 class/final/lookup tail, offset table, and sparse
 blocks parse with the same rules. Header word `0x68` is nonzero and points past
 the normal sparse-block run into an additional sensitivity payload that is not
 decoded -- treat any data past the normal sparse-block run as unknown.
+
+Both readers accept the magic and parse these files with the 0x52 rules: the
+Rust reader (`VDF_SENSITIVITY_FILE_MAGIC`, probed as
+`VdfKind::SensitivityRun`; `VdfFile::parse` treats it identically to a
+simulation run, since following OT offsets ignores the undecoded tail by
+construction) and the Python inspector (`VDF_ALT_RESULT_MAGIC`). The zambaqui
+0x53 fixtures are validated end-to-end against the section-6 final-values
+oracle by `sensitivity_run_files_parse_and_match_final_values_oracle` in
+`src/simlin-engine/tests/integration/vdf_sensitivity.rs`. Two 0x53-visible
+behaviors to know about: unsaved OT slots (an optimization run saves only a
+subset of variables) carry class code 0, a zero offset-table word, and the
+`:NA:` sentinel (-1.298e33) as their section-6 final value; and the zambaqui
+corpus (0x52 and 0x53 alike) contains class-0x05 exogenous-data blocks stored
+on the header-0x74 data grid (see "Data-grid blocks" above), fully decoded by
+both readers.
+
+
+## Appendix: the owner/descriptor discriminator
+
+A negative result, recorded because the reader's design depends on it: **the
+format stores no tag that distinguishes a graphical-function descriptor record
+(whose `f[11]` is a section-6 lookup-record index) from an owner record (whose
+`f[11]` is an OT-block start).**
+
+A field-by-field analysis across the corpus confirms this:
+
+- no byte, bit, or `(f[0], f[1])` combination separates the two populations --
+  every field's value set on descriptor records is a subset of the owner
+  records' value set;
+- `f[14]` (the lookup-association sentinel) is *not* the discriminator: it
+  marks any lookup association, so `WITH LOOKUP` owner records carry it just
+  like standalone definitions (see the field table in "Section 1");
+- the section-6 lookup record carries no back-pointer to its descriptor
+  record, so the association cannot be inverted from that side either.
+
+Vensim's own reader never needs the tag: it has the compiled model and already
+knows which symbols are graphical-function definitions. A model-free reader
+must reconstruct the descriptor set, which is why the pipeline in
+"Name-to-OT mapping" uses:
+
+- for **overlapping** spans: the lexical lookup-def-name test (contains
+  `lookup`, `table`, or `graphical function`) with the highest-`f[10]`
+  fallback for files like `Ref.vdf` whose descriptor names are domain
+  abbreviations;
+- for **standalone** descriptors: the decoded forward link plus the
+  stock-coded ghost-slot telltale (see "Standalone graphical-function
+  ('lookup-only') descriptors").
