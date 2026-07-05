@@ -852,6 +852,11 @@ class VdfFile:
         count = u16(self.data, self.first_data_block)
         if count != self.time_point_count:
             return None
+        # A zero-count Time block (header 0x78 and the block's u16 both
+        # zeroed by corruption) has no time axis to extract; mirror the Rust
+        # reader, which rejects it in extract_time_series.
+        if count == 0:
+            return None
         data_start = self.first_data_block + 2 + self.bitmap_size
         if data_start + count * 4 > len(self.data):
             return None

@@ -2387,6 +2387,9 @@ impl VdfData {
             }
         }
 
+        // Invariant: `time_values` is non-empty -- `extract_time_series`
+        // rejects a zero-count Time block, and the dataset path requires a
+        // positive header time-point count.
         let initial_time = self.time_values[0];
         let final_time = self.time_values[step_count - 1];
         let saveper = if step_count > 1 {
@@ -2426,6 +2429,16 @@ fn extract_time_series(
     let count = read_u16(data, block_offset) as usize;
     if count != time_point_count {
         return Err(format!("time block count {count} != expected {time_point_count}").into());
+    }
+    // A run with zero saved time points is not decodable: `build_results`
+    // derives start/stop from the first and last Time values, so an empty
+    // axis would panic downstream -- and the workspace ships panic=abort,
+    // which would take the whole host process with it at the FFI boundary.
+    // Reachable only via coordinated corruption (header 0x78 AND the Time
+    // block's u16 count both zeroed), which the single-mutation sweep test
+    // cannot produce; rejected here at the source instead.
+    if count == 0 {
+        return Err("VDF time block has zero saved time points".into());
     }
     let data_start = block_offset + 2 + bitmap_size;
     let mut times = Vec::with_capacity(count);
@@ -4318,6 +4331,37 @@ mod tests {
                 exercise_vdf_readers(&mutated);
             }
         }
+    }
+
+    /// A corrupt run file whose header time-point count (0x78) AND Time
+    /// block u16 count are BOTH zero must fail extraction with Err, never
+    /// panic: `build_results` indexes the first/last Time values, and the
+    /// coordinated two-byte corruption slips past the single-mutation sweep
+    /// above (zeroing only 0x78 trips the count-mismatch check instead).
+    /// Found by external review of the FFI import path.
+    #[test]
+    fn test_zero_time_point_run_file_errs_instead_of_panicking() {
+        let pristine = std::fs::read("../../test/bobby/vdf/water/Current.vdf").unwrap();
+        let parsed = VdfFile::parse(pristine.clone()).unwrap();
+        let time_block = parsed.first_data_block;
+
+        let mut patched = pristine;
+        patched[0x78..0x7C].copy_from_slice(&0u32.to_le_bytes());
+        patched[time_block..time_block + 2].copy_from_slice(&0u16.to_le_bytes());
+
+        // The header gates do not read the time axis, so parse still
+        // succeeds; the zero-step rejection must come from extraction.
+        let vdf = VdfFile::parse(patched).expect("header gates unaffected by the patch");
+        assert_eq!(vdf.time_point_count, 0);
+        let err = match vdf.extract_data() {
+            Ok(_) => panic!("zero-step run file must fail extraction"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("zero saved time points"),
+            "unexpected error: {err}"
+        );
+        assert!(vdf.to_results_via_records().is_err());
     }
 
     #[test]

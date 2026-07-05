@@ -208,6 +208,22 @@ class TestLoadVdfMalformedInput:
             return
         assert isinstance(df, pd.DataFrame)
 
+    def test_zero_time_point_run_file_raises_not_aborts(self, tmp_path: Path) -> None:
+        # Coordinated corruption: header time-point count (0x78) and the
+        # Time block's u16 count both zeroed. Before the zero-step guard
+        # this reached an index panic in the engine's build_results, which
+        # under the release panic=abort profile would take the interpreter
+        # down with it (catch_unwind cannot intercept an abort).
+        data = bytearray(vdf_path("water", "Current.vdf").read_bytes())
+        offset_table_start = int.from_bytes(data[0x60:0x64], "little")
+        time_block = int.from_bytes(data[offset_table_start : offset_table_start + 4], "little")
+        data[0x78:0x7C] = (0).to_bytes(4, "little")
+        data[time_block : time_block + 2] = (0).to_bytes(2, "little")
+        zero_step = tmp_path / "zero_step.vdf"
+        zero_step.write_bytes(bytes(data))
+        with pytest.raises(SimlinRuntimeError, match="zero saved time points"):
+            simlin.load_vdf(zero_step)
+
 
 class TestLoadVdfDataFrameConventions:
     """The DataFrame must match Run.results conventions."""

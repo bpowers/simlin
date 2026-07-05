@@ -198,6 +198,27 @@ fn open_vdf_rejects_malformed_input_without_crashing() {
         assert!(!err.is_null());
         simlin_error_free(err);
     }
+
+    // Zero-step run file: header time-point count (0x78) and the Time
+    // block's u16 count both zeroed. This coordinated corruption slips past
+    // the single-mutation sweep and used to reach an index panic in
+    // build_results -- fatal under panic=abort, where catch_unwind cannot
+    // help -- so it must surface as an error through the FFI.
+    let mut zero_step = data.clone();
+    let offset_table_start = u32::from_le_bytes(zero_step[0x60..0x64].try_into().unwrap()) as usize;
+    let time_block = u32::from_le_bytes(
+        zero_step[offset_table_start..offset_table_start + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    zero_step[0x78..0x7C].copy_from_slice(&0u32.to_le_bytes());
+    zero_step[time_block..time_block + 2].copy_from_slice(&0u16.to_le_bytes());
+    let (code, msg) = open_vdf(&zero_step).unwrap_err();
+    assert_eq!(code, SimlinErrorCode::Generic);
+    assert!(
+        msg.contains("zero saved time points"),
+        "unexpected message: {msg}"
+    );
 }
 
 #[test]
