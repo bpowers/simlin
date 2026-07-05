@@ -224,6 +224,20 @@ class TestLoadVdfMalformedInput:
         with pytest.raises(SimlinRuntimeError, match="zero saved time points"):
             simlin.load_vdf(zero_step)
 
+    def test_oversized_dataset_count_raises_not_aborts(self, tmp_path: Path) -> None:
+        # One 0xFF poke on the dataset count word's high byte (data.vdf
+        # stores 225 at 0x7C) used to request a ~34 GB time axis before any
+        # validation ran -- an allocation-failure abort in constrained
+        # environments that catch_unwind cannot intercept. Must be rejected
+        # at parse time instead.
+        data = bytearray(vdf_path("econ", "data.vdf").read_bytes())
+        assert int.from_bytes(data[0x7C:0x80], "little") == 225
+        data[0x7F] = 0xFF
+        oversized = tmp_path / "oversized.vdf"
+        oversized.write_bytes(bytes(data))
+        with pytest.raises(SimlinRuntimeError, match="cannot fit"):
+            simlin.load_vdf(oversized)
+
 
 class TestLoadVdfDataFrameConventions:
     """The DataFrame must match Run.results conventions."""

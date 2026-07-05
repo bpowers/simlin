@@ -219,6 +219,17 @@ fn open_vdf_rejects_malformed_input_without_crashing() {
         msg.contains("zero saved time points"),
         "unexpected message: {msg}"
     );
+
+    // Oversized dataset time-point count: one 0xFF poke on the count word's
+    // high byte (0x7F; data.vdf stores 225 at 0x7C) used to request a ~34 GB
+    // time axis in extract_data before any validation -- an allocation
+    // failure the FFI cannot intercept under panic=abort. Must be rejected
+    // at parse instead.
+    let mut oversized = dataset.clone();
+    oversized[0x7F] = 0xFF;
+    let (code, msg) = open_vdf(&oversized).unwrap_err();
+    assert_eq!(code, SimlinErrorCode::Generic);
+    assert!(msg.contains("cannot fit"), "unexpected message: {msg}");
 }
 
 #[test]

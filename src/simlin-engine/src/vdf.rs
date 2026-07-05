@@ -876,6 +876,20 @@ impl VdfDatasetFile {
         let time_point_count =
             dataset_header_time_point_count(&data).ok_or("missing dataset time-point count")?;
         let bitmap_size = time_point_count.div_ceil(8);
+        // Bound the header count against the file before anything downstream
+        // sizes an allocation from it: every data block carries a
+        // one-bit-per-point bitmap, so a count whose bitmap cannot fit in the
+        // file is structurally bogus. A one-byte corruption of the count
+        // header would otherwise request a multi-gigabyte time axis in
+        // extract_data -- an allocation-failure abort that catch_unwind
+        // cannot intercept (found by Codex review of the FFI import path).
+        if bitmap_size.saturating_add(2) > data.len() {
+            return Err(format!(
+                "dataset time-point count {time_point_count} cannot fit in a {}-byte file",
+                data.len()
+            )
+            .into());
+        }
         let sections = find_sections(&data);
         if sections.len() != 5 {
             return Err(
@@ -1001,11 +1015,15 @@ impl VdfDatasetFile {
                 (normalize_vdf_name(&binding.name) == "decimalyear").then_some(binding.block_index)
             })
             .ok_or("dataset VDF missing decimal year series")?;
-        let time_values = extract_block_series(
+        // Only the grid LENGTH matters for decoding the time block itself, so
+        // go straight to decode_block_grid rather than materializing a dummy
+        // time axis (which would be a count-sized allocation made before any
+        // block-level validation runs).
+        let time_values = decode_block_grid(
             &self.data,
             self.data_block_offsets[time_block_index],
             self.bitmap_size,
-            &vec![0.0; self.time_point_count],
+            self.time_point_count,
         )?;
 
         let mut series = HashMap::new();
@@ -4330,6 +4348,20 @@ mod tests {
                 mutated[pos] = next() as u8;
                 exercise_vdf_readers(&mutated);
             }
+
+            // Deterministic worst-case pokes of the grid-count header words
+            // (0x74 data grid, 0x78 saved grid, 0x7C block grid): setting a
+            // high byte to 0xFF requests a multi-gigabyte grid. The random
+            // rounds above cannot reliably prove this class safe -- on Linux,
+            // overcommit lets a lazily-zeroed oversized allocation "succeed"
+            // locally while aborting in constrained environments -- so the
+            // readers must reject these structurally (count bounds), not
+            // survive them by allocator luck.
+            for pos in 0x74..0x80usize {
+                let mut mutated = data.clone();
+                mutated[pos] = 0xFF;
+                exercise_vdf_readers(&mutated);
+            }
         }
     }
 
@@ -4362,6 +4394,32 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(vdf.to_results_via_records().is_err());
+    }
+
+    /// A corrupted dataset time-point count header must be rejected at parse
+    /// time, before extract_data sizes any allocation from it: byte 0x7F is
+    /// the high byte of data.vdf's count word (0x7C = 225), and setting it to
+    /// 0xFF requests a ~4.3e9-point time axis (~34 GB) whose allocation
+    /// failure would abort the process -- catch_unwind cannot intercept an
+    /// allocator abort, and Linux overcommit is why the random-mutation sweep
+    /// never caught it locally. Found by Codex review of the FFI import path.
+    #[test]
+    fn test_oversized_dataset_count_errs_at_parse() {
+        let mut patched = std::fs::read("../../test/bobby/vdf/econ/data.vdf").unwrap();
+        assert_eq!(
+            read_u32(&patched, 0x7C),
+            225,
+            "fixture layout changed; update the corruption offset"
+        );
+        patched[0x7F] = 0xFF;
+        let err = match VdfDatasetFile::parse(patched) {
+            Ok(_) => panic!("oversized dataset count must fail parse"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("cannot fit"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
