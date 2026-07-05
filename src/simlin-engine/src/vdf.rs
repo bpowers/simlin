@@ -1462,9 +1462,16 @@ impl VdfFile {
     /// Map record `field[2]` name keys to section-2 name-table indices.
     ///
     /// The key is the 4-byte word offset of the printable name within the
-    /// section-2 data region, plus seven words. The first name (`Time`) has no
-    /// length prefix; every following name's key points at the first character
-    /// after its u16 length prefix.
+    /// section-2 data region, plus seven words: `(string_offset -
+    /// section_data_start) / 4 + 7`. The first name (`Time`) has no length
+    /// prefix, so its key is always 7; every following name's key points at
+    /// the first character after its u16 length prefix. Names whose string
+    /// start is not 4-byte aligned receive no key.
+    ///
+    /// Derived from [`parse_name_table_entries`] -- the same parse that
+    /// builds `self.names` -- so stale/deleted entries (which yield no name)
+    /// also consume no index here, keeping the keyed indices aligned with
+    /// `names` on edited files (GH #839).
     fn record_name_key_to_name_index(&self) -> HashMap<u32, usize> {
         let Some(name_section_idx) = self.name_section_idx else {
             return HashMap::new();
@@ -1472,41 +1479,23 @@ impl VdfFile {
         let Some(section) = self.sections.get(name_section_idx) else {
             return HashMap::new();
         };
-        if self.names.is_empty() {
-            return HashMap::new();
-        }
 
         let data_start = section.data_offset();
-        let parse_end = section.region_end.min(self.data.len());
-        let first_len = (section.field5 >> 16) as usize;
-        if first_len == 0 || data_start + first_len > self.data.len() {
-            return HashMap::new();
-        }
-
         let mut out = HashMap::new();
-        out.insert(7, 0);
-
-        let mut pos = data_start + first_len;
-        let mut name_idx = 1usize;
-        while name_idx < self.names.len() && pos + 2 <= parse_end {
-            let len = read_u16(&self.data, pos) as usize;
-            pos += 2;
-            if len == 0 {
-                continue;
-            }
-            if pos + len > parse_end || len > 256 {
+        for (name_idx, entry) in parse_name_table_entries(&self.data, section, section.region_end)
+            .iter()
+            .enumerate()
+        {
+            // `names` comes from the same parse, but guard the zip anyway so
+            // a divergence can only drop keys, never index out of bounds.
+            if name_idx >= self.names.len() {
                 break;
             }
-
-            let start_rel = pos - data_start;
+            let start_rel = entry.string_offset - data_start;
             if start_rel.is_multiple_of(4) {
                 out.insert((start_rel / 4 + 7) as u32, name_idx);
             }
-
-            pos += len;
-            name_idx += 1;
         }
-
         out
     }
 
@@ -1717,31 +1706,52 @@ pub fn find_sections(data: &[u8]) -> Vec<Section> {
     sections
 }
 
-/// Parse the name table up to `parse_end`. The name table may extend past
-/// the section header's size field within its region. `parse_end` should
-/// be the section's `region_end`.
+/// One printable section-2 name-table entry paired with the file offset of
+/// its first string byte (past any u16 length prefix). The offset is what
+/// record `f[2]` keys are computed from, so every consumer of the name table
+/// derives from this single parse -- see [`parse_name_table_entries`].
+pub(crate) struct VdfNameTableEntry {
+    pub(crate) name: String,
+    /// Absolute file offset of the name's first character.
+    pub(crate) string_offset: usize,
+}
+
+/// Single-pass parse of the section-2 name table into printable entries.
 ///
 /// The first entry has no u16 length prefix; its length comes from field5's
 /// high 16 bits. Subsequent entries are u16-length-prefixed. u16=0 entries
-/// are group separators (skipped).
+/// are group separators (skipped). An out-of-bounds or implausibly long
+/// (> 256 byte) length terminates the table.
 ///
-/// Validates each entry (max 256 bytes, printable ASCII) and stops when it
-/// encounters data that doesn't look like a name entry.
-pub fn parse_name_table_extended(data: &[u8], section: &Section, parse_end: usize) -> Vec<String> {
-    let mut names = Vec::new();
+/// Edited Vensim files leave stale/deleted entries: a valid u16 length
+/// prefix over non-printable binary payload. Vensim's reader skips them by
+/// the declared byte count and keeps going -- the table does not end at the
+/// first such entry, and a stale entry consumes NO name index (it yields no
+/// entry here). Deriving both `VdfFile::names` and the record `f[2]` key
+/// maps from this one function is what keeps their indices aligned across
+/// stale entries (GH #839). (See docs/design/vdf.md, section 2.)
+pub(crate) fn parse_name_table_entries(
+    data: &[u8],
+    section: &Section,
+    parse_end: usize,
+) -> Vec<VdfNameTableEntry> {
+    let mut entries = Vec::new();
     let data_start = section.data_offset();
     let parse_end = parse_end.min(data.len());
 
     let first_len = (section.field5 >> 16) as usize;
     if first_len == 0 || data_start + first_len > data.len() {
-        return names;
+        return entries;
     }
     let s: String = data[data_start..data_start + first_len]
         .iter()
         .take_while(|&&b| b != 0)
         .map(|&b| b as char)
         .collect();
-    names.push(s);
+    entries.push(VdfNameTableEntry {
+        name: s,
+        string_offset: data_start,
+    });
 
     let mut pos = data_start + first_len;
 
@@ -1771,18 +1781,30 @@ pub fn parse_name_table_extended(data: &[u8], section: &Section, parse_end: usiz
             .map(|&b| b as char)
             .collect();
 
-        // Edited Vensim files leave stale/deleted entries: a valid u16 length
-        // prefix over non-printable binary payload. Vensim's reader skips them
-        // by the declared length and keeps going -- the table does not end at
-        // the first such entry. Only the out-of-bounds and implausible-length
-        // guards above stop the table. (See docs/design/vdf.md, section 2.)
         if !s.is_empty() && s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-            names.push(s);
+            entries.push(VdfNameTableEntry {
+                name: s,
+                string_offset: pos,
+            });
         }
         pos += len;
     }
 
-    names
+    entries
+}
+
+/// Parse the name table up to `parse_end`. The name table may extend past
+/// the section header's size field within its region. `parse_end` should
+/// be the section's `region_end`.
+///
+/// Thin wrapper over [`parse_name_table_entries`] that drops the string
+/// offsets; see that function for the entry format and the stale-entry
+/// skipping rule.
+pub fn parse_name_table_extended(data: &[u8], section: &Section, parse_end: usize) -> Vec<String> {
+    parse_name_table_entries(data, section, parse_end)
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect()
 }
 
 /// Find the name table section index. Heuristic: it's the section where
@@ -3561,6 +3583,124 @@ mod tests {
     }
 
     #[test]
+    fn test_record_name_key_map_skips_stale_entries_on_risk_fixtures() {
+        // GH #839: risk.vdf and risk2.vdf carry stale/deleted name-table
+        // entries (a valid u16 length prefix over non-printable payload).
+        // `VdfFile::names` skips them, so the key map must too -- otherwise
+        // every key after a stale entry resolves to the wrong (shifted-by-one)
+        // name and the trailing names lose their keys entirely.
+        let risk = vdf_file("../../test/bobby/vdf/econ/risk.vdf");
+        let keys = risk.record_name_key_to_name_index();
+        assert_eq!(
+            risk.names[*keys.get(&767).unwrap()],
+            "desired risk taking behavior"
+        );
+        assert_eq!(
+            risk.names[*keys.get(&775).unwrap()],
+            "time to change risk taking behavior"
+        );
+        assert_eq!(
+            risk.names[*keys.get(&785).unwrap()],
+            "#SMOOTH(interestearnedfromderivatives-investmentslostinderivitivedefaults,\
+             timedelayininvestmentearnings)#"
+        );
+
+        let risk2 = vdf_file("../../test/bobby/vdf/econ/risk2.vdf");
+        let keys2 = risk2.record_name_key_to_name_index();
+        assert_eq!(
+            risk2.names[*keys2.get(&289).unwrap()],
+            "perceived inflation rate"
+        );
+        assert_eq!(
+            risk2.names[*keys2.get(&296).unwrap()],
+            "inflation elasticity of risky behavior"
+        );
+        assert_eq!(
+            risk2.names[*keys2.get(&307).unwrap()],
+            "effect of risk taking on loan standards"
+        );
+        assert_eq!(
+            risk2.names[*keys2.get(&318).unwrap()],
+            "risk elasticity of standards"
+        );
+        assert_eq!(risk2.names[*keys2.get(&326).unwrap()], "federal funds rate");
+        // Key 286 is the string offset of a stale entry; it names nothing.
+        assert!(
+            !keys2.contains_key(&286),
+            "stale-entry offset 286 must not receive a key"
+        );
+    }
+
+    #[test]
+    fn test_record_name_key_map_stays_aligned_after_synthetic_stale_entry() {
+        // Same fixture shape as
+        // `test_parse_name_table_extended_skips_stale_nonprintable_entries`:
+        // a stale entry between "abc" and "def". The stale entry consumes no
+        // name index, so "def" keeps both its index (2) and its own string-
+        // offset key; the stale entry's aligned offset gets no key at all.
+        let mut data = vec![0u8; 256];
+        data[0..4].copy_from_slice(&VDF_SECTION_MAGIC);
+        data[20..24].copy_from_slice(&(6u32 << 16).to_le_bytes());
+
+        // First name at 24 (rel 0, key 7): "Time\0\0" (len 6, no u16 prefix).
+        data[24..28].copy_from_slice(b"Time");
+
+        // Name 2: u16 at 30, string at 32 (rel 8, key 9): "abc".
+        data[30..32].copy_from_slice(&6u16.to_le_bytes());
+        data[32..35].copy_from_slice(b"abc");
+
+        // STALE entry: u16 at 38, payload at 40 (rel 16, would-be key 11).
+        data[38..40].copy_from_slice(&10u16.to_le_bytes());
+        data[40..50].copy_from_slice(&[0x91, 0x01, 0x00, 0x00, b'c', b'y', b' ', b'0', 0, 0]);
+
+        // Name 3: u16 at 50, string at 52 (rel 28, key 14): "def".
+        data[50..52].copy_from_slice(&6u16.to_le_bytes());
+        data[52..55].copy_from_slice(b"def");
+
+        let section = Section {
+            file_offset: 0,
+            field1: 0,
+            region_end: 80,
+            field3: 500,
+            field4: 0,
+            field5: 6u32 << 16,
+        };
+        let names = parse_name_table_extended(&data, &section, 80);
+        assert_eq!(names, vec!["Time", "abc", "def"]);
+
+        let vdf = VdfFile {
+            data,
+            time_point_count: 0,
+            bitmap_size: 0,
+            sections: vec![section],
+            names,
+            name_section_idx: Some(0),
+            slot_table: Vec::new(),
+            slot_table_offset: 0,
+            records: Vec::new(),
+            offset_table_start: 0,
+            offset_table_count: 0,
+            first_data_block: 0,
+            header_final_values_offset: 0,
+            header_lookup_mapping_offset: 0,
+        };
+        let keys = vdf.record_name_key_to_name_index();
+
+        assert_eq!(keys.get(&7), Some(&0), "first name key is always 7");
+        assert_eq!(keys.get(&9), Some(&1), "abc keeps its key");
+        assert_eq!(
+            keys.get(&14),
+            Some(&2),
+            "def must map from its own string offset, not lose its key"
+        );
+        assert!(
+            !keys.contains_key(&11),
+            "the stale entry's offset must not receive a key"
+        );
+        assert_eq!(keys.len(), 3);
+    }
+
+    #[test]
     fn test_to_results_via_records_edited_run_5_recovers_visible_variables() {
         // model_editing/run_5.vdf: an incrementally edited fixture where
         // the original conservative `to_results` returns an ambiguity
@@ -3804,6 +3944,27 @@ mod tests {
                 "{label}: expected more than just Time"
             );
         }
+    }
+
+    #[test]
+    fn test_to_results_via_records_resolves_correct_names_past_stale_entries() {
+        // GH #839: risk2.vdf's name table has stale entries, so before the
+        // key-map fix the record with f[2]=289 / f[11]=80 resolved to the
+        // shifted-by-one name "inflation elasticity of risky behavior"
+        // instead of "perceived inflation rate". Pin the correct binding at
+        // the Results level, not just in the key map.
+        let vdf = vdf_file("../../test/bobby/vdf/econ/risk2.vdf");
+        let results = vdf
+            .to_results_via_records()
+            .expect("risk2: record-based mapping should succeed");
+        let vdf_data = vdf.extract_data().unwrap();
+        assert_result_column_matches_ot(
+            "econ/risk2",
+            &results,
+            &vdf_data,
+            "perceived inflation rate",
+            80,
+        );
     }
 
     #[test]

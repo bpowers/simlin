@@ -226,7 +226,10 @@ in run files) has no length prefix. Every subsequent entry is a `u16`
 length-prefixed string. A `u16` value of `0` is a group separator. Some edited
 files contain length-prefixed entries whose payload is non-printable binary --
 treat these as stale/deleted entries and skip exactly the declared byte count
-rather than stopping the table.
+rather than stopping the table. A stale entry consumes **no name index**: the
+record `f[2]` key formula maps a printable name's string offset to its index
+among the *printable* entries only, so a reader that counts stale entries as
+indices mislabels every name after the first stale entry.
 
 Name categories (a classification aid, not an ownership rule -- validate a saved
 series through a record's `f[2]`/`f[11]`/`f[6]` and the section-6 class code):

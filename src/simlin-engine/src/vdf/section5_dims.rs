@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::{
     STDLIB_PARTICIPANT_HELPERS, VDF_SENTINEL, VENSIM_BUILTINS, VdfDimensionSet, VdfFile,
-    VdfSection5SetEntry, is_vdf_metadata_entry, read_u16,
+    VdfSection5SetEntry, is_vdf_metadata_entry,
 };
 
 /// Anchor-level dimension facts decoded from the record stream.
@@ -54,48 +54,16 @@ struct Anchor {
     complete: bool,
 }
 
-/// Replay the section-2 name-table layout to map every record `field[2]`
-/// name key to its printable name. This duplicates the private
-/// `VdfFile::record_name_key_to_name_index` so the recovery path does
-/// not depend on additional private accessors.
+/// Map every record `field[2]` name key to its printable name. Derives from
+/// `VdfFile::record_name_key_to_name_index` (and therefore from the single
+/// shared name-table parse) rather than re-walking the section-2 bytes, so
+/// stale/deleted entries can never shift this map out of alignment with
+/// `VdfFile::names` (GH #839).
 fn build_name_key_to_name(vdf: &VdfFile) -> HashMap<u32, String> {
-    let mut out = HashMap::new();
-    let Some(name_section_idx) = vdf.name_section_idx else {
-        return out;
-    };
-    let Some(section) = vdf.sections.get(name_section_idx) else {
-        return out;
-    };
-    if vdf.names.is_empty() {
-        return out;
-    }
-    let data_start = section.data_offset();
-    let parse_end = section.region_end.min(vdf.data.len());
-    let first_len = (section.field5 >> 16) as usize;
-    if first_len == 0 || data_start + first_len > vdf.data.len() {
-        return out;
-    }
-    // The first name has no length prefix and its canonical key is 7.
-    out.insert(7u32, vdf.names[0].clone());
-    let mut pos = data_start + first_len;
-    let mut name_idx = 1usize;
-    while name_idx < vdf.names.len() && pos + 2 <= parse_end {
-        let len = read_u16(&vdf.data, pos) as usize;
-        pos += 2;
-        if len == 0 {
-            continue;
-        }
-        if pos + len > parse_end || len > 256 {
-            break;
-        }
-        let start_rel = pos - data_start;
-        if start_rel.is_multiple_of(4) {
-            out.insert((start_rel / 4 + 7) as u32, vdf.names[name_idx].clone());
-        }
-        pos += len;
-        name_idx += 1;
-    }
-    out
+    vdf.record_name_key_to_name_index()
+        .into_iter()
+        .filter_map(|(key, name_idx)| vdf.names.get(name_idx).map(|name| (key, name.clone())))
+        .collect()
 }
 
 fn is_visible_model_name(name: &str) -> bool {
