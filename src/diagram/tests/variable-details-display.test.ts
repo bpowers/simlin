@@ -32,7 +32,7 @@ const unitError: UnitError = {
   code: ErrorCode.BadTable,
   start: 0,
   end: 0,
-  isConsistencyError: true,
+  kind: 'consistency',
   details: 'dimensions are not equal',
 };
 

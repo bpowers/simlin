@@ -635,9 +635,36 @@ describe('convertErrorDetails', () => {
     const errs = unitErrors.get('inflow');
     expect(errs).toHaveLength(1);
     expect(errs![0].details).toBe("computed units 'blerz' don't match specified units");
-    expect(errs![0].isConsistencyError).toBe(true);
+    expect(errs![0].kind).toBe('consistency');
     expect(errs![0].start).toBe(0);
     expect(errs![0].end).toBe(6);
+  });
+
+  it('maps the three-valued unit error kind through to core UnitError', () => {
+    const errAt = (unitErrorKind: SimlinUnitErrorKind, variableName: string): ErrorDetail =>
+      ({
+        modelName: 'main',
+        variableName,
+        kind: SimlinErrorKind.Units,
+        unitErrorKind,
+        code: 33,
+        startOffset: 0,
+        endOffset: 3,
+        message: null,
+        details: null,
+      }) as unknown as ErrorDetail;
+
+    const { unitErrors } = convertErrorDetails(
+      [
+        errAt(SimlinUnitErrorKind.Definition, 'a'),
+        errAt(SimlinUnitErrorKind.Consistency, 'b'),
+        errAt(SimlinUnitErrorKind.Inference, 'c'),
+      ],
+      'main',
+    );
+    expect(unitErrors.get('a')![0].kind).toBe('definition');
+    expect(unitErrors.get('b')![0].kind).toBe('consistency');
+    expect(unitErrors.get('c')![0].kind).toBe('inference');
   });
 
   it('leaves details undefined when the engine provides none', () => {
@@ -655,7 +682,7 @@ describe('convertErrorDetails', () => {
 
     const { unitErrors } = convertErrorDetails(errors, 'main');
     expect(unitErrors.get('x')![0].details).toBeUndefined();
-    expect(unitErrors.get('x')![0].isConsistencyError).toBe(false);
+    expect(unitErrors.get('x')![0].kind).toBe('definition');
   });
 });
 
@@ -698,6 +725,41 @@ describe('ProjectController error cache + navigation', () => {
     await flushTimers();
     expect(controller.getSnapshot().cachedErrors.varErrors.has('y')).toBe(true);
     expect(controller.getSnapshot().cachedErrors.varErrors.has('x')).toBe(false);
+    await controller.dispose();
+  });
+
+  it('prefers the bare details over the terminal-formatted message for model errors', async () => {
+    // The unit-inference umbrella diagnostic carries a plain-language
+    // sentence in `details`; the `message` twin is terminal-formatted and
+    // must not reach the errors panel when details is present.
+    const errorList: ErrorDetail[] = [
+      {
+        modelName: 'main',
+        variableName: null,
+        kind: SimlinErrorKind.Model,
+        code: 33,
+        message: "error in model 'main': unit_mismatch -- unit checking failed; inconsistent constraints:\n    1 == x",
+        details: "the units of 'a' and 'b' are inconsistent with each other",
+      } as unknown as ErrorDetail,
+      {
+        modelName: 'main',
+        variableName: null,
+        kind: SimlinErrorKind.Model,
+        code: 1,
+        message: 'error in model main: something broke',
+        details: null,
+      } as unknown as ErrorDetail,
+    ];
+    const engine = makeFakeEngine({ errors: errorList });
+    const { config } = makeControllerConfig({ engine });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+
+    const cached = await controller.refreshCachedErrors();
+    expect(cached?.modelErrors).toHaveLength(2);
+    expect(cached?.modelErrors[0].details).toBe("the units of 'a' and 'b' are inconsistent with each other");
+    // A model error without details still falls back to the message.
+    expect(cached?.modelErrors[1].details).toBe('error in model main: something broke');
     await controller.dispose();
   });
 

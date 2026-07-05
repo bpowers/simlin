@@ -277,13 +277,23 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     // available on the `InferenceResult` for callers that want it.
     let inference = crate::units_infer::infer(&models_s1, units_ctx, target_model);
     if has_declared_units && !inference.conflicts.is_empty() {
+        // The diagnostic detail is user-facing (it reaches the GUI's error
+        // panel): a plain-language sentence naming the involved variables,
+        // not the raw `1 == unit-expression` constraint dump. The full
+        // conflict list (with constraint text) remains available on the
+        // `InferenceResult` for callers that want it.
+        let friendly = match &inference.conflicts[0] {
+            crate::common::UnitError::InferenceError {
+                sources, details, ..
+            } => crate::errors::unit_inference_reason(sources, details.as_deref()),
+            other => format!("{other}"),
+        };
         let detail = if inference.conflicts.len() == 1 {
-            format!("{}", inference.conflicts[0])
+            friendly
         } else {
             format!(
-                "{} dimensional unit conflicts found during inference; first: {}",
-                inference.conflicts.len(),
-                inference.conflicts[0]
+                "{friendly} ({} unit problems found in total)",
+                inference.conflicts.len()
             )
         };
         CompilationDiagnostic(Diagnostic {

@@ -52,11 +52,18 @@ export interface EquationError {
   readonly end: number;
 }
 
+// Mirrors the engine's three-valued unit-error kind (SimlinUnitErrorKind).
+// The kind determines where the error's `start`/`end` offsets point:
+// `definition` offsets index the units string; `consistency` offsets index
+// the equation; `inference` errors describe a contradiction spanning several
+// variables, so their offsets are not meaningful for any single field.
+export type UnitErrorKind = 'definition' | 'consistency' | 'inference';
+
 export interface UnitError {
   readonly code: ErrorCode;
   readonly start: number;
   readonly end: number;
-  readonly isConsistencyError: boolean;
+  readonly kind: UnitErrorKind;
   readonly details: string | undefined;
 }
 
