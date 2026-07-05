@@ -20,8 +20,10 @@
 //!
 //! This module mirrors `_recover_dimension_sets` in `tools/vdf_xray.py`
 //! so that Rust consumers can recover dim names + elements without
-//! re-implementing the rule set per caller. See
-//! `/tmp/vdf_ref_dims.md` for the numeric evidence.
+//! re-implementing the rule set per caller. The rules are documented in
+//! `docs/design/vdf.md` ("Section 5: dimension sets"); the numeric
+//! evidence is pinned by the MDL-derived expectations in
+//! `tests/integration/vdf_multidim.rs`.
 
 use std::collections::{HashMap, HashSet};
 

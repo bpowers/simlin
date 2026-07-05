@@ -8,7 +8,8 @@
 //! `f[11]` doubles as either an OT-block start (owner) or a section-6
 //! lookup-record index (graphical-function descriptor) -- an *untagged* union
 //! whose discriminator is not stored on disk (see `docs/design/vdf.md`
-//! appendix). The reader is expected to already know the model. For the
+//! "Appendix: the owner/descriptor discriminator"). The reader is expected to
+//! already know the model. For the
 //! model-free reader this module reconstructs which records are owners using
 //! the decoded forward link: a descriptor's `f[11]` indexes the section-6
 //! lookup-record array, and that array is in case-insensitive alphabetical
@@ -194,13 +195,31 @@ pub(super) fn decoded_record_spans(
 /// `used_f10_fallback` records when the descriptor peeling step had to
 /// resort to the highest-`f[10]` tie-break because the lexical
 /// lookup-def-name test was ambiguous (`Ref.vdf` is the canonical case).
-/// The flag is exposed for tests and future diagnostics; it has no effect
-/// on the descriptor membership decision itself.
+/// `standalone_drop_veto_fired` / `standalone_drop_vetoed_candidates` record
+/// when the standalone lookup-only drop's per-file coherence veto withheld
+/// candidates (`SimService/Base.vdf` is the canonical case) -- a silent veto
+/// would let a future file quietly resurrect ghost columns. The flags are
+/// exposed for tests and future diagnostics; they have no effect on the
+/// descriptor membership decision itself.
 #[derive(Clone, Debug, Default)]
 pub(super) struct DescriptorIdentification {
     pub(super) descriptor_indices: HashSet<usize>,
     #[allow(dead_code)]
     pub(super) used_f10_fallback: bool,
+    #[allow(dead_code)]
+    pub(super) standalone_drop_veto_fired: bool,
+    #[allow(dead_code)]
+    pub(super) standalone_drop_vetoed_candidates: usize,
+}
+
+/// Outcome of the standalone lookup-only descriptor detection: the records
+/// to drop, plus the per-file coherence veto diagnostics (`veto_fired` with
+/// the number of physically-gated candidates the veto withheld).
+#[derive(Clone, Debug, Default)]
+struct StandaloneDropOutcome {
+    dropped: HashSet<usize>,
+    veto_fired: bool,
+    vetoed_candidates: usize,
 }
 
 /// Iterative union-find without rank.
@@ -240,8 +259,8 @@ impl UnionFind {
 /// OT-block start, for descriptors it is the zero-based index into the
 /// section-6 lookup-record array (case-insensitive alphabetical order of
 /// the lookup-def names). The on-disk format does not store the
-/// discriminator -- a field-by-field analysis (vdf.md appendix "Claims
-/// about the owner/descriptor discriminator") confirms no byte, bit, or
+/// discriminator -- a field-by-field analysis (vdf.md "Appendix: the
+/// owner/descriptor discriminator") confirms no byte, bit, or
 /// `(f0, f1)` combination distinguishes the two.
 ///
 /// Algorithm. Spans that overlap in OT space form a connected component
@@ -392,17 +411,20 @@ pub(super) fn identify_descriptor_records(
         spans,
         &f11_by_span,
         &overlapping,
+        &descriptor_indices,
         n_lookups,
         &lookup_word10,
         &lookup_word11,
         &class_codes,
         vdf.offset_table_count,
     );
-    descriptor_indices.extend(standalone);
+    descriptor_indices.extend(standalone.dropped);
 
     DescriptorIdentification {
         descriptor_indices,
         used_f10_fallback,
+        standalone_drop_veto_fired: standalone.veto_fired,
+        standalone_drop_vetoed_candidates: standalone.vetoed_candidates,
     }
 }
 
@@ -440,7 +462,41 @@ pub(super) fn identify_descriptor_records(
 ///   `[word[10], word[10] + span_len)`, and for an **arrayed** descriptor
 ///   (`span_len > 1`) the forward width (`word[11]`) equals the element count.
 ///   These confirm `f[11]` really indexes this variable's graphical function
-///   rather than coincidentally landing in the lookup-index range.
+///   rather than coincidentally landing in the lookup-index range;
+/// - **consumer corroboration**: the forward link must be the exact START of
+///   a decoded span of exactly the descriptor's length that can actually be
+///   an emitted owner: spans that are themselves standalone candidates and
+///   spans already peeled as overlap-path descriptors (`peeled_descriptors`)
+///   are excluded as corroborators -- a dropped ghost cannot vouch for
+///   another drop, and two real stocks must not mutually corroborate each
+///   other's (wrong) drop. A lookup's consumer is by definition a real saved
+///   variable, so a genuine bare-lookup descriptor's forward link resolves
+///   to a decoded consumer span (10/10 on `Ref.vdf`). A real stock whose own
+///   OT start is coincidentally `< n_lookups` points, through the unrelated
+///   lookup it accidentally indexes, at an arbitrary OT that is usually not
+///   a span start (3 of the 4 `SimService/Base.vdf` false-positive stocks
+///   fail here);
+/// - **per-file coherence**: if ANY candidate that passes the physical gates
+///   above fails consumer corroboration, NO standalone drop happens at all.
+///   A writer that emits standalone bare-lookup descriptors does so
+///   coherently (every one corroborates), while a file whose standalone
+///   `f[11] < n_lookups` population is stocks-by-coincidence (`SimService`:
+///   the leading alphabetical stock block collides with the lookup-index
+///   range because both OT stock allocation and the lookup array are
+///   alphabetical) will contain uncorroborated candidates, vetoing the set.
+///   The veto is NOT silent: the outcome carries `veto_fired` and the count
+///   of withheld candidates, surfaced on `DescriptorIdentification`, so a
+///   future file with nine genuine bare lookups and one weird candidate
+///   resurrecting nine ghost columns is observable rather than a repeat of
+///   the silent-behavior class that shipped the original false positives.
+///
+/// Record-field discrimination is impossible here: the SimService
+/// false-positive stocks carry `f[14] == 0xf6800000` just like descriptors
+/// (they are lookup-associated stocks), while two genuine `Ref.vdf`
+/// descriptors (`Ozone precursor forcings`, `"OC, BC, and bio aerosol
+/// forcings"`) carry graph-metadata floats in `f[8]`/`f[9]`/`f[14]` instead
+/// of sentinels -- no field separates the populations (see vdf.md
+/// "Appendix: the owner/descriptor discriminator").
 ///
 /// Not matched here (the model-free reader cannot safely distinguish them from
 /// real owners, so they are left as-is): the `rs_hfc*` family, whose forward
@@ -457,13 +513,24 @@ fn standalone_lookup_only_descriptors(
     spans: &[DecodedRecordSpan],
     f11_by_span: &[u32],
     overlapping: &HashSet<usize>,
+    peeled_descriptors: &HashSet<usize>,
     n_lookups: usize,
     lookup_word10: &[usize],
     lookup_word11: &[usize],
     class_codes: &[u8],
     ot_count: usize,
-) -> HashSet<usize> {
-    let mut dropped = HashSet::new();
+) -> StandaloneDropOutcome {
+    // Corroboration index: span start -> [(span index, length)].
+    let mut span_starts: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+    for (i, span) in spans.iter().enumerate() {
+        span_starts
+            .entry(span.start)
+            .or_default()
+            .push((i, span.length()));
+    }
+
+    // Pass 1: candidates passing the physical gates, with their forward OT.
+    let mut candidates: Vec<(usize, usize, usize)> = Vec::new(); // (span idx, rec_idx, fwd)
     for (i, span) in spans.iter().enumerate() {
         if overlapping.contains(&i) {
             continue;
@@ -526,9 +593,50 @@ fn standalone_lookup_only_descriptors(
         if !fwd_block_all_owner {
             continue;
         }
-        dropped.insert(span.rec_idx);
+        candidates.push((i, span.rec_idx, fwd));
     }
-    dropped
+
+    // Pass 2: consumer corroboration. Corroborators are restricted to spans
+    // that can actually be emitted owners: a standalone candidate (which
+    // might itself be dropped) and an overlap-peeled descriptor are excluded,
+    // so a dropped ghost never vouches for a drop and two candidates never
+    // mutually corroborate.
+    let candidate_span_idxs: HashSet<usize> = candidates.iter().map(|&(i, _, _)| i).collect();
+    let mut dropped = HashSet::new();
+    let mut any_uncorroborated = false;
+    for &(i, rec_idx, fwd) in &candidates {
+        let span_len = spans[i].length();
+        let corroborated = span_starts.get(&fwd).is_some_and(|entries| {
+            entries.iter().any(|&(j, l)| {
+                j != i
+                    && l == span_len
+                    && !candidate_span_idxs.contains(&j)
+                    && !peeled_descriptors.contains(&spans[j].rec_idx)
+            })
+        });
+        if corroborated {
+            dropped.insert(rec_idx);
+        } else {
+            any_uncorroborated = true;
+        }
+    }
+
+    // Per-file coherence: one uncorroborated candidate means the file's
+    // standalone f[11] < n_lookups population is owners-by-coincidence,
+    // so nothing is dropped. Refusing to drop is the safe failure mode --
+    // and the veto is reported, not silent.
+    if any_uncorroborated {
+        return StandaloneDropOutcome {
+            dropped: HashSet::new(),
+            veto_fired: true,
+            vetoed_candidates: candidates.len(),
+        };
+    }
+    StandaloneDropOutcome {
+        dropped,
+        veto_fired: false,
+        vetoed_candidates: 0,
+    }
 }
 
 #[cfg(test)]
@@ -579,21 +687,29 @@ mod standalone_descriptor_tests {
 
         // One standalone descriptor span: its f[11] == 1 (a valid lookup
         // index), but as an OT-start it lands on OT 2 (the stock ghost). It is
-        // NOT in any overlap component.
-        let spans = [span(0, "Some Forcing graph", 2)];
-        let f11_by_span = [1u32];
+        // NOT in any overlap component. The consumer span at the forward link
+        // (OT 1) corroborates the drop; it is never a candidate itself
+        // because its slot is DYNAMIC, so the ghost-stock gate rejects it
+        // first (its f[11] of 0 would fail the forward-link gate too).
+        let spans = [
+            span(0, "Some Forcing graph", 2),
+            span(1, "Some Forcing consumer", 1),
+        ];
+        let f11_by_span = [1u32, 0u32];
         let overlapping: HashSet<usize> = HashSet::new();
 
-        let dropped = standalone_lookup_only_descriptors(
+        let outcome = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
+            &HashSet::new(),
             n_lookups,
             &lookup_word10,
             &lookup_word11,
             &class_codes,
             ot_count,
         );
+        let dropped = outcome.dropped;
 
         // The descriptor (rec_idx 0) must be dropped (recognised as a
         // lookup-only table), NOT emitted at its ghost f[11]-as-OT-start slot.
@@ -623,16 +739,18 @@ mod standalone_descriptor_tests {
         let f11_by_span = [1u32];
         let overlapping: HashSet<usize> = HashSet::new();
 
-        let dropped = standalone_lookup_only_descriptors(
+        let outcome = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
+            &HashSet::new(),
             n_lookups,
             &lookup_word10,
             &lookup_word11,
             &class_codes,
             ot_count,
         );
+        let dropped = outcome.dropped;
         assert!(
             dropped.is_empty(),
             "a dynamic-coded owner must not be dropped: {dropped:?}"
@@ -672,20 +790,27 @@ mod standalone_descriptor_tests {
         let lookup_word10 = [9usize, 2usize];
         let n_lookups = lookup_word10.len();
         let lookup_word11 = vec![1usize; n_lookups];
-        let spans = [span(0, "Some Dynamic Owner", 1)];
-        let f11_by_span = [1u32];
+        // A consumer span at the forward link (OT 2) satisfies the consumer
+        // corroboration gate, so ONLY the STOCK-slot guard can reject.
+        let spans = [
+            span(0, "Some Dynamic Owner", 1),
+            span(1, "Forward Consumer", 2),
+        ];
+        let f11_by_span = [1u32, 0u32];
         let overlapping: HashSet<usize> = HashSet::new();
 
-        let dropped = standalone_lookup_only_descriptors(
+        let outcome = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
+            &HashSet::new(),
             n_lookups,
             &lookup_word10,
             &lookup_word11,
             &class_codes,
             ot_count,
         );
+        let dropped = outcome.dropped;
         assert!(
             dropped.is_empty(),
             "a dynamic owner whose only disqualifier is the non-stock slot must \
@@ -711,16 +836,18 @@ mod standalone_descriptor_tests {
         let f11_by_span = [1u32];
         let overlapping: HashSet<usize> = HashSet::new();
 
-        let dropped = standalone_lookup_only_descriptors(
+        let outcome = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
+            &HashSet::new(),
             n_lookups,
             &lookup_word10,
             &lookup_word11,
             &class_codes,
             ot_count,
         );
+        let dropped = outcome.dropped;
         assert!(
             dropped.is_empty(),
             "a Time forward-link must not be dropped: {dropped:?}"
@@ -744,16 +871,18 @@ mod standalone_descriptor_tests {
         let mut overlapping: HashSet<usize> = HashSet::new();
         overlapping.insert(0);
 
-        let dropped = standalone_lookup_only_descriptors(
+        let outcome = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
+            &HashSet::new(),
             n_lookups,
             &lookup_word10,
             &lookup_word11,
             &class_codes,
             ot_count,
         );
+        let dropped = outcome.dropped;
         assert!(
             dropped.is_empty(),
             "an overlapping descriptor must be left to the component path: {dropped:?}"
@@ -786,21 +915,27 @@ mod standalone_descriptor_tests {
         let lookup_word10 = [9usize, 1usize];
         let lookup_word11 = [0usize, 3usize];
         let n_lookups = lookup_word10.len();
-        // A 3-element arrayed descriptor over the stock ghost span [4,7).
-        let spans = [span_with_len(0, "RS arrayed graph", 4, 3)];
-        let f11_by_span = [1u32];
+        // A 3-element arrayed descriptor over the stock ghost span [4,7);
+        // the 3-wide consumer span at the forward link (OT 1) corroborates.
+        let spans = [
+            span_with_len(0, "RS arrayed graph", 4, 3),
+            span_with_len(1, "RS arrayed consumer", 1, 3),
+        ];
+        let f11_by_span = [1u32, 0u32];
         let overlapping: HashSet<usize> = HashSet::new();
 
-        let dropped = standalone_lookup_only_descriptors(
+        let outcome = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
+            &HashSet::new(),
             n_lookups,
             &lookup_word10,
             &lookup_word11,
             &class_codes,
             ot_count,
         );
+        let dropped = outcome.dropped;
         // Recognised as a lookup-only table and dropped.
         assert!(
             dropped.contains(&0),
@@ -831,14 +966,65 @@ mod standalone_descriptor_tests {
         let lookup_word10 = [9usize, 1usize];
         let lookup_word11 = [0usize, 5usize];
         let n_lookups = lookup_word10.len();
-        let spans = [span_with_len(0, "RS HFC arrayed graph", 4, 3)];
-        let f11_by_span = [1u32];
+        // A 3-wide span at the forward link keeps consumer corroboration
+        // satisfiable; ONLY the width mismatch (5 != 3) rejects the drop.
+        let spans = [
+            span_with_len(0, "RS HFC arrayed graph", 4, 3),
+            span_with_len(1, "RS HFC shared consumer", 1, 3),
+        ];
+        let f11_by_span = [1u32, 0u32];
         let overlapping: HashSet<usize> = HashSet::new();
 
-        let dropped = standalone_lookup_only_descriptors(
+        let outcome = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
+            &HashSet::new(),
+            n_lookups,
+            &lookup_word10,
+            &lookup_word11,
+            &class_codes,
+            ot_count,
+        );
+        let dropped = outcome.dropped;
+        assert!(
+            dropped.is_empty(),
+            "an arrayed descriptor with a wider shared consumer must not be \
+             dropped (the width gate is the sole disqualifier here): {dropped:?}"
+        );
+    }
+
+    /// A real stock whose own OT start is coincidentally a valid lookup
+    /// index passes every physical gate (it IS a stock, so the ghost-stock
+    /// telltale is trivially satisfied; scalar spans have no width gate;
+    /// the unrelated lookup it indexes has a valid owner-coded forward
+    /// link) -- consumer corroboration is the SOLE veto: no decoded span
+    /// starts at the forward OT. Mirrors `SimService/Base.vdf`'s
+    /// `Agriculture Employment` (first value 3.4e6), which the pre-gate
+    /// code silently dropped.
+    #[test]
+    fn plain_stock_owner_without_consumer_span_is_not_dropped() {
+        // OT layout: 0=Time, 1=the real stock (its own f[11]-as-OT-start
+        // slot), 2=a dynamic owner slot the unrelated lookup's forward link
+        // points at -- but NO decoded span starts there.
+        let class_codes = [
+            VDF_SECTION6_OT_CODE_TIME,
+            VDF_SECTION6_OT_CODE_STOCK,   // OT 1: the stock's own data
+            VDF_SECTION6_OT_CODE_DYNAMIC, // OT 2: forward link target, span-less
+        ];
+        let ot_count = class_codes.len();
+        let lookup_word10 = [9usize, 2usize];
+        let n_lookups = lookup_word10.len();
+        let lookup_word11 = vec![1usize; n_lookups];
+        let spans = [span(0, "Agriculture Employment", 1)];
+        let f11_by_span = [1u32];
+        let overlapping: HashSet<usize> = HashSet::new();
+
+        let outcome = standalone_lookup_only_descriptors(
+            &spans,
+            &f11_by_span,
+            &overlapping,
+            &HashSet::new(),
             n_lookups,
             &lookup_word10,
             &lookup_word11,
@@ -846,10 +1032,155 @@ mod standalone_descriptor_tests {
             ot_count,
         );
         assert!(
-            dropped.is_empty(),
-            "an arrayed descriptor with a wider shared consumer must not be \
-             dropped (the width gate is the sole disqualifier here): {dropped:?}"
+            outcome.dropped.is_empty(),
+            "a stock owner with an uncorroborated forward link must not be \
+             dropped (consumer corroboration is the sole gate here): {:?}",
+            outcome.dropped
         );
+        // The veto is observable, never silent.
+        assert!(outcome.veto_fired);
+        assert_eq!(outcome.vetoed_candidates, 1);
+    }
+
+    /// Per-file coherence: when TWO candidates pass the physical gates and
+    /// one of them fails consumer corroboration, NEITHER is dropped -- the
+    /// uncorroborated candidate is evidence the file's standalone
+    /// `f[11] < n_lookups` population is stocks-by-coincidence, not
+    /// bare-lookup descriptors. Mirrors `SimService/Base.vdf`, where
+    /// `Alaska Oil Discovered Reserves` happened to corroborate (its
+    /// unrelated lookup's consumer exists as a span) but its three sibling
+    /// stocks did not.
+    #[test]
+    fn one_uncorroborated_candidate_vetoes_all_standalone_drops() {
+        // OT layout: 0=Time, 1..3=two stock slots (the two candidates'
+        // f[11]-as-OT-start slots), 3=a dynamic slot where a decoded span
+        // DOES start (corroborates candidate 0), 4=a dynamic slot where no
+        // span starts (candidate 1 fails corroboration).
+        let class_codes = [
+            VDF_SECTION6_OT_CODE_TIME,
+            VDF_SECTION6_OT_CODE_STOCK,   // OT 1: candidate 0's slot
+            VDF_SECTION6_OT_CODE_STOCK,   // OT 2: candidate 1's slot
+            VDF_SECTION6_OT_CODE_DYNAMIC, // OT 3: corroborated forward link
+            VDF_SECTION6_OT_CODE_DYNAMIC, // OT 4: uncorroborated forward link
+        ];
+        let ot_count = class_codes.len();
+        // lookup[1].word[10] == 3 (a span starts there), lookup[2].word[10]
+        // == 4 (no span starts there).
+        let lookup_word10 = [9usize, 3usize, 4usize];
+        let n_lookups = lookup_word10.len();
+        let lookup_word11 = vec![1usize; n_lookups];
+        let spans = [
+            span(0, "Alaska Oil Discovered Reserves", 1),
+            span(1, "Atmos UOcean Temp", 2),
+            span(2, "land allocated for ethanol", 3),
+        ];
+        let f11_by_span = [1u32, 2u32, 0u32];
+        let overlapping: HashSet<usize> = HashSet::new();
+
+        let outcome = standalone_lookup_only_descriptors(
+            &spans,
+            &f11_by_span,
+            &overlapping,
+            &HashSet::new(),
+            n_lookups,
+            &lookup_word10,
+            &lookup_word11,
+            &class_codes,
+            ot_count,
+        );
+        assert!(
+            outcome.dropped.is_empty(),
+            "one uncorroborated candidate must veto every standalone drop \
+             in the file: {:?}",
+            outcome.dropped
+        );
+        // Both physically-gated candidates were withheld, observably.
+        assert!(outcome.veto_fired);
+        assert_eq!(outcome.vetoed_candidates, 2);
+    }
+
+    /// Two candidates must not mutually corroborate each other's drop: a
+    /// corroborator has to be a span that can actually be an emitted owner,
+    /// and a standalone candidate might itself be dropped. Here candidate 0's
+    /// forward link lands exactly on candidate 1's span and vice versa --
+    /// without the corroborator restriction both real stocks would be
+    /// dropped and the veto would never fire.
+    #[test]
+    fn candidates_do_not_mutually_corroborate() {
+        let class_codes = [
+            VDF_SECTION6_OT_CODE_TIME,
+            VDF_SECTION6_OT_CODE_STOCK, // OT 1: candidate 0's slot
+            VDF_SECTION6_OT_CODE_STOCK, // OT 2: candidate 1's slot
+        ];
+        let ot_count = class_codes.len();
+        // lookup[1].word[10] == 2 (candidate 1's slot), lookup[2].word[10]
+        // == 1 (candidate 0's slot): a mutual-corroboration trap.
+        let lookup_word10 = [9usize, 2usize, 1usize];
+        let n_lookups = lookup_word10.len();
+        let lookup_word11 = vec![1usize; n_lookups];
+        let spans = [span(0, "Stock A", 1), span(1, "Stock B", 2)];
+        let f11_by_span = [1u32, 2u32];
+        let overlapping: HashSet<usize> = HashSet::new();
+
+        let outcome = standalone_lookup_only_descriptors(
+            &spans,
+            &f11_by_span,
+            &overlapping,
+            &HashSet::new(),
+            n_lookups,
+            &lookup_word10,
+            &lookup_word11,
+            &class_codes,
+            ot_count,
+        );
+        assert!(
+            outcome.dropped.is_empty(),
+            "two candidates must not mutually corroborate: {:?}",
+            outcome.dropped
+        );
+        assert!(outcome.veto_fired);
+        assert_eq!(outcome.vetoed_candidates, 2);
+    }
+
+    /// An overlap-peeled descriptor cannot corroborate a standalone drop: a
+    /// peeled ghost is not an emitted owner. The forward link here lands on a
+    /// span that is in `peeled_descriptors`, so the candidate is
+    /// uncorroborated and the veto fires.
+    #[test]
+    fn peeled_descriptor_does_not_corroborate() {
+        let class_codes = [
+            VDF_SECTION6_OT_CODE_TIME,
+            VDF_SECTION6_OT_CODE_STOCK,   // OT 1: candidate's slot
+            VDF_SECTION6_OT_CODE_DYNAMIC, // OT 2: forward link, peeled span
+        ];
+        let ot_count = class_codes.len();
+        let lookup_word10 = [9usize, 2usize];
+        let n_lookups = lookup_word10.len();
+        let lookup_word11 = vec![1usize; n_lookups];
+        let spans = [span(0, "Some Stock", 1), span(7, "Peeled ghost", 2)];
+        let f11_by_span = [1u32, 0u32];
+        let overlapping: HashSet<usize> = HashSet::new();
+        // Span 1 (rec_idx 7) was peeled as an overlap-path descriptor.
+        let peeled: HashSet<usize> = [7usize].into_iter().collect();
+
+        let outcome = standalone_lookup_only_descriptors(
+            &spans,
+            &f11_by_span,
+            &overlapping,
+            &peeled,
+            n_lookups,
+            &lookup_word10,
+            &lookup_word11,
+            &class_codes,
+            ot_count,
+        );
+        assert!(
+            outcome.dropped.is_empty(),
+            "a peeled descriptor must not corroborate a drop: {:?}",
+            outcome.dropped
+        );
+        assert!(outcome.veto_fired);
+        assert_eq!(outcome.vetoed_candidates, 1);
     }
 }
 

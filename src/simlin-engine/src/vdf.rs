@@ -4214,6 +4214,50 @@ mod tests {
     }
 
     #[test]
+    fn test_standalone_drop_veto_diagnostics_on_fixtures() {
+        // The per-file coherence veto must be observable, not silent:
+        // Ref.vdf's ten standalone candidates all corroborate (no veto),
+        // while SimService's four coincidental stock candidates trip it.
+        // The SimService half follows the third_party fixture-availability
+        // convention (skip when the checkout has no third_party).
+        use super::record_results::{decoded_record_spans, identify_descriptor_records};
+
+        let ref_vdf = vdf_file("../../test/xmutil_test_models/Ref.vdf");
+        let key_map = ref_vdf.record_name_key_to_name_index();
+        let dir = ref_vdf.parse_section3_directory();
+        let spans = decoded_record_spans(&ref_vdf, &key_map, dir.as_ref());
+        let id = identify_descriptor_records(&ref_vdf, &spans);
+        assert!(
+            !id.standalone_drop_veto_fired,
+            "Ref.vdf standalone candidates all corroborate; the veto must not fire"
+        );
+        assert_eq!(id.standalone_drop_vetoed_candidates, 0);
+
+        let fixtures = [
+            "../../third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/Base.vdf",
+            "../../third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/ctxt0001/Base.vdf",
+        ];
+        if !std::path::Path::new(fixtures[0]).exists() {
+            return;
+        }
+        for path in fixtures {
+            let sim = vdf_file(path);
+            let key_map = sim.record_name_key_to_name_index();
+            let dir = sim.parse_section3_directory();
+            let spans = decoded_record_spans(&sim, &key_map, dir.as_ref());
+            let id = identify_descriptor_records(&sim, &spans);
+            assert!(
+                id.standalone_drop_veto_fired,
+                "{path}: the coherence veto must fire for the coincidental stock candidates"
+            );
+            assert_eq!(
+                id.standalone_drop_vetoed_candidates, 4,
+                "{path}: the four coincidental stocks are the withheld candidates"
+            );
+        }
+    }
+
+    #[test]
     fn test_to_results_via_records_lookup_ex_separates_lookup_definition_from_output() {
         let vdf = vdf_file("../../test/bobby/vdf/lookups/lookup_ex.vdf");
         let results = vdf

@@ -477,7 +477,9 @@ Reconstructing the result set is a single pass over the section-1 records:
 2. **Descriptor pruning.** Spans that overlap in OT space form a connected
    component. Within each component, peel off the graphical-function descriptor
    record: if exactly one candidate's name is lexically lookupish (contains
-   `lookup`, `table`, or `graphical function`), it is the descriptor; otherwise
+   the space-prefixed ` lookup` or ` table`, or the phrase `graphical
+   function` -- the space prefix keeps names like `stable population` from
+   matching), it is the descriptor; otherwise
    the candidate with the highest `f[10]` is treated as the descriptor (this
    fallback fires on `Ref.vdf`, where descriptor names like `RS N2O` are domain
    abbreviations). A descriptor's `f[11]` is its index into the section-6
@@ -514,6 +516,30 @@ an overlapping descriptor (`record_results::standalone_lookup_only_descriptors`)
 The table's values, where they matter, are carried by the **consumer** variables
 that call it with a real input -- those are ordinary owners the reader emits
 under their own names.
+
+Two additional gates protect real stocks from a coincidental drop
+(`SimService/Base.vdf` is the cautionary case: stocks sort first in the OT
+and the lookup array is also alphabetical, so with 18 lookups a real stock's
+own OT start lands below `n_lookups`, the ghost-stock telltale is trivially
+true -- the variable really is a stock -- scalar spans have no width gate,
+and an unrelated lookup's forward link can complete the physical gates;
+4 of its 17 exposed stocks were silently dropped this way):
+
+- **Consumer corroboration**: the forward link must be the exact *start* of a
+  different decoded span of exactly the descriptor's length. A genuine bare
+  lookup's consumer is a real saved variable, so this always resolves
+  (10/10 on `Ref.vdf`); a stock-by-coincidence points at an arbitrary OT that
+  is usually not a span start.
+- **Per-file coherence**: if any candidate passing the physical gates fails
+  consumer corroboration, no standalone drop happens in the file at all. A
+  writer that emits standalone descriptors does so coherently; a single
+  incoherent candidate marks the population as owners-by-coincidence.
+
+No record field can substitute for these gates: the SimService
+false-positive stocks carry `f[14] == 0xf6800000` exactly like descriptors
+(they are lookup-associated stocks), while two genuine `Ref.vdf` descriptors
+(`Ozone precursor forcings`, `"OC, BC, and bio aerosol forcings"`) carry
+graph-metadata floats in `f[8]`/`f[9]`/`f[14]` instead of sentinels.
 
 This is why the reader does not (and should not) reconstruct a series for a
 lookup-only variable: the variable's value is `lookup(input)` for whatever input
@@ -567,3 +593,35 @@ header offsets, section-6 class/final/lookup tail, offset table, and sparse
 blocks parse with the same rules. Header word `0x68` is nonzero and points past
 the normal sparse-block run into an additional sensitivity payload that is not
 decoded -- treat any data past the normal sparse-block run as unknown.
+
+
+## Appendix: the owner/descriptor discriminator
+
+A negative result, recorded because the reader's design depends on it: **the
+format stores no tag that distinguishes a graphical-function descriptor record
+(whose `f[11]` is a section-6 lookup-record index) from an owner record (whose
+`f[11]` is an OT-block start).**
+
+A field-by-field analysis across the corpus confirms this:
+
+- no byte, bit, or `(f[0], f[1])` combination separates the two populations --
+  every field's value set on descriptor records is a subset of the owner
+  records' value set;
+- `f[14]` (the lookup-association sentinel) is *not* the discriminator: it
+  marks any lookup association, so `WITH LOOKUP` owner records carry it just
+  like standalone definitions (see the field table in "Section 1");
+- the section-6 lookup record carries no back-pointer to its descriptor
+  record, so the association cannot be inverted from that side either.
+
+Vensim's own reader never needs the tag: it has the compiled model and already
+knows which symbols are graphical-function definitions. A model-free reader
+must reconstruct the descriptor set, which is why the pipeline in
+"Name-to-OT mapping" uses:
+
+- for **overlapping** spans: the lexical lookup-def-name test (contains
+  `lookup`, `table`, or `graphical function`) with the highest-`f[10]`
+  fallback for files like `Ref.vdf` whose descriptor names are domain
+  abbreviations;
+- for **standalone** descriptors: the decoded forward link plus the
+  stock-coded ghost-slot telltale (see "Standalone graphical-function
+  ('lookup-only') descriptors").

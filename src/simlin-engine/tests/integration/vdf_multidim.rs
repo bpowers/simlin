@@ -46,6 +46,58 @@ fn assert_result_column_matches_ot(results: &Results, vdf_data: &VdfData, name: 
     }
 }
 
+/// Regression for the SimService standalone-drop false positives: four REAL
+/// dynamic stock series whose OT starts collide with the lookup-index range
+/// (stocks sort first in the OT and the lookup array is also alphabetical, so
+/// with 18 lookups a real stock's own `f[11]` is `< n_lookups` and the
+/// ghost-stock telltale is trivially true). The consumer-corroboration +
+/// per-file-coherence gates in `standalone_lookup_only_descriptors` must keep
+/// all four with sane values. Follows the third_party fixture-availability
+/// convention (`corpus_roots`-style existence check) since third_party is not
+/// present in every checkout.
+#[test]
+fn simservice_stocks_are_not_dropped_as_lookup_only() {
+    let fixtures = [
+        "../../third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/Base.vdf",
+        "../../third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/ctxt0001/Base.vdf",
+    ];
+    if !Path::new(fixtures[0]).exists() {
+        return;
+    }
+
+    for path in fixtures {
+        let data = std::fs::read(path).expect("read SimService fixture");
+        let vdf = VdfFile::parse(data).expect("parse SimService fixture");
+        let results = vdf
+            .to_results_via_records()
+            .expect("record-based mapping should produce SimService columns");
+
+        for (name, expected_first) in [
+            ("Agriculture Employment", Some(3.4e6_f64)),
+            ("Alaska Oil Discovered Reserves", None),
+            ("Alaska Oil Undiscovered Resources", None),
+            ("Atmos UOcean Temp", None),
+        ] {
+            let ident = Ident::<Canonical>::new(name);
+            let col = *results
+                .offsets
+                .get(&ident)
+                .unwrap_or_else(|| panic!("{path}: missing stock column {name}"));
+            let first = results.data[col];
+            assert!(
+                first.is_finite(),
+                "{path}: {name} first value must be finite, got {first}"
+            );
+            if let Some(expected) = expected_first {
+                assert!(
+                    (first - expected).abs() <= expected * 1e-3,
+                    "{path}: {name} first value {first} != expected {expected}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn ref_vdf_record_results_prune_descriptor_overlaps() {
     let ref_vdf = load_ref_vdf();
@@ -703,10 +755,11 @@ fn test_section5_entries_align_with_anchor_f8_ascending() {
 /// of its parent root dim's payload, and that the subseq positions match
 /// the MDL-declared element indices.
 ///
-/// Evidence: `/tmp/vdf_ref_dims.md` section 1 enumerates all 11 Ref.vdf
-/// subranges with their expected positions. The payload refs themselves
-/// are opaque compile-time "axis-participation" tokens; the binding is
-/// the subsequence-position rule.
+/// The `expected` table below enumerates all 11 Ref.vdf subranges with
+/// their MDL-derived positions (the rule itself is documented in
+/// `docs/design/vdf.md`, "Section 5: dimension sets"). The payload refs
+/// themselves are opaque compile-time "axis-participation" tokens; the
+/// binding is the subsequence-position rule.
 #[test]
 fn test_subrange_payload_is_parent_subseq_on_ref_vdf() {
     let ref_vdf = load_ref_vdf();
@@ -790,9 +843,10 @@ fn test_recover_dimension_sets_via_sec5_matches_xray_on_ref_vdf() {
     let ref_vdf = load_ref_vdf();
     let recovered = ref_vdf.recover_dimension_sets_via_sec5();
 
-    // MDL-pinned expectations. These match the "End-to-end validation"
-    // section of /tmp/vdf_ref_dims.md. `scenario` is omitted because it
-    // is a partial single-element root in this save (the MDL declares 3
+    // MDL-pinned expectations, transcribed from the C-LEARN MDL's dimension
+    // declarations (the recovery rules are documented in docs/design/vdf.md,
+    // "Section 5: dimension sets"). `scenario` is omitted because it is a
+    // partial single-element root in this save (the MDL declares 3
     // elements, but only `Deterministic` was simulated), and the
     // recovery declines to emit it rather than guess the missing names.
     let expected: Vec<(&str, Vec<&str>)> = vec![
