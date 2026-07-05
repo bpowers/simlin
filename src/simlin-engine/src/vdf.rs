@@ -273,20 +273,37 @@ pub const VENSIM_BUILTINS: [&str; 28] = [
 ];
 
 // ---- Low-level readers ----
+//
+// The readers are TOTAL: an out-of-range read returns 0 instead of
+// panicking. VDF input is untrusted (arbitrary caller-supplied bytes cross
+// the libsimlin FFI, and release builds compile with panic = "abort", where
+// any panic aborts the host process), and 0 is a value every downstream
+// structural guard already rejects or treats as "absent". Well-formed files
+// never take the fallback because their header/section guards keep every
+// derived offset in bounds.
 
-/// Read a little-endian u32 from the given byte offset.
+/// Read a little-endian u32 from the given byte offset (0 if out of range).
 pub fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+    match data.get(offset..offset + 4) {
+        Some(bytes) => u32::from_le_bytes(bytes.try_into().unwrap()),
+        None => 0,
+    }
 }
 
-/// Read a little-endian u16 from the given byte offset.
+/// Read a little-endian u16 from the given byte offset (0 if out of range).
 pub fn read_u16(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap())
+    match data.get(offset..offset + 2) {
+        Some(bytes) => u16::from_le_bytes(bytes.try_into().unwrap()),
+        None => 0,
+    }
 }
 
-/// Read a little-endian f32 from the given byte offset.
+/// Read a little-endian f32 from the given byte offset (0.0 if out of range).
 pub fn read_f32(data: &[u8], offset: usize) -> f32 {
-    f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+    match data.get(offset..offset + 4) {
+        Some(bytes) => f32::from_le_bytes(bytes.try_into().unwrap()),
+        None => 0.0,
+    }
 }
 
 // ---- Parsed structures ----
@@ -665,6 +682,67 @@ impl VdfDatasetData {
     /// Borrow a named series by display name.
     pub fn series(&self, name: &str) -> Option<&[f64]> {
         self.series.get(name).map(|series| series.as_slice())
+    }
+
+    /// Convert the extracted dataset series into an engine [`Results`] table.
+    ///
+    /// This gives dataset VDFs the same consumption surface as simulation-run
+    /// VDFs (`VdfFile::to_results_via_records`), so FFI callers can expose one
+    /// results type for both container kinds. Column keys are the display
+    /// names canonicalized through `Ident::new` -- the same keying rule the
+    /// run-file path applies -- with `time` at offset 0 sourced from the
+    /// recovered decimal-year axis. If two display names canonicalize to the
+    /// same ident (not observed in practice; Vensim dataset names are unique),
+    /// the later series keeps the offsets entry.
+    pub fn to_results(&self) -> Results {
+        let step_count = self.time_values.len();
+        let step_size = 1 + self.series_order.len();
+        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        let mut data = vec![f64::NAN; step_count * step_size];
+
+        offsets.insert(Ident::<Canonical>::from_str_unchecked("time"), 0);
+        for (step, &t) in self.time_values.iter().enumerate() {
+            data[step * step_size] = t;
+        }
+
+        for (i, name) in self.series_order.iter().enumerate() {
+            let col = 1 + i;
+            offsets.insert(Ident::<Canonical>::new(name), col);
+            if let Some(series) = self.series.get(name) {
+                for (step, &v) in series.iter().take(step_count).enumerate() {
+                    data[step * step_size + col] = v;
+                }
+            }
+        }
+
+        // The dataset's time axis is a saved-output grid, not an integration
+        // grid, so dt/save_step are the observed first-interval spacing (or a
+        // defensive 1.0 for single-point axes; a repeated first timestamp
+        // yields 0.0, which nothing downstream reads today) and the method is
+        // a placeholder.
+        let start = self.time_values.first().copied().unwrap_or(0.0);
+        let stop = self.time_values.last().copied().unwrap_or(start);
+        let saveper = if step_count > 1 {
+            self.time_values[1] - self.time_values[0]
+        } else {
+            1.0
+        };
+
+        Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: Specs {
+                start,
+                stop,
+                dt: saveper,
+                save_step: saveper,
+                method: Method::Euler,
+                n_chunks: step_count,
+            },
+            is_vensim: true,
+        }
     }
 }
 
@@ -2342,7 +2420,10 @@ fn extract_time_series(
     time_point_count: usize,
     bitmap_size: usize,
 ) -> StdResult<Vec<f64>, Box<dyn Error>> {
-    let count = u16::from_le_bytes(data[block_offset..block_offset + 2].try_into()?) as usize;
+    if block_offset + 2 > data.len() {
+        return Err(format!("time block at 0x{block_offset:x} truncated").into());
+    }
+    let count = read_u16(data, block_offset) as usize;
     if count != time_point_count {
         return Err(format!("time block count {count} != expected {time_point_count}").into());
     }
@@ -2350,8 +2431,10 @@ fn extract_time_series(
     let mut times = Vec::with_capacity(count);
     for i in 0..count {
         let off = data_start + i * 4;
-        let val = f32::from_le_bytes(data[off..off + 4].try_into()?) as f64;
-        times.push(val);
+        if off + 4 > data.len() {
+            return Err(format!("time block at 0x{block_offset:x} truncated").into());
+        }
+        times.push(read_f32(data, off) as f64);
     }
     Ok(times)
 }
@@ -4117,6 +4200,124 @@ mod tests {
         assert!(delta_hpi[0].is_nan());
         assert!((delta_hpi[1] - -0.14000000059604645).abs() < 1e-6);
         assert!((delta_hpi[delta_hpi.len() - 1] - -176.60000610351563).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dataset_vdf_to_results_matches_extracted_series() {
+        let dataset =
+            VdfDatasetFile::parse(std::fs::read("../../test/bobby/vdf/econ/data.vdf").unwrap())
+                .unwrap();
+        let data = dataset.extract_data().unwrap();
+        let results = data.to_results();
+
+        assert_eq!(results.step_count, 225);
+        assert_eq!(results.step_size, 11); // time + 10 series
+        assert!((results.specs.start - 1990.0).abs() < 1e-6);
+        assert!((results.specs.stop - 2008.6700439453125).abs() < 1e-6);
+
+        let col = |name: &str| -> Vec<f64> {
+            let off = *results
+                .offsets
+                .get(&Ident::<Canonical>::new(name))
+                .unwrap_or_else(|| panic!("missing column {name}"));
+            results.iter().map(|row| row[off]).collect()
+        };
+
+        let time = col("time");
+        assert!((time[0] - 1990.0).abs() < 1e-6);
+        assert!((time[224] - 2008.6700439453125).abs() < 1e-6);
+
+        // Pinned from test_dataset_vdf_extracts_reference_series: the Results
+        // projection must carry the identical values under canonical keys.
+        let cpi = col("Consumer Price Index");
+        assert!((cpi[0] - 127.4000015258789).abs() < 1e-6);
+        assert!((cpi[224] - 218.7830047607422).abs() < 1e-6);
+
+        let fed_funds = col("Federal Funds Rate");
+        assert!((fed_funds[0] - 8.229999542236328).abs() < 1e-6);
+        assert!((fed_funds[224] - 1.809999942779541).abs() < 1e-6);
+
+        let inflation = col("Inflation Rate");
+        assert!(inflation[0].is_nan());
+        assert!((inflation[12] - 5.38116979598999).abs() < 1e-6);
+    }
+
+    /// Exercise every reader entry point the FFI import path uses on a byte
+    /// buffer, returning instead of panicking on malformed input.
+    fn exercise_vdf_readers(bytes: &[u8]) {
+        match probe_vdf_kind(bytes) {
+            Some(VdfKind::SimulationResults) | Some(VdfKind::SensitivityRun) => {
+                if let Ok(vdf) = VdfFile::parse(bytes.to_vec()) {
+                    let _ = vdf.to_results_via_records();
+                }
+            }
+            Some(VdfKind::Dataset) => {
+                if let Ok(dataset) = VdfDatasetFile::parse(bytes.to_vec())
+                    && let Ok(data) = dataset.extract_data()
+                {
+                    let _ = data.to_results();
+                }
+            }
+            None => {}
+        }
+    }
+
+    #[test]
+    fn test_readers_are_total_on_truncated_and_mutated_input() {
+        // Malformed input must produce Err (or a degraded-but-valid Results),
+        // never panic: libsimlin release builds compile with panic = "abort",
+        // so a panic in this code aborts the whole host process (e.g. a
+        // Python interpreter importing a corrupt VDF). This sweep is the real
+        // enforcement of that contract -- the FFI-level catch_unwind is only
+        // defense-in-depth for unwind builds.
+        let fixtures = [
+            "../../test/bobby/vdf/water/Current.vdf",
+            "../../test/bobby/vdf/subscripts/subscripts.vdf",
+            "../../test/bobby/vdf/econ/data.vdf",
+            // Larger fixtures cover the lookup-record, exogenous-data-block,
+            // and stale-name-table paths.
+            "../../test/bobby/vdf/econ/risk2.vdf",
+            "../../test/bobby/vdf/lookups/lookup_ex.vdf",
+        ];
+        for path in fixtures {
+            let data = std::fs::read(path).unwrap();
+
+            // Every truncation length for small files; a coarser stride
+            // (plus the final 128 lengths) for larger ones to stay inside
+            // the test time budget.
+            let stride = data.len().div_ceil(2_048);
+            let mut lengths: Vec<usize> = (0..data.len()).step_by(stride).collect();
+            lengths.extend(data.len().saturating_sub(128)..=data.len());
+            for len in lengths {
+                exercise_vdf_readers(&data[..len]);
+            }
+
+            // Deterministic single-byte corruptions across the whole file,
+            // plus a burst of corruptions in the header region (where offsets
+            // and counts live).
+            let mut rng: u64 = 0x9e3779b97f4a7c15;
+            let mut next = move || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                rng
+            };
+            // Larger fixtures cost more per parse, so scale the corruption
+            // rounds down to keep the whole sweep inside the time budget.
+            let rounds = if data.len() > 16_384 { 64 } else { 512 };
+            for _ in 0..rounds {
+                let mut mutated = data.clone();
+                let pos = (next() as usize) % mutated.len();
+                mutated[pos] ^= (next() as u8) | 1;
+                exercise_vdf_readers(&mutated);
+            }
+            for _ in 0..rounds {
+                let mut mutated = data.clone();
+                let pos = (next() as usize) % FILE_HEADER_SIZE.min(mutated.len());
+                mutated[pos] = next() as u8;
+                exercise_vdf_readers(&mutated);
+            }
+        }
     }
 
     #[test]

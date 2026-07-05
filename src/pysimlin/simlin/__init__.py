@@ -46,6 +46,7 @@ from .types import (
     TimeSpec,
     UnitIssue,
 )
+from .vdf import load_vdf
 
 
 def load(path: Union[str, Path]) -> Model:
@@ -147,4 +148,5 @@ __all__ = [
     "UnitIssue",
     "error_code_to_string",
     "load",
+    "load_vdf",
 ]

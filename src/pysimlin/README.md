@@ -7,6 +7,7 @@ Python bindings for the Simlin system dynamics simulation engine.
 - Load models from XMILE, Vensim MDL, and Simlin JSON and protobuf formats
 - Run system dynamics simulations with full control
 - Get simulation results as pandas DataFrames
+- Import Vensim VDF binary output files as pandas DataFrames
 - Analyze model structure and feedback loops
 - Edit existing models or build new ones programmatically via Python context managers
 - Full type hints for IDE support
@@ -441,6 +442,30 @@ print(df.tail())
 # Get metadata
 time_spec = run.time_spec
 overrides = run.overrides  # Dict of variable overrides used
+```
+
+### Importing Vensim Data Files (VDF)
+
+Vensim saves simulation output in a binary `.vdf` format. `simlin.load_vdf`
+reads one directly (no model file needed) and returns a DataFrame shaped
+exactly like `Run.results`: index is time, columns are canonicalized
+variable names, arrayed variables appear as one column per element
+(`"stock[element]"`). Simulation runs, sensitivity runs, and imported
+dataset files are all auto-detected from the file magic.
+
+<!-- pysimlin-test: skip -->
+```python
+import pandas as pd
+
+df = simlin.load_vdf("Current.vdf")
+print(df["water_level"].iloc[-1])
+
+# Compare a Vensim run against a Simlin re-simulation. The two frames
+# have independent time indexes, so align on the shared time points.
+run = simlin.load("model.mdl").run(analyze_loops=False)
+comparison = pd.DataFrame(
+    {"vensim": df["water_level"], "simlin": run.results["water_level"]}
+).dropna()
 ```
 
 ### Model Interventions

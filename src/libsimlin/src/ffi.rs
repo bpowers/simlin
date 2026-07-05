@@ -38,6 +38,14 @@ pub struct SimlinError {
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
 
+/// Opaque standalone results structure (e.g. an imported VDF file)
+#[repr(C)]
+#[allow(dead_code)]
+pub struct SimlinResults {
+    _private: [u8; 0],
+    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
+
 /// Loop polarity for C API.
 ///
 /// `MostlyReinforcing`/`MostlyBalancing` ("Rux"/"Bux" in the LTM literature)
