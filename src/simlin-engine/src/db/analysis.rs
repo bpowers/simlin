@@ -2874,22 +2874,16 @@ pub fn causal_graph_from_element_edges(
 /// any new direct call to `model_element_loop_circuits` should be
 /// reviewed against the bug recap in
 /// `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`.
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `model_loop_circuits_tiered` for LTM compilation; this \
-            full-element Johnson run is retained for measurement and \
-            external diagnostic callers only."
-)]
-// `#[salsa::tracked]` expands to internal generated code that calls back
-// into this function by name, which would re-trigger the `deprecated`
-// warning inside the macro expansion. `#[allow(deprecated)]` on the
-// outer item suppresses both the macro-internal callsite and any
-// deprecation lint applied to the salsa-generated companion items, so
-// the lint still fires for real external callers (re-exports in
-// `db.rs`, test/example code) -- which is exactly what we want.
-#[allow(deprecated)]
+// The `#[deprecated]` attribute lives on the thin public wrapper below,
+// NOT on this tracked query: `#[salsa::tracked]` expands to generated
+// code that calls back into the annotated function by name, so marking
+// the tracked fn itself deprecated re-triggers the lint inside the macro
+// expansion (and which generated callsites `#[allow(deprecated)]` covers
+// varies across salsa releases). Keeping the query un-deprecated and
+// deprecating only the wrapper makes the lint fire exactly for real
+// external callers (re-exports in `db.rs`, test/example code).
 #[salsa::tracked(returns(ref))]
-pub fn model_element_loop_circuits(
+fn model_element_loop_circuits_query(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
@@ -2908,6 +2902,23 @@ pub fn model_element_loop_circuits(
             truncated: true,
         },
     }
+}
+
+/// Deprecated public surface for the full-element Johnson run; see the
+/// legacy note above `model_element_loop_circuits_query` for why LTM
+/// callers must use [`model_loop_circuits_tiered`] instead.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `model_loop_circuits_tiered` for LTM compilation; this \
+            full-element Johnson run is retained for measurement and \
+            external diagnostic callers only."
+)]
+pub fn model_element_loop_circuits(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> &LoopCircuitsResult {
+    model_element_loop_circuits_query(db, model, project)
 }
 
 /// One variable-level cycle classified as fast-path

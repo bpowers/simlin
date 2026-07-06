@@ -228,10 +228,13 @@ impl<A: ProjectAccess> ServerHandler for SimlinServeMcpServer<A> {
         // field at initialize time — clients that surface this to the
         // LLM (Claude Code, Claude Desktop) will include it as context.
         ServerInfo::new(
+            // No logging capability: MCP logging is deprecated (SEP-2577)
+            // and we never sent log notifications anyway -- project-change
+            // events flow through the custom `simlin/` notification
+            // namespace (see `notifications.rs`).
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
-                .enable_logging()
                 .build(),
         )
         .with_protocol_version(ProtocolVersion::LATEST)
@@ -399,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn get_info_advertises_tools_resources_logging_capabilities() {
+    fn get_info_advertises_tools_and_resources_capabilities() {
         let temp = TempDir::new().expect("tempdir");
         let canonical_root = temp.path().canonicalize().expect("canon root");
         let state = build_state(canonical_root);
@@ -417,8 +420,8 @@ mod tests {
             "resources capability must be advertised"
         );
         assert!(
-            info.capabilities.logging.is_some(),
-            "logging capability must be advertised"
+            info.capabilities.logging.is_none(),
+            "logging capability must not be advertised (deprecated by SEP-2577, never used)"
         );
         assert_eq!(info.server_info.name, "simlin-serve");
     }

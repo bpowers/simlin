@@ -2259,8 +2259,8 @@ pub(crate) fn render_read_slice_for_diagnostic(slice: &[AxisRead]) -> String {
 /// while ordinary feeder partials in the same non-additive term would freeze
 /// that same wrong whole-array reducer value.
 #[salsa::tracked(returns(ref))]
-pub(crate) fn unhoisted_bare_arrayed_reducer_arg<'db>(
-    db: &'db dyn Db,
+pub(crate) fn unhoisted_bare_arrayed_reducer_arg(
+    db: &dyn Db,
     from: String,
     to: String,
     model: SourceModel,

@@ -70,9 +70,6 @@ wildcards = "deny"
 allow-wildcard-paths = true
 highlight = "all"
 skip = [
-    # resvg's transitive deps pin older versions we can't control
-    { crate = "float-cmp@0.9", reason = "strict-num (via tiny-skia/usvg) pins 0.9; we use 0.10 directly" },
-    { crate = "roxmltree@0.20", reason = "fontconfig-parser (via fontdb/usvg) pins 0.20; usvg itself uses 0.21" },
 ]
 
 [sources]
