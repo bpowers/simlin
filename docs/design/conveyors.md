@@ -136,9 +136,19 @@ explicitly overridden by tagging each leakage flow with the `<leak/>`
 property") — so a model whose first listed outflow carries `<leak/>` gets a
 later primary. Compile **errors**: a conveyor with no outflows, or whose
 outflows are all leak-marked, cannot simulate (XMILE: at least one outflow MUST
-be the normal outflow). A conveyor outflow MUST NOT carry a normal equation-
-valued `<eqn>` — but note the leak-fraction encoding below. Real Stella models
-put the leak **fraction** in the `<eqn>` of a `<leak/>`-tagged flow:
+be the normal outflow).
+
+XMILE says a conveyor outflow MUST NOT carry a normal equation — the conveyor
+drives it — but real Stella exports put a **placeholder** `<eqn>0</eqn>` on
+primary conveyor outflows anyway (both vendored `.stmx` fixtures do, e.g.
+`recovering` in `sir_social_distancing_mixnot.stmx`). The reader therefore
+**preserves but ignores** any `<eqn>` on a primary conveyor outflow: it is kept
+for round-trip fidelity and plays no role in simulation — never an error. The
+writer emits the spec-strict form (no `<eqn>` on a primary outflow), consistent
+with the `<non_negative/>` writer rule in [§3.4](#34-non-negativity). On a
+*leak-marked* flow the `<eqn>` is meaningful — it carries the leak fraction.
+Real Stella models put the leak **fraction** in the `<eqn>` of a
+`<leak/>`-tagged flow:
 
 ```xml
 <flow name="attriting" leak_start="0" leak_end="0.25">
@@ -652,17 +662,19 @@ simlin implements all five; each distributes the admitted volume `A` (from step
 4) across slats at insert time (step 6):
 
 Definitions used below: `d` = the entry depth (step 6); target slats are indexed
-`i ∈ 0..d−1` (0 = exit); a slat's **fractional position from the entry side**
-over the entry path is `x_i = 1 − (i + 0.5)/d` (so `x ≈ 0` at the entry slat
-`i = d−1`, `x ≈ 1` at the exit slat `i = 0`, consistent with the
+`i ∈ 0..d−1` (0 = exit) for every method except `dest`, which targets the whole
+physical belt `i ∈ 0..L−1` (see its row); a slat's **fractional position from
+the entry side** over the entry path is `x_i = 1 − (i + 0.5)/d` (so `x ≈ 0` at
+the entry slat `i = d−1`, `x ≈ 1` at the exit slat `i = 0`, consistent with the
 [§5.3](#53-leak-zones) orientation). Every placement distributes the admitted
-volume `A` as per-slat shares `A_i ≥ 0` with `Σ A_i = A`:
+volume `A` as per-slat shares `A_i ≥ 0` with `Σ A_i = A` **exactly** — no
+placement may lose admitted material:
 
 | `isee:spreadflow` | Per-slat share `A_i` |
 |---|---|
 | `beginning` (default) | `A_i = A` for `i = d−1` (the entry slat), 0 elsewhere: one cohort at depth `d`. |
 | `even` | `A_i = A / d` for every `i ∈ 0..d−1` — including the exit slat, whose share exits after one DT (isee: "equal amount every position"). |
-| `dest` | `A_i = A × content_i / Σ_j content_j`, summed over **all** slats of the current belt (length `L`, not just the first `d`) — proportional to existing content. If total content is 0, fall back to `beginning`. |
+| `dest` | `A_i = A × content_i / Σ_j content_j` for `i ∈ 0..L−1` — every slat of the current physical belt receives its content-proportional share (an empty slat's share is 0 by construction, and `Σ A_i = A` exactly since numerators and denominator range over the same slats). A share landing on a stale-tail slat beyond `d` has `d_c = i + 1 > d`; its leak budget is capped by the [§5.1](#51-linear-leakage) `min(M_k(d_c), M_k(d))` rule. If total content is 0, fall back to `beginning`. |
 | `dist` | `A_i = A × w_i / Σ_j w_j` over `i ∈ 0..d−1`, where `w_i = max(0, g(x_i))` and `g` is `<isee:distrib_eq>`: a graphical function evaluated at `x_i` with its own x-axis scale and extrapolation rules (isee normalizes the table "so that it is effectively a probability density function" — the `Σ w` division here is that normalization), or a 1-D array of length `m` where `w_i` = the element `floor(x_i × m)` (clamped to `m−1`). If `Σ w = 0`, fall back to `beginning`. |
 | `source` | Applies only when this inflow is **conveyor-driven from an upstream leak flow** (the "coupling" is flow identity: the inflow *is* that leak). For each upstream slat `j` that leaked `q_j` this step (Phase A), with `y_j` = that slat's fractional position from the entry side of the *upstream* belt, place `q_j` at the target slat `i ∈ 0..d−1` whose `x_i` is nearest `y_j` (ties toward the exit) — positions mirror proportionally when the two belts differ in length. If the inflow is not an upstream leak, fall back to `beginning`. |
 
@@ -740,10 +752,13 @@ pushback on the inflow cannot be expressed as fixed equations):
   The conveyor's own value slot receives `Σ slats.content`.
 - **Initialization** ([§7](#7-initialization)) runs in the initials pass, filling
   `slats` from the stock `<eqn>` value before the first step.
-- **Compiled representation.** The equation-less conveyor outflow/leak flows
-  compile to a "driven by conveyor" marker (not an equation), so the
-  `empty_equation` error no longer fires; instead the compiler wires the flow's
-  value slot to the owning conveyor's update output.
+- **Compiled representation.** Conveyor-driven flows (the primary outflow and
+  leak flows) compile to a "driven by conveyor" marker, not an equation — the
+  primary outflow's `<eqn>` is absent or an ignored Stella placeholder
+  ([§3.3](#33-leakage-flows)), and a leak flow's fraction expression feeds the
+  cohort schedule rather than the flow slot. The `empty_equation` error no
+  longer fires; instead the compiler wires the flow's value slot to the owning
+  conveyor's update output.
 
 ### 9.4 Integration method
 
