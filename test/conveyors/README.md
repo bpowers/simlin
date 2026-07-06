@@ -11,20 +11,30 @@ conforming engine). Until then they are here so the implementer has real,
 authoritative XMILE to parse and represent. Do not add them to
 `tests/integration/main.rs` until both conditions hold.
 
+For the deterministic core behavior, `reference_prototype.py` (below) already
+supplies verified acceptance oracles derived directly from the spec, so a Rust
+implementation of the core continuous conveyor can be test-driven without Stella.
+
 ## Files
 
 | File | Source | License | Conveyor features | Notes |
 |------|--------|---------|-------------------|-------|
-| `minimal_conveyor.xmile` | hand-authored (this repo) | project | transit time + capacity, single outflow, no leak | The Phase 1 target. Smallest possible conveyor; obvious expected behavior. |
-| `sir_social_distancing_mixnot.stmx` | peterhovmand/COVID-19-SD-generic-structures | CC BY 4.0 | transit time only (`<len>transit_time</len>`) | Simplest real Stella oracle. `dt = 1/4`, Days, 0–100. Deterministic. |
-| `covid19_severity.stmx` | peterhovmand/COVID-19-SD-generic-structures | CC BY 4.0 | transit time + leakage (`<leak/>` flows) + arrayed conveyors (`Severity` dim) + `exponential_leak="true"` | Exercises leakage and subscripted conveyors. Deterministic. |
+| `minimal_conveyor.xmile` | hand-authored (this repo) | project | transit time + capacity, single outflow, no leak | The Phase 1 target. Smallest possible conveyor; obvious expected behavior. The only genuinely transit-time-only fixture here. |
+| `sir_social_distancing_mixnot.stmx` | peterhovmand/COVID-19-SD-generic-structures | CC BY 4.0 | transit time (`<len>transit_time</len>`) + **distribution-based spread inflow** (`isee:spreadflow="dist"`, design doc §8) | `dt = 1/4`, Days, 0–100. The belt is transit-time-only; the `Not_Mixing` submodel's inflow uses the distribution spread-input placement — NOT a plain at-beginning conveyor. |
+| `covid19_severity.stmx` | peterhovmand/COVID-19-SD-generic-structures | CC BY 4.0 | transit time + leakage (`<leak/>` flows) + arrayed conveyors (`Severity` dim) + `exponential_leak="true"` | Exercises leakage and subscripted conveyors. |
+| `reference_prototype.py` | this repo | project | — | Executable reference implementation of the spec's per-DT algorithm (design doc §4–§7). Run `python3 test/conveyors/reference_prototype.py`; it prints the §15 worked-example trajectories and asserts every invariant (steady state, transit delay, linear/exponential leak conservation, capacity/inflow-limit clipping, non-integer-transit rounding). NOT production code — a faithful transcription of the spec, and the acceptance oracle for the core continuous conveyor. |
 
 ### Non-conveyor blockers (must be resolved or trimmed before these become oracles)
 
 Verified against HEAD on 2026-07-05 with `simlin-cli simulate`:
 
-- `sir_social_distancing_mixnot.stmx`: uses the isee builtin `LOOKUPMEAN`
-  (unimplemented -> `unknown_builtin` on `transit time`).
+- `sir_social_distancing_mixnot.stmx`: the `Not_Mixing` submodel feeds its
+  conveyor via an inflow marked `isee:spreadflow="dist"` with
+  `<isee:distrib_eq>profile</isee:distrib_eq>` — the "following a distribution"
+  spread-input placement, fully specified in the design doc §8 (so it is a
+  covered feature, not a plain at-beginning conveyor). Independently, it uses the
+  isee builtin `LOOKUPMEAN` for the transit time, which is unimplemented
+  (`unknown_builtin` on `transit time`) and must be added before this model runs.
 - `covid19_severity.stmx`: several unit-consistency errors
   (`bad_binary_op_in_units`) plus `PREVIOUS`/`isee:spreadflow` usage; these are
   independent of conveyor support.

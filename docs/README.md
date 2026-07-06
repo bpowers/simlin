@@ -4,7 +4,7 @@
 
 - [architecture.md](architecture.md) -- Component descriptions, dependency graph, project structure
 - [design/2026-02-21-incremental-compilation.md](design/2026-02-21-incremental-compilation.md) -- Incremental compilation via salsa: symbolic bytecode, per-variable tracking, LTM integration
-- [design/conveyors.md](design/conveyors.md) -- XMILE conveyor support: spec, simulation semantics, engine integration points, phasing, and open decisions
+- [design/conveyors.md](design/conveyors.md) -- XMILE conveyor support: complete specification of syntax, per-DT simulation semantics, leakage/initialization formulas, spread inputs, arrays, and engine integration
 - [design/engine-performance.md](design/engine-performance.md) -- Engine compile/simulate profile (C-LEARN), implemented optimizations, and remaining proposals
 - [design/ltm--loops-that-matter.md](design/ltm--loops-that-matter.md) -- LTM implementation design: data structures, synthetic variables, module handling
 - [design/mdl-parser.md](design/mdl-parser.md) -- Vensim MDL parser design history and implementation notes
