@@ -1,0 +1,1703 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE">
+	<header>
+		<smile version="1.0" namespace="std, isee" uses_arrays="1" uses_conveyor=""/>
+		<name>model-no-interface</name>
+		<uuid>cbbad60b-89e5-4578-9130-b1e9bca5acae</uuid>
+		<vendor>isee systems, inc.</vendor>
+		<product version="1.9.5" isee:build_number="2103" isee:saved_by_v1="true" lang="en">Stella Architect</product>
+	</header>
+	<sim_specs isee:sim_duration="Sim Duration" isee:restore_on_start="false" method="Euler" time_units="Days" isee:instantaneous_flows="false">
+		<start>0</start>
+		<stop>365</stop>
+		<dt reciprocal="true">4</dt>
+	</sim_specs>
+	<dimensions>
+		<dim name="DisplaySeverity">
+			<elem name="Healthy"/>
+			<elem name="Mild"/>
+			<elem name="Moderate"/>
+			<elem name="Servere"/>
+			<elem name="Recovered"/>
+			<elem name="Dead"/>
+		</dim>
+		<dim name="GraphSeverity">
+			<elem name="Hospitalized"/>
+			<elem name="Sick"/>
+			<elem name="Dead"/>
+			<elem name="Healthy"/>
+			<elem name="Recovered"/>
+		</dim>
+		<dim name="Severity">
+			<elem name="Asymptomatic"/>
+			<elem name="Mild"/>
+			<elem name="Moderate"/>
+			<elem name="Severe"/>
+		</dim>
+	</dimensions>
+	<isee:prefs show_module_prefix="true" live_update_on_drag="true" show_restore_buttons="false" layer="model" interface_scale_ui="true" interface_max_page_width="10000" interface_max_page_height="10000" interface_min_page_width="0" interface_min_page_height="0" saved_runs="5" keep="false" rifp="true"/>
+	<isee:multiplayer_settings include_chat="true" allow_observers="false" advance_time_increment="1" observer_start_page="home_page" enabled="false"/>
+	<isee:time_formats default_format="Builtin">
+		<isee:time_format name="Builtin" type="adaptive"/>
+	</isee:time_formats>
+	<default_format/>
+	<model_units>
+		<unit name="People">
+			<eqn/>
+			<alias>person</alias>
+			<alias>persons</alias>
+		</unit>
+		<unit name="Dimensionless">
+			<eqn>1</eqn>
+			<alias>dmnl</alias>
+			<alias>unitless</alias>
+			<alias>fraction</alias>
+		</unit>
+		<unit name="Days">
+			<eqn/>
+			<alias>day</alias>
+		</unit>
+		<unit name="Per Day">
+			<eqn>1/Days</eqn>
+		</unit>
+		<unit name="euros per year per person">
+			<eqn>EUR/(person-year)</eqn>
+		</unit>
+		<unit name="dollars per job">
+			<eqn>USD/jobs</eqn>
+		</unit>
+		<unit name="dollars per month per worker">
+			<eqn>USD/(worker-mo)</eqn>
+		</unit>
+		<unit name="jobs per month per worker">
+			<eqn>jobs/(worker-mo)</eqn>
+		</unit>
+		<unit name="months per year">
+			<eqn>mo/yr</eqn>
+		</unit>
+	</model_units>
+	<model>
+		<variables>
+			<stock name="Uninfected\nat risk">
+				<eqn>community_population</eqn>
+				<outflow>new_infections_by_severity</outflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<stock name="infected\nnot contagious">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<inflow>new_infections_by_severity</inflow>
+				<inflow>assymptomatic_arriving</inflow>
+				<outflow>becoming_contagious</outflow>
+				<outflow>testing_not_contagious</outflow>
+				<conveyor exponential_leak="true">
+					<len>days_infected_but_not_contagious_or_symptomatic</len>
+				</conveyor>
+				<units>Person</units>
+			</stock>
+			<stock name="asymptomatic\ncontagious">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<inflow>becoming_contagious</inflow>
+				<outflow>becming_symptomatic</outflow>
+				<outflow>testing_assymptomatic</outflow>
+				<conveyor exponential_leak="true">
+					<len>days_contagious_but_not_symptomatic</len>
+				</conveyor>
+				<units>Person</units>
+			</stock>
+			<stock name="symptomatic\ncontagious">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<inflow>becming_symptomatic</inflow>
+				<outflow>losing_contagion</outflow>
+				<outflow>testing_symptomatic</outflow>
+				<outflow>contagious_deaths</outflow>
+				<conveyor exponential_leak="true">
+					<len>days_symptomatic_and_contagious</len>
+				</conveyor>
+				<units>Person</units>
+			</stock>
+			<stock name="symptomatic\nnot contagious">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<inflow>losing_contagion</inflow>
+				<outflow>recovering</outflow>
+				<outflow>testing_symptomatic_not_contagious</outflow>
+				<outflow>non_contagious_deaths</outflow>
+				<conveyor exponential_leak="true">
+					<len>days_symptomatic_but_no_onger_contagious</len>
+				</conveyor>
+				<units>Person</units>
+			</stock>
+			<stock name="recovered">
+				<eqn>0</eqn>
+				<inflow>recovering</inflow>
+				<inflow>tested_recovering</inflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<flow name="new infections\nby severity">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>contacts_with_at_risk * infectivity * severity_spread</eqn>
+				<non_negative/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="becoming\ncontagious">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<non_negative/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="becming\nsymptomatic">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<non_negative/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="losing\ncontagion">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<non_negative/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="recovering">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<non_negative/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="contagious\ndeaths">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>fractional_death_rate</eqn>
+				<non_negative/>
+				<leak/>
+				<units>PErson/Day</units>
+			</flow>
+			<aux name="baseline contact\nrate">
+				<eqn>1</eqn>
+				<units>Per Day</units>
+			</aux>
+			<aux name="days infected but\nnot contagious or\nsymptomatic">
+				<eqn>2</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="days contagious but\nnot symptomatic">
+				<eqn>4</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="days symptomatic\nand contagious">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<element subscript="Asymptomatic">
+					<eqn>7</eqn>
+				</element>
+				<element subscript="Mild">
+					<eqn>7</eqn>
+				</element>
+				<element subscript="Moderate">
+					<eqn>10</eqn>
+				</element>
+				<element subscript="Severe">
+					<eqn>14</eqn>
+				</element>
+				<units>Days</units>
+			</aux>
+			<aux name="days symptomatic but\nno onger contagious">
+				<eqn>5</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="symptomatic\nadjustment">
+				<eqn>0.05</eqn>
+				<units>dmnl</units>
+			</aux>
+			<aux name="tested\nadjustment">
+				<eqn>0.005</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="quarantine\neffectiveness">
+				<eqn>0.1</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="contacts">
+				<eqn>asymtomatic_not_tested_contagious * global_contact_rate + 
+mildly_symptomatic_not_tested_contagious * mildly_symptomatic_contact_rate +
+symptomatic_not_tested_contagious * symptomatic_contact_rate +
+tested_contagious * tested_contact_rate</eqn>
+				<units>Person/Day</units>
+			</aux>
+			<flow name="tested non\ncontagious\ndeaths">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>fractional_death_rate</eqn>
+				<non_negative/>
+				<leak/>
+				<units>PErson/Day</units>
+			</flow>
+			<aux name="global change\nstart">
+				<eqn>60</eqn>
+				<units>Days</units>
+			</aux>
+			<flow name="assymptomatic\narriving" isee:spreadflow="even">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>IF Severity = Severity.Asymptomatic THEN PULSE(1, STARTTIME,  500) ELSE 0</eqn>
+				<non_negative/>
+				<units>PErson/Day</units>
+			</flow>
+			<stock name="tested infected\nnot contagious">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<inflow>testing_not_contagious</inflow>
+				<outflow>becoming_contagious_1</outflow>
+				<conveyor>
+					<len>days_infected_but_not_contagious_or_symptomatic</len>
+				</conveyor>
+				<units>Person</units>
+			</stock>
+			<stock name="tested asymptomatic\ncontagious">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<inflow>becoming_contagious_1</inflow>
+				<inflow>testing_assymptomatic</inflow>
+				<outflow>tested_becoming_symptomatic</outflow>
+				<conveyor>
+					<len>days_contagious_but_not_symptomatic</len>
+				</conveyor>
+				<units>Person</units>
+			</stock>
+			<stock name="tested symptomatic\ncontagious">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<inflow>tested_becoming_symptomatic</inflow>
+				<inflow>testing_symptomatic</inflow>
+				<outflow>tested_losing_contagion</outflow>
+				<outflow>tested_contagious_deaths</outflow>
+				<conveyor exponential_leak="true">
+					<len>days_symptomatic_and_contagious</len>
+				</conveyor>
+				<units>Person</units>
+			</stock>
+			<flow name="becoming\ncontagious 1">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<non_negative/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="tested becoming\nsymptomatic">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<non_negative/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="tested losing\ncontagion">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<non_negative/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="tested contagious\ndeaths">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>fractional_death_rate</eqn>
+				<non_negative/>
+				<leak/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="testing\nnot contagious" isee:spreadflow="source">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>effective_asymptomatic_test_rate</eqn>
+				<non_negative/>
+				<leak/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="testing\nassymptomatic" isee:spreadflow="source">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>test_rate_different_severity</eqn>
+				<non_negative/>
+				<leak/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="testing\nsymptomatic" isee:spreadflow="source">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>test_rate_different_severity</eqn>
+				<non_negative/>
+				<leak/>
+				<units>PErson/Day</units>
+			</flow>
+			<aux name="asymptomatic\ntesting">
+				<eqn>MIN(testing_capacity-symptomatic_testing - mildly_symptomatic_testing,  recent_testing_positive * contacts_tested_per_positive_test)</eqn>
+				<units>Person/Day</units>
+			</aux>
+			<aux name="severity\nspread">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<element subscript="Asymptomatic">
+					<eqn>0.1</eqn>
+				</element>
+				<element subscript="Mild">
+					<eqn>0.3</eqn>
+				</element>
+				<element subscript="Moderate">
+					<eqn>0.4</eqn>
+				</element>
+				<element subscript="Severe">
+					<eqn>0.2</eqn>
+				</element>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="asymptomatic\nnever tested\npositive">
+				<eqn>SUM(asymptomatic_contagious[*]) + SUM(infected_not_contagious[*]) + symptomatic_contagious[Asymptomatic] + symptomatic_not_contagious[Asymptomatic]</eqn>
+				<isee:summing/>
+				<units>Person</units>
+			</aux>
+			<aux name="community\npopulation">
+				<eqn>1e6</eqn>
+				<units>Person</units>
+			</aux>
+			<stock name="tested symptomatic\nnot contagious">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<inflow>tested_losing_contagion</inflow>
+				<inflow>testing_symptomatic_not_contagious</inflow>
+				<outflow>tested_recovering</outflow>
+				<outflow>tested_non_contagious_deaths</outflow>
+				<conveyor exponential_leak="true">
+					<len>days_symptomatic_but_no_onger_contagious</len>
+				</conveyor>
+				<units>Person</units>
+			</stock>
+			<flow name="testing\nsymptomatic\nnot contagious" isee:spreadflow="source">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>test_rate_different_severity</eqn>
+				<non_negative/>
+				<leak/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="tested\nrecovering">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>0</eqn>
+				<non_negative/>
+				<units>PErson/Day</units>
+			</flow>
+			<flow name="non\ncontagious\ndeaths">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>fractional_death_rate</eqn>
+				<non_negative/>
+				<leak/>
+				<units>PErson/Day</units>
+			</flow>
+			<aux name="Crude Death\nRate by Group">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<element subscript="Asymptomatic">
+					<eqn>0</eqn>
+				</element>
+				<element subscript="Mild">
+					<eqn>0</eqn>
+				</element>
+				<element subscript="Moderate">
+					<eqn>0.001</eqn>
+				</element>
+				<element subscript="Severe">
+					<eqn>0.15</eqn>
+				</element>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="fractional\ndeath rate">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>Crude_Death_Rate_by_Group/(days_symptomatic_and_contagious + days_symptomatic_but_no_onger_contagious)</eqn>
+				<units>Per Day</units>
+			</aux>
+			<aux name="tested\ncontagious">
+				<eqn>SUM(tested_asymptomatic_contagious[*]) + SUM(tested_symptomatic_contagious[*])</eqn>
+				<isee:summing/>
+				<units>Person</units>
+			</aux>
+			<aux name="symptomatic not\ntested contagious">
+				<eqn>symptomatic_contagious[Moderate] + symptomatic_contagious[Severe]</eqn>
+				<isee:summing/>
+				<units>person</units>
+			</aux>
+			<aux name="asymtomatic not tested\ncontagious">
+				<eqn>SUM(asymptomatic_contagious[*])</eqn>
+				<isee:summing/>
+				<units>Person</units>
+			</aux>
+			<aux name="global\ncontact rate">
+				<eqn>IF TIME &lt; global_change_start OR TIME &gt; global_change_start + global_change_duration THEN baseline_contact_rate ELSE baseline_contact_rate * (1 - quarantine_effectiveness)</eqn>
+				<units>Per Day</units>
+			</aux>
+			<aux name="infectivity">
+				<eqn>0.4</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="symptomatic\ncontact rate">
+				<eqn>MIN(global_contact_rate,  baseline_contact_rate * symptomatic_adjustment)</eqn>
+				<units>Per Day</units>
+			</aux>
+			<aux name="tested contact\nrate">
+				<eqn>MIN(global_contact_rate,  baseline_contact_rate * tested_adjustment)</eqn>
+				<units>Per Day</units>
+			</aux>
+			<aux name="contacts with\nat risk">
+				<eqn>contacts *  Uninfected_at_risk/total_population</eqn>
+				<units>Person/Day</units>
+			</aux>
+			<aux name="total\npopulation">
+				<eqn>Uninfected_at_risk + SUM(asymptomatic_contagious[*]) + SUM(infected_not_contagious[*]) + recovered + SUM(symptomatic_contagious[*]) + SUM(symptomatic_not_contagious[*]) + SUM(tested_asymptomatic_contagious[*]) + SUM(tested_infected_not_contagious[*]) + SUM(tested_symptomatic_not_contagious[*])</eqn>
+				<isee:summing/>
+				<units>Person</units>
+			</aux>
+			<stock name="tested\ninfected">
+				<eqn>0</eqn>
+				<inflow>testing_incidence</inflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<flow name="testing\nincidence">
+				<eqn>testing_positive</eqn>
+				<non_negative/>
+				<units>Person/Day</units>
+			</flow>
+			<aux name="testing\npositive">
+				<eqn>SUM(testing_assymptomatic[*]) + SUM(testing_not_contagious[*]) + SUM(testing_symptomatic[*]) + SUM(testing_symptomatic_not_contagious[*])</eqn>
+				<isee:summing/>
+				<units>Person/Day</units>
+			</aux>
+			<aux name="presumed\npositives">
+				<eqn>becming_symptomatic[Moderate] + becming_symptomatic[Severe] + testing_positive</eqn>
+				<isee:summing/>
+				<units>Person/Day</units>
+			</aux>
+			<stock name="presumed\ninfected">
+				<eqn>0</eqn>
+				<inflow>presumed_new_infections</inflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<flow name="presumed\nnew infections">
+				<eqn>presumed_positives</eqn>
+				<non_negative/>
+				<units>Person/Day</units>
+			</flow>
+			<aux name="death\nrate">
+				<eqn>SUM(contagious_deaths[*]) + SUM(non_contagious_deaths[*]) + SUM(tested_contagious_deaths[*]) + SUM(tested_non_contagious_deaths[*])</eqn>
+				<isee:summing/>
+				<units>Person/Day</units>
+			</aux>
+			<stock name="Cumulative\nDeaths">
+				<eqn>0</eqn>
+				<inflow>all_dying</inflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<flow name="all dying">
+				<eqn>death_rate</eqn>
+				<non_negative/>
+				<units>PErson/Day</units>
+			</flow>
+			<aux name="needing\nhospitalization">
+				<eqn>symptomatic_contagious[Severe] + symptomatic_not_contagious[Severe] + tested_symptomatic_contagious[Severe] + tested_symptomatic_not_contagious[Severe]</eqn>
+				<isee:summing/>
+				<units>person</units>
+			</aux>
+			<aux name="Peak Hospitalization">
+				<eqn>MAX(needing_hospitalization, PREVIOUS(SELF,  0))</eqn>
+				<units>Person</units>
+			</aux>
+			<aux name="too ill to work">
+				<eqn>needing_hospitalization + symptomatic_contagious[Moderate] + symptomatic_not_contagious[Moderate] + tested_symptomatic_contagious[Moderate] + tested_symptomatic_not_contagious[Moderate]</eqn>
+				<isee:summing/>
+				<units>Person</units>
+			</aux>
+			<aux name="peak of too\nill to work">
+				<eqn>MAX(PREVIOUS(SELF, 0), too_ill_to_work)</eqn>
+				<units>Person</units>
+			</aux>
+			<aux name="global change\nduration">
+				<eqn>14</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="target symptomatic\ntest rate">
+				<eqn>0.1</eqn>
+				<units>Per Day</units>
+			</aux>
+			<aux name="testing\ncapacity">
+				<eqn>100</eqn>
+				<units>PErson/Day</units>
+			</aux>
+			<aux name="symptomatic\nnever tested\npositive">
+				<eqn>symptomatic_contagious[Moderate] + symptomatic_contagious[Severe] + symptomatic_not_contagious[Moderate] + symptomatic_not_contagious[Severe]</eqn>
+				<isee:summing/>
+				<units>Person</units>
+			</aux>
+			<aux name="effective\nasymptomatic\ntest rate">
+				<eqn>asymptomatic_testing * contact_tracing_effectiveness//asymptomatic_never_tested_positive</eqn>
+				<units>Per Day</units>
+			</aux>
+			<aux name="active by condition">
+				<dimensions>
+					<dim name="DisplaySeverity"/>
+				</dimensions>
+				<element subscript="Healthy">
+					<eqn>Uninfected_at_risk</eqn>
+				</element>
+				<element subscript="Mild">
+					<eqn>Total_infected[Asymptomatic]+Total_infected[Mild]</eqn>
+				</element>
+				<element subscript="Moderate">
+					<eqn>Total_infected[Moderate]</eqn>
+				</element>
+				<element subscript="Servere">
+					<eqn>Total_infected[Severe]</eqn>
+				</element>
+				<element subscript="Recovered">
+					<eqn>recovered</eqn>
+				</element>
+				<element subscript="Dead">
+					<eqn>Cumulative_Deaths</eqn>
+				</element>
+				<units>Person</units>
+			</aux>
+			<aux name="Total infected">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>asymptomatic_contagious + infected_not_contagious + symptomatic_contagious + symptomatic_not_contagious + tested_asymptomatic_contagious + tested_infected_not_contagious + tested_symptomatic_contagious + tested_symptomatic_not_contagious</eqn>
+				<isee:summing/>
+				<units>Person</units>
+			</aux>
+			<aux name="active most\ndismal">
+				<dimensions>
+					<dim name="DisplaySeverity"/>
+				</dimensions>
+				<eqn>IF TIME &lt;= most_dismal_time THEN active_by_condition ELSE PREVIOUS(SELF, 0)</eqn>
+				<units>Person</units>
+			</aux>
+			<aux name="active by condition for display">
+				<dimensions>
+					<dim name="DisplaySeverity"/>
+				</dimensions>
+				<eqn>IF TIME = STOPTIME THEN active_most_dismal ELSE active_by_condition</eqn>
+				<units>Person</units>
+			</aux>
+			<aux name="most dismal\ntime">
+				<eqn>IF too_ill_to_work &gt;= peak_of_too_ill_to_work THEN TIME ELSE PREVIOUS(SELF, STARTTIME)</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="time do display">
+				<eqn>IF TIME &lt; STOPTIME THEN TIME ELSE most_dismal_time</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="Sim Duration">
+				<eqn>IF TIME &gt; most_dismal_time AND SUM(Total_infected) &lt; 20 THEN 0.1 ELSE 20</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="mildly symptomatic\nadjustment">
+				<eqn>0.5</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="mildly symptomatic\ncontact rate">
+				<eqn>MIN(global_contact_rate, baseline_contact_rate * mildly_symptomatic_adjustment )</eqn>
+				<units>Per Day</units>
+			</aux>
+			<aux name="mildly symptomatic\nnot tested contagious">
+				<eqn>symptomatic_contagious[Mild]</eqn>
+				<isee:summing/>
+				<units>person</units>
+			</aux>
+			<aux name="symptomatic\ntesting">
+				<eqn>MIN(testing_capacity,  symptomatic_never_tested_positive * target_symptomatic_test_rate)</eqn>
+				<units>PErson/Day</units>
+			</aux>
+			<aux name="mildly symptomatic\ntesting">
+				<eqn>MIN(testing_capacity-symptomatic_testing,  mildly_symptomatic_never_tested_positive * target_mildly_symptomatic_test_rate)</eqn>
+				<units>Person/Day</units>
+			</aux>
+			<aux name="mildly\nsymptomatic\nnever tested\npositive">
+				<eqn>symptomatic_contagious[Mild] + symptomatic_not_contagious[Mild]</eqn>
+				<isee:summing/>
+				<units>Person</units>
+			</aux>
+			<aux name="test rate\ndifferent severity">
+				<dimensions>
+					<dim name="Severity"/>
+				</dimensions>
+				<eqn>IF Severity = Severity.Mild THEN mildly_symptomatic_testing // mildly_symptomatic_never_tested_positive ELSE symptomatic_testing // symptomatic_never_tested_positive</eqn>
+				<units>Per Day</units>
+			</aux>
+			<aux name="target mildly\nsymptomatic test rate">
+				<eqn>target_symptomatic_test_rate * mild_test_fraction</eqn>
+				<units>Per Day</units>
+			</aux>
+			<aux name="mild test fraction">
+				<eqn>0.25</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="contact tracing\neffectiveness">
+				<eqn>0</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<stock name="Hospital Bed\nDays">
+				<eqn>0</eqn>
+				<inflow>increasing_bed_days</inflow>
+				<non_negative/>
+				<units>Person*Day</units>
+			</stock>
+			<flow name="increasing\nbed days">
+				<eqn>needing_hospitalization</eqn>
+				<non_negative/>
+				<units>person</units>
+			</flow>
+			<aux name="all testing">
+				<eqn>asymptomatic_testing + mildly_symptomatic_testing + symptomatic_testing</eqn>
+				<isee:summing/>
+				<units>Person/Day</units>
+			</aux>
+			<aux name="contacts tested\nper positive\ntest">
+				<eqn>1</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="recent testing\npositive">
+				<eqn>SMTH1(testing_positive,  testing_smooth_time,  0)</eqn>
+				<isee:delay_aux/>
+				<units>Person/Day</units>
+			</aux>
+			<aux name="testing smooth\ntime">
+				<eqn>7</eqn>
+				<units>Days</units>
+			</aux>
+			<stock name="Cumulative\nTesting">
+				<eqn>0</eqn>
+				<inflow>Flow_1</inflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<flow name="Flow 1">
+				<eqn>all_testing</eqn>
+				<non_negative/>
+				<units>Person/Day</units>
+			</flow>
+			<aux name="active by graph condition">
+				<dimensions>
+					<dim name="GraphSeverity"/>
+				</dimensions>
+				<element subscript="Hospitalized">
+					<eqn>active_by_condition[Servere]</eqn>
+				</element>
+				<element subscript="Sick">
+					<eqn>active_by_condition[Mild]+active_by_condition[Moderate]</eqn>
+				</element>
+				<element subscript="Dead">
+					<eqn>active_by_condition[Dead]</eqn>
+				</element>
+				<element subscript="Healthy">
+					<eqn>active_by_condition[Healthy]</eqn>
+				</element>
+				<element subscript="Recovered">
+					<eqn>active_by_condition[Recovered]</eqn>
+				</element>
+				<units>person</units>
+			</aux>
+		</variables>
+		<views>
+			<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+				<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<isee:loop_indicator color="black" background="white"/>
+				<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+				<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="black" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="black" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="black" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="black" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+					<isee:series_styles>
+						<isee:series_style color="blue" thickness="1"/>
+						<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF7F00" thickness="1"/>
+						<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF007F" thickness="1"/>
+						<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#C8C8C8" thickness="1"/>
+					</isee:series_styles>
+				</graph>
+				<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+				<button color="black" background="#E0E0E0" font_size="12pt" border_width="thin" border_style="solid" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" isee:highlight_on_hover="false" isee:highlight_color="#959595"/>
+				<isee:annotation color="black" background="#E0E0E0" font_size="12pt" border_width="thin" border_style="solid" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" isee:highlight_on_hover="false" isee:highlight_color="#959595" popup_corner_radius="0" popup_background_color="#FFFECF"/>
+				<slider color="#66CC66" background="#E0E0E0" font_size="12pt" num_ticks="3" label_side="top" wrap_title="true" vertical="false" isee:fancy_appearance="false" isee:show_hover_tip="when_deciding" input_expands="true" input_width="100"/>
+				<isee:sim_speed_slider color="black" background="white"/>
+				<isee:time_slider color="#E95F74" background="silver"/>
+				<isee:pie_input color="black" background="white" font_size="12pt" legend_position="bottom" isee:transparent="false"/>
+				<knob color="#66CC66" background="#E0E0E0" font_size="12pt" label_side="bottom" wrap_title="true"/>
+				<numeric_input color="black" background="#E0E0E0" font_size="12pt" label_side="left" wrap_title="true" input_expands="false" input_width="100"/>
+				<switch color="black" background="#E0E0E0" font_size="12pt" label_side="top" wrap_title="true" isee:appearance="switch" isee:on_color="green"/>
+				<options color="black" background="white" appearance="radio-buttons" arrangement="vertical"/>
+				<graphical_input color="black" background="#E0E0E0" font_size="12pt" isee:show_hover_tip="true"/>
+				<group_input color="black" background="#E0E0E0" font_size="12pt"/>
+				<lamp color="black" background="white" font_size="9pt"/>
+				<gauge color="black" background="white" font_size="9pt" needle_color="#F09F72" bar_color="#EEEEEE" bar_progress_color="black" appearance="radial" num_major_ticks="11" num_minor_ticks="11" show_numeric_value="true"/>
+				<isee:spatial_map color="black" background="white" font_size="12pt"/>
+				<isee:animation_object color="black" background="white" font_size="12pt"/>
+				<isee:navigation_widget color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt" border_color="#999999" border_width="thin" border_style="solid" item_spacing="6" appearance="tabs" corner_radius="4" selected_item_color="black" selected_item_background="white" item_background="#DDDDDD"/>
+				<isee:shape color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt" border_width="thin" border_style="solid" opacity="1" transparent_background="true"/>
+				<isee:selector color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<isee:iframe color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt" border_width="thin" border_style="solid"/>
+				<isee:financial_table color="black" background="#E0E0E0" text_align="right" font_size="12pt" auto_fit="true" first_column_width="250" other_column_width="100" header_font_style="normal" header_font_weight="bold" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="14pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+			</style>
+			<view isee:show_pages="false" background="white" page_width="1280" page_height="960" isee:page_cols="2" isee:page_rows="3" isee:scroll_x="192.5" zoom="120" isee:popup_graphs_are_comparative="true" type="stock_flow">
+				<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+					<stock color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom"/>
+					<isee:placeholder color="#228B22" background="white" font_color="#228B22" font_size="9pt" label_side="bottom"/>
+					<module color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="red" background="white" font_color="red" font_size="9pt"/>
+					<connector color="#FF007F" background="white" font_color="#FF007F" font_size="9pt" isee:thickness="1"/>
+					<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<isee:loop_indicator color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+					<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="black" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="black" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="black" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="black" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+						<isee:series_styles>
+							<isee:series_style color="blue" thickness="1"/>
+							<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+				</style>
+				<stock label_side="top" x="56.5238" y="308.293" width="93.75" height="65" name="Uninfected\nat risk"/>
+				<stock x="274.635" y="340.793" name="infected\nnot contagious"/>
+				<stock x="471.19" y="344.571" name="asymptomatic\ncontagious"/>
+				<stock label_side="left" label_angle="135" x="642.936" y="347.429" name="symptomatic\ncontagious"/>
+				<stock label_side="top" x="818.333" y="351" name="symptomatic\nnot contagious"/>
+				<stock x="990.38" y="333.5" width="45" height="35" name="recovered"/>
+				<flow x="195.204" y="340.793" name="new infections\nby severity">
+					<pts>
+						<pt x="150.274" y="340.793"/>
+						<pt x="252.135" y="340.793"/>
+					</pts>
+				</flow>
+				<flow x="366.913" y="351" name="becoming\ncontagious">
+					<pts>
+						<pt x="297.135" y="351"/>
+						<pt x="448.69" y="351"/>
+					</pts>
+				</flow>
+				<flow x="551.063" y="344.571" name="becming\nsymptomatic">
+					<pts>
+						<pt x="493.69" y="344.571"/>
+						<pt x="620.436" y="344.571"/>
+					</pts>
+				</flow>
+				<flow x="724.635" y="347.429" name="losing\ncontagion">
+					<pts>
+						<pt x="665.436" y="347.429"/>
+						<pt x="795.833" y="347.429"/>
+					</pts>
+				</flow>
+				<flow x="909.605" y="351" name="recovering">
+					<pts>
+						<pt x="840.833" y="351"/>
+						<pt x="990.377" y="351"/>
+					</pts>
+				</flow>
+				<flow label_side="bottom" x="715.42" y="411.429" name="contagious\ndeaths">
+					<pts>
+						<pt x="656.27" y="364.929"/>
+						<pt x="656.27" y="411.429"/>
+						<pt x="798.571" y="411.429"/>
+					</pts>
+				</flow>
+				<aux x="437.675" y="169.143" name="baseline contact\nrate"/>
+				<aux x="335.484" y="640.064" name="days infected but\nnot contagious or\nsymptomatic"/>
+				<aux x="447.468" y="616.429" name="days contagious but\nnot symptomatic"/>
+				<aux label_side="bottom" x="579.429" y="773.244" name="days symptomatic\nand contagious"/>
+				<aux x="639.111" y="887.768" name="days symptomatic but\nno onger contagious"/>
+				<aux label_side="bottom" x="611.436" y="200" name="symptomatic\nadjustment"/>
+				<aux x="584.436" y="16.9821" width="18" height="18" name="tested\nadjustment"/>
+				<aux x="429.555" y="22.9767" name="quarantine\neffectiveness"/>
+				<aux x="537.001" y="132.143" name="contacts"/>
+				<flow label_side="bottom" x="843.357" y="610.714" name="tested non\ncontagious\ndeaths">
+					<pts>
+						<pt x="808.571" y="578.278"/>
+						<pt x="808.571" y="610.714"/>
+						<pt x="902.143" y="610.714"/>
+					</pts>
+				</flow>
+				<aux label_side="bottom" x="340.635" y="56.125" name="global change\nstart"/>
+				<flow isee:segment_with_valve="0" label_side="bottom" x="220" y="260.286" name="assymptomatic\narriving">
+					<pts>
+						<pt x="220" y="174.286"/>
+						<pt x="220" y="334.286"/>
+						<pt x="252.135" y="334.286"/>
+					</pts>
+				</flow>
+				<stock x="237.842" y="536.849" width="45" height="35" name="tested infected\nnot contagious"/>
+				<stock x="465.468" y="558.127" name="tested asymptomatic\ncontagious"/>
+				<stock x="634.826" y="559.096" name="tested symptomatic\ncontagious"/>
+				<flow x="356.905" y="554.349" name="becoming\ncontagious 1">
+					<pts>
+						<pt x="282.842" y="554.349"/>
+						<pt x="442.968" y="554.349"/>
+					</pts>
+				</flow>
+				<flow x="544.147" y="558.127" name="tested becoming\nsymptomatic">
+					<pts>
+						<pt x="487.968" y="558.127"/>
+						<pt x="612.326" y="558.127"/>
+					</pts>
+				</flow>
+				<flow isee:segment_with_valve="0" x="716.294" y="559.096" name="tested losing\ncontagion">
+					<pts>
+						<pt x="657.326" y="559.096"/>
+						<pt x="787.262" y="559.096"/>
+					</pts>
+				</flow>
+				<flow label_side="bottom" x="662.524" y="616.429" name="tested contagious\ndeaths">
+					<pts>
+						<pt x="636.191" y="576.596"/>
+						<pt x="636.191" y="616.429"/>
+						<pt x="712.857" y="616.429"/>
+					</pts>
+				</flow>
+				<flow label_side="right" x="268.913" y="441.571" name="testing\nnot contagious">
+					<pts>
+						<pt x="268.913" y="358.293"/>
+						<pt x="268.913" y="536.849"/>
+					</pts>
+				</flow>
+				<flow label_side="right" x="465.468" y="445.349" name="testing\nassymptomatic">
+					<pts>
+						<pt x="465.468" y="362.071"/>
+						<pt x="465.468" y="540.627"/>
+					</pts>
+				</flow>
+				<flow label_side="right" label_angle="315" x="634.826" y="447.263" name="testing\nsymptomatic">
+					<pts>
+						<pt x="634.826" y="364.929"/>
+						<pt x="634.826" y="541.596"/>
+					</pts>
+				</flow>
+				<aux label_side="bottom" x="116.98" y="712.549" width="18" height="18" name="asymptomatic\ntesting"/>
+				<aux x="57.4837" y="222" name="severity\nspread"/>
+				<connector uid="1" angle="342.187">
+					<from>severity_spread</from>
+					<to>new_infections_by_severity</to>
+				</connector>
+				<aux x="48.98" y="650.143" width="18" height="18" name="asymptomatic\nnever tested\npositive"/>
+				<aux x="367.476" y="711.46" name="community\npopulation"/>
+				<stock label_side="top" x="809.762" y="560.778" name="tested symptomatic\nnot contagious"/>
+				<flow label_side="right" x="818.333" y="449.889" name="testing\nsymptomatic\nnot contagious">
+					<pts>
+						<pt x="818.333" y="368.5"/>
+						<pt x="818.333" y="543.278"/>
+					</pts>
+				</flow>
+				<flow x="920.694" y="557.778" name="tested\nrecovering">
+					<pts>
+						<pt x="832.262" y="557.778"/>
+						<pt x="1009.13" y="557.778"/>
+						<pt x="1009.13" y="368.5"/>
+					</pts>
+				</flow>
+				<flow x="905.506" y="402.857" name="non\ncontagious\ndeaths">
+					<pts>
+						<pt x="838.583" y="368.5"/>
+						<pt x="838.583" y="402.857"/>
+						<pt x="996.429" y="402.857"/>
+					</pts>
+				</flow>
+				<aux x="572.143" y="693.46" name="Crude Death\nRate by Group"/>
+				<aux x="534.222" y="628.714" name="fractional\ndeath rate"/>
+				<connector uid="2" angle="135.787">
+					<from>Crude_Death_Rate_by_Group</from>
+					<to>fractional_death_rate</to>
+				</connector>
+				<connector uid="3" angle="147.336">
+					<from>days_symptomatic_and_contagious</from>
+					<to>fractional_death_rate</to>
+				</connector>
+				<connector uid="4" angle="66.0784">
+					<from>days_symptomatic_but_no_onger_contagious</from>
+					<to>fractional_death_rate</to>
+				</connector>
+				<connector uid="5" angle="352.817">
+					<from>fractional_death_rate</from>
+					<to>tested_contagious_deaths</to>
+				</connector>
+				<connector uid="6" angle="335.236">
+					<from>fractional_death_rate</from>
+					<to>tested_non_contagious_deaths</to>
+				</connector>
+				<connector uid="7" angle="196.587">
+					<from>
+						<alias uid="8"/>
+					</from>
+					<to>contagious_deaths</to>
+				</connector>
+				<connector uid="9" angle="1.19349">
+					<from>
+						<alias uid="8"/>
+					</from>
+					<to>non_contagious_deaths</to>
+				</connector>
+				<aux x="728.341" y="64.6964" name="tested\ncontagious"/>
+				<aux x="691.429" y="139.286" name="symptomatic not\ntested contagious"/>
+				<aux x="679.421" y="225.714" name="asymtomatic not tested\ncontagious"/>
+				<connector uid="10" angle="113.385">
+					<from>asymtomatic_not_tested_contagious</from>
+					<to>contacts</to>
+				</connector>
+				<connector uid="11" angle="160.463">
+					<from>symptomatic_not_tested_contagious</from>
+					<to>contacts</to>
+				</connector>
+				<connector uid="12" angle="229.38">
+					<from>tested_contagious</from>
+					<to>contacts</to>
+				</connector>
+				<aux x="429.555" y="87.571" name="global\ncontact rate"/>
+				<connector uid="13" angle="340.524">
+					<from>global_change_start</from>
+					<to>global_contact_rate</to>
+				</connector>
+				<connector uid="14" angle="239.395">
+					<from>quarantine_effectiveness</from>
+					<to>global_contact_rate</to>
+				</connector>
+				<connector uid="15" angle="150.051">
+					<from>baseline_contact_rate</from>
+					<to>global_contact_rate</to>
+				</connector>
+				<aux x="39.4837" y="105.571" name="infectivity"/>
+				<connector uid="16" angle="340.999">
+					<from>infectivity</from>
+					<to>new_infections_by_severity</to>
+				</connector>
+				<connector uid="17" angle="297.53">
+					<from>global_contact_rate</from>
+					<to>contacts</to>
+				</connector>
+				<aux x="537.001" y="187.143" name="symptomatic\ncontact rate"/>
+				<connector uid="18" angle="166.507">
+					<from>symptomatic_adjustment</from>
+					<to>symptomatic_contact_rate</to>
+				</connector>
+				<connector uid="19" angle="9.93211">
+					<from>baseline_contact_rate</from>
+					<to>symptomatic_contact_rate</to>
+				</connector>
+				<connector uid="20" angle="90">
+					<from>symptomatic_contact_rate</from>
+					<to>contacts</to>
+				</connector>
+				<aux x="505.564" y="68.1429" width="18" height="18" name="tested contact\nrate"/>
+				<connector uid="21" angle="195.876">
+					<from>tested_adjustment</from>
+					<to>tested_contact_rate</to>
+				</connector>
+				<connector uid="22" angle="75.095">
+					<from>baseline_contact_rate</from>
+					<to>tested_contact_rate</to>
+				</connector>
+				<connector uid="23" angle="312.948">
+					<from>tested_contact_rate</from>
+					<to>contacts</to>
+				</connector>
+				<aux x="243.135" y="117.857" name="contacts with\nat risk"/>
+				<aux x="132.143" y="64.6964" name="total\npopulation"/>
+				<connector uid="24" angle="87.2168">
+					<from>Uninfected_at_risk</from>
+					<to>contacts_with_at_risk</to>
+				</connector>
+				<connector uid="25" angle="23.6422">
+					<from>total_population</from>
+					<to>contacts_with_at_risk</to>
+				</connector>
+				<connector uid="26" angle="188.69">
+					<from>contacts</from>
+					<to>contacts_with_at_risk</to>
+				</connector>
+				<connector uid="27" angle="302.985">
+					<from>contacts_with_at_risk</from>
+					<to>new_infections_by_severity</to>
+				</connector>
+				<stock x="228.69" y="1003.81" name="tested\ninfected"/>
+				<flow x="133.98" y="1003.81" name="testing\nincidence">
+					<pts>
+						<pt x="61.7694" y="1003.81"/>
+						<pt x="206.19" y="1003.81"/>
+					</pts>
+				</flow>
+				<aux x="81.6943" y="950.571" name="testing\npositive"/>
+				<connector uid="28" angle="343.474">
+					<from>testing_positive</from>
+					<to>testing_incidence</to>
+				</connector>
+				<aux x="317.484" y="968.571" name="presumed\npositives"/>
+				<stock label_side="top" x="450" y="1011.07" width="45" height="35" name="presumed\ninfected"/>
+				<flow x="377.789" y="1028.57" name="presumed\nnew infections">
+					<pts>
+						<pt x="305.579" y="1028.57"/>
+						<pt x="450" y="1028.57"/>
+					</pts>
+				</flow>
+				<connector uid="29" angle="350.758">
+					<from>presumed_positives</from>
+					<to>presumed_new_infections</to>
+				</connector>
+				<aux x="746.341" y="737.127" name="death\nrate"/>
+				<stock label_side="top" x="889.194" y="808.333" name="Cumulative\nDeaths"/>
+				<flow x="797.514" y="808.333" name="all dying">
+					<pts>
+						<pt x="728.333" y="808.333"/>
+						<pt x="866.694" y="808.333"/>
+					</pts>
+				</flow>
+				<connector uid="30" angle="1.11547">
+					<from>death_rate</from>
+					<to>all_dying</to>
+				</connector>
+				<aux x="459.913" y="1071.34" name="needing\nhospitalization"/>
+				<aux x="617.69" y="1077.74" name="Peak Hospitalization"/>
+				<connector uid="31" angle="24.0437">
+					<from>needing_hospitalization</from>
+					<to>Peak_Hospitalization</to>
+				</connector>
+				<aux x="459.913" y="1135.86" name="too ill to work"/>
+				<aux x="611.968" y="1146.98" name="peak of too\nill to work"/>
+				<connector uid="32" angle="24.0656">
+					<from>too_ill_to_work</from>
+					<to>peak_of_too_ill_to_work</to>
+				</connector>
+				<aux x="496.564" y="22.9767" name="global change\nduration"/>
+				<connector uid="33" angle="223.949">
+					<from>global_change_duration</from>
+					<to>global_contact_rate</to>
+				</connector>
+				<aux label_side="bottom" x="233.593" y="885" name="target symptomatic\ntest rate"/>
+				<aux x="211.347" y="764.604" name="testing\ncapacity"/>
+				<aux x="208.918" y="814.079" width="20.7778" height="20.7778" name="symptomatic\nnever tested\npositive"/>
+				<aux x="163.341" y="652" name="effective\nasymptomatic\ntest rate"/>
+				<connector uid="34" angle="153.236">
+					<from>testing_capacity</from>
+					<to>asymptomatic_testing</to>
+				</connector>
+				<connector uid="35" angle="85.4132">
+					<from>asymptomatic_testing</from>
+					<to>effective_asymptomatic_test_rate</to>
+				</connector>
+				<connector uid="36" angle="3.87808">
+					<from>asymptomatic_never_tested_positive</from>
+					<to>effective_asymptomatic_test_rate</to>
+				</connector>
+				<connector uid="37" angle="297.14">
+					<from>global_contact_rate</from>
+					<to>symptomatic_contact_rate</to>
+				</connector>
+				<connector uid="38" angle="23.1138">
+					<from>global_contact_rate</from>
+					<to>tested_contact_rate</to>
+				</connector>
+				<aux x="226.429" y="1117.86" name="active by condition"/>
+				<connector uid="39" angle="154.253">
+					<from>
+						<alias uid="40"/>
+					</from>
+					<to>active_by_condition</to>
+				</connector>
+				<aux x="286" y="1176.29" name="Total infected"/>
+				<connector uid="41" angle="149.758">
+					<from>Total_infected</from>
+					<to>active_by_condition</to>
+				</connector>
+				<connector uid="42" angle="115.346">
+					<from>
+						<alias uid="43"/>
+					</from>
+					<to>active_by_condition</to>
+				</connector>
+				<connector uid="44" angle="324.405">
+					<from>
+						<alias uid="45"/>
+					</from>
+					<to>active_by_condition</to>
+				</connector>
+				<aux label_side="bottom" x="380" y="1194.28" name="active most\ndismal"/>
+				<connector uid="46" angle="352.875">
+					<from>active_by_condition</from>
+					<to>active_most_dismal</to>
+				</connector>
+				<connector uid="47" angle="241.834">
+					<from>peak_of_too_ill_to_work</from>
+					<to>most_dismal_time</to>
+				</connector>
+				<connector uid="48" angle="342.024">
+					<from>too_ill_to_work</from>
+					<to>most_dismal_time</to>
+				</connector>
+				<aux x="362" y="1271.43" name="active by condition for display"/>
+				<connector uid="49" angle="267.337">
+					<from>active_by_condition</from>
+					<to>active_by_condition_for_display</to>
+				</connector>
+				<connector uid="50" angle="274.574">
+					<from>active_most_dismal</from>
+					<to>active_by_condition_for_display</to>
+				</connector>
+				<aux x="488.571" y="1203.57" name="most dismal\ntime"/>
+				<connector uid="51" angle="202.62">
+					<from>most_dismal_time</from>
+					<to>active_most_dismal</to>
+				</connector>
+				<aux x="497.857" y="1271.43" name="time do display"/>
+				<connector uid="52" angle="297.031">
+					<from>most_dismal_time</from>
+					<to>time_do_display</to>
+				</connector>
+				<aux x="402.857" y="1352.86" name="Sim Duration"/>
+				<connector uid="53" angle="235.176">
+					<from>most_dismal_time</from>
+					<to>Sim_Duration</to>
+				</connector>
+				<connector uid="54" angle="328.664">
+					<from>Total_infected</from>
+					<to>Sim_Duration</to>
+				</connector>
+				<stacked_container uid="55" x="795.968" y="1352.86">
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" isee:fill_intensity="0.1" isee:allow_zero_axis="true" left_axis_multi_scale="false" left_axis_auto_scale="true" right_axis_multi_scale="false" right_axis_auto_scale="true">
+						<plot color="blue" isee:keep_zero_visible="true" pen_width="1" index="0" show_y_axis="true">
+							<entity name="active_by_condition_for_display[*]"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<connector uid="56" angle="63.3571">
+					<from>effective_asymptomatic_test_rate</from>
+					<to>testing_not_contagious</to>
+				</connector>
+				<aux x="388.254" y="250.714" name="mildly symptomatic\nadjustment"/>
+				<aux x="455.675" y="214.286" name="mildly symptomatic\ncontact rate"/>
+				<connector uid="57" angle="42.2473">
+					<from>mildly_symptomatic_adjustment</from>
+					<to>mildly_symptomatic_contact_rate</to>
+				</connector>
+				<connector uid="58" angle="192.94">
+					<from>baseline_contact_rate</from>
+					<to>mildly_symptomatic_contact_rate</to>
+				</connector>
+				<connector uid="59" angle="187.436">
+					<from>global_contact_rate</from>
+					<to>mildly_symptomatic_contact_rate</to>
+				</connector>
+				<aux x="544.147" y="257.143" name="mildly symptomatic\nnot tested contagious"/>
+				<connector uid="60" angle="148.422">
+					<from>mildly_symptomatic_not_tested_contagious</from>
+					<to>contacts</to>
+				</connector>
+				<connector uid="61" angle="101.705">
+					<from>mildly_symptomatic_contact_rate</from>
+					<to>contacts</to>
+				</connector>
+				<aux label_side="bottom" x="158.503" y="805.913" name="symptomatic\ntesting"/>
+				<connector uid="62" angle="111.082">
+					<from>symptomatic_testing</from>
+					<to>asymptomatic_testing</to>
+				</connector>
+				<connector uid="63" angle="169.457">
+					<from>testing_capacity</from>
+					<to>symptomatic_testing</to>
+				</connector>
+				<connector uid="64" angle="174.462">
+					<from>symptomatic_never_tested_positive</from>
+					<to>symptomatic_testing</to>
+				</connector>
+				<connector uid="65" angle="178.483">
+					<from>target_symptomatic_test_rate</from>
+					<to>symptomatic_testing</to>
+				</connector>
+				<aux x="88.2381" y="819.286" name="mildly symptomatic\ntesting"/>
+				<connector uid="66" angle="164.916">
+					<from>testing_capacity</from>
+					<to>mildly_symptomatic_testing</to>
+				</connector>
+				<aux label_side="bottom" x="36.2857" y="746.604" name="mildly\nsymptomatic\nnever tested\npositive"/>
+				<connector uid="67" angle="272.294">
+					<from>mildly_symptomatic_never_tested_positive</from>
+					<to>mildly_symptomatic_testing</to>
+				</connector>
+				<connector uid="68" angle="201.963">
+					<from>symptomatic_testing</from>
+					<to>mildly_symptomatic_testing</to>
+				</connector>
+				<connector uid="69" angle="123.303">
+					<from>mildly_symptomatic_testing</from>
+					<to>asymptomatic_testing</to>
+				</connector>
+				<aux x="54.2857" y="867" name="test rate\ndifferent severity"/>
+				<connector uid="70" angle="248.484">
+					<from>mildly_symptomatic_never_tested_positive</from>
+					<to>test_rate_different_severity</to>
+				</connector>
+				<connector uid="71" angle="233.151">
+					<from>symptomatic_never_tested_positive</from>
+					<to>test_rate_different_severity</to>
+				</connector>
+				<connector uid="72" angle="235.368">
+					<from>mildly_symptomatic_testing</from>
+					<to>test_rate_different_severity</to>
+				</connector>
+				<connector uid="73" angle="228.798">
+					<from>symptomatic_testing</from>
+					<to>test_rate_different_severity</to>
+				</connector>
+				<connector uid="74" angle="202.443">
+					<from>
+						<alias uid="75"/>
+					</from>
+					<to>testing_assymptomatic</to>
+				</connector>
+				<connector uid="76" angle="9.09028">
+					<from>
+						<alias uid="75"/>
+					</from>
+					<to>testing_symptomatic</to>
+				</connector>
+				<connector uid="77" angle="339.864">
+					<from>
+						<alias uid="75"/>
+					</from>
+					<to>testing_symptomatic_not_contagious</to>
+				</connector>
+				<aux label_side="bottom" x="133.98" y="905.768" name="target mildly\nsymptomatic test rate"/>
+				<connector uid="78" angle="136.586">
+					<from>target_mildly_symptomatic_test_rate</from>
+					<to>mildly_symptomatic_testing</to>
+				</connector>
+				<connector uid="79" angle="228.633">
+					<from>target_symptomatic_test_rate</from>
+					<to>target_mildly_symptomatic_test_rate</to>
+				</connector>
+				<aux x="274.286" y="932.571" name="mild test fraction"/>
+				<connector uid="80" angle="209.573">
+					<from>mild_test_fraction</from>
+					<to>target_mildly_symptomatic_test_rate</to>
+				</connector>
+				<aux x="260.19" y="610.714" name="contact tracing\neffectiveness"/>
+				<stock x="770" y="1120.48" name="Hospital Bed\nDays"/>
+				<flow x="686.25" y="1120.48" name="increasing\nbed days">
+					<pts>
+						<pt x="625" y="1120.48"/>
+						<pt x="747.5" y="1120.48"/>
+					</pts>
+				</flow>
+				<connector uid="81" angle="351.028">
+					<from>needing_hospitalization</from>
+					<to>increasing_bed_days</to>
+				</connector>
+				<aux x="603.326" y="981.571" name="all testing"/>
+				<connector uid="82" angle="175.359">
+					<from>contact_tracing_effectiveness</from>
+					<to>effective_asymptomatic_test_rate</to>
+				</connector>
+				<aux x="360.16" y="805.913" name="contacts tested\nper positive\ntest"/>
+				<connector uid="83" angle="155.821">
+					<from>contacts_tested_per_positive_test</from>
+					<to>asymptomatic_testing</to>
+				</connector>
+				<aux x="39.98" y="1036.25" name="recent testing\npositive"/>
+				<connector uid="84" angle="193.153">
+					<from>testing_positive</from>
+					<to>recent_testing_positive</to>
+				</connector>
+				<aux x="54.2857" y="1117.86" name="testing smooth\ntime"/>
+				<connector uid="85" angle="126.096">
+					<from>testing_smooth_time</from>
+					<to>recent_testing_positive</to>
+				</connector>
+				<connector uid="86" angle="183.991">
+					<from>
+						<alias uid="87"/>
+					</from>
+					<to>asymptomatic_testing</to>
+				</connector>
+				<stock x="755.341" y="1006.07" width="45" height="35" name="Cumulative\nTesting"/>
+				<flow x="689.318" y="1014.57" width="18" height="18" name="Flow 1">
+					<pts>
+						<pt x="641.294" y="1023.57"/>
+						<pt x="755.341" y="1023.57"/>
+					</pts>
+				</flow>
+				<connector uid="88" angle="26.1245">
+					<from>all_testing</from>
+					<to>Flow_1</to>
+				</connector>
+				<stacked_container uid="89" x="1007.26" y="819.286">
+					<graph width="350" height="250" type="bar" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" isee:fill_intensity="0.1" isee:allow_zero_axis="true" left_axis_multi_scale="false" left_axis_auto_scale="true" right_axis_multi_scale="false" right_axis_auto_scale="true">
+						<plot color="blue" isee:keep_zero_visible="true" pen_width="1" index="0" show_y_axis="true">
+							<entity name="active_by_condition_for_display[*]"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<aux x="244.429" y="1046.57" name="active by graph condition"/>
+				<connector uid="90" angle="79.908">
+					<from>active_by_condition</from>
+					<to>active_by_graph_condition</to>
+				</connector>
+				<alias color="blue" background="white" font_style="italic" uid="8" x="761.714" y="432.429" width="18" height="18">
+					<shape type="circle" radius="18"/>
+					<of>fractional_death_rate</of>
+				</alias>
+				<alias font_style="italic" uid="40" x="303.839" y="1108.93" width="47.3214" height="25">
+					<of>Uninfected_at_risk</of>
+				</alias>
+				<alias font_style="italic" uid="43" x="181.786" y="1198.93" width="45" height="35">
+					<of>Cumulative_Deaths</of>
+				</alias>
+				<alias font_style="italic" uid="45" x="136.071" y="1051.79" width="45" height="35">
+					<of>recovered</of>
+				</alias>
+				<alias color="blue" background="white" font_style="italic" uid="75" x="561.714" y="472.429" width="18" height="18">
+					<shape type="circle" radius="18"/>
+					<of>test_rate_different_severity</of>
+				</alias>
+				<alias color="blue" background="white" font_style="italic" uid="87" x="289.571" y="717.429" width="18" height="18">
+					<shape type="circle" radius="18"/>
+					<of>recent_testing_positive</of>
+				</alias>
+			</view>
+			<view background="white" page_width="1066" page_height="600" home_view="true" type="interface">
+				<style/>
+				<stacked_container uid="91" x="264.525" y="146.005" width="354.01" height="382.643" z_index="45" isee:appearance="tabs">
+					<graph axis_color="black" isee:graph_area_color="white" axis_title_font_size="14pt" axis_label_font_size="12pt" width="354.01" height="382.643" type="area" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="6" num_y_labels="5" title=" " isee:page_title="Infection Curve" isee:fill_intensity="1" isee:stacked_area_y_max="1000000" isee:allow_zero_axis="true" left_axis_multi_scale="false" left_axis_auto_scale="true" right_axis_multi_scale="false" right_axis_auto_scale="true">
+						<plot color="blue" isee:keep_zero_visible="true" pen_width="1" index="0" show_y_axis="true">
+							<entity name="active_by_graph_condition[*]"/>
+						</plot>
+					</graph>
+					<graph font_weight="bold" text_decoration="underline" font_size="14pt" axis_color="black" grid_color="#666666" isee:graph_area_color="white" isee:transparent="true" isee:hide_border="true" axis_title_font_size="14pt" axis_label_font_size="12pt" width="354.01" height="382.643" type="time_series" isee:points_only="false" show_grid="true" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="6" num_y_grid_lines="5" num_x_labels="6" num_y_labels="3" isee:page_title="Population Status" isee:fill_intensity="0.1" x_axis_title="Day" isee:allow_zero_axis="true" left_axis_multi_scale="true" left_axis_auto_scale="true" right_axis_multi_scale="false" right_axis_auto_scale="true">
+						<plot color="#003F5C" isee:keep_zero_visible="false" pen_width="2" index="0" show_y_axis="true">
+							<entity name="presumed_new_infections"/>
+							<scale min="0" max="30000"/>
+						</plot>
+						<plot color="#F8615A" isee:keep_zero_visible="false" pen_width="2" index="1" show_y_axis="true">
+							<entity name="too_ill_to_work"/>
+							<scale min="0" max="500000"/>
+						</plot>
+						<plot color="#EF5675" isee:keep_zero_visible="false" pen_width="2" index="2" show_y_axis="true">
+							<entity name="death_rate"/>
+							<scale min="0" max="2000"/>
+						</plot>
+						<plot color="#FFA600" isee:keep_zero_visible="false" pen_width="2" index="3" show_y_axis="true">
+							<entity name="needing_hospitalization"/>
+							<scale min="0" max="200000"/>
+						</plot>
+					</graph>
+					<graph font_weight="bold" text_decoration="underline" font_size="14pt" isee:graph_area_color="white" isee:transparent="true" isee:hide_border="true" axis_title_font_size="14pt" axis_label_font_size="12pt" width="354.01" height="382.643" type="time_series" isee:points_only="false" show_grid="true" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="6" num_y_grid_lines="5" num_x_labels="6" num_y_labels="3" isee:page_title="Cumulative Measures" isee:fill_intensity="0.1" x_axis_title="Day" isee:allow_zero_axis="true" left_axis_multi_scale="true" left_axis_auto_scale="true" right_axis_multi_scale="false" right_axis_auto_scale="true">
+						<plot color="blue" isee:keep_zero_visible="true" pen_width="2" index="0" show_y_axis="true">
+							<entity name="Cumulative_Deaths"/>
+						</plot>
+						<plot color="red" isee:keep_zero_visible="true" pen_width="2" index="1" show_y_axis="true">
+							<entity name="Hospital_Bed_Days"/>
+						</plot>
+						<plot color="fuchsia" isee:keep_zero_visible="true" pen_width="2" index="2" show_y_axis="true">
+							<entity name="Cumulative_Testing"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<text_box uid="92" x="281" y="50" width="260" height="58">The graphs in the published sim, are below - and lall the inputs in the pages that follow for reference/</text_box>
+			</view>
+			<view background="white" page_width="1066" page_height="600" type="interface">
+				<style/>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="93" x="43.701" y="201.032" width="295" height="50" increment="0.01" min="0.1" max="4" title="Baseline Contact" isee:navigate_to="false" show_name="true">
+					<entity name="baseline_contact_rate"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="94" x="43.701" y="272.032" width="295" height="50" increment="0.01" min="0" max="1" title="Mildly Symptomatic Adjustment" isee:navigate_to="false" show_name="true">
+					<entity name="mildly_symptomatic_adjustment"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<isee:annotation z_index="47" background="#000B65" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="95" x="366.286" y="229">
+					<popup hide_when_editing="true" x="387.452" y="210" width="361.763" height="44">
+						<text>The number of unique individuals that a person runs into each day, averaged across the entire populsation.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="47" background="#000B65" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="96" x="366.286" y="297.032">
+					<popup hide_when_editing="true" x="387.452" y="281.421" width="345.823" height="59.839">
+						<text>The adjustment to contacts that mildly symptomatic people make. A value of 0.5 means contacts are cut in half.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="47" background="#000B65" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="97" x="366.286" y="377">
+					<popup hide_when_editing="true" x="393.944" y="366.241" width="340.177" height="56.5594">
+						<text>The adjustment to contacts that  symptomatic people make. A value of 0.05 means contacts are cut to a 20th of what they were.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="47" background="#000B65" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="98" x="366.286" y="459.188">
+					<popup hide_when_editing="true" x="394.102" y="447.328" width="342" height="63.3448">
+						<text>The adjustment to contacts that people who have tested positive to COVID-19 make. A value of 0.01 means that interactions are cut to a hundredth.</text>
+					</popup>
+				</isee:annotation>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="99" x="46.804" y="352" width="295" height="50" increment="0.01" min="0" max="1" title="Symptomatic Adjustment" isee:navigate_to="false" show_name="true">
+					<entity name="symptomatic_adjustment"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="100" x="46.804" y="436.813" width="295" height="50" increment="0.01" min="0" max="1" title="Tested Adjustment" isee:navigate_to="false" show_name="true">
+					<entity name="tested_adjustment"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+			</view>
+			<view background="white" page_width="1066" page_height="600" type="interface">
+				<style/>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="101" x="233.701" y="151.032" width="295" height="50" increment="0.01" min="0.1" max="4" title="Baseline Contact" isee:navigate_to="false" show_name="true">
+					<entity name="baseline_contact_rate"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="102" x="233.701" y="222.032" width="295" height="50" increment="0.01" min="0" max="1" title="Mildly Symptomatic Adjustment" isee:navigate_to="false" show_name="true">
+					<entity name="mildly_symptomatic_adjustment"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<isee:annotation z_index="47" background="#000B65" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="103" x="556.286" y="179">
+					<popup hide_when_editing="true" x="577.452" y="160" width="361.763" height="44">
+						<text>The number of unique individuals that a person runs into each day, averaged across the entire populsation.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="47" background="#000B65" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="104" x="541.286" y="232.032" width="30" height="30">
+					<popup hide_when_editing="true" x="577.452" y="231.421" width="345.823" height="59.839">
+						<text>The adjustment to contacts that mildly symptomatic people make. A value of 0.5 means contacts are cut in half.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="47" background="#000B65" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="105" x="556.286" y="327">
+					<popup hide_when_editing="true" x="583.944" y="316.241" width="340.177" height="56.5594">
+						<text>The adjustment to contacts that  symptomatic people make. A value of 0.05 means contacts are cut to a 20th of what they were.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="47" background="#000B65" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="106" x="556.286" y="409.188">
+					<popup hide_when_editing="true" x="584.102" y="397.328" width="342" height="63.3448">
+						<text>The adjustment to contacts that people who have tested positive to COVID-19 make. A value of 0.01 means that interactions are cut to a hundredth.</text>
+					</popup>
+				</isee:annotation>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="107" x="236.804" y="302" width="295" height="50" increment="0.01" min="0" max="1" title="Symptomatic Adjustment" isee:navigate_to="false" show_name="true">
+					<entity name="symptomatic_adjustment"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="108" x="236.804" y="386.813" width="295" height="50" increment="0.01" min="0" max="1" title="Tested Adjustment" isee:navigate_to="false" show_name="true">
+					<entity name="tested_adjustment"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+			</view>
+			<view background="white" page_width="1066" page_height="600" type="interface">
+				<style/>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="109" x="26.18" y="270.448" width="295" height="50" increment="0.25" min="0" max="14" title="Infected not Contagious" isee:navigate_to="false" show_name="true">
+					<entity name="days_infected_but_not_contagious_or_symptomatic"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<isee:annotation z_index="47" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="110" x="348.769" y="300.793">
+					<popup hide_when_editing="true" x="378.211" y="296.276" width="361.763" height="93.6552">
+						<text>After first being infected, an individual will have the virus in their system (and is presumed to test positive for it) but will not be shedding the virus (passing to others). Like all the durations, this is still an uncertain number, but is probably less than 5 and may very well be 0.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="47" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="111" x="348.769" y="370">
+					<popup hide_when_editing="true" x="373.383" y="365.264" width="345.823" height="89.4711">
+						<text>After being infected, there may be a period of time during which an individual is contagious, but shows no symptoms. There does not seem to be any consensus of how long this is, with estimates ranging from 2 to a as many as 14 days.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="47" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="112" x="348.769" y="446.326">
+					<popup hide_when_editing="true" x="379.185" y="443.896" width="340.177" height="88.1038">
+						<text>The COVID-19 disease progression is relatively slow. This length of time Symptomatic and Contagious increases with severity. To pick a different severity select from the drop-down. By default these are 7,7,10, 14.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="47" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="113" x="348.769" y="563.705">
+					<popup hide_when_editing="true" x="367.619" y="558.087" width="342" height="115.069">
+						<text>Viral shedding can stop before symptoms disappear. There is some evidence that the course of COVID-19 results in significant autoimmune damage after the virus has been controlled. But again there is no clear consensus on if or how long this is. There is better agreement on the sum of time spent in the two symptomatic phases.</text>
+					</popup>
+				</isee:annotation>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="114" x="31.119" y="340.276" width="295" height="50" increment="0.25" min="0" max="14" title="Contagious not Symptomatic" isee:navigate_to="false" show_name="true">
+					<entity name="days_contagious_but_not_symptomatic"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="115" x="31.119" y="407.399" width="295" height="64.4955" increment="0.25" min="0" max="14" title="Symptomatic and Contagious by Severity" isee:navigate_to="false" show_name="true">
+					<entity name="days_symptomatic_and_contagious[?]"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<slider z_index="47" num_ticks="2" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="always" input_expands="false" input_width="200" uid="116" x="26.18" y="532" width="295" height="50" increment="0.25" min="0" max="14" title="Symptomatic no longer Contagious" isee:navigate_to="false" show_name="true">
+					<entity name="days_symptomatic_but_no_onger_contagious"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<isee:selector z_index="48" uid="117" x="202.304" y="469.241" width="113.793" height="22.4138" select_placeholder="false" dimension="Severity"/>
+			</view>
+			<view background="white" page_width="1066" page_height="600" type="interface">
+				<style/>
+				<text_box z_index="47" vertical_text_align="center" font_size="14pt" appearance="transparent" uid="118" x="109.795" y="262.666" width="330.794" height="71.0833">Note: Asymptomatic is not noticable, Mild is easily ignored, Moderate will keep people from work, Severe requires hospitalization.</text_box>
+				<isee:pie_input z_index="47" legend_position="right" isee:transparent="true" uid="119" x="84.178" y="70.674" width="323.794" height="181.992" isee:label_pie_slices="false" isee:round_values="false" title="Severity Spread">
+					<plot title="Asymptomatic" color="#2EFF00">
+						<entity name="severity_spread[Asymptomatic]"/>
+						<reset_to after="never">0</reset_to>
+					</plot>
+					<plot title="Mild" color="#3DD80E">
+						<entity name="severity_spread[Mild]"/>
+						<reset_to after="never">0</reset_to>
+					</plot>
+					<plot title="Moderate" color="#FFAB66">
+						<entity name="severity_spread[Moderate]"/>
+						<reset_to after="never">0</reset_to>
+					</plot>
+					<plot title="Severe" color="#F02465">
+						<entity name="severity_spread[Severe]"/>
+						<reset_to after="never">0</reset_to>
+					</plot>
+				</isee:pie_input>
+				<slider z_index="47" num_ticks="5" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="when_deciding" input_expands="false" input_width="200" uid="120" x="88.145" y="341.929" width="295" height="65" increment="0.01" min="0" max="1" title="Infectivity" isee:navigate_to="false" show_name="true">
+					<entity name="infectivity"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<isee:annotation z_index="47" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="121" x="422.972" y="135.138">
+					<popup hide_when_editing="true" x="371.948" y="58.283" width="402.5" height="171.434">
+						<text>This lets you set the distribution of severity. Asymptomatic has no symptoms at all (Typhoid Mary). The mild severity is with limited symptoms, perhaps like a cold. There are no deaths associated with the first two groups. The medium is with noticeable symptoms, similar to a bad flu, but not requiring hospitalization. A small fraction of the moderate group may die as result of the sickness. The severe category requires hospitalization. There is a significant chance of dying for those in this group this group. Each group is entered when the infection occurs, there is no progression from one group to another.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="47" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="122" x="422.972" y="374.429">
+					<popup hide_when_editing="true" x="375.909" y="280.974" width="274.5" height="128.3">
+						<text>The probability that the COV-19 will pass from one person to another when a contact occurs. This again is not well understood, but the dramatic rates of expansion when no actions are taken to mitigate transmission do suggest it is high.</text>
+					</popup>
+				</isee:annotation>
+			</view>
+			<view background="white" page_width="1066" page_height="600" type="interface">
+				<style/>
+				<slider z_index="35" num_ticks="5" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="when_deciding" input_expands="false" input_width="200" uid="123" x="98.735" y="111.515" width="295" height="50" increment="1" min="10" max="300" title="Quarantine Start Day" isee:navigate_to="false" show_name="true">
+					<entity name="global_change_start"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<slider z_index="36" num_ticks="5" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="when_deciding" input_expands="false" input_width="200" uid="124" x="98.735" y="175.985" width="295" height="50" increment="7" min="7" max="364" title="Quarantine Duration" isee:navigate_to="false" show_name="true">
+					<entity name="global_change_duration"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<slider z_index="29" num_ticks="5" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="when_deciding" input_expands="false" input_width="200" uid="125" x="98.735" y="408.205" width="295" height="50" increment="0.01" min="0" max="1" title="Symptomatic Test Rate" isee:navigate_to="false" show_name="true">
+					<entity name="target_symptomatic_test_rate"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<slider z_index="31" num_ticks="5" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="when_deciding" input_expands="false" input_width="200" uid="126" x="98.735" y="335.646" width="295" height="50" increment="0.005" min="0" max="0.5" title="Contact Tracing Effectiveness" isee:navigate_to="false" show_name="true">
+					<entity name="contact_tracing_effectiveness"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<slider z_index="27" num_ticks="6" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="when_deciding" input_expands="false" input_width="200" uid="127" x="98.735" y="479.588" width="295" height="50" increment="100" min="0" max="5000" title="Daily Testing Capacity" isee:navigate_to="false" show_name="true">
+					<entity name="testing_capacity"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<isee:annotation z_index="42" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="128" x="421.32" y="142.779">
+					<popup hide_when_editing="true" x="-4.263" y="-65.9166" width="361.763" height="97">
+						<text>Start – The time when an action is taken to dramatically decrease interactions and virus spreading. Including canceling of public events, closing of schools, cleaning of common areas, restricting movement and changing work practices.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="43" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="129" x="421.32" y="207.515">
+					<popup hide_when_editing="true" x="-4.5" y="4.249" width="345.823" height="86.7356">
+						<text>Duration – How long the change to behavior will last. This is in days and by default is 14 (two weeks) though that is a very short time given the nature of this virus.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="44" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="130" x="421.32" y="272.456">
+					<popup hide_when_editing="true" x="1.323" y="27" width="340.177" height="143.456">
+						<text>Effectiveness – The extent to which contact and transmission is reduced relative to business as usual. A value of 0 (the default) means nobody changes behavior or reduces contacts. A value of 1 means perfect quarantine, or effective no contact. This change begins at the start of the intervention and persists during the duration of the intervention. After the end of the intervention, life returns to normal.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="46" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="131" x="421.32" y="435.029">
+					<popup hide_when_editing="true" x="0.119" y="215.456" width="353" height="102.412">
+						<text>Target symptomatic test rate – This is the number of tests per day that each sick person receives. Alternatively, think of it as the reciprocal of the number of days to get tested. Thus 0.5 would mean It takes two days to get tested. Mildly sick people are tested at one quarter this rate.</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="45" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="132" x="421.32" y="366.882">
+					<popup hide_when_editing="true" x="-46.795" y="110.155" width="342" height="123">
+						<text>When someone tests positive for COVID-19, people that person has been in contact with may also be tested. This effectiveness says how likely the people identified are in fact going to test positive. This testing only occurs if there is sufficient test capacity after symptomatic testing</text>
+					</popup>
+				</isee:annotation>
+				<isee:annotation z_index="47" background="#000B65" font_weight="bold" font_color="white" corner_radius="15" isee:flat="true" popup_background_color="white" popup_font_family="Verdana" launcher_label="?" show_by_default="false" hide_launcher="false" uid="133" x="406.32" y="489.588" width="30" height="30">
+					<popup hide_when_editing="true" x="29.5" y="297.235" width="315.82" height="99.588">
+						<text>Testing capacity – This is the number of tests that can run every day. You can set it to any value, though in reality it would be necessary to create sufficient capacity.</text>
+					</popup>
+				</isee:annotation>
+				<text_box z_index="33" font_weight="bold" text_align="center" font_size="14pt" appearance="transparent" uid="134" x="175.736" y="78.706" width="230.584" height="18">Global Quarantine Settings</text_box>
+				<slider z_index="37" num_ticks="5" label_side="left" isee:fancy_appearance="true" isee:show_hover_tip="when_deciding" input_expands="false" input_width="200" uid="135" x="98.735" y="243.456" width="295" height="50" min="0" max="1" title="Quarantine Effectiveness" isee:navigate_to="false" show_name="true">
+					<entity name="quarantine_effectiveness"/>
+					<reset_to after="never">0</reset_to>
+				</slider>
+				<text_box z_index="33" font_weight="bold" text_align="center" font_size="14pt" appearance="transparent" uid="136" x="208.736" y="296.353" width="131.765" height="15.9412">Testing Settings</text_box>
+			</view>
+			<isee:templates>
+				<view background="white" page_width="1066" page_height="600" type="template">
+					<style/>
+				</view>
+			</isee:templates>
+			<isee:stories/>
+		</views>
+	</model>
+</xmile>
+

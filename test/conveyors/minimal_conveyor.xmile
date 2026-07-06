@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header>
+    <name>conveyor minimal</name>
+    <vendor>test</vendor>
+    <product version="1.0">test</product>
+    <options>
+      <uses_conveyor/>
+    </options>
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start>
+    <stop>12</stop>
+    <dt>0.25</dt>
+  </sim_specs>
+  <model>
+    <variables>
+      <stock name="Students">
+        <eqn>1000</eqn>
+        <inflow>matriculating</inflow>
+        <outflow>graduating</outflow>
+        <conveyor>
+          <len>4</len>
+          <capacity>1200</capacity>
+        </conveyor>
+      </stock>
+      <flow name="matriculating">
+        <eqn>250</eqn>
+        <non_negative/>
+      </flow>
+      <flow name="graduating">
+      </flow>
+      <stock name="Alumni">
+        <eqn>0</eqn>
+        <inflow>graduating</inflow>
+      </stock>
+    </variables>
+  </model>
+</xmile>
