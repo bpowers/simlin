@@ -1,0 +1,1033 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE">
+	<header>
+		<smile version="1.0" namespace="std, isee" uses_arrays="1" uses_conveyor="" uses_submodels=""/>
+		<name>SIRSocialDistancingMixNot</name>
+		<uuid>839a9787-016d-488d-8a55-7172027b4044</uuid>
+		<vendor>isee systems, inc.</vendor>
+		<product version="2.0" isee:build_number="2110" isee:saved_by_v1="true" lang="en">Stella Architect</product>
+	</header>
+	<sim_specs isee:sim_duration="1.3" isee:simulation_delay="0.013" isee:restore_on_start="false" method="Euler" time_units="Days" isee:instantaneous_flows="false" isee:loop_scores="false" isee:loop_exhaustive_allowed="1000">
+		<start>0</start>
+		<stop>100</stop>
+		<dt reciprocal="true">4</dt>
+	</sim_specs>
+	<dimensions>
+		<dim name="contact" size="20"/>
+		<dim name="Individual" size="1000"/>
+	</dimensions>
+	<isee:prefs show_module_prefix="true" live_update_on_drag="true" show_restore_buttons="false" layer="model" interface_scale_ui="true" interface_max_page_width="10000" interface_max_page_height="10000" interface_min_page_width="0" interface_min_page_height="0" saved_runs="5" keep="false" rifp="true"/>
+	<isee:multiplayer_settings include_chat="true" allow_observers="false" advance_time_increment="1" observer_start_page="home_page" enabled="false"/>
+	<isee:time_formats default_format="Builtin">
+		<isee:time_format name="Builtin" type="adaptive"/>
+	</isee:time_formats>
+	<default_format/>
+	<model_units>
+		<unit name="People">
+			<eqn/>
+			<alias>person</alias>
+			<alias>persons</alias>
+		</unit>
+		<unit name="Dimensionless">
+			<eqn>1</eqn>
+			<alias>dmnl</alias>
+			<alias>unitless</alias>
+			<alias>fraction</alias>
+		</unit>
+		<unit name="Days">
+			<eqn/>
+			<alias>day</alias>
+		</unit>
+	</model_units>
+	<model>
+		<variables>
+			<module name="Not Mixing" isee:label="">
+				<connect to="Not_Mixing.contact_rate" from=".contact_rate_not"/>
+				<connect2 to="Not_Mixing.contact_rate" from="contact_rate_not"/>
+				<connect to="Not_Mixing.infectivity" from=".infectivity"/>
+				<connect2 to="Not_Mixing.infectivity" from="infectivity"/>
+				<connect to="Not_Mixing.disease_duration" from=".disease_duration"/>
+				<connect2 to="Not_Mixing.disease_duration" from="disease_duration"/>
+				<connect to="Not_Mixing.contact_adjustment" from=".contact_adjustment"/>
+				<connect2 to="Not_Mixing.contact_adjustment" from="contact_adjustment"/>
+				<connect to="Not_Mixing.adjustment_start_time" from=".adjustment_start_time"/>
+				<connect2 to="Not_Mixing.adjustment_start_time" from="adjustment_start_time"/>
+				<connect to="Not_Mixing.profile" from=".profile"/>
+				<connect2 to="Not_Mixing.profile" from="profile"/>
+			</module>
+			<module name="Perfect\nMixing" isee:label="">
+				<connect to="Perfect_Mixing.contact_rate" from=".contact_rate_perfect"/>
+				<connect2 to="Perfect_Mixing.contact_rate" from="contact_rate_perfect"/>
+				<connect to="Perfect_Mixing.infectivity" from=".infectivity"/>
+				<connect2 to="Perfect_Mixing.infectivity" from="infectivity"/>
+				<connect to="Perfect_Mixing.disease_duration" from=".disease_duration"/>
+				<connect2 to="Perfect_Mixing.disease_duration" from="disease_duration"/>
+				<connect to="Perfect_Mixing.contact_adjustment" from=".contact_adjustment"/>
+				<connect2 to="Perfect_Mixing.contact_adjustment" from="contact_adjustment"/>
+				<connect to="Perfect_Mixing.adjustment_srat_time" from=".adjustment_start_time"/>
+				<connect2 to="Perfect_Mixing.adjustment_srat_time" from="adjustment_start_time"/>
+			</module>
+			<aux name="contact\nrate\nnot">
+				<eqn>40</eqn>
+				<units>Touch/Person/Day</units>
+			</aux>
+			<aux name="contact\nrate\nperfect">
+				<eqn>49.6</eqn>
+				<units>Touch/Person/Day</units>
+			</aux>
+			<aux name="contact\nadjustment">
+				<eqn>0.5</eqn>
+				<range min="0" max="1"/>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="adjustment\nstart time">
+				<eqn>30</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="disease\nduration">
+				<eqn>14</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="profile">
+				<eqn>0+0</eqn>
+				<gf>
+					<xscale min="0" max="1"/>
+					<yscale min="0" max="0.1"/>
+					<ypts>0,0.000872093023256,0.00348837209302,0.00726744186047,0.0123546511628,0.0186046511628,0.0270348837209,0.0351744186047,0.0446220930233,0.0520348837209,0.0603197674419,0.0667151162791,0.0716569767442,0.0747093023256,0.0747093023256,0.0731104651163,0.069476744186,0.0625,0.0553779069767,0.0475290697674,0.0389534883721,0.03125,0.024273255814,0.0178779069767,0.0125,0.00828488372093,0.00581395348837,0.0030523255814,0.00174418604651,0.00101744186047,0</ypts>
+				</gf>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="infectivity">
+				<eqn>0.0045</eqn>
+				<units>Person/touch</units>
+			</aux>
+			<aux name="contact\nrate\ndiscrete">
+				<eqn>40</eqn>
+				<units>Touch/Person/Day</units>
+			</aux>
+			<module name="Not Mixing\nat all" isee:label="">
+				<connect to="Not_Mixing_at_all.contact_rate" from=".contact_rate_not"/>
+				<connect2 to="Not_Mixing_at_all.contact_rate" from="contact_rate_not"/>
+				<connect to="Not_Mixing_at_all.infectivity" from=".infectivity"/>
+				<connect2 to="Not_Mixing_at_all.infectivity" from="infectivity"/>
+				<connect to="Not_Mixing_at_all.disease_duration" from=".disease_duration"/>
+				<connect2 to="Not_Mixing_at_all.disease_duration" from="disease_duration"/>
+				<connect to="Not_Mixing_at_all.contact_adjustment" from=".contact_adjustment"/>
+				<connect2 to="Not_Mixing_at_all.contact_adjustment" from="contact_adjustment"/>
+				<connect to="Not_Mixing_at_all.adjustment_start_time" from=".adjustment_start_time"/>
+				<connect2 to="Not_Mixing_at_all.adjustment_start_time" from="adjustment_start_time"/>
+			</module>
+		</variables>
+		<views>
+			<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+				<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<isee:loop_indicator color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+				<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="black" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="black" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="black" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="black" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+					<isee:series_styles>
+						<isee:series_style color="blue" thickness="1"/>
+						<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF7F00" thickness="1"/>
+						<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF007F" thickness="1"/>
+						<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#C8C8C8" thickness="1"/>
+					</isee:series_styles>
+				</graph>
+				<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+				<button color="black" background="#E0E0E0" font_size="12pt" border_width="thin" border_style="solid" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" isee:highlight_on_hover="false" isee:highlight_color="#959595"/>
+				<isee:annotation color="black" background="#E0E0E0" font_size="12pt" border_width="thin" border_style="solid" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" isee:highlight_on_hover="false" isee:highlight_color="#959595" popup_corner_radius="0" popup_background_color="#FFFECF"/>
+				<slider color="#66CC66" background="#E0E0E0" font_size="12pt" num_ticks="3" label_side="top" wrap_title="true" vertical="false" isee:fancy_appearance="false" isee:show_hover_tip="when_deciding" input_expands="true" input_width="100"/>
+				<isee:sim_speed_slider color="black" background="white"/>
+				<isee:time_slider color="#E95F74" background="silver"/>
+				<isee:pie_input color="black" background="white" font_size="12pt" legend_position="bottom" isee:transparent="false"/>
+				<knob color="#66CC66" background="#E0E0E0" font_size="12pt" label_side="bottom" wrap_title="true"/>
+				<numeric_input color="black" background="#E0E0E0" font_size="12pt" label_side="left" wrap_title="true" input_expands="false" input_width="100"/>
+				<switch color="black" background="#E0E0E0" font_size="12pt" label_side="top" wrap_title="true" isee:appearance="switch" isee:on_color="green"/>
+				<options color="black" background="white" appearance="radio-buttons" arrangement="vertical"/>
+				<graphical_input color="black" background="#E0E0E0" font_size="12pt" isee:show_hover_tip="true"/>
+				<group_input color="black" background="#E0E0E0" font_size="12pt"/>
+				<lamp color="black" background="white" font_size="9pt"/>
+				<gauge color="black" background="white" font_size="9pt" needle_color="#F09F72" bar_color="#EEEEEE" bar_progress_color="black" appearance="radial" num_major_ticks="11" num_minor_ticks="11" show_numeric_value="true"/>
+				<isee:spatial_map color="black" background="white" font_size="12pt"/>
+				<isee:animation_object color="black" background="white" font_size="12pt"/>
+				<isee:navigation_widget color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt" border_color="#999999" border_width="thin" border_style="solid" item_spacing="6" appearance="tabs" corner_radius="4" selected_item_color="black" selected_item_background="white" item_background="#DDDDDD"/>
+				<isee:shape color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt" border_width="thin" border_style="solid" opacity="1" transparent_background="true"/>
+				<isee:selector color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<isee:iframe color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt" border_width="thin" border_style="solid"/>
+				<isee:financial_table color="black" background="#E0E0E0" text_align="right" font_size="12pt" auto_fit="true" first_column_width="250" other_column_width="100" header_font_style="normal" header_font_weight="bold" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="14pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+			</style>
+			<view isee:show_pages="false" background="white" page_width="1280" page_height="960" zoom="180" isee:popup_graphs_are_comparative="true" isee:disable_non_negative_highlights="false" type="stock_flow">
+				<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+					<stock color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom"/>
+					<isee:placeholder color="#228B22" background="white" font_color="#228B22" font_size="9pt" label_side="bottom"/>
+					<module color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="red" background="white" font_color="red" font_size="9pt"/>
+					<connector color="#FF007F" background="white" font_color="#FF007F" font_size="9pt" isee:thickness="1"/>
+					<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<isee:loop_indicator color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+					<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="black" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="black" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="black" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="black" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+						<isee:series_styles>
+							<isee:series_style color="blue" thickness="1"/>
+							<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+				</style>
+				<module x="193.889" y="182.222" name="Not Mixing"/>
+				<module x="193.889" y="311.833" name="Perfect\nMixing"/>
+				<aux x="26.4445" y="285.445" name="contact\nrate\nnot"/>
+				<stacked_container uid="1" x="507.778" y="167.889">
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" isee:fill_intensity="0.1" isee:allow_zero_axis="true" left_axis_multi_scale="false" left_axis_auto_scale="true" left_include_units="true" right_axis_multi_scale="false" right_axis_auto_scale="true" right_include_units="true">
+						<plot color="blue" isee:keep_zero_visible="true" pen_width="1" index="0" show_y_axis="true">
+							<entity name="Not_Mixing.infecting"/>
+						</plot>
+						<plot color="red" pen_style="dot_dashed" isee:keep_zero_visible="true" pen_width="1" index="1" show_y_axis="true">
+							<entity name="Perfect_Mixing.infecting"/>
+						</plot>
+						<plot color="fuchsia" pen_style="dotted" isee:keep_zero_visible="true" pen_width="1" index="2" show_y_axis="true">
+							<entity name="Not_Mixing_at_all.infecting"/>
+						</plot>
+					</graph>
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" isee:fill_intensity="0.1" isee:allow_zero_axis="true" left_axis_multi_scale="false" left_axis_auto_scale="true" left_include_units="true" right_axis_multi_scale="false" right_axis_auto_scale="true" right_include_units="true">
+						<plot color="blue" isee:keep_zero_visible="true" pen_width="1" index="0" show_y_axis="true">
+							<entity name="Not_Mixing.Infected"/>
+						</plot>
+						<plot color="red" pen_style="dot_dashed" isee:keep_zero_visible="true" pen_width="1" index="1" show_y_axis="true">
+							<entity name="Perfect_Mixing.Infected"/>
+						</plot>
+						<plot color="fuchsia" pen_style="dotted" isee:keep_zero_visible="true" pen_width="1" index="2" show_y_axis="true">
+							<entity name="Not_Mixing_at_all.Infected"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<aux x="21.7227" y="361.111" width="18" height="18" name="contact\nrate\nperfect"/>
+				<connector uid="2" angle="69.7752">
+					<from>contact_rate_not</from>
+					<to>Not_Mixing</to>
+				</connector>
+				<aux x="81.4445" y="243.778" name="contact\nadjustment"/>
+				<aux x="81.4445" y="311.833" name="adjustment\nstart time"/>
+				<connector uid="3" angle="28.6977">
+					<from>contact_adjustment</from>
+					<to>Not_Mixing</to>
+				</connector>
+				<connector uid="4" angle="45.8729">
+					<from>adjustment_start_time</from>
+					<to>Not_Mixing</to>
+				</connector>
+				<connector uid="5" angle="328.816">
+					<from>contact_adjustment</from>
+					<to>Perfect_Mixing</to>
+				</connector>
+				<connector uid="6" angle="0">
+					<from>adjustment_start_time</from>
+					<to>Perfect_Mixing</to>
+				</connector>
+				<connector uid="7" angle="19.6552">
+					<from>contact_rate_perfect</from>
+					<to>Perfect_Mixing</to>
+				</connector>
+				<aux x="271.889" y="333.722" name="disease\nduration"/>
+				<aux x="271.889" y="257.222" name="profile"/>
+				<connector uid="8" angle="164.324">
+					<from>disease_duration</from>
+					<to>Perfect_Mixing</to>
+				</connector>
+				<connector uid="9" angle="126.016">
+					<from>disease_duration</from>
+					<to>Not_Mixing</to>
+				</connector>
+				<connector uid="10" angle="150.411">
+					<from>profile</from>
+					<to>Not_Mixing</to>
+				</connector>
+				<aux x="299.444" y="219.778" name="infectivity"/>
+				<connector uid="11" angle="91.8012">
+					<from>infectivity</from>
+					<to>Not_Mixing</to>
+				</connector>
+				<connector uid="12" angle="221.092">
+					<from>infectivity</from>
+					<to>Perfect_Mixing</to>
+				</connector>
+				<aux x="52.7778" y="434.667" name="contact\nrate\ndiscrete"/>
+				<module x="193.889" y="86.1109" name="Not Mixing\nat all"/>
+				<connector uid="13" angle="102.391">
+					<from>contact_rate_not</from>
+					<to>Not_Mixing_at_all</to>
+				</connector>
+				<connector uid="14" angle="103.088">
+					<from>contact_adjustment</from>
+					<to>Not_Mixing_at_all</to>
+				</connector>
+				<connector uid="15" angle="122.442">
+					<from>adjustment_start_time</from>
+					<to>Not_Mixing_at_all</to>
+				</connector>
+				<connector uid="16" angle="70.5388">
+					<from>infectivity</from>
+					<to>Not_Mixing_at_all</to>
+				</connector>
+				<connector uid="17" angle="61.1784">
+					<from>disease_duration</from>
+					<to>Not_Mixing_at_all</to>
+				</connector>
+			</view>
+			<view background="white" page_width="1066" page_height="600" home_view="true" type="interface">
+				<style/>
+				<isee:model_view uid="18" x="10" y="6" width="1037" height="590" zoom="1" center_x="518.5" center_y="295" locked_view="true" transparent="true" show_ltm_animation="true" show_ltm_table="true">
+					<model name="Top-Level"/>
+					<isee:highlight_list/>
+				</isee:model_view>
+				<button label="" uid="19" x="266" y="563">
+					<actions>
+						<action>start</action>
+					</actions>
+				</button>
+			</view>
+			<isee:templates>
+				<view background="white" page_width="1066" page_height="600" type="template">
+					<style/>
+				</view>
+			</isee:templates>
+			<isee:stories/>
+		</views>
+	</model>
+	<model name="Not_Mixing">
+		<variables>
+			<stock name="susceptible">
+				<eqn>1000</eqn>
+				<outflow>infecting</outflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<stock name="Infected">
+				<eqn>1</eqn>
+				<inflow>infecting</inflow>
+				<outflow>recovering</outflow>
+				<conveyor>
+					<len>transit_time</len>
+				</conveyor>
+				<units>Person</units>
+			</stock>
+			<flow name="infecting" isee:spreadflow="dist">
+				<eqn>risky_contacts * infectivity</eqn>
+				<non_negative/>
+				<isee:distrib_eq>profile</isee:distrib_eq>
+				<units>Person/Days</units>
+			</flow>
+			<aux name="contacts">
+				<eqn>Infected * contact_rate * (IF TIME &gt; adjustment_start_time THEN contact_adjustment ELSE 1)</eqn>
+				<units>Touch/Day</units>
+			</aux>
+			<aux name="contact\nrate" access="input">
+				<eqn>85</eqn>
+				<units>Touch/Person/Day</units>
+			</aux>
+			<aux name="fraction\nsusceptible">
+				<eqn>susceptible/total_pop</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="total pop">
+				<eqn>Recovered + Infected + susceptible</eqn>
+				<isee:summing/>
+				<units>Person</units>
+			</aux>
+			<aux name="risky\ncontacts">
+				<eqn>contacts*fraction_susceptible</eqn>
+				<units>Touch/Day</units>
+			</aux>
+			<aux name="infectivity" access="input">
+				<eqn>0.0045</eqn>
+				<units>Person/touch</units>
+			</aux>
+			<flow name="recovering">
+				<eqn>0</eqn>
+				<non_negative/>
+				<units>Person/Days</units>
+			</flow>
+			<stock name="Recovered">
+				<eqn>0</eqn>
+				<inflow>recovering</inflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<aux name="disease\nduration" access="input">
+				<eqn>14</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="contact\nadjustment" access="input">
+				<eqn>0.5</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="adjustment\nstart time" access="input">
+				<eqn>35</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="R0">
+				<eqn>contact_rate * infectivity * disease_duration</eqn>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="profile" access="input">
+				<eqn>0+0</eqn>
+				<gf>
+					<xscale min="0" max="1"/>
+					<yscale min="0" max="100"/>
+					<ypts>0,39.5,64.5,74.6,79.8,82,83.3,83.3,80.7,75,66.7,54.4,34.6</ypts>
+				</gf>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="transit time">
+				<eqn>disease_duration/LOOKUPMEAN(profile, 1)</eqn>
+				<units>Days</units>
+			</aux>
+		</variables>
+		<views>
+			<view isee:show_pages="false" background="white" page_width="1280" page_height="960" zoom="180" isee:popup_graphs_are_comparative="true" isee:disable_non_negative_highlights="false" type="stock_flow">
+				<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+					<stock color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom"/>
+					<isee:placeholder color="#228B22" background="white" font_color="#228B22" font_size="9pt" label_side="bottom"/>
+					<module color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="red" background="white" font_color="red" font_size="9pt"/>
+					<connector color="#FF007F" background="white" font_color="#FF007F" font_size="9pt" isee:thickness="1"/>
+					<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<isee:loop_indicator color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+					<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="black" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="black" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="black" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="black" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+						<isee:series_styles>
+							<isee:series_style color="blue" thickness="1"/>
+							<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+				</style>
+				<stock label_side="top" x="209" y="230" name="susceptible"/>
+				<stock x="344" y="230" name="Infected"/>
+				<flow x="270.5" y="230" name="infecting">
+					<pts>
+						<pt x="231.5" y="230"/>
+						<pt x="321.5" y="230"/>
+					</pts>
+				</flow>
+				<aux x="318" y="116" name="contacts"/>
+				<connector uid="20" angle="83.211">
+					<from>Infected</from>
+					<to>contacts</to>
+				</connector>
+				<aux font_style="italic" font_weight="bold" x="434" y="107" name="contact\nrate"/>
+				<connector uid="21" angle="152.103">
+					<from>contact_rate</from>
+					<to>contacts</to>
+				</connector>
+				<aux x="197" y="122" name="fraction\nsusceptible"/>
+				<aux x="121" y="104" name="total pop"/>
+				<connector uid="22" angle="33.3106">
+					<from>total_pop</from>
+					<to>fraction_susceptible</to>
+				</connector>
+				<connector uid="23" angle="134.326">
+					<from>susceptible</from>
+					<to>fraction_susceptible</to>
+				</connector>
+				<aux x="260" y="152" name="risky\ncontacts"/>
+				<connector uid="24" angle="26.5651">
+					<from>fraction_susceptible</from>
+					<to>risky_contacts</to>
+				</connector>
+				<connector uid="25" angle="183.18">
+					<from>contacts</from>
+					<to>risky_contacts</to>
+				</connector>
+				<aux font_style="italic" font_weight="bold" x="215" y="313" name="infectivity"/>
+				<connector uid="26" angle="21.5014">
+					<from>infectivity</from>
+					<to>infecting</to>
+				</connector>
+				<connector uid="27" angle="336.038">
+					<from>risky_contacts</from>
+					<to>infecting</to>
+				</connector>
+				<stacked_container uid="28" x="610" y="433">
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" isee:fill_intensity="0.1" isee:allow_zero_axis="true" left_axis_multi_scale="false" left_axis_auto_scale="true" left_include_units="true" right_axis_multi_scale="false" right_axis_auto_scale="true" right_include_units="true">
+						<plot color="blue" isee:keep_zero_visible="true" pen_width="1" index="0" show_y_axis="true">
+							<entity name="susceptible"/>
+						</plot>
+						<plot color="red" pen_style="dot_dashed" isee:keep_zero_visible="true" pen_width="1" index="1" show_y_axis="true">
+							<entity name="Infected"/>
+						</plot>
+						<plot color="fuchsia" pen_style="dotted" isee:keep_zero_visible="true" pen_width="1" index="2" show_y_axis="true">
+							<entity name="Recovered"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<flow x="422" y="230" name="recovering">
+					<pts>
+						<pt x="366.5" y="230"/>
+						<pt x="489.5" y="230"/>
+					</pts>
+				</flow>
+				<stock label_side="top" x="512" y="233" name="Recovered"/>
+				<aux font_style="italic" font_weight="bold" x="310.111" y="382.222" name="disease\nduration"/>
+				<aux font_style="italic" font_weight="bold" x="392" y="27" name="contact\nadjustment"/>
+				<aux font_style="italic" font_weight="bold" label_side="bottom" x="497" y="42" name="adjustment\nstart time"/>
+				<connector uid="29" angle="180">
+					<from>adjustment_start_time</from>
+					<to>contacts</to>
+				</connector>
+				<connector uid="30" angle="173.66">
+					<from>contact_adjustment</from>
+					<to>contacts</to>
+				</connector>
+				<aux x="726.111" y="133.889" name="R0"/>
+				<connector uid="31" angle="29.9536">
+					<from>
+						<alias uid="32"/>
+					</from>
+					<to>R0</to>
+				</connector>
+				<connector uid="33" angle="18.4349">
+					<from>
+						<alias uid="34"/>
+					</from>
+					<to>R0</to>
+				</connector>
+				<connector uid="35" angle="340.75">
+					<from>
+						<alias uid="36"/>
+					</from>
+					<to>R0</to>
+				</connector>
+				<aux font_style="italic" font_weight="bold" x="215.444" y="370.222" name="profile"/>
+				<aux x="303.667" y="313" name="transit time"/>
+				<connector uid="37" angle="32.9678">
+					<from>profile</from>
+					<to>transit_time</to>
+				</connector>
+				<connector uid="38" angle="61.645">
+					<from>disease_duration</from>
+					<to>transit_time</to>
+				</connector>
+				<connector uid="39" angle="40.7918">
+					<from>profile</from>
+					<to>infecting</to>
+				</connector>
+				<alias font_style="italic" font_weight="bold" uid="36" x="637.111" y="64.3333" width="18" height="18">
+					<of>infectivity</of>
+				</alias>
+				<alias font_style="italic" font_weight="bold" uid="34" x="632.667" y="124.889" width="18" height="18">
+					<of>contact_rate</of>
+				</alias>
+				<alias color="blue" background="white" font_style="italic" font_weight="bold" uid="32" x="634.333" y="194.333" width="18" height="18">
+					<shape type="circle" radius="18"/>
+					<of>disease_duration</of>
+				</alias>
+			</view>
+		</views>
+	</model>
+	<model name="Not_Mixing_at_all">
+		<variables>
+			<stock name="susceptible">
+				<eqn>1000</eqn>
+				<outflow>infecting</outflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<stock name="Infected">
+				<eqn>1</eqn>
+				<inflow>infecting</inflow>
+				<outflow>recovering</outflow>
+				<conveyor>
+					<len>transit_time</len>
+				</conveyor>
+				<units>Person</units>
+			</stock>
+			<flow name="infecting">
+				<eqn>risky_contacts * infectivity</eqn>
+				<non_negative/>
+				<units>Person/Days</units>
+			</flow>
+			<aux name="contacts">
+				<eqn>Infected * contact_rate * (IF TIME &gt; adjustment_start_time THEN contact_adjustment ELSE 1)</eqn>
+				<units>Touch/Day</units>
+			</aux>
+			<aux name="contact\nrate" access="input">
+				<eqn>85</eqn>
+				<units>Touch/Person/Day</units>
+			</aux>
+			<aux name="fraction\nsusceptible">
+				<eqn>susceptible/total_pop</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="total pop">
+				<eqn>Recovered + Infected + susceptible</eqn>
+				<isee:summing/>
+				<units>Person</units>
+			</aux>
+			<aux name="risky\ncontacts">
+				<eqn>contacts*fraction_susceptible</eqn>
+				<units>Touch/Day</units>
+			</aux>
+			<aux name="infectivity" access="input">
+				<eqn>0.0045</eqn>
+				<units>Person/touch</units>
+			</aux>
+			<flow name="recovering">
+				<eqn>0</eqn>
+				<non_negative/>
+				<units>Person/Days</units>
+			</flow>
+			<stock name="Recovered">
+				<eqn>0</eqn>
+				<inflow>recovering</inflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<aux name="disease\nduration" access="input">
+				<eqn>14</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="contact\nadjustment" access="input">
+				<eqn>0.5</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="adjustment\nstart time" access="input">
+				<eqn>35</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="R0">
+				<eqn>contact_rate * infectivity * disease_duration</eqn>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="transit time">
+				<eqn>disease_duration</eqn>
+				<units>Days</units>
+			</aux>
+		</variables>
+		<views>
+			<view isee:show_pages="false" background="white" page_width="1280" page_height="960" isee:page_cols="2" isee:popup_graphs_are_comparative="true" isee:disable_non_negative_highlights="false" type="stock_flow">
+				<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+					<stock color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom"/>
+					<isee:placeholder color="#228B22" background="white" font_color="#228B22" font_size="9pt" label_side="bottom"/>
+					<module color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="red" background="white" font_color="red" font_size="9pt"/>
+					<connector color="#FF007F" background="white" font_color="#FF007F" font_size="9pt" isee:thickness="1"/>
+					<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<isee:loop_indicator color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+					<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="black" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="black" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="black" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="black" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+						<isee:series_styles>
+							<isee:series_style color="blue" thickness="1"/>
+							<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+				</style>
+				<stock label_side="top" x="209" y="230" name="susceptible"/>
+				<stock x="344" y="230" name="Infected"/>
+				<flow x="270.5" y="230" name="infecting">
+					<pts>
+						<pt x="231.5" y="230"/>
+						<pt x="321.5" y="230"/>
+					</pts>
+				</flow>
+				<aux x="318" y="116" name="contacts"/>
+				<connector uid="40" angle="83.211">
+					<from>Infected</from>
+					<to>contacts</to>
+				</connector>
+				<aux font_style="italic" font_weight="bold" x="434" y="107" name="contact\nrate"/>
+				<connector uid="41" angle="152.103">
+					<from>contact_rate</from>
+					<to>contacts</to>
+				</connector>
+				<aux x="197" y="122" name="fraction\nsusceptible"/>
+				<aux x="121" y="104" name="total pop"/>
+				<connector uid="42" angle="33.3106">
+					<from>total_pop</from>
+					<to>fraction_susceptible</to>
+				</connector>
+				<connector uid="43" angle="134.326">
+					<from>susceptible</from>
+					<to>fraction_susceptible</to>
+				</connector>
+				<aux x="260" y="152" name="risky\ncontacts"/>
+				<connector uid="44" angle="26.5651">
+					<from>fraction_susceptible</from>
+					<to>risky_contacts</to>
+				</connector>
+				<connector uid="45" angle="183.18">
+					<from>contacts</from>
+					<to>risky_contacts</to>
+				</connector>
+				<aux font_style="italic" font_weight="bold" x="215" y="313" name="infectivity"/>
+				<connector uid="46" angle="21.5014">
+					<from>infectivity</from>
+					<to>infecting</to>
+				</connector>
+				<connector uid="47" angle="336.038">
+					<from>risky_contacts</from>
+					<to>infecting</to>
+				</connector>
+				<stacked_container uid="48" x="610" y="433">
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" isee:fill_intensity="0.1" isee:allow_zero_axis="true" left_axis_multi_scale="false" left_axis_auto_scale="true" left_include_units="true" right_axis_multi_scale="false" right_axis_auto_scale="true" right_include_units="true">
+						<plot color="blue" isee:keep_zero_visible="true" pen_width="1" index="0" show_y_axis="true">
+							<entity name="susceptible"/>
+						</plot>
+						<plot color="red" pen_style="dot_dashed" isee:keep_zero_visible="true" pen_width="1" index="1" show_y_axis="true">
+							<entity name="Infected"/>
+						</plot>
+						<plot color="fuchsia" pen_style="dotted" isee:keep_zero_visible="true" pen_width="1" index="2" show_y_axis="true">
+							<entity name="Recovered"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<flow x="422" y="230" name="recovering">
+					<pts>
+						<pt x="366.5" y="230"/>
+						<pt x="489.5" y="230"/>
+					</pts>
+				</flow>
+				<stock label_side="top" x="512" y="233" name="Recovered"/>
+				<aux font_style="italic" font_weight="bold" x="310.111" y="382.222" name="disease\nduration"/>
+				<aux font_style="italic" font_weight="bold" x="392" y="27" name="contact\nadjustment"/>
+				<aux font_style="italic" font_weight="bold" label_side="bottom" x="497" y="42" name="adjustment\nstart time"/>
+				<connector uid="49" angle="180">
+					<from>adjustment_start_time</from>
+					<to>contacts</to>
+				</connector>
+				<connector uid="50" angle="173.66">
+					<from>contact_adjustment</from>
+					<to>contacts</to>
+				</connector>
+				<aux x="726.111" y="133.889" name="R0"/>
+				<connector uid="51" angle="29.9536">
+					<from>
+						<alias uid="52"/>
+					</from>
+					<to>R0</to>
+				</connector>
+				<connector uid="53" angle="18.4349">
+					<from>
+						<alias uid="54"/>
+					</from>
+					<to>R0</to>
+				</connector>
+				<connector uid="55" angle="340.75">
+					<from>
+						<alias uid="56"/>
+					</from>
+					<to>R0</to>
+				</connector>
+				<aux x="303.667" y="313" name="transit time"/>
+				<connector uid="57" angle="61.645">
+					<from>disease_duration</from>
+					<to>transit_time</to>
+				</connector>
+				<alias font_style="italic" font_weight="bold" uid="56" x="637.111" y="64.3333" width="18" height="18">
+					<of>infectivity</of>
+				</alias>
+				<alias font_style="italic" font_weight="bold" uid="54" x="632.667" y="124.889" width="18" height="18">
+					<of>contact_rate</of>
+				</alias>
+				<alias color="blue" background="white" font_style="italic" font_weight="bold" uid="52" x="634.333" y="194.333" width="18" height="18">
+					<shape type="circle" radius="18"/>
+					<of>disease_duration</of>
+				</alias>
+			</view>
+		</views>
+	</model>
+	<model name="Perfect_Mixing">
+		<variables>
+			<stock name="susceptible">
+				<eqn>1000</eqn>
+				<outflow>infecting</outflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<stock name="Infected">
+				<eqn>1</eqn>
+				<inflow>infecting</inflow>
+				<outflow>recovering</outflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<flow name="infecting">
+				<eqn>risky_contacts * infectivity</eqn>
+				<non_negative/>
+				<units>Person/Days</units>
+			</flow>
+			<aux name="contacts">
+				<eqn>Infected * contact_rate * (IF TIME &gt; adjustment_srat_time THEN contact_adjustment ELSE 1)</eqn>
+				<units>Touch/Day</units>
+			</aux>
+			<aux name="contact\nrate" access="input">
+				<eqn>85</eqn>
+				<units>Touch/Person/Day</units>
+			</aux>
+			<aux name="fraction\nsusceptible">
+				<eqn>susceptible/total_pop</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="total pop">
+				<eqn>Recovered + Infected + susceptible</eqn>
+				<isee:summing/>
+				<units>Person</units>
+			</aux>
+			<aux name="risky\ncontacts">
+				<eqn>contacts*fraction_susceptible</eqn>
+				<units>Touch/Day</units>
+			</aux>
+			<aux name="infectivity" access="input">
+				<eqn>0.0045</eqn>
+				<units>Person/touch</units>
+			</aux>
+			<flow name="recovering">
+				<eqn>Infected/disease_duration</eqn>
+				<non_negative/>
+				<units>Person/Days</units>
+			</flow>
+			<stock name="Recovered">
+				<eqn>0</eqn>
+				<inflow>recovering</inflow>
+				<non_negative/>
+				<units>Person</units>
+			</stock>
+			<aux name="disease\nduration" access="input">
+				<eqn>14</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="contact\nadjustment" access="input">
+				<eqn>0.5</eqn>
+				<units>Dmnl</units>
+			</aux>
+			<aux name="adjustment\nsrat time" access="input">
+				<eqn>35</eqn>
+				<units>Days</units>
+			</aux>
+			<aux name="R0">
+				<eqn>contact_rate * infectivity * disease_duration</eqn>
+				<units>Dimensionless</units>
+			</aux>
+		</variables>
+		<views>
+			<view isee:show_pages="false" background="white" page_width="1280" page_height="960" zoom="180" isee:popup_graphs_are_comparative="true" isee:disable_non_negative_highlights="false" type="stock_flow">
+				<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+					<stock color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom"/>
+					<isee:placeholder color="#228B22" background="white" font_color="#228B22" font_size="9pt" label_side="bottom"/>
+					<module color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="red" background="white" font_color="red" font_size="9pt"/>
+					<connector color="#FF007F" background="white" font_color="#FF007F" font_size="9pt" isee:thickness="1"/>
+					<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<isee:loop_indicator color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+					<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="black" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="black" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="black" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="black" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+						<isee:series_styles>
+							<isee:series_style color="blue" thickness="1"/>
+							<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+				</style>
+				<stock label_side="top" x="209" y="230" name="susceptible"/>
+				<stock x="344" y="230" name="Infected"/>
+				<flow x="270.5" y="230" name="infecting">
+					<pts>
+						<pt x="231.5" y="230"/>
+						<pt x="321.5" y="230"/>
+					</pts>
+				</flow>
+				<aux x="318" y="116" name="contacts"/>
+				<connector uid="58" angle="83.211">
+					<from>Infected</from>
+					<to>contacts</to>
+				</connector>
+				<aux font_style="italic" font_weight="bold" x="434" y="107" name="contact\nrate"/>
+				<connector uid="59" angle="152.103">
+					<from>contact_rate</from>
+					<to>contacts</to>
+				</connector>
+				<aux x="197" y="122" name="fraction\nsusceptible"/>
+				<aux x="121" y="104" name="total pop"/>
+				<connector uid="60" angle="33.3106">
+					<from>total_pop</from>
+					<to>fraction_susceptible</to>
+				</connector>
+				<connector uid="61" angle="134.326">
+					<from>susceptible</from>
+					<to>fraction_susceptible</to>
+				</connector>
+				<aux x="260" y="152" name="risky\ncontacts"/>
+				<connector uid="62" angle="26.5651">
+					<from>fraction_susceptible</from>
+					<to>risky_contacts</to>
+				</connector>
+				<connector uid="63" angle="183.18">
+					<from>contacts</from>
+					<to>risky_contacts</to>
+				</connector>
+				<aux font_style="italic" font_weight="bold" x="215" y="313" name="infectivity"/>
+				<connector uid="64" angle="21.5014">
+					<from>infectivity</from>
+					<to>infecting</to>
+				</connector>
+				<connector uid="65" angle="336.038">
+					<from>risky_contacts</from>
+					<to>infecting</to>
+				</connector>
+				<stacked_container uid="66" x="610" y="433">
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" isee:fill_intensity="0.1" isee:allow_zero_axis="true" left_axis_multi_scale="false" left_axis_auto_scale="true" left_include_units="true" right_axis_multi_scale="false" right_axis_auto_scale="true" right_include_units="true">
+						<plot color="blue" isee:keep_zero_visible="true" pen_width="1" index="0" show_y_axis="true">
+							<entity name="susceptible"/>
+						</plot>
+						<plot color="red" pen_style="dot_dashed" isee:keep_zero_visible="true" pen_width="1" index="1" show_y_axis="true">
+							<entity name="Infected"/>
+						</plot>
+						<plot color="fuchsia" pen_style="dotted" isee:keep_zero_visible="true" pen_width="1" index="2" show_y_axis="true">
+							<entity name="Recovered"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<flow x="422" y="230" name="recovering">
+					<pts>
+						<pt x="366.5" y="230"/>
+						<pt x="489.5" y="230"/>
+					</pts>
+				</flow>
+				<stock label_side="top" x="512" y="233" name="Recovered"/>
+				<connector uid="67" angle="70.0169">
+					<from>Infected</from>
+					<to>recovering</to>
+				</connector>
+				<aux font_style="italic" font_weight="bold" x="497" y="140" name="disease\nduration"/>
+				<connector uid="68" angle="203.199">
+					<from>disease_duration</from>
+					<to>recovering</to>
+				</connector>
+				<aux font_style="italic" font_weight="bold" x="392" y="27" name="contact\nadjustment"/>
+				<aux font_style="italic" font_weight="bold" x="497" y="42" name="adjustment\nsrat time"/>
+				<connector uid="69" angle="180">
+					<from>adjustment_srat_time</from>
+					<to>contacts</to>
+				</connector>
+				<connector uid="70" angle="173.66">
+					<from>contact_adjustment</from>
+					<to>contacts</to>
+				</connector>
+				<aux x="726.111" y="133.889" name="R0"/>
+				<connector uid="71" angle="29.9536">
+					<from>
+						<alias uid="72"/>
+					</from>
+					<to>R0</to>
+				</connector>
+				<connector uid="73" angle="18.4349">
+					<from>
+						<alias uid="74"/>
+					</from>
+					<to>R0</to>
+				</connector>
+				<connector uid="75" angle="340.75">
+					<from>
+						<alias uid="76"/>
+					</from>
+					<to>R0</to>
+				</connector>
+				<alias font_style="italic" font_weight="bold" uid="76" x="637.111" y="64.3333" width="18" height="18">
+					<of>infectivity</of>
+				</alias>
+				<alias font_style="italic" font_weight="bold" uid="74" x="632.667" y="124.889" width="18" height="18">
+					<of>contact_rate</of>
+				</alias>
+				<alias color="blue" background="white" font_style="italic" font_weight="bold" uid="72" x="634.333" y="194.333" width="18" height="18">
+					<shape type="circle" radius="18"/>
+					<of>disease_duration</of>
+				</alias>
+			</view>
+		</views>
+	</model>
+</xmile>
+
