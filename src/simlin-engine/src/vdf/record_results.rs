@@ -632,11 +632,23 @@ fn spans_overlap(a: &DecodedRecordSpan, b: &DecodedRecordSpan) -> bool {
     !(a.end <= b.start || b.end <= a.start)
 }
 
-/// Whether span `idx` still overlaps another span in `active`.
+/// Whether two spans are in genuine residual CONFLICT: overlapping extents AND
+/// different names. Same-name overlaps are NOT conflicts -- they are ordinary
+/// duplicate records for one variable that the per-name emission dedup owns
+/// (keep-lowest-start), exactly the rule `residual_overlap_components` uses to
+/// build the components. Using name-blind overlap here would honest-drop a
+/// same-name duplicate pair that a differently-named ghost dragged into a
+/// component, losing the variable entirely (GH #844).
+fn spans_conflict(a: &DecodedRecordSpan, b: &DecodedRecordSpan) -> bool {
+    spans_overlap(a, b) && a.name != b.name
+}
+
+/// Whether span `idx` still conflicts with another span in `active` (different
+/// name, overlapping extent).
 fn overlaps_any(idx: usize, active: &[usize], spans: &[DecodedRecordSpan]) -> bool {
     active
         .iter()
-        .any(|&other| other != idx && spans_overlap(&spans[idx], &spans[other]))
+        .any(|&other| other != idx && spans_conflict(&spans[idx], &spans[other]))
 }
 
 /// Fraction of adjacent OT-sorted uncontested-owner pairs that are name-ordered
@@ -778,8 +790,10 @@ fn resolve_residual_components(
     }
 
     // Per-component active sets: component spans + un-peeled phase-1 descriptors
-    // overlapping any component span (a phase-1 descriptor is given a second
-    // chance exactly when it collides with a component's spans).
+    // conflicting with any original component span (a phase-1 descriptor is
+    // given a second chance exactly when it cross-name-collides with a
+    // component's spans; a same-name overlap is not a conflict, so it stays
+    // dropped -- its owner twin already represents it).
     let mut comp_active: Vec<Vec<usize>> = Vec::with_capacity(components.len());
     let mut unpeeled_recidx: HashSet<usize> = HashSet::new();
     for c in components {
@@ -789,7 +803,7 @@ fn resolve_residual_components(
             if phase1_descriptors.contains(&span.rec_idx)
                 && component_spans
                     .iter()
-                    .any(|&cs| spans_overlap(span, &spans[cs]))
+                    .any(|&cs| spans_conflict(span, &spans[cs]))
             {
                 active.push(i);
                 unpeeled_recidx.insert(span.rec_idx);
@@ -884,7 +898,7 @@ fn resolve_residual_components(
         let mut contested: Vec<usize> = Vec::new();
         for (ai, &a) in leftover.iter().enumerate() {
             for &b in &leftover[ai + 1..] {
-                if spans_overlap(&spans[a], &spans[b]) {
+                if spans_conflict(&spans[a], &spans[b]) {
                     let lo = spans[a].start.max(spans[b].start);
                     let hi = spans[a].end.min(spans[b].end);
                     contested.extend(lo..hi);
@@ -1969,6 +1983,35 @@ mod resolve_residual_tests {
         assert!(
             !res.dropped.contains(&8) && !res.readmitted.contains(&8),
             "d tar overlaps only an un-peeled descriptor, so it must stay untouched"
+        );
+        assert!(res.unresolved_components.is_empty());
+    }
+
+    /// Same-name duplicate pair inside a component. A differently-named ghost
+    /// drags TWO same-name duplicate records for one variable into a component.
+    /// The conflict predicate is name-aware (matching the detector), so once the
+    /// ghost is dropped the same-name pair no longer registers as conflicting:
+    /// BOTH survive re-resolution and flow to the per-name emission dedup, just
+    /// as they would outside a residual component -- the variable is NOT lost
+    /// (GH #844). A name-blind predicate would honest-drop both.
+    #[test]
+    fn same_name_duplicate_pair_survives_when_ghost_dropped() {
+        let spans = [
+            span(0, "a", 1, 1),         // uncontested prev anchor
+            span(1, "z", 9, 1),         // uncontested next anchor
+            span(2, "m dup", 5, 1),     // duplicate record A for variable `m dup`
+            span(3, "m dup", 5, 1),     // duplicate record B (same name, same slot)
+            span(4, "zzz ghost", 5, 1), // ghost, sorts past the next anchor -> dropped
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        // The same-name pair is pulled into the ghost's component.
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].span_indices, vec![2, 3, 4]);
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0);
+        assert_eq!(dropped_names(&res, &spans), vec!["zzz ghost"]);
+        assert!(
+            !res.dropped.contains(&2) && !res.dropped.contains(&3),
+            "both same-name duplicates must survive re-resolution (dedup owns them)"
         );
         assert!(res.unresolved_components.is_empty());
     }

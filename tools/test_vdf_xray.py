@@ -2391,6 +2391,28 @@ class ResolveResidualComponentsTests(unittest.TestCase):
         self.assertIn(3, di.descriptor_indices, "ghost must be dropped with no lookups")
         self.assertNotIn(2, di.descriptor_indices, "real owner must be recovered")
 
+    def test_same_name_duplicate_pair_survives_when_ghost_dropped(self):
+        # GH #844: a differently-named ghost drags TWO same-name duplicate
+        # records into a component. The conflict predicate is name-aware, so
+        # once the ghost is dropped the same-name pair is no longer conflicting:
+        # BOTH survive re-resolution and flow to the per-name emission dedup. A
+        # name-blind predicate would honest-drop both, losing the variable.
+        spans = [
+            self._span(0, "a", 1, 1),
+            self._span(1, "z", 9, 1),
+            self._span(2, "m dup", 5, 1),
+            self._span(3, "m dup", 5, 1),
+            self._span(4, "zzz ghost", 5, 1),
+        ]
+        comps = vdf_xray.residual_overlap_components(spans, set())
+        self.assertEqual(len(comps), 1)
+        self.assertEqual(comps[0].span_indices, [2, 3, 4])
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0)
+        self.assertEqual(self._dropped_names(res, spans), ["zzz ghost"])
+        self.assertNotIn(2, res.dropped)
+        self.assertNotIn(3, res.dropped)
+        self.assertEqual(res.unresolved_components, [])
+
     def test_gate_abstains_when_owners_not_alphabetical(self):
         spans = [
             self._span(0, "z", 1, 1),

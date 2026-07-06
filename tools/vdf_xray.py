@@ -2437,6 +2437,17 @@ def _spans_overlap(a: DecodedRecordSpan, b: DecodedRecordSpan) -> bool:
     return not (a.end <= b.start or b.end <= a.start)
 
 
+def _spans_conflict(a: DecodedRecordSpan, b: DecodedRecordSpan) -> bool:
+    """Genuine residual CONFLICT: overlapping extents AND different names.
+    Same-name overlaps are ordinary duplicate records for one variable that the
+    per-name emission dedup owns (keep-lowest-start) -- the same rule
+    `residual_overlap_components` uses to build the components. A name-blind
+    predicate here would honest-drop a same-name duplicate pair that a
+    differently-named ghost dragged into a component, losing the variable
+    entirely (GH #844). Mirrors Rust `record_results.rs::spans_conflict`."""
+    return _spans_overlap(a, b) and a.name != b.name
+
+
 def resolve_residual_components(
     spans: list[DecodedRecordSpan],
     components: list[ResidualOverlapComponent],
@@ -2498,14 +2509,15 @@ def resolve_residual_components(
         active = [spans[i] for i in c.span_indices]
         # Test un-peel candidacy against a SNAPSHOT of the original component
         # spans, not the growing `active` list: a phase-1 descriptor is
-        # un-peeled iff it collides with an ORIGINAL component span, never
-        # merely with a previously-un-peeled descriptor (mirrors the Rust
+        # un-peeled iff it cross-name-conflicts with an ORIGINAL component span,
+        # never merely with a previously-un-peeled descriptor (mirrors the Rust
         # `component_spans` snapshot; keeps the two readers bit-identical on a
-        # chained-descriptor residual region).
+        # chained-descriptor residual region). A same-name overlap is not a
+        # conflict, so it stays dropped -- its owner twin already represents it.
         component_spans = list(active)
         for i, s in enumerate(spans):
             if s.rec_idx in phase1_descriptors and any(
-                _spans_overlap(s, cs) for cs in component_spans
+                _spans_conflict(s, cs) for cs in component_spans
             ):
                 active.append(s)
                 unpeeled_recidx.add(s.rec_idx)
@@ -2527,11 +2539,13 @@ def resolve_residual_components(
     changed = True
     while changed:
         changed = False
-        # Confirm any span no longer overlapping another active span.
+        # Confirm any span no longer CONFLICTING with another active span (a
+        # same-name overlap is not a conflict, so a same-name duplicate pair
+        # confirms and survives once its differently-named ghost is dropped).
         for active in comp_active:
             still = []
             for s in active:
-                if any(t is not s and _spans_overlap(s, t) for t in active):
+                if any(t is not s and _spans_conflict(s, t) for t in active):
                     still.append(s)
                 else:
                     recovered.append(s)
@@ -2539,10 +2553,10 @@ def resolve_residual_components(
             active[:] = still
         recovered.sort(key=lambda s: s.start)
         recovered_starts = [s.start for s in recovered]
-        # Drop decisive ghosts: in a still-overlapping group with at least one
+        # Drop decisive ghosts: in a still-conflicting group with at least one
         # ordering-consistent owner, drop the ordering-inconsistent spans.
         for active in comp_active:
-            overl = [s for s in active if any(t is not s and _spans_overlap(s, t) for t in active)]
+            overl = [s for s in active if any(t is not s and _spans_conflict(s, t) for t in active)]
             if not overl:
                 continue
             owners = [s for s in overl
@@ -2558,14 +2572,14 @@ def resolve_residual_components(
     # (d) honest-drop the still-conflicted remainder; report it on diagnostics.
     unresolved: list[ResidualOverlapComponent] = []
     for c, active in zip(components, comp_active):
-        leftover = [s for s in active if any(t is not s and _spans_overlap(s, t) for t in active)]
+        leftover = [s for s in active if any(t is not s and _spans_conflict(s, t) for t in active)]
         if leftover:
             leftover_idx = {id(s) for s in leftover}
             span_indices = sorted(i for i in c.span_indices if id(spans[i]) in leftover_idx)
             for s in leftover:
                 dropped.add(s.rec_idx)
             contested = sorted({ot for a in leftover for b in leftover
-                                if a is not b and _spans_overlap(a, b)
+                                if a is not b and _spans_conflict(a, b)
                                 for ot in range(max(a.start, b.start), min(a.end, b.end))})
             unresolved.append(ResidualOverlapComponent(
                 span_indices=span_indices, contested_ots=contested))
