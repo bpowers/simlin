@@ -1679,6 +1679,124 @@ class StandaloneLookupOnlyDescriptorTests(unittest.TestCase):
         self.assertTrue(diagnostics.standalone_drop_veto_fired)
         self.assertEqual(diagnostics.standalone_drop_vetoed_candidates, 4)
 
+    def test_residual_overlap_recovery_on_fixtures(self) -> None:
+        # Stage 2 recovery for GH #841. Ref.vdf (and every file whose overlaps
+        # the peel already resolves) has NO residual components, so the whole
+        # re-resolution is a provable no-op there. SimService/Base.vdf's
+        # stale-f[11] unsaved-variable records survive the peel still in
+        # owner-vs-owner conflict; the re-resolution recovers every real owner
+        # (dropping only the ghosts) and, because every conflict is
+        # adjudicated, leaves NOTHING honest-dropped -- so the residual
+        # diagnostics come back empty, no ghost column is emitted, and no OT
+        # slot is claimed twice.
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+        _, ref_diag = vdf_xray.extract_named_results_with_diagnostics(ref)
+        self.assertEqual(ref_diag.residual_overlap, [])
+
+        relpaths = [
+            "third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/Base.vdf",
+            "third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/ctxt0001/Base.vdf",
+        ]
+        if not (REPO_ROOT / relpaths[0]).exists():
+            self.skipTest("third_party SimService fixtures not available")
+
+        # The EXACT 41 ghosts the re-resolution must drop on both fixtures
+        # (lowercased). Pinning the full set plus the exact emitted-column count
+        # below means a wrongly-recovered unlisted ghost cannot slip past.
+        ghosts = [
+            "age specific fertility distribution function",
+            "china future gdp growth rate",
+            "coal capacity utilisation in production table",
+            "coal fraction discoverable table",
+            "dice ipcc other rad forcing table",
+            "effect of technology on productivity of investment in coal production table",
+            "maize fraction table",
+            "nuclear generation efficiency table",
+            "oil substitutability effect on oil import",
+            "pc meat demand function",
+            "pc fish demand data",
+            "pc fish demand function",
+            "qdbtu to mb",
+            "row coal demand function",
+            "renewable energy consumer real price",
+            "renewable resource price per mbtu",
+            "wood value added per ton",
+            "c total population table",
+            "elasticity of fdi to fiscal pressure",
+            "electricity net export table",
+            "extra heavy table",
+            "forestry production in cubic meters",
+            "gas generation efficiency table",
+            "gas to liquids table",
+            "hydro electricity generation in bkwh table",
+            "meat value added per ton table",
+            "nuclear electricity demand in bkwh",
+            "overall carbon tax table",
+            "pc bushel domestic consumption non ethanol",
+            "petroleum generation efficiency table",
+            "private capital transfers over gdp table",
+            "private factor income table",
+            "private transfers table",
+            "relative china technology",
+            "renewable electricity price",
+            "renewable portfolio standard table",
+            "residential energy conservation",
+            "share of electricity for freight transportation",
+            "share of electricity for urban and commuter transportation",
+            "total fertility rate",
+            "value added agriculture products table",
+        ]
+        self.assertEqual(len(ghosts), 41)
+        reals = [
+            "Indicated China GDP",
+            "indicated per capita fish demand",
+            "indicated row Coal demand",
+            "industrial electricity demand in BKWH",
+        ]
+        for relpath in relpaths:
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                results, diag = vdf_xray.extract_named_results_with_diagnostics(vdf)
+                self.assertIsNotNone(results)
+                assert results is not None
+
+                # Every conflict is adjudicated, so nothing is honest-dropped.
+                self.assertEqual(diag.residual_overlap, [])
+
+                names = {result.name for result in results}
+                lower = {name.lower() for name in names}
+                for ghost in ghosts:
+                    self.assertFalse(
+                        any(name == ghost or name.startswith(ghost + "[") for name in lower),
+                        f"ghost {ghost!r} must not be emitted")
+                for real in reals:
+                    self.assertTrue(
+                        real in names or any(n.startswith(real + "[") for n in names),
+                        f"real owner {real!r} must be recovered")
+
+                # OT-122 orphaned (its ghost `c total population table` dropped),
+                # Population fully recovered, no OT slot claimed twice.
+                ot_indices = [result.ot_index for result in results]
+                self.assertEqual(
+                    len(ot_indices), len(set(ot_indices)),
+                    "no OT slot may be claimed by two emitted columns")
+                # Exact emitted-column count: a wrongly-recovered ghost would push
+                # it to 1236, a wrongly-dropped real below 1235.
+                self.assertEqual(
+                    len(results), 1235,
+                    "exact emitted-column count changed (residual recovery regressed)")
+                self.assertEqual(
+                    sum(1 for name in names if name.startswith("Population[")), 164,
+                    "recovered Population must expose all 164 array elements")
+                oil = sorted(
+                    result.values[0]
+                    for result in results
+                    if result.name.lower().startswith("c identified oil reserve["))
+                self.assertEqual(len(oil), 2)
+                # Initial reserves are context-independent stock initial values.
+                self.assertAlmostEqual(oil[0], 7900.0, delta=0.01)
+                self.assertAlmostEqual(oil[1], 51000.0, delta=0.01)
+
     def test_simservice_stocks_are_not_dropped_as_lookup_only(self) -> None:
         # Regression for the SimService false positives: four real dynamic
         # stocks whose OT starts collide with the lookup-index range must
@@ -2131,6 +2249,215 @@ class DataGridBitmapTests(unittest.TestCase):
         # only widens the stored f32s, so the pins are exact-equality.
         self.assertEqual(series[0], 0.6202020049095154)
         self.assertEqual(series[-1], 2.086980104446411)
+
+
+class ResolveResidualComponentsTests(unittest.TestCase):
+    """Stage 2 re-resolution ordering oracle (`resolve_residual_components`),
+    mirroring the Rust `resolve_residual_tests` module span-for-span so the two
+    readers stay in lockstep on synthetic traps as well as on the corpus."""
+
+    @staticmethod
+    def _span(rec_idx: int, name: str, start: int, length: int) -> vdf_xray.DecodedRecordSpan:
+        return vdf_xray.DecodedRecordSpan(
+            rec_idx=rec_idx, name_idx=rec_idx, name=name, start=start,
+            end=start + length, shape_code=0, sort_key=0, slot_ref=0,
+            group_id=0, has_sentinel=False, ot_codes=[])
+
+    def _dropped_names(self, res, spans):
+        return sorted(s.name for s in spans if s.rec_idx in res.dropped)
+
+    def test_empty_components_is_noop(self):
+        spans = [self._span(0, "a", 1, 1), self._span(1, "b", 2, 1)]
+        res = vdf_xray.resolve_residual_components(
+            spans, [], set(), vdf_xray.RESIDUAL_ORDERING_GATE,
+            vdf_xray.RESIDUAL_ORDERING_MIN_PAIRS)
+        self.assertFalse(res.dropped)
+        self.assertFalse(res.readmitted)
+        self.assertEqual(res.unresolved_components, [])
+
+    def test_run_boundary_prev_only_drops_wide_ghost(self):
+        spans = [
+            self._span(0, "c gas", 1, 1),
+            self._span(1, "agri", 30, 1),
+            self._span(2, "age ghost", 3, 4),
+            self._span(3, "c oil", 3, 1),
+            self._span(4, "c pig", 4, 1),
+            self._span(5, "c rat", 5, 1),
+            self._span(6, "c sun", 6, 1),
+        ]
+        comps = vdf_xray.residual_overlap_components(spans, set())
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0, 0)
+        self.assertEqual(self._dropped_names(res, spans), ["age ghost"])
+        self.assertFalse(res.readmitted)
+        self.assertEqual(res.unresolved_components, [])
+
+    def test_recovered_anchor_bracket_resolves_scalar_pair(self):
+        spans = [
+            self._span(0, "tbl x lookup", 9, 2),
+            self._span(1, "ind a", 10, 1),
+            self._span(2, "ind b", 12, 1),
+            self._span(3, "cat food", 12, 1),
+            self._span(4, "tbl y lookup", 13, 2),
+            self._span(5, "ind c", 14, 1),
+            self._span(6, "a1", 11, 1),
+            self._span(7, "z1", 16, 1),
+        ]
+        comps = vdf_xray.residual_overlap_components(spans, set())
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0, 0)
+        self.assertEqual(
+            self._dropped_names(res, spans),
+            ["cat food", "tbl x lookup", "tbl y lookup"])
+        self.assertEqual(res.unresolved_components, [])
+
+    def test_inconclusive_conflict_is_honest_dropped(self):
+        spans = [
+            self._span(0, "a", 1, 1),
+            self._span(1, "b", 9, 1),
+            self._span(2, "yyy", 5, 1),
+            self._span(3, "zzz", 5, 1),
+        ]
+        comps = vdf_xray.residual_overlap_components(spans, set())
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0, 0)
+        self.assertEqual(self._dropped_names(res, spans), ["yyy", "zzz"])
+        self.assertEqual(len(res.unresolved_components), 1)
+        self.assertEqual(res.unresolved_components[0].contested_ots, [5])
+
+    def test_unpeeled_descriptor_is_readmitted_when_kept(self):
+        spans = [
+            self._span(0, "c gas", 1, 1),
+            self._span(1, "agri", 20, 1),
+            self._span(2, "age ghost", 8, 4),
+            self._span(3, "c pig", 9, 1),
+            self._span(4, "c rat", 10, 1),
+            self._span(5, "c sun", 11, 1),
+            self._span(6, "c oil", 7, 2),
+        ]
+        phase1 = {6}
+        comps = vdf_xray.residual_overlap_components(spans, phase1)
+        res = vdf_xray.resolve_residual_components(spans, comps, phase1, 0.0, 0)
+        self.assertEqual(self._dropped_names(res, spans), ["age ghost"])
+        self.assertEqual(res.readmitted, {6})
+        self.assertEqual(res.unresolved_components, [])
+
+    def test_lexical_peel_drops_lookupish_names(self):
+        spans = [
+            self._span(0, "real var", 1, 1),
+            self._span(1, "real var2", 2, 1),
+            self._span(2, "foo lookup", 1, 2),
+        ]
+        comps = vdf_xray.residual_overlap_components(spans, set())
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0, 0)
+        self.assertEqual(self._dropped_names(res, spans), ["foo lookup"])
+        self.assertEqual(res.unresolved_components, [])
+
+    def test_chained_descriptor_is_not_transitively_unpeeled(self):
+        spans = [
+            self._span(0, "c gas", 1, 1),
+            self._span(1, "zz", 30, 1),
+            self._span(2, "age ghost", 5, 5),
+            self._span(3, "d1", 5, 1),
+            self._span(4, "d2", 6, 1),
+            self._span(5, "d3", 7, 1),
+            self._span(6, "d4", 8, 1),
+            self._span(7, "d oil", 9, 3),
+            self._span(8, "d tar", 11, 2),
+        ]
+        phase1 = {7, 8}
+        comps = vdf_xray.residual_overlap_components(spans, phase1)
+        res = vdf_xray.resolve_residual_components(spans, comps, phase1, 0.0, 0)
+        self.assertEqual(self._dropped_names(res, spans), ["age ghost"])
+        self.assertEqual(res.readmitted, {7})
+        # d tar overlaps only an un-peeled descriptor, so it stays untouched.
+        self.assertNotIn(8, res.dropped)
+        self.assertNotIn(8, res.readmitted)
+        self.assertEqual(res.unresolved_components, [])
+
+    def test_residual_pass_runs_on_lookup_free_file(self):
+        # GH #844: identify_descriptor_records must reach the residual pass even
+        # when the file has zero lookup records. Before the fix it early-returned
+        # on n_lookups == 0, so a differently-named owner-vs-owner OT conflict on
+        # such a file emitted BOTH names. The n_lookups == 0 path touches only
+        # `section6_lookup_records`, so a tiny stub file suffices.
+        class _NoLookupVdf:
+            def section6_lookup_records(self):
+                return []
+
+        # Nine alphabetically-ordered uncontested owners (>= MIN_PAIRS pairs,
+        # ratio 1.0) so the gate passes on real evidence; prev `e own`@4 / next
+        # `n own`@6 bracket the slot-5 conflict, keeping `m real`, dropping the
+        # ghost `z ghost` (which sorts past `n own`).
+        spans = [
+            self._span(0, "b own", 1, 1),
+            self._span(1, "c own", 2, 1),
+            self._span(2, "d own", 3, 1),
+            self._span(3, "e own", 4, 1),
+            self._span(4, "m real", 5, 1),   # fits [e own, n own] -> recovered
+            self._span(5, "z ghost", 5, 1),  # sorts past n own -> dropped
+            self._span(6, "n own", 6, 1),
+            self._span(7, "o own", 7, 1),
+            self._span(8, "p own", 8, 1),
+            self._span(9, "q own", 9, 1),
+            self._span(10, "r own", 10, 1),
+        ]
+        di = vdf_xray.identify_descriptor_records(_NoLookupVdf(), spans)
+        self.assertIn(5, di.descriptor_indices, "ghost must be dropped with no lookups")
+        self.assertNotIn(4, di.descriptor_indices, "real owner must be recovered")
+
+    def test_same_name_duplicate_pair_survives_when_ghost_dropped(self):
+        # GH #844: a differently-named ghost drags TWO same-name duplicate
+        # records into a component. The conflict predicate is name-aware, so
+        # once the ghost is dropped the same-name pair is no longer conflicting:
+        # BOTH survive re-resolution and flow to the per-name emission dedup. A
+        # name-blind predicate would honest-drop both, losing the variable.
+        spans = [
+            self._span(0, "a", 1, 1),
+            self._span(1, "z", 9, 1),
+            self._span(2, "m dup", 5, 1),
+            self._span(3, "m dup", 5, 1),
+            self._span(4, "zzz ghost", 5, 1),
+        ]
+        comps = vdf_xray.residual_overlap_components(spans, set())
+        self.assertEqual(len(comps), 1)
+        self.assertEqual(comps[0].span_indices, [2, 3, 4])
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0, 0)
+        self.assertEqual(self._dropped_names(res, spans), ["zzz ghost"])
+        self.assertNotIn(2, res.dropped)
+        self.assertNotIn(3, res.dropped)
+        self.assertEqual(res.unresolved_components, [])
+
+    def test_gate_abstains_when_owners_not_alphabetical(self):
+        # RATIO gate: low alphabetical consistency -> abstain. min_pairs=0
+        # isolates the ratio side.
+        spans = [
+            self._span(0, "z", 1, 1),
+            self._span(1, "a", 2, 1),
+            self._span(2, "m", 3, 1),
+            self._span(3, "b", 4, 1),
+            self._span(4, "ghost", 10, 1),
+            self._span(5, "owner", 10, 1),
+        ]
+        comps = vdf_xray.residual_overlap_components(spans, set())
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.95, 0)
+        self.assertEqual(self._dropped_names(res, spans), ["ghost", "owner"])
+        self.assertEqual(len(res.unresolved_components), 1)
+
+    def test_gate_abstains_on_too_few_measured_pairs(self):
+        # MIN_PAIRS gate (GH #844, codex round 3): one uncontested anchor `m`
+        # (0 adjacent pairs) is too little evidence, so the oracle must NOT run
+        # (which would silently drop the real `a real` while keeping the ghost
+        # `z ghost`). With the production floor the gate abstains: BOTH contested
+        # spans honest-drop and the component surfaces on diagnostics.
+        # gate_threshold=0.0 proves the pair-count floor drives it, not the ratio.
+        spans = [
+            self._span(0, "m", 3, 1),
+            self._span(1, "a real", 5, 1),
+            self._span(2, "z ghost", 5, 1),
+        ]
+        comps = vdf_xray.residual_overlap_components(spans, set())
+        res = vdf_xray.resolve_residual_components(
+            spans, comps, set(), 0.0, vdf_xray.RESIDUAL_ORDERING_MIN_PAIRS)
+        self.assertEqual(self._dropped_names(res, spans), ["a real", "z ghost"])
+        self.assertEqual(len(res.unresolved_components), 1)
 
 
 if __name__ == "__main__":

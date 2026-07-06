@@ -275,15 +275,72 @@ pub(super) fn recover_dimension_sets_via_sec5(vdf: &VdfFile) -> Vec<VdfDimension
     if anchors.is_empty() {
         return Vec::new();
     }
-    let sec5 = match vdf.parse_section5_set_stream() {
-        Some((_, entries, _)) => entries,
-        None => return Vec::new(),
-    };
+    // Fast path: the pinned 1:1 anchor/sec5 alignment enables full recovery
+    // (complete roots plus subrange subsequence projection).
+    if let Some(sets) = recover_paired_dimension_sets(vdf, &anchors) {
+        return sets;
+    }
+    // Fallback: when the anchor/sec5 counts disagree (or section 5 is absent)
+    // the subrange subsequence rule cannot run, but complete root dims come
+    // straight from their record field[8] element groups and need no
+    // section 5 at all. Recovering them here mirrors the Python reader, whose
+    // `_recover_record_dimension_sets` emits complete roots independently of
+    // `recover_all_dimension_elements` (the sec5-paired subrange step): the
+    // SimService `Base.vdf` files (18 anchors vs 43 section-5 entries) recover
+    // `country`/`layers`/... this way. Without it the arrayed owners fall back
+    // to numeric element labels and diverge from the Python reader.
+    complete_root_dimension_sets(&anchors)
+}
+
+/// Emit one `VdfDimensionSet` per COMPLETE root dim directly from its record
+/// field[8] element group, with no section-5 dependency (mirrors step 1 of the
+/// Python reader's `_recover_record_dimension_sets`). Deterministic: anchors
+/// arrive from [`recover_anchors`] in `(group_id, name)` order, and the first
+/// occurrence of each name wins.
+///
+/// The keep-first dedup is load-bearing for Rust/Python parity: the Python
+/// mirror applies the identical dedup, without which a duplicate-named complete
+/// anchor would leave two same-name entries there and its cardinality-match
+/// label fallback would drop to numeric labels while this deduped reader emits
+/// real ones. No corpus file has such duplicates, so the two stay in lockstep.
+fn complete_root_dimension_sets(anchors: &[Anchor]) -> Vec<VdfDimensionSet> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for anchor in anchors {
+        if !anchor.complete {
+            continue;
+        }
+        if !seen.insert(anchor.name.to_lowercase()) {
+            continue;
+        }
+        out.push(VdfDimensionSet {
+            name: anchor.name.clone(),
+            elements: anchor
+                .elements
+                .iter()
+                .map(|(_, name)| name.clone())
+                .collect(),
+        });
+    }
+    out
+}
+
+/// Full dimension recovery under the pinned 1:1 anchor/section-5 alignment
+/// (complete roots plus subrange subsequence projection). Returns `None` when
+/// section 5 is absent or the anchor/section-5 counts disagree, so the caller
+/// can fall back to the section-5-free complete-root recovery.
+fn recover_paired_dimension_sets(
+    vdf: &VdfFile,
+    anchors: &[Anchor],
+) -> Option<Vec<VdfDimensionSet>> {
+    let sec5 = vdf
+        .parse_section5_set_stream()
+        .map(|(_, entries, _)| entries)?;
     // Anchor/sec5 pairing rule requires a 1:1 match. If the counts
     // disagree, the fixture does not satisfy the pinned alignment rule
-    // and we bail out rather than fabricate a partial recovery.
+    // and we fall back rather than fabricate a partial recovery.
     if anchors.len() != sec5.len() {
-        return Vec::new();
+        return None;
     }
 
     // Collect payloads in the same canonical order (f[8]-ascending).
@@ -381,8 +438,10 @@ pub(super) fn recover_dimension_sets_via_sec5(vdf: &VdfFile) -> Vec<VdfDimension
     }
 
     // Emit results in anchor order for stability across runs.
-    anchors
-        .iter()
-        .filter_map(|a| results.remove(&a.name))
-        .collect()
+    Some(
+        anchors
+            .iter()
+            .filter_map(|a| results.remove(&a.name))
+            .collect(),
+    )
 }

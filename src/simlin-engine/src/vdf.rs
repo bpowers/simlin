@@ -36,6 +36,20 @@ mod signatures;
 use record_results::build_record_result_columns;
 pub use section3::{VdfSection3Directory, VdfSection3DirectoryEntry};
 
+/// One residual OT-overlap component surfaced by
+/// [`VdfFile::residual_overlap_diagnostics`]: differently-named decoded spans
+/// that still claim a shared OT slot after descriptor peeling and the
+/// standalone lookup-only drop, all of which the reader drops from emission.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VdfResidualOverlap {
+    /// OT slots claimed by two or more differently-named spans of the
+    /// component (the genuine conflicts). Sorted ascending.
+    pub contested_ots: Vec<usize>,
+    /// Names of the decoded spans dropped from emission for this component.
+    /// Sorted by the spans' record index.
+    pub dropped_names: Vec<String>,
+}
+
 /// Names of stdlib module internal variables that DO consume OT entries.
 /// LV1/LV2/LV3/ST are stock-backed; DEL/DL/RT1/RT2 are non-stock. Used by
 /// the section-5 dimension recovery to exclude these helper names from the
@@ -1787,6 +1801,39 @@ impl VdfFile {
             }
         }
         out
+    }
+
+    /// Per-file residual OT-overlap diagnostics: decoded record spans that
+    /// still claim a shared OT slot after graphical-function descriptor
+    /// peeling, the standalone lookup-only drop, AND the residual-overlap
+    /// re-resolution -- i.e. the conflicts the ordering oracle could not
+    /// adjudicate and therefore honest-dropped rather than letting alphabetical
+    /// column order silently pick an owner (see docs/design/vdf.md "Residual
+    /// OT-overlap"). Empty across the whole tracked corpus, including the two
+    /// SimService `Base.vdf` files whose stale-`f[11]` conflicts the oracle now
+    /// fully recovers; it is non-empty only when the per-file gate fails (a
+    /// non-alphabetical file) or the oracle leaves a conflict unadjudicated.
+    /// Mirrors the Python reader's `NamedResultsDiagnostics.residual_overlap`
+    /// surface.
+    pub fn residual_overlap_diagnostics(&self) -> Vec<VdfResidualOverlap> {
+        use record_results::{decoded_record_spans, identify_descriptor_records};
+        let name_key_to_name_index = self.record_name_key_to_name_index();
+        let section3_directory = self.parse_section3_directory();
+        let spans =
+            decoded_record_spans(self, &name_key_to_name_index, section3_directory.as_ref());
+        let desc_id = identify_descriptor_records(self, &spans);
+        desc_id
+            .residual_overlap_components
+            .iter()
+            .map(|component| VdfResidualOverlap {
+                contested_ots: component.contested_ots.clone(),
+                dropped_names: component
+                    .span_indices
+                    .iter()
+                    .filter_map(|&i| spans.get(i).map(|s| s.name.clone()))
+                    .collect(),
+            })
+            .collect()
     }
 
     /// Extract one data block's series aligned to the saved time axis.
@@ -4842,6 +4889,269 @@ mod tests {
                 "{path}: the four coincidental stocks are the withheld candidates"
             );
         }
+    }
+
+    #[test]
+    fn test_residual_overlap_recovery_on_simservice_fixtures() {
+        // Stage 2 recovery for GH #841. Ref.vdf (and every file whose overlaps
+        // the peel already resolves) has NO residual components, so the whole
+        // re-resolution is a provable no-op there. SimService/Base.vdf's
+        // stale-f[11] unsaved-variable records survive the peel still in
+        // owner-vs-owner conflict; the re-resolution recovers every real owner
+        // (dropping only the ghosts) and, because every conflict is
+        // adjudicated, leaves NOTHING honest-dropped -- so the residual
+        // diagnostics come back empty. No OT slot may ever be claimed by two
+        // differently-named emitted owners. SimService half follows the
+        // third_party fixture-availability convention.
+        use super::record_results::{decoded_record_spans, identify_descriptor_records};
+
+        let ref_vdf = vdf_file("../../test/xmutil_test_models/Ref.vdf");
+        assert!(
+            ref_vdf.residual_overlap_diagnostics().is_empty(),
+            "Ref.vdf overlaps are fully resolved by the peel; re-resolution must be a no-op"
+        );
+
+        let fixtures = [
+            "../../third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/Base.vdf",
+            "../../third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/ctxt0001/Base.vdf",
+        ];
+        if !std::path::Path::new(fixtures[0]).exists() {
+            return;
+        }
+        // The EXACT set of 41 ghost records the re-resolution must drop on both
+        // fixtures (the wide cluster-A ghost, the four scalar-pair ghosts, and
+        // the 36 cluster-B ghosts). Pinning the full set -- not a sample --
+        // plus the exact emitted-column count below means a wrongly-recovered
+        // unlisted ghost on an otherwise-unclaimed OT cannot slip past the
+        // no-double-claim check.
+        let ghosts = [
+            "AGE SPECIFIC FERTILITY DISTRIBUTION FUNCTION",
+            "China future GDP growth rate",
+            "Coal Capacity Utilisation in Production table",
+            "Coal Fraction Discoverable Table",
+            "DICE IPCC Other Rad Forcing Table",
+            "Effect of technology on productivity of investment in Coal production table",
+            "MAIZE FRACTION TABLE",
+            "Nuclear GENERATION EFFICIENCY table",
+            "Oil substitutability EFFECT ON Oil import",
+            "PC MEAT DEMAND FUNCTION",
+            "PC fish demand data",
+            "PC fish demand function",
+            "QDBTU to MB",
+            "ROW Coal demand function",
+            "Renewable Energy consumer real price",
+            "Renewable Resource price per MBTU",
+            "WOOD VALUE ADDED PER TON",
+            "c total population table",
+            "elasticity of fdi to fiscal pressure",
+            "electricity net export table",
+            "extra heavy table",
+            "forestry production in cubic meters",
+            "gas generation efficiency table",
+            "gas to liquids table",
+            "hydro electricity generation in BKWH table",
+            "meat value added per ton table",
+            "nuclear electricity demand in BKWH",
+            "overall carbon tax table",
+            "pc bushel domestic consumption non ethanol",
+            "petroleum generation efficiency table",
+            "private capital transfers over gdp table",
+            "private factor income table",
+            "private transfers table",
+            "relative china technology",
+            "renewable electricity price",
+            "renewable portfolio standard table",
+            "residential energy conservation",
+            "share of electricity for freight transportation",
+            "share of electricity for urban and commuter transportation",
+            "total fertility rate",
+            "value added agriculture products table",
+        ];
+        assert_eq!(ghosts.len(), 41);
+        let reals = [
+            "Indicated China GDP",
+            "indicated per capita fish demand",
+            "indicated row Coal demand",
+            "industrial electricity demand in BKWH",
+        ];
+        for path in fixtures {
+            let sim = vdf_file(path);
+
+            // Every conflict is adjudicated, so nothing is honest-dropped.
+            assert!(
+                sim.residual_overlap_diagnostics().is_empty(),
+                "{path}: the ordering oracle resolves every conflict; no residual remainder"
+            );
+
+            let key_map = sim.record_name_key_to_name_index();
+            let dir = sim.parse_section3_directory();
+            let spans = decoded_record_spans(&sim, &key_map, dir.as_ref());
+            let id = identify_descriptor_records(&sim, &spans);
+            let emitted: HashSet<&str> = spans
+                .iter()
+                .filter(|s| !id.descriptor_indices.contains(&s.rec_idx))
+                .map(|s| s.name.as_str())
+                .collect();
+            for ghost in ghosts {
+                assert!(
+                    !emitted.iter().any(|n| n.eq_ignore_ascii_case(ghost)),
+                    "{path}: ghost {ghost:?} must not survive as an emitted owner"
+                );
+            }
+            for real in reals {
+                assert!(
+                    emitted.iter().any(|n| n.eq_ignore_ascii_case(real)),
+                    "{path}: real owner {real:?} must be recovered as an emitted owner"
+                );
+            }
+
+            // No OT slot may be claimed by two differently-named emitted owners.
+            let mut slot_owner: HashMap<usize, &str> = HashMap::new();
+            for span in spans
+                .iter()
+                .filter(|s| !id.descriptor_indices.contains(&s.rec_idx))
+            {
+                for ot in span.start..span.end {
+                    if let Some(prev) = slot_owner.insert(ot, span.name.as_str())
+                        && prev != span.name.as_str()
+                    {
+                        panic!(
+                            "{path}: OT slot {ot} claimed by two emitted owners \
+                             ({prev:?} and {:?})",
+                            span.name
+                        );
+                    }
+                }
+            }
+
+            // The recovered owners carry the correct series: `Population` is a
+            // 164-element array, and the wrongly-f10-peeled `c Identified Oil
+            // Reserve` is re-admitted with its two known element series.
+            let results = sim
+                .to_results_via_records()
+                .unwrap_or_else(|e| panic!("{path}: to_results_via_records: {e}"));
+            // Exact emitted-column count (Time + every recovered owner element).
+            // Both fixtures decode to the same 1235 columns; a wrongly-recovered
+            // ghost would push this to 1236, a wrongly-dropped real below 1235.
+            assert_eq!(
+                results.offsets.len(),
+                1235,
+                "{path}: exact emitted-column count changed (residual recovery regressed)"
+            );
+            let population_elems = results
+                .offsets
+                .keys()
+                .filter(|k| k.to_string().starts_with("population["))
+                .count();
+            assert_eq!(
+                population_elems, 164,
+                "{path}: recovered Population must expose all 164 array elements"
+            );
+            let mut oil_endpoints: Vec<(f64, f64)> = results
+                .offsets
+                .iter()
+                .filter(|(k, _)| k.to_string().starts_with("c_identified_oil_reserve["))
+                .map(|(_, &col)| {
+                    let first = results.data[col];
+                    let last = results.data[(results.step_count - 1) * results.step_size + col];
+                    (first, last)
+                })
+                .collect();
+            oil_endpoints.sort_by(|a, b| b.0.total_cmp(&a.0));
+            assert_eq!(
+                oil_endpoints.len(),
+                2,
+                "{path}: recovered oil reserve must expose both element series"
+            );
+            // The initial reserves are stock initial conditions (identical
+            // across simulation contexts: Base.vdf and the ctxt0001 scenario);
+            // the finals differ by scenario but must show depletion. Pinning
+            // the initials proves the correct series was re-admitted at the
+            // right OT slots (a wrong slot would carry unrelated magnitudes).
+            let approx = |a: f64, b: f64| (a - b).abs() < 0.01;
+            assert!(
+                approx(oil_endpoints[0].0, 51000.0) && approx(oil_endpoints[1].0, 7900.0),
+                "{path}: recovered oil reserve initial values wrong: {oil_endpoints:?}"
+            );
+            assert!(
+                oil_endpoints[0].1 < oil_endpoints[0].0 && oil_endpoints[1].1 < oil_endpoints[1].0,
+                "{path}: recovered oil reserve must deplete from its initial value: {oil_endpoints:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn residual_pass_runs_on_lookup_free_file() {
+        // GH #844: a lookup-free VDF (`n_lookups == 0`) still reaches the
+        // residual-overlap re-resolution. Before the fix, `identify_descriptor
+        // _records` early-returned on `n_lookups == 0`, so a differently-named
+        // owner-vs-owner OT conflict on such a file was silently resolved by
+        // alphabetical emission order (Rust) / emitted twice (Python). Here the
+        // uncontested anchors `a owner`@1 / `z owner`@9 bracket slot 5, so the
+        // ordering oracle keeps the real owner `m real` and drops the ghost
+        // `zzz ghost` (which sorts past the next anchor) -- with zero lookups.
+        use super::record_results::{DecodedRecordSpan, identify_descriptor_records};
+
+        // Minimal lookup-free file: `offset_table_count == 0` makes
+        // `section6_lookup_records()` return None, i.e. n_lookups == 0.
+        let vdf = VdfFile {
+            data: Vec::new(),
+            time_point_count: 0,
+            bitmap_size: 0,
+            block_time_point_count: 0,
+            block_bitmap_size: 0,
+            data_time_point_count: 0,
+            data_bitmap_size: 0,
+            sections: Vec::new(),
+            names: Vec::new(),
+            name_section_idx: None,
+            slot_table: Vec::new(),
+            slot_table_offset: 0,
+            records: Vec::new(),
+            offset_table_start: 0,
+            offset_table_count: 0,
+            first_data_block: 0,
+            header_final_values_offset: 0,
+            header_lookup_mapping_offset: 0,
+        };
+        assert!(
+            vdf.section6_lookup_records().is_none(),
+            "fixture must have zero lookup records"
+        );
+
+        let span = |rec_idx: usize, name: &str, start: usize| DecodedRecordSpan {
+            rec_idx,
+            name: name.to_string(),
+            start,
+            end: start + 1,
+            sort_key: 0,
+        };
+        // Nine alphabetically-ordered uncontested owners (>= RESIDUAL_ORDERING
+        // _MIN_PAIRS adjacent pairs, ratio 1.0) so the gate passes on real
+        // evidence, bracketing the slot-5 conflict: prev `e own`@4 and next
+        // `n own`@6 keep `m real` and drop `z ghost` (which sorts past `n own`).
+        let spans = [
+            span(0, "b own", 1),
+            span(1, "c own", 2),
+            span(2, "d own", 3),
+            span(3, "e own", 4),
+            span(4, "m real", 5),  // fits [e own, n own] -> recovered
+            span(5, "z ghost", 5), // sorts past n own -> dropped
+            span(6, "n own", 6),
+            span(7, "o own", 7),
+            span(8, "p own", 8),
+            span(9, "q own", 9),
+            span(10, "r own", 10),
+        ];
+        let id = identify_descriptor_records(&vdf, &spans);
+        assert!(
+            id.descriptor_indices.contains(&5),
+            "the ghost must be dropped by the residual pass even with no lookups"
+        );
+        assert!(
+            !id.descriptor_indices.contains(&4),
+            "the real owner must be recovered, not dropped"
+        );
     }
 
     #[test]

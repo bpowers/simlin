@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import bisect
 from itertools import product
 import json
 import math
@@ -1674,6 +1675,17 @@ def _recover_record_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
             continue
         if len(ordered_indices) < 2:
             continue
+        # Deduplicate same-named complete anchors, keeping the first (a
+        # dimension appears once in the recovered set). This mirrors the Rust
+        # reader's `section5_dims.rs::complete_root_dimension_sets`; without it
+        # a duplicate-named complete anchor would leave two same-name entries
+        # here, and the cardinality-match label fallback below
+        # (`len(matches) == 1`) would then see two matches and drop to numeric
+        # labels while the deduped Rust reader emitted real ones -- a parity
+        # divergence. No corpus file has such duplicates (both readers stay in
+        # lockstep), so this is defense-in-depth that keeps them aligned.
+        if anchor.name.lower() in seen:
+            continue
 
         dims.append(RecoveredDimensionSet(
             name=anchor.name,
@@ -1816,6 +1828,21 @@ def _name_looks_lookupish(name: str) -> bool:
 
 
 @dataclass
+class ResidualOverlapComponent:
+    """
+    A residual OT-overlap component: two or more DIFFERENTLY-named decoded
+    spans that still claim a shared OT slot after descriptor peeling and the
+    standalone lookup-only drop. Stage 1 drops every span in the component
+    from emission (honest missing data over a silent alphabetical first-claim
+    win); the component is retained here so a later stage can re-resolve it.
+
+    Mirrors Rust `record_results.rs::ResidualOverlapComponent`.
+    """
+    span_indices: list[int]
+    contested_ots: list[int]
+
+
+@dataclass
 class DescriptorIdentification:
     """
     Result of identifying graphical-function descriptor records.
@@ -1824,11 +1851,18 @@ class DescriptorIdentification:
     when the standalone lookup-only drop's per-file coherence veto withheld
     candidates (SimService/Base.vdf is the canonical case) -- a silent veto
     would let a future file quietly resurrect ghost columns.
+
+    `residual_overlap_components` records the still-conflicted spans dropped by
+    the residual-overlap floor: every span in each component is added to
+    `descriptor_indices` and therefore NOT emitted, so no OT slot is resolved
+    by alphabetical emission order. Retained as data so a later re-resolution
+    stage can narrow the drop before falling back to this floor.
     """
     descriptor_indices: set[int]
     used_f10_fallback: bool
     standalone_drop_veto_fired: bool = False
     standalone_drop_vetoed_candidates: int = 0
+    residual_overlap_components: list[ResidualOverlapComponent] = field(default_factory=list)
 
 
 @dataclass
@@ -1881,7 +1915,26 @@ def identify_descriptor_records(
     """
     n_lookups = len(vdf.section6_lookup_records() or [])
     if n_lookups == 0:
-        return DescriptorIdentification(descriptor_indices=set(), used_f10_fallback=False)
+        # No lookup records to forward-link, so the overlap-path descriptor peel
+        # and the standalone lookup-only drop are no-ops -- but the residual
+        # pass is name/OT-based and MUST still run: a lookup-free file can carry
+        # the stale-f[11] owner-vs-owner conflict this guards against, and
+        # skipping it would emit duplicate columns for a contested slot (GH
+        # #844). phase-1 descriptors are empty here, so nothing is un-peeled and
+        # `descriptor_indices` is exactly the re-resolution's drop set -- the
+        # same result the Rust reader's unconditional residual pass produces.
+        residual_components = residual_overlap_components(spans, set())
+        resolution = resolve_residual_components(
+            spans, residual_components, set(), RESIDUAL_ORDERING_GATE,
+            RESIDUAL_ORDERING_MIN_PAIRS,
+        )
+        return DescriptorIdentification(
+            descriptor_indices=set(resolution.dropped),
+            used_f10_fallback=False,
+            standalone_drop_veto_fired=False,
+            standalone_drop_vetoed_candidates=0,
+            residual_overlap_components=resolution.unresolved_components,
+        )
 
     # Build OT-slot -> spans-claiming-it. Spans that overlap (share any OT slot
     # with another span) are descriptor-pair candidates. Note: descriptors
@@ -1997,11 +2050,30 @@ def identify_descriptor_records(
     )
     descriptor_indices.update(standalone.dropped)
 
+    # Residual-overlap re-resolution. After peeling overlap-path descriptors and
+    # dropping standalone lookup-only tables, some differently-named spans can
+    # STILL claim a shared OT slot -- an owner-vs-owner conflict no structural
+    # signal resolved. Compute those components as data, then re-resolve each
+    # from scratch (lexical peel of table names + the alphabetical-ordering
+    # oracle), recovering the real owners and dropping only the ghosts. Whatever
+    # the oracle cannot adjudicate is honest-dropped and surfaced on the
+    # diagnostics. Mirrors the Rust reference (record_results.rs
+    # `residual_overlap_components` + `resolve_residual_components`).
+    phase1_descriptors = set(descriptor_indices)
+    residual_components = residual_overlap_components(spans, descriptor_indices)
+    resolution = resolve_residual_components(
+        spans, residual_components, phase1_descriptors, RESIDUAL_ORDERING_GATE,
+        RESIDUAL_ORDERING_MIN_PAIRS,
+    )
+    descriptor_indices -= resolution.readmitted
+    descriptor_indices |= resolution.dropped
+
     return DescriptorIdentification(
         descriptor_indices=descriptor_indices,
         used_f10_fallback=used_f10_fallback,
         standalone_drop_veto_fired=standalone.veto_fired,
         standalone_drop_vetoed_candidates=standalone.vetoed_candidates,
+        residual_overlap_components=resolution.unresolved_components,
     )
 
 
@@ -2158,6 +2230,387 @@ def standalone_lookup_only_descriptors(
             vetoed_candidates=len(candidates),
         )
     return StandaloneDropOutcome(dropped=dropped)
+
+
+def residual_overlap_components(
+    spans: list[DecodedRecordSpan],
+    dropped: set[int],
+) -> list[ResidualOverlapComponent]:
+    """
+    Detect residual OT-overlap among the decoded spans that survive descriptor
+    peeling and the standalone lookup-only drop.
+
+    `identify_descriptor_records` resolves the owner/descriptor f[11] union for
+    the overlaps a structural signal can adjudicate (the lexical lookup-def
+    name test, the section-6 forward link). On the 2007-era SimService writer
+    that is not enough: it emits section-1 records for model variables that
+    were NOT saved in the run (data variables, lookup/table definitions,
+    supplementary vars), each carrying a stale f[11] (plausibly the variable's
+    slot in the full runtime array, while the file's OT holds only saved
+    variables). The stale f[11]-as-OT-start spans land on arbitrary saved
+    slots; most fail the `f11 < n_lookups` candidacy gate, so the overlap peel
+    can neither remove them nor detect that it failed, and the component exits
+    still conflicted (see docs/design/vdf.md "Residual OT-overlap").
+
+    Emitting both spans would let alphabetical column order silently pick the
+    OT owner and scatter one variable's data under another variable's name.
+    This returns the residual components; the caller drops every span in them.
+
+    Conflict is DIFFERENT-name only: two spans of the same name that overlap
+    are the ordinary same-variable duplicate the emitter's per-name dedup
+    already resolves (lowest start wins), not a cross-variable ownership
+    conflict. Every span sharing a genuinely-contested slot (one carrying two
+    distinct names) is pulled into the component and dropped, since the whole
+    slot is ambiguous. Mirrors Rust
+    `record_results.rs::residual_overlap_components`.
+    """
+    # slot -> surviving span indices claiming it.
+    by_slot: dict[int, list[int]] = {}
+    for i, span in enumerate(spans):
+        if span.rec_idx in dropped:
+            continue
+        for ot in range(span.start, span.end):
+            by_slot.setdefault(ot, []).append(i)
+
+    parent = list(range(len(spans)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    conflicted: set[int] = set()
+    contested_slot_reps: list[tuple[int, int]] = []  # (ot, rep span idx)
+    for ot, slot_spans in by_slot.items():
+        distinct_names = any(
+            spans[slot_spans[a]].name != spans[slot_spans[b]].name
+            for a in range(len(slot_spans))
+            for b in range(a + 1, len(slot_spans))
+        )
+        if not distinct_names:
+            continue
+        base = slot_spans[0]
+        for other in slot_spans:
+            union(base, other)
+            conflicted.add(other)
+        contested_slot_reps.append((ot, base))
+
+    if not conflicted:
+        return []
+
+    spans_by_root: dict[int, list[int]] = {}
+    for i in conflicted:
+        spans_by_root.setdefault(find(i), []).append(i)
+    ots_by_root: dict[int, list[int]] = {}
+    for ot, rep in contested_slot_reps:
+        ots_by_root.setdefault(find(rep), []).append(ot)
+
+    components: list[ResidualOverlapComponent] = []
+    for root, span_indices in spans_by_root.items():
+        span_indices.sort()
+        contested_ots = sorted(set(ots_by_root.get(root, [])))
+        components.append(ResidualOverlapComponent(
+            span_indices=span_indices,
+            contested_ots=contested_ots,
+        ))
+    # Deterministic order (dict iteration is insertion-ordered but the roots
+    # are not meaningful): by first contested OT, then by first span index.
+    components.sort(key=lambda c: (
+        c.contested_ots[0] if c.contested_ots else math.inf,
+        c.span_indices[0] if c.span_indices else math.inf,
+    ))
+    return components
+
+
+# Minimum fraction of adjacent uncontested-owner pairs (sorted by OT) that must
+# be alphabetically ordered for the ordering oracle to run on a file. Vensim
+# allocates OT slots in case-insensitive alphabetical order within a run, so a
+# genuine run file's uncontested owners are overwhelmingly ordered (the four
+# probed corpus files measure 98.6-99.6%; the few percent of breaks are run
+# boundaries). A file below this bar does not exhibit the invariant, so the
+# oracle abstains and every residual span is honest-dropped (Stage 1 semantics).
+# The bar is a principled "overwhelming majority", not tuned to any one file.
+RESIDUAL_ORDERING_GATE = 0.95
+
+# Minimum number of adjacent uncontested-owner pairs a file must have for the
+# ordering oracle to run. Below it the oracle abstains (the component
+# honest-drops with diagnostics), because a ratio measured over one or two pairs
+# carries no real evidence -- with fewer than two owners the ratio is vacuously
+# 1.0 and would pass the gate with zero measured support. The exact value is NOT
+# corpus-supported: any floor between 2 and ~800 is indistinguishable, since the
+# only component-bearing files (the two SimService Base.vdf) measure ~840 pairs.
+# It is cheap fail-safe insurance -- abstention costs only recovery, never
+# correctness -- and below ~20 pairs the 0.95 ratio already demands near-perfect
+# ordering; this floor just forbids the degenerate zero/one-pair case outright.
+# Mirrors Rust `record_results.rs::RESIDUAL_ORDERING_MIN_PAIRS`.
+RESIDUAL_ORDERING_MIN_PAIRS = 8
+
+
+@dataclass
+class ResidualResolution:
+    """
+    Outcome of re-resolving the residual-overlap components.
+
+    `dropped` are record indices the re-resolution drops (ghosts + honest-drop
+    fallback). `readmitted` are record indices that phase 1 peeled but the
+    re-resolution recovered as real owners (e.g. `c Identified Oil Reserve`).
+    `unresolved_components` are the residual components' honest-dropped
+    remainder (the spans the oracle could not adjudicate), surfaced on the
+    diagnostics; empty when every component fully resolves. Mirrors Rust
+    `record_results.rs::ResidualResolution`.
+    """
+    dropped: set[int]
+    readmitted: set[int]
+    unresolved_components: list[ResidualOverlapComponent]
+
+
+def _residual_alphabetical_consistency(uncontested_by_ot: list[DecodedRecordSpan]) -> float:
+    """Fraction of adjacent OT-sorted uncontested-owner pairs that are
+    name-ordered -- the measured strength of Vensim's alphabetical OT
+    allocation on this file. 1.0 when there are fewer than two owners."""
+    if len(uncontested_by_ot) < 2:
+        return 1.0
+    ok = sum(
+        1 for a, b in zip(uncontested_by_ot, uncontested_by_ot[1:])
+        if _vensim_sort_key(a.name) <= _vensim_sort_key(b.name)
+    )
+    return ok / (len(uncontested_by_ot) - 1)
+
+
+def _ordering_ok(prev_key: Optional[str], next_key: Optional[str], name_key: str) -> bool:
+    """
+    Ordering verdict for a span given its prev/next uncontested-owner anchor
+    bracket (all args are case-insensitive sort keys).
+
+    An INVERTED bracket (`prev_key > next_key`) means a run boundary sits
+    between the two anchors, so the next side is unreliable and only the more
+    reliable prev side is tested (the cluster-A case, where the next anchor
+    `agricultural land in use` sorts before the real `c *` owners). Otherwise
+    the name must fall within `[prev, next]`.
+    """
+    if prev_key is not None and next_key is not None and prev_key > next_key:
+        return prev_key <= name_key
+    return (prev_key is None or prev_key <= name_key) and (
+        next_key is None or name_key <= next_key
+    )
+
+
+def _anchor_prev(starts: list[int], anchors: list[DecodedRecordSpan],
+                 start: int) -> Optional[DecodedRecordSpan]:
+    """Nearest anchor with OT start strictly before `start` (`anchors` sorted by
+    start, `starts` their start list)."""
+    j = bisect.bisect_left(starts, start) - 1
+    return anchors[j] if j >= 0 else None
+
+
+def _anchor_next(starts: list[int], anchors: list[DecodedRecordSpan],
+                 end: int) -> Optional[DecodedRecordSpan]:
+    """Nearest anchor with OT start at or after `end`."""
+    j = bisect.bisect_left(starts, end)
+    return anchors[j] if j < len(anchors) else None
+
+
+def _residual_span_is_owner(
+    span: DecodedRecordSpan,
+    recovered: list[DecodedRecordSpan],
+    recovered_starts: list[int],
+    uncontested: list[DecodedRecordSpan],
+    uncontested_starts: list[int],
+) -> bool:
+    """
+    Ordering-oracle verdict: does `span` sit where Vensim's alphabetical OT
+    allocation would put a real owner?
+
+    Anchors come in two tiers. When a RECOVERED real owner (a residual-component
+    span already confirmed this pass) brackets the span on BOTH sides, that
+    tier wins: recovered reals share the span's interleaved run, so they are the
+    reliable same-run evidence (this is what adjudicates `indicated per capita
+    fish demand` vs `China future GDP growth rate` at OT 127 -- the recovered
+    `Indicated China GDP`@123 / `indicated row Coal demand`@128 bracket, not the
+    nearest uncontested owner `cafe history`@124, which is a different run).
+    Otherwise the file's uncontested owners are the anchors.
+    """
+    name_key = _vensim_sort_key(span.name)
+    rp = _anchor_prev(recovered_starts, recovered, span.start)
+    rn = _anchor_next(recovered_starts, recovered, span.end)
+    if rp is not None and rn is not None:
+        return _ordering_ok(_vensim_sort_key(rp.name), _vensim_sort_key(rn.name), name_key)
+    up = _anchor_prev(uncontested_starts, uncontested, span.start)
+    un = _anchor_next(uncontested_starts, uncontested, span.end)
+    up_key = _vensim_sort_key(up.name) if up is not None else None
+    un_key = _vensim_sort_key(un.name) if un is not None else None
+    return _ordering_ok(up_key, un_key, name_key)
+
+
+def _spans_overlap(a: DecodedRecordSpan, b: DecodedRecordSpan) -> bool:
+    return not (a.end <= b.start or b.end <= a.start)
+
+
+def _spans_conflict(a: DecodedRecordSpan, b: DecodedRecordSpan) -> bool:
+    """Genuine residual CONFLICT: overlapping extents AND different names.
+    Same-name overlaps are ordinary duplicate records for one variable that the
+    per-name emission dedup owns (keep-lowest-start) -- the same rule
+    `residual_overlap_components` uses to build the components. A name-blind
+    predicate here would honest-drop a same-name duplicate pair that a
+    differently-named ghost dragged into a component, losing the variable
+    entirely (GH #844). Mirrors Rust `record_results.rs::spans_conflict`."""
+    return _spans_overlap(a, b) and a.name != b.name
+
+
+def resolve_residual_components(
+    spans: list[DecodedRecordSpan],
+    components: list[ResidualOverlapComponent],
+    phase1_descriptors: set[int],
+    gate_threshold: float,
+    min_pairs: int,
+) -> ResidualResolution:
+    """
+    Re-resolve each residual-overlap component from scratch, recovering the real
+    owners and dropping only the ghosts (stale-`f[11]` unsaved-variable records).
+
+    Per component (see docs/design/vdf.md "Residual OT-overlap"):
+    (a) discard the component's phase-1 overlap peels that spatially belong to
+        it (un-peel: any phase-1 descriptor overlapping a component span, e.g.
+        the wrongly f10-peeled `c Identified Oil Reserve`), then
+    (b) LEXICALLY peel spans whose names are lookupish (` lookup`/` table`/...),
+        WITHOUT the `f11 < n_lookups` gate -- a lookup definition is a table,
+        not a series, so its stale `f[11]` cannot forward-link, then
+    (c) adjudicate the remaining conflicts with the alphabetical-ordering oracle
+        (`_residual_span_is_owner`), iterating a fixpoint so a span confirmed as
+        an owner becomes an anchor for its neighbours, then
+    (d) honest-drop anything still in conflict (surfaced on the diagnostics).
+
+    The whole procedure is gated per file: the oracle runs only when the
+    uncontested owners supply at least `min_pairs` adjacent pairs AND exhibit the
+    alphabetical-allocation invariant (ratio >= `gate_threshold`). Otherwise it
+    abstains and every residual span is honest-dropped (Stage 1 semantics), so a
+    file that does not follow the invariant -- or offers too little evidence to
+    tell -- is never mis-adjudicated. (Production passes `RESIDUAL_ORDERING_GATE`
+    / `RESIDUAL_ORDERING_MIN_PAIRS`; oracle-mechanics unit tests pass 0.0 / 0 to
+    open the gate, exactly as they already open the ratio side.)
+
+    Mirrors Rust `record_results.rs::resolve_residual_components`.
+    """
+    dropped: set[int] = set()
+    readmitted: set[int] = set()
+    if not components:
+        return ResidualResolution(dropped, readmitted, [])
+
+    comp_span_idx = {i for c in components for i in c.span_indices}
+    # Uncontested owners: the clean, non-conflicted owner partition -- the
+    # alphabetical reference.
+    uncontested = sorted(
+        (s for i, s in enumerate(spans)
+         if s.rec_idx not in phase1_descriptors and i not in comp_span_idx),
+        key=lambda s: s.start,
+    )
+    uncontested_starts = [s.start for s in uncontested]
+
+    # Gate: abstain (honest-drop all) when the file offers too few
+    # uncontested-owner pairs to measure, OR does not exhibit the alphabetical
+    # invariant. The pair-count check is FIRST so the vacuous <2-owner case
+    # (where the ratio is 1.0) can never pass on zero evidence.
+    n_pairs = max(len(uncontested) - 1, 0)
+    if n_pairs < min_pairs or _residual_alphabetical_consistency(uncontested) < gate_threshold:
+        for c in components:
+            for i in c.span_indices:
+                dropped.add(spans[i].rec_idx)
+        return ResidualResolution(dropped, readmitted, list(components))
+
+    # Per-component active sets: component spans + un-peeled phase-1 descriptors
+    # overlapping any component span. A phase-1 descriptor is un-peeled (given a
+    # second chance) exactly when it collides with a component's spans.
+    comp_active: list[list[DecodedRecordSpan]] = []
+    unpeeled_recidx: set[int] = set()
+    for c in components:
+        active = [spans[i] for i in c.span_indices]
+        # Test un-peel candidacy against a SNAPSHOT of the original component
+        # spans, not the growing `active` list: a phase-1 descriptor is
+        # un-peeled iff it cross-name-conflicts with an ORIGINAL component span,
+        # never merely with a previously-un-peeled descriptor (mirrors the Rust
+        # `component_spans` snapshot; keeps the two readers bit-identical on a
+        # chained-descriptor residual region). A same-name overlap is not a
+        # conflict, so it stays dropped -- its owner twin already represents it.
+        component_spans = list(active)
+        for i, s in enumerate(spans):
+            if s.rec_idx in phase1_descriptors and any(
+                _spans_conflict(s, cs) for cs in component_spans
+            ):
+                active.append(s)
+                unpeeled_recidx.add(s.rec_idx)
+        comp_active.append(active)
+
+    # (a) lexical peel (drop lookupish table names).
+    for active in comp_active:
+        keep = []
+        for s in active:
+            if _name_looks_lookupish(s.name):
+                dropped.add(s.rec_idx)
+            else:
+                keep.append(s)
+        active[:] = keep
+
+    # (b)+(c) fixpoint: confirm non-overlapping spans as recovered owners, then
+    # drop the decisive ghosts, until no component changes.
+    recovered: list[DecodedRecordSpan] = []
+    changed = True
+    while changed:
+        changed = False
+        # Confirm any span no longer CONFLICTING with another active span (a
+        # same-name overlap is not a conflict, so a same-name duplicate pair
+        # confirms and survives once its differently-named ghost is dropped).
+        for active in comp_active:
+            still = []
+            for s in active:
+                if any(t is not s and _spans_conflict(s, t) for t in active):
+                    still.append(s)
+                else:
+                    recovered.append(s)
+                    changed = True
+            active[:] = still
+        recovered.sort(key=lambda s: s.start)
+        recovered_starts = [s.start for s in recovered]
+        # Drop decisive ghosts: in a still-conflicting group with at least one
+        # ordering-consistent owner, drop the ordering-inconsistent spans.
+        for active in comp_active:
+            overl = [s for s in active if any(t is not s and _spans_conflict(s, t) for t in active)]
+            if not overl:
+                continue
+            owners = [s for s in overl
+                      if _residual_span_is_owner(s, recovered, recovered_starts,
+                                                 uncontested, uncontested_starts)]
+            ghosts = [s for s in overl if s not in owners]
+            if owners and ghosts:
+                for s in ghosts:
+                    dropped.add(s.rec_idx)
+                active[:] = [s for s in active if s not in ghosts]
+                changed = True
+
+    # (d) honest-drop the still-conflicted remainder; report it on diagnostics.
+    unresolved: list[ResidualOverlapComponent] = []
+    for c, active in zip(components, comp_active):
+        leftover = [s for s in active if any(t is not s and _spans_conflict(s, t) for t in active)]
+        if leftover:
+            leftover_idx = {id(s) for s in leftover}
+            span_indices = sorted(i for i in c.span_indices if id(spans[i]) in leftover_idx)
+            for s in leftover:
+                dropped.add(s.rec_idx)
+            contested = sorted({ot for a in leftover for b in leftover
+                                if a is not b and _spans_conflict(a, b)
+                                for ot in range(max(a.start, b.start), min(a.end, b.end))})
+            unresolved.append(ResidualOverlapComponent(
+                span_indices=span_indices, contested_ots=contested))
+
+    # Un-peeled phase-1 descriptors that were KEPT are readmitted as owners.
+    kept_recidx = {s.rec_idx for active in comp_active for s in active} | {s.rec_idx for s in recovered}
+    readmitted = {r for r in unpeeled_recidx if r in kept_recidx and r not in dropped}
+    return ResidualResolution(dropped, readmitted, unresolved)
 
 
 def _array_element_labels_for_span(
@@ -2487,6 +2940,18 @@ class NamedResultsDiagnostics:
     # Rust reader's `VdfData::unreconciled_ots`; empty on every tracked
     # corpus file (GH #842).
     bitmap_unreconciled_ots: list[int] = field(default_factory=list)
+    # Residual OT-overlap: differently-named decoded spans that still claim a
+    # shared OT slot after descriptor peeling, the standalone lookup-only drop,
+    # AND the residual-overlap re-resolution -- i.e. the conflicts the ordering
+    # oracle could not adjudicate and therefore honest-dropped (honest missing
+    # data over a silent alphabetical first-claim win). Empty across the whole
+    # tracked corpus, including the two SimService Base.vdf files whose
+    # stale-f[11] conflicts the oracle now fully recovers; non-empty only when
+    # the per-file gate fails or the oracle leaves a conflict unadjudicated.
+    # Mirrors the Rust reader's
+    # `DescriptorIdentification.residual_overlap_components` (span-index based;
+    # the name-resolved analogue is Rust `VdfFile::residual_overlap_diagnostics`).
+    residual_overlap: list[ResidualOverlapComponent] = field(default_factory=list)
 
 
 def extract_named_results_with_diagnostics(
@@ -2538,6 +3003,7 @@ def extract_named_results_with_diagnostics(
         desc_id.standalone_drop_vetoed_candidates
     )
     diagnostics.bitmap_unreconciled_ots = vdf.unreconciled_data_blocks()
+    diagnostics.residual_overlap = desc_id.residual_overlap_components
 
     owner_spans = [s for s in spans if s.rec_idx not in desc_id.descriptor_indices]
 

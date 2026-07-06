@@ -201,6 +201,13 @@ pub(super) fn decoded_record_spans(
 /// would let a future file quietly resurrect ghost columns. The flags are
 /// exposed for tests and future diagnostics; they have no effect on the
 /// descriptor membership decision itself.
+///
+/// `residual_overlap_components` records the still-conflicted spans dropped by
+/// the residual-overlap floor (see [`residual_overlap_components`]): every span
+/// in each component is added to `descriptor_indices` and therefore NOT
+/// emitted, so no OT slot is ever resolved by alphabetical emission order.
+/// The components are retained as data (not just the drop set) so a later
+/// re-resolution stage can narrow the drop before it falls back to this floor.
 #[derive(Clone, Debug, Default)]
 pub(super) struct DescriptorIdentification {
     pub(super) descriptor_indices: HashSet<usize>,
@@ -210,6 +217,23 @@ pub(super) struct DescriptorIdentification {
     pub(super) standalone_drop_veto_fired: bool,
     #[allow(dead_code)]
     pub(super) standalone_drop_vetoed_candidates: usize,
+    pub(super) residual_overlap_components: Vec<ResidualOverlapComponent>,
+}
+
+/// A residual OT-overlap component: two or more DIFFERENTLY-named decoded
+/// spans that still claim a shared OT slot after descriptor peeling and the
+/// standalone lookup-only drop. Stage 1 drops every span in the component
+/// from emission (honest missing data over a silent alphabetical first-claim
+/// win); the component is retained here so a later stage can re-resolve it
+/// before falling back to the drop.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ResidualOverlapComponent {
+    /// Indices into the `spans` slice for every span in the component (all
+    /// dropped in Stage 1).
+    pub(super) span_indices: Vec<usize>,
+    /// OT slots claimed by two or more differently-named spans of the
+    /// component (the genuine conflicts). Sorted ascending.
+    pub(super) contested_ots: Vec<usize>,
 }
 
 /// Outcome of the standalone lookup-only descriptor detection: the records
@@ -283,148 +307,654 @@ pub(super) fn identify_descriptor_records(
     spans: &[DecodedRecordSpan],
 ) -> DescriptorIdentification {
     let n_lookups = vdf.section6_lookup_records().map(|v| v.len()).unwrap_or(0);
-    if n_lookups == 0 || spans.is_empty() {
+    if spans.is_empty() {
         return DescriptorIdentification::default();
     }
 
-    // Build OT-slot -> spans-claiming-it. Spans that share any OT slot with
-    // another span are descriptor-pair candidates.
+    let mut descriptor_indices: HashSet<usize> = HashSet::new();
+    let mut used_f10_fallback = false;
+    let mut standalone_veto_fired = false;
+    let mut standalone_vetoed_candidates = 0usize;
+
+    // The overlap-path descriptor peel and the standalone lookup-only drop both
+    // forward-link through section-6 lookup records, so they run ONLY when the
+    // file has lookups. The residual-overlap pass further below is name/OT-based
+    // and must run UNCONDITIONALLY: a lookup-free file can still carry the
+    // stale-f[11] owner-vs-owner conflict this guards against, and skipping it
+    // would silently resolve by alphabetical emission order (GH #844).
+    if n_lookups > 0 {
+        // Build OT-slot -> spans-claiming-it. Spans that share any OT slot with
+        // another span are descriptor-pair candidates.
+        let mut by_slot: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, span) in spans.iter().enumerate() {
+            for ot in span.start..span.end {
+                by_slot.entry(ot).or_default().push(i);
+            }
+        }
+
+        // Connected components of overlapping spans (union-find on span indices).
+        let mut uf = UnionFind::new(spans.len());
+        for slot_spans in by_slot.values() {
+            if slot_spans.len() >= 2 {
+                let base = slot_spans[0];
+                for &other in &slot_spans[1..] {
+                    uf.union(base, other);
+                }
+            }
+        }
+
+        // A span participates in overlap iff some OT in its range has 2+
+        // claimants.
+        let mut overlapping: HashSet<usize> = HashSet::new();
+        for slot_spans in by_slot.values() {
+            if slot_spans.len() >= 2 {
+                overlapping.extend(slot_spans.iter().copied());
+            }
+        }
+
+        let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, _) in spans.iter().enumerate() {
+            if overlapping.contains(&i) {
+                let root = uf.find(i);
+                components.entry(root).or_default().push(i);
+            }
+        }
+
+        for component in components.values() {
+            // Iteratively peel off descriptor records until the component is
+            // internally non-overlapping. Candidates are restricted to records
+            // whose `f[11]` is in `[0, lookup_count)` -- the structural
+            // pre-condition for the lookup-record forward link.
+            let mut active: Vec<usize> = component.clone();
+            loop {
+                let mut comp_by_slot: HashMap<usize, Vec<usize>> = HashMap::new();
+                for &i in &active {
+                    let span = &spans[i];
+                    for ot in span.start..span.end {
+                        comp_by_slot.entry(ot).or_default().push(i);
+                    }
+                }
+                let mut still_overlapping: HashSet<usize> = HashSet::new();
+                for slot_spans in comp_by_slot.values() {
+                    if slot_spans.len() >= 2 {
+                        still_overlapping.extend(slot_spans.iter().copied());
+                    }
+                }
+                if still_overlapping.is_empty() {
+                    break;
+                }
+                let candidates: Vec<usize> = active
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        if !still_overlapping.contains(&i) {
+                            return false;
+                        }
+                        let f11 = vdf.records[spans[i].rec_idx].fields[11] as usize;
+                        f11 < n_lookups
+                    })
+                    .collect();
+                if candidates.is_empty() {
+                    // Owner-only overlap with no descriptor candidate: leave the
+                    // component alone. The caller (or precision report) is
+                    // expected to surface a residual `record-span-overlap`.
+                    break;
+                }
+                let lookupish: Vec<usize> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&i| is_lookupish_name(&spans[i].name))
+                    .collect();
+                let descriptor_span_idx = if lookupish.len() == 1 {
+                    lookupish[0]
+                } else {
+                    used_f10_fallback = true;
+                    *candidates
+                        .iter()
+                        .max_by_key(|&&i| (spans[i].sort_key, spans[i].rec_idx))
+                        .expect("candidates non-empty")
+                };
+                descriptor_indices.insert(spans[descriptor_span_idx].rec_idx);
+                active.retain(|&i| i != descriptor_span_idx);
+            }
+        }
+
+        // Standalone (non-overlapping) descriptors: a lookup-only variable Vensim
+        // saves only as a descriptor record (a graphical-function definition). The
+        // overlap path above never sees it (it collides with nothing), so it would
+        // otherwise decode at its spurious `f[11]`-as-OT-start ghost slot. A bare
+        // lookup is a table, not a time series, so recognise it and DROP it -- its
+        // values, where they matter, are carried by the consumer variables that
+        // call it (separately-emitted owners).
+        let lookup_records = vdf.section6_lookup_records();
+        let lookup_word10: Vec<usize> = lookup_records
+            .as_ref()
+            .map(|recs| recs.iter().map(|r| r.ot_index()).collect())
+            .unwrap_or_default();
+        let lookup_word11: Vec<usize> = lookup_records
+            .as_ref()
+            .map(|recs| recs.iter().map(|r| r.output_width()).collect())
+            .unwrap_or_default();
+        let class_codes = vdf.section6_ot_class_codes().unwrap_or_default();
+        let f11_by_span: Vec<u32> = spans
+            .iter()
+            .map(|s| vdf.records[s.rec_idx].fields[11])
+            .collect();
+        let standalone = standalone_lookup_only_descriptors(
+            spans,
+            &f11_by_span,
+            &overlapping,
+            &descriptor_indices,
+            n_lookups,
+            &lookup_word10,
+            &lookup_word11,
+            &class_codes,
+            vdf.offset_table_count,
+        );
+        descriptor_indices.extend(standalone.dropped);
+        standalone_veto_fired = standalone.veto_fired;
+        standalone_vetoed_candidates = standalone.vetoed_candidates;
+    }
+
+    // Residual-overlap re-resolution. After peeling overlap-path descriptors
+    // and dropping standalone lookup-only tables, some differently-named spans
+    // can STILL claim a shared OT slot -- an owner-vs-owner conflict no
+    // structural signal resolved. Compute those components as data, then
+    // re-resolve each from scratch (lexical peel of table names + the
+    // alphabetical-ordering oracle), recovering the real owners and dropping
+    // only the ghosts. Whatever the oracle cannot adjudicate is honest-dropped
+    // and threaded out on `DescriptorIdentification` for the diagnostics.
+    let phase1_descriptors = descriptor_indices.clone();
+    let residual_components = residual_overlap_components(spans, &descriptor_indices);
+    let resolution = resolve_residual_components(
+        spans,
+        &residual_components,
+        &phase1_descriptors,
+        RESIDUAL_ORDERING_GATE,
+        RESIDUAL_ORDERING_MIN_PAIRS,
+    );
+    for rec_idx in &resolution.readmitted {
+        descriptor_indices.remove(rec_idx);
+    }
+    descriptor_indices.extend(resolution.dropped.iter().copied());
+
+    DescriptorIdentification {
+        descriptor_indices,
+        used_f10_fallback,
+        standalone_drop_veto_fired: standalone_veto_fired,
+        standalone_drop_vetoed_candidates: standalone_vetoed_candidates,
+        residual_overlap_components: resolution.unresolved_components,
+    }
+}
+
+/// Detect residual OT-overlap among the decoded spans that survive descriptor
+/// peeling and the standalone lookup-only drop (functional core: takes the
+/// spans plus the already-dropped `rec_idx` set, so it is unit-testable on
+/// synthetic inputs with no fixture).
+///
+/// `identify_descriptor_records` resolves the owner/descriptor `f[11]` union
+/// for the overlaps a structural signal can adjudicate (the lexical
+/// lookup-def name test, the section-6 forward link). On the 2007-era
+/// SimService writer that is not enough: it emits section-1 records for model
+/// variables that were NOT saved in the run (data variables, lookup/table
+/// definitions, supplementary vars), and those records carry a stale `f[11]`
+/// (plausibly the variable's slot in the full runtime array, while the file's
+/// OT contains only saved variables). The stale `f[11]`-as-OT-start spans land
+/// on arbitrary saved slots; most fail the `f11 < n_lookups` candidacy gate, so
+/// the overlap peel can neither remove them nor detect that it failed, and the
+/// component exits still conflicted (see docs/design/vdf.md "Residual
+/// OT-overlap" and the stale-`f[11]` hypothesis).
+///
+/// Emitting both spans would let alphabetical emission order silently pick the
+/// OT owner and scatter one variable's data under another variable's name. This
+/// returns the residual components; the caller drops every span in them.
+///
+/// Conflict is DIFFERENT-name only: two spans of the same name that overlap are
+/// the ordinary same-variable duplicate the emitter's per-name dedup already
+/// resolves (lowest start wins), not a cross-variable ownership conflict. Every
+/// span sharing a genuinely-contested slot (one carrying two distinct names) is
+/// pulled into the component and dropped, since the whole slot is ambiguous.
+fn residual_overlap_components(
+    spans: &[DecodedRecordSpan],
+    dropped: &HashSet<usize>,
+) -> Vec<ResidualOverlapComponent> {
+    // slot -> surviving span indices claiming it.
     let mut by_slot: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, span) in spans.iter().enumerate() {
+        if dropped.contains(&span.rec_idx) {
+            continue;
+        }
         for ot in span.start..span.end {
             by_slot.entry(ot).or_default().push(i);
         }
     }
 
-    // Connected components of overlapping spans (union-find on span indices).
+    // A slot is genuinely contested iff two of its claimants carry distinct
+    // names. Union every span on such a slot (the whole slot is ambiguous) and
+    // record the slot as contested.
     let mut uf = UnionFind::new(spans.len());
-    for slot_spans in by_slot.values() {
-        if slot_spans.len() >= 2 {
-            let base = slot_spans[0];
-            for &other in &slot_spans[1..] {
-                uf.union(base, other);
-            }
-        }
-    }
-
-    // A span participates in overlap iff some OT in its range has 2+
-    // claimants.
-    let mut overlapping: HashSet<usize> = HashSet::new();
-    for slot_spans in by_slot.values() {
-        if slot_spans.len() >= 2 {
-            overlapping.extend(slot_spans.iter().copied());
-        }
-    }
-
-    let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, _) in spans.iter().enumerate() {
-        if overlapping.contains(&i) {
-            let root = uf.find(i);
-            components.entry(root).or_default().push(i);
-        }
-    }
-
-    let mut descriptor_indices: HashSet<usize> = HashSet::new();
-    let mut used_f10_fallback = false;
-
-    for component in components.values() {
-        // Iteratively peel off descriptor records until the component is
-        // internally non-overlapping. Candidates are restricted to records
-        // whose `f[11]` is in `[0, lookup_count)` -- the structural
-        // pre-condition for the lookup-record forward link.
-        let mut active: Vec<usize> = component.clone();
-        loop {
-            let mut comp_by_slot: HashMap<usize, Vec<usize>> = HashMap::new();
-            for &i in &active {
-                let span = &spans[i];
-                for ot in span.start..span.end {
-                    comp_by_slot.entry(ot).or_default().push(i);
+    let mut conflicted: HashSet<usize> = HashSet::new();
+    let mut contested_slot_reps: Vec<(usize, usize)> = Vec::new(); // (ot, rep span idx)
+    for (&ot, slot_spans) in &by_slot {
+        let mut distinct_names = false;
+        'pairs: for a in 0..slot_spans.len() {
+            for b in (a + 1)..slot_spans.len() {
+                if spans[slot_spans[a]].name != spans[slot_spans[b]].name {
+                    distinct_names = true;
+                    break 'pairs;
                 }
             }
-            let mut still_overlapping: HashSet<usize> = HashSet::new();
-            for slot_spans in comp_by_slot.values() {
-                if slot_spans.len() >= 2 {
-                    still_overlapping.extend(slot_spans.iter().copied());
-                }
-            }
-            if still_overlapping.is_empty() {
-                break;
-            }
-            let candidates: Vec<usize> = active
-                .iter()
-                .copied()
-                .filter(|&i| {
-                    if !still_overlapping.contains(&i) {
-                        return false;
-                    }
-                    let f11 = vdf.records[spans[i].rec_idx].fields[11] as usize;
-                    f11 < n_lookups
-                })
-                .collect();
-            if candidates.is_empty() {
-                // Owner-only overlap with no descriptor candidate: leave the
-                // component alone. The caller (or precision report) is
-                // expected to surface a residual `record-span-overlap`.
-                break;
-            }
-            let lookupish: Vec<usize> = candidates
-                .iter()
-                .copied()
-                .filter(|&i| is_lookupish_name(&spans[i].name))
-                .collect();
-            let descriptor_span_idx = if lookupish.len() == 1 {
-                lookupish[0]
-            } else {
-                used_f10_fallback = true;
-                *candidates
-                    .iter()
-                    .max_by_key(|&&i| (spans[i].sort_key, spans[i].rec_idx))
-                    .expect("candidates non-empty")
-            };
-            descriptor_indices.insert(spans[descriptor_span_idx].rec_idx);
-            active.retain(|&i| i != descriptor_span_idx);
         }
+        if !distinct_names {
+            continue;
+        }
+        let base = slot_spans[0];
+        for &other in slot_spans {
+            uf.union(base, other);
+            conflicted.insert(other);
+        }
+        contested_slot_reps.push((ot, base));
     }
 
-    // Standalone (non-overlapping) descriptors: a lookup-only variable Vensim
-    // saves only as a descriptor record (a graphical-function definition). The
-    // overlap path above never sees it (it collides with nothing), so it would
-    // otherwise decode at its spurious `f[11]`-as-OT-start ghost slot. A bare
-    // lookup is a table, not a time series, so recognise it and DROP it -- its
-    // values, where they matter, are carried by the consumer variables that
-    // call it (separately-emitted owners).
-    let lookup_records = vdf.section6_lookup_records();
-    let lookup_word10: Vec<usize> = lookup_records
-        .as_ref()
-        .map(|recs| recs.iter().map(|r| r.ot_index()).collect())
-        .unwrap_or_default();
-    let lookup_word11: Vec<usize> = lookup_records
-        .as_ref()
-        .map(|recs| recs.iter().map(|r| r.output_width()).collect())
-        .unwrap_or_default();
-    let class_codes = vdf.section6_ot_class_codes().unwrap_or_default();
-    let f11_by_span: Vec<u32> = spans
-        .iter()
-        .map(|s| vdf.records[s.rec_idx].fields[11])
+    if conflicted.is_empty() {
+        return Vec::new();
+    }
+
+    // Group conflicted spans by union-find root; collect each component's
+    // contested OTs by the same root.
+    let mut spans_by_root: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &i in &conflicted {
+        spans_by_root.entry(uf.find(i)).or_default().push(i);
+    }
+    let mut ots_by_root: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &(ot, rep) in &contested_slot_reps {
+        ots_by_root.entry(uf.find(rep)).or_default().push(ot);
+    }
+
+    let mut components: Vec<ResidualOverlapComponent> = spans_by_root
+        .into_iter()
+        .map(|(root, mut span_indices)| {
+            span_indices.sort_unstable();
+            let mut contested_ots = ots_by_root.remove(&root).unwrap_or_default();
+            contested_ots.sort_unstable();
+            contested_ots.dedup();
+            ResidualOverlapComponent {
+                span_indices,
+                contested_ots,
+            }
+        })
         .collect();
-    let standalone = standalone_lookup_only_descriptors(
-        spans,
-        &f11_by_span,
-        &overlapping,
-        &descriptor_indices,
-        n_lookups,
-        &lookup_word10,
-        &lookup_word11,
-        &class_codes,
-        vdf.offset_table_count,
-    );
-    descriptor_indices.extend(standalone.dropped);
+    // Deterministic order (HashMap iteration is not): by first contested OT,
+    // then by first span index.
+    components.sort_by_key(|c| {
+        (
+            c.contested_ots.first().copied().unwrap_or(usize::MAX),
+            c.span_indices.first().copied().unwrap_or(usize::MAX),
+        )
+    });
+    components
+}
 
-    DescriptorIdentification {
-        descriptor_indices,
-        used_f10_fallback,
-        standalone_drop_veto_fired: standalone.veto_fired,
-        standalone_drop_vetoed_candidates: standalone.vetoed_candidates,
+/// Minimum fraction of adjacent uncontested-owner pairs (sorted by OT) that
+/// must be alphabetically ordered for the ordering oracle to run on a file.
+///
+/// Vensim allocates OT slots in case-insensitive alphabetical order within a
+/// run, so a genuine run file's uncontested owners are overwhelmingly ordered
+/// (the four probed corpus files measure 98.6-99.6%; the residual few percent
+/// of breaks are run boundaries). A file below this bar does not exhibit the
+/// invariant, so the oracle abstains and every residual span is honest-dropped
+/// (Stage 1 semantics). The bar is a principled "overwhelming majority", not
+/// tuned to make any one file pass.
+const RESIDUAL_ORDERING_GATE: f64 = 0.95;
+
+/// Minimum number of adjacent uncontested-owner pairs a file must have for the
+/// ordering oracle to run. Below it the oracle abstains (the component
+/// honest-drops with diagnostics), because a ratio measured over one or two
+/// pairs carries no real evidence -- with fewer than two owners the ratio is
+/// vacuously 1.0 and would pass the gate with zero measured support.
+///
+/// The exact value is NOT corpus-supported: any floor between 2 and ~800 is
+/// indistinguishable, since the only component-bearing files (the two
+/// SimService `Base.vdf`) measure ~840 pairs, far above any small floor. It
+/// exists purely as cheap fail-safe insurance -- abstention costs only recovery
+/// (Stage 1 honest-drop stays correct), never correctness, so erring toward
+/// abstention on thin evidence is always safe. Note that below ~20 pairs the
+/// 0.95 ratio already demands near-perfect ordering, which is the intended
+/// behavior when evidence is thin; this floor just forbids the degenerate
+/// zero/one-pair case outright.
+const RESIDUAL_ORDERING_MIN_PAIRS: usize = 8;
+
+/// Outcome of re-resolving the residual-overlap components (Stage 2).
+///
+/// `dropped` are `rec_idx`es the re-resolution drops (ghosts + the honest-drop
+/// fallback). `readmitted` are `rec_idx`es phase 1 peeled that the
+/// re-resolution recovered as real owners (e.g. `c Identified Oil Reserve`).
+/// `unresolved_components` are the honest-dropped remainder the oracle could
+/// not adjudicate, surfaced on the diagnostics (empty when every component
+/// fully resolves, as on `SimService/Base.vdf`).
+#[derive(Clone, Debug, Default)]
+pub(super) struct ResidualResolution {
+    pub(super) dropped: HashSet<usize>,
+    pub(super) readmitted: HashSet<usize>,
+    pub(super) unresolved_components: Vec<ResidualOverlapComponent>,
+}
+
+/// Case-insensitive Vensim OT-allocation sort key (mirrors the Python reader's
+/// `_vensim_sort_key`). Names in the corpus are ASCII, so this matches the
+/// Python `str.lower()` byte-for-byte.
+fn vensim_sort_key(name: &str) -> String {
+    name.to_lowercase()
+}
+
+fn spans_overlap(a: &DecodedRecordSpan, b: &DecodedRecordSpan) -> bool {
+    !(a.end <= b.start || b.end <= a.start)
+}
+
+/// Whether two spans are in genuine residual CONFLICT: overlapping extents AND
+/// different names. Same-name overlaps are NOT conflicts -- they are ordinary
+/// duplicate records for one variable that the per-name emission dedup owns
+/// (keep-lowest-start), exactly the rule `residual_overlap_components` uses to
+/// build the components. Using name-blind overlap here would honest-drop a
+/// same-name duplicate pair that a differently-named ghost dragged into a
+/// component, losing the variable entirely (GH #844).
+fn spans_conflict(a: &DecodedRecordSpan, b: &DecodedRecordSpan) -> bool {
+    spans_overlap(a, b) && a.name != b.name
+}
+
+/// Whether span `idx` still conflicts with another span in `active` (different
+/// name, overlapping extent).
+fn overlaps_any(idx: usize, active: &[usize], spans: &[DecodedRecordSpan]) -> bool {
+    active
+        .iter()
+        .any(|&other| other != idx && spans_conflict(&spans[idx], &spans[other]))
+}
+
+/// Fraction of adjacent OT-sorted uncontested-owner pairs that are name-ordered
+/// -- the measured strength of Vensim's alphabetical OT allocation on this
+/// file. 1.0 when there are fewer than two owners.
+fn alphabetical_consistency(uncontested_by_ot: &[usize], spans: &[DecodedRecordSpan]) -> f64 {
+    if uncontested_by_ot.len() < 2 {
+        return 1.0;
+    }
+    let mut ok = 0usize;
+    for w in uncontested_by_ot.windows(2) {
+        if vensim_sort_key(&spans[w[0]].name) <= vensim_sort_key(&spans[w[1]].name) {
+            ok += 1;
+        }
+    }
+    ok as f64 / (uncontested_by_ot.len() - 1) as f64
+}
+
+/// Ordering verdict for a span given its prev/next anchor bracket (all args are
+/// case-insensitive sort keys). An INVERTED bracket (`prev > next`) means a run
+/// boundary sits between the anchors, so the unreliable next side is dropped
+/// and only the prev side is tested (the cluster-A case, where the next anchor
+/// `agricultural land in use` sorts before the real `c *` owners). Otherwise
+/// the name must fall within `[prev, next]`.
+fn ordering_ok(prev: Option<&str>, next: Option<&str>, name: &str) -> bool {
+    if let (Some(p), Some(n)) = (prev, next)
+        && p > n
+    {
+        return p <= name;
+    }
+    prev.is_none_or(|p| p <= name) && next.is_none_or(|n| name <= n)
+}
+
+/// Nearest span in the OT-`start`-sorted `sorted` list with start strictly
+/// before `start`.
+fn anchor_prev(sorted: &[usize], spans: &[DecodedRecordSpan], start: usize) -> Option<usize> {
+    let pos = sorted.partition_point(|&i| spans[i].start < start);
+    (pos > 0).then(|| sorted[pos - 1])
+}
+
+/// Nearest span in the OT-`start`-sorted `sorted` list with start at or after
+/// `end`.
+fn anchor_next(sorted: &[usize], spans: &[DecodedRecordSpan], end: usize) -> Option<usize> {
+    let pos = sorted.partition_point(|&i| spans[i].start < end);
+    sorted.get(pos).copied()
+}
+
+/// Ordering-oracle verdict: does `span_idx` sit where Vensim's alphabetical OT
+/// allocation would put a real owner?
+///
+/// Anchors come in two tiers. When a RECOVERED real owner (a residual-component
+/// span already confirmed this pass) brackets the span on BOTH sides, that tier
+/// wins: recovered reals share the span's interleaved run, so they are the
+/// reliable same-run evidence (this is what adjudicates `indicated per capita
+/// fish demand` vs `China future GDP growth rate` at OT 127 -- the recovered
+/// `Indicated China GDP`@123 / `indicated row Coal demand`@128 bracket, not the
+/// nearest uncontested owner `cafe history`@124, which is a different run).
+/// Otherwise the file's uncontested owners are the anchors.
+fn residual_span_is_owner(
+    span_idx: usize,
+    recovered_sorted: &[usize],
+    uncontested_sorted: &[usize],
+    spans: &[DecodedRecordSpan],
+) -> bool {
+    let name_key = vensim_sort_key(&spans[span_idx].name);
+    let start = spans[span_idx].start;
+    let end = spans[span_idx].end;
+    let rp = anchor_prev(recovered_sorted, spans, start);
+    let rn = anchor_next(recovered_sorted, spans, end);
+    if let (Some(p), Some(n)) = (rp, rn) {
+        return ordering_ok(
+            Some(&vensim_sort_key(&spans[p].name)),
+            Some(&vensim_sort_key(&spans[n].name)),
+            &name_key,
+        );
+    }
+    let up = anchor_prev(uncontested_sorted, spans, start).map(|i| vensim_sort_key(&spans[i].name));
+    let un = anchor_next(uncontested_sorted, spans, end).map(|i| vensim_sort_key(&spans[i].name));
+    ordering_ok(up.as_deref(), un.as_deref(), &name_key)
+}
+
+/// Re-resolve each residual-overlap component from scratch, recovering the real
+/// owners and dropping only the ghosts (stale-`f[11]` unsaved-variable
+/// records). Functional core: operates on the decoded spans plus the phase-1
+/// descriptor set, so it is unit-testable on synthetic inputs.
+///
+/// Per component (see docs/design/vdf.md "Residual OT-overlap"):
+/// (a) discard the component's phase-1 overlap peels that spatially belong to
+///     it (un-peel: any phase-1 descriptor overlapping a component span, e.g.
+///     the wrongly f10-peeled `c Identified Oil Reserve`), then
+/// (b) LEXICALLY peel spans whose names are lookupish, WITHOUT the
+///     `f11 < n_lookups` gate -- a lookup definition is a table, not a series,
+///     so its stale `f[11]` cannot forward-link, then
+/// (c) adjudicate the remaining conflicts with the alphabetical-ordering oracle
+///     ([`residual_span_is_owner`]), iterating a fixpoint so a span confirmed as
+///     an owner becomes an anchor for its neighbours, then
+/// (d) honest-drop anything still in conflict (surfaced on the diagnostics).
+///
+/// Gated per file: the oracle runs only when the uncontested owners supply at
+/// least `min_pairs` adjacent pairs AND exhibit the alphabetical-allocation
+/// invariant (ratio >= `gate_threshold`). Otherwise it abstains and every
+/// residual span is honest-dropped (Stage 1 semantics), so a file that does not
+/// follow the invariant -- or offers too little evidence to tell -- is never
+/// mis-adjudicated. (Production passes `RESIDUAL_ORDERING_GATE` /
+/// `RESIDUAL_ORDERING_MIN_PAIRS`; oracle-mechanics unit tests pass `0.0` / `0`
+/// to open the gate, exactly as they already open the ratio side.)
+fn resolve_residual_components(
+    spans: &[DecodedRecordSpan],
+    components: &[ResidualOverlapComponent],
+    phase1_descriptors: &HashSet<usize>,
+    gate_threshold: f64,
+    min_pairs: usize,
+) -> ResidualResolution {
+    let mut dropped: HashSet<usize> = HashSet::new();
+    if components.is_empty() {
+        return ResidualResolution::default();
+    }
+
+    let comp_span_idx: HashSet<usize> = components
+        .iter()
+        .flat_map(|c| c.span_indices.iter().copied())
+        .collect();
+
+    // Uncontested owners: the clean, non-conflicted owner partition -- the
+    // alphabetical reference. Sorted by OT start.
+    let mut uncontested: Vec<usize> = (0..spans.len())
+        .filter(|&i| !phase1_descriptors.contains(&spans[i].rec_idx) && !comp_span_idx.contains(&i))
+        .collect();
+    uncontested.sort_by_key(|&i| (spans[i].start, spans[i].rec_idx));
+
+    // Gate: abstain (honest-drop all) when the file offers too few
+    // uncontested-owner pairs to measure, OR does not exhibit the alphabetical
+    // invariant. The pair-count check is FIRST so the vacuous <2-owner case
+    // (where `alphabetical_consistency` is 1.0) can never pass on zero evidence.
+    let n_pairs = uncontested.len().saturating_sub(1);
+    if n_pairs < min_pairs || alphabetical_consistency(&uncontested, spans) < gate_threshold {
+        for c in components {
+            for &i in &c.span_indices {
+                dropped.insert(spans[i].rec_idx);
+            }
+        }
+        return ResidualResolution {
+            dropped,
+            readmitted: HashSet::new(),
+            unresolved_components: components.to_vec(),
+        };
+    }
+
+    // Per-component active sets: component spans + un-peeled phase-1 descriptors
+    // conflicting with any original component span (a phase-1 descriptor is
+    // given a second chance exactly when it cross-name-collides with a
+    // component's spans; a same-name overlap is not a conflict, so it stays
+    // dropped -- its owner twin already represents it).
+    let mut comp_active: Vec<Vec<usize>> = Vec::with_capacity(components.len());
+    let mut unpeeled_recidx: HashSet<usize> = HashSet::new();
+    for c in components {
+        let mut active: Vec<usize> = c.span_indices.clone();
+        let component_spans = active.clone();
+        for (i, span) in spans.iter().enumerate() {
+            if phase1_descriptors.contains(&span.rec_idx)
+                && component_spans
+                    .iter()
+                    .any(|&cs| spans_conflict(span, &spans[cs]))
+            {
+                active.push(i);
+                unpeeled_recidx.insert(span.rec_idx);
+            }
+        }
+        active.sort_by_key(|&i| (spans[i].start, spans[i].rec_idx));
+        comp_active.push(active);
+    }
+
+    // (a) lexical peel: drop lookupish table names (no `f11 < n_lookups` gate).
+    for active in &mut comp_active {
+        active.retain(|&i| {
+            if is_lookupish_name(&spans[i].name) {
+                dropped.insert(spans[i].rec_idx);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    // (b)+(c) fixpoint: confirm non-overlapping spans as recovered owners, then
+    // drop the decisive ghosts, until no component changes.
+    let mut recovered: Vec<usize> = Vec::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for active in &mut comp_active {
+            let mut still = Vec::with_capacity(active.len());
+            for &i in active.iter() {
+                if overlaps_any(i, active, spans) {
+                    still.push(i);
+                } else {
+                    recovered.push(i);
+                    changed = true;
+                }
+            }
+            *active = still;
+        }
+        recovered.sort_by_key(|&i| (spans[i].start, spans[i].rec_idx));
+        for active in &mut comp_active {
+            let overl: Vec<usize> = active
+                .iter()
+                .copied()
+                .filter(|&i| overlaps_any(i, active, spans))
+                .collect();
+            if overl.is_empty() {
+                continue;
+            }
+            let mut ghosts: Vec<usize> = Vec::new();
+            let mut has_owner = false;
+            for &i in &overl {
+                if residual_span_is_owner(i, &recovered, &uncontested, spans) {
+                    has_owner = true;
+                } else {
+                    ghosts.push(i);
+                }
+            }
+            if has_owner && !ghosts.is_empty() {
+                let ghost_set: HashSet<usize> = ghosts.iter().copied().collect();
+                for &i in &ghosts {
+                    dropped.insert(spans[i].rec_idx);
+                }
+                active.retain(|&i| !ghost_set.contains(&i));
+                changed = true;
+            }
+        }
+    }
+
+    // (d) honest-drop the still-conflicted remainder; report it on diagnostics.
+    let mut unresolved: Vec<ResidualOverlapComponent> = Vec::new();
+    for (c, active) in components.iter().zip(comp_active.iter()) {
+        let leftover: Vec<usize> = active
+            .iter()
+            .copied()
+            .filter(|&i| overlaps_any(i, active, spans))
+            .collect();
+        if leftover.is_empty() {
+            continue;
+        }
+        let leftover_set: HashSet<usize> = leftover.iter().copied().collect();
+        let mut span_indices: Vec<usize> = c
+            .span_indices
+            .iter()
+            .copied()
+            .filter(|i| leftover_set.contains(i))
+            .collect();
+        span_indices.sort_unstable();
+        for &i in &leftover {
+            dropped.insert(spans[i].rec_idx);
+        }
+        let mut contested: Vec<usize> = Vec::new();
+        for (ai, &a) in leftover.iter().enumerate() {
+            for &b in &leftover[ai + 1..] {
+                if spans_conflict(&spans[a], &spans[b]) {
+                    let lo = spans[a].start.max(spans[b].start);
+                    let hi = spans[a].end.min(spans[b].end);
+                    contested.extend(lo..hi);
+                }
+            }
+        }
+        contested.sort_unstable();
+        contested.dedup();
+        unresolved.push(ResidualOverlapComponent {
+            span_indices,
+            contested_ots: contested,
+        });
+    }
+
+    // Un-peeled phase-1 descriptors that were kept are readmitted as owners.
+    let mut kept_recidx: HashSet<usize> = recovered.iter().map(|&i| spans[i].rec_idx).collect();
+    for active in &comp_active {
+        for &i in active {
+            kept_recidx.insert(spans[i].rec_idx);
+        }
+    }
+    let readmitted: HashSet<usize> = unpeeled_recidx
+        .into_iter()
+        .filter(|r| kept_recidx.contains(r) && !dropped.contains(r))
+        .collect();
+
+    ResidualResolution {
+        dropped,
+        readmitted,
+        unresolved_components: unresolved,
     }
 }
 
@@ -1181,6 +1711,390 @@ mod standalone_descriptor_tests {
         );
         assert!(outcome.veto_fired);
         assert_eq!(outcome.vetoed_candidates, 1);
+    }
+}
+
+#[cfg(test)]
+mod residual_overlap_tests {
+    use super::*;
+
+    fn span_with_len(rec_idx: usize, name: &str, start: usize, len: usize) -> DecodedRecordSpan {
+        DecodedRecordSpan {
+            rec_idx,
+            name: name.to_string(),
+            start,
+            end: start + len,
+            sort_key: 0,
+        }
+    }
+
+    fn scalar(rec_idx: usize, name: &str, start: usize) -> DecodedRecordSpan {
+        span_with_len(rec_idx, name, start, 1)
+    }
+
+    /// A clean, non-overlapping owner partition (the corpus norm once
+    /// descriptors are peeled) yields NO residual components, so the floor is
+    /// a provable no-op on every file the peel already resolves.
+    #[test]
+    fn clean_partition_has_no_residual_components() {
+        let spans = [
+            scalar(0, "alpha", 1),
+            scalar(1, "beta", 2),
+            span_with_len(2, "gamma", 3, 3),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        assert!(
+            components.is_empty(),
+            "no overlap must produce no residual components: {components:?}"
+        );
+    }
+
+    /// Two differently-named spans that share an OT slot after peeling are a
+    /// genuine owner-vs-owner conflict: both are pulled into one component so
+    /// the caller can drop them (honest missing data over a silent
+    /// alphabetical first-claim win).
+    #[test]
+    fn distinct_name_overlap_is_a_residual_component() {
+        let spans = [scalar(0, "china gdp", 5), scalar(1, "row coal demand", 5)];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        assert_eq!(components.len(), 1, "one contested slot, one component");
+        assert_eq!(components[0].span_indices, vec![0, 1]);
+        assert_eq!(components[0].contested_ots, vec![5]);
+    }
+
+    /// Two overlapping spans of the SAME name are the ordinary
+    /// same-variable duplicate the per-name emitter dedup already resolves;
+    /// they must NOT be flagged as a cross-variable conflict (dropping both
+    /// would lose the variable entirely).
+    #[test]
+    fn same_name_overlap_is_not_residual() {
+        let spans = [scalar(0, "population", 3), scalar(1, "population", 3)];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        assert!(
+            components.is_empty(),
+            "same-name overlap is not a residual conflict: {components:?}"
+        );
+    }
+
+    /// A wide ghost span (a stale-`f[11]` unsaved-variable record) covering
+    /// several narrow real owners forms ONE component containing the ghost
+    /// and every owner it overlaps -- the `SimService/Base.vdf` cluster-A
+    /// shape. Stage 1 drops the whole component; a later stage re-resolves it.
+    #[test]
+    fn wide_ghost_over_narrow_owners_forms_one_component() {
+        let spans = [
+            span_with_len(0, "age specific fertility distribution function", 2, 6),
+            scalar(1, "c real gdp", 2),
+            scalar(2, "capital agriculture", 4),
+            span_with_len(3, "co2 in deep ocean", 5, 3),
+            // An unrelated, non-overlapping owner outside the ghost span.
+            scalar(4, "agricultural land in use", 20),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        assert_eq!(components.len(), 1, "one wide ghost, one component");
+        assert_eq!(
+            components[0].span_indices,
+            vec![0, 1, 2, 3],
+            "the ghost and every owner it covers are in the component; the \
+             disjoint owner is not"
+        );
+        assert_eq!(components[0].contested_ots, vec![2, 4, 5, 6, 7]);
+    }
+
+    /// A span already dropped (a peeled descriptor or standalone lookup-only
+    /// table) is invisible to residual detection: it cannot re-introduce a
+    /// conflict it is no longer part of.
+    #[test]
+    fn dropped_span_is_excluded() {
+        let spans = [scalar(0, "china gdp", 5), scalar(1, "row coal demand", 5)];
+        // Span 1 (rec_idx 1) was already dropped upstream, so span 0 no longer
+        // conflicts with anything.
+        let dropped: HashSet<usize> = [1usize].into_iter().collect();
+        let components = residual_overlap_components(&spans, &dropped);
+        assert!(
+            components.is_empty(),
+            "a dropped span cannot form a residual conflict: {components:?}"
+        );
+    }
+
+    /// Two disjoint conflicts produce two separate components, ordered
+    /// deterministically by first contested OT.
+    #[test]
+    fn disjoint_conflicts_are_separate_components() {
+        let spans = [
+            scalar(0, "b var", 30),
+            scalar(1, "a var", 30),
+            scalar(2, "d var", 10),
+            scalar(3, "c var", 10),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        assert_eq!(components.len(), 2);
+        // Deterministic order: the OT-10 conflict comes before the OT-30 one.
+        assert_eq!(components[0].contested_ots, vec![10]);
+        assert_eq!(components[0].span_indices, vec![2, 3]);
+        assert_eq!(components[1].contested_ots, vec![30]);
+        assert_eq!(components[1].span_indices, vec![0, 1]);
+    }
+}
+
+/// Stage 2 re-resolution (`resolve_residual_components`): the ordering oracle,
+/// exercised on synthetic spans that reproduce each Base.vdf trap in miniature.
+#[cfg(test)]
+mod resolve_residual_tests {
+    use super::*;
+
+    fn span(rec_idx: usize, name: &str, start: usize, len: usize) -> DecodedRecordSpan {
+        DecodedRecordSpan {
+            rec_idx,
+            name: name.to_string(),
+            start,
+            end: start + len,
+            sort_key: 0,
+        }
+    }
+
+    fn dropped_names<'a>(res: &ResidualResolution, spans: &'a [DecodedRecordSpan]) -> Vec<&'a str> {
+        let mut names: Vec<&str> = spans
+            .iter()
+            .filter(|s| res.dropped.contains(&s.rec_idx))
+            .map(|s| s.name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Empty components -> the whole re-resolution is a no-op (the corpus norm:
+    /// 139/141 files have no residual overlap at all).
+    #[test]
+    fn empty_components_is_noop() {
+        let spans = [span(0, "a", 1, 1), span(1, "b", 2, 1)];
+        let res = resolve_residual_components(
+            &spans,
+            &[],
+            &HashSet::new(),
+            RESIDUAL_ORDERING_GATE,
+            RESIDUAL_ORDERING_MIN_PAIRS,
+        );
+        assert!(res.dropped.is_empty() && res.readmitted.is_empty());
+        assert!(res.unresolved_components.is_empty());
+    }
+
+    /// Run-boundary trap (cluster A). A wide ghost sorts BEFORE the real owners
+    /// it covers; the next uncontested anchor sorts before the prev anchor (a
+    /// run boundary), so the oracle falls back to the reliable prev side alone.
+    /// The ghost fails prev and is dropped; every narrow owner passes.
+    #[test]
+    fn run_boundary_prev_only_drops_wide_ghost() {
+        // Uncontested anchors: `c gas`@1 (prev) and `agri`@30 (next, sorts
+        // before `c gas` -> inverted bracket -> prev-only).
+        let spans = [
+            span(0, "c gas", 1, 1),
+            span(1, "agri", 30, 1),
+            span(2, "age ghost", 3, 4), // wide ghost [3,7)
+            span(3, "c oil", 3, 1),
+            span(4, "c pig", 4, 1),
+            span(5, "c rat", 5, 1),
+            span(6, "c sun", 6, 1),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0, 0);
+        assert_eq!(dropped_names(&res, &spans), vec!["age ghost"]);
+        assert!(res.readmitted.is_empty());
+        assert!(res.unresolved_components.is_empty());
+    }
+
+    /// Recovered-anchor discrimination (comp2). Two non-lookupish spans share a
+    /// slot; the nearest UNCONTESTED owners bracket BOTH (neither can be told
+    /// apart that way). Only the recovered reals from the adjacent
+    /// lexical-peel-resolved pairs form the tight same-run bracket that drops
+    /// the ghost -- proving the recovered-anchor tier is load-bearing.
+    #[test]
+    fn recovered_anchor_bracket_resolves_scalar_pair() {
+        let spans = [
+            span(0, "tbl x lookup", 9, 2),  // comp1 lookupish ghost [9,11)
+            span(1, "ind a", 10, 1),        // comp1 real
+            span(2, "ind b", 12, 1),        // comp2 real (the hard one)
+            span(3, "cat food", 12, 1),     // comp2 ghost (non-lookupish, run X)
+            span(4, "tbl y lookup", 13, 2), // comp3 lookupish ghost [13,15)
+            span(5, "ind c", 14, 1),        // comp3 real
+            // Uncontested owners that loosely bracket comp2 on BOTH sides but
+            // cannot discriminate (both candidates fall within [a1, z1]).
+            span(6, "a1", 11, 1),
+            span(7, "z1", 16, 1),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0, 0);
+        assert_eq!(
+            dropped_names(&res, &spans),
+            vec!["cat food", "tbl x lookup", "tbl y lookup"]
+        );
+        assert!(res.unresolved_components.is_empty());
+    }
+
+    /// Inconclusive -> honest-drop fallback. When no candidate for a shared slot
+    /// is ordering-consistent (no owner to keep), the oracle abstains on that
+    /// conflict and both spans are honest-dropped and surfaced on the
+    /// diagnostics -- never silently first-claimed.
+    #[test]
+    fn inconclusive_conflict_is_honest_dropped() {
+        let spans = [
+            span(0, "a", 1, 1),
+            span(1, "b", 9, 1),
+            // Both sort AFTER the next anchor `b`@9 -> neither is a valid owner.
+            span(2, "yyy", 5, 1),
+            span(3, "zzz", 5, 1),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0, 0);
+        assert_eq!(dropped_names(&res, &spans), vec!["yyy", "zzz"]);
+        assert_eq!(res.unresolved_components.len(), 1);
+        assert_eq!(res.unresolved_components[0].contested_ots, vec![5]);
+    }
+
+    /// Un-peel + readmit (the `c Identified Oil Reserve` case). A phase-1
+    /// overlap-peeled descriptor that spatially belongs to a component is given
+    /// a second chance; when the oracle keeps it, it is readmitted as an owner.
+    #[test]
+    fn unpeeled_descriptor_is_readmitted_when_kept() {
+        let spans = [
+            span(0, "c gas", 1, 1),
+            span(1, "agri", 20, 1),
+            span(2, "age ghost", 8, 4), // wide ghost [8,12)
+            span(3, "c pig", 9, 1),
+            span(4, "c rat", 10, 1),
+            span(5, "c sun", 11, 1),
+            span(6, "c oil", 7, 2), // phase-1 descriptor [7,9), overlaps ghost @8
+        ];
+        let phase1: HashSet<usize> = [6usize].into_iter().collect();
+        let components = residual_overlap_components(&spans, &phase1);
+        let res = resolve_residual_components(&spans, &components, &phase1, 0.0, 0);
+        assert_eq!(dropped_names(&res, &spans), vec!["age ghost"]);
+        assert_eq!(res.readmitted, [6usize].into_iter().collect());
+        assert!(res.unresolved_components.is_empty());
+    }
+
+    /// Lexically lookupish names in a component are peeled WITHOUT the
+    /// `f11 < n_lookups` gate: a lookup definition is a table, not a series.
+    #[test]
+    fn lexical_peel_drops_lookupish_names() {
+        let spans = [
+            span(0, "real var", 1, 1),
+            span(1, "real var2", 2, 1),
+            span(2, "foo lookup", 1, 2), // lookupish ghost [1,3)
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0, 0);
+        assert_eq!(dropped_names(&res, &spans), vec!["foo lookup"]);
+        assert!(res.unresolved_components.is_empty());
+    }
+
+    /// Chained-descriptor un-peel boundary. A phase-1 descriptor is un-peeled
+    /// iff it overlaps an ORIGINAL component span -- never merely a
+    /// previously-un-peeled descriptor. `d oil`@[9,12) overlaps the ghost and
+    /// is un-peeled (and kept -> readmitted); `d tar`@[11,13) overlaps only
+    /// `d oil`, so it stays a descriptor and is neither dropped nor readmitted.
+    /// Pins the Rust/Python bit-parity contract on this constructible case.
+    #[test]
+    fn chained_descriptor_is_not_transitively_unpeeled() {
+        let spans = [
+            span(0, "c gas", 1, 1),     // uncontested prev anchor
+            span(1, "zz", 30, 1),       // uncontested next anchor
+            span(2, "age ghost", 5, 5), // wide ghost [5,10)
+            span(3, "d1", 5, 1),
+            span(4, "d2", 6, 1),
+            span(5, "d3", 7, 1),
+            span(6, "d4", 8, 1),
+            span(7, "d oil", 9, 3), // phase-1 descriptor [9,12), overlaps ghost @9
+            span(8, "d tar", 11, 2), // phase-1 descriptor [11,13), overlaps ONLY d oil
+        ];
+        let phase1: HashSet<usize> = [7usize, 8].into_iter().collect();
+        let components = residual_overlap_components(&spans, &phase1);
+        let res = resolve_residual_components(&spans, &components, &phase1, 0.0, 0);
+        assert_eq!(dropped_names(&res, &spans), vec!["age ghost"]);
+        assert_eq!(res.readmitted, [7usize].into_iter().collect());
+        assert!(
+            !res.dropped.contains(&8) && !res.readmitted.contains(&8),
+            "d tar overlaps only an un-peeled descriptor, so it must stay untouched"
+        );
+        assert!(res.unresolved_components.is_empty());
+    }
+
+    /// Same-name duplicate pair inside a component. A differently-named ghost
+    /// drags TWO same-name duplicate records for one variable into a component.
+    /// The conflict predicate is name-aware (matching the detector), so once the
+    /// ghost is dropped the same-name pair no longer registers as conflicting:
+    /// BOTH survive re-resolution and flow to the per-name emission dedup, just
+    /// as they would outside a residual component -- the variable is NOT lost
+    /// (GH #844). A name-blind predicate would honest-drop both.
+    #[test]
+    fn same_name_duplicate_pair_survives_when_ghost_dropped() {
+        let spans = [
+            span(0, "a", 1, 1),         // uncontested prev anchor
+            span(1, "z", 9, 1),         // uncontested next anchor
+            span(2, "m dup", 5, 1),     // duplicate record A for variable `m dup`
+            span(3, "m dup", 5, 1),     // duplicate record B (same name, same slot)
+            span(4, "zzz ghost", 5, 1), // ghost, sorts past the next anchor -> dropped
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        // The same-name pair is pulled into the ghost's component.
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].span_indices, vec![2, 3, 4]);
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0, 0);
+        assert_eq!(dropped_names(&res, &spans), vec!["zzz ghost"]);
+        assert!(
+            !res.dropped.contains(&2) && !res.dropped.contains(&3),
+            "both same-name duplicates must survive re-resolution (dedup owns them)"
+        );
+        assert!(res.unresolved_components.is_empty());
+    }
+
+    /// Gate abstention (RATIO). A file whose uncontested owners do NOT exhibit
+    /// the alphabetical-allocation invariant fails the gate, so the oracle
+    /// abstains and every residual span is honest-dropped (Stage 1 semantics).
+    /// `min_pairs == 0` isolates the ratio side of the gate.
+    #[test]
+    fn gate_abstains_when_owners_not_alphabetical() {
+        // Badly-shuffled uncontested owners -> low alphabetical consistency.
+        let spans = [
+            span(0, "z", 1, 1),
+            span(1, "a", 2, 1),
+            span(2, "m", 3, 1),
+            span(3, "b", 4, 1),
+            span(4, "ghost", 10, 1),
+            span(5, "owner", 10, 1),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.95, 0);
+        // Both contested spans dropped; the component is reported unresolved.
+        assert_eq!(dropped_names(&res, &spans), vec!["ghost", "owner"]);
+        assert_eq!(res.unresolved_components.len(), 1);
+    }
+
+    /// Gate abstention (MIN_PAIRS). Codex's scenario: a file with a residual
+    /// component but too few uncontested owners to measure -- one anchor `m`,
+    /// zero adjacent pairs -- must NOT let the oracle run on vacuous evidence
+    /// (which would silently drop the real owner `a real` while emitting the
+    /// ghost `z ghost`, or vice versa). With `min_pairs > 0` the gate abstains:
+    /// BOTH contested spans honest-drop and the component surfaces on the
+    /// diagnostics. A `gate_threshold` of 0.0 proves the abstention is driven by
+    /// the pair-count floor, not the ratio (GH #844).
+    #[test]
+    fn gate_abstains_on_too_few_measured_pairs() {
+        let spans = [
+            span(0, "m", 3, 1),      // the lone uncontested owner (0 adjacent pairs)
+            span(1, "a real", 5, 1), // real owner (would sort below the ghost)
+            span(2, "z ghost", 5, 1),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        let res = resolve_residual_components(
+            &spans,
+            &components,
+            &HashSet::new(),
+            0.0,
+            RESIDUAL_ORDERING_MIN_PAIRS,
+        );
+        assert_eq!(dropped_names(&res, &spans), vec!["a real", "z ghost"]);
+        assert_eq!(res.unresolved_components.len(), 1);
     }
 }
 
