@@ -1915,7 +1915,25 @@ def identify_descriptor_records(
     """
     n_lookups = len(vdf.section6_lookup_records() or [])
     if n_lookups == 0:
-        return DescriptorIdentification(descriptor_indices=set(), used_f10_fallback=False)
+        # No lookup records to forward-link, so the overlap-path descriptor peel
+        # and the standalone lookup-only drop are no-ops -- but the residual
+        # pass is name/OT-based and MUST still run: a lookup-free file can carry
+        # the stale-f[11] owner-vs-owner conflict this guards against, and
+        # skipping it would emit duplicate columns for a contested slot (GH
+        # #844). phase-1 descriptors are empty here, so nothing is un-peeled and
+        # `descriptor_indices` is exactly the re-resolution's drop set -- the
+        # same result the Rust reader's unconditional residual pass produces.
+        residual_components = residual_overlap_components(spans, set())
+        resolution = resolve_residual_components(
+            spans, residual_components, set(), RESIDUAL_ORDERING_GATE
+        )
+        return DescriptorIdentification(
+            descriptor_indices=set(resolution.dropped),
+            used_f10_fallback=False,
+            standalone_drop_veto_fired=False,
+            standalone_drop_vetoed_candidates=0,
+            residual_overlap_components=resolution.unresolved_components,
+        )
 
     # Build OT-slot -> spans-claiming-it. Spans that overlap (share any OT slot
     # with another span) are descriptor-pair candidates. Note: descriptors
@@ -2886,10 +2904,14 @@ class NamedResultsDiagnostics:
     # corpus file (GH #842).
     bitmap_unreconciled_ots: list[int] = field(default_factory=list)
     # Residual OT-overlap: differently-named decoded spans that still claim a
-    # shared OT slot after descriptor peeling and the standalone lookup-only
-    # drop. Every such span is DROPPED from emission (honest missing data over
-    # a silent alphabetical first-claim win). Empty on every tracked corpus
-    # file except the two SimService Base.vdf files. Mirrors the Rust reader's
+    # shared OT slot after descriptor peeling, the standalone lookup-only drop,
+    # AND the residual-overlap re-resolution -- i.e. the conflicts the ordering
+    # oracle could not adjudicate and therefore honest-dropped (honest missing
+    # data over a silent alphabetical first-claim win). Empty across the whole
+    # tracked corpus, including the two SimService Base.vdf files whose
+    # stale-f[11] conflicts the oracle now fully recovers; non-empty only when
+    # the per-file gate fails or the oracle leaves a conflict unadjudicated.
+    # Mirrors the Rust reader's
     # `DescriptorIdentification.residual_overlap_components` (span-index based;
     # the name-resolved analogue is Rust `VdfFile::residual_overlap_diagnostics`).
     residual_overlap: list[ResidualOverlapComponent] = field(default_factory=list)

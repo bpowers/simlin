@@ -307,142 +307,154 @@ pub(super) fn identify_descriptor_records(
     spans: &[DecodedRecordSpan],
 ) -> DescriptorIdentification {
     let n_lookups = vdf.section6_lookup_records().map(|v| v.len()).unwrap_or(0);
-    if n_lookups == 0 || spans.is_empty() {
+    if spans.is_empty() {
         return DescriptorIdentification::default();
-    }
-
-    // Build OT-slot -> spans-claiming-it. Spans that share any OT slot with
-    // another span are descriptor-pair candidates.
-    let mut by_slot: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, span) in spans.iter().enumerate() {
-        for ot in span.start..span.end {
-            by_slot.entry(ot).or_default().push(i);
-        }
-    }
-
-    // Connected components of overlapping spans (union-find on span indices).
-    let mut uf = UnionFind::new(spans.len());
-    for slot_spans in by_slot.values() {
-        if slot_spans.len() >= 2 {
-            let base = slot_spans[0];
-            for &other in &slot_spans[1..] {
-                uf.union(base, other);
-            }
-        }
-    }
-
-    // A span participates in overlap iff some OT in its range has 2+
-    // claimants.
-    let mut overlapping: HashSet<usize> = HashSet::new();
-    for slot_spans in by_slot.values() {
-        if slot_spans.len() >= 2 {
-            overlapping.extend(slot_spans.iter().copied());
-        }
-    }
-
-    let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, _) in spans.iter().enumerate() {
-        if overlapping.contains(&i) {
-            let root = uf.find(i);
-            components.entry(root).or_default().push(i);
-        }
     }
 
     let mut descriptor_indices: HashSet<usize> = HashSet::new();
     let mut used_f10_fallback = false;
+    let mut standalone_veto_fired = false;
+    let mut standalone_vetoed_candidates = 0usize;
 
-    for component in components.values() {
-        // Iteratively peel off descriptor records until the component is
-        // internally non-overlapping. Candidates are restricted to records
-        // whose `f[11]` is in `[0, lookup_count)` -- the structural
-        // pre-condition for the lookup-record forward link.
-        let mut active: Vec<usize> = component.clone();
-        loop {
-            let mut comp_by_slot: HashMap<usize, Vec<usize>> = HashMap::new();
-            for &i in &active {
-                let span = &spans[i];
-                for ot in span.start..span.end {
-                    comp_by_slot.entry(ot).or_default().push(i);
-                }
+    // The overlap-path descriptor peel and the standalone lookup-only drop both
+    // forward-link through section-6 lookup records, so they run ONLY when the
+    // file has lookups. The residual-overlap pass further below is name/OT-based
+    // and must run UNCONDITIONALLY: a lookup-free file can still carry the
+    // stale-f[11] owner-vs-owner conflict this guards against, and skipping it
+    // would silently resolve by alphabetical emission order (GH #844).
+    if n_lookups > 0 {
+        // Build OT-slot -> spans-claiming-it. Spans that share any OT slot with
+        // another span are descriptor-pair candidates.
+        let mut by_slot: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, span) in spans.iter().enumerate() {
+            for ot in span.start..span.end {
+                by_slot.entry(ot).or_default().push(i);
             }
-            let mut still_overlapping: HashSet<usize> = HashSet::new();
-            for slot_spans in comp_by_slot.values() {
-                if slot_spans.len() >= 2 {
-                    still_overlapping.extend(slot_spans.iter().copied());
-                }
-            }
-            if still_overlapping.is_empty() {
-                break;
-            }
-            let candidates: Vec<usize> = active
-                .iter()
-                .copied()
-                .filter(|&i| {
-                    if !still_overlapping.contains(&i) {
-                        return false;
-                    }
-                    let f11 = vdf.records[spans[i].rec_idx].fields[11] as usize;
-                    f11 < n_lookups
-                })
-                .collect();
-            if candidates.is_empty() {
-                // Owner-only overlap with no descriptor candidate: leave the
-                // component alone. The caller (or precision report) is
-                // expected to surface a residual `record-span-overlap`.
-                break;
-            }
-            let lookupish: Vec<usize> = candidates
-                .iter()
-                .copied()
-                .filter(|&i| is_lookupish_name(&spans[i].name))
-                .collect();
-            let descriptor_span_idx = if lookupish.len() == 1 {
-                lookupish[0]
-            } else {
-                used_f10_fallback = true;
-                *candidates
-                    .iter()
-                    .max_by_key(|&&i| (spans[i].sort_key, spans[i].rec_idx))
-                    .expect("candidates non-empty")
-            };
-            descriptor_indices.insert(spans[descriptor_span_idx].rec_idx);
-            active.retain(|&i| i != descriptor_span_idx);
         }
-    }
 
-    // Standalone (non-overlapping) descriptors: a lookup-only variable Vensim
-    // saves only as a descriptor record (a graphical-function definition). The
-    // overlap path above never sees it (it collides with nothing), so it would
-    // otherwise decode at its spurious `f[11]`-as-OT-start ghost slot. A bare
-    // lookup is a table, not a time series, so recognise it and DROP it -- its
-    // values, where they matter, are carried by the consumer variables that
-    // call it (separately-emitted owners).
-    let lookup_records = vdf.section6_lookup_records();
-    let lookup_word10: Vec<usize> = lookup_records
-        .as_ref()
-        .map(|recs| recs.iter().map(|r| r.ot_index()).collect())
-        .unwrap_or_default();
-    let lookup_word11: Vec<usize> = lookup_records
-        .as_ref()
-        .map(|recs| recs.iter().map(|r| r.output_width()).collect())
-        .unwrap_or_default();
-    let class_codes = vdf.section6_ot_class_codes().unwrap_or_default();
-    let f11_by_span: Vec<u32> = spans
-        .iter()
-        .map(|s| vdf.records[s.rec_idx].fields[11])
-        .collect();
-    let standalone = standalone_lookup_only_descriptors(
-        spans,
-        &f11_by_span,
-        &overlapping,
-        &descriptor_indices,
-        n_lookups,
-        &lookup_word10,
-        &lookup_word11,
-        &class_codes,
-        vdf.offset_table_count,
-    );
-    descriptor_indices.extend(standalone.dropped);
+        // Connected components of overlapping spans (union-find on span indices).
+        let mut uf = UnionFind::new(spans.len());
+        for slot_spans in by_slot.values() {
+            if slot_spans.len() >= 2 {
+                let base = slot_spans[0];
+                for &other in &slot_spans[1..] {
+                    uf.union(base, other);
+                }
+            }
+        }
+
+        // A span participates in overlap iff some OT in its range has 2+
+        // claimants.
+        let mut overlapping: HashSet<usize> = HashSet::new();
+        for slot_spans in by_slot.values() {
+            if slot_spans.len() >= 2 {
+                overlapping.extend(slot_spans.iter().copied());
+            }
+        }
+
+        let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, _) in spans.iter().enumerate() {
+            if overlapping.contains(&i) {
+                let root = uf.find(i);
+                components.entry(root).or_default().push(i);
+            }
+        }
+
+        for component in components.values() {
+            // Iteratively peel off descriptor records until the component is
+            // internally non-overlapping. Candidates are restricted to records
+            // whose `f[11]` is in `[0, lookup_count)` -- the structural
+            // pre-condition for the lookup-record forward link.
+            let mut active: Vec<usize> = component.clone();
+            loop {
+                let mut comp_by_slot: HashMap<usize, Vec<usize>> = HashMap::new();
+                for &i in &active {
+                    let span = &spans[i];
+                    for ot in span.start..span.end {
+                        comp_by_slot.entry(ot).or_default().push(i);
+                    }
+                }
+                let mut still_overlapping: HashSet<usize> = HashSet::new();
+                for slot_spans in comp_by_slot.values() {
+                    if slot_spans.len() >= 2 {
+                        still_overlapping.extend(slot_spans.iter().copied());
+                    }
+                }
+                if still_overlapping.is_empty() {
+                    break;
+                }
+                let candidates: Vec<usize> = active
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        if !still_overlapping.contains(&i) {
+                            return false;
+                        }
+                        let f11 = vdf.records[spans[i].rec_idx].fields[11] as usize;
+                        f11 < n_lookups
+                    })
+                    .collect();
+                if candidates.is_empty() {
+                    // Owner-only overlap with no descriptor candidate: leave the
+                    // component alone. The caller (or precision report) is
+                    // expected to surface a residual `record-span-overlap`.
+                    break;
+                }
+                let lookupish: Vec<usize> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&i| is_lookupish_name(&spans[i].name))
+                    .collect();
+                let descriptor_span_idx = if lookupish.len() == 1 {
+                    lookupish[0]
+                } else {
+                    used_f10_fallback = true;
+                    *candidates
+                        .iter()
+                        .max_by_key(|&&i| (spans[i].sort_key, spans[i].rec_idx))
+                        .expect("candidates non-empty")
+                };
+                descriptor_indices.insert(spans[descriptor_span_idx].rec_idx);
+                active.retain(|&i| i != descriptor_span_idx);
+            }
+        }
+
+        // Standalone (non-overlapping) descriptors: a lookup-only variable Vensim
+        // saves only as a descriptor record (a graphical-function definition). The
+        // overlap path above never sees it (it collides with nothing), so it would
+        // otherwise decode at its spurious `f[11]`-as-OT-start ghost slot. A bare
+        // lookup is a table, not a time series, so recognise it and DROP it -- its
+        // values, where they matter, are carried by the consumer variables that
+        // call it (separately-emitted owners).
+        let lookup_records = vdf.section6_lookup_records();
+        let lookup_word10: Vec<usize> = lookup_records
+            .as_ref()
+            .map(|recs| recs.iter().map(|r| r.ot_index()).collect())
+            .unwrap_or_default();
+        let lookup_word11: Vec<usize> = lookup_records
+            .as_ref()
+            .map(|recs| recs.iter().map(|r| r.output_width()).collect())
+            .unwrap_or_default();
+        let class_codes = vdf.section6_ot_class_codes().unwrap_or_default();
+        let f11_by_span: Vec<u32> = spans
+            .iter()
+            .map(|s| vdf.records[s.rec_idx].fields[11])
+            .collect();
+        let standalone = standalone_lookup_only_descriptors(
+            spans,
+            &f11_by_span,
+            &overlapping,
+            &descriptor_indices,
+            n_lookups,
+            &lookup_word10,
+            &lookup_word11,
+            &class_codes,
+            vdf.offset_table_count,
+        );
+        descriptor_indices.extend(standalone.dropped);
+        standalone_veto_fired = standalone.veto_fired;
+        standalone_vetoed_candidates = standalone.vetoed_candidates;
+    }
 
     // Residual-overlap re-resolution. After peeling overlap-path descriptors
     // and dropping standalone lookup-only tables, some differently-named spans
@@ -468,8 +480,8 @@ pub(super) fn identify_descriptor_records(
     DescriptorIdentification {
         descriptor_indices,
         used_f10_fallback,
-        standalone_drop_veto_fired: standalone.veto_fired,
-        standalone_drop_vetoed_candidates: standalone.vetoed_candidates,
+        standalone_drop_veto_fired: standalone_veto_fired,
+        standalone_drop_vetoed_candidates: standalone_vetoed_candidates,
         residual_overlap_components: resolution.unresolved_components,
     }
 }

@@ -2371,6 +2371,26 @@ class ResolveResidualComponentsTests(unittest.TestCase):
         self.assertNotIn(8, res.readmitted)
         self.assertEqual(res.unresolved_components, [])
 
+    def test_residual_pass_runs_on_lookup_free_file(self):
+        # GH #844: identify_descriptor_records must reach the residual pass even
+        # when the file has zero lookup records. Before the fix it early-returned
+        # on n_lookups == 0, so a differently-named owner-vs-owner OT conflict on
+        # such a file emitted BOTH names. The n_lookups == 0 path touches only
+        # `section6_lookup_records`, so a tiny stub file suffices.
+        class _NoLookupVdf:
+            def section6_lookup_records(self):
+                return []
+
+        spans = [
+            self._span(0, "a owner", 1, 1),
+            self._span(1, "z owner", 9, 1),
+            self._span(2, "m real", 5, 1),    # fits [a owner, z owner] -> recovered
+            self._span(3, "zzz ghost", 5, 1),  # sorts past z owner -> dropped
+        ]
+        di = vdf_xray.identify_descriptor_records(_NoLookupVdf(), spans)
+        self.assertIn(3, di.descriptor_indices, "ghost must be dropped with no lookups")
+        self.assertNotIn(2, di.descriptor_indices, "real owner must be recovered")
+
     def test_gate_abstains_when_owners_not_alphabetical(self):
         spans = [
             self._span(0, "z", 1, 1),

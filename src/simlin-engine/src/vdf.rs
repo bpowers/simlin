@@ -1805,13 +1805,16 @@ impl VdfFile {
 
     /// Per-file residual OT-overlap diagnostics: decoded record spans that
     /// still claim a shared OT slot after graphical-function descriptor
-    /// peeling and the standalone lookup-only drop, and which the reader
-    /// therefore DROPS from emission rather than letting alphabetical column
-    /// order silently pick an owner (see docs/design/vdf.md "Residual
-    /// OT-overlap"). Empty on every tracked corpus file except the two
-    /// SimService `Base.vdf` files, whose 2007-era writer emits stale-`f[11]`
-    /// records for unsaved variables. Mirrors the Python reader's
-    /// `NamedResultsDiagnostics.residual_overlap_*` surface.
+    /// peeling, the standalone lookup-only drop, AND the residual-overlap
+    /// re-resolution -- i.e. the conflicts the ordering oracle could not
+    /// adjudicate and therefore honest-dropped rather than letting alphabetical
+    /// column order silently pick an owner (see docs/design/vdf.md "Residual
+    /// OT-overlap"). Empty across the whole tracked corpus, including the two
+    /// SimService `Base.vdf` files whose stale-`f[11]` conflicts the oracle now
+    /// fully recovers; it is non-empty only when the per-file gate fails (a
+    /// non-alphabetical file) or the oracle leaves a conflict unadjudicated.
+    /// Mirrors the Python reader's `NamedResultsDiagnostics.residual_overlap`
+    /// surface.
     pub fn residual_overlap_diagnostics(&self) -> Vec<VdfResidualOverlap> {
         use record_results::{decoded_record_spans, identify_descriptor_records};
         let name_key_to_name_index = self.record_name_key_to_name_index();
@@ -5075,6 +5078,69 @@ mod tests {
                 "{path}: recovered oil reserve must deplete from its initial value: {oil_endpoints:?}"
             );
         }
+    }
+
+    #[test]
+    fn residual_pass_runs_on_lookup_free_file() {
+        // GH #844: a lookup-free VDF (`n_lookups == 0`) still reaches the
+        // residual-overlap re-resolution. Before the fix, `identify_descriptor
+        // _records` early-returned on `n_lookups == 0`, so a differently-named
+        // owner-vs-owner OT conflict on such a file was silently resolved by
+        // alphabetical emission order (Rust) / emitted twice (Python). Here the
+        // uncontested anchors `a owner`@1 / `z owner`@9 bracket slot 5, so the
+        // ordering oracle keeps the real owner `m real` and drops the ghost
+        // `zzz ghost` (which sorts past the next anchor) -- with zero lookups.
+        use super::record_results::{DecodedRecordSpan, identify_descriptor_records};
+
+        // Minimal lookup-free file: `offset_table_count == 0` makes
+        // `section6_lookup_records()` return None, i.e. n_lookups == 0.
+        let vdf = VdfFile {
+            data: Vec::new(),
+            time_point_count: 0,
+            bitmap_size: 0,
+            block_time_point_count: 0,
+            block_bitmap_size: 0,
+            data_time_point_count: 0,
+            data_bitmap_size: 0,
+            sections: Vec::new(),
+            names: Vec::new(),
+            name_section_idx: None,
+            slot_table: Vec::new(),
+            slot_table_offset: 0,
+            records: Vec::new(),
+            offset_table_start: 0,
+            offset_table_count: 0,
+            first_data_block: 0,
+            header_final_values_offset: 0,
+            header_lookup_mapping_offset: 0,
+        };
+        assert!(
+            vdf.section6_lookup_records().is_none(),
+            "fixture must have zero lookup records"
+        );
+
+        let span = |rec_idx: usize, name: &str, start: usize| DecodedRecordSpan {
+            rec_idx,
+            name: name.to_string(),
+            start,
+            end: start + 1,
+            sort_key: 0,
+        };
+        let spans = [
+            span(0, "a owner", 1),
+            span(1, "z owner", 9),
+            span(2, "m real", 5),    // fits [a owner, z owner] -> recovered
+            span(3, "zzz ghost", 5), // sorts past z owner -> dropped
+        ];
+        let id = identify_descriptor_records(&vdf, &spans);
+        assert!(
+            id.descriptor_indices.contains(&3),
+            "the ghost must be dropped by the residual pass even with no lookups"
+        );
+        assert!(
+            !id.descriptor_indices.contains(&2),
+            "the real owner must be recovered, not dropped"
+        );
     }
 
     #[test]
