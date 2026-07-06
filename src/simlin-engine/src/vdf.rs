@@ -4889,13 +4889,15 @@ mod tests {
     }
 
     #[test]
-    fn test_residual_overlap_honest_drop_on_simservice_fixtures() {
-        // Stage 1 correctness floor for GH #841. Ref.vdf (and every file whose
-        // overlaps the peel already resolves) must have NO residual components,
-        // so the floor is a provable no-op there. SimService/Base.vdf's
+    fn test_residual_overlap_recovery_on_simservice_fixtures() {
+        // Stage 2 recovery for GH #841. Ref.vdf (and every file whose overlaps
+        // the peel already resolves) has NO residual components, so the whole
+        // re-resolution is a provable no-op there. SimService/Base.vdf's
         // stale-f[11] unsaved-variable records survive the peel still in
-        // owner-vs-owner conflict; every such span must be DROPPED (no ghost
-        // `AGE SPECIFIC ...` columns) so no OT slot is ever claimed by two
+        // owner-vs-owner conflict; the re-resolution recovers every real owner
+        // (dropping only the ghosts) and, because every conflict is
+        // adjudicated, leaves NOTHING honest-dropped -- so the residual
+        // diagnostics come back empty. No OT slot may ever be claimed by two
         // differently-named emitted owners. SimService half follows the
         // third_party fixture-availability convention.
         use super::record_results::{decoded_record_spans, identify_descriptor_records};
@@ -4903,7 +4905,7 @@ mod tests {
         let ref_vdf = vdf_file("../../test/xmutil_test_models/Ref.vdf");
         assert!(
             ref_vdf.residual_overlap_diagnostics().is_empty(),
-            "Ref.vdf overlaps are fully resolved by the peel; the residual floor must be a no-op"
+            "Ref.vdf overlaps are fully resolved by the peel; re-resolution must be a no-op"
         );
 
         let fixtures = [
@@ -4913,47 +4915,99 @@ mod tests {
         if !std::path::Path::new(fixtures[0]).exists() {
             return;
         }
+        // The EXACT set of 41 ghost records the re-resolution must drop on both
+        // fixtures (the wide cluster-A ghost, the four scalar-pair ghosts, and
+        // the 36 cluster-B ghosts). Pinning the full set -- not a sample --
+        // plus the exact emitted-column count below means a wrongly-recovered
+        // unlisted ghost on an otherwise-unclaimed OT cannot slip past the
+        // no-double-claim check.
+        let ghosts = [
+            "AGE SPECIFIC FERTILITY DISTRIBUTION FUNCTION",
+            "China future GDP growth rate",
+            "Coal Capacity Utilisation in Production table",
+            "Coal Fraction Discoverable Table",
+            "DICE IPCC Other Rad Forcing Table",
+            "Effect of technology on productivity of investment in Coal production table",
+            "MAIZE FRACTION TABLE",
+            "Nuclear GENERATION EFFICIENCY table",
+            "Oil substitutability EFFECT ON Oil import",
+            "PC MEAT DEMAND FUNCTION",
+            "PC fish demand data",
+            "PC fish demand function",
+            "QDBTU to MB",
+            "ROW Coal demand function",
+            "Renewable Energy consumer real price",
+            "Renewable Resource price per MBTU",
+            "WOOD VALUE ADDED PER TON",
+            "c total population table",
+            "elasticity of fdi to fiscal pressure",
+            "electricity net export table",
+            "extra heavy table",
+            "forestry production in cubic meters",
+            "gas generation efficiency table",
+            "gas to liquids table",
+            "hydro electricity generation in BKWH table",
+            "meat value added per ton table",
+            "nuclear electricity demand in BKWH",
+            "overall carbon tax table",
+            "pc bushel domestic consumption non ethanol",
+            "petroleum generation efficiency table",
+            "private capital transfers over gdp table",
+            "private factor income table",
+            "private transfers table",
+            "relative china technology",
+            "renewable electricity price",
+            "renewable portfolio standard table",
+            "residential energy conservation",
+            "share of electricity for freight transportation",
+            "share of electricity for urban and commuter transportation",
+            "total fertility rate",
+            "value added agriculture products table",
+        ];
+        assert_eq!(ghosts.len(), 41);
+        let reals = [
+            "Indicated China GDP",
+            "indicated per capita fish demand",
+            "indicated row Coal demand",
+            "industrial electricity demand in BKWH",
+        ];
         for path in fixtures {
             let sim = vdf_file(path);
 
-            // The residual diagnostics fire and name the #841 headline ghost.
-            let diagnostics = sim.residual_overlap_diagnostics();
+            // Every conflict is adjudicated, so nothing is honest-dropped.
             assert!(
-                !diagnostics.is_empty(),
-                "{path}: residual overlap must be detected and reported"
+                sim.residual_overlap_diagnostics().is_empty(),
+                "{path}: the ordering oracle resolves every conflict; no residual remainder"
             );
-            let dropped_names: HashSet<&str> = diagnostics
-                .iter()
-                .flat_map(|c| c.dropped_names.iter().map(|s| s.as_str()))
-                .collect();
-            assert!(
-                dropped_names.contains("AGE SPECIFIC FERTILITY DISTRIBUTION FUNCTION"),
-                "{path}: the wide ghost span must be among the honest-dropped residual spans"
-            );
-            for component in &diagnostics {
-                assert!(
-                    !component.contested_ots.is_empty(),
-                    "{path}: every reported residual component must carry contested OTs"
-                );
-            }
 
-            // No emitted owner span may still overlap another differently-named
-            // emitted owner span, and no ghost column may be emitted.
             let key_map = sim.record_name_key_to_name_index();
             let dir = sim.parse_section3_directory();
             let spans = decoded_record_spans(&sim, &key_map, dir.as_ref());
             let id = identify_descriptor_records(&sim, &spans);
+            let emitted: HashSet<&str> = spans
+                .iter()
+                .filter(|s| !id.descriptor_indices.contains(&s.rec_idx))
+                .map(|s| s.name.as_str())
+                .collect();
+            for ghost in ghosts {
+                assert!(
+                    !emitted.iter().any(|n| n.eq_ignore_ascii_case(ghost)),
+                    "{path}: ghost {ghost:?} must not survive as an emitted owner"
+                );
+            }
+            for real in reals {
+                assert!(
+                    emitted.iter().any(|n| n.eq_ignore_ascii_case(real)),
+                    "{path}: real owner {real:?} must be recovered as an emitted owner"
+                );
+            }
+
+            // No OT slot may be claimed by two differently-named emitted owners.
             let mut slot_owner: HashMap<usize, &str> = HashMap::new();
             for span in spans
                 .iter()
                 .filter(|s| !id.descriptor_indices.contains(&s.rec_idx))
             {
-                assert!(
-                    !span
-                        .name
-                        .eq_ignore_ascii_case("AGE SPECIFIC FERTILITY DISTRIBUTION FUNCTION"),
-                    "{path}: the ghost span must not survive as an emitted owner"
-                );
                 for ot in span.start..span.end {
                     if let Some(prev) = slot_owner.insert(ot, span.name.as_str())
                         && prev != span.name.as_str()
@@ -4966,6 +5020,60 @@ mod tests {
                     }
                 }
             }
+
+            // The recovered owners carry the correct series: `Population` is a
+            // 164-element array, and the wrongly-f10-peeled `c Identified Oil
+            // Reserve` is re-admitted with its two known element series.
+            let results = sim
+                .to_results_via_records()
+                .unwrap_or_else(|e| panic!("{path}: to_results_via_records: {e}"));
+            // Exact emitted-column count (Time + every recovered owner element).
+            // Both fixtures decode to the same 1235 columns; a wrongly-recovered
+            // ghost would push this to 1236, a wrongly-dropped real below 1235.
+            assert_eq!(
+                results.offsets.len(),
+                1235,
+                "{path}: exact emitted-column count changed (residual recovery regressed)"
+            );
+            let population_elems = results
+                .offsets
+                .keys()
+                .filter(|k| k.to_string().starts_with("population["))
+                .count();
+            assert_eq!(
+                population_elems, 164,
+                "{path}: recovered Population must expose all 164 array elements"
+            );
+            let mut oil_endpoints: Vec<(f64, f64)> = results
+                .offsets
+                .iter()
+                .filter(|(k, _)| k.to_string().starts_with("c_identified_oil_reserve["))
+                .map(|(_, &col)| {
+                    let first = results.data[col];
+                    let last = results.data[(results.step_count - 1) * results.step_size + col];
+                    (first, last)
+                })
+                .collect();
+            oil_endpoints.sort_by(|a, b| b.0.total_cmp(&a.0));
+            assert_eq!(
+                oil_endpoints.len(),
+                2,
+                "{path}: recovered oil reserve must expose both element series"
+            );
+            // The initial reserves are stock initial conditions (identical
+            // across simulation contexts: Base.vdf and the ctxt0001 scenario);
+            // the finals differ by scenario but must show depletion. Pinning
+            // the initials proves the correct series was re-admitted at the
+            // right OT slots (a wrong slot would carry unrelated magnitudes).
+            let approx = |a: f64, b: f64| (a - b).abs() < 0.01;
+            assert!(
+                approx(oil_endpoints[0].0, 51000.0) && approx(oil_endpoints[1].0, 7900.0),
+                "{path}: recovered oil reserve initial values wrong: {oil_endpoints:?}"
+            );
+            assert!(
+                oil_endpoints[0].1 < oil_endpoints[0].0 && oil_endpoints[1].1 < oil_endpoints[1].0,
+                "{path}: recovered oil reserve must deplete from its initial value: {oil_endpoints:?}"
+            );
         }
     }
 

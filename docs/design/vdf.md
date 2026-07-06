@@ -679,17 +679,63 @@ arbitrary saved slots. The observed evidence on `Base.vdf`:
 - No record field separates the two populations: ghosts and real owners both
   carry `f[14] == 0xf6800000`.
 
-**Stage 1 handling (`record_results::residual_overlap_components`).** After the
-peel and the standalone drop, the reader detects the still-conflicted spans:
+**Detection (`record_results::residual_overlap_components`).** After the peel
+and the standalone drop, the reader detects the still-conflicted spans as data:
 two spans conflict when they share an OT slot **and** carry different names
 (same-name overlap is the ordinary duplicate the per-name emitter dedup already
-resolves). Every span in a genuinely-contested component is **dropped** from
-emission -- honest missing data over a silent first-claim win -- and the
-component is surfaced on the per-file diagnostics
-(`VdfFile::residual_overlap_diagnostics` / the Python reader's
-`NamedResultsDiagnostics.residual_overlap`), analogous to
-`VdfData::unreconciled_ots`. The components are computed as data first, so a
-later stage can re-resolve a component before falling back to this drop.
+resolves), and a union-find groups the transitively-conflicting spans into
+connected components.
+
+**Recovery (`record_results::resolve_residual_components`).** Each component is
+re-resolved from scratch, recovering the real owners and dropping only the
+ghosts. This leans on one empirical invariant: **Vensim allocates OT slots in
+case-insensitive alphabetical order within a run** (a "run" being a contiguous
+alphabetical block; run boundaries are where the sequence restarts). Per
+component:
+
+1. **Un-peel.** Discard the component's phase-1 overlap peels -- any peeled
+   descriptor that spatially overlaps a component span is given a second chance
+   (this recovers `c Identified Oil Reserve`, wrongly f10-peeled when it
+   collided with the wide ghost).
+2. **Lexical peel.** Drop spans whose names are lookupish (` lookup`, ` table`,
+   `graphical function`, ...) *without* the `f[11] < n_lookups` gate: a lookup
+   definition is a table, not a series, so its stale `f[11]` cannot
+   forward-link. This alone resolves the scalar pairs whose ghost is a table
+   (`c total population table`, `Coal Fraction Discoverable Table`, ...).
+3. **Ordering oracle (`residual_span_is_owner`).** A span is a real owner iff it
+   sits where the alphabetical allocation would put it, judged against an
+   anchor bracket. The nearest **uncontested** owners on each side are the
+   default anchors; an **inverted** bracket (prev sorts after next) signals a
+   run boundary between them, so only the more reliable prev side is tested
+   (this is how the wide ghost `AGE SPECIFIC ...`, which sorts before the `c *`
+   owners it covers, is dropped while every narrow owner passes). When a span is
+   bracketed on **both** sides by owners already **recovered** from adjacent
+   components, those win: recovered reals share the span's interleaved run, so
+   they are the reliable same-run evidence (this is what adjudicates
+   `indicated per capita fish demand` vs `China future GDP growth rate` at
+   OT 127 -- the recovered `Indicated China GDP`@123 / `indicated row Coal
+   demand`@128 bracket, not the nearest uncontested owner `cafe history`@124,
+   which belongs to a different run). The oracle iterates a fixpoint: a span
+   confirmed as an owner becomes an anchor for its neighbours.
+4. **Honest-drop fallback.** Any conflict the oracle cannot adjudicate (no
+   ordering-consistent owner) is dropped -- honest missing data over a silent
+   first-claim win -- and surfaced on the per-file diagnostics
+   (`VdfFile::residual_overlap_diagnostics` / the Python reader's
+   `NamedResultsDiagnostics.residual_overlap`), analogous to
+   `VdfData::unreconciled_ots`.
+
+The whole recovery is **gated per file** on the measured alphabetical
+consistency of the uncontested owners (`RESIDUAL_ORDERING_GATE`, the fraction of
+adjacent OT-sorted owner pairs that are name-ordered): a file must clear
+**0.95** -- an overwhelming majority -- to run the oracle. The four probed
+corpus files measure 98.6-99.6% (and the two SimService files with residual
+components both sit at 0.9964), comfortably above the bar; the sub-0.95 corpus
+files are all tiny run files with no residual components. A file that does not
+exhibit the invariant fails the gate, the oracle abstains, and every residual
+span is honest-dropped -- so a non-alphabetical file is never mis-adjudicated. On the two SimService files the
+recovery is complete: every real owner is recovered (`Population`'s 164 elements,
+the oil reserve series, the four `indicated`/`industrial` owners) and nothing is
+left honest-dropped, so the diagnostics come back empty.
 
 ### Worked example: a `SMOOTH1` call
 
