@@ -6,7 +6,8 @@ consistency and produce the worked trajectories recorded in the doc's section
 
 Not production code -- a faithful transcription of the spec's per-DT rules.
 Coverage: the two-phase update (4.3) including arrest and the held-exit merge,
-linear/exponential leakage with fixed per-cohort schedules (5.1-5.3), capacity
+linear/exponential leakage with entry-fixed schedules, per-DT re-read
+fractions, and additive multi-flow exponential (5.1-5.3), capacity
 and inflow limits (6.3), discrete quantized admission vs capacity with per-inflow attribution (6.4 rule 1),
 transit latching/shrink/merging (6.1-6.2), steady-state init (7.1), conveyor
 chains, and half-away rounding (4.1). Not exercised here: leak zones narrower
@@ -33,13 +34,15 @@ def check(label, ok):
 class Slat:
     # section 4.2: content plus each cohort's fixed linear-leak schedule
     content: float
-    leak_alloc: list   # per leak flow: fixed per-DT leak amount
-    leak_budget: list  # per leak flow: remaining lifetime leak total
+    leak_basis: list   # per leak flow: volume per in-zone DT per unit of
+                       # fraction (A / M_k(d), fixed at insertion)
+    leak_window: list  # per leak flow: remaining leakable basis-volume
 
 
 @dataclass
 class LeakFlow:
-    fraction: float
+    fraction: object   # float, or callable(t) -> float: fractions are re-read
+                       # every DT (isee: "the current values will be used")
     zone_start: float = 0.0
     zone_end: float = 1.0
 
@@ -79,6 +82,10 @@ class Conveyor:
         # in-zone slats between insertion depth (index depth-1) and exit, inclusive
         return sum(1 for i in range(depth) if self.in_zone(i, length, lk))
 
+    def f_now(self, k, t):
+        fr = self.leaks[k].fraction
+        return fr(t) if callable(fr) else fr
+
     def contents(self):
         return sum(s.content for s in self.slats)
 
@@ -90,20 +97,20 @@ class Conveyor:
         # path d_c). For default placement own_depth == entry_depth, so the
         # budget is exactly f*A -- the full documented fraction over the
         # cohort's own journey, regardless of any stale tail (belt_len > d).
-        alloc, budget = [], []
+        basis, window = [], []
         for lk in self.leaks:
             if self.exponential_leak:
-                alloc.append(0.0)
-                budget.append(0.0)
+                basis.append(0.0)
+                window.append(0.0)
                 continue
             m_entry = self.zone_count_from(lk, belt_len, entry_depth)
-            a = lk.fraction * volume / m_entry if m_entry else 0.0
-            alloc.append(a)
+            b = volume / m_entry if m_entry else 0.0
+            basis.append(b)
             # min with m_entry: caps a dest share landing on a stale-tail slat
-            # beyond the entry depth at the documented f*A (no-op otherwise)
+            # beyond the entry depth at an entry cohort's window (no-op otherwise)
             m_own = self.zone_count_from(lk, belt_len, own_depth)
-            budget.append(a * min(m_own, m_entry))
-        return alloc, budget
+            window.append(b * min(m_own, m_entry))
+        return basis, window
 
     # ---- initialization (section 7.1) ----
     def init_steady(self, V):
@@ -111,26 +118,29 @@ class Conveyor:
         N = self.n_slats()
         c = [0.0] * N
         c[N - 1] = 1.0
-        unit_alloc = []
+        unit_basis = []
         for lk in self.leaks:
             m = self.zone_count(lk, N)
-            unit_alloc.append(0.0 if self.exponential_leak or m == 0
-                              else lk.fraction / m)
+            unit_basis.append(0.0 if self.exponential_leak or m == 0
+                              else 1.0 / m)
+        # retained profile evaluates each fraction at its initial value (t=0);
+        # exponential sheds are ADDITIVE from the same c[i] base (section 5.2)
         for i in range(N - 1, 0, -1):
             shed = 0.0
             for k, lk in enumerate(self.leaks):
                 if self.in_zone(i, N, lk):
-                    shed += (c[i] * lk.fraction * self.dt if self.exponential_leak
-                             else unit_alloc[k])
+                    shed += (c[i] * self.f_now(k, 0.0) * self.dt
+                             if self.exponential_leak
+                             else self.f_now(k, 0.0) * unit_basis[k])
             c[i - 1] = max(0.0, c[i] - shed)
         S = sum(c)
         E = V / S if S > 0 else 0.0
         self.slats = []
         for i in range(N):
-            alloc = [E * ua for ua in unit_alloc]
-            budget = [alloc[k] * self.zone_count_from(lk, N, i + 1)
+            basis = [E * ub for ub in unit_basis]
+            window = [basis[k] * self.zone_count_from(lk, N, i + 1)
                       for k, lk in enumerate(self.leaks)]
-            self.slats.append(Slat(E * c[i], alloc, budget))
+            self.slats.append(Slat(E * c[i], basis, window))
 
     def init_from_inflow(self, inflow_rate):
         self.init_steady(1.0)
@@ -139,34 +149,47 @@ class Conveyor:
         scale = E / self.slats[-1].content if self.slats[-1].content else 0.0
         for s in self.slats:
             s.content *= scale
-            s.leak_alloc = [a * scale for a in s.leak_alloc]
-            s.leak_budget = [b * scale for b in s.leak_budget]
+            s.leak_basis = [a * scale for a in s.leak_basis]
+            s.leak_window = [b * scale for b in s.leak_window]
 
     # ---- phase A (section 4.3 steps 0-3): arrest, latch, leak, exit --
     # purely local (the harness passes arrest flags in; latching is modeled
     # by mutating latched_transit before the step, equivalent to step 1)
-    def phase_a(self, arrested=False, dest_arrested=False):
+    def phase_a(self, arrested=False, dest_arrested=False, t=0.0):
         if arrested:
             return dict(out_vol=0.0, leak_vols=[0.0] * len(self.leaks),
                         arrested=True, held=False)
         L = len(self.slats)
-        leak_vols = []
-        for k, lk in enumerate(self.leaks):
-            shed_total = 0.0
-            for i in range(L):
-                if not self.in_zone(i, L, lk):
-                    continue
-                s = self.slats[i]
-                if self.exponential_leak:
-                    shed = s.content * lk.fraction * self.dt
-                else:
-                    shed = min(s.leak_alloc[k], s.leak_budget[k])
-                shed = min(shed, s.content)
-                s.content -= shed
-                if not self.exponential_leak:
-                    s.leak_budget[k] -= shed
-                shed_total += shed
-            leak_vols.append(shed_total)
+        fs = [self.f_now(k, t) for k in range(len(self.leaks))]
+        leak_vols = [0.0] * len(self.leaks)
+        for i in range(L):
+            s = self.slats[i]
+            in_z = [self.in_zone(i, L, lk) for lk in self.leaks]
+            if self.exponential_leak:
+                # section 5.2: rates ADD -- every flow computed from the same
+                # start-of-step base, scaled proportionally if they overdrain
+                c0 = s.content
+                sheds = [c0 * fs[k] * self.dt if in_z[k] else 0.0
+                         for k in range(len(self.leaks))]
+                tot = sum(sheds)
+                if tot > c0 > 0.0:
+                    sheds = [x * (c0 / tot) for x in sheds]
+                elif c0 <= 0.0:
+                    sheds = [0.0] * len(sheds)
+                s.content -= sum(sheds)
+                for k, x in enumerate(sheds):
+                    leak_vols[k] += x
+            else:
+                # section 5.1: current fraction x fixed basis, in priority
+                # order against running content; window consumed by travel
+                for k in range(len(self.leaks)):
+                    if not in_z[k]:
+                        continue
+                    use = min(s.leak_basis[k], s.leak_window[k])
+                    shed = min(fs[k] * use, s.content)
+                    s.content -= shed
+                    s.leak_window[k] -= use
+                    leak_vols[k] += shed
         # step 3: held exit if the primary outflow's destination is arrested
         if dest_arrested:
             return dict(out_vol=0.0, leak_vols=leak_vols, arrested=False,
@@ -229,8 +252,8 @@ class Conveyor:
             if len(self.slats) > 1:
                 s0, s1 = self.slats[0], self.slats[1]
                 s0.content += s1.content
-                s0.leak_alloc = [x + y for x, y in zip(s0.leak_alloc, s1.leak_alloc)]
-                s0.leak_budget = [x + y for x, y in zip(s0.leak_budget, s1.leak_budget)]
+                s0.leak_basis = [x + y for x, y in zip(s0.leak_basis, s1.leak_basis)]
+                s0.leak_window = [x + y for x, y in zip(s0.leak_window, s1.leak_window)]
                 del self.slats[1]
         else:
             self.slats.pop(0)
@@ -245,8 +268,8 @@ class Conveyor:
         alloc, budget = self.cohort_schedule(admitted, len(self.slats), d, d)
         tgt = self.slats[d - 1]
         tgt.content += admitted
-        tgt.leak_alloc = [x + y for x, y in zip(tgt.leak_alloc, alloc)]
-        tgt.leak_budget = [x + y for x, y in zip(tgt.leak_budget, budget)]
+        tgt.leak_basis = [x + y for x, y in zip(tgt.leak_basis, alloc)]
+        tgt.leak_window = [x + y for x, y in zip(tgt.leak_window, budget)]
         return dict(in_rate=admitted / dt,
                     in_rates=[v / dt for v in in_vols], cleared=cleared)
 
@@ -264,7 +287,7 @@ def step_all(convs, eq_inflow_rates, chain=None, t=0.0, arrested=None):
     feeds_arrested = {chain[down] for down in chain if down in arrested}
     contents0 = {c.name: c.contents() for c in convs}
     pa = {c.name: c.phase_a(arrested=c.name in arrested,
-                            dest_arrested=c.name in feeds_arrested)
+                            dest_arrested=c.name in feeds_arrested, t=t)
           for c in convs}                               # phase A: any order
     results = {}
     for c in convs:                                     # phase B: any order
@@ -521,6 +544,46 @@ check("S12 after shutoff, inflow 1 reports at most its residual carry (< 1 unit)
       cum_reported[1] - shutoff_reported < 1.0 + 1e-9)
 check("S12 both inflows delivered integral totals",
       all(abs(v - round(v)) < 1e-9 for v in cum_reported))
+
+# S13: time-varying LINEAR leak fraction (isee: current values are used).
+# Steady at f=0.2; f jumps to 0.4 at t=4. ALL cohorts leak at the new rate
+# immediately (leak rate doubles at the switch step), and the outflow
+# re-equilibrates at (1-0.4)*250 = 150 once the belt turns over.
+print("\n=== S13 linear leak with time-varying fraction 0.2 -> 0.4 at t=4 ===")
+c13 = Conveyor('c13', transit=4, dt=0.25,
+               leaks=[LeakFlow(lambda t: 0.2 if t < 4 else 0.4)])
+c13.init_from_inflow(250)
+switch_leak = None
+last_out13 = None
+t = 0.0
+for _ in range(64):
+    r = step_all([c13], {'c13': 250.0}, t=t)['c13']
+    if abs(t - 4.0) < 1e-9:
+        switch_leak = r['leak'][0]
+    last_out13 = r['outflow']
+    t += 0.25
+check("S13 leak rate doubles for ALL cohorts at the switch (50 -> 100)",
+      switch_leak is not None and abs(switch_leak - 100.0) < 1e-6)
+check("S13 outflow re-equilibrates at (1-0.4)*250 == 150",
+      abs(last_out13 - 150.0) < 1e-6)
+
+# S14: two overlapping exponential leaks ADD (isee): two 0.1/time leaks behave
+# exactly like one 0.2/time leak, each reporting half -- NOT the sequential
+# (1-0.9*0.9) compounding.
+print("\n=== S14 two exponential leaks 0.1/time each == one 0.2/time ===")
+c14 = Conveyor('c14', transit=4, dt=0.25, exponential_leak=True,
+               leaks=[LeakFlow(0.1), LeakFlow(0.1)])
+c14.init_from_inflow(250)
+t = 0.0
+r14 = None
+for _ in range(32):
+    r14 = step_all([c14], {'c14': 250.0}, t=t)['c14']
+    t += 0.25
+expect14 = 250 * (1 - 0.2 * 0.25) ** 16
+check(f"S14 steady outflow == 250*(1-0.2*dt)^16 == {round(expect14, 6)} (rates add)",
+      abs(r14['outflow'] - expect14) < 1e-4)
+check("S14 the two leak flows report equal halves",
+      abs(r14['leak'][0] - r14['leak'][1]) < 1e-9)
 
 print()
 if FAILURES:
