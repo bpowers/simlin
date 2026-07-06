@@ -5,13 +5,14 @@ consistency and produce the worked trajectories recorded in the doc's section
 15, which are the acceptance oracles for the Rust implementation.
 
 Not production code -- a faithful transcription of the spec's per-DT rules.
-Coverage: the two-phase update (4.3), linear/exponential leakage with fixed
-per-cohort schedules (5.1-5.3), capacity and inflow limits (6.3), transit
-latching/merging (6.1-6.2), steady-state init (7.1), conveyor chains, and
-half-away rounding (4.1). Not exercised here: arrest, leak zones narrower than
-the belt, <leak_integers/>, discrete quantization, spread inputs, explicit-list
-init -- their rules are specified in the doc and get fixtures with the Rust
-implementation.
+Coverage: the two-phase update (4.3) including arrest and the held-exit merge,
+linear/exponential leakage with fixed per-cohort schedules (5.1-5.3), capacity
+and inflow limits (6.3), transit latching/shrink/merging (6.1-6.2),
+steady-state init (7.1), conveyor chains, and half-away rounding (4.1). Not
+exercised here: leak zones narrower than the belt, <leak_integers/>, discrete
+quantization, spread inputs, explicit-list init, leak-fed chains ('source'
+placement) -- their rules are specified in the doc and get fixtures with the
+Rust implementation.
 Run: python3 test/conveyors/reference_prototype.py   (exits nonzero on failure)
 """
 from dataclasses import dataclass, field
@@ -80,19 +81,21 @@ class Conveyor:
     def empty_slat(self):
         return Slat(0.0, [0.0] * len(self.leaks), [0.0] * len(self.leaks))
 
-    def cohort_schedule(self, volume, length, depth):
-        # section 5.1: alloc fixed at insertion; budget prorated to the
-        # zone slats this cohort will actually traverse
+    def cohort_schedule(self, volume, belt_len, entry_depth, own_depth):
+        # section 5.1: alloc = f*A / M(entry path d); budget = alloc * M(own
+        # path d_c). For default placement own_depth == entry_depth, so the
+        # budget is exactly f*A -- the full documented fraction over the
+        # cohort's own journey, regardless of any stale tail (belt_len > d).
         alloc, budget = [], []
         for lk in self.leaks:
             if self.exponential_leak:
                 alloc.append(0.0)
                 budget.append(0.0)
                 continue
-            m = self.zone_count(lk, length)
-            a = lk.fraction * volume / m if m else 0.0
+            m_entry = self.zone_count_from(lk, belt_len, entry_depth)
+            a = lk.fraction * volume / m_entry if m_entry else 0.0
             alloc.append(a)
-            budget.append(a * self.zone_count_from(lk, length, depth))
+            budget.append(a * self.zone_count_from(lk, belt_len, own_depth))
         return alloc, budget
 
     # ---- initialization (section 7.1) ----
@@ -132,11 +135,11 @@ class Conveyor:
             s.leak_alloc = [a * scale for a in s.leak_alloc]
             s.leak_budget = [b * scale for b in s.leak_budget]
 
-    # ---- phase A (section 4.3 steps 1-3): leak + exit, purely local ----
-    def phase_a(self, arrested=False):
+    # ---- phase A (section 4.3 steps 0-3): latch + leak + exit, purely local
+    def phase_a(self, arrested=False, dest_arrested=False):
         if arrested:
             return dict(out_vol=0.0, leak_vols=[0.0] * len(self.leaks),
-                        arrested=True)
+                        arrested=True, held=False)
         L = len(self.slats)
         leak_vols = []
         for k, lk in enumerate(self.leaks):
@@ -155,8 +158,12 @@ class Conveyor:
                     s.leak_budget[k] -= shed
                 shed_total += shed
             leak_vols.append(shed_total)
+        # step 3: held exit if the primary outflow's destination is arrested
+        if dest_arrested:
+            return dict(out_vol=0.0, leak_vols=leak_vols, arrested=False,
+                        held=True)
         return dict(out_vol=self.slats[0].content, leak_vols=leak_vols,
-                    arrested=False)
+                    arrested=False, held=False)
 
     # ---- phase B (section 4.3 steps 4-6): admit + shift + insert ----
     def phase_b(self, pa, eq_request_rate, conv_vol, contents0, t):
@@ -172,20 +179,29 @@ class Conveyor:
             limit_vol = max(0.0, self.in_limit - self.in_carry)
         else:
             limit_vol = self.in_limit * dt
-        eq_admitted = min(eq_request_rate * dt, cap_room, limit_vol)
+        eq_admitted = min(max(0.0, eq_request_rate) * dt, cap_room, limit_vol)
         if self.discrete:
             self.in_carry += eq_admitted
         admitted = conv_vol + eq_admitted
-        # shift
-        self.slats.pop(0)
+        # step 5: shift (held exit keeps slat 0 and merges the next slat in)
+        if pa['held']:
+            if len(self.slats) > 1:
+                s0, s1 = self.slats[0], self.slats[1]
+                s0.content += s1.content
+                s0.leak_alloc = [x + y for x, y in zip(s0.leak_alloc, s1.leak_alloc)]
+                s0.leak_budget = [x + y for x, y in zip(s0.leak_budget, s1.leak_budget)]
+                del self.slats[1]
+        else:
+            self.slats.pop(0)
         while self.slats and self.slats[-1].content == 0.0 and \
                 len(self.slats) > self.n_slats():
             self.slats.pop()
-        # insert at depth d (default 'beginning' placement)
+        # step 6: insert at depth d -- ALWAYS runs, even for admitted == 0,
+        # so the belt never has fewer than d slats
         d = self.n_slats()
         while len(self.slats) < d:
             self.slats.append(self.empty_slat())
-        alloc, budget = self.cohort_schedule(admitted, len(self.slats), d)
+        alloc, budget = self.cohort_schedule(admitted, len(self.slats), d, d)
         tgt = self.slats[d - 1]
         tgt.content += admitted
         tgt.leak_alloc = [x + y for x, y in zip(tgt.leak_alloc, alloc)]
@@ -193,14 +209,21 @@ class Conveyor:
         return dict(in_rate=admitted / dt)
 
 
-def step_all(convs, eq_inflow_rates, chain=None, t=0.0):
+def step_all(convs, eq_inflow_rates, chain=None, t=0.0, arrested=None):
     """One Euler step over all conveyors (section 4.3 two-phase pass).
     chain: dict mapping downstream conveyor name -> upstream conveyor name
     whose primary outflow feeds it (conveyor-driven, admitted unconditionally).
-    Conservation is asserted for every conveyor every step."""
+    arrested: set of conveyor names whose <arrest> is nonzero this step; an
+    upstream conveyor whose primary outflow targets an arrested conveyor gets
+    a HELD exit (section 4.3 steps 3/5). Conservation is asserted for every
+    conveyor every step."""
     chain = chain or {}
+    arrested = arrested or set()
+    feeds_arrested = {chain[down] for down in chain if down in arrested}
     contents0 = {c.name: c.contents() for c in convs}
-    pa = {c.name: c.phase_a() for c in convs}          # phase A: any order
+    pa = {c.name: c.phase_a(arrested=c.name in arrested,
+                            dest_arrested=c.name in feeds_arrested)
+          for c in convs}                               # phase A: any order
     results = {}
     for c in convs:                                     # phase B: any order
         up = chain.get(c.name)
@@ -228,8 +251,12 @@ def run(name, conv, V, inflow_fn, stop, init_inflow=None):
     while t <= stop + 1e-9:
         if conv.discrete and math.floor(t) != prev_unit:
             conv.in_carry, prev_unit = 0.0, math.floor(t)
+        # Reporting convention (doc section 15): each row shows the stock's
+        # START-of-step contents at time t plus the flow rates during
+        # [t, t+DT) -- matching simlin CSV semantics.
+        contents_at_t = conv.contents()
         r = step_all([conv], {conv.name: inflow_fn(t)}, t=t)[conv.name]
-        rows.append((round(t, 4), round(conv.contents(), 6),
+        rows.append((round(t, 4), round(contents_at_t, 6),
                      round(r['outflow'], 6),
                      [round(x, 6) for x in r['leak']],
                      round(r['inflow'], 6)))
@@ -257,6 +284,9 @@ r2 = run("S2 fill-from-empty (V=0, inflow=250, T=4)", c2, 0, lambda t: 250, 6)
 first_out = next(row[0] for row in r2 if row[2] > 0)
 check("S2 first nonzero outflow at t=4.0 (transit delay)",
       abs(first_out - 4.0) < 1e-9)
+check("S2 start-of-step convention: contents 0 at t=0, 1000 first at t=4.0",
+      r2[0][1] == 0.0 and
+      next(row[0] for row in r2 if abs(row[1] - 1000) < 1e-9) == 4.0)
 
 # S3: linear leak f=0.2 full zone -- steady outflow/inflow == 1-f
 c3 = Conveyor('c3', transit=4, dt=0.25, leaks=[LeakFlow(0.2)])
@@ -318,12 +348,16 @@ check("S8 B's capacity (100) transiently exceeded by conveyor-driven inflow",
 check("S8 conservation across the chain (nothing lost)",
       abs((a8.contents() + b8.contents() + exited) - total0) < 1e-6)
 
-# S9: transit shrink merges cohorts; linear-leak state sums; conservation holds
+# S9: transit shrink merges cohorts; linear-leak state sums; conservation
+# holds; and -- the finding-1 regression guard -- post-shrink entry cohorts
+# still leak the FULL fraction f (steady outflow returns to (1-f)*inflow even
+# while the stale tail keeps the physical belt longer than the entry depth).
 print("\n=== S9 transit shrink 4->2 mid-run with linear leak f=0.2 ===")
 c9 = Conveyor('c9', transit=4, dt=0.25, leaks=[LeakFlow(0.2)])
 c9.init_from_inflow(250)
 total_in = total_out = total_leak = 0.0
 start9 = c9.contents()
+last_out = 0.0
 t = 0.0
 for _ in range(48):
     if abs(t - 2.0) < 1e-9:
@@ -332,12 +366,50 @@ for _ in range(48):
     total_in += r['inflow'] * 0.25
     total_out += r['outflow'] * 0.25
     total_leak += sum(r['leak']) * 0.25
+    last_out = r['outflow']
     t += 0.25
 resid9 = total_in - total_out - total_leak - (c9.contents() - start9)
 check("S9 whole-run conservation under shrink+merge (residual ~ 0)",
       abs(resid9) < 1e-6)
 check("S9 lifetime leak never exceeds budget (leak <= 0.2 x (inflow+init))",
       total_leak <= 0.2 * (total_in + start9) + 1e-6)
+check("S9 post-shrink steady outflow == (1-f)*inflow == 200 (full-fraction leak)",
+      abs(last_out - 200.0) < 1e-6)
+
+# S10: arrest + held exit. A (T=2, draining 500) feeds B (T=4); B is arrested
+# for t in [1.0, 2.0). During the hold A's outflow reports 0 and material
+# accumulates in A's exit slat (section 4.3 steps 3/5); B is frozen. On
+# release the accumulated lump exits A in one DT. Nothing is lost.
+print("\n=== S10 arrest + held exit (B arrested t in [1,2)) ===")
+a10 = Conveyor('a10', transit=2, dt=0.25)
+b10 = Conveyor('b10', transit=4, dt=0.25)
+a10.init_steady(500)
+b10.init_steady(0)
+total0 = a10.contents() + b10.contents()
+exited = 0.0
+hold_ok = True
+release_out = None
+t = 0.0
+for _ in range(64):
+    arr = {'b10'} if 1.0 - 1e-9 <= t < 2.0 - 1e-9 else set()
+    r = step_all([a10, b10], {'a10': 0.0}, chain={'b10': 'a10'}, t=t,
+                 arrested=arr)
+    if arr:
+        b_delta_ok = abs(r['b10']['outflow']) < 1e-12 and \
+            abs(r['b10']['inflow']) < 1e-12
+        hold_ok = hold_ok and r['a10']['outflow'] == 0.0 and b_delta_ok
+    if abs(t - 2.0) < 1e-9:
+        release_out = r['a10']['outflow']
+    exited += r['b10']['outflow'] * 0.25
+    t += 0.25
+check("S10 during hold: A outflow == 0 and B frozen", hold_ok)
+# At hold start (t=1.0) A has drained 4 of its 8 slats, so 250 remains; all
+# of it merges into the exit slat across the 4 held steps and exits as one
+# lump on release: rate 250/0.25 = 1000.
+check("S10 release step: accumulated lump exits A (250 == 4 slats, rate 1000)",
+      release_out is not None and abs(release_out - 250.0 / 0.25) < 1e-6)
+check("S10 conservation: everything initially in A ends up through B",
+      abs((a10.contents() + b10.contents() + exited) - total0) < 1e-6)
 
 print()
 if FAILURES:
