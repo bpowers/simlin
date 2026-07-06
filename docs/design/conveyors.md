@@ -399,8 +399,9 @@ once, at the cohort's entry DT — [§4.4](#44-runtime-expression-hygiene)).
 
 Terminology (this resolves an ambiguity in the word "entry"): the **entry
 depth** `d = round(latched_transit / DT)` is where default-placement material is
-inserted (step 6); a cohort's **insertion depth** `d_c ≤ d` is where it actually
-lands (`d_c = d` for default placement; `d_c < d` only for spread-input shares,
+inserted (step 6); a cohort's **insertion depth** `d_c` is where it actually
+lands (`d_c = d` for default placement; `d_c < d` for most spread-input shares;
+only a `dest` share can land beyond `d`, on a stale-tail slat —
 [§8](#8-inflow-placement-spread-inputs)). After a transit shrink the *physical*
 belt can be longer than `d` (a stale tail of older material) — a new cohort's
 journey is its own `d_c` slats, **not** the physical belt length.
@@ -410,9 +411,14 @@ When a cohort of volume `A` is inserted, for each linear leak flow `k`
 
 ```
 M_k(p)   = count of in-zone slats among indices 0..p-1     // §5.3, per the belt after step-6 extension
-alloc_k  = f_k × A / M_k(d)       // per-DT leak amount, fixed for the cohort's life
-budget_k = alloc_k × M_k(d_c)     // lifetime total this cohort may leak to flow k
+alloc_k  = f_k × A / M_k(d)                 // per-DT leak amount, fixed for the cohort's life
+budget_k = alloc_k × min(M_k(d_c), M_k(d))  // lifetime total this cohort may leak to flow k
 ```
+
+(The `min` with `M_k(d)` matters only for a `dest` share landing on a
+stale-tail slat beyond `d`: it caps that share's lifetime leak at the
+documented `f_k × A` instead of letting the longer path over-schedule it. For
+every other placement `d_c ≤ d` and the `min` is a no-op.)
 
 For default placement (`d_c = d`) the budget is exactly `f_k × A` — the full
 documented fraction, leaked evenly over the cohort's own `d`-slat journey. This
@@ -555,10 +561,13 @@ integrated into the algorithm above:
 3. **Start-of-time-unit initialization** ([§7](#7-initialization)): the belt's
    `N` slats partition into **time-unit blocks** by simulated travel time —
    slat `i` belongs to block `u = floor(i × DT)` (well-defined for any DT,
-   integer `1/DT` or not), giving `U = ceil(N × DT)` blocks. A scalar initial
-   value is divided across the `U` blocks, the whole per-block share placed in
-   that block's deepest slat rather than spread evenly; an explicit init list
-   places each entry the same way ([§7.2](#72-explicit-per-slat-list)).
+   integer `1/DT` or not), giving `U = floor((N − 1) × DT) + 1` blocks (the
+   number of blocks that actually own a slat; equal to `N × DT` when `1/DT` is
+   integral, and never producing an empty block when it is not). A scalar
+   initial value is divided across the `U` blocks, the whole per-block share
+   placed in that block's deepest slat rather than spread evenly; an explicit
+   init list places each entry the same way
+   ([§7.2](#72-explicit-per-slat-list)).
 
 A conveyor with a queue directly upstream MUST be discrete (XMILE §3.7.2;
 enforced as a compile error — [§11](#11-queues-and-the-conveyor-side-of-queueconveyor-coupling)).
@@ -612,7 +621,7 @@ by list length:
   non-integer transit times, per the isee rule.
 - **Any other length (one entry per time unit):** using the time-unit blocks of
   [§6.4](#64-discrete-conveyors) rule 3 (slat `i` in block `floor(i × DT)`,
-  `U = ceil(N × DT)` blocks), entry `v_u` fills block `u`: split evenly across
+  `U = floor((N − 1) × DT) + 1` blocks), entry `v_u` fills block `u`: split evenly across
   the block's slats for a **continuous** conveyor (so the outflow during unit
   `u` totals `v_u`), or placed whole in the block's deepest slat for a
   **discrete** conveyor (isee "start of each time unit" semantics). The list is
@@ -708,12 +717,15 @@ pushback on the inflow cannot be expressed as fixed equations):
   driven outflow/leak/inflow slots map to entries in this table via the layout.
 - **Update hook.** Add the two-phase conveyor pass
   ([§4.3](#43-per-dt-update)) inside the Euler loop's `eval_step`, ordered
-  **after** ordinary flow equations are evaluated (so requested inflow rates and
-  `arrest`/`sample`/`len`/`capacity`/`in_limit` auxiliaries are current) and
-  **before** stock integration (so the driven flow values feed the stock
-  update). Phase A writes each conveyor's outflow and leak rates; Phase B writes
-  admitted-inflow rates and advances the belts. Within each phase the iteration
-  order over conveyors is arbitrary (no topological sort — [§4.3](#43-per-dt-update)).
+  **after** the equations the pass depends on (its inputs: requested inflow
+  rates and the `arrest`/`sample`/`len`/`capacity`/`in_limit`/leak-fraction
+  expressions) and **before** both stock integration and any equation that
+  *reads* a pass output — the §4.3 "Visibility to other equations" rules are
+  the normative ordering; equations reading a driven flow are dependency-
+  ordered after the pass, not lumped with "ordinary flows" generally. Phase A
+  writes each conveyor's outflow and leak rates; Phase B writes admitted-inflow
+  rates and advances the belts. Within each phase the iteration order over
+  conveyors is arbitrary (no topological sort — [§4.3](#43-per-dt-update)).
   The conveyor's own value slot receives `Σ slats.content`.
 - **Initialization** ([§7](#7-initialization)) runs in the initials pass, filling
   `slats` from the stock `<eqn>` value before the first step.

@@ -95,7 +95,10 @@ class Conveyor:
             m_entry = self.zone_count_from(lk, belt_len, entry_depth)
             a = lk.fraction * volume / m_entry if m_entry else 0.0
             alloc.append(a)
-            budget.append(a * self.zone_count_from(lk, belt_len, own_depth))
+            # min with m_entry: caps a dest share landing on a stale-tail slat
+            # beyond the entry depth at the documented f*A (no-op otherwise)
+            m_own = self.zone_count_from(lk, belt_len, own_depth)
+            budget.append(a * min(m_own, m_entry))
         return alloc, budget
 
     # ---- initialization (section 7.1) ----
