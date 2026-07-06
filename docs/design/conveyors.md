@@ -14,6 +14,15 @@ use `grep -a`) for syntax and prose semantics, and isee systems' "Computational
 Details" help pages for the per-DT math. The isee "traditional conveyor" model
 is the reference behavior simlin implements.
 
+**Precedence rule: Stella wins.** Where the OASIS XMILE prose and documented or
+observed Stella/isee behavior conflict, simlin follows **Stella**. Conveyors
+exist in exactly one implementation that real models were built against; the
+XMILE spec is a description of that implementation, and it is far more likely
+the description is imperfect than that anyone has faithfully implemented the
+description against Stella's behavior. Where Stella's behavior is unknown
+(neither documented nor observable), simlin defines deterministic behavior and
+flags it for cross-engine confirmation ([§14](#14-validation-and-logistics)).
+
 ## 1. Motivation
 
 Conveyors are a first-class stock type in Stella / isee systems models, used for
@@ -141,14 +150,14 @@ be the normal outflow).
 XMILE says a conveyor outflow MUST NOT carry a normal equation — the conveyor
 drives it — but real Stella exports put a **placeholder** `<eqn>0</eqn>` on
 primary conveyor outflows anyway (both vendored `.stmx` fixtures do, e.g.
-`recovering` in `sir_social_distancing_mixnot.stmx`). The reader therefore
-**preserves but ignores** any `<eqn>` on a primary conveyor outflow: it is kept
-for round-trip fidelity and plays no role in simulation — never an error. The
-writer emits the spec-strict form (no `<eqn>` on a primary outflow), consistent
-with the `<non_negative/>` writer rule in [§3.4](#34-non-negativity). On a
-*leak-marked* flow the `<eqn>` is meaningful — it carries the leak fraction.
-Real Stella models put the leak **fraction** in the `<eqn>` of a
-`<leak/>`-tagged flow:
+`recovering` in `sir_social_distancing_mixnot.stmx`). Per the precedence rule,
+Stella's practice governs: the reader **preserves but ignores** any `<eqn>` on
+a primary conveyor outflow (it plays no role in simulation — never an error),
+and the writer **re-emits a preserved placeholder** so a round-tripped Stella
+file keeps its shape; the writer never *invents* a placeholder for a conveyor
+authored in simlin. On a *leak-marked* flow the `<eqn>` is meaningful — it
+carries the leak fraction. Real Stella models put the leak **fraction** in the
+`<eqn>` of a `<leak/>`-tagged flow:
 
 ```xml
 <flow name="attriting" leak_start="0" leak_end="0.25">
@@ -179,11 +188,12 @@ until a fraction is supplied.
 
 Conveyor and queue **inflows** are non-negative by requirement (uniflow); the
 primary conveyor outflow is non-negative by definition. `<non_negative/>` is
-redundant on those flows but Stella emits it on leak flows, so the reader accepts
-it there without error and ignores it on the primary inflow/outflow. The writer
-MUST NOT emit `<non_negative/>` on a primary conveyor outflow (XMILE §4.3: "this
-property MUST NOT appear for them"); it MAY emit it on leak flows, matching
-Stella.
+redundant on those flows, but Stella emits it on primary conveyor outflows and
+leak flows alike (verified in the vendored fixtures), despite XMILE §4.3's
+"this property MUST NOT appear for them". Per the precedence rule the reader
+accepts it anywhere without error (semantically inert on conveyor-driven
+flows), and the writer **preserves it as read** — round-tripped Stella files
+keep their shape; simlin-authored conveyors don't gain it.
 
 ### 3.5 isee spread-input attributes
 
@@ -419,9 +429,10 @@ explicitly):
 
 ### 5.1 Linear leakage
 
-`f ∈ [0, 1]` is the fraction of an entering cohort that leaks out by the time it
-exits (when `f` is constant). Two things have different sampling times, and isee
-documents both explicitly:
+`f ∈ [0, 1]` is the fraction that leaks out by the time a cohort exits — of the
+material **reaching the flow's zone** (isee's default; for a zone starting at
+the entry, that is simply the entering cohort — see "Staggered zones" below).
+Two things have different sampling times, and isee documents both explicitly:
 
 - The **schedule** — which slats leak, over how many DTs, at what volume per DT
   per unit of fraction — is **fixed at the moment the cohort enters**, derived
@@ -447,7 +458,12 @@ When a cohort of volume `A` is inserted, for each linear leak flow `k`
 
 ```
 M_k(p)    = count of in-zone slats among indices 0..p-1    // §5.3, per the belt after step-6 extension
-basis_k   = A / M_k(d)                       // volume per in-zone DT per unit of fraction; fixed at insertion
+r_k       = projected fraction of the cohort still remaining when it reaches
+            flow k's zone start (unit forward simulation over the entry path
+            using the CURRENT fractions -- the §7.1 retained-profile machinery;
+            r_k = 1 when flow k's zone starts at the entry, so for identical or
+            full-belt zones this whole term vanishes)
+basis_k   = (A × r_k) / M_k(d)               // volume per in-zone DT per unit of fraction; fixed at insertion
 window_k  = basis_k × min(M_k(d_c), M_k(d))  // remaining leakable basis-volume (travel window)
 ```
 
@@ -493,18 +509,26 @@ suggests"). The check is enforced at runtime by the content clamp in step-2
 priority order — exactly the later-leakages-get-less behavior isee describes —
 and the compiler warns when constant leak fractions sum above 1.
 
-**Staggered zones — a documented vendor divergence.** When linear leak flows
-have *different* (non-identical) zones, isee's default interprets each `f` as a
-fraction of the material **remaining at the start of that flow's zone** (its
-"Ignore losses from earlier leak zones" toggle, unchecked by default: two 0.5
-leaks on zones [0, 0.5] and [0.5, 1] remove 75%, not 100%). OASIS XMILE §3.7.2
-instead defines `f` against the **inflowing** amount (the same two leaks remove
-100%). simlin implements the XMILE reading — the formulas above are all
-denominated in the entering volume `A` — which coincides with isee for
-identical (e.g. full-belt) zones, the only configurations in the vendored
-corpus. Staggered-zone linear models are a known Stella-parity delta
-([§14](#14-validation-and-logistics)); an `isee:`-namespaced toggle can select
-the zone-start-remaining interpretation later if a real model needs it.
+**Staggered zones.** When linear leak flows have *different* (non-identical)
+zones, isee's default interprets each `f` as a fraction of the material
+**remaining at the start of that flow's zone**: two 0.5 leaks on zones
+[0, 0.5] and [0.5, 1] remove 75% (the second 0.5 applies to the surviving
+half), not 100%. simlin implements this isee default — that is what the `r_k`
+factor above encodes: `r_2 = 0.5` for the second flow in the example, so
+`basis_2 = 0.5A/M_2` and its lifetime total is `0.25A`. (OASIS XMILE §3.7.2
+instead defines `f` against the inflowing amount; per this spec's precedence
+rule, Stella's behavior wins.) `r_k` is *projected at insertion* from the
+current fractions rather than measured when the cohort arrives at the zone —
+this keeps the schedule merge-additive and start-of-run exact; under
+time-varying fractions the projection can drift from the arrival-time
+remainder, a simlin-defined corner (isee is silent on staggered zones combined
+with time-varying fractions). isee's **"Ignore losses from earlier leak
+zones"** toggle selects the other interpretation: when the conveyor sets
+`ignore_earlier_zone_losses` ([§9.1](#91-data-model)), `r_k = 1` for every
+flow (each `f` applies to the inflowing amount — the same two leaks then
+remove 100%, and the XMILE prose becomes exact). For identical or full-belt
+zones — every model in the vendored corpus — the two interpretations coincide
+(`r_k = 1` always).
 
 ### 5.2 Exponential leakage
 
@@ -595,12 +619,13 @@ available if the inflow comes from another conveyor").
 - **Capacity** bounds instantaneous contents: `cap_room = capacity −
   contents_after − conv_vol` (step 4), where `contents_after` credits the room
   freed by this DT's outflow **and leak**, and `conv_vol` is the
-  unconditionally-admitted conveyor-driven inflow. This *extends* isee's
-  documented `(Capacity − Conveyor)/DT + outflow` formula, which credits only
-  the outflow: simlin also credits leak (the room genuinely exists by the end
-  of the step). Models combining capacity limits with leakage may therefore
-  admit slightly more per DT than Stella — a known, deliberate delta to check
-  in the cross-engine confirmation ([§14](#14-validation-and-logistics)).
+  unconditionally-admitted conveyor-driven inflow. This implements isee's
+  documented `MIN((Capacity − Conveyor)/DT + total outflow volume, inflow)`
+  formula, reading "total outflow volume" as the sum of everything leaving the
+  conveyor this DT — leakage flows *are* outflows of a conveyor. If Stella's
+  "total outflow" turns out to mean the primary outflow only, capacity+leak
+  models would admit slightly less there; the interpretation is flagged for
+  cross-engine confirmation ([§14](#14-validation-and-logistics)).
 - **Inflow limit** bounds equation-driven inflow per **time unit**:
   - *Continuous conveyor:* `limit_vol = in_limit × DT` (the per-time-unit limit
     prorated to this DT).
@@ -778,6 +803,11 @@ pub struct Conveyor {
     pub batch_integrity: bool,
     pub one_at_a_time: bool,           // default true
     pub exponential_leak: bool,
+    pub ignore_earlier_zone_losses: bool,  // isee "Ignore losses from earlier leak
+                                           // zones" toggle (default false -- §5.1
+                                           // staggered zones); Stella persists it as
+                                           // an isee: vendor attribute, mapped by the
+                                           // reader when observed in real files
 }
 pub struct Leakage {
     pub fraction: Option<String>,      // <leak> expr, None for a bare <leak/> marker
@@ -1037,11 +1067,15 @@ rules (integer/zoned leakage, discrete quantization, spread placements,
 explicit-list init) are specified in prose and get fixtures with the Rust
 implementation. Two items are logistics, not spec gaps:
 
-- **Cross-engine confirmation.** The prototype pins simlin's own numerics; a
-  Stella (or other conforming-engine) run of the vendored fixtures would confirm
-  the derived formulas in §5/§7 match the vendor bit-for-bit. Not required to
-  implement — the §15 trajectories are sufficient to build and test against —
-  but a good confidence check when Stella access is available.
+- **Cross-engine confirmation.** Stella is the ground truth this spec targets
+  (the precedence rule in the preamble). The prototype pins simlin's own
+  numerics; a Stella run of the vendored fixtures is the authoritative check
+  and **overrides this spec wherever they disagree** — flagged interpretation
+  points to probe first: the §6.3 "total outflow volume" reading, the §4.1
+  non-integer-transit rounding, the §4.2 stale-tail corners, and staggered
+  zones under time-varying fractions (§5.1). Not required to start
+  implementing — the §15 trajectories are sufficient to build against — but
+  any Stella disagreement is a spec bug to fix, not a delta to document.
 - **Diagram/editor authoring.** Rendering and authoring conveyor stocks and leak
   flows in the diagram editor is scoped with the TypeScript surface work in
   step 1/4 of [§12](#12-build-sequence); it does not affect the engine spec.
@@ -1057,7 +1091,8 @@ Every check below **passes**. Run it with
 **Prototype coverage — what these scenarios do and do not verify.** Executed:
 the two-phase update including arrest and the held-exit merge (§4.3),
 linear/exponential leakage with entry-fixed schedules and per-DT re-read
-fractions, including additive multi-flow exponential (§5.1–§5.3),
+fractions, additive multi-flow exponential, and staggered zones with the
+zone-start-remaining basis (§5.1–§5.3),
 capacity and inflow limits (§6.3), discrete quantized admission against a tight
 capacity with per-inflow attribution (§6.4 rule 1), transit latching/shrink/merging (§6.1–§6.2),
 steady-state initialization (§7.1), conveyor chains, and half-away rounding
@@ -1090,6 +1125,7 @@ rate 250/time unit unless noted.
 | S12 | discrete conveyor, **two** equation-driven inflows (1.6 and 0.8/time; the second shuts off at `t = 8`) | — | — | per-inflow attribution ([§6.4](#64-discrete-conveyors) rule 1): the bookkeeping identity `cum_cleared_j = cum_reported_j + quant_carry[j]` holds for each inflow at every step, so every inserted unit debits exactly the upstream flow that cleared it; after shutoff an inflow reports at most its residual carry; both totals integral |
 | S13 | linear leak with **time-varying fraction** `0.2 → 0.4` at `t = 4` | — | — | fractions are re-read every DT ([§5.1](#51-linear-leakage)): the leak rate doubles for **all** cohorts at the switch step (50 → 100), not only new entrants, and the outflow re-equilibrates at `(1 − 0.4)·250 = 150` |
 | S14 | **two** exponential leaks, 0.1/time each, same zone | — | 110.031667 | overlapping exponential rates **add** ([§5.2](#52-exponential-leakage)): identical to one 0.2/time leak — steady outflow `250·(1 − 0.2·DT)^16`, each flow reporting exactly half — not the `1 − 0.9×0.9` sequential compounding |
+| S15 | **staggered** linear zones: `f = 0.5` on `[0, 0.5]` plus `f = 0.5` on `[0.5, 1]` | — | 62.5 | isee's own worked example ([§5.1](#51-linear-leakage) staggered zones): the second fraction applies to the material **remaining at its zone start**, so 75% leaks (flows report 125 and 62.5) and 25% flows out — not the 100% an inflowing-amount basis would remove |
 
 In addition to the per-scenario invariants, the harness asserts the
 [§4.3](#43-per-dt-update) **conservation identity**

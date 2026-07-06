@@ -7,12 +7,12 @@ consistency and produce the worked trajectories recorded in the doc's section
 Not production code -- a faithful transcription of the spec's per-DT rules.
 Coverage: the two-phase update (4.3) including arrest and the held-exit merge,
 linear/exponential leakage with entry-fixed schedules, per-DT re-read
-fractions, and additive multi-flow exponential (5.1-5.3), capacity
+fractions, additive multi-flow exponential, and staggered zones with the
+zone-start-remaining basis (5.1-5.3), capacity
 and inflow limits (6.3), discrete quantized admission vs capacity with per-inflow attribution (6.4 rule 1),
 transit latching/shrink/merging (6.1-6.2), steady-state init (7.1), conveyor
-chains, and half-away rounding (4.1). Not exercised here: leak zones narrower
-than the belt, <leak_integers/>, spread inputs, explicit-list init, leak-fed
-chains ('source' placement) -- their rules are specified in the doc and get
+chains, and half-away rounding (4.1). Not exercised here: <leak_integers/>, spread inputs, explicit-list init,
+leak-fed chains ('source' placement), the ignore_earlier_zone_losses toggle -- their rules are specified in the doc and get
 fixtures with the Rust implementation.
 Run: python3 test/conveyors/reference_prototype.py   (exits nonzero on failure)
 """
@@ -92,19 +92,50 @@ class Conveyor:
     def empty_slat(self):
         return Slat(0.0, [0.0] * len(self.leaks), [0.0] * len(self.leaks))
 
-    def cohort_schedule(self, volume, belt_len, entry_depth, own_depth):
-        # section 5.1: alloc = f*A / M(entry path d); budget = alloc * M(own
-        # path d_c). For default placement own_depth == entry_depth, so the
-        # budget is exactly f*A -- the full documented fraction over the
-        # cohort's own journey, regardless of any stale tail (belt_len > d).
+    def zone_start_retained(self, belt_len, entry_depth, t):
+        # section 5.1 r_k: projected fraction of a unit cohort remaining when
+        # it reaches each flow's zone start (isee default: staggered-zone
+        # fractions apply to the material remaining at zone start). Unit
+        # forward simulation over the entry path with the CURRENT fractions;
+        # r_k = 1 when ignore_earlier_zone_losses or for entry-start zones.
+        n = len(self.leaks)
+        if self.exponential_leak or getattr(self, 'ignore_earlier_zone_losses', False):
+            return [1.0] * n
+        m_entry = [self.zone_count_from(lk, belt_len, entry_depth)
+                   for lk in self.leaks]
+        first_zone_slat = [None] * n   # deepest (first-traversed) in-zone slat
+        for k, lk in enumerate(self.leaks):
+            for i in range(entry_depth - 1, -1, -1):
+                if self.in_zone(i, belt_len, lk):
+                    first_zone_slat[k] = i
+                    break
+        r = [1.0] * n
+        c = 1.0
+        for i in range(entry_depth - 1, -1, -1):   # travel entry -> exit
+            for k, lk in enumerate(self.leaks):
+                if first_zone_slat[k] == i:
+                    r[k] = c
+            shed = 0.0
+            for k, lk in enumerate(self.leaks):
+                if self.in_zone(i, belt_len, lk) and m_entry[k]:
+                    shed += self.f_now(k, t) * r[k] / m_entry[k]
+            c = max(0.0, c - shed)
+        return r
+
+    def cohort_schedule(self, volume, belt_len, entry_depth, own_depth, t=0.0):
+        # section 5.1: basis = A*r_k / M(entry path d); window = basis * M(own
+        # path d_c). For default placement own_depth == entry_depth and full
+        # zones, the lifetime total is exactly f*A over the cohort's own
+        # journey, regardless of any stale tail (belt_len > d).
         basis, window = [], []
-        for lk in self.leaks:
+        r = self.zone_start_retained(belt_len, entry_depth, t)
+        for k, lk in enumerate(self.leaks):
             if self.exponential_leak:
                 basis.append(0.0)
                 window.append(0.0)
                 continue
             m_entry = self.zone_count_from(lk, belt_len, entry_depth)
-            b = volume / m_entry if m_entry else 0.0
+            b = volume * r[k] / m_entry if m_entry else 0.0
             basis.append(b)
             # min with m_entry: caps a dest share landing on a stale-tail slat
             # beyond the entry depth at an entry cohort's window (no-op otherwise)
@@ -118,11 +149,12 @@ class Conveyor:
         N = self.n_slats()
         c = [0.0] * N
         c[N - 1] = 1.0
+        r0 = self.zone_start_retained(N, N, 0.0)
         unit_basis = []
-        for lk in self.leaks:
+        for k, lk in enumerate(self.leaks):
             m = self.zone_count(lk, N)
             unit_basis.append(0.0 if self.exponential_leak or m == 0
-                              else 1.0 / m)
+                              else r0[k] / m)
         # retained profile evaluates each fraction at its initial value (t=0);
         # exponential sheds are ADDITIVE from the same c[i] base (section 5.2)
         for i in range(N - 1, 0, -1):
@@ -265,7 +297,7 @@ class Conveyor:
         d = self.n_slats()
         while len(self.slats) < d:
             self.slats.append(self.empty_slat())
-        alloc, budget = self.cohort_schedule(admitted, len(self.slats), d, d)
+        alloc, budget = self.cohort_schedule(admitted, len(self.slats), d, d, t)
         tgt = self.slats[d - 1]
         tgt.content += admitted
         tgt.leak_basis = [x + y for x, y in zip(tgt.leak_basis, alloc)]
@@ -584,6 +616,24 @@ check(f"S14 steady outflow == 250*(1-0.2*dt)^16 == {round(expect14, 6)} (rates a
       abs(r14['outflow'] - expect14) < 1e-4)
 check("S14 the two leak flows report equal halves",
       abs(r14['leak'][0] - r14['leak'][1]) < 1e-9)
+
+# S15: STAGGERED linear leak zones -- isee's own worked example. Two 0.5
+# leaks, zones [0, 0.5] (entry half) and [0.5, 1] (exit half): the second
+# fraction applies to the material REMAINING at its zone start, so 75% of the
+# inflow leaks and 25% flows out (NOT 100% as an inflow-basis reading gives).
+print("\n=== S15 staggered zones: 0.5 on [0,.5] + 0.5 on [.5,1] -> 75% leaked ===")
+c15 = Conveyor('c15', transit=4, dt=0.25,
+               leaks=[LeakFlow(0.5, 0.0, 0.5), LeakFlow(0.5, 0.5, 1.0)])
+c15.init_from_inflow(250)
+r15 = None
+t = 0.0
+for _ in range(48):
+    r15 = step_all([c15], {'c15': 250.0}, t=t)['c15']
+    t += 0.25
+check("S15 steady outflow == 0.25 x inflow == 62.5 (zone-start-remaining basis)",
+      abs(r15['outflow'] - 62.5) < 1e-6)
+check("S15 first leak reports 125 (0.5 x inflow), second 62.5 (0.5 x remaining)",
+      abs(r15['leak'][0] - 125.0) < 1e-6 and abs(r15['leak'][1] - 62.5) < 1e-6)
 
 print()
 if FAILURES:
