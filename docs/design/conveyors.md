@@ -226,8 +226,11 @@ ConveyorState {
     leak_carry: Vec<f64>,   // per leak-flow accumulator for <leak_integers/> (never resets)
     in_carry:  f64,         // per-time-unit in_limit budget spent (discrete only; resets at
                             // integer time boundaries -- §6.3)
-    quant_carry: f64,       // discrete admission fractional-unit accumulator (§6.4 rule 1;
-                            // never resets -- distinct state from in_carry)
+    quant_carry: Vec<f64>,  // discrete admission fractional-unit accumulators, one PER
+                            // equation-driven inflow (§6.4 rule 1 -- per-inflow so every
+                            // inserted whole unit is attributable to the upstream flow
+                            // whose clearance accrued it; never resets -- distinct state
+                            // from in_carry)
 }
 Slat {
     content: f64,           // material in this slat
@@ -272,20 +275,23 @@ which is exactly isee's guidance.
 
 **Phase A — leak and exit (each conveyor, from its own start-of-step state):**
 
-0. **Latch.** Evaluate `<sample>`; when it is nonzero (and the conveyor is not
-   arrested — an arrested conveyor's time is suspended, so it does not
-   re-latch), update `latched_transit` from `<len>` (with the runtime hygiene of
-   [§4.4](#44-runtime-expression-hygiene)). This happens before any Phase-A
-   mutation, so this step's insert (step 6) uses the newly latched depth.
-
-1. **Arrest.** Evaluate `<arrest>`. If nonzero, this conveyor is *arrested* this
-   step: every inflow and outflow of this conveyor reports 0, `slats` is left
-   untouched (material frozen, not lost), and both phases are skipped for it.
-   Arrest flags come from ordinary expressions already evaluated this step, so
-   all flags are known before any conveyor mutates. Clock-based state is
-   unaffected by arrest: the `in_carry` integer-time-boundary reset
+0. **Arrest.** Evaluate `<arrest>` **first — before the latch**, because an
+   arrested conveyor's time is suspended and it must not re-latch (otherwise a
+   step where arrest, sample, and a `<len>` change coincide would freeze the
+   material yet still change the post-release entry depth). If nonzero, this
+   conveyor is *arrested* this step: every inflow and outflow of this conveyor
+   reports 0, `slats` is left untouched (material frozen, not lost), and all
+   remaining steps — including the latch — are skipped for it. Arrest flags
+   come from ordinary expressions already evaluated this step, so all flags
+   are known before any conveyor mutates. Clock-based state is unaffected by
+   arrest: the `in_carry` integer-time-boundary reset
    ([§6.3](#63-capacity-and-inflow-limit)) still fires, and
    `leak_carry`/`quant_carry` persist untouched.
+
+1. **Latch.** Evaluate `<sample>`; when it is nonzero, update `latched_transit`
+   from `<len>` (with the runtime hygiene of
+   [§4.4](#44-runtime-expression-hygiene)). This happens before any belt
+   mutation, so this step's insert (step 6) uses the newly latched depth.
 
 2. **Leak.** For each leak flow `k` in outflow-list order, for each slat `i` in
    `k`'s zone ([§5.3](#53-leak-zones)): compute `leak_{k,i}` per
@@ -373,7 +379,7 @@ arbitrary expressions, so invalid values are reachable at runtime even when the
 compile-time checks pass. The rules (all simlin-defined, chosen for
 determinism):
 
-- **Transit time.** At each latch (step 0): a finite value is clamped to
+- **Transit time.** At each latch (step 1): a finite value is clamped to
   `max(DT, value)`; a non-finite (NaN/±INF) value leaves `latched_transit`
   unchanged. The *initial* latch (during initialization) with a non-finite or
   `≤ 0` value is a runtime initialization error.
@@ -557,25 +563,35 @@ apportioned in inflow order (step 4). Blocked material stays upstream.
 continuous stream. Its complete semantics are three rules, all already
 integrated into the algorithm above:
 
-1. **Quantized admission.** Step 4's *equation-driven* clearance accumulates
-   rather than inserting directly: `quant_carry += eq_admitted`
-   ([§4.2](#42-conveyor-runtime-state); `quant_carry` never resets — it is
-   distinct from the boundary-resetting `in_carry`), then
-   `units = min(floor(quant_carry), floor(cap_room))` whole units are inserted
-   (just `floor(quant_carry)` when capacity is INF) and
-   `quant_carry -= units`. The capacity re-check on the whole unit is
-   load-bearing: carry accumulated in earlier steps was never
-   capacity-cleared *as a unit*, so without it a unit could materialize into
-   room step 4 cleared only fractionally (e.g. `quant_carry = 0.9`,
-   `cap_room = 0.2`: the 0.2 clearance raises the carry to 1.1, but no unit
-   fits until `cap_room ≥ 1`). The `in_limit` window (`in_carry`) accounts at
-   clearance time and is *not* re-checked at insertion. Un-inserted carry is
-   never taken from upstream — the reported inflow rate reflects only inserted
-   units, so conservation and the capacity bound both hold exactly. Slat
-   contents therefore stay integral, and exits arrive as integral lumps.
-   Conveyor-driven inflow bypasses quantization entirely (never blocked —
-   [§4.3](#43-per-dt-update); it is already integral when the upstream is
-   discrete, which the queue-fed case mandates).
+1. **Quantized admission, tracked per inflow.** Step 4's *equation-driven*
+   clearance accumulates rather than inserting directly, and the accumulator
+   is **per inflow** (`quant_carry[j]` for the `j`-th equation-driven inflow —
+   [§4.2](#42-conveyor-runtime-state); never resets, distinct from the
+   boundary-resetting `in_carry`) so that every whole unit that eventually
+   inserts is attributable to the specific upstream flow whose clearance
+   accrued it — even on a later step where that inflow's request has dropped
+   to 0, and even with several inflows. Per step:
+   - Step 4 apportions the clearance in listed order as usual; each inflow's
+     share accrues to its own carry: `quant_carry[j] += cleared_j`.
+   - Insertion walks the inflows **in listed order** with a shared capacity
+     budget `B = floor(cap_room)` (`B = ∞` when capacity is INF):
+     `units_j = min(floor(quant_carry[j]), B)`; `B -= units_j`;
+     `quant_carry[j] -= units_j`. Inflow `j`'s **reported rate** =
+     `units_j / DT` — the reported value debits exactly the upstream that
+     owns the material, so no flow misattributes or invents material.
+   - The capacity re-check on whole units is load-bearing: carry accumulated
+     in earlier steps was never capacity-cleared *as a unit*, so without it a
+     unit could materialize into room step 4 cleared only fractionally (e.g.
+     carry `0.9`, `cap_room = 0.2`: the 0.2 clearance raises the carry to 1.1,
+     but no unit fits until `cap_room ≥ 1`). The `in_limit` window
+     (`in_carry`) accounts at clearance time and is *not* re-checked at
+     insertion.
+   Un-inserted carry is never taken from upstream — an inflow's reported rate
+   reflects only its inserted units, so conservation and the capacity bound
+   both hold exactly. Slat contents therefore stay integral, and exits arrive
+   as integral lumps. Conveyor-driven inflow bypasses quantization entirely
+   (never blocked — [§4.3](#43-per-dt-update); it is already integral when the
+   upstream is discrete, which the queue-fed case mandates).
 2. **Per-time-unit inflow-limit window** ([§6.3](#63-capacity-and-inflow-limit)):
    the full `in_limit` budget may be consumed within a single DT, resetting at
    integer time boundaries — rather than being prorated `× DT`.
@@ -985,7 +1001,7 @@ Every check below **passes**. Run it with
 the two-phase update including arrest and the held-exit merge (§4.3),
 linear/exponential leakage with fixed per-cohort schedules (§5.1–§5.3),
 capacity and inflow limits (§6.3), discrete quantized admission against a tight
-capacity (§6.4 rule 1), transit latching/shrink/merging (§6.1–§6.2),
+capacity with per-inflow attribution (§6.4 rule 1), transit latching/shrink/merging (§6.1–§6.2),
 steady-state initialization (§7.1), conveyor chains, and half-away rounding
 (§4.1). **Not** executed (specified in prose only; they get fixtures with the
 Rust implementation): leak zones narrower than the belt, `<leak_integers/>`,
@@ -1012,7 +1028,8 @@ rate 250/time unit unless noted.
 | S8 | chain: conveyor A (`T = 2`, draining 500) feeds conveyor B (`T = 4`, `capacity = 100`) | — | — | conveyor-driven inflow is never blocked ([§4.3](#43-per-dt-update)): B's capacity is transiently exceeded, and total material across A + B + B's cumulative outflow is conserved exactly |
 | S9 | transit shrink `4 → 2` at `t = 2` with linear leak `f = 0.2` | — | — | cohorts merging into one slat sum their `content`/`leak_alloc`/`leak_budget` ([§6.2](#62-belt-growth-merging-and-non-fifo-exit)); whole-run conservation holds; lifetime leak never exceeds the `f`-budget; **post-shrink steady outflow returns to `(1 − f)·inflow = 200`** — new entry cohorts leak the full fraction over their own path even while the stale tail keeps the physical belt longer than the entry depth ([§5.1](#51-linear-leakage)) |
 | S10 | chain A (`T = 2`, draining 500) feeds B; B arrested for `t ∈ [1, 2)` | — | — | held exit ([§4.3](#43-per-dt-update) steps 3/5): during the hold A's outflow reports 0 and material accumulates in A's exit slat while B is frozen; on release the accumulated 250 exits A as one lump (rate 1000); chain conservation exact throughout |
-| S11 | discrete conveyor (`T = 2`, `capacity = 3`), fractional requests (0.6/DT) | — | — | quantized admission ([§6.4](#64-discrete-conveyors) rule 1): slat contents stay integral, a whole unit inserts only when `floor(cap_room)` fits it — so contents never exceed capacity even as `quant_carry` crosses 1.0 against fractional room — and material still flows (no deadlock) |
+| S11 | discrete conveyor (`T = 2`, `capacity = 3`), fractional requests (0.6/DT) | — | — | quantized admission ([§6.4](#64-discrete-conveyors) rule 1): slat contents stay integral, a whole unit inserts only when `floor(cap_room)` fits it — so contents never exceed capacity even as the carry crosses 1.0 against fractional room — and material still flows (no deadlock) |
+| S12 | discrete conveyor, **two** equation-driven inflows (1.6 and 0.8/time; the second shuts off at `t = 8`) | — | — | per-inflow attribution ([§6.4](#64-discrete-conveyors) rule 1): the bookkeeping identity `cum_cleared_j = cum_reported_j + quant_carry[j]` holds for each inflow at every step, so every inserted unit debits exactly the upstream flow that cleared it; after shutoff an inflow reports at most its residual carry; both totals integral |
 
 In addition to the per-scenario invariants, the harness asserts the
 [§4.3](#43-per-dt-update) **conservation identity**

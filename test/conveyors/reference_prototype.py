@@ -7,7 +7,7 @@ consistency and produce the worked trajectories recorded in the doc's section
 Not production code -- a faithful transcription of the spec's per-DT rules.
 Coverage: the two-phase update (4.3) including arrest and the held-exit merge,
 linear/exponential leakage with fixed per-cohort schedules (5.1-5.3), capacity
-and inflow limits (6.3), discrete quantized admission vs capacity (6.4 rule 1),
+and inflow limits (6.3), discrete quantized admission vs capacity with per-inflow attribution (6.4 rule 1),
 transit latching/shrink/merging (6.1-6.2), steady-state init (7.1), conveyor
 chains, and half-away rounding (4.1). Not exercised here: leak zones narrower
 than the belt, <leak_integers/>, spread inputs, explicit-list init, leak-fed
@@ -57,7 +57,10 @@ class Conveyor:
     slats: list = field(default_factory=list)   # index 0 = exit
     latched_transit: float = None
     in_carry: float = 0.0
-    quant_carry: float = 0.0
+    # section 6.4 rule 1: one fractional-unit accumulator PER equation-driven
+    # inflow, so every inserted whole unit is attributable to the upstream
+    # flow whose clearance accrued it (sized lazily on first step)
+    quant_carry: list = field(default_factory=list)
 
     # section 4.1: N = round(T/DT) half away from zero, >= 1
     def n_slats(self, transit=None):
@@ -139,7 +142,9 @@ class Conveyor:
             s.leak_alloc = [a * scale for a in s.leak_alloc]
             s.leak_budget = [b * scale for b in s.leak_budget]
 
-    # ---- phase A (section 4.3 steps 0-3): latch + leak + exit, purely local
+    # ---- phase A (section 4.3 steps 0-3): arrest, latch, leak, exit --
+    # purely local (the harness passes arrest flags in; latching is modeled
+    # by mutating latched_transit before the step, equivalent to step 1)
     def phase_a(self, arrested=False, dest_arrested=False):
         if arrested:
             return dict(out_vol=0.0, leak_vols=[0.0] * len(self.leaks),
@@ -170,10 +175,13 @@ class Conveyor:
                     arrested=False, held=False)
 
     # ---- phase B (section 4.3 steps 4-6): admit + shift + insert ----
-    def phase_b(self, pa, eq_request_rate, conv_vol, contents0, t):
+    # eq_request_rates: one requested rate per equation-driven inflow, in
+    # listed order (step 4's listed-order apportionment).
+    def phase_b(self, pa, eq_request_rates, conv_vol, contents0, t):
         dt = self.dt
         if pa['arrested']:
-            return dict(in_rate=0.0)
+            return dict(in_rate=0.0, in_rates=[0.0] * len(eq_request_rates),
+                        cleared=[0.0] * len(eq_request_rates))
         contents_after = contents0 - sum(pa['leak_vols']) - pa['out_vol']
         cap_room = (INF if self.capacity == INF
                     else max(0.0, self.capacity - contents_after - conv_vol))
@@ -183,19 +191,38 @@ class Conveyor:
             limit_vol = max(0.0, self.in_limit - self.in_carry)
         else:
             limit_vol = self.in_limit * dt
-        eq_admitted = min(max(0.0, eq_request_rate) * dt, cap_room, limit_vol)
+        # step 4: apportion clearance across inflows in listed order
+        rem_cap, rem_limit = cap_room, limit_vol
+        cleared = []
+        for rate in eq_request_rates:
+            c = min(max(0.0, rate) * dt, rem_cap, rem_limit)
+            cleared.append(c)
+            if rem_cap != INF:
+                rem_cap -= c
+            if rem_limit != INF:
+                rem_limit -= c
         if self.discrete:
-            # section 6.4 rule 1: clearance accrues into quant_carry; whole
-            # units insert only when the CURRENT capacity room fits them (the
+            # section 6.4 rule 1: per-inflow carry; whole units insert in
+            # listed order under a shared floor(cap_room) budget, so each
+            # inserted unit debits exactly the inflow that cleared it (the
             # in_limit window accounted at clearance time, not re-checked)
-            self.in_carry += eq_admitted
-            self.quant_carry += eq_admitted
-            units = math.floor(self.quant_carry)
-            if self.capacity != INF:
-                units = min(units, math.floor(cap_room))
-            units = max(0, units)
-            self.quant_carry -= units
-            eq_admitted = float(units)
+            if not self.quant_carry:
+                self.quant_carry = [0.0] * len(eq_request_rates)
+            self.in_carry += sum(cleared)
+            budget = INF if self.capacity == INF else math.floor(cap_room)
+            in_vols = []
+            for j, c in enumerate(cleared):
+                self.quant_carry[j] += c
+                units = math.floor(self.quant_carry[j])
+                if budget != INF:
+                    units = min(units, budget)
+                    budget -= units
+                units = max(0, units)
+                self.quant_carry[j] -= units
+                in_vols.append(float(units))
+        else:
+            in_vols = cleared
+        eq_admitted = sum(in_vols)
         admitted = conv_vol + eq_admitted
         # step 5: shift (held exit keeps slat 0 and merges the next slat in)
         if pa['held']:
@@ -220,7 +247,8 @@ class Conveyor:
         tgt.content += admitted
         tgt.leak_alloc = [x + y for x, y in zip(tgt.leak_alloc, alloc)]
         tgt.leak_budget = [x + y for x, y in zip(tgt.leak_budget, budget)]
-        return dict(in_rate=admitted / dt)
+        return dict(in_rate=admitted / dt,
+                    in_rates=[v / dt for v in in_vols], cleared=cleared)
 
 
 def step_all(convs, eq_inflow_rates, chain=None, t=0.0, arrested=None):
@@ -242,8 +270,10 @@ def step_all(convs, eq_inflow_rates, chain=None, t=0.0, arrested=None):
     for c in convs:                                     # phase B: any order
         up = chain.get(c.name)
         conv_vol = pa[up]['out_vol'] if up else 0.0
-        pb = c.phase_b(pa[c.name], eq_inflow_rates.get(c.name, 0.0),
-                       conv_vol, contents0[c.name], t)
+        rates = eq_inflow_rates.get(c.name, 0.0)
+        if not isinstance(rates, list):
+            rates = [rates]
+        pb = c.phase_b(pa[c.name], rates, conv_vol, contents0[c.name], t)
         r = pa[c.name]
         admitted = pb['in_rate'] * c.dt
         delta = c.contents() - contents0[c.name]
@@ -252,7 +282,8 @@ def step_all(convs, eq_inflow_rates, chain=None, t=0.0, arrested=None):
             f"conservation violated for {c.name}: residual {residual}"
         results[c.name] = dict(outflow=r['out_vol'] / c.dt,
                                leak=[v / c.dt for v in r['leak_vols']],
-                               inflow=pb['in_rate'])
+                               inflow=pb['in_rate'],
+                               inflows=pb['in_rates'], cleared=pb['cleared'])
     return results
 
 
@@ -450,6 +481,46 @@ check("S11 slat contents always integral (whole units only)", integral_ok)
 check("S11 contents never exceed capacity 3 (unit re-checked against cap_room)",
       cap_ok)
 check("S11 material flows (quantization does not deadlock)", inserted_total > 0)
+
+# S12: per-inflow quantization attribution. Two equation-driven inflows on a
+# discrete conveyor: each inflow's cumulative reported volume must track its
+# OWN cumulative clearance to within one unit at every step (the carry bound),
+# so a whole unit always debits the upstream flow that cleared it -- even when
+# a request drops to 0 after fractional clearances accrued.
+print("\n=== S12 discrete conveyor, two inflows, per-inflow attribution ===")
+c12 = Conveyor('c12', transit=2, dt=0.25, capacity=4, discrete=True)
+c12.init_steady(0)
+cum_cleared = [0.0, 0.0]
+cum_reported = [0.0, 0.0]
+identity_ok = True
+carry_nonneg = True
+shutoff_reported = None
+t = 0.0
+prev_unit = 0
+for step_i in range(64):
+    if math.floor(t) != prev_unit:
+        c12.in_carry, prev_unit = 0.0, math.floor(t)
+    # inflow 0 runs at 1.6/time; inflow 1 at 0.8/time but shuts off at t=8
+    rates = [1.6, 0.8 if t < 8 else 0.0]
+    r = step_all([c12], {'c12': rates}, t=t)['c12']
+    for j in range(2):
+        cum_cleared[j] += r['cleared'][j]
+        cum_reported[j] += r['inflows'][j] * 0.25
+        # the attribution identity: every unit an inflow ever reported came
+        # from its OWN cumulative clearance, the difference being exactly its
+        # residual fractional (or capacity-blocked) carry
+        identity_ok = identity_ok and \
+            abs(cum_cleared[j] - (cum_reported[j] + c12.quant_carry[j])) < 1e-9
+        carry_nonneg = carry_nonneg and c12.quant_carry[j] >= 0.0
+    if shutoff_reported is None and t >= 8:
+        shutoff_reported = cum_reported[1]
+    t += 0.25
+check("S12 per-inflow bookkeeping identity: cleared_j == reported_j + carry_j",
+      identity_ok and carry_nonneg)
+check("S12 after shutoff, inflow 1 reports at most its residual carry (< 1 unit)",
+      cum_reported[1] - shutoff_reported < 1.0 + 1e-9)
+check("S12 both inflows delivered integral totals",
+      all(abs(v - round(v)) < 1e-9 for v in cum_reported))
 
 print()
 if FAILURES:
