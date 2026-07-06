@@ -632,7 +632,10 @@ available if the inflow comes from another conveyor").
   - *Discrete conveyor:* the full per-time-unit budget may enter within a single
     DT. `in_carry` tracks volume admitted since the last integer time boundary
     and resets to 0 when the simulation clock crosses an integer time unit;
-    `limit_vol = in_limit − in_carry`.
+    `limit_vol = max(0, in_limit − in_carry)` — the clamp matters when a
+    time-varying `in_limit` drops below the budget already spent this window,
+    which would otherwise make `limit_vol` negative and admit a negative
+    volume in violation of the uniflow rule ([§3.4](#34-non-negativity)).
 
 Equation-driven admitted inflow is `min(req_vol, cap_room, limit_vol)`,
 apportioned in inflow order (step 4). Blocked material stays upstream.
@@ -711,12 +714,16 @@ configuration, linear or exponential, any zones, any number of flows):
    compiles with only a warning ([§5.1](#51-linear-leakage)).
 2. Let `S = Σ_i c[i]`. Set the cohort scale `E = V / S` (or `E = 0` if `S = 0`).
 3. Initialize each slat `i` as a cohort of entering volume `E` that has already
-   traveled to position `i`: `content = E × c[i]`,
-   `leak_basis[k] = E / M_k`, and `leak_window[k] = leak_basis[k] ×`
-   (the number of flow-`k` in-zone slats from `i` to the exit, inclusive) —
-   i.e. the unspent remainder of its schedule ([§5.1](#51-linear-leakage)).
-   The retained-profile simulation in step 1 evaluates each leak fraction at
-   its initial (t = start) value.
+   traveled to position `i`, carrying **exactly the [§5.1](#51-linear-leakage)
+   schedule** of an entry cohort (fractions and `r_k` evaluated at their
+   initial, t = start values): `content = E × c[i]`,
+   `leak_basis[k] = E × r_k / M_k(N)` — the `r_k` zone-start-remaining factor
+   included, so a staggered later-zone flow (S15) leaks against the surviving
+   material, not the original entry amount — and `leak_window[k] =
+   leak_basis[k] ×` (the number of flow-`k` in-zone slats from `i` to the
+   exit, inclusive), i.e. the unspent remainder of its schedule. The
+   retained-profile simulation in step 1 uses the same initial-value
+   fractions.
 
 Closed forms for the common cases (illustration; the algorithm above is
 authoritative):
