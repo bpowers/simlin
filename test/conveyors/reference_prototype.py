@@ -7,12 +7,12 @@ consistency and produce the worked trajectories recorded in the doc's section
 Not production code -- a faithful transcription of the spec's per-DT rules.
 Coverage: the two-phase update (4.3) including arrest and the held-exit merge,
 linear/exponential leakage with fixed per-cohort schedules (5.1-5.3), capacity
-and inflow limits (6.3), transit latching/shrink/merging (6.1-6.2),
-steady-state init (7.1), conveyor chains, and half-away rounding (4.1). Not
-exercised here: leak zones narrower than the belt, <leak_integers/>, discrete
-quantization, spread inputs, explicit-list init, leak-fed chains ('source'
-placement) -- their rules are specified in the doc and get fixtures with the
-Rust implementation.
+and inflow limits (6.3), discrete quantized admission vs capacity (6.4 rule 1),
+transit latching/shrink/merging (6.1-6.2), steady-state init (7.1), conveyor
+chains, and half-away rounding (4.1). Not exercised here: leak zones narrower
+than the belt, <leak_integers/>, spread inputs, explicit-list init, leak-fed
+chains ('source' placement) -- their rules are specified in the doc and get
+fixtures with the Rust implementation.
 Run: python3 test/conveyors/reference_prototype.py   (exits nonzero on failure)
 """
 from dataclasses import dataclass, field
@@ -57,6 +57,7 @@ class Conveyor:
     slats: list = field(default_factory=list)   # index 0 = exit
     latched_transit: float = None
     in_carry: float = 0.0
+    quant_carry: float = 0.0
 
     # section 4.1: N = round(T/DT) half away from zero, >= 1
     def n_slats(self, transit=None):
@@ -184,7 +185,17 @@ class Conveyor:
             limit_vol = self.in_limit * dt
         eq_admitted = min(max(0.0, eq_request_rate) * dt, cap_room, limit_vol)
         if self.discrete:
+            # section 6.4 rule 1: clearance accrues into quant_carry; whole
+            # units insert only when the CURRENT capacity room fits them (the
+            # in_limit window accounted at clearance time, not re-checked)
             self.in_carry += eq_admitted
+            self.quant_carry += eq_admitted
+            units = math.floor(self.quant_carry)
+            if self.capacity != INF:
+                units = min(units, math.floor(cap_room))
+            units = max(0, units)
+            self.quant_carry -= units
+            eq_admitted = float(units)
         admitted = conv_vol + eq_admitted
         # step 5: shift (held exit keeps slat 0 and merges the next slat in)
         if pa['held']:
@@ -413,6 +424,32 @@ check("S10 release step: accumulated lump exits A (250 == 4 slats, rate 1000)",
       release_out is not None and abs(release_out - 250.0 / 0.25) < 1e-6)
 check("S10 conservation: everything initially in A ends up through B",
       abs((a10.contents() + b10.contents() + exited) - total0) < 1e-6)
+
+# S11: discrete quantization vs a tight capacity (the codex-flagged corner).
+# Requests are fractional (0.6/DT); units may only materialize when a WHOLE
+# unit fits in the current cap_room -- floor(quant_carry) alone would breach
+# capacity whenever carry crosses 1.0 against fractional room.
+print("\n=== S11 discrete conveyor, quantized admission vs capacity=3 ===")
+c11 = Conveyor('c11', transit=2, dt=0.25, capacity=3, discrete=True)
+c11.init_steady(0)
+integral_ok = True
+cap_ok = True
+inserted_total = 0.0
+t = 0.0
+prev_unit = 0
+for _ in range(64):
+    if math.floor(t) != prev_unit:
+        c11.in_carry, prev_unit = 0.0, math.floor(t)
+    r = step_all([c11], {'c11': 2.4}, t=t)['c11']   # 2.4/time = 0.6/DT
+    inserted_total += r['inflow'] * 0.25
+    cap_ok = cap_ok and c11.contents() <= 3 + 1e-9
+    integral_ok = integral_ok and all(
+        abs(s.content - round(s.content)) < 1e-9 for s in c11.slats)
+    t += 0.25
+check("S11 slat contents always integral (whole units only)", integral_ok)
+check("S11 contents never exceed capacity 3 (unit re-checked against cap_room)",
+      cap_ok)
+check("S11 material flows (quantization does not deadlock)", inserted_total > 0)
 
 print()
 if FAILURES:
