@@ -197,7 +197,11 @@ records is a subset of the owner records' value set, and the section-6 lookup
 record carries no back-pointer. A reader that has the model knows the descriptor
 set; a model-free reader recognises it from the lookup-def names (see
 "Name-to-OT mapping"). Once the descriptor records are set aside, the remaining
-owner spans form a clean, non-overlapping OT partition.
+owner spans form a non-overlapping OT partition **on every file whose overlaps
+the descriptor peel fully resolves** -- the whole tracked corpus except the
+two 2007-era SimService `Base.vdf` files, where some records survive the peel
+still in owner-vs-owner conflict. That residual case, and the stale-`f[11]`
+record phenomenon behind it, is described in "Residual OT-overlap" below.
 
 ### Slot table
 
@@ -643,6 +647,49 @@ of `RS HFC[COP, HFC type]`). Recovering the lookup variable's own series from an
 of these needs the model, not the VDF. (A `gf(Time)` lowering for such a bare
 lookup is an engine bug -- a table is not generally a function of time; see
 #597.)
+
+### Residual OT-overlap (stale-`f[11]` unsaved-variable records)
+
+The descriptor peel and the standalone drop resolve every owner/descriptor
+overlap on the whole tracked corpus **except** the two 2007-era SimService
+`Base.vdf` files (GH #841). On those, some decoded spans survive the peel still
+claiming a shared OT slot with another, differently-named span -- an
+owner-vs-owner conflict no structural signal (lexical lookup-def name, forward
+link) can adjudicate. Emitting both would let alphabetical column order
+silently pick the OT owner and scatter one variable's data under another
+variable's name.
+
+**Hypothesis: stale-`f[11]` records for unsaved variables.** The evidence points
+to the SimService writer emitting section-1 records for model variables that
+were **not saved in the run** (data variables, lookup/table definitions,
+supplementary vars), and those records carrying a stale `f[11]` -- plausibly the
+variable's slot in the *full runtime array*, while the file's OT contains only
+the *saved* variables. The stale `f[11]`-as-OT-start spans therefore land on
+arbitrary saved slots. The observed evidence on `Base.vdf`:
+
+- A wide ghost span `AGE SPECIFIC FERTILITY DISTRIBUTION FUNCTION` (an unsaved
+  lookup/table, `f[11] == 18 == n_lookups`, 82 elements) covers OT[18,100),
+  overlapping ~38 real narrow owners saved in that range (`c real gdp`,
+  `Capital Agriculture`, `CO2 in Deep Ocean`, ...). Because its `f[11]` is
+  **not** `< n_lookups`, it is never a peel candidate, so the peel can neither
+  remove it nor detect that it failed.
+- A mirror shape at OT[174,338): the real 164-element arrayed stock
+  `Population`, saved there, sits under 36 narrow ghost claimants (unsaved
+  tables/aux whose stale `f[11]` lands in the same range).
+- No record field separates the two populations: ghosts and real owners both
+  carry `f[14] == 0xf6800000`.
+
+**Stage 1 handling (`record_results::residual_overlap_components`).** After the
+peel and the standalone drop, the reader detects the still-conflicted spans:
+two spans conflict when they share an OT slot **and** carry different names
+(same-name overlap is the ordinary duplicate the per-name emitter dedup already
+resolves). Every span in a genuinely-contested component is **dropped** from
+emission -- honest missing data over a silent first-claim win -- and the
+component is surfaced on the per-file diagnostics
+(`VdfFile::residual_overlap_diagnostics` / the Python reader's
+`NamedResultsDiagnostics.residual_overlap`), analogous to
+`VdfData::unreconciled_ots`. The components are computed as data first, so a
+later stage can re-resolve a component before falling back to this drop.
 
 ### Worked example: a `SMOOTH1` call
 

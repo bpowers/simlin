@@ -1674,6 +1674,17 @@ def _recover_record_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
             continue
         if len(ordered_indices) < 2:
             continue
+        # Deduplicate same-named complete anchors, keeping the first (a
+        # dimension appears once in the recovered set). This mirrors the Rust
+        # reader's `section5_dims.rs::complete_root_dimension_sets`; without it
+        # a duplicate-named complete anchor would leave two same-name entries
+        # here, and the cardinality-match label fallback below
+        # (`len(matches) == 1`) would then see two matches and drop to numeric
+        # labels while the deduped Rust reader emitted real ones -- a parity
+        # divergence. No corpus file has such duplicates (both readers stay in
+        # lockstep), so this is defense-in-depth that keeps them aligned.
+        if anchor.name.lower() in seen:
+            continue
 
         dims.append(RecoveredDimensionSet(
             name=anchor.name,
@@ -1816,6 +1827,21 @@ def _name_looks_lookupish(name: str) -> bool:
 
 
 @dataclass
+class ResidualOverlapComponent:
+    """
+    A residual OT-overlap component: two or more DIFFERENTLY-named decoded
+    spans that still claim a shared OT slot after descriptor peeling and the
+    standalone lookup-only drop. Stage 1 drops every span in the component
+    from emission (honest missing data over a silent alphabetical first-claim
+    win); the component is retained here so a later stage can re-resolve it.
+
+    Mirrors Rust `record_results.rs::ResidualOverlapComponent`.
+    """
+    span_indices: list[int]
+    contested_ots: list[int]
+
+
+@dataclass
 class DescriptorIdentification:
     """
     Result of identifying graphical-function descriptor records.
@@ -1824,11 +1850,18 @@ class DescriptorIdentification:
     when the standalone lookup-only drop's per-file coherence veto withheld
     candidates (SimService/Base.vdf is the canonical case) -- a silent veto
     would let a future file quietly resurrect ghost columns.
+
+    `residual_overlap_components` records the still-conflicted spans dropped by
+    the residual-overlap floor: every span in each component is added to
+    `descriptor_indices` and therefore NOT emitted, so no OT slot is resolved
+    by alphabetical emission order. Retained as data so a later re-resolution
+    stage can narrow the drop before falling back to this floor.
     """
     descriptor_indices: set[int]
     used_f10_fallback: bool
     standalone_drop_veto_fired: bool = False
     standalone_drop_vetoed_candidates: int = 0
+    residual_overlap_components: list[ResidualOverlapComponent] = field(default_factory=list)
 
 
 @dataclass
@@ -1997,11 +2030,24 @@ def identify_descriptor_records(
     )
     descriptor_indices.update(standalone.dropped)
 
+    # Residual-overlap floor. After peeling overlap-path descriptors and
+    # dropping standalone lookup-only tables, some differently-named spans can
+    # STILL claim a shared OT slot -- an owner-vs-owner conflict no structural
+    # signal resolved. Compute those components as data, then (Stage 1) drop
+    # every span in them so extraction never emits BOTH names for a contested
+    # slot. A later stage re-resolves a component before this drop. Mirrors the
+    # Rust reference (record_results.rs `residual_overlap_components`).
+    residual_components = residual_overlap_components(spans, descriptor_indices)
+    for component in residual_components:
+        for span_idx in component.span_indices:
+            descriptor_indices.add(spans[span_idx].rec_idx)
+
     return DescriptorIdentification(
         descriptor_indices=descriptor_indices,
         used_f10_fallback=used_f10_fallback,
         standalone_drop_veto_fired=standalone.veto_fired,
         standalone_drop_vetoed_candidates=standalone.vetoed_candidates,
+        residual_overlap_components=residual_components,
     )
 
 
@@ -2158,6 +2204,102 @@ def standalone_lookup_only_descriptors(
             vetoed_candidates=len(candidates),
         )
     return StandaloneDropOutcome(dropped=dropped)
+
+
+def residual_overlap_components(
+    spans: list[DecodedRecordSpan],
+    dropped: set[int],
+) -> list[ResidualOverlapComponent]:
+    """
+    Detect residual OT-overlap among the decoded spans that survive descriptor
+    peeling and the standalone lookup-only drop.
+
+    `identify_descriptor_records` resolves the owner/descriptor f[11] union for
+    the overlaps a structural signal can adjudicate (the lexical lookup-def
+    name test, the section-6 forward link). On the 2007-era SimService writer
+    that is not enough: it emits section-1 records for model variables that
+    were NOT saved in the run (data variables, lookup/table definitions,
+    supplementary vars), each carrying a stale f[11] (plausibly the variable's
+    slot in the full runtime array, while the file's OT holds only saved
+    variables). The stale f[11]-as-OT-start spans land on arbitrary saved
+    slots; most fail the `f11 < n_lookups` candidacy gate, so the overlap peel
+    can neither remove them nor detect that it failed, and the component exits
+    still conflicted (see docs/design/vdf.md "Residual OT-overlap").
+
+    Emitting both spans would let alphabetical column order silently pick the
+    OT owner and scatter one variable's data under another variable's name.
+    This returns the residual components; the caller drops every span in them.
+
+    Conflict is DIFFERENT-name only: two spans of the same name that overlap
+    are the ordinary same-variable duplicate the emitter's per-name dedup
+    already resolves (lowest start wins), not a cross-variable ownership
+    conflict. Every span sharing a genuinely-contested slot (one carrying two
+    distinct names) is pulled into the component and dropped, since the whole
+    slot is ambiguous. Mirrors Rust
+    `record_results.rs::residual_overlap_components`.
+    """
+    # slot -> surviving span indices claiming it.
+    by_slot: dict[int, list[int]] = {}
+    for i, span in enumerate(spans):
+        if span.rec_idx in dropped:
+            continue
+        for ot in range(span.start, span.end):
+            by_slot.setdefault(ot, []).append(i)
+
+    parent = list(range(len(spans)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    conflicted: set[int] = set()
+    contested_slot_reps: list[tuple[int, int]] = []  # (ot, rep span idx)
+    for ot, slot_spans in by_slot.items():
+        distinct_names = any(
+            spans[slot_spans[a]].name != spans[slot_spans[b]].name
+            for a in range(len(slot_spans))
+            for b in range(a + 1, len(slot_spans))
+        )
+        if not distinct_names:
+            continue
+        base = slot_spans[0]
+        for other in slot_spans:
+            union(base, other)
+            conflicted.add(other)
+        contested_slot_reps.append((ot, base))
+
+    if not conflicted:
+        return []
+
+    spans_by_root: dict[int, list[int]] = {}
+    for i in conflicted:
+        spans_by_root.setdefault(find(i), []).append(i)
+    ots_by_root: dict[int, list[int]] = {}
+    for ot, rep in contested_slot_reps:
+        ots_by_root.setdefault(find(rep), []).append(ot)
+
+    components: list[ResidualOverlapComponent] = []
+    for root, span_indices in spans_by_root.items():
+        span_indices.sort()
+        contested_ots = sorted(set(ots_by_root.get(root, [])))
+        components.append(ResidualOverlapComponent(
+            span_indices=span_indices,
+            contested_ots=contested_ots,
+        ))
+    # Deterministic order (dict iteration is insertion-ordered but the roots
+    # are not meaningful): by first contested OT, then by first span index.
+    components.sort(key=lambda c: (
+        c.contested_ots[0] if c.contested_ots else math.inf,
+        c.span_indices[0] if c.span_indices else math.inf,
+    ))
+    return components
 
 
 def _array_element_labels_for_span(
@@ -2487,6 +2629,14 @@ class NamedResultsDiagnostics:
     # Rust reader's `VdfData::unreconciled_ots`; empty on every tracked
     # corpus file (GH #842).
     bitmap_unreconciled_ots: list[int] = field(default_factory=list)
+    # Residual OT-overlap: differently-named decoded spans that still claim a
+    # shared OT slot after descriptor peeling and the standalone lookup-only
+    # drop. Every such span is DROPPED from emission (honest missing data over
+    # a silent alphabetical first-claim win). Empty on every tracked corpus
+    # file except the two SimService Base.vdf files. Mirrors the Rust reader's
+    # `DescriptorIdentification.residual_overlap_components` (span-index based;
+    # the name-resolved analogue is Rust `VdfFile::residual_overlap_diagnostics`).
+    residual_overlap: list[ResidualOverlapComponent] = field(default_factory=list)
 
 
 def extract_named_results_with_diagnostics(
@@ -2538,6 +2688,7 @@ def extract_named_results_with_diagnostics(
         desc_id.standalone_drop_vetoed_candidates
     )
     diagnostics.bitmap_unreconciled_ots = vdf.unreconciled_data_blocks()
+    diagnostics.residual_overlap = desc_id.residual_overlap_components
 
     owner_spans = [s for s in spans if s.rec_idx not in desc_id.descriptor_indices]
 

@@ -36,6 +36,20 @@ mod signatures;
 use record_results::build_record_result_columns;
 pub use section3::{VdfSection3Directory, VdfSection3DirectoryEntry};
 
+/// One residual OT-overlap component surfaced by
+/// [`VdfFile::residual_overlap_diagnostics`]: differently-named decoded spans
+/// that still claim a shared OT slot after descriptor peeling and the
+/// standalone lookup-only drop, all of which the reader drops from emission.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VdfResidualOverlap {
+    /// OT slots claimed by two or more differently-named spans of the
+    /// component (the genuine conflicts). Sorted ascending.
+    pub contested_ots: Vec<usize>,
+    /// Names of the decoded spans dropped from emission for this component.
+    /// Sorted by the spans' record index.
+    pub dropped_names: Vec<String>,
+}
+
 /// Names of stdlib module internal variables that DO consume OT entries.
 /// LV1/LV2/LV3/ST are stock-backed; DEL/DL/RT1/RT2 are non-stock. Used by
 /// the section-5 dimension recovery to exclude these helper names from the
@@ -1787,6 +1801,36 @@ impl VdfFile {
             }
         }
         out
+    }
+
+    /// Per-file residual OT-overlap diagnostics: decoded record spans that
+    /// still claim a shared OT slot after graphical-function descriptor
+    /// peeling and the standalone lookup-only drop, and which the reader
+    /// therefore DROPS from emission rather than letting alphabetical column
+    /// order silently pick an owner (see docs/design/vdf.md "Residual
+    /// OT-overlap"). Empty on every tracked corpus file except the two
+    /// SimService `Base.vdf` files, whose 2007-era writer emits stale-`f[11]`
+    /// records for unsaved variables. Mirrors the Python reader's
+    /// `NamedResultsDiagnostics.residual_overlap_*` surface.
+    pub fn residual_overlap_diagnostics(&self) -> Vec<VdfResidualOverlap> {
+        use record_results::{decoded_record_spans, identify_descriptor_records};
+        let name_key_to_name_index = self.record_name_key_to_name_index();
+        let section3_directory = self.parse_section3_directory();
+        let spans =
+            decoded_record_spans(self, &name_key_to_name_index, section3_directory.as_ref());
+        let desc_id = identify_descriptor_records(self, &spans);
+        desc_id
+            .residual_overlap_components
+            .iter()
+            .map(|component| VdfResidualOverlap {
+                contested_ots: component.contested_ots.clone(),
+                dropped_names: component
+                    .span_indices
+                    .iter()
+                    .filter_map(|&i| spans.get(i).map(|s| s.name.clone()))
+                    .collect(),
+            })
+            .collect()
     }
 
     /// Extract one data block's series aligned to the saved time axis.
@@ -4841,6 +4885,87 @@ mod tests {
                 id.standalone_drop_vetoed_candidates, 4,
                 "{path}: the four coincidental stocks are the withheld candidates"
             );
+        }
+    }
+
+    #[test]
+    fn test_residual_overlap_honest_drop_on_simservice_fixtures() {
+        // Stage 1 correctness floor for GH #841. Ref.vdf (and every file whose
+        // overlaps the peel already resolves) must have NO residual components,
+        // so the floor is a provable no-op there. SimService/Base.vdf's
+        // stale-f[11] unsaved-variable records survive the peel still in
+        // owner-vs-owner conflict; every such span must be DROPPED (no ghost
+        // `AGE SPECIFIC ...` columns) so no OT slot is ever claimed by two
+        // differently-named emitted owners. SimService half follows the
+        // third_party fixture-availability convention.
+        use super::record_results::{decoded_record_spans, identify_descriptor_records};
+
+        let ref_vdf = vdf_file("../../test/xmutil_test_models/Ref.vdf");
+        assert!(
+            ref_vdf.residual_overlap_diagnostics().is_empty(),
+            "Ref.vdf overlaps are fully resolved by the peel; the residual floor must be a no-op"
+        );
+
+        let fixtures = [
+            "../../third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/Base.vdf",
+            "../../third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/ctxt0001/Base.vdf",
+        ];
+        if !std::path::Path::new(fixtures[0]).exists() {
+            return;
+        }
+        for path in fixtures {
+            let sim = vdf_file(path);
+
+            // The residual diagnostics fire and name the #841 headline ghost.
+            let diagnostics = sim.residual_overlap_diagnostics();
+            assert!(
+                !diagnostics.is_empty(),
+                "{path}: residual overlap must be detected and reported"
+            );
+            let dropped_names: HashSet<&str> = diagnostics
+                .iter()
+                .flat_map(|c| c.dropped_names.iter().map(|s| s.as_str()))
+                .collect();
+            assert!(
+                dropped_names.contains("AGE SPECIFIC FERTILITY DISTRIBUTION FUNCTION"),
+                "{path}: the wide ghost span must be among the honest-dropped residual spans"
+            );
+            for component in &diagnostics {
+                assert!(
+                    !component.contested_ots.is_empty(),
+                    "{path}: every reported residual component must carry contested OTs"
+                );
+            }
+
+            // No emitted owner span may still overlap another differently-named
+            // emitted owner span, and no ghost column may be emitted.
+            let key_map = sim.record_name_key_to_name_index();
+            let dir = sim.parse_section3_directory();
+            let spans = decoded_record_spans(&sim, &key_map, dir.as_ref());
+            let id = identify_descriptor_records(&sim, &spans);
+            let mut slot_owner: HashMap<usize, &str> = HashMap::new();
+            for span in spans
+                .iter()
+                .filter(|s| !id.descriptor_indices.contains(&s.rec_idx))
+            {
+                assert!(
+                    !span
+                        .name
+                        .eq_ignore_ascii_case("AGE SPECIFIC FERTILITY DISTRIBUTION FUNCTION"),
+                    "{path}: the ghost span must not survive as an emitted owner"
+                );
+                for ot in span.start..span.end {
+                    if let Some(prev) = slot_owner.insert(ot, span.name.as_str())
+                        && prev != span.name.as_str()
+                    {
+                        panic!(
+                            "{path}: OT slot {ot} claimed by two emitted owners \
+                             ({prev:?} and {:?})",
+                            span.name
+                        );
+                    }
+                }
+            }
         }
     }
 

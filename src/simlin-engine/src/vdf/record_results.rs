@@ -201,6 +201,13 @@ pub(super) fn decoded_record_spans(
 /// would let a future file quietly resurrect ghost columns. The flags are
 /// exposed for tests and future diagnostics; they have no effect on the
 /// descriptor membership decision itself.
+///
+/// `residual_overlap_components` records the still-conflicted spans dropped by
+/// the residual-overlap floor (see [`residual_overlap_components`]): every span
+/// in each component is added to `descriptor_indices` and therefore NOT
+/// emitted, so no OT slot is ever resolved by alphabetical emission order.
+/// The components are retained as data (not just the drop set) so a later
+/// re-resolution stage can narrow the drop before it falls back to this floor.
 #[derive(Clone, Debug, Default)]
 pub(super) struct DescriptorIdentification {
     pub(super) descriptor_indices: HashSet<usize>,
@@ -210,6 +217,23 @@ pub(super) struct DescriptorIdentification {
     pub(super) standalone_drop_veto_fired: bool,
     #[allow(dead_code)]
     pub(super) standalone_drop_vetoed_candidates: usize,
+    pub(super) residual_overlap_components: Vec<ResidualOverlapComponent>,
+}
+
+/// A residual OT-overlap component: two or more DIFFERENTLY-named decoded
+/// spans that still claim a shared OT slot after descriptor peeling and the
+/// standalone lookup-only drop. Stage 1 drops every span in the component
+/// from emission (honest missing data over a silent alphabetical first-claim
+/// win); the component is retained here so a later stage can re-resolve it
+/// before falling back to the drop.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ResidualOverlapComponent {
+    /// Indices into the `spans` slice for every span in the component (all
+    /// dropped in Stage 1).
+    pub(super) span_indices: Vec<usize>,
+    /// OT slots claimed by two or more differently-named spans of the
+    /// component (the genuine conflicts). Sorted ascending.
+    pub(super) contested_ots: Vec<usize>,
 }
 
 /// Outcome of the standalone lookup-only descriptor detection: the records
@@ -420,12 +444,135 @@ pub(super) fn identify_descriptor_records(
     );
     descriptor_indices.extend(standalone.dropped);
 
+    // Residual-overlap floor. After peeling overlap-path descriptors and
+    // dropping standalone lookup-only tables, some differently-named spans can
+    // STILL claim a shared OT slot -- an owner-vs-owner conflict no structural
+    // signal resolved. Compute those components as data, then (Stage 1) drop
+    // every span in them so the emission path never lets alphabetical order
+    // silently pick an OT owner. A later stage re-resolves a component before
+    // this drop; the components are threaded out on `DescriptorIdentification`.
+    let residual_overlap_components = residual_overlap_components(spans, &descriptor_indices);
+    for component in &residual_overlap_components {
+        for &span_idx in &component.span_indices {
+            descriptor_indices.insert(spans[span_idx].rec_idx);
+        }
+    }
+
     DescriptorIdentification {
         descriptor_indices,
         used_f10_fallback,
         standalone_drop_veto_fired: standalone.veto_fired,
         standalone_drop_vetoed_candidates: standalone.vetoed_candidates,
+        residual_overlap_components,
     }
+}
+
+/// Detect residual OT-overlap among the decoded spans that survive descriptor
+/// peeling and the standalone lookup-only drop (functional core: takes the
+/// spans plus the already-dropped `rec_idx` set, so it is unit-testable on
+/// synthetic inputs with no fixture).
+///
+/// `identify_descriptor_records` resolves the owner/descriptor `f[11]` union
+/// for the overlaps a structural signal can adjudicate (the lexical
+/// lookup-def name test, the section-6 forward link). On the 2007-era
+/// SimService writer that is not enough: it emits section-1 records for model
+/// variables that were NOT saved in the run (data variables, lookup/table
+/// definitions, supplementary vars), and those records carry a stale `f[11]`
+/// (plausibly the variable's slot in the full runtime array, while the file's
+/// OT contains only saved variables). The stale `f[11]`-as-OT-start spans land
+/// on arbitrary saved slots; most fail the `f11 < n_lookups` candidacy gate, so
+/// the overlap peel can neither remove them nor detect that it failed, and the
+/// component exits still conflicted (see docs/design/vdf.md "Residual
+/// OT-overlap" and the stale-`f[11]` hypothesis).
+///
+/// Emitting both spans would let alphabetical emission order silently pick the
+/// OT owner and scatter one variable's data under another variable's name. This
+/// returns the residual components; the caller drops every span in them.
+///
+/// Conflict is DIFFERENT-name only: two spans of the same name that overlap are
+/// the ordinary same-variable duplicate the emitter's per-name dedup already
+/// resolves (lowest start wins), not a cross-variable ownership conflict. Every
+/// span sharing a genuinely-contested slot (one carrying two distinct names) is
+/// pulled into the component and dropped, since the whole slot is ambiguous.
+fn residual_overlap_components(
+    spans: &[DecodedRecordSpan],
+    dropped: &HashSet<usize>,
+) -> Vec<ResidualOverlapComponent> {
+    // slot -> surviving span indices claiming it.
+    let mut by_slot: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, span) in spans.iter().enumerate() {
+        if dropped.contains(&span.rec_idx) {
+            continue;
+        }
+        for ot in span.start..span.end {
+            by_slot.entry(ot).or_default().push(i);
+        }
+    }
+
+    // A slot is genuinely contested iff two of its claimants carry distinct
+    // names. Union every span on such a slot (the whole slot is ambiguous) and
+    // record the slot as contested.
+    let mut uf = UnionFind::new(spans.len());
+    let mut conflicted: HashSet<usize> = HashSet::new();
+    let mut contested_slot_reps: Vec<(usize, usize)> = Vec::new(); // (ot, rep span idx)
+    for (&ot, slot_spans) in &by_slot {
+        let mut distinct_names = false;
+        'pairs: for a in 0..slot_spans.len() {
+            for b in (a + 1)..slot_spans.len() {
+                if spans[slot_spans[a]].name != spans[slot_spans[b]].name {
+                    distinct_names = true;
+                    break 'pairs;
+                }
+            }
+        }
+        if !distinct_names {
+            continue;
+        }
+        let base = slot_spans[0];
+        for &other in slot_spans {
+            uf.union(base, other);
+            conflicted.insert(other);
+        }
+        contested_slot_reps.push((ot, base));
+    }
+
+    if conflicted.is_empty() {
+        return Vec::new();
+    }
+
+    // Group conflicted spans by union-find root; collect each component's
+    // contested OTs by the same root.
+    let mut spans_by_root: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &i in &conflicted {
+        spans_by_root.entry(uf.find(i)).or_default().push(i);
+    }
+    let mut ots_by_root: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &(ot, rep) in &contested_slot_reps {
+        ots_by_root.entry(uf.find(rep)).or_default().push(ot);
+    }
+
+    let mut components: Vec<ResidualOverlapComponent> = spans_by_root
+        .into_iter()
+        .map(|(root, mut span_indices)| {
+            span_indices.sort_unstable();
+            let mut contested_ots = ots_by_root.remove(&root).unwrap_or_default();
+            contested_ots.sort_unstable();
+            contested_ots.dedup();
+            ResidualOverlapComponent {
+                span_indices,
+                contested_ots,
+            }
+        })
+        .collect();
+    // Deterministic order (HashMap iteration is not): by first contested OT,
+    // then by first span index.
+    components.sort_by_key(|c| {
+        (
+            c.contested_ots.first().copied().unwrap_or(usize::MAX),
+            c.span_indices.first().copied().unwrap_or(usize::MAX),
+        )
+    });
+    components
 }
 
 /// Identify *standalone* (non-overlapping) graphical-function descriptor
@@ -1181,6 +1328,129 @@ mod standalone_descriptor_tests {
         );
         assert!(outcome.veto_fired);
         assert_eq!(outcome.vetoed_candidates, 1);
+    }
+}
+
+#[cfg(test)]
+mod residual_overlap_tests {
+    use super::*;
+
+    fn span_with_len(rec_idx: usize, name: &str, start: usize, len: usize) -> DecodedRecordSpan {
+        DecodedRecordSpan {
+            rec_idx,
+            name: name.to_string(),
+            start,
+            end: start + len,
+            sort_key: 0,
+        }
+    }
+
+    fn scalar(rec_idx: usize, name: &str, start: usize) -> DecodedRecordSpan {
+        span_with_len(rec_idx, name, start, 1)
+    }
+
+    /// A clean, non-overlapping owner partition (the corpus norm once
+    /// descriptors are peeled) yields NO residual components, so the floor is
+    /// a provable no-op on every file the peel already resolves.
+    #[test]
+    fn clean_partition_has_no_residual_components() {
+        let spans = [
+            scalar(0, "alpha", 1),
+            scalar(1, "beta", 2),
+            span_with_len(2, "gamma", 3, 3),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        assert!(
+            components.is_empty(),
+            "no overlap must produce no residual components: {components:?}"
+        );
+    }
+
+    /// Two differently-named spans that share an OT slot after peeling are a
+    /// genuine owner-vs-owner conflict: both are pulled into one component so
+    /// the caller can drop them (honest missing data over a silent
+    /// alphabetical first-claim win).
+    #[test]
+    fn distinct_name_overlap_is_a_residual_component() {
+        let spans = [scalar(0, "china gdp", 5), scalar(1, "row coal demand", 5)];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        assert_eq!(components.len(), 1, "one contested slot, one component");
+        assert_eq!(components[0].span_indices, vec![0, 1]);
+        assert_eq!(components[0].contested_ots, vec![5]);
+    }
+
+    /// Two overlapping spans of the SAME name are the ordinary
+    /// same-variable duplicate the per-name emitter dedup already resolves;
+    /// they must NOT be flagged as a cross-variable conflict (dropping both
+    /// would lose the variable entirely).
+    #[test]
+    fn same_name_overlap_is_not_residual() {
+        let spans = [scalar(0, "population", 3), scalar(1, "population", 3)];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        assert!(
+            components.is_empty(),
+            "same-name overlap is not a residual conflict: {components:?}"
+        );
+    }
+
+    /// A wide ghost span (a stale-`f[11]` unsaved-variable record) covering
+    /// several narrow real owners forms ONE component containing the ghost
+    /// and every owner it overlaps -- the `SimService/Base.vdf` cluster-A
+    /// shape. Stage 1 drops the whole component; a later stage re-resolves it.
+    #[test]
+    fn wide_ghost_over_narrow_owners_forms_one_component() {
+        let spans = [
+            span_with_len(0, "age specific fertility distribution function", 2, 6),
+            scalar(1, "c real gdp", 2),
+            scalar(2, "capital agriculture", 4),
+            span_with_len(3, "co2 in deep ocean", 5, 3),
+            // An unrelated, non-overlapping owner outside the ghost span.
+            scalar(4, "agricultural land in use", 20),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        assert_eq!(components.len(), 1, "one wide ghost, one component");
+        assert_eq!(
+            components[0].span_indices,
+            vec![0, 1, 2, 3],
+            "the ghost and every owner it covers are in the component; the \
+             disjoint owner is not"
+        );
+        assert_eq!(components[0].contested_ots, vec![2, 4, 5, 6, 7]);
+    }
+
+    /// A span already dropped (a peeled descriptor or standalone lookup-only
+    /// table) is invisible to residual detection: it cannot re-introduce a
+    /// conflict it is no longer part of.
+    #[test]
+    fn dropped_span_is_excluded() {
+        let spans = [scalar(0, "china gdp", 5), scalar(1, "row coal demand", 5)];
+        // Span 1 (rec_idx 1) was already dropped upstream, so span 0 no longer
+        // conflicts with anything.
+        let dropped: HashSet<usize> = [1usize].into_iter().collect();
+        let components = residual_overlap_components(&spans, &dropped);
+        assert!(
+            components.is_empty(),
+            "a dropped span cannot form a residual conflict: {components:?}"
+        );
+    }
+
+    /// Two disjoint conflicts produce two separate components, ordered
+    /// deterministically by first contested OT.
+    #[test]
+    fn disjoint_conflicts_are_separate_components() {
+        let spans = [
+            scalar(0, "b var", 30),
+            scalar(1, "a var", 30),
+            scalar(2, "d var", 10),
+            scalar(3, "c var", 10),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        assert_eq!(components.len(), 2);
+        // Deterministic order: the OT-10 conflict comes before the OT-30 one.
+        assert_eq!(components[0].contested_ots, vec![10]);
+        assert_eq!(components[0].span_indices, vec![2, 3]);
+        assert_eq!(components[1].contested_ots, vec![30]);
+        assert_eq!(components[1].span_indices, vec![0, 1]);
     }
 }
 

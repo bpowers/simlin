@@ -1679,6 +1679,56 @@ class StandaloneLookupOnlyDescriptorTests(unittest.TestCase):
         self.assertTrue(diagnostics.standalone_drop_veto_fired)
         self.assertEqual(diagnostics.standalone_drop_vetoed_candidates, 4)
 
+    def test_residual_overlap_honest_drop_on_fixtures(self) -> None:
+        # Stage 1 correctness floor for GH #841. Ref.vdf (and every file whose
+        # overlaps the peel already resolves) has NO residual components, so
+        # the floor is a provable no-op there. SimService/Base.vdf's
+        # stale-f[11] unsaved-variable records survive the peel still in
+        # owner-vs-owner conflict; every such span must be DROPPED (no ghost
+        # `age specific ...` columns, no OT slot claimed by two names), so the
+        # Python reader stops emitting BOTH names for a contested slot and
+        # matches the Rust reader.
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+        _, ref_diag = vdf_xray.extract_named_results_with_diagnostics(ref)
+        self.assertEqual(ref_diag.residual_overlap, [])
+
+        relpaths = [
+            "third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/Base.vdf",
+            "third_party/uib_sd/spring_2008/SimService_BUENO/SimService/Model Files/ctxt0001/Base.vdf",
+        ]
+        if not (REPO_ROOT / relpaths[0]).exists():
+            self.skipTest("third_party SimService fixtures not available")
+
+        for relpath in relpaths:
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                spans = vdf_xray.decoded_record_spans(vdf)
+                desc = vdf_xray.identify_descriptor_records(vdf, spans)
+                results, diag = vdf_xray.extract_named_results_with_diagnostics(vdf)
+                self.assertIsNotNone(results)
+                assert results is not None
+
+                # The residual diagnostics fire and name the #841 headline ghost.
+                self.assertTrue(diag.residual_overlap)
+                dropped_names = {
+                    spans[i].name
+                    for component in diag.residual_overlap
+                    for i in component.span_indices
+                }
+                self.assertIn(
+                    "AGE SPECIFIC FERTILITY DISTRIBUTION FUNCTION", dropped_names)
+                for component in diag.residual_overlap:
+                    self.assertTrue(component.contested_ots)
+
+                # No ghost column emitted, and no OT slot claimed twice.
+                names = {result.name for result in results}
+                self.assertFalse(
+                    any(name.lower().startswith("age specific") for name in names))
+                ot_indices = [result.ot_index for result in results]
+                self.assertEqual(
+                    len(ot_indices), len(set(ot_indices)),
+                    "no OT slot may be claimed by two emitted columns")
+
     def test_simservice_stocks_are_not_dropped_as_lookup_only(self) -> None:
         # Regression for the SimService false positives: four real dynamic
         # stocks whose OT starts collide with the lookup-index range must

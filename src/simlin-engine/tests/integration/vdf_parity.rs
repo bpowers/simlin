@@ -33,14 +33,28 @@ use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::vdf::{VdfFile, VdfKind, probe_vdf_kind};
 
 /// Directories walked for parity fixtures. `test/` is always present; the
-/// zambaqui third_party corpus rides the existence-continue convention
-/// (optional checkout, skipped when absent) because it is the only corpus
-/// source of 0x53 sensitivity runs and of header-0x74 data-grid blocks on a
-/// genuinely third bitmap width (GH #842) -- pinning cross-reader agreement
-/// there keeps the two data-grid implementations in lockstep. The rest of
-/// `third_party/` stays excluded to bound the harness runtime.
+/// two third_party corpora ride the existence-continue convention (optional
+/// checkout, skipped when absent):
+///
+/// - `zambaqui` is the only corpus source of 0x53 sensitivity runs and of
+///   header-0x74 data-grid blocks on a genuinely third bitmap width (GH
+///   #842) -- pinning cross-reader agreement there keeps the two data-grid
+///   implementations in lockstep.
+/// - `spring_2008` is the only corpus source of residual OT-overlap files:
+///   the two SimService `Base.vdf` files, whose 2007-era writer emits
+///   stale-`f[11]` records for unsaved variables that survive descriptor
+///   peeling still in owner-vs-owner conflict (GH #841). Pinning the readers
+///   here keeps the residual-overlap honest-drop identical on both sides
+///   (without it the Python reader would emit both contested names while
+///   Rust dropped one, silently diverging).
+///
+/// The rest of `third_party/` stays excluded to bound the harness runtime.
 fn parity_corpus_roots() -> &'static [&'static str] {
-    &["../../test", "../../third_party/uib_sd/zambaqui"]
+    &[
+        "../../test",
+        "../../third_party/uib_sd/zambaqui",
+        "../../third_party/uib_sd/spring_2008",
+    ]
 }
 
 fn collect_vdf_files(dir: &Path) -> Vec<PathBuf> {
