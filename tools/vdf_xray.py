@@ -1925,7 +1925,8 @@ def identify_descriptor_records(
         # same result the Rust reader's unconditional residual pass produces.
         residual_components = residual_overlap_components(spans, set())
         resolution = resolve_residual_components(
-            spans, residual_components, set(), RESIDUAL_ORDERING_GATE
+            spans, residual_components, set(), RESIDUAL_ORDERING_GATE,
+            RESIDUAL_ORDERING_MIN_PAIRS,
         )
         return DescriptorIdentification(
             descriptor_indices=set(resolution.dropped),
@@ -2061,7 +2062,8 @@ def identify_descriptor_records(
     phase1_descriptors = set(descriptor_indices)
     residual_components = residual_overlap_components(spans, descriptor_indices)
     resolution = resolve_residual_components(
-        spans, residual_components, phase1_descriptors, RESIDUAL_ORDERING_GATE
+        spans, residual_components, phase1_descriptors, RESIDUAL_ORDERING_GATE,
+        RESIDUAL_ORDERING_MIN_PAIRS,
     )
     descriptor_indices -= resolution.readmitted
     descriptor_indices |= resolution.dropped
@@ -2336,6 +2338,19 @@ def residual_overlap_components(
 # The bar is a principled "overwhelming majority", not tuned to any one file.
 RESIDUAL_ORDERING_GATE = 0.95
 
+# Minimum number of adjacent uncontested-owner pairs a file must have for the
+# ordering oracle to run. Below it the oracle abstains (the component
+# honest-drops with diagnostics), because a ratio measured over one or two pairs
+# carries no real evidence -- with fewer than two owners the ratio is vacuously
+# 1.0 and would pass the gate with zero measured support. The exact value is NOT
+# corpus-supported: any floor between 2 and ~800 is indistinguishable, since the
+# only component-bearing files (the two SimService Base.vdf) measure ~840 pairs.
+# It is cheap fail-safe insurance -- abstention costs only recovery, never
+# correctness -- and below ~20 pairs the 0.95 ratio already demands near-perfect
+# ordering; this floor just forbids the degenerate zero/one-pair case outright.
+# Mirrors Rust `record_results.rs::RESIDUAL_ORDERING_MIN_PAIRS`.
+RESIDUAL_ORDERING_MIN_PAIRS = 8
+
 
 @dataclass
 class ResidualResolution:
@@ -2453,6 +2468,7 @@ def resolve_residual_components(
     components: list[ResidualOverlapComponent],
     phase1_descriptors: set[int],
     gate_threshold: float,
+    min_pairs: int,
 ) -> ResidualResolution:
     """
     Re-resolve each residual-overlap component from scratch, recovering the real
@@ -2470,10 +2486,14 @@ def resolve_residual_components(
         an owner becomes an anchor for its neighbours, then
     (d) honest-drop anything still in conflict (surfaced on the diagnostics).
 
-    The whole procedure is gated per file: if the uncontested owners do not
-    exhibit the alphabetical-allocation invariant (`gate_threshold`), the oracle
+    The whole procedure is gated per file: the oracle runs only when the
+    uncontested owners supply at least `min_pairs` adjacent pairs AND exhibit the
+    alphabetical-allocation invariant (ratio >= `gate_threshold`). Otherwise it
     abstains and every residual span is honest-dropped (Stage 1 semantics), so a
-    file that does not follow the invariant is never mis-adjudicated.
+    file that does not follow the invariant -- or offers too little evidence to
+    tell -- is never mis-adjudicated. (Production passes `RESIDUAL_ORDERING_GATE`
+    / `RESIDUAL_ORDERING_MIN_PAIRS`; oracle-mechanics unit tests pass 0.0 / 0 to
+    open the gate, exactly as they already open the ratio side.)
 
     Mirrors Rust `record_results.rs::resolve_residual_components`.
     """
@@ -2492,9 +2512,12 @@ def resolve_residual_components(
     )
     uncontested_starts = [s.start for s in uncontested]
 
-    # Gate: abstain (honest-drop all) when the file does not exhibit the
-    # alphabetical invariant.
-    if _residual_alphabetical_consistency(uncontested) < gate_threshold:
+    # Gate: abstain (honest-drop all) when the file offers too few
+    # uncontested-owner pairs to measure, OR does not exhibit the alphabetical
+    # invariant. The pair-count check is FIRST so the vacuous <2-owner case
+    # (where the ratio is 1.0) can never pass on zero evidence.
+    n_pairs = max(len(uncontested) - 1, 0)
+    if n_pairs < min_pairs or _residual_alphabetical_consistency(uncontested) < gate_threshold:
         for c in components:
             for i in c.span_indices:
                 dropped.add(spans[i].rec_idx)

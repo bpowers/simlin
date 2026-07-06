@@ -471,6 +471,7 @@ pub(super) fn identify_descriptor_records(
         &residual_components,
         &phase1_descriptors,
         RESIDUAL_ORDERING_GATE,
+        RESIDUAL_ORDERING_MIN_PAIRS,
     );
     for rec_idx in &resolution.readmitted {
         descriptor_indices.remove(rec_idx);
@@ -605,6 +606,23 @@ fn residual_overlap_components(
 /// (Stage 1 semantics). The bar is a principled "overwhelming majority", not
 /// tuned to make any one file pass.
 const RESIDUAL_ORDERING_GATE: f64 = 0.95;
+
+/// Minimum number of adjacent uncontested-owner pairs a file must have for the
+/// ordering oracle to run. Below it the oracle abstains (the component
+/// honest-drops with diagnostics), because a ratio measured over one or two
+/// pairs carries no real evidence -- with fewer than two owners the ratio is
+/// vacuously 1.0 and would pass the gate with zero measured support.
+///
+/// The exact value is NOT corpus-supported: any floor between 2 and ~800 is
+/// indistinguishable, since the only component-bearing files (the two
+/// SimService `Base.vdf`) measure ~840 pairs, far above any small floor. It
+/// exists purely as cheap fail-safe insurance -- abstention costs only recovery
+/// (Stage 1 honest-drop stays correct), never correctness, so erring toward
+/// abstention on thin evidence is always safe. Note that below ~20 pairs the
+/// 0.95 ratio already demands near-perfect ordering, which is the intended
+/// behavior when evidence is thin; this floor just forbids the degenerate
+/// zero/one-pair case outright.
+const RESIDUAL_ORDERING_MIN_PAIRS: usize = 8;
 
 /// Outcome of re-resolving the residual-overlap components (Stage 2).
 ///
@@ -747,15 +765,20 @@ fn residual_span_is_owner(
 ///     an owner becomes an anchor for its neighbours, then
 /// (d) honest-drop anything still in conflict (surfaced on the diagnostics).
 ///
-/// Gated per file: if the uncontested owners do not exhibit the
-/// alphabetical-allocation invariant (`gate_threshold`), the oracle abstains and
-/// every residual span is honest-dropped (Stage 1 semantics), so a file that
-/// does not follow the invariant is never mis-adjudicated.
+/// Gated per file: the oracle runs only when the uncontested owners supply at
+/// least `min_pairs` adjacent pairs AND exhibit the alphabetical-allocation
+/// invariant (ratio >= `gate_threshold`). Otherwise it abstains and every
+/// residual span is honest-dropped (Stage 1 semantics), so a file that does not
+/// follow the invariant -- or offers too little evidence to tell -- is never
+/// mis-adjudicated. (Production passes `RESIDUAL_ORDERING_GATE` /
+/// `RESIDUAL_ORDERING_MIN_PAIRS`; oracle-mechanics unit tests pass `0.0` / `0`
+/// to open the gate, exactly as they already open the ratio side.)
 fn resolve_residual_components(
     spans: &[DecodedRecordSpan],
     components: &[ResidualOverlapComponent],
     phase1_descriptors: &HashSet<usize>,
     gate_threshold: f64,
+    min_pairs: usize,
 ) -> ResidualResolution {
     let mut dropped: HashSet<usize> = HashSet::new();
     if components.is_empty() {
@@ -774,9 +797,12 @@ fn resolve_residual_components(
         .collect();
     uncontested.sort_by_key(|&i| (spans[i].start, spans[i].rec_idx));
 
-    // Gate: abstain (honest-drop all) when the file does not exhibit the
-    // alphabetical invariant.
-    if alphabetical_consistency(&uncontested, spans) < gate_threshold {
+    // Gate: abstain (honest-drop all) when the file offers too few
+    // uncontested-owner pairs to measure, OR does not exhibit the alphabetical
+    // invariant. The pair-count check is FIRST so the vacuous <2-owner case
+    // (where `alphabetical_consistency` is 1.0) can never pass on zero evidence.
+    let n_pairs = uncontested.len().saturating_sub(1);
+    if n_pairs < min_pairs || alphabetical_consistency(&uncontested, spans) < gate_threshold {
         for c in components {
             for &i in &c.span_indices {
                 dropped.insert(spans[i].rec_idx);
@@ -1842,7 +1868,13 @@ mod resolve_residual_tests {
     #[test]
     fn empty_components_is_noop() {
         let spans = [span(0, "a", 1, 1), span(1, "b", 2, 1)];
-        let res = resolve_residual_components(&spans, &[], &HashSet::new(), RESIDUAL_ORDERING_GATE);
+        let res = resolve_residual_components(
+            &spans,
+            &[],
+            &HashSet::new(),
+            RESIDUAL_ORDERING_GATE,
+            RESIDUAL_ORDERING_MIN_PAIRS,
+        );
         assert!(res.dropped.is_empty() && res.readmitted.is_empty());
         assert!(res.unresolved_components.is_empty());
     }
@@ -1865,7 +1897,7 @@ mod resolve_residual_tests {
             span(6, "c sun", 6, 1),
         ];
         let components = residual_overlap_components(&spans, &HashSet::new());
-        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0);
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0, 0);
         assert_eq!(dropped_names(&res, &spans), vec!["age ghost"]);
         assert!(res.readmitted.is_empty());
         assert!(res.unresolved_components.is_empty());
@@ -1891,7 +1923,7 @@ mod resolve_residual_tests {
             span(7, "z1", 16, 1),
         ];
         let components = residual_overlap_components(&spans, &HashSet::new());
-        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0);
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0, 0);
         assert_eq!(
             dropped_names(&res, &spans),
             vec!["cat food", "tbl x lookup", "tbl y lookup"]
@@ -1913,7 +1945,7 @@ mod resolve_residual_tests {
             span(3, "zzz", 5, 1),
         ];
         let components = residual_overlap_components(&spans, &HashSet::new());
-        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0);
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0, 0);
         assert_eq!(dropped_names(&res, &spans), vec!["yyy", "zzz"]);
         assert_eq!(res.unresolved_components.len(), 1);
         assert_eq!(res.unresolved_components[0].contested_ots, vec![5]);
@@ -1935,7 +1967,7 @@ mod resolve_residual_tests {
         ];
         let phase1: HashSet<usize> = [6usize].into_iter().collect();
         let components = residual_overlap_components(&spans, &phase1);
-        let res = resolve_residual_components(&spans, &components, &phase1, 0.0);
+        let res = resolve_residual_components(&spans, &components, &phase1, 0.0, 0);
         assert_eq!(dropped_names(&res, &spans), vec!["age ghost"]);
         assert_eq!(res.readmitted, [6usize].into_iter().collect());
         assert!(res.unresolved_components.is_empty());
@@ -1951,7 +1983,7 @@ mod resolve_residual_tests {
             span(2, "foo lookup", 1, 2), // lookupish ghost [1,3)
         ];
         let components = residual_overlap_components(&spans, &HashSet::new());
-        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0);
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0, 0);
         assert_eq!(dropped_names(&res, &spans), vec!["foo lookup"]);
         assert!(res.unresolved_components.is_empty());
     }
@@ -1977,7 +2009,7 @@ mod resolve_residual_tests {
         ];
         let phase1: HashSet<usize> = [7usize, 8].into_iter().collect();
         let components = residual_overlap_components(&spans, &phase1);
-        let res = resolve_residual_components(&spans, &components, &phase1, 0.0);
+        let res = resolve_residual_components(&spans, &components, &phase1, 0.0, 0);
         assert_eq!(dropped_names(&res, &spans), vec!["age ghost"]);
         assert_eq!(res.readmitted, [7usize].into_iter().collect());
         assert!(
@@ -2007,7 +2039,7 @@ mod resolve_residual_tests {
         // The same-name pair is pulled into the ghost's component.
         assert_eq!(components.len(), 1);
         assert_eq!(components[0].span_indices, vec![2, 3, 4]);
-        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0);
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.0, 0);
         assert_eq!(dropped_names(&res, &spans), vec!["zzz ghost"]);
         assert!(
             !res.dropped.contains(&2) && !res.dropped.contains(&3),
@@ -2016,9 +2048,10 @@ mod resolve_residual_tests {
         assert!(res.unresolved_components.is_empty());
     }
 
-    /// Gate abstention. A file whose uncontested owners do NOT exhibit the
-    /// alphabetical-allocation invariant fails the gate, so the oracle abstains
-    /// and every residual span is honest-dropped (Stage 1 semantics).
+    /// Gate abstention (RATIO). A file whose uncontested owners do NOT exhibit
+    /// the alphabetical-allocation invariant fails the gate, so the oracle
+    /// abstains and every residual span is honest-dropped (Stage 1 semantics).
+    /// `min_pairs == 0` isolates the ratio side of the gate.
     #[test]
     fn gate_abstains_when_owners_not_alphabetical() {
         // Badly-shuffled uncontested owners -> low alphabetical consistency.
@@ -2031,9 +2064,36 @@ mod resolve_residual_tests {
             span(5, "owner", 10, 1),
         ];
         let components = residual_overlap_components(&spans, &HashSet::new());
-        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.95);
+        let res = resolve_residual_components(&spans, &components, &HashSet::new(), 0.95, 0);
         // Both contested spans dropped; the component is reported unresolved.
         assert_eq!(dropped_names(&res, &spans), vec!["ghost", "owner"]);
+        assert_eq!(res.unresolved_components.len(), 1);
+    }
+
+    /// Gate abstention (MIN_PAIRS). Codex's scenario: a file with a residual
+    /// component but too few uncontested owners to measure -- one anchor `m`,
+    /// zero adjacent pairs -- must NOT let the oracle run on vacuous evidence
+    /// (which would silently drop the real owner `a real` while emitting the
+    /// ghost `z ghost`, or vice versa). With `min_pairs > 0` the gate abstains:
+    /// BOTH contested spans honest-drop and the component surfaces on the
+    /// diagnostics. A `gate_threshold` of 0.0 proves the abstention is driven by
+    /// the pair-count floor, not the ratio (GH #844).
+    #[test]
+    fn gate_abstains_on_too_few_measured_pairs() {
+        let spans = [
+            span(0, "m", 3, 1),      // the lone uncontested owner (0 adjacent pairs)
+            span(1, "a real", 5, 1), // real owner (would sort below the ghost)
+            span(2, "z ghost", 5, 1),
+        ];
+        let components = residual_overlap_components(&spans, &HashSet::new());
+        let res = resolve_residual_components(
+            &spans,
+            &components,
+            &HashSet::new(),
+            0.0,
+            RESIDUAL_ORDERING_MIN_PAIRS,
+        );
+        assert_eq!(dropped_names(&res, &spans), vec!["a real", "z ghost"]);
         assert_eq!(res.unresolved_components.len(), 1);
     }
 }

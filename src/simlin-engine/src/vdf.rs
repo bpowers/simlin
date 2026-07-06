@@ -5126,19 +5126,30 @@ mod tests {
             end: start + 1,
             sort_key: 0,
         };
+        // Nine alphabetically-ordered uncontested owners (>= RESIDUAL_ORDERING
+        // _MIN_PAIRS adjacent pairs, ratio 1.0) so the gate passes on real
+        // evidence, bracketing the slot-5 conflict: prev `e own`@4 and next
+        // `n own`@6 keep `m real` and drop `z ghost` (which sorts past `n own`).
         let spans = [
-            span(0, "a owner", 1),
-            span(1, "z owner", 9),
-            span(2, "m real", 5),    // fits [a owner, z owner] -> recovered
-            span(3, "zzz ghost", 5), // sorts past z owner -> dropped
+            span(0, "b own", 1),
+            span(1, "c own", 2),
+            span(2, "d own", 3),
+            span(3, "e own", 4),
+            span(4, "m real", 5),  // fits [e own, n own] -> recovered
+            span(5, "z ghost", 5), // sorts past n own -> dropped
+            span(6, "n own", 6),
+            span(7, "o own", 7),
+            span(8, "p own", 8),
+            span(9, "q own", 9),
+            span(10, "r own", 10),
         ];
         let id = identify_descriptor_records(&vdf, &spans);
         assert!(
-            id.descriptor_indices.contains(&3),
+            id.descriptor_indices.contains(&5),
             "the ghost must be dropped by the residual pass even with no lookups"
         );
         assert!(
-            !id.descriptor_indices.contains(&2),
+            !id.descriptor_indices.contains(&4),
             "the real owner must be recovered, not dropped"
         );
     }

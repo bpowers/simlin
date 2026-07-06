@@ -727,12 +727,16 @@ component:
 The whole recovery is **gated per file** on the measured alphabetical
 consistency of the uncontested owners (`RESIDUAL_ORDERING_GATE`, the fraction of
 adjacent OT-sorted owner pairs that are name-ordered): a file must clear
-**0.95** -- an overwhelming majority -- to run the oracle. The four probed
-corpus files measure 98.6-99.6% (and the two SimService files with residual
-components both sit at 0.9964), comfortably above the bar; the sub-0.95 corpus
-files are all tiny run files with no residual components. A file that does not
-exhibit the invariant fails the gate, the oracle abstains, and every residual
-span is honest-dropped -- so a non-alphabetical file is never mis-adjudicated. On the two SimService files the
+**0.95** -- an overwhelming majority -- to run the oracle. The gate also
+requires a minimum number of measured pairs (`RESIDUAL_ORDERING_MIN_PAIRS`, 8):
+below it the ratio carries no real evidence (with fewer than two owners it is
+vacuously 1.0), so the oracle abstains rather than adjudicate on nothing. The
+four probed corpus files measure 98.6-99.6% over ~840 pairs (and the two
+SimService files with residual components both sit at 0.9964), comfortably above
+both bars; the sub-0.95 corpus files are all tiny run files with no residual
+components. A file that does not exhibit the invariant -- or offers too few
+pairs to tell -- fails the gate, the oracle abstains, and every residual span is
+honest-dropped, so it is never mis-adjudicated. On the two SimService files the
 recovery is complete: every real owner is recovered (`Population`'s 164 elements,
 the oil reserve series, the four `indicated`/`industrial` owners) and nothing is
 left honest-dropped, so the diagnostics come back empty.

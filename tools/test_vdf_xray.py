@@ -2269,7 +2269,8 @@ class ResolveResidualComponentsTests(unittest.TestCase):
     def test_empty_components_is_noop(self):
         spans = [self._span(0, "a", 1, 1), self._span(1, "b", 2, 1)]
         res = vdf_xray.resolve_residual_components(
-            spans, [], set(), vdf_xray.RESIDUAL_ORDERING_GATE)
+            spans, [], set(), vdf_xray.RESIDUAL_ORDERING_GATE,
+            vdf_xray.RESIDUAL_ORDERING_MIN_PAIRS)
         self.assertFalse(res.dropped)
         self.assertFalse(res.readmitted)
         self.assertEqual(res.unresolved_components, [])
@@ -2285,7 +2286,7 @@ class ResolveResidualComponentsTests(unittest.TestCase):
             self._span(6, "c sun", 6, 1),
         ]
         comps = vdf_xray.residual_overlap_components(spans, set())
-        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0)
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0, 0)
         self.assertEqual(self._dropped_names(res, spans), ["age ghost"])
         self.assertFalse(res.readmitted)
         self.assertEqual(res.unresolved_components, [])
@@ -2302,7 +2303,7 @@ class ResolveResidualComponentsTests(unittest.TestCase):
             self._span(7, "z1", 16, 1),
         ]
         comps = vdf_xray.residual_overlap_components(spans, set())
-        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0)
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0, 0)
         self.assertEqual(
             self._dropped_names(res, spans),
             ["cat food", "tbl x lookup", "tbl y lookup"])
@@ -2316,7 +2317,7 @@ class ResolveResidualComponentsTests(unittest.TestCase):
             self._span(3, "zzz", 5, 1),
         ]
         comps = vdf_xray.residual_overlap_components(spans, set())
-        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0)
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0, 0)
         self.assertEqual(self._dropped_names(res, spans), ["yyy", "zzz"])
         self.assertEqual(len(res.unresolved_components), 1)
         self.assertEqual(res.unresolved_components[0].contested_ots, [5])
@@ -2333,7 +2334,7 @@ class ResolveResidualComponentsTests(unittest.TestCase):
         ]
         phase1 = {6}
         comps = vdf_xray.residual_overlap_components(spans, phase1)
-        res = vdf_xray.resolve_residual_components(spans, comps, phase1, 0.0)
+        res = vdf_xray.resolve_residual_components(spans, comps, phase1, 0.0, 0)
         self.assertEqual(self._dropped_names(res, spans), ["age ghost"])
         self.assertEqual(res.readmitted, {6})
         self.assertEqual(res.unresolved_components, [])
@@ -2345,7 +2346,7 @@ class ResolveResidualComponentsTests(unittest.TestCase):
             self._span(2, "foo lookup", 1, 2),
         ]
         comps = vdf_xray.residual_overlap_components(spans, set())
-        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0)
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0, 0)
         self.assertEqual(self._dropped_names(res, spans), ["foo lookup"])
         self.assertEqual(res.unresolved_components, [])
 
@@ -2363,7 +2364,7 @@ class ResolveResidualComponentsTests(unittest.TestCase):
         ]
         phase1 = {7, 8}
         comps = vdf_xray.residual_overlap_components(spans, phase1)
-        res = vdf_xray.resolve_residual_components(spans, comps, phase1, 0.0)
+        res = vdf_xray.resolve_residual_components(spans, comps, phase1, 0.0, 0)
         self.assertEqual(self._dropped_names(res, spans), ["age ghost"])
         self.assertEqual(res.readmitted, {7})
         # d tar overlaps only an un-peeled descriptor, so it stays untouched.
@@ -2381,15 +2382,26 @@ class ResolveResidualComponentsTests(unittest.TestCase):
             def section6_lookup_records(self):
                 return []
 
+        # Nine alphabetically-ordered uncontested owners (>= MIN_PAIRS pairs,
+        # ratio 1.0) so the gate passes on real evidence; prev `e own`@4 / next
+        # `n own`@6 bracket the slot-5 conflict, keeping `m real`, dropping the
+        # ghost `z ghost` (which sorts past `n own`).
         spans = [
-            self._span(0, "a owner", 1, 1),
-            self._span(1, "z owner", 9, 1),
-            self._span(2, "m real", 5, 1),    # fits [a owner, z owner] -> recovered
-            self._span(3, "zzz ghost", 5, 1),  # sorts past z owner -> dropped
+            self._span(0, "b own", 1, 1),
+            self._span(1, "c own", 2, 1),
+            self._span(2, "d own", 3, 1),
+            self._span(3, "e own", 4, 1),
+            self._span(4, "m real", 5, 1),   # fits [e own, n own] -> recovered
+            self._span(5, "z ghost", 5, 1),  # sorts past n own -> dropped
+            self._span(6, "n own", 6, 1),
+            self._span(7, "o own", 7, 1),
+            self._span(8, "p own", 8, 1),
+            self._span(9, "q own", 9, 1),
+            self._span(10, "r own", 10, 1),
         ]
         di = vdf_xray.identify_descriptor_records(_NoLookupVdf(), spans)
-        self.assertIn(3, di.descriptor_indices, "ghost must be dropped with no lookups")
-        self.assertNotIn(2, di.descriptor_indices, "real owner must be recovered")
+        self.assertIn(5, di.descriptor_indices, "ghost must be dropped with no lookups")
+        self.assertNotIn(4, di.descriptor_indices, "real owner must be recovered")
 
     def test_same_name_duplicate_pair_survives_when_ghost_dropped(self):
         # GH #844: a differently-named ghost drags TWO same-name duplicate
@@ -2407,13 +2419,15 @@ class ResolveResidualComponentsTests(unittest.TestCase):
         comps = vdf_xray.residual_overlap_components(spans, set())
         self.assertEqual(len(comps), 1)
         self.assertEqual(comps[0].span_indices, [2, 3, 4])
-        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0)
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.0, 0)
         self.assertEqual(self._dropped_names(res, spans), ["zzz ghost"])
         self.assertNotIn(2, res.dropped)
         self.assertNotIn(3, res.dropped)
         self.assertEqual(res.unresolved_components, [])
 
     def test_gate_abstains_when_owners_not_alphabetical(self):
+        # RATIO gate: low alphabetical consistency -> abstain. min_pairs=0
+        # isolates the ratio side.
         spans = [
             self._span(0, "z", 1, 1),
             self._span(1, "a", 2, 1),
@@ -2423,8 +2437,26 @@ class ResolveResidualComponentsTests(unittest.TestCase):
             self._span(5, "owner", 10, 1),
         ]
         comps = vdf_xray.residual_overlap_components(spans, set())
-        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.95)
+        res = vdf_xray.resolve_residual_components(spans, comps, set(), 0.95, 0)
         self.assertEqual(self._dropped_names(res, spans), ["ghost", "owner"])
+        self.assertEqual(len(res.unresolved_components), 1)
+
+    def test_gate_abstains_on_too_few_measured_pairs(self):
+        # MIN_PAIRS gate (GH #844, codex round 3): one uncontested anchor `m`
+        # (0 adjacent pairs) is too little evidence, so the oracle must NOT run
+        # (which would silently drop the real `a real` while keeping the ghost
+        # `z ghost`). With the production floor the gate abstains: BOTH contested
+        # spans honest-drop and the component surfaces on diagnostics.
+        # gate_threshold=0.0 proves the pair-count floor drives it, not the ratio.
+        spans = [
+            self._span(0, "m", 3, 1),
+            self._span(1, "a real", 5, 1),
+            self._span(2, "z ghost", 5, 1),
+        ]
+        comps = vdf_xray.residual_overlap_components(spans, set())
+        res = vdf_xray.resolve_residual_components(
+            spans, comps, set(), 0.0, vdf_xray.RESIDUAL_ORDERING_MIN_PAIRS)
+        self.assertEqual(self._dropped_names(res, spans), ["a real", "z ghost"])
         self.assertEqual(len(res.unresolved_components), 1)
 
 
