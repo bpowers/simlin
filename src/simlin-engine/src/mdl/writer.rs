@@ -402,6 +402,12 @@ pub struct WriterContext {
     /// to compute which elements the dropped `default_equation` covered.
     /// Indexed dimensions are absent (they have no named elements to except).
     dim_elements: HashMap<String, Vec<String>>,
+    /// Subset of `extrapolate_lookups` that is actually referenced by at least
+    /// one `LOOKUP(table, _)` call the printer rewrites to a kind-preserving
+    /// `TABXL`. A standalone extrapolating lookup NOT in this set has no call
+    /// site to mark it, so its kind silently clamps on re-import -- the writer
+    /// warns for exactly those (#854/#856).
+    referenced_extrapolate_lookups: HashSet<String>,
 }
 
 impl WriterContext {
@@ -428,11 +434,20 @@ impl WriterContext {
                 dim_elements.insert(crate::common::canonicalize(&dim.name).into(), elems.clone());
             }
         }
+        // Only scan for call sites when there is an extrapolating lookup to
+        // preserve -- the overwhelmingly common model has none, so this is a
+        // no-op there (and a one-time equation parse pass otherwise).
+        let referenced_extrapolate_lookups = if extrapolate_lookups.is_empty() {
+            HashSet::new()
+        } else {
+            collect_extrapolating_lookup_call_sites(model, &extrapolate_lookups)
+        };
         WriterContext {
             var_idents,
             var_dims,
             extrapolate_lookups,
             dim_elements,
+            referenced_extrapolate_lookups,
         }
     }
 
@@ -449,6 +464,15 @@ impl WriterContext {
     /// emitted as `TABXL()` to survive the round trip (#854).
     fn is_extrapolating_lookup(&self, canonical: &str) -> bool {
         self.extrapolate_lookups.contains(canonical)
+    }
+
+    /// True when `canonical` is a standalone extrapolating lookup that NO
+    /// `LOOKUP` call site references, so no kind-preserving `TABXL` is emitted
+    /// and its extrapolate kind would silently clamp to Continuous on
+    /// re-import. The writer warns for exactly these (#854/#856).
+    fn is_unreferenced_extrapolating_lookup(&self, canonical: &str) -> bool {
+        self.extrapolate_lookups.contains(canonical)
+            && !self.referenced_extrapolate_lookups.contains(canonical)
     }
 
     /// True when `canonical` names a declared model variable.
@@ -486,6 +510,92 @@ fn var_is_extrapolating_lookup(var: &datamodel::Variable) -> bool {
         return false;
     }
     matches!(equation, Equation::Scalar(eqn) if is_lookup_only_equation(eqn))
+}
+
+/// The set of `extrapolate_lookups` idents that some variable references via a
+/// `LOOKUP(table, _)` call -- i.e. exactly the calls the printer rewrites to a
+/// kind-preserving `TABXL`. A standalone extrapolating lookup absent from this
+/// set has no such call site, so its kind would silently clamp on re-import.
+fn collect_extrapolating_lookup_call_sites(
+    model: &datamodel::Model,
+    extrapolate_lookups: &HashSet<String>,
+) -> HashSet<String> {
+    let mut referenced = HashSet::new();
+    for var in &model.variables {
+        let Some(equation) = var.get_equation() else {
+            continue;
+        };
+        let mut texts: Vec<&str> = Vec::new();
+        match equation {
+            Equation::Scalar(s) => texts.push(s),
+            Equation::ApplyToAll(_, s) => texts.push(s),
+            Equation::Arrayed(_, elements, default, _) => {
+                texts.extend(elements.iter().map(|(_, eqn, _, _)| eqn.as_str()));
+                if let Some(d) = default {
+                    texts.push(d);
+                }
+            }
+        }
+        for text in texts {
+            if let Ok(Some(ast)) = Expr0::new(text, LexerType::Equation) {
+                collect_lookup_refs(&ast, extrapolate_lookups, &mut referenced);
+            }
+        }
+    }
+    referenced
+}
+
+/// Walk `expr`, recording into `referenced` the canonical ident of every
+/// `LOOKUP(table, _)` call whose bare-variable table argument names one of
+/// `extrapolate_lookups`. The `func == "lookup"` / bare-`Var` first-argument
+/// shape mirrors the printer's TABXL rewrite exactly, so this counts a call
+/// site iff a `TABXL` is actually emitted for it.
+fn collect_lookup_refs(
+    expr: &Expr0,
+    extrapolate_lookups: &HashSet<String>,
+    referenced: &mut HashSet<String>,
+) {
+    match expr {
+        Expr0::Const(_, _, _) | Expr0::Var(_, _) => {}
+        Expr0::App(UntypedBuiltinFn(func, args), _) => {
+            if func == "lookup"
+                && args.len() == 2
+                && let Expr0::Var(table, _) = &args[0]
+            {
+                let canon = crate::common::canonicalize(table.as_str());
+                if extrapolate_lookups.contains(canon.as_ref()) {
+                    referenced.insert(canon.into());
+                }
+            }
+            for a in args {
+                collect_lookup_refs(a, extrapolate_lookups, referenced);
+            }
+        }
+        Expr0::Subscript(_, indices, _) => {
+            for idx in indices {
+                match idx {
+                    IndexExpr0::Range(l, r, _) => {
+                        collect_lookup_refs(l, extrapolate_lookups, referenced);
+                        collect_lookup_refs(r, extrapolate_lookups, referenced);
+                    }
+                    IndexExpr0::Expr(e) => collect_lookup_refs(e, extrapolate_lookups, referenced),
+                    IndexExpr0::Wildcard(_)
+                    | IndexExpr0::StarRange(_, _)
+                    | IndexExpr0::DimPosition(_, _) => {}
+                }
+            }
+        }
+        Expr0::Op1(_, e, _) => collect_lookup_refs(e, extrapolate_lookups, referenced),
+        Expr0::Op2(_, l, r, _) => {
+            collect_lookup_refs(l, extrapolate_lookups, referenced);
+            collect_lookup_refs(r, extrapolate_lookups, referenced);
+        }
+        Expr0::If(c, t, f, _) => {
+            collect_lookup_refs(c, extrapolate_lookups, referenced);
+            collect_lookup_refs(t, extrapolate_lookups, referenced);
+            collect_lookup_refs(f, extrapolate_lookups, referenced);
+        }
+    }
 }
 
 /// The declared dimension names (in order) of an arrayed / apply-to-all
@@ -1333,7 +1443,7 @@ fn write_variable_entry_ctx_warn(
 
     let name = display_name_for_ident(ident, display_names);
     warn_dropped_non_negative(&name, compat, warnings);
-    warn_unrepresentable_gf_kinds(&name, equation, gf, warnings);
+    warn_unrepresentable_gf_kinds(&name, ident, equation, gf, ctx, warnings);
 
     let data_source_eqn = compat_get_direct_equation(compat);
     let effective_gf = if data_source_eqn.is_some() { None } else { gf };
@@ -1419,8 +1529,10 @@ fn warn_dropped_non_negative(
 ///   ([`WriterContext::is_extrapolating_lookup`]) and so does NOT warn here.
 fn warn_unrepresentable_gf_kinds(
     name: &str,
+    ident: &str,
     equation: &Equation,
     gf: Option<&GraphicalFunction>,
+    ctx: &WriterContext,
     warnings: &mut Vec<ExportWarning>,
 ) {
     use datamodel::GraphicalFunctionKind::{Continuous, Discrete, Extrapolate};
@@ -1430,9 +1542,19 @@ fn warn_unrepresentable_gf_kinds(
     if let Some(gf) = gf {
         let is_standalone =
             matches!(equation, Equation::Scalar(eqn) if is_lookup_only_equation(eqn));
+        // A standalone Extrapolate lookup normally round-trips via the TABXL
+        // rewrite of its LOOKUP call sites (#854) -- but only when a call site
+        // exists. An unreferenced (e.g. dead) table has none, so no TABXL is
+        // emitted and its kind clamps to Continuous on re-import; that must
+        // warn rather than be silently suppressed (#856).
+        let preserved_by_tabxl = is_standalone
+            && !ctx.is_unreferenced_extrapolating_lookup(&crate::common::canonicalize(ident));
         match gf.kind {
             Discrete => warnings.push(discrete_gf_warning(name)),
             Extrapolate if !is_standalone => warnings.push(embedded_extrapolate_gf_warning(name)),
+            Extrapolate if !preserved_by_tabxl => {
+                warnings.push(unreferenced_extrapolate_gf_warning(name))
+            }
             Continuous | Extrapolate => {}
         }
     }
@@ -1492,6 +1614,14 @@ fn embedded_extrapolate_gf_warning(name: &str) -> ExportWarning {
     ExportWarning::new(format!(
         "graphical function for '{name}' extrapolates, but it is an inline WITH \
          LOOKUP whose table cannot be referenced by a TABXL call site; exported \
+         clamped (continuous) instead"
+    ))
+}
+
+fn unreferenced_extrapolate_gf_warning(name: &str) -> ExportWarning {
+    ExportWarning::new(format!(
+        "graphical function for '{name}' extrapolates, but its lookup table has \
+         no LOOKUP call site to emit as a kind-preserving TABXL; exported \
          clamped (continuous) instead"
     ))
 }

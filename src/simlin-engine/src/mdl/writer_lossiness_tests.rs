@@ -213,6 +213,23 @@ fn extrapolate_lookup_roundtrips_via_tabxl() {
 }
 
 #[test]
+fn unreferenced_extrapolate_lookup_warns() {
+    // A standalone Extrapolate lookup with NO LOOKUP call site has no TABXL
+    // emitted to mark it, so its extrapolate kind silently clamps to
+    // Continuous on re-import. That loss must surface as a warning rather than
+    // being suppressed on the assumption a preserving TABXL was written
+    // (#854/#856; a dead/unreferenced table is the residual the referenced
+    // case in `extrapolate_lookup_roundtrips_via_tabxl` does not cover).
+    let table = make_lookup_only_aux("demand_curve", GraphicalFunctionKind::Extrapolate);
+    let project = make_project(vec![make_model(vec![table])]);
+    let warnings = warnings_of(&project);
+    assert!(
+        message_mentioning(&warnings, "demand curve").is_some(),
+        "an unreferenced extrapolating lookup must warn, got {warnings:?}"
+    );
+}
+
+#[test]
 fn discrete_gf_emits_warning() {
     let table = make_lookup_only_aux("steps", GraphicalFunctionKind::Discrete);
     let project = make_project(vec![make_model(vec![table])]);
