@@ -291,6 +291,7 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::ConveyorNotExpanded => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorSpreadflowUnsupported => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorArrayedDimensionUnresolved => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorContainerAccessUnsupported => SimlinErrorCode::Generic,
         }
     }
 }

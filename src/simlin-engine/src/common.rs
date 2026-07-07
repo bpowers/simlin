@@ -452,6 +452,16 @@ pub enum ErrorCode {
     /// cannot be resolved. An internal-consistency guard on the arrayed-conveyor
     /// expansion (docs/design/conveyors.md §10).
     ConveyorArrayedDimensionUnresolved,
+    /// An equation uses a conveyor stock as a **container** -- indexing into its
+    /// belt (`conv[j]`) or reducing over its slat contents
+    /// (`SUM`/`MIN`/`MAX`/`MEAN`/`STDDEV`/`SIZE` of a conveyor). XMILE §3.7.1
+    /// makes conveyors containers, but the belt lives in the VM's conveyor side
+    /// table with a runtime-dynamic length, not in the fixed-dimension data
+    /// buffer the bytecode VM reads, so container access is not yet supported.
+    /// Rejected loudly rather than silently mis-resolving (`SIZE` -> 1,
+    /// `MEAN` -> the belt total) or erroring opaquely
+    /// (docs/design/conveyors.md §10).
+    ConveyorContainerAccessUnsupported,
 }
 
 impl fmt::Display for ErrorCode {
@@ -524,6 +534,7 @@ impl fmt::Display for ErrorCode {
             ConveyorNotExpanded => "conveyor_not_expanded",
             ConveyorSpreadflowUnsupported => "conveyor_spreadflow_unsupported",
             ConveyorArrayedDimensionUnresolved => "conveyor_arrayed_dimension_unresolved",
+            ConveyorContainerAccessUnsupported => "conveyor_container_access_unsupported",
         };
 
         write!(f, "{name}")
