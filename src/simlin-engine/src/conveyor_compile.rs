@@ -44,8 +44,25 @@
 //! expression may still reference other arrayed variables to yield distinct
 //! per-element values. Per-`<element>`-block DISTINCT conveyor attributes are
 //! not representable in the datamodel, so they cannot arise here.
-//! Conveyors inside submodules, queue coupling, and container access
-//! (`conv[j]`, `SUM(conv)`) reading belt slats are later build-sequence steps.
+//!
+//! It also handles **container access** (§10): reading a belt's slat contents in
+//! equations. The compiler cannot expose the runtime-dynamic slat vector to the
+//! bytecode, so each SUPPORTED container access -- `SUM`/`MEAN`/`SIZE`/`MIN`/
+//! `MAX`/`STDDEV` over a single belt, and `conv[j]` for a compile-time-constant
+//! slat index `j` -- is rewritten in place to a reference to a synthesized hidden
+//! STOCK, and the conveyor pass computes the result natively and PUBLISHES it
+//! into that stock's slot at step-start (before the flows phase / after belt
+//! init). Modeling the container variable as a no-flow stock is what makes the
+//! published value survive the flows phase (a stock slot is read but never
+//! recomputed by flows, and integrated unchanged by stocks) and gives it
+//! start-of-step read semantics for free. For an arrayed conveyor the container
+//! stock is arrayed over the same dims, so `conv[elem]`/`conv[elem,j]` index it
+//! element-wise via the ordinary array machinery. Genuinely-unlowerable residual
+//! forms (a reducer over an EXPRESSION involving the belt, a dynamic slat index,
+//! ranges/wildcards over slats, a bare arrayed-conveyor reducer other than SUM)
+//! stay loud-rejected with `ConveyorContainerAccessUnsupported`.
+//!
+//! Conveyors inside submodules and queue coupling are later build-sequence steps.
 
 use std::collections::HashMap;
 
@@ -65,6 +82,47 @@ pub struct LeakMeta {
     pub zone_start: f64,
     pub zone_end: f64,
     pub integers: bool,
+}
+
+/// The container-access result a synthesized container variable publishes each
+/// step from a belt's start-of-step state (§10). Each maps to exactly one scalar
+/// per belt (one array element for an arrayed conveyor):
+///
+/// - `Slat(j)` is the 1-based-from-exit slat content `conv[j]`; `j` outside
+///   `[1, L]` (L = the current physical belt length) yields NaN, matching an
+///   out-of-range dynamic array subscript.
+/// - the reducers apply over the belt's current slat-content vector (length L),
+///   following the VM's empty-reducer conventions (`Sum` -> 0, the rest -> NaN;
+///   see `vm.rs`). `Size` is the physical belt length L.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContainerKind {
+    Slat(usize),
+    Sum,
+    Mean,
+    Size,
+    Min,
+    Max,
+    Stddev,
+}
+
+/// A synthesized container variable's metadata: its canonical name (a hidden
+/// STOCK, arrayed over the conveyor's dims for an arrayed conveyor) and the
+/// access it computes (§10). The variable is modeled as a stock so the Flows
+/// phase never recomputes its slot -- the conveyor pass overwrites its `curr`
+/// slot at step-start and the Stocks phase (a no-flow INTEG) leaves it unchanged
+/// for the rest of the step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContainerMeta {
+    pub name: String,
+    pub kind: ContainerKind,
+}
+
+/// A resolved container variable: its data-buffer slot offset plus the access to
+/// compute from the belt.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContainerPlan {
+    pub off: usize,
+    pub kind: ContainerKind,
 }
 
 /// A resolved `dist` distribution (§8). Because the entry depth `d` can vary
@@ -120,6 +178,11 @@ pub struct ConveyorMeta {
     pub primary_out: String,
     pub leaks: Vec<LeakMeta>,
     pub inflows: Vec<InflowMeta>,
+    /// Container-access variables reading this conveyor's belt (§10). Each is a
+    /// synthesized hidden stock whose slot the pass publishes at step-start. For
+    /// an arrayed conveyor the container variable is arrayed over the same dims,
+    /// so element `e` of the container aligns with belt `e`.
+    pub containers: Vec<ContainerMeta>,
     /// Canonical name of the downstream conveyor whose belt this conveyor's
     /// primary outflow feeds (for the held-exit rule, §4.3 step 3). `None` if
     /// the primary outflow feeds an ordinary stock/cloud.
@@ -174,6 +237,9 @@ pub struct ConveyorPlan {
     pub primary_out_off: usize,
     pub leaks: Vec<LeakPlan>,
     pub inflows: Vec<InflowPlan>,
+    /// Container-access variables reading this belt (§10): resolved slot + kind.
+    /// The pass publishes each from this belt's start-of-step state.
+    pub containers: Vec<ContainerPlan>,
     /// Index into the plan list of the downstream conveyor this conveyor's
     /// primary outflow feeds (for the held-exit rule); `None` otherwise.
     pub primary_dest_conveyor: Option<usize>,
@@ -205,6 +271,23 @@ fn param_aux_name(stock: &str, param: &str) -> String {
 
 fn leak_frac_name(flow: &str) -> String {
     format!("$conv$leak${}$frac", canon(flow))
+}
+
+/// Synthesized hidden-stock name for a container-access variable over conveyor
+/// `stock` (§10). `$conv$<tag>$<stock>` (e.g. `$conv$sum$belt`) or, for a slat
+/// index, `$conv$slat$<stock>$<j>`. The `$`-separated form stays canonical and
+/// collision-free against ordinary model variables and the other `$conv$` auxes.
+fn container_var_name(stock: &str, kind: &ContainerKind) -> String {
+    let stock = canon(stock);
+    match kind {
+        ContainerKind::Slat(j) => format!("$conv$slat${stock}${j}"),
+        ContainerKind::Sum => format!("$conv$sum${stock}"),
+        ContainerKind::Mean => format!("$conv$mean${stock}"),
+        ContainerKind::Size => format!("$conv$size${stock}"),
+        ContainerKind::Min => format!("$conv$min${stock}"),
+        ContainerKind::Max => format!("$conv$max${stock}"),
+        ContainerKind::Stddev => format!("$conv$stddev${stock}"),
+    }
 }
 
 /// A resolved inflow placement: the static fallback plus, for the dynamic
@@ -429,9 +512,12 @@ pub fn expand_conveyors(
     }
 
     // Canonical conveyor-stock name -> its array-dimension count (0 = scalar).
-    // Used by the container-access guard below to tell an ordinary array-element
-    // read of an arrayed conveyor apart from an unsupported belt-slat read (§10).
+    // Used by the container-access rewrite below to tell an ordinary array-element
+    // read of an arrayed conveyor apart from a belt-slat read (§10).
     let mut conveyor_dims: HashMap<String, usize> = HashMap::new();
+    // Canonical conveyor-stock name -> its declared dimensions (empty = scalar),
+    // so a synthesized container variable can be arrayed over the same dims.
+    let mut conveyor_stock_dims: HashMap<String, Vec<DimensionName>> = HashMap::new();
 
     let mut driven_flows: Vec<String> = Vec::new();
     for v in &model.variables {
@@ -448,6 +534,7 @@ pub fn expand_conveyors(
         // offset enumeration; empty for a scalar conveyor.
         let stock_dims = equation_dims(&stock.equation);
         conveyor_dims.insert(stock_name.clone(), stock_dims.len());
+        conveyor_stock_dims.insert(stock_name.clone(), stock_dims.clone());
         let element_subscripts = element_subscripts_for_dims(&project, &stock_dims, &stock.ident)?;
 
         // Partition outflows into the primary (first non-leak) and leaks.
@@ -561,6 +648,7 @@ pub fn expand_conveyors(
             primary_out,
             leaks: leak_metas,
             inflows,
+            containers: Vec::new(), // filled by the container-access rewrite below
             primary_dest_conveyor,
             element_subscripts,
         });
@@ -609,36 +697,85 @@ pub fn expand_conveyors(
         }
     }
 
-    // Reject any equation that uses a conveyor as a CONTAINER -- indexing into
-    // its belt (`conv[j]`) or reducing over its slat contents
-    // (`SUM`/`SIZE`/`MEAN`/... of a conveyor). XMILE §3.7.1 makes conveyors
-    // containers, but the belt lives in the VM's conveyor side table with a
-    // runtime-dynamic length, not in the fixed-dimension data buffer the bytecode
-    // VM reads, so `[]`/array-builtins over belt contents are not yet supported.
-    // Detecting this at expand time (before the conveyor markers are cleared for
-    // ordinary compilation) turns today's silent mis-resolution (`SIZE` -> 1,
-    // `MEAN` -> the belt total) and opaque "failed to compile fragments" subscript
-    // errors into one clear, loud diagnostic naming the conveyor (§10).
+    // Rewrite each equation that uses a conveyor as a CONTAINER -- indexing into
+    // its belt (`conv[j]`, constant `j`) or reducing over its slat contents
+    // (`SUM`/`SIZE`/`MEAN`/`MIN`/`MAX`/`STDDEV` of a single belt). XMILE §3.7.1
+    // makes conveyors containers. The belt lives in the VM's conveyor side table
+    // with a runtime-dynamic length, not in the fixed-dimension data buffer the
+    // bytecode VM reads, so we cannot expose the slat vector to the bytecode.
+    // Instead the conveyor pass computes each container-access RESULT natively
+    // and PUBLISHES it into a synthesized hidden variable's slot at step-start
+    // (§10); here we replace each supported container subexpression with a
+    // reference to that variable. Genuinely-unlowerable forms (a reducer over an
+    // EXPRESSION involving the belt, a dynamic/non-constant slat index, ranges or
+    // wildcards over slats) stay loud-rejected via
+    // `ConveyorContainerAccessUnsupported`.
+    //
+    // The synthesized variable is a STOCK (a no-flow INTEG): the Flows phase
+    // reads but never recomputes a stock slot, and the Stocks phase integrates it
+    // unchanged, so the pass's step-start publish survives the whole step and any
+    // Flows-phase reader sees the start-of-step belt value. For an arrayed
+    // conveyor the container variable is arrayed over the same dims, so element
+    // `e` reads belt `e`.
+    let mut container_specs: std::collections::BTreeMap<String, ContainerVarSpec> =
+        std::collections::BTreeMap::new();
+    let mut rewritten_equations: HashMap<String, Equation> = HashMap::new();
     {
         let model = &project.models[model_idx];
         for v in &model.variables {
-            for eqn in equation_scalar_strings(v) {
-                let Ok(Some(ast)) = crate::ast::Expr0::new(&eqn, crate::lexer::LexerType::Equation)
-                else {
-                    continue;
-                };
-                if let Some((conv, form)) = find_container_access(&ast, &conveyor_dims) {
-                    return Err((
-                        ErrorCode::ConveyorContainerAccessUnsupported,
-                        format!(
-                            "variable '{}' uses conveyor '{conv}' as a container ({form}); \
-                             indexing a conveyor's belt or reducing over its slat contents \
-                             (SUM/MIN/MAX/MEAN/STDDEV/SIZE) is not yet supported",
-                            v.get_ident()
-                        ),
-                    ));
-                }
+            // A driven flow's equation becomes a `0` placeholder in Pass 2, so
+            // rewriting it would be discarded; skip it.
+            if driven_set.contains(&canon(v.get_ident())) {
+                continue;
             }
+            let eqn = match v {
+                datamodel::Variable::Stock(s) => &s.equation,
+                datamodel::Variable::Flow(f) => &f.equation,
+                datamodel::Variable::Aux(a) => &a.equation,
+                datamodel::Variable::Module(_) => continue,
+            };
+            if let Some(new_eqn) =
+                rewrite_container_equation(eqn, &conveyor_dims, &mut container_specs)?
+            {
+                rewritten_equations.insert(canon(v.get_ident()), new_eqn);
+            }
+        }
+    }
+
+    // The conveyor's OWN parameter (`<len>`/`<capacity>`/`<in_limit>`/`<sample>`/
+    // `<arrest>`) and leak-fraction expressions were synthesized into `$conv$...`
+    // auxes from their RAW strings during Pass 1, so the reader loop above did not
+    // scan them (they are not yet in `model.variables`). Apply the SAME container
+    // rewrite to them now that `conveyor_dims` is complete -- otherwise a
+    // belt-reading builtin in, say, `<capacity>SIZE(belt)</capacity>` would bind
+    // to the plain scalar stock and silently mis-compute (SIZE of a scalar is 1),
+    // violating this module's "supported -> rewrite, else loud-reject; never
+    // silently wrong" contract. A SUPPORTED form here becomes a lagged
+    // (start-of-step / previous-step-length) dependency on the container stock,
+    // which is consistent with the step-start publish; a residual form gets the
+    // same `ConveyorContainerAccessUnsupported` rejection as an ordinary equation.
+    for aux in &mut new_auxes {
+        if let Some(new_eqn) =
+            rewrite_container_equation(&aux.equation, &conveyor_dims, &mut container_specs)?
+        {
+            aux.equation = new_eqn;
+        }
+    }
+
+    // Attach each container variable to its conveyor's meta and synthesize the
+    // hidden container stock (arrayed over the conveyor's dims when arrayed).
+    let mut container_stocks: Vec<datamodel::Stock> = Vec::new();
+    for (name, spec) in &container_specs {
+        let dims = conveyor_stock_dims
+            .get(&spec.conv_stock)
+            .cloned()
+            .unwrap_or_default();
+        container_stocks.push(make_container_stock(name, &dims));
+        if let Some(meta) = metas.iter_mut().find(|m| m.stock == spec.conv_stock) {
+            meta.containers.push(ContainerMeta {
+                name: name.clone(),
+                kind: spec.kind.clone(),
+            });
         }
     }
 
@@ -650,6 +787,16 @@ pub fn expand_conveyors(
     // while accepting this expanded one.
     let model = &mut project.models[model_idx];
     for v in &mut model.variables {
+        // Replace a reader's equation with its container-access-rewritten form
+        // (the container subexpressions now reference the synthesized stocks).
+        if let Some(new_eqn) = rewritten_equations.remove(&canon(v.get_ident())) {
+            match v {
+                datamodel::Variable::Stock(s) => s.equation = new_eqn,
+                datamodel::Variable::Flow(f) => f.equation = new_eqn,
+                datamodel::Variable::Aux(a) => a.equation = new_eqn,
+                datamodel::Variable::Module(_) => {}
+            }
+        }
         match v {
             datamodel::Variable::Flow(f) if driven_set.contains(&canon(&f.ident)) => {
                 // Preserve the flow's array shape so an arrayed driven flow keeps
@@ -672,6 +819,10 @@ pub fn expand_conveyors(
     }
     for aux in new_auxes {
         model.variables.push(datamodel::Variable::Aux(aux));
+    }
+    // Append the synthesized container stocks (no-flow INTEGs the pass drives).
+    for stock in container_stocks {
+        model.variables.push(datamodel::Variable::Stock(stock));
     }
 
     Ok((project, metas))
@@ -700,52 +851,105 @@ fn equation_scalar_strings(v: &datamodel::Variable) -> Vec<String> {
     }
 }
 
-/// The single-argument array-reducer / SIZE builtins that XMILE §3.7.1 / §10
-/// would apply over a conveyor's slat-content vector. The parser lowercases call
-/// names, so these are matched lowercase. `min`/`max` are two-arg scalar
-/// builtins too, so the caller additionally requires exactly one argument (a
-/// scalar `MIN(conv_total, 5)` is a legitimate reduction of the belt TOTAL, not
-/// belt-container access).
-fn is_container_reducer(name: &str) -> bool {
-    matches!(name, "sum" | "min" | "max" | "mean" | "stddev" | "size")
+/// The conveyor and access a supported container subexpression resolves to,
+/// keyed (by the caller) on the synthesized container variable's canonical name.
+struct ContainerVarSpec {
+    /// Canonical name of the conveyor stock whose belt this reads.
+    conv_stock: String,
+    kind: ContainerKind,
 }
 
-/// Decide whether a single-argument reducer / `SIZE` call `fname(arg)` is
-/// container access over a conveyor belt (§10), returning the conveyor's
-/// canonical name. Two distinct triggers:
-///
-/// 1. A **bare arrayed conveyor** operand (`Var`, ndims>0) is the §10 "reducer
-///    over a conveyor" spelling: `MEAN`/`MIN`/`MAX`/`STDDEV`/`SIZE` of it are
-///    silently wrong (they read per-element belt TOTALS, not the slat vector --
-///    `SIZE`->N_elem instead of L, `MEAN`->mean of totals). Only `SUM`
-///    coincides (sum of per-element totals == sum over all slats), so it alone
-///    stays allowed.
-/// 2. Anywhere in the argument subtree, a **belt reference** -- a scalar
-///    conveyor (bare or wrapped in operators/functions, e.g. `MEAN(belt / x)`)
-///    or a single-belt-selecting subscript of an arrayed conveyor
-///    (`MEAN(conv[a])`) -- makes the reduction a belt read for EVERY reducer.
-///
-/// A reduction over an ordinary array expression involving an ARRAYED
-/// conveyor's per-element totals (`SUM(conv * 2)`, `SUM(conv[*])`) is NOT a
-/// belt reference, so it stays a legitimate array reduce and returns `None`.
-fn reducer_container_arg(
-    fname: &str,
-    arg: &crate::ast::Expr0,
-    conveyor_dims: &HashMap<String, usize>,
-) -> Option<String> {
-    use crate::ast::Expr0;
-    // Trigger 1: a bare arrayed conveyor. SUM is the only spec-safe bare
-    // arrayed reduction; every other reducer reads its slats per §10.
-    if let Expr0::Var(raw, _) = arg {
-        let name = canon(raw.as_str());
-        if matches!(conveyor_dims.get(&name), Some(&nd) if nd > 0) {
-            return if fname == "sum" { None } else { Some(name) };
-        }
+/// Build the hidden container STOCK for a synthesized container variable (§10):
+/// a no-flow INTEG initialized to `0`, arrayed over the conveyor's dims when the
+/// conveyor is arrayed. The conveyor pass overwrites its slot at step-start every
+/// step (including t=0), so the `0` initial value is only a placeholder; because
+/// it has no in/outflows the Stocks phase integrates it unchanged, letting the
+/// published value survive the Flows phase.
+fn make_container_stock(ident: &str, dims: &[DimensionName]) -> datamodel::Stock {
+    datamodel::Stock {
+        ident: ident.to_string(),
+        equation: param_equation("0", dims),
+        documentation: String::new(),
+        units: None,
+        inflows: Vec::new(),
+        outflows: Vec::new(),
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
     }
-    // Trigger 2: a scalar-conveyor / single-belt reference anywhere in the
-    // subtree (covers a bare scalar conveyor and single-belt arrayed subscripts,
-    // including when wrapped in operators/functions -- `MEAN(belt + 0)`).
-    subtree_has_belt_reference(arg, conveyor_dims)
+}
+
+/// A single-belt reference `expr` selects: the conveyor's canonical name and the
+/// element-selecting index expressions (empty for a scalar conveyor). Returns
+/// `Some` iff `expr` is EXACTLY a bare scalar conveyor `Var` or an arrayed
+/// conveyor `Subscript` whose index count equals its array-dimension count with
+/// every index a concrete single-element selector (no wildcard/range/star). An
+/// expression that merely CONTAINS a belt reference (e.g. `belt / 2`) returns
+/// `None` -- the caller routes that to loud rejection.
+fn direct_belt_reference(
+    expr: &crate::ast::Expr0,
+    conveyor_dims: &HashMap<String, usize>,
+) -> Option<(String, Vec<crate::ast::IndexExpr0>)> {
+    use crate::ast::Expr0;
+    match expr {
+        Expr0::Var(raw, _) => {
+            let name = canon(raw.as_str());
+            match conveyor_dims.get(&name) {
+                Some(0) => Some((name, Vec::new())),
+                _ => None, // arrayed bare Var = per-element totals, not one belt
+            }
+        }
+        Expr0::Subscript(raw, indices, _) => {
+            let name = canon(raw.as_str());
+            match conveyor_dims.get(&name) {
+                Some(&ndims)
+                    if ndims > 0 && indices.len() == ndims && all_single_element(indices) =>
+                {
+                    Some((name, indices.clone()))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Are all `indices` concrete single-element selectors (`Expr`/`DimPosition`,
+/// no `Wildcard`/`StarRange`/`Range`)?
+fn all_single_element(indices: &[crate::ast::IndexExpr0]) -> bool {
+    use crate::ast::IndexExpr0;
+    indices
+        .iter()
+        .all(|i| matches!(i, IndexExpr0::Expr(_) | IndexExpr0::DimPosition(_, _)))
+}
+
+/// A compile-time-constant, non-negative, integral slat index `j` (1-based from
+/// the exit, §10), or `None` if the index is not a bare literal integer (a
+/// dynamic/non-constant or fractional slat index is unsupported).
+fn const_slat_index(idx: &crate::ast::IndexExpr0) -> Option<usize> {
+    use crate::ast::{Expr0, IndexExpr0};
+    let IndexExpr0::Expr(Expr0::Const(_, val, _)) = idx else {
+        return None;
+    };
+    if val.is_finite() && *val >= 0.0 && val.fract() == 0.0 {
+        Some(*val as usize)
+    } else {
+        None
+    }
+}
+
+/// The reducer kind for a container reducer builtin name, or `None` if it is not
+/// one. Names are lowercase (the parser lowercases call names).
+fn reduce_kind(name: &str) -> Option<ContainerKind> {
+    Some(match name {
+        "sum" => ContainerKind::Sum,
+        "mean" => ContainerKind::Mean,
+        "size" => ContainerKind::Size,
+        "min" => ContainerKind::Min,
+        "max" => ContainerKind::Max,
+        "stddev" => ContainerKind::Stddev,
+        _ => return None,
+    })
 }
 
 /// The first conveyor **belt reference** in `expr`'s subtree, if any: a scalar
@@ -821,81 +1025,250 @@ fn subscript_selects_single_belt(indices: &[crate::ast::IndexExpr0], ndims: usiz
         .all(|i| matches!(i, IndexExpr0::Expr(_) | IndexExpr0::DimPosition(_, _)))
 }
 
-/// Walk `expr` for the first use of a conveyor stock as a CONTAINER (§10):
-/// indexing into its belt (`conv[j]` on a scalar conveyor, or an arrayed
-/// conveyor subscripted with MORE indices than it has array dimensions), or a
-/// single-argument array reducer / `SIZE` whose operand reads one belt's
-/// contents. Returns `(conveyor name, human-readable form)` for the first site,
-/// or `None`. `conveyor_dims` maps each conveyor stock's canonical name to its
-/// array-dimension count (0 = scalar).
-///
-/// Ordinary array access is deliberately NOT flagged: reading one element of an
-/// arrayed conveyor (`conv[elem]`, its per-element belt TOTAL), a partial slice,
-/// a bare scalar read (`x = conv`), `SUM` over an arrayed conveyor's per-element
-/// totals (`SUM(conv)` / `SUM(conv[*])` / `SUM(conv * 2)`, the one spec-safe
-/// bare arrayed reduction), all resolve to the conveyor's scalar stock value(s)
-/// and are unaffected. Every other bare arrayed reducer (`MEAN`/`MIN`/`MAX`/
-/// `STDDEV`/`SIZE(conv)`) IS flagged -- it reads the slat vector per §10, which
-/// the per-element totals do not represent. See [`reducer_container_arg`].
-fn find_container_access(
+/// The loud-rejection error for an unsupported container-access form (§10).
+fn unsupported_container(conv: &str, form: &str) -> (ErrorCode, String) {
+    (
+        ErrorCode::ConveyorContainerAccessUnsupported,
+        format!(
+            "conveyor '{conv}' is used as a container in an unsupported form ({form}); \
+             supported container access is SUM/MEAN/SIZE/MIN/MAX/STDDEV of a single belt \
+             and conv[j] for a constant slat index j"
+        ),
+    )
+}
+
+/// Rewrite each supported container-access subexpression in a variable's
+/// equation to reference the synthesized container variable (§10), registering
+/// the variable in `specs` (keyed by its canonical name). Returns `Some(new
+/// equation)` if any component changed, `Ok(None)` if none did, or `Err` for an
+/// unsupported residual. A parse failure leaves the component unchanged (an
+/// invalid equation is surfaced later by ordinary compilation).
+fn rewrite_container_equation(
+    equation: &Equation,
+    conveyor_dims: &HashMap<String, usize>,
+    specs: &mut std::collections::BTreeMap<String, ContainerVarSpec>,
+) -> Result<Option<Equation>, (ErrorCode, String)> {
+    let rewrite_str = |s: &str,
+                       specs: &mut std::collections::BTreeMap<String, ContainerVarSpec>|
+     -> Result<Option<String>, (ErrorCode, String)> {
+        let Ok(Some(ast)) = crate::ast::Expr0::new(s, crate::lexer::LexerType::Equation) else {
+            return Ok(None);
+        };
+        let mut changed = false;
+        let new_ast = rewrite_container_in_expr(&ast, conveyor_dims, specs, &mut changed)?;
+        if changed {
+            Ok(Some(crate::ast::print_eqn(&new_ast)))
+        } else {
+            Ok(None)
+        }
+    };
+
+    match equation {
+        Equation::Scalar(s) => Ok(rewrite_str(s, specs)?.map(Equation::Scalar)),
+        Equation::ApplyToAll(dims, s) => {
+            Ok(rewrite_str(s, specs)?.map(|ns| Equation::ApplyToAll(dims.clone(), ns)))
+        }
+        Equation::Arrayed(dims, elems, default, has_except) => {
+            let mut changed = false;
+            let mut new_elems = Vec::with_capacity(elems.len());
+            for (elem, s, uid, aux) in elems {
+                let ns = match rewrite_str(s, specs)? {
+                    Some(ns) => {
+                        changed = true;
+                        ns
+                    }
+                    None => s.clone(),
+                };
+                new_elems.push((elem.clone(), ns, uid.clone(), aux.clone()));
+            }
+            let new_default = match default {
+                Some(d) => match rewrite_str(d, specs)? {
+                    Some(nd) => {
+                        changed = true;
+                        Some(nd)
+                    }
+                    None => Some(d.clone()),
+                },
+                None => None,
+            };
+            if changed {
+                Ok(Some(Equation::Arrayed(
+                    dims.clone(),
+                    new_elems,
+                    new_default,
+                    *has_except,
+                )))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Recursively rewrite supported container-access subexpressions in `expr` to a
+/// reference to the synthesized container variable (§10), registering each in
+/// `specs` and setting `changed` when a substitution is made. Unsupported forms
+/// return `Err`. See [`rewrite_container_equation`] for the equation-level entry.
+fn rewrite_container_in_expr(
     expr: &crate::ast::Expr0,
     conveyor_dims: &HashMap<String, usize>,
-) -> Option<(String, String)> {
+    specs: &mut std::collections::BTreeMap<String, ContainerVarSpec>,
+    changed: &mut bool,
+) -> Result<crate::ast::Expr0, (ErrorCode, String)> {
     use crate::ast::{Expr0, IndexExpr0};
     use crate::builtins::UntypedBuiltinFn;
+    use crate::common::RawIdent;
+
+    // Register a container variable and return the AST reference to it: a bare
+    // `Var` for a scalar conveyor, or a `Subscript` carrying the element
+    // selectors for an arrayed one (so the ordinary array machinery indexes the
+    // arrayed container stock element-wise).
+    let mut register =
+        |conv_stock: String, kind: ContainerKind, elem_indices: Vec<IndexExpr0>| -> Expr0 {
+            let name = container_var_name(&conv_stock, &kind);
+            specs
+                .entry(name.clone())
+                .or_insert(ContainerVarSpec { conv_stock, kind });
+            *changed = true;
+            let loc = crate::builtins::Loc::default();
+            if elem_indices.is_empty() {
+                Expr0::Var(RawIdent::new(name), loc)
+            } else {
+                Expr0::Subscript(RawIdent::new(name), elem_indices, loc)
+            }
+        };
+
     match expr {
-        Expr0::Const(..) | Expr0::Var(..) => None,
-        Expr0::Subscript(raw, indices, _) => {
+        Expr0::Const(..) | Expr0::Var(..) => Ok(expr.clone()),
+        Expr0::Subscript(raw, indices, loc) => {
             let name = canon(raw.as_str());
-            if let Some(&ndims) = conveyor_dims.get(&name)
-                && indices.len() > ndims
-            {
-                let form = if ndims == 0 {
-                    "subscripting a scalar conveyor is belt-slat access".to_string()
-                } else {
-                    "subscripting past its array dimensions is belt-slat access".to_string()
-                };
-                return Some((name, form));
+            if let Some(&ndims) = conveyor_dims.get(&name) {
+                // A subscript with one MORE index than array dims is belt-slat
+                // access `conv[elem.., j]` (`conv[j]` for a scalar conveyor).
+                if indices.len() == ndims + 1 {
+                    let slat_idx = &indices[ndims];
+                    let Some(j) = const_slat_index(slat_idx) else {
+                        return Err(unsupported_container(
+                            &name,
+                            "a slat index must be a constant integer (dynamic subscript)",
+                        ));
+                    };
+                    let elem_indices = indices[..ndims].to_vec();
+                    if !all_single_element(&elem_indices) {
+                        return Err(unsupported_container(
+                            &name,
+                            "a ranged/wildcard array subscript cannot select one belt",
+                        ));
+                    }
+                    return Ok(register(name, ContainerKind::Slat(j), elem_indices));
+                }
+                // More indices than that: a multi-dimensional belt subscript we
+                // do not model.
+                if indices.len() > ndims + 1 {
+                    return Err(unsupported_container(
+                        &name,
+                        "multi-dimensional belt subscripting is unsupported",
+                    ));
+                }
+                // indices.len() <= ndims: ordinary array-element access of the
+                // conveyor's per-element totals -- not container access. Fall
+                // through to recurse into the index expressions.
             }
-            // A conveyor subscript within its dims is ordinary element access;
-            // still recurse into index sub-expressions in case one nests a
-            // container access (e.g. `x[SIZE(conv)]`).
+            // Recurse into index sub-expressions (a nested container access, e.g.
+            // `x[conv[1]]`, is rewritten; a range's bounds likewise).
+            let mut new_indices = Vec::with_capacity(indices.len());
             for idx in indices {
-                let found = match idx {
-                    IndexExpr0::Range(l, r, _) => find_container_access(l, conveyor_dims)
-                        .or_else(|| find_container_access(r, conveyor_dims)),
-                    IndexExpr0::Expr(e) => find_container_access(e, conveyor_dims),
-                    _ => None,
-                };
-                if found.is_some() {
-                    return found;
-                }
+                new_indices.push(match idx {
+                    IndexExpr0::Expr(e) => IndexExpr0::Expr(rewrite_container_in_expr(
+                        e,
+                        conveyor_dims,
+                        specs,
+                        changed,
+                    )?),
+                    IndexExpr0::Range(l, r, iloc) => IndexExpr0::Range(
+                        rewrite_container_in_expr(l, conveyor_dims, specs, changed)?,
+                        rewrite_container_in_expr(r, conveyor_dims, specs, changed)?,
+                        *iloc,
+                    ),
+                    other => other.clone(),
+                });
             }
-            None
+            Ok(Expr0::Subscript(raw.clone(), new_indices, *loc))
         }
-        Expr0::App(UntypedBuiltinFn(fname, args), _) => {
-            if is_container_reducer(fname)
+        Expr0::App(UntypedBuiltinFn(fname, args), loc) => {
+            // A single-argument container reducer over ONE belt is supported.
+            if let Some(kind) = reduce_kind(fname)
                 && args.len() == 1
-                && let Some(conv) = reducer_container_arg(fname, &args[0], conveyor_dims)
             {
-                return Some((
-                    conv,
-                    format!("{}(...) over its slat contents", fname.to_uppercase()),
-                ));
-            }
-            for arg in args {
-                if let Some(found) = find_container_access(arg, conveyor_dims) {
-                    return Some(found);
+                let arg = &args[0];
+                // A bare arrayed conveyor `Var`: SUM(conv) is the ordinary reduce
+                // over per-element totals (== sum over all slats), left untouched;
+                // every OTHER bare-arrayed reducer reads the slat vector, which
+                // the per-element totals do not represent -- reject loudly rather
+                // than silently return a mean/min/max/size of belt totals.
+                if let Expr0::Var(vraw, _) = arg {
+                    let vname = canon(vraw.as_str());
+                    if matches!(conveyor_dims.get(&vname), Some(&nd) if nd > 0) && *fname != "sum" {
+                        return Err(unsupported_container(
+                            &vname,
+                            "a bare arrayed-conveyor reducer other than SUM has no \
+                             single-belt interpretation; reduce one belt via conv[elem]",
+                        ));
+                    }
+                }
+                // A direct single-belt operand (scalar conveyor `Var` or an
+                // arrayed conveyor `conv[elem]` subscript): reduce that belt
+                // natively. `direct_belt_reference` returns `None` for a bare
+                // arrayed `Var`, so SUM(conv) over per-element totals falls
+                // through to the ordinary recurse below.
+                if let Some((conv, elem_indices)) = direct_belt_reference(arg, conveyor_dims) {
+                    return Ok(register(conv, kind, elem_indices));
+                }
+                // The belt appears wrapped in an expression (not a direct
+                // single-belt reference): reducing it would need the per-slat
+                // vector, which we cannot lower to one scalar.
+                if let Some(conv) = subtree_has_belt_reference(arg, conveyor_dims) {
+                    return Err(unsupported_container(
+                        &conv,
+                        "a reducer over an expression involving the belt cannot be \
+                         reduced to one native scalar",
+                    ));
                 }
             }
-            None
+            // Not container access: recurse into every argument.
+            let mut new_args = Vec::with_capacity(args.len());
+            for arg in args {
+                new_args.push(rewrite_container_in_expr(
+                    arg,
+                    conveyor_dims,
+                    specs,
+                    changed,
+                )?);
+            }
+            Ok(Expr0::App(UntypedBuiltinFn(fname.clone(), new_args), *loc))
         }
-        Expr0::Op1(_, inner, _) => find_container_access(inner, conveyor_dims),
-        Expr0::Op2(_, l, r, _) => find_container_access(l, conveyor_dims)
-            .or_else(|| find_container_access(r, conveyor_dims)),
-        Expr0::If(c, t, f, _) => find_container_access(c, conveyor_dims)
-            .or_else(|| find_container_access(t, conveyor_dims))
-            .or_else(|| find_container_access(f, conveyor_dims)),
+        Expr0::Op1(op, inner, loc) => Ok(Expr0::Op1(
+            *op,
+            Box::new(rewrite_container_in_expr(
+                inner,
+                conveyor_dims,
+                specs,
+                changed,
+            )?),
+            *loc,
+        )),
+        Expr0::Op2(op, l, r, loc) => Ok(Expr0::Op2(
+            *op,
+            Box::new(rewrite_container_in_expr(l, conveyor_dims, specs, changed)?),
+            Box::new(rewrite_container_in_expr(r, conveyor_dims, specs, changed)?),
+            *loc,
+        )),
+        Expr0::If(c, t, f, loc) => Ok(Expr0::If(
+            Box::new(rewrite_container_in_expr(c, conveyor_dims, specs, changed)?),
+            Box::new(rewrite_container_in_expr(t, conveyor_dims, specs, changed)?),
+            Box::new(rewrite_container_in_expr(f, conveyor_dims, specs, changed)?),
+            *loc,
+        )),
     }
 }
 
@@ -1087,6 +1460,19 @@ pub fn resolve_plans(
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
+            // Container variables read this belt (§10). The container stock is
+            // arrayed over the conveyor's dims, so element `e` of the container
+            // resolves to belt `e` via the same element-aware offset lookup.
+            let containers = meta
+                .containers
+                .iter()
+                .map(|c| {
+                    Some(ContainerPlan {
+                        off: eoff(&c.name)?,
+                        kind: c.kind.clone(),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
             // A held-exit destination links element `e` to the same element of
             // the downstream conveyor. If the downstream has fewer elements
             // (mismatched shapes, not element-wise coupled), leave it unlinked --
@@ -1110,6 +1496,7 @@ pub fn resolve_plans(
                 primary_out_off: eoff(&meta.primary_out)?,
                 leaks,
                 inflows,
+                containers,
                 primary_dest_conveyor,
             });
         }
@@ -1310,6 +1697,62 @@ pub fn init_belts(
         states.push(state);
     }
     Ok(states)
+}
+
+/// Compute one container-access result from a belt's current (start-of-step)
+/// state (§10). The reducer conventions match the VM's array reducers (`vm.rs`):
+/// `Sum` -> 0 on an empty belt, every other reducer -> NaN; `Size` is the
+/// physical belt length. `Slat(j)` is 1-based from the exit; `j` outside
+/// `[1, L]` yields NaN.
+fn container_value(state: &ConveyorState, kind: &ContainerKind) -> f64 {
+    match kind {
+        ContainerKind::Slat(j) => {
+            if *j < 1 {
+                f64::NAN
+            } else {
+                state.slat_content(*j - 1).unwrap_or(f64::NAN)
+            }
+        }
+        ContainerKind::Size => state.belt_len() as f64,
+        ContainerKind::Sum => state.contents(),
+        ContainerKind::Mean | ContainerKind::Min | ContainerKind::Max | ContainerKind::Stddev => {
+            let slats = state.slat_contents();
+            if slats.is_empty() {
+                return f64::NAN;
+            }
+            match kind {
+                ContainerKind::Mean => slats.iter().sum::<f64>() / slats.len() as f64,
+                ContainerKind::Min => slats.iter().copied().fold(f64::INFINITY, f64::min),
+                ContainerKind::Max => slats.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                ContainerKind::Stddev => {
+                    let n = slats.len() as f64;
+                    let mean = slats.iter().sum::<f64>() / n;
+                    let var = slats.iter().map(|v| (v - mean).powf(2.0)).sum::<f64>() / n;
+                    var.sqrt()
+                }
+                _ => unreachable!("outer match restricts kind"),
+            }
+        }
+    }
+}
+
+/// Publish each conveyor's container-access results into their data-buffer slots
+/// (§10). Called at STEP-START -- before the Flows phase in the Euler loop and
+/// after belt initialization in `run_initials` -- so the published values
+/// reflect the belt as left by the previous step (= start-of-step for this
+/// step). Each container variable is a hidden no-flow STOCK, so the Flows phase
+/// never recomputes its slot and the Stocks phase leaves it unchanged: the value
+/// is visible to Flows-phase readers and survives the whole step.
+pub fn publish_container_values(
+    plans: &[ConveyorPlan],
+    states: &[ConveyorState],
+    curr: &mut [f64],
+) {
+    for (plan, state) in plans.iter().zip(states.iter()) {
+        for c in &plan.containers {
+            curr[c.off] = container_value(state, &c.kind);
+        }
+    }
 }
 
 /// The two-phase conveyor pass (§4.3), run once per Euler step between the flows
@@ -2052,10 +2495,11 @@ mod tests {
         );
     }
 
-    // ----- container access (§10): loud rejection -----
+    // ----- container access (§10): native computation + residual rejection -----
 
     /// Build the standard scalar-conveyor model plus a `reader` aux with the
-    /// given equation, and return the `build_vm` result.
+    /// given equation, and return the `build_vm` result. The belt fills from
+    /// empty (init 0).
     fn build_with_reader(reader_eqn: &str) -> crate::common::Result<crate::vm::Vm> {
         let xml = wrap_model(&format!(
             r#"
@@ -2070,26 +2514,263 @@ mod tests {
         build_vm(&project, &main)
     }
 
+    /// Build a STEADY-STATE scalar-conveyor model (belt init 1000, inflow 250,
+    /// transit 4, dt 0.25 -> 16 slats each holding 62.5) plus a `reader` aux, run
+    /// it, and return `reader`'s series. Every hand-computed oracle in these
+    /// tests reads this known belt.
+    fn steady_reader_series(reader_eqn: &str) -> Vec<f64> {
+        let xml = wrap_model(&format!(
+            r#"
+        <stock name="belt"><eqn>1000</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <aux name="reader"><eqn>{reader_eqn}</eqn></aux>"#
+        ));
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build steady reader");
+        vm.run_to_end().expect("run");
+        vm.get_series(&Ident::new("reader")).expect("reader series")
+    }
+
     #[test]
-    fn scalar_conveyor_container_access_forms_are_rejected() {
-        // Every container-access form over a scalar conveyor -- belt-slat
-        // subscript and each array reducer / SIZE -- is rejected loudly (§10)
-        // rather than silently mis-resolving (SIZE -> 1, MEAN -> the belt total)
-        // or erroring opaquely (the subscript's "failed to compile fragments").
-        for eqn in [
-            "belt[1]",
-            "SUM(belt)",
-            "MIN(belt)",
-            "MAX(belt)",
-            "MEAN(belt)",
-            "STDDEV(belt)",
-            "SIZE(belt)",
-            "SUM(belt) + 1",                // nested inside a larger expression
-            "IF belt[2] > 0 THEN 1 ELSE 0", // nested inside a conditional
-        ] {
-            let err = build_with_reader(eqn)
+    fn scalar_container_reducers_read_the_belt() {
+        // The steady belt is 16 slats each 62.5 (SUM 1000). SUM/MEAN/SIZE/MIN/
+        // MAX/STDDEV are now computed natively from the belt, not rejected (§10).
+        let cases = [
+            ("SUM(belt)", 1000.0),
+            ("MEAN(belt)", 62.5),
+            ("SIZE(belt)", 16.0),
+            ("MIN(belt)", 62.5),
+            ("MAX(belt)", 62.5),
+            ("STDDEV(belt)", 0.0),
+        ];
+        for (eqn, want) in cases {
+            let series = steady_reader_series(eqn);
+            for (i, &v) in series.iter().enumerate() {
+                assert!(
+                    (v - want).abs() < 1e-9,
+                    "'{eqn}' step {i}: got {v}, want {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_slat_index_reads_slat_and_out_of_range_is_nan() {
+        // conv[j] is 1-based from the exit. On the 16-slat steady belt every slat
+        // is 62.5; conv[0] and conv[17] are out of range -> NaN (§10).
+        assert!((steady_reader_series("belt[1]")[10] - 62.5).abs() < 1e-9);
+        assert!((steady_reader_series("belt[16]")[10] - 62.5).abs() < 1e-9);
+        assert!(
+            steady_reader_series("belt[0]")[10].is_nan(),
+            "belt[0] -> NaN"
+        );
+        assert!(
+            steady_reader_series("belt[17]")[10].is_nan(),
+            "belt[17] -> NaN"
+        );
+    }
+
+    #[test]
+    fn container_access_in_larger_expression_and_conditional() {
+        // A supported container access nested inside a larger expression / an IF
+        // is rewritten in place (not whole-equation), so the surrounding math is
+        // preserved: SUM(belt) + 1 == 1001; IF belt[2] > 0 THEN 1 ELSE 0 == 1.
+        assert!((steady_reader_series("SUM(belt) + 1")[5] - 1001.0).abs() < 1e-9);
+        for &v in steady_reader_series("IF belt[2] > 0 THEN 1 ELSE 0").iter() {
+            assert_eq!(v, 1.0);
+        }
+    }
+
+    #[test]
+    fn container_reducer_on_filling_belt_tracks_min_max_stddev() {
+        // A belt filling from empty exercises MIN/MAX/STDDEV over a non-uniform
+        // and briefly-empty belt. Insert-at-entry (default `beginning`) means an
+        // empty belt after step 0's insert holds one slat; MIN of a partially
+        // filled belt (some 0 slats) is 0 while MAX rises toward the inflow
+        // cohort (250*0.25 = 62.5), and STDDEV is > 0 mid-fill.
+        let min_s = steady_reader_min_max_stddev("MIN(belt)");
+        let max_s = steady_reader_min_max_stddev("MAX(belt)");
+        let std_s = steady_reader_min_max_stddev("STDDEV(belt)");
+        // Early in the fill the belt has both 0 slats and a 62.5 cohort.
+        assert_eq!(min_s[2], 0.0, "MIN over a partly-empty belt is 0");
+        assert!(
+            (max_s[2] - 62.5).abs() < 1e-9,
+            "MAX over the cohort is 62.5, got {}",
+            max_s[2]
+        );
+        assert!(
+            std_s[2] > 0.0,
+            "STDDEV mid-fill is positive, got {}",
+            std_s[2]
+        );
+        // Once full and steady every slat is 62.5: MIN==MAX, STDDEV==0.
+        let last = min_s.len() - 1;
+        assert!((min_s[last] - 62.5).abs() < 1e-9 && (max_s[last] - 62.5).abs() < 1e-9);
+        assert!(
+            std_s[last].abs() < 1e-9,
+            "steady STDDEV 0, got {}",
+            std_s[last]
+        );
+    }
+
+    /// A filling-from-empty belt reader series (belt init 0, inflow 250).
+    fn steady_reader_min_max_stddev(reader_eqn: &str) -> Vec<f64> {
+        let mut vm = build_with_reader(reader_eqn).expect("build filling reader");
+        vm.run_to_end().expect("run");
+        vm.get_series(&Ident::new("reader")).expect("reader")
+    }
+
+    #[test]
+    fn container_value_is_start_of_step_and_feeds_a_flow_same_step() {
+        // The CRUX (§10): a container value is read DURING the flows phase, must
+        // reflect START-OF-STEP belt state, and must survive the flows eval so it
+        // is not clobbered. `reader = SUM(belt)` feeds both another aux
+        // (`doubled = reader * 2`) and a flow into a sink stock (`accum`), all in
+        // the same step. On the steady belt SUM(belt) == 1000 every step, so
+        // doubled == 2000 and accum accumulates 1000/time.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>1000</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <aux name="reader"><eqn>SUM(belt)</eqn></aux>
+        <aux name="doubled"><eqn>reader * 2</eqn></aux>
+        <stock name="accum"><eqn>0</eqn><inflow>sink_f</inflow></stock>
+        <flow name="sink_f"><eqn>reader</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build crux model");
+        vm.run_to_end().expect("run");
+        let reader = vm.get_series(&Ident::new("reader")).expect("reader");
+        let doubled = vm.get_series(&Ident::new("doubled")).expect("doubled");
+        let accum = vm.get_series(&Ident::new("accum")).expect("accum");
+        for (i, (&r, &d)) in reader.iter().zip(doubled.iter()).enumerate() {
+            assert!((r - 1000.0).abs() < 1e-9, "step {i} reader {r}");
+            assert!((d - 2000.0).abs() < 1e-9, "step {i} doubled {d}");
+        }
+        // accum integrates 1000/time from t=0; the final value ~= 1000 * stop.
+        let last = accum[accum.len() - 1];
+        assert!(
+            (last - 1000.0 * 20.0).abs() < 1.0,
+            "accum final {last} (want ~20000)"
+        );
+    }
+
+    #[test]
+    fn container_reducer_is_read_before_this_steps_insert() {
+        // Start-of-step timing (§10): a reader of SUM(belt) sees the belt BEFORE
+        // this step's exit/insert. The belt fills from empty (16 zero-slats,
+        // inflow 250 -> 62.5 inserted per step, nothing exits for 16 steps), so
+        // SUM(belt) at step t reflects only the t inserts made in the PRIOR steps:
+        // reader[t] == 62.5 * t for t <= 16, then plateaus at 1000. If the value
+        // were recomputed after this step's insert it would read 62.5 higher.
+        let series = steady_reader_min_max_stddev("SUM(belt)"); // belt init 0
+        assert_eq!(series[0], 0.0, "step 0: no inserts yet");
+        for (t, &v) in series.iter().enumerate().take(17).skip(1) {
+            assert!(
+                (v - 62.5 * t as f64).abs() < 1e-9,
+                "step {t}: SUM(belt)={v} (want {}, start-of-step)",
+                62.5 * t as f64
+            );
+        }
+        assert!((series[20] - 1000.0).abs() < 1e-9, "plateaus at 1000");
+    }
+
+    #[test]
+    fn container_access_in_conveyor_parameter_expression_is_computed() {
+        // A container access inside the conveyor's OWN parameter expression must
+        // be rewritten too (not just ordinary equations): `<capacity>SIZE(belt)`
+        // binds to the belt length (16), so contents plateau at 16 -- NOT the
+        // silent SIZE(scalar)=1 that plateaued at 1 before the fix.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>4</len><capacity>SIZE(belt)</capacity></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build param-container vm");
+        vm.run_to_end().expect("run");
+        let belt = vm.get_series(&Ident::new("belt")).expect("belt");
+        for (i, &b) in belt.iter().enumerate() {
+            assert!(
+                b <= 16.0 + 1e-6,
+                "step {i}: contents {b} exceeds capacity 16"
+            );
+        }
+        let last = belt[belt.len() - 1];
+        assert!(
+            (last - 16.0).abs() < 1e-6,
+            "capacity=SIZE(belt)=16 plateaus contents at 16, got {last} (silent-wrong would be 1)"
+        );
+    }
+
+    #[test]
+    fn residual_container_access_in_conveyor_parameter_is_rejected() {
+        // A residual container form in a parameter or leak-fraction expression is
+        // loud-rejected exactly like one in an ordinary equation -- never
+        // silently mis-bound to the scalar stock.
+        let cases = [
+            r#"<conveyor><len>4</len><capacity>MEAN(belt / 2)</capacity></conveyor>"#,
+            r#"<conveyor><len>MEAN(belt / 2)</len></conveyor>"#,
+        ];
+        for conveyor in cases {
+            let xml = wrap_model(&format!(
+                r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          {conveyor}</stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#
+            ));
+            let project = parse(&xml);
+            let main = project.models[0].name.clone();
+            let err = build_vm(&project, &main)
                 .err()
-                .unwrap_or_else(|| panic!("container access '{eqn}' should be rejected"));
+                .unwrap_or_else(|| panic!("residual param '{conveyor}' should be rejected"));
+            assert_eq!(
+                err.code,
+                ErrorCode::ConveyorContainerAccessUnsupported,
+                "conveyor '{conveyor}'"
+            );
+        }
+    }
+
+    #[test]
+    fn residual_container_access_in_leak_fraction_is_rejected() {
+        // A residual container form in a leak-fraction expression is likewise
+        // loud-rejected (the fraction is synthesized into a `$conv$leak$...$frac`
+        // aux from its raw string, so it must be rewritten/checked too).
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>attriting</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <flow name="attriting"><eqn>MEAN(belt / 2)</eqn><leak/></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let err = build_vm(&project, &main)
+            .expect_err("residual leak-fraction container access should be rejected");
+        assert_eq!(err.code, ErrorCode::ConveyorContainerAccessUnsupported);
+    }
+
+    #[test]
+    fn scalar_dynamic_and_ranged_container_access_still_rejected() {
+        // The genuinely-unlowerable residuals stay loud-rejected (§10): a dynamic
+        // (non-constant) slat index and a slat range/wildcard need the per-slat
+        // vector, which cannot be reduced to one native scalar.
+        for eqn in ["belt[k]", "belt[1:2]", "belt[*]"] {
+            let err = build_with_reader(&format!("{eqn} + 0"))
+                .err()
+                .unwrap_or_else(|| panic!("residual '{eqn}' should be rejected"));
             assert_eq!(
                 err.code,
                 ErrorCode::ConveyorContainerAccessUnsupported,
@@ -2141,16 +2822,12 @@ mod tests {
         vm.run_to_end().expect("run");
     }
 
-    #[test]
-    fn arrayed_conveyor_element_read_is_allowed_but_belt_access_rejected() {
-        // For an arrayed conveyor, reading one element (`belt[a]`, that belt's
-        // TOTAL) and reducing over the per-element totals (`SUM(belt)`) are
-        // ordinary array ops -- allowed. Reducing over ONE element's belt
-        // (`SUM(belt[a])`) or over-subscripting (`belt[a, 2]`) is belt-slat
-        // container access -- rejected (§10).
-        let build = |reader: &str| -> crate::common::Result<crate::vm::Vm> {
-            let xml = wrap_model(&format!(
-                r#"
+    /// Build the standard arrayed-conveyor model (board {a,b}; inflow a=100,
+    /// b=250; transit 4; belt filling from empty) plus a `reader` aux, returning
+    /// the `build_vm` result.
+    fn build_arrayed_reader(reader: &str) -> crate::common::Result<crate::vm::Vm> {
+        let xml = wrap_model(&format!(
+            r#"
         <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
           <dimensions><dim name="board"/></dimensions>
           <conveyor><len>4</len></conveyor></stock>
@@ -2160,39 +2837,57 @@ mod tests {
           <dimensions><dim name="board"/></dimensions></flow>
         <flow name="out_f"><dimensions><dim name="board"/></dimensions></flow>
         <aux name="reader"><eqn>{reader}</eqn></aux>"#
-            ))
-            .replace(
-                "<model>",
-                "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
-            );
-            let project = parse(&xml);
-            let main = project.models[0].name.clone();
-            build_vm(&project, &main)
+        ))
+        .replace(
+            "<model>",
+            "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        build_vm(&project, &main)
+    }
+
+    #[test]
+    fn arrayed_conveyor_ordinary_array_reads_allowed() {
+        // For an arrayed conveyor, reading one element (`belt[a]`, that belt's
+        // TOTAL) and reducing over the per-element totals (`SUM(belt)`) are
+        // ordinary array ops -- unchanged, no container synthesis.
+        for eqn in ["belt[a]", "SUM(belt)", "SUM(belt[*])", "SUM(belt * 2)"] {
+            let mut vm = build_arrayed_reader(eqn)
+                .unwrap_or_else(|_| panic!("ordinary array read '{eqn}' should compile"));
+            vm.run_to_end().expect("run");
+        }
+    }
+
+    #[test]
+    fn arrayed_single_belt_container_access_computes_per_element() {
+        // A single-belt subscript reduced by a reducer, or a per-element belt
+        // slot, is now supported (§10): the container variable is arrayed over
+        // the conveyor's dims, so `SUM(belt[a])` reads belt a and `belt[b, 2]`
+        // reads belt b's slat 2. Steady: belt[a] = 16 slats of 25 (SUM 400),
+        // belt[b] = 16 slats of 62.5 (SUM 1000).
+        let series = |reader: &str| -> Vec<f64> {
+            let mut vm = build_arrayed_reader(reader).expect("build arrayed reader");
+            vm.run_to_end().expect("run");
+            vm.get_series(&Ident::new("reader")).expect("reader")
         };
+        let steady = |s: &[f64]| s[s.len() - 1];
+        assert!((steady(&series("SUM(belt[a])")) - 400.0).abs() < 1e-6);
+        assert!((steady(&series("SUM(belt[b])")) - 1000.0).abs() < 1e-6);
+        assert!((steady(&series("MEAN(belt[a])")) - 25.0).abs() < 1e-6);
+        assert!((steady(&series("MEAN(belt[b])")) - 62.5).abs() < 1e-6);
+        assert!((steady(&series("SIZE(belt[a])")) - 16.0).abs() < 1e-9);
+        // belt[b, 2]: slat 2 of belt b, 62.5 at steady state.
+        assert!((steady(&series("belt[b, 2]")) - 62.5).abs() < 1e-6);
+        // belt[a, 1]: exit slat of belt a, 25 at steady state.
+        assert!((steady(&series("belt[a, 1]")) - 25.0).abs() < 1e-6);
+    }
 
-        // Allowed: single-element read (belt total for that element).
-        let mut vm = build("belt[a]").expect("reading one arrayed-conveyor element is fine");
-        vm.run_to_end().expect("run element read");
-
-        // Allowed: SUM over the array of per-element belt totals. SUM is the
-        // ONLY spec-safe bare arrayed reduction (sum of totals == sum of all
-        // slats), so it stays allowed.
-        let mut vm = build("SUM(belt)").expect("reducing per-element belt totals is fine");
-        vm.run_to_end().expect("run per-element sum");
-
-        // Allowed: an explicit whole-array wildcard slice is still a reduction
-        // over per-element belt totals, equivalent to `SUM(belt)`.
-        let mut vm = build("SUM(belt[*])").expect("wildcard reduction over belt totals is fine");
-        vm.run_to_end().expect("run wildcard sum");
-
-        // Allowed: SUM over an ordinary array expression built from per-element
-        // belt totals -- not a belt reference (Finding 2 false-positive guard).
-        let mut vm = build("SUM(belt * 2)").expect("SUM over an array expression is fine");
-        vm.run_to_end().expect("run array-expr sum");
-
-        // Rejected (Finding 1): every OTHER bare arrayed reducer reads the slat
-        // vector per §10 and is silently wrong over per-element totals
-        // (SIZE->N_elem not L, MEAN->mean of totals, etc.).
+    #[test]
+    fn arrayed_bare_non_sum_reducer_still_rejected() {
+        // A bare arrayed-conveyor reducer other than SUM has no single-belt
+        // interpretation (it would read per-element TOTALS, not slats) -- it
+        // stays loud-rejected (§10). SUM is the one spec-safe bare reduction.
         for eqn in [
             "MEAN(belt)",
             "MIN(belt)",
@@ -2201,39 +2896,13 @@ mod tests {
             "SIZE(belt)",
         ] {
             assert_eq!(
-                build(eqn)
+                build_arrayed_reader(eqn)
                     .expect_err("bare arrayed non-SUM reducer should be rejected")
                     .code,
                 ErrorCode::ConveyorContainerAccessUnsupported,
                 "equation '{eqn}'"
             );
         }
-
-        // Rejected: single-belt-selecting subscript reduced by ANY reducer.
-        for eqn in [
-            "SUM(belt[a])",
-            "MEAN(belt[a])",
-            "MIN(belt[a])",
-            "MAX(belt[a])",
-            "STDDEV(belt[a])",
-            "SIZE(belt[a])",
-        ] {
-            assert_eq!(
-                build(eqn)
-                    .expect_err("reducing one belt should be rejected")
-                    .code,
-                ErrorCode::ConveyorContainerAccessUnsupported,
-                "equation '{eqn}'"
-            );
-        }
-
-        // Rejected: over-subscripting past the array dimension (belt-slat access).
-        assert_eq!(
-            build("belt[a, 2]")
-                .expect_err("over-subscript should be rejected")
-                .code,
-            ErrorCode::ConveyorContainerAccessUnsupported,
-        );
     }
 
     #[test]

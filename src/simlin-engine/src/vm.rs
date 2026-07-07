@@ -809,6 +809,16 @@ impl Vm {
                 if self.conveyor_plans.is_empty() {
                     Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
                 } else {
+                    // Publish container-access values (§10) at STEP-START, before
+                    // the flows phase: they reflect the belt as left by the
+                    // previous step (= start-of-step) and, because each container
+                    // variable is a no-flow stock, survive the flows/stocks phases
+                    // unchanged so Flows-phase readers see the start-of-step value.
+                    crate::conveyor_compile::publish_container_values(
+                        &self.conveyor_plans,
+                        &self.conveyors,
+                        curr,
+                    );
                     // The conveyor pass runs between flows and stocks: flows
                     // compute the belt inputs (transit, capacity, leak
                     // fractions, requested inflow rates), the pass advances the
@@ -1350,6 +1360,14 @@ impl Vm {
                     return Err(Error::new(ErrorKind::Simulation, code, Some(msg)));
                 }
             }
+            // Publish container-access values (§10) for the initialized belts, so
+            // the t=0 slot holds the start-of-step value even before the first
+            // Euler step re-publishes it.
+            crate::conveyor_compile::publish_container_values(
+                &self.conveyor_plans,
+                &self.conveyors,
+                curr,
+            );
             self.conveyor_last_unit = spec_start.floor() as i64;
         }
 
