@@ -51,6 +51,31 @@ pub unsafe extern "C" fn simlin_sim_new(
     let project_ptr = model_ref.project;
     let project_ref = &*project_ptr;
 
+    // Conveyor models compile through the dedicated conveyor build path, which
+    // expands each belt into hidden parameter auxes plus a native VM pass. That
+    // path uses a private db (bypassing the incremental salsa db) and does not
+    // participate in LTM (conveyor + LTM is a documented degradation), so it is
+    // taken ONLY when the model actually contains a conveyor. The ordinary
+    // incremental compile below deliberately rejects an un-expanded conveyor.
+    type ConveyorBuild = std::result::Result<
+        (
+            engine::CompiledSimulation,
+            Vec<engine::conveyor_compile::ConveyorPlan>,
+        ),
+        engine::Error,
+    >;
+    let conveyor_build: Option<ConveyorBuild> = {
+        let datamodel = project_ref.datamodel.lock().unwrap();
+        if engine::conveyor_compile::project_has_conveyor(&datamodel, &model_ref.model_name) {
+            Some(engine::conveyor_compile::build_compiled(
+                &datamodel,
+                &model_ref.model_name,
+            ))
+        } else {
+            None
+        }
+    };
+
     // Salsa-based incremental compilation. Both LTM and non-LTM paths
     // use the same pipeline; the only difference is the ltm_enabled flag
     // on the SourceProject input. The DB is kept in sync by apply_patch
@@ -70,7 +95,20 @@ pub unsafe extern "C" fn simlin_sim_new(
         captured_loop_partitions,
         captured_loop_element_index,
         captured_ltm_mode,
-    ): CompileSnapshot = {
+    ): CompileSnapshot = if conveyor_build.is_some() {
+        // The conveyor path (below) supplies the VM; skip the incremental
+        // compile entirely and provide neutral LTM snapshots.
+        (
+            Err(engine::Error {
+                kind: engine::ErrorKind::Simulation,
+                code: engine::ErrorCode::NotSimulatable,
+                details: None,
+            }),
+            engine::indexmap::IndexMap::new(),
+            HashMap::new(),
+            None,
+        )
+    } else {
         let mut db = project_ref.db.lock().unwrap();
         if let Some(source_project) = db.current_source_project() {
             // Latch that this project has requested LTM at least once. Done
@@ -172,12 +210,28 @@ pub unsafe extern "C" fn simlin_sim_new(
         }
     };
 
-    let (compiled, vm, vm_error) = match incremental_result {
-        Ok(compiled) => match Vm::new(compiled.clone()) {
-            Ok(vm) => (Some(compiled), Some(vm), None),
-            Err(err) => (Some(compiled), None, Some(err)),
-        },
-        Err(err) => (None, None, Some(err)),
+    let (compiled, vm, vm_error, conveyor_plans) = if let Some(result) = conveyor_build {
+        // Conveyor path: build the VM and attach its plans. The compiled sim
+        // AND the plans are both cached so reset() can recreate the VM (which
+        // consumes itself via into_results on run) and re-attach the pass.
+        match result {
+            Ok((compiled, plans)) => match Vm::new(compiled.clone()) {
+                Ok(mut vm) => {
+                    vm.set_conveyor_plans(plans.clone());
+                    (Some(compiled), Some(vm), None, Some(plans))
+                }
+                Err(err) => (Some(compiled), None, Some(err), Some(plans)),
+            },
+            Err(err) => (None, None, Some(err), None),
+        }
+    } else {
+        match incremental_result {
+            Ok(compiled) => match Vm::new(compiled.clone()) {
+                Ok(vm) => (Some(compiled), Some(vm), None, None),
+                Err(err) => (Some(compiled), None, Some(err), None),
+            },
+            Err(err) => (None, None, Some(err), None),
+        }
     };
 
     crate::model_ref(model);
@@ -194,6 +248,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             loop_element_index: captured_loop_element_index,
             ltm_mode: captured_ltm_mode,
             cached_partition_denominators: HashMap::new(),
+            conveyor_plans,
         }),
         ref_count: AtomicUsize::new(1),
     });
@@ -338,6 +393,10 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
         // Recreate VM from cached compiled simulation
         match Vm::new(compiled.clone()) {
             Ok(mut new_vm) => {
+                // Re-attach the conveyor pass dropped by the plain Vm::new.
+                if let Some(ref plans) = state.conveyor_plans {
+                    new_vm.set_conveyor_plans(plans.clone());
+                }
                 for (&off, &val) in &state.overrides {
                     if let Err(err) = new_vm.set_value_by_offset(off, val) {
                         store_ffi_error(out_error, ffi_error_from_engine(&err));

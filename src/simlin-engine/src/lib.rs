@@ -32,6 +32,7 @@ pub mod common;
 pub mod compat;
 mod compiler;
 pub mod conveyor;
+pub mod conveyor_compile;
 #[cfg(test)]
 mod conveyor_tests;
 pub mod data_provider;

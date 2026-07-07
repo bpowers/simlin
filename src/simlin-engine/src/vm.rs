@@ -344,6 +344,16 @@ pub struct Vm {
     // returns the fallback during the initial timestep even when
     // RK stages advance TIME away from INITIAL_TIME.
     prev_values_valid: bool,
+    // Conveyor support (docs/design/conveyors.md §9.3). Empty for every
+    // non-conveyor model, and all conveyor logic is guarded on a non-empty
+    // plan list -- so an ordinary simulation runs with zero overhead and
+    // byte-identical behavior. `conveyors` is the per-belt side table (§4.2),
+    // rebuilt from the initials-populated buffer on each `run_initials`.
+    conveyor_plans: Vec<crate::conveyor_compile::ConveyorPlan>,
+    conveyors: Vec<crate::conveyor::ConveyorState>,
+    // Last integer time unit seen by the conveyor pass, for the discrete
+    // per-time-unit in_limit budget reset (§6.3).
+    conveyor_last_unit: i64,
 }
 
 #[derive(Clone)]
@@ -692,7 +702,20 @@ impl Vm {
             stock_offsets,
             rk_scratch,
             prev_values_valid: false,
+            conveyor_plans: Vec::new(),
+            conveyors: Vec::new(),
+            conveyor_last_unit: i64::MIN,
         })
+    }
+
+    /// Attach resolved conveyor plans (docs/design/conveyors.md §9.3). Called by
+    /// the conveyor-aware build path ([`crate::conveyor_compile::build_vm`])
+    /// after ordinary compilation resolves the belt parameter/flow slots. A
+    /// plain `Vm::new` leaves the plan list empty, so ordinary models are
+    /// unaffected.
+    pub fn set_conveyor_plans(&mut self, plans: Vec<crate::conveyor_compile::ConveyorPlan>) {
+        self.conveyor_last_unit = self.specs.start.floor() as i64;
+        self.conveyor_plans = plans;
     }
 
     pub fn run_to_end(&mut self) -> Result<()> {
@@ -702,6 +725,15 @@ impl Vm {
 
     #[inline(never)]
     pub fn run_to(&mut self, end: f64) -> Result<()> {
+        // Conveyors integrate under Euler only: the slat model is defined per-DT
+        // and has no meaning under Runge-Kutta substeps (§9.4). The build path
+        // rejects this at compile time; this guards a Vm assembled directly.
+        if !self.conveyor_plans.is_empty() && !matches!(self.specs.method, Method::Euler) {
+            return sim_err!(
+                ConveyorNonEulerMethod,
+                "conveyors require Euler integration".to_string()
+            );
+        }
         self.run_initials()?;
 
         let spec_start = self.specs.start;
@@ -774,7 +806,45 @@ impl Vm {
                     break;
                 }
 
-                Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
+                if self.conveyor_plans.is_empty() {
+                    Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
+                } else {
+                    // The conveyor pass runs between flows and stocks: flows
+                    // compute the belt inputs (transit, capacity, leak
+                    // fractions, requested inflow rates), the pass advances the
+                    // belts and writes the driven flow rates, then stocks
+                    // integrate every stock -- including the conveyor stocks --
+                    // from those rates (docs/design/conveyors.md §4.3, §9.3).
+                    Self::eval(
+                        &self.sliced_sim,
+                        &mut state,
+                        root_idx,
+                        StepPart::Flows,
+                        0,
+                        &[],
+                        curr,
+                        next,
+                    );
+                    let t = curr[TIME_OFF];
+                    crate::conveyor_compile::run_pass(
+                        &self.conveyor_plans,
+                        &mut self.conveyors,
+                        curr,
+                        dt,
+                        t,
+                        &mut self.conveyor_last_unit,
+                    );
+                    Self::eval(
+                        &self.sliced_sim,
+                        &mut state,
+                        root_idx,
+                        StepPart::Stocks,
+                        0,
+                        &[],
+                        curr,
+                        next,
+                    );
+                }
                 state.prev_values.copy_from_slice(curr);
                 state.use_prev_fallback = false;
                 self.prev_values_valid = true;
@@ -1238,6 +1308,50 @@ impl Vm {
         let curr_start = self.curr_chunk * self.n_slots;
         self.initial_values
             .copy_from_slice(&data[curr_start..curr_start + self.n_slots]);
+
+        // Initialize the conveyor belts (docs/design/conveyors.md §7/§9.3). The
+        // belt parameters (transit, capacity, leak fractions) are synthesized
+        // auxes that nothing depends on, so they are NOT in the initials runlist
+        // -- they are computed only in the flows phase. Run one flows evaluation
+        // here (AFTER the initial_values snapshot above, so INIT() stays pure)
+        // to populate those slots, then read the transit / stock <eqn> / initial
+        // fractions to fill the belts.
+        if !self.conveyor_plans.is_empty() {
+            let root_idx = self.sliced_sim.root_idx;
+            // A fresh EvalState (the one above borrowed `initial_values`, which
+            // the snapshot just re-borrowed mutably). `use_prev_fallback` is
+            // true: no prev snapshot exists yet during initialization.
+            let mut init_state = EvalState {
+                stack: &mut self.stack,
+                temp_storage: &mut self.temp_storage,
+                view_stack: &mut self.view_stack,
+                iter_stack: &mut self.iter_stack,
+                broadcast_stack: &mut self.broadcast_stack,
+                initial_values: &self.initial_values,
+                prev_values: &mut self.prev_values,
+                use_prev_fallback: true,
+            };
+            let (curr, next) =
+                borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
+            Self::eval(
+                &self.sliced_sim,
+                &mut init_state,
+                root_idx,
+                StepPart::Flows,
+                0,
+                &[],
+                curr,
+                next,
+            );
+            match crate::conveyor_compile::init_belts(&self.conveyor_plans, curr, dt) {
+                Ok(states) => self.conveyors = states,
+                Err((code, msg)) => {
+                    self.data = Some(data);
+                    return Err(Error::new(ErrorKind::Simulation, code, Some(msg)));
+                }
+            }
+            self.conveyor_last_unit = spec_start.floor() as i64;
+        }
 
         self.did_initials = true;
         self.step_accum = 0;

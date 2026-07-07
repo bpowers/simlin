@@ -404,6 +404,43 @@ pub enum ErrorCode {
     /// table has no scalar value of its own; it must be called, e.g.
     /// `LOOKUP(my_table, x)` or `my_table(x)` (issue #606).
     LookupReferencedWithoutArgument,
+    /// A conveyor stock has no non-leakage outflow (no outflows at all, or every
+    /// outflow is `<leak/>`-marked). A conveyor needs one primary outflow that
+    /// the belt drives (docs/design/conveyors.md §3.3).
+    ConveyorWithoutOutflow,
+    /// A conveyor is present under RK2/RK4 integration. The slat model is
+    /// defined per-DT and has no meaning under Runge-Kutta substeps, so
+    /// conveyors require Euler (docs/design/conveyors.md §9.4).
+    ConveyorNonEulerMethod,
+    /// A queue is directly upstream of a non-discrete conveyor
+    /// (docs/design/conveyors.md §11 / §6.4).
+    ConveyorQueueUpstreamNotDiscrete,
+    /// A conveyor's transit time (`<len>`) is not positive at compile time
+    /// (docs/design/conveyors.md §4.1).
+    ConveyorTransitNotPositive,
+    /// A conveyor's transit time is not an integer multiple of DT; the belt is
+    /// DT-quantized to the nearest whole slat count. Warning-level
+    /// (docs/design/conveyors.md §4.1).
+    ConveyorTransitNotDtMultiple,
+    /// A conveyor's constant linear leak fractions sum above 1. Warning-level;
+    /// the primary outflow will be starved (docs/design/conveyors.md §5.1).
+    ConveyorLeakFractionsExceedOne,
+    /// LTM analysis was requested on a model containing conveyors; the belt's
+    /// internal dynamics are not scored as INTEG. Warning-level
+    /// (docs/design/conveyors.md §9.6).
+    ConveyorLtmDegraded,
+    /// Another equation references a conveyor-driven flow (the primary outflow
+    /// or a leak flow) by name. The conveyor pass runs after the flows phase, so
+    /// such a reader would read the pre-pass placeholder 0 rather than the
+    /// belt-driven rate. Rejected loudly rather than silently mis-computed
+    /// (docs/design/conveyors.md §4.3 "Visibility to other equations").
+    ConveyorDrivenFlowRead,
+    /// A conveyor stock reached the ordinary compile path without being expanded
+    /// by the conveyor build path (`conveyor_compile::build_vm`). Conveyor
+    /// simulation is only wired through that entry point; any other path would
+    /// integrate the belt as a plain stock and silently mis-simulate, so it is
+    /// rejected (docs/design/conveyors.md §9.3).
+    ConveyorNotExpanded,
 }
 
 impl fmt::Display for ErrorCode {
@@ -465,6 +502,15 @@ impl fmt::Display for ErrorCode {
             UnsupportedForSerialization => "unsupported_for_serialization",
             DuplicateMacroName => "duplicate_macro_name",
             LookupReferencedWithoutArgument => "lookup_referenced_without_argument",
+            ConveyorWithoutOutflow => "conveyor_without_outflow",
+            ConveyorNonEulerMethod => "conveyor_non_euler_method",
+            ConveyorQueueUpstreamNotDiscrete => "conveyor_queue_upstream_not_discrete",
+            ConveyorTransitNotPositive => "conveyor_transit_not_positive",
+            ConveyorTransitNotDtMultiple => "conveyor_transit_not_dt_multiple",
+            ConveyorLeakFractionsExceedOne => "conveyor_leak_fractions_exceed_one",
+            ConveyorLtmDegraded => "conveyor_ltm_degraded",
+            ConveyorDrivenFlowRead => "conveyor_driven_flow_read",
+            ConveyorNotExpanded => "conveyor_not_expanded",
         };
 
         write!(f, "{name}")

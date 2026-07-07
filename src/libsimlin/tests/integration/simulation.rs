@@ -1722,3 +1722,45 @@ fn test_systems_format_module_var_get_series() {
         simlin_project_unref(proj);
     }
 }
+
+/// End-to-end FFI proof that a conveyor model simulates through the production
+/// `simlin_sim_new` path (which routes conveyors through the conveyor build
+/// path). The minimal fixture is at steady state (init 1000 == inflow 250 *
+/// transit 4), so Students holds flat at 1000 and graduating is a constant 250.
+#[test]
+fn test_conveyor_model_simulates_via_ffi() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    unsafe {
+        let (proj, model, sim) = create_test_sim(&datamodel);
+        run_to_end(sim);
+        let students = get_series_vec(sim, "students", 4096);
+        assert!(
+            students.len() > 40,
+            "expected many steps, got {}",
+            students.len()
+        );
+        for (i, &s) in students.iter().enumerate() {
+            assert!(
+                (s - 1000.0).abs() < 1e-6,
+                "step {i}: Students={s} (want 1000)"
+            );
+        }
+        let graduating = get_series_vec(sim, "graduating", 4096);
+        for (i, &g) in graduating.iter().enumerate().skip(1) {
+            assert!(
+                (g - 250.0).abs() < 1e-6,
+                "step {i}: graduating={g} (want 250)"
+            );
+        }
+        // reset + rerun must reproduce identical steady state (belts rebuilt).
+        reset_sim(sim);
+        run_to_end(sim);
+        let students2 = get_series_vec(sim, "students", 4096);
+        assert_eq!(students, students2, "reset+rerun diverged");
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

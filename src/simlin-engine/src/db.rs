@@ -1063,6 +1063,26 @@ pub fn compile_project_incremental(
     {
         return crate::sim_err!(NotSimulatable, msg.clone());
     }
+    // Conveyor stocks are simulated only through the conveyor build path
+    // (`conveyor_compile::build_vm`), which expands each belt into hidden
+    // parameter auxes + a native pass and CLEARS the conveyor marker. A conveyor
+    // marker surviving to this point means the model reached the ordinary
+    // compile path un-expanded; integrating it as a plain stock would silently
+    // mis-simulate, so reject it loudly (docs/design/conveyors.md §9.3).
+    for source_model in project.models(db).values() {
+        for source_var in source_model.variables(db).values() {
+            if source_var.compat(db).conveyor.is_some() {
+                return crate::sim_err!(
+                    ConveyorNotExpanded,
+                    format!(
+                        "conveyor stock '{}' reached the ordinary compile path un-expanded; \
+                         conveyor simulation must go through conveyor_compile::build_vm",
+                        source_var.ident(db)
+                    )
+                );
+            }
+        }
+    }
     // `assemble_simulation` is salsa-tracked, returning an `Arc` so its return
     // type is `salsa::Update`; clone the `CompiledSimulation` out of the
     // salsa-owned `Arc` to preserve this entry point's owned return type

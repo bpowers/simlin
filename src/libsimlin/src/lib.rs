@@ -278,6 +278,17 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             // precise distinction is preserved in the engine-level `ErrorCode`
             // and the error's `details` message (issue #606).
             engine::ErrorCode::LookupReferencedWithoutArgument => SimlinErrorCode::Generic,
+            // Conveyor diagnostics collapse to the wire Generic code (the wire
+            // enum deliberately does not track the engine's growing tail).
+            engine::ErrorCode::ConveyorWithoutOutflow => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorNonEulerMethod => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorQueueUpstreamNotDiscrete => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorTransitNotPositive => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorTransitNotDtMultiple => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorLeakFractionsExceedOne => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorLtmDegraded => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorDrivenFlowRead => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorNotExpanded => SimlinErrorCode::Generic,
         }
     }
 }
@@ -455,6 +466,11 @@ pub(crate) struct SimState {
     /// `simlin_sim_run_to_end`, `simlin_sim_reset`, and
     /// `simlin_sim_set_value_by_offset`.
     pub(crate) cached_partition_denominators: HashMap<(Option<usize>, usize), Vec<f64>>,
+    /// Resolved conveyor plans for a conveyor model (`None`/empty otherwise).
+    /// `run_to_end` consumes the VM (`into_results`) and `reset` recreates it
+    /// from `compiled`; a plain `Vm::new(compiled)` would drop the conveyor
+    /// pass, so reset re-attaches these plans to the recreated VM.
+    pub(crate) conveyor_plans: Option<Vec<engine::conveyor_compile::ConveyorPlan>>,
 }
 
 /// Opaque simulation structure
