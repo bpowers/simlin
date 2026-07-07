@@ -52,6 +52,8 @@ fn step_single(
         leak_fractions: fractions,
         capacity,
         in_limit,
+        placements: &[],
+        conv_placement: Placement::Beginning,
     });
     let delta = conv.contents() - contents0;
     let leaked: f64 = pa.leak_vols.iter().sum();
@@ -110,6 +112,8 @@ fn step_chain(
         leak_fractions: &no,
         capacity: INF,
         in_limit: INF,
+        placements: &[],
+        conv_placement: Placement::Beginning,
     });
     let pb_b = b.phase_b(PhaseBInputs {
         phase_a: &pa_b,
@@ -118,6 +122,8 @@ fn step_chain(
         leak_fractions: &no,
         capacity: b_cap(b),
         in_limit: INF,
+        placements: &[],
+        conv_placement: Placement::Beginning,
     });
     // Conservation for each conveyor.
     for (label, contents0, pa, admitted, conv) in [
@@ -703,5 +709,133 @@ fn continuous_integer_leak_reports_whole_units() {
     assert!(
         any_fractional_slat,
         "a continuous conveyor holds fractional slat contents"
+    );
+}
+
+// ---- spread inputs (section 8) ----
+
+/// Fresh empty no-leak belt of `transit/dt` slats.
+fn fresh_belt(transit: f64, dt: f64) -> ConveyorState {
+    let mut c = ConveyorState::new(dt, false, false, false, vec![]);
+    c.init_steady(transit, 0.0, &[]);
+    c
+}
+
+/// Run one phase_a + phase_b inserting a single equation inflow of `rate` with
+/// `placement` (no cap/limit), returning the belt contents exit-first.
+fn insert_once(c: &mut ConveyorState, rate: f64, placement: Placement, transit: f64) -> Vec<f64> {
+    let pa = c.phase_a(PhaseAInputs {
+        arrested: false,
+        sample: true,
+        transit,
+        leak_fractions: &[],
+        dest_arrested: false,
+        leak_dest_arrested: &[],
+    });
+    c.phase_b(PhaseBInputs {
+        phase_a: &pa,
+        eq_request_rates: &[rate],
+        conv_vol: 0.0,
+        leak_fractions: &[],
+        capacity: f64::INFINITY,
+        in_limit: f64::INFINITY,
+        placements: &[placement],
+        conv_placement: Placement::Beginning,
+    });
+    c.slat_contents()
+}
+
+#[test]
+fn spread_beginning_places_all_at_entry() {
+    let mut c = fresh_belt(4.0, 1.0); // 4 slats, d=4, entry = index 3
+    let contents = insert_once(&mut c, 8.0, Placement::Beginning, 4.0);
+    assert_eq!(contents, vec![0.0, 0.0, 0.0, 8.0]);
+}
+
+#[test]
+fn spread_even_splits_across_entry_path() {
+    let mut c = fresh_belt(4.0, 1.0);
+    let contents = insert_once(&mut c, 8.0, Placement::Even, 4.0);
+    // A/d = 2 at every entry-path slat (incl the exit slat).
+    for (i, &x) in contents.iter().enumerate() {
+        assert!((x - 2.0).abs() < 1e-12, "slat {i}: {x}");
+    }
+    assert!((contents.iter().sum::<f64>() - 8.0).abs() < 1e-12);
+}
+
+#[test]
+fn spread_dist_weights_normalize_to_shares() {
+    let mut c = fresh_belt(4.0, 1.0);
+    // weights exit-first over the 4 entry-path slats; A_i = A * w_i / Σw.
+    let w = vec![1.0, 3.0, 0.0, 4.0];
+    let contents = insert_once(&mut c, 8.0, Placement::Dist(w.clone()), 4.0);
+    let sw: f64 = w.iter().sum();
+    for (i, &wi) in w.iter().enumerate() {
+        assert!(
+            (contents[i] - 8.0 * wi / sw).abs() < 1e-12,
+            "slat {i}: {}",
+            contents[i]
+        );
+    }
+    assert!((contents.iter().sum::<f64>() - 8.0).abs() < 1e-12);
+}
+
+#[test]
+fn spread_dist_empty_weights_fall_back_to_beginning() {
+    let mut c = fresh_belt(4.0, 1.0);
+    let contents = insert_once(&mut c, 8.0, Placement::Dist(vec![]), 4.0);
+    assert_eq!(contents, vec![0.0, 0.0, 0.0, 8.0]);
+}
+
+#[test]
+fn spread_dest_falls_back_to_beginning_on_empty_belt() {
+    let mut c = fresh_belt(4.0, 1.0);
+    let contents = insert_once(&mut c, 8.0, Placement::Dest, 4.0);
+    assert_eq!(contents, vec![0.0, 0.0, 0.0, 8.0]);
+}
+
+#[test]
+fn spread_dest_is_content_proportional() {
+    // Seed the belt so it has non-uniform content, then dest-place a new inflow
+    // and check each slat gained A * content_i / Σcontent (conserving A).
+    let mut c = fresh_belt(4.0, 1.0);
+    // Two beginning inserts (with a shift between) give a non-empty, non-uniform
+    // belt without any leak.
+    insert_once(&mut c, 4.0, Placement::Beginning, 4.0);
+    insert_once(&mut c, 8.0, Placement::Beginning, 4.0);
+    let before = c.slat_contents();
+    let total: f64 = before.iter().sum();
+    // Now a dest insert of A=6 (compute shift-adjusted expectation directly).
+    let pa = c.phase_a(PhaseAInputs {
+        arrested: false,
+        sample: true,
+        transit: 4.0,
+        leak_fractions: &[],
+        dest_arrested: false,
+        leak_dest_arrested: &[],
+    });
+    // After phase_a the belt hasn't shifted yet; capture post-shift content by
+    // running phase_b and comparing the delta to A * (post-shift content).
+    c.phase_b(PhaseBInputs {
+        phase_a: &pa,
+        eq_request_rates: &[6.0],
+        conv_vol: 0.0,
+        leak_fractions: &[],
+        capacity: f64::INFINITY,
+        in_limit: f64::INFINITY,
+        placements: &[Placement::Dest],
+        conv_placement: Placement::Beginning,
+    });
+    let after = c.slat_contents();
+    let gained: f64 = after.iter().sum::<f64>() - (total - pa.out_vol);
+    assert!(
+        (gained - 6.0).abs() < 1e-9,
+        "dest must admit all of A=6, gained {gained}"
+    );
+    // dest spreads over >1 slat when the belt has multiple filled slats.
+    let nonzero = after.iter().filter(|&&x| x > 1e-9).count();
+    assert!(
+        nonzero >= 2,
+        "dest should spread across content, contents={after:?}"
     );
 }

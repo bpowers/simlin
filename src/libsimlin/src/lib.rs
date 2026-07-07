@@ -289,6 +289,7 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::ConveyorLtmDegraded => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorDrivenFlowRead => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorNotExpanded => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorSpreadflowUnsupported => SimlinErrorCode::Generic,
         }
     }
 }

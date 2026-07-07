@@ -441,6 +441,12 @@ pub enum ErrorCode {
     /// integrate the belt as a plain stock and silently mis-simulate, so it is
     /// rejected (docs/design/conveyors.md §9.3).
     ConveyorNotExpanded,
+    /// A conveyor inflow requests an `isee:spreadflow` placement whose runtime
+    /// wiring is not yet available (`dist` needs the distribution graphical
+    /// function evaluated per slat; `source` needs upstream-leak coupling).
+    /// Rejected loudly rather than silently placed at the entry
+    /// (docs/design/conveyors.md §8).
+    ConveyorSpreadflowUnsupported,
 }
 
 impl fmt::Display for ErrorCode {
@@ -511,6 +517,7 @@ impl fmt::Display for ErrorCode {
             ConveyorLtmDegraded => "conveyor_ltm_degraded",
             ConveyorDrivenFlowRead => "conveyor_driven_flow_read",
             ConveyorNotExpanded => "conveyor_not_expanded",
+            ConveyorSpreadflowUnsupported => "conveyor_spreadflow_unsupported",
         };
 
         write!(f, "{name}")

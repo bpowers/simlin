@@ -155,6 +155,27 @@ pub struct PhaseAResult {
     pub held: bool,
 }
 
+/// Inflow placement (§8 "spread inputs"). Selects where an admitted inflow's
+/// volume `A` lands on the belt at insert time. `Dist` carries the per-entry-slat
+/// weights `w_i` (i = 0..d-1, exit-first) the caller pre-evaluated from the
+/// `<isee:distrib_eq>` graphical function or array; a caller that cannot resolve
+/// them passes an empty vector, which falls back to `Beginning`.
+// Debug is unconditional (not gated on debug-derive): ConveyorPlan/InflowPlan
+// and their metas derive Debug unconditionally and embed a Placement.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Placement {
+    /// All of `A` at the entry slat (depth `d`). The XMILE default.
+    Beginning,
+    /// `A / d` at every entry-path slat `i ∈ 0..d-1` (incl. the exit slat).
+    Even,
+    /// `A × content_i / Σ content` over the whole physical belt; falls back to
+    /// `Beginning` when the belt is empty.
+    Dest,
+    /// `A × w_i / Σ w` over `i ∈ 0..d-1`; falls back to `Beginning` when
+    /// `Σ w == 0` (or the weight vector is empty / shorter than `d`).
+    Dist(Vec<f64>),
+}
+
 /// Inputs to [`ConveyorState::phase_b`] for one conveyor this DT.
 pub struct PhaseBInputs<'a> {
     /// The Phase A result for this same conveyor.
@@ -174,6 +195,12 @@ pub struct PhaseBInputs<'a> {
     /// Equation-driven inflow limit per **time unit**, `f64::INFINITY` if
     /// unconstrained.
     pub in_limit: f64,
+    /// Placement per equation-driven inflow, aligned to `eq_request_rates`.
+    /// Empty ⇒ every inflow uses `Beginning` (the default).
+    pub placements: &'a [Placement],
+    /// Placement for the lumped conveyor-driven volume (`Beginning` by default;
+    /// `Source` coupling is a separate build-sequence step).
+    pub conv_placement: Placement,
 }
 
 /// Phase B result: the admitted inflow rates this DT.
@@ -805,24 +832,97 @@ impl ConveyorState {
         // Step 5: shift.
         self.shift(inp.phase_a.held);
 
-        // Step 6: insert at entry depth d -- always runs, even for admitted == 0.
+        // Step 6: insert -- always runs, even for admitted == 0. Each admitted
+        // component (conveyor-driven volume + each equation inflow) is spread
+        // across slats per its placement (§8) into per-slat shares. Because a
+        // cohort's leak schedule is linear in its volume, shares that land on
+        // the same slat (same insertion depth d_c = i+1) merge exactly into one
+        // cohort_schedule call -- so we accumulate a per-slat total then insert.
         let d = self.n_slats();
         while self.slats.len() < d {
             self.slats.push_back(Slat::empty(self.n_leaks()));
         }
         let belt_len = self.slats.len();
-        let (basis, window) = self.cohort_schedule(admitted, belt_len, d, d, inp.leak_fractions);
-        let tgt = &mut self.slats[d - 1];
-        tgt.content += admitted;
-        for k in 0..self.leaks.len() {
-            tgt.leak_basis[k] += basis[k];
-            tgt.leak_window[k] += window[k];
+        let mut shares = vec![0.0; belt_len];
+        self.add_placement_shares(&mut shares, inp.conv_vol, &inp.conv_placement, d, belt_len);
+        for (j, &vol) in in_vols.iter().enumerate() {
+            let placement = inp.placements.get(j).unwrap_or(&Placement::Beginning);
+            self.add_placement_shares(&mut shares, vol, placement, d, belt_len);
+        }
+        for (i, &share) in shares.iter().enumerate() {
+            if share == 0.0 {
+                continue;
+            }
+            // The share's own insertion depth is d_c = i + 1 (§8): a mid-belt
+            // share's leak budget is prorated to the zone slats it will traverse.
+            let (basis, window) =
+                self.cohort_schedule(share, belt_len, d, i + 1, inp.leak_fractions);
+            let tgt = &mut self.slats[i];
+            tgt.content += share;
+            for k in 0..self.leaks.len() {
+                tgt.leak_basis[k] += basis[k];
+                tgt.leak_window[k] += window[k];
+            }
         }
 
         PhaseBResult {
             admitted,
             in_vols,
             cleared,
+        }
+    }
+
+    /// Distribute an admitted `volume` across belt slats per `placement` (§8),
+    /// adding the per-slat shares into `shares` (length `belt_len`, index 0 =
+    /// exit). `d` is the entry depth. Each placement conserves volume exactly
+    /// (`Σ shares_added == volume`); a degenerate placement falls back to
+    /// `Beginning` (all at the entry slat `d-1`).
+    fn add_placement_shares(
+        &self,
+        shares: &mut [f64],
+        volume: f64,
+        placement: &Placement,
+        d: usize,
+        belt_len: usize,
+    ) {
+        if d == 0 || belt_len == 0 {
+            return;
+        }
+        let beginning = |shares: &mut [f64]| shares[d - 1] += volume;
+        match placement {
+            Placement::Beginning => beginning(shares),
+            Placement::Even => {
+                let per = volume / d as f64;
+                for share in shares.iter_mut().take(d) {
+                    *share += per;
+                }
+            }
+            Placement::Dest => {
+                let total: f64 = self.slats.iter().take(belt_len).map(|s| s.content).sum();
+                if total > 0.0 {
+                    for (i, share) in shares.iter_mut().enumerate().take(belt_len) {
+                        *share += volume * self.slats[i].content / total;
+                    }
+                } else {
+                    beginning(shares);
+                }
+            }
+            Placement::Dist(weights) => {
+                // weights[i] is w_i for entry-path slat i (0..d-1), exit-first.
+                let usable = weights.len() >= d;
+                let sum_w: f64 = if usable {
+                    weights.iter().take(d).map(|w| w.max(0.0)).sum()
+                } else {
+                    0.0
+                };
+                if usable && sum_w > 0.0 {
+                    for (i, share) in shares.iter_mut().enumerate().take(d) {
+                        *share += volume * weights[i].max(0.0) / sum_w;
+                    }
+                } else {
+                    beginning(shares);
+                }
+            }
         }
     }
 

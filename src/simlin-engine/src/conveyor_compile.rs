@@ -26,14 +26,16 @@
 //! needed (the §4.3 conservation identity guarantees `Δstock = admitted - out -
 //! leak`).
 //!
-//! Scope: this handles conveyors in the **main model** under Euler. Conveyors
-//! inside submodules, arrayed conveyors, spread-input placement beyond the
-//! default, and queue coupling are later build-sequence steps.
+//! Scope: this handles conveyors in the **main model** under Euler, including
+//! the `beginning`/`even`/`dest` spread-input placements (§8). Conveyors inside
+//! submodules, arrayed conveyors, the `dist`/`source` placements (which need the
+//! distribution graphical function / upstream-leak coupling), and queue coupling
+//! are later build-sequence steps.
 
 use std::collections::HashMap;
 
 use crate::common::{Canonical, ErrorCode, Ident, canonicalize};
-use crate::conveyor::{ConveyorState, LeakConfig, PhaseAInputs, PhaseBInputs};
+use crate::conveyor::{ConveyorState, LeakConfig, PhaseAInputs, PhaseBInputs, Placement};
 use crate::datamodel::{self, Equation};
 
 /// A leak flow's synthesized metadata (names + static zone/integer config).
@@ -56,6 +58,8 @@ pub struct InflowMeta {
     /// True iff this inflow is a driven outflow of some conveyor (so it is
     /// admitted unconditionally and bypasses capacity/inflow-limit, §4.3).
     pub conveyor_driven: bool,
+    /// Inflow placement on the belt (§8), from the flow's `isee:spreadflow`.
+    pub placement: Placement,
 }
 
 /// Per-conveyor synthesized metadata, produced by [`expand_conveyors`] and
@@ -98,6 +102,7 @@ pub struct LeakPlan {
 pub struct InflowPlan {
     pub flow_off: usize,
     pub conveyor_driven: bool,
+    pub placement: Placement,
 }
 
 /// A fully-resolved conveyor: data-buffer slot offsets for the VM's pass.
@@ -146,6 +151,36 @@ fn param_aux_name(stock: &str, param: &str) -> String {
 
 fn leak_frac_name(flow: &str) -> String {
     format!("$conv$leak${}$frac", canon(flow))
+}
+
+/// Map an inflow flow's `isee:spreadflow` (§8) to a runtime [`Placement`]. A
+/// flow with no placement (or not found -- e.g. a cloud source) defaults to
+/// `Beginning`. `Dist`/`Source` are recognized but their runtime wiring is a
+/// later build-sequence step, so they are rejected loudly here rather than
+/// silently placed at the entry.
+fn inflow_placement(
+    model: &datamodel::Model,
+    flow: &str,
+) -> Result<Placement, (ErrorCode, String)> {
+    let spread = model.variables.iter().find_map(|v| match v {
+        datamodel::Variable::Flow(f) if canon(&f.ident) == flow => {
+            Some(f.compat.spreadflow.clone())
+        }
+        _ => None,
+    });
+    match spread.flatten() {
+        None | Some(datamodel::SpreadFlow::Beginning) => Ok(Placement::Beginning),
+        Some(datamodel::SpreadFlow::Even) => Ok(Placement::Even),
+        Some(datamodel::SpreadFlow::Dest) => Ok(Placement::Dest),
+        Some(datamodel::SpreadFlow::Dist(_)) => Err((
+            ErrorCode::ConveyorSpreadflowUnsupported,
+            format!("inflow '{flow}' uses isee:spreadflow 'dist', which is not yet supported"),
+        )),
+        Some(datamodel::SpreadFlow::Source) => Err((
+            ErrorCode::ConveyorSpreadflowUnsupported,
+            format!("inflow '{flow}' uses isee:spreadflow 'source', which is not yet supported"),
+        )),
+    }
 }
 
 /// Is the flow named `flow` (canonical) a conveyor leak outflow in `model`?
@@ -313,14 +348,16 @@ pub fn expand_conveyors(
             .iter()
             .map(|inf| {
                 let inf_c = canon(inf);
+                let placement = inflow_placement(model, &inf_c)?;
                 // Conveyor-driven iff this inflow is a driven outflow of a
                 // conveyor (resolved after we know all driven flows).
-                InflowMeta {
+                Ok(InflowMeta {
                     flow: inf_c,
                     conveyor_driven: false, // filled below
-                }
+                    placement,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, (ErrorCode, String)>>()?;
 
         // Held-exit destination: which conveyor (if any) does the primary
         // outflow feed?
@@ -498,6 +535,7 @@ pub fn resolve_plans(
                 Some(InflowPlan {
                     flow_off: off(&i.flow)?,
                     conveyor_driven: i.conveyor_driven,
+                    placement: i.placement.clone(),
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -703,6 +741,13 @@ pub fn run_pass(
             .iter()
             .map(|l| clamp_fraction(curr[l.frac_off], plan.exponential_leak))
             .collect();
+        // Placements aligned to eq_rates (the same non-conveyor-driven filter).
+        let placements: Vec<Placement> = plan
+            .inflows
+            .iter()
+            .filter(|inf| !inf.conveyor_driven)
+            .map(|inf| inf.placement.clone())
+            .collect();
         let pb = states[i].phase_b(PhaseBInputs {
             phase_a: &pa[i],
             eq_request_rates: &eq_rates,
@@ -710,6 +755,8 @@ pub fn run_pass(
             leak_fractions: &fracs,
             capacity,
             in_limit,
+            placements: &placements,
+            conv_placement: Placement::Beginning,
         });
         // Write admitted equation-driven inflow rates back (in listed order;
         // conveyor-driven inflow slots already hold the correct upstream rate).
@@ -942,6 +989,59 @@ mod tests {
         let err = crate::db::compile_project_incremental(&db, sync.project, &main)
             .expect_err("un-expanded conveyor must be rejected");
         assert_eq!(err.code, ErrorCode::ConveyorNotExpanded);
+    }
+
+    #[test]
+    fn even_placement_sends_material_to_exit_immediately() {
+        // With `even`, an inflow lands A/d at every entry-path slat INCLUDING
+        // the exit slat, so material exits on the first step -- unlike the
+        // default `beginning` (0 outflow until the belt fills). Steady outflow
+        // still equals the inflow (mass conservation, independent of placement).
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f" isee:spreadflow="even"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build even");
+        vm.run_to_end().expect("run");
+        let out = vm.get_series(&Ident::new("out_f")).expect("out_f");
+        assert!(
+            out[1] > 0.0,
+            "even: material should exit immediately, out[1]={}",
+            out[1]
+        );
+        assert!(
+            (out[out.len() - 1] - 250.0).abs() < 1e-4,
+            "steady outflow {}",
+            out[out.len() - 1]
+        );
+    }
+
+    #[test]
+    fn dist_and_source_spreadflow_are_rejected() {
+        for method in ["dist", "source"] {
+            let xml = wrap_model(&format!(
+                r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f" isee:spreadflow="{method}"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#
+            ));
+            let project = parse(&xml);
+            let main = project.models[0].name.clone();
+            let err = build_vm(&project, &main)
+                .err()
+                .unwrap_or_else(|| panic!("{method} spreadflow should be rejected"));
+            assert_eq!(
+                err.code,
+                ErrorCode::ConveyorSpreadflowUnsupported,
+                "method {method}"
+            );
+        }
     }
 
     #[test]
