@@ -10,8 +10,8 @@ use crate::datamodel;
 use crate::datamodel::Equation;
 use crate::xmile::dimensions::Gf;
 use crate::xmile::{
-    ToXml, VarDimension, VarDimensions, XmlWriter, write_tag, write_tag_end, write_tag_start,
-    write_tag_start_with_attrs,
+    ToXml, VarDimension, VarDimensions, XmlWriter, write_tag, write_tag_empty_with_attrs,
+    write_tag_end, write_tag_start, write_tag_start_with_attrs,
 };
 
 use super::model::{Module, NonNegative, access_from, can_be_module_input, visibility};
@@ -127,6 +127,73 @@ impl ToXml<XmlWriter> for VarElement {
     }
 }
 
+/// The `<conveyor>` block on a conveyor stock. See docs/design/conveyors.md §3.2.
+/// The `<len>` transit time is required; the rest are optional. Boolean sub-feature
+/// attributes are `Option<bool>` so an absent attribute maps to the documented
+/// default (not blindly `false`) during datamodel conversion.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
+pub struct Conveyor {
+    pub len: String,
+    pub capacity: Option<String>,
+    pub in_limit: Option<String>,
+    pub sample: Option<String>,
+    pub arrest: Option<String>,
+    #[serde(rename = "@discrete")]
+    pub discrete: Option<bool>,
+    #[serde(rename = "@batch_integrity")]
+    pub batch_integrity: Option<bool>,
+    #[serde(rename = "@one_at_a_time")]
+    pub one_at_a_time: Option<bool>,
+    #[serde(rename = "@exponential_leak")]
+    pub exponential_leak: Option<bool>,
+}
+
+impl ToXml<XmlWriter> for Conveyor {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
+        // Emit an attribute only when it differs from the XMILE default, so a
+        // plain `<conveyor>` round-trips without spurious attributes.
+        let mut attrs: Vec<(&str, &str)> = vec![];
+        if self.discrete == Some(true) {
+            attrs.push(("discrete", "true"));
+        }
+        if self.batch_integrity == Some(true) {
+            attrs.push(("batch_integrity", "true"));
+        }
+        if self.one_at_a_time == Some(false) {
+            attrs.push(("one_at_a_time", "false"));
+        }
+        if self.exponential_leak == Some(true) {
+            attrs.push(("exponential_leak", "true"));
+        }
+        write_tag_start_with_attrs(writer, "conveyor", &attrs)?;
+        write_tag(writer, "len", &self.len)?;
+        if let Some(ref c) = self.capacity {
+            write_tag(writer, "capacity", c)?;
+        }
+        if let Some(ref v) = self.in_limit {
+            write_tag(writer, "in_limit", v)?;
+        }
+        if let Some(ref v) = self.sample {
+            write_tag(writer, "sample", v)?;
+        }
+        if let Some(ref v) = self.arrest {
+            write_tag(writer, "arrest", v)?;
+        }
+        write_tag_end(writer, "conveyor")
+    }
+}
+
+/// A `<leak>` element on a conveyor outflow. A bare `<leak/>` marker deserializes
+/// to `value: None` (the fraction is then carried by the flow's `<eqn>`); a
+/// value-bearing `<leak>expr</leak>` deserializes to `value: Some(expr)`.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
+pub struct Leak {
+    #[serde(rename = "$text")]
+    pub value: Option<String>,
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Stock {
@@ -140,6 +207,7 @@ pub struct Stock {
     #[serde(rename = "outflow")]
     pub outflows: Option<Vec<String>>,
     pub non_negative: Option<NonNegative>,
+    pub conveyor: Option<Conveyor>,
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
     pub elements: Option<Vec<VarElement>>,
@@ -204,6 +272,10 @@ impl ToXml<XmlWriter> for Stock {
             write_tag(writer, "non_negative", "")?;
         }
 
+        if let Some(ref conveyor) = self.conveyor {
+            conveyor.write_xml(writer)?;
+        }
+
         if let Some(ref ai_state) = self.ai_state {
             write_tag(writer, "ai_state", ai_state)?;
         }
@@ -213,6 +285,42 @@ impl ToXml<XmlWriter> for Stock {
         }
 
         write_tag_end(writer, "stock")
+    }
+}
+
+/// Convert an XMILE `<conveyor>` block to the datamodel, applying documented
+/// defaults for absent boolean attributes (`one_at_a_time` defaults to true).
+fn conveyor_to_datamodel(c: Conveyor) -> datamodel::Conveyor {
+    datamodel::Conveyor {
+        transit_time: c.len,
+        capacity: c.capacity,
+        inflow_limit: c.in_limit,
+        sample: c.sample,
+        arrest: c.arrest,
+        discrete: c.discrete.unwrap_or(false),
+        batch_integrity: c.batch_integrity.unwrap_or(false),
+        one_at_a_time: c.one_at_a_time.unwrap_or(true),
+        exponential_leak: c.exponential_leak.unwrap_or(false),
+        // The isee "ignore earlier zone losses" toggle is persisted as an isee
+        // vendor attribute whose exact name is unconfirmed (no vendored fixture
+        // uses it); default to false until a real file pins the spelling.
+        ignore_earlier_zone_losses: false,
+    }
+}
+
+/// Convert a datamodel conveyor back to the XMILE serde form, dropping default
+/// boolean flags to `None` so `write_xml` only emits non-default attributes.
+fn conveyor_from_datamodel(c: datamodel::Conveyor) -> Conveyor {
+    Conveyor {
+        len: c.transit_time,
+        capacity: c.capacity,
+        in_limit: c.inflow_limit,
+        sample: c.sample,
+        arrest: c.arrest,
+        discrete: if c.discrete { Some(true) } else { None },
+        batch_integrity: if c.batch_integrity { Some(true) } else { None },
+        one_at_a_time: if c.one_at_a_time { None } else { Some(false) },
+        exponential_leak: if c.exponential_leak { Some(true) } else { None },
     }
 }
 
@@ -297,6 +405,7 @@ impl From<Stock> for datamodel::Stock {
                 can_be_module_input: can_be_module_input(&stock.access),
                 visibility: visibility(&stock.access),
                 data_source,
+                conveyor: stock.conveyor.map(conveyor_to_datamodel),
                 ..datamodel::Compat::default()
             },
             ai_state: ai_state_from(stock.ai_state),
@@ -356,6 +465,7 @@ impl From<datamodel::Stock> for Stock {
             } else {
                 None
             },
+            conveyor: stock.compat.conveyor.map(conveyor_from_datamodel),
             dimensions: match &stock.equation {
                 Equation::Scalar(..) => None,
                 Equation::ApplyToAll(dims, ..) => Some(VarDimensions {
@@ -411,6 +521,21 @@ pub struct Flow {
     pub units: Option<String>,
     pub gf: Option<Gf>,
     pub non_negative: Option<NonNegative>,
+    // Conveyor leakage: a `<leak>`/`<leak/>` marks this flow as a leakage
+    // outflow; `<leak_integers/>` restricts it to whole units; the leak zone is
+    // given by the `leak_start`/`leak_end` attributes on the flow.
+    pub leak: Option<Leak>,
+    #[serde(rename = "leak_integers")]
+    pub leak_integers: Option<NonNegative>,
+    #[serde(rename = "@leak_start")]
+    pub leak_start: Option<String>,
+    #[serde(rename = "@leak_end")]
+    pub leak_end: Option<String>,
+    // isee inflow placement (namespace prefix stripped by quick-xml on read).
+    #[serde(rename = "@spreadflow")]
+    pub spreadflow: Option<String>,
+    #[serde(rename = "distrib_eq")]
+    pub distrib_eq: Option<String>,
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
     pub elements: Option<Vec<VarElement>>,
@@ -428,6 +553,15 @@ impl ToXml<XmlWriter> for Flow {
         let mut attrs = vec![("name", self.name.as_str())];
         if let Some(access) = self.access.as_ref() {
             attrs.push(("access", access.as_str()));
+        }
+        if let Some(spreadflow) = self.spreadflow.as_ref() {
+            attrs.push(("isee:spreadflow", spreadflow.as_str()));
+        }
+        if let Some(leak_start) = self.leak_start.as_ref() {
+            attrs.push(("leak_start", leak_start.as_str()));
+        }
+        if let Some(leak_end) = self.leak_end.as_ref() {
+            attrs.push(("leak_end", leak_end.as_str()));
         }
         write_tag_start_with_attrs(writer, "flow", &attrs)?;
 
@@ -469,6 +603,19 @@ impl ToXml<XmlWriter> for Flow {
             write_tag(writer, "non_negative", "")?;
         }
 
+        if let Some(ref leak) = self.leak {
+            match &leak.value {
+                Some(value) if !value.is_empty() => write_tag(writer, "leak", value)?,
+                _ => write_tag_empty_with_attrs(writer, "leak", &[])?,
+            }
+        }
+        if self.leak_integers.is_some() {
+            write_tag_empty_with_attrs(writer, "leak_integers", &[])?;
+        }
+        if let Some(ref distrib_eq) = self.distrib_eq {
+            write_tag(writer, "isee:distrib_eq", distrib_eq)?;
+        }
+
         if let Some(ref ai_state) = self.ai_state {
             write_tag(writer, "ai_state", ai_state)?;
         }
@@ -481,11 +628,43 @@ impl ToXml<XmlWriter> for Flow {
     }
 }
 
+/// Parse an `isee:spreadflow` attribute into the datamodel enum. Unknown values
+/// fall back to `Beginning` (the XMILE default placement).
+fn spreadflow_to_datamodel(method: &str, distrib_eq: Option<String>) -> datamodel::SpreadFlow {
+    use datamodel::SpreadFlow::*;
+    match method.trim().to_lowercase().as_str() {
+        "even" => Even,
+        "dest" => Dest,
+        "dist" => Dist(distrib_eq.unwrap_or_default()),
+        "source" => Source,
+        _ => Beginning,
+    }
+}
+
 impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
         let mut compat = extract_compat!(flow, flow.access);
         compat.non_negative = flow.non_negative.is_some();
         compat.data_source = flow.data_source.as_ref().map(|ds| ds.to_datamodel());
+        if flow.leak.is_some() {
+            // A value-bearing `<leak>expr</leak>` supplies the fraction; a bare
+            // `<leak/>` leaves it None and the runtime falls back to the flow's
+            // `<eqn>` (docs/design/conveyors.md §3.3).
+            let fraction = flow
+                .leak
+                .as_ref()
+                .and_then(|l| l.value.clone())
+                .filter(|s| !s.is_empty());
+            compat.leakage = Some(datamodel::Leakage {
+                fraction,
+                integers: flow.leak_integers.is_some(),
+                zone_start: flow.leak_start.clone(),
+                zone_end: flow.leak_end.clone(),
+            });
+        }
+        if let Some(ref method) = flow.spreadflow {
+            compat.spreadflow = Some(spreadflow_to_datamodel(method, flow.distrib_eq.clone()));
+        }
         datamodel::Flow {
             ident: flow.name.clone(),
             equation: convert_equation!(flow),
@@ -501,6 +680,27 @@ impl From<Flow> for datamodel::Flow {
 
 impl From<datamodel::Flow> for Flow {
     fn from(flow: datamodel::Flow) -> Self {
+        let (leak, leak_integers, leak_start, leak_end) = match flow.compat.leakage {
+            Some(l) => (
+                Some(Leak { value: l.fraction }),
+                if l.integers {
+                    Some(NonNegative {})
+                } else {
+                    None
+                },
+                l.zone_start,
+                l.zone_end,
+            ),
+            None => (None, None, None, None),
+        };
+        let (spreadflow, distrib_eq) = match flow.compat.spreadflow {
+            Some(datamodel::SpreadFlow::Beginning) => (Some("beginning".to_string()), None),
+            Some(datamodel::SpreadFlow::Even) => (Some("even".to_string()), None),
+            Some(datamodel::SpreadFlow::Dest) => (Some("dest".to_string()), None),
+            Some(datamodel::SpreadFlow::Dist(eq)) => (Some("dist".to_string()), Some(eq)),
+            Some(datamodel::SpreadFlow::Source) => (Some("source".to_string()), None),
+            None => (None, None),
+        };
         Flow {
             name: flow.ident,
             eqn: match &flow.equation {
@@ -542,6 +742,12 @@ impl From<datamodel::Flow> for Flow {
             } else {
                 None
             },
+            leak,
+            leak_integers,
+            leak_start,
+            leak_end,
+            spreadflow,
+            distrib_eq,
             dimensions: match &flow.equation {
                 Equation::Scalar(..) => None,
                 Equation::ApplyToAll(dims, ..) => Some(VarDimensions {
@@ -834,6 +1040,7 @@ fn test_canonicalize_stock_inflows() {
             "\"succumbing 2\"".to_string(),
         ]),
         non_negative: None,
+        conveyor: None,
         dimensions: None,
         elements: None,
         access: None,
@@ -889,6 +1096,7 @@ fn test_xml_stock_parsing() {
         inflows: None,
         outflows: Some(vec!["succumbing".to_string(), "succumbing_2".to_string()]),
         non_negative: None,
+        conveyor: None,
         dimensions: None,
         elements: None,
         access: None,
@@ -1106,4 +1314,258 @@ fn test_module_parsing() {
 
     let roundtripped = Module::from(datamodel::Module::from(actual));
     assert_eq!(expected_roundtripped, roundtripped);
+}
+
+#[cfg(test)]
+mod conveyor_tests {
+    use crate::datamodel::{self, SpreadFlow};
+    use crate::xmile::{project_from_reader, project_to_xmile};
+    use std::io::BufReader;
+
+    /// Wrap variable XML in a minimal, valid XMILE project document.
+    fn wrap(vars: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product>
+    <options><uses_conveyor/></options>
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start><stop>12</stop><dt>0.25</dt>
+  </sim_specs>
+  <model><variables>{vars}</variables></model>
+</xmile>"#
+        )
+    }
+
+    fn parse(xml: &str) -> datamodel::Project {
+        project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("parse")
+    }
+
+    /// Parse, serialize, re-parse: the datamodel must survive a full round-trip.
+    fn roundtrip(project: &datamodel::Project) -> datamodel::Project {
+        let xml = project_to_xmile(project).expect("serialize");
+        parse(&xml)
+    }
+
+    fn find_stock<'a>(p: &'a datamodel::Project, name: &str) -> &'a datamodel::Stock {
+        p.models[0]
+            .variables
+            .iter()
+            .find_map(|v| match v {
+                datamodel::Variable::Stock(s) if s.ident == name => Some(s),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("stock {name} not found"))
+    }
+
+    fn find_flow<'a>(p: &'a datamodel::Project, name: &str) -> &'a datamodel::Flow {
+        p.models[0]
+            .variables
+            .iter()
+            .find_map(|v| match v {
+                datamodel::Variable::Flow(f) if f.ident == name => Some(f),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("flow {name} not found"))
+    }
+
+    #[test]
+    fn conveyor_block_all_fields_roundtrip() {
+        let xml = wrap(
+            r#"
+        <stock name="belt">
+          <eqn>1000</eqn>
+          <inflow>in_f</inflow>
+          <outflow>out_f</outflow>
+          <conveyor discrete="true" one_at_a_time="false" batch_integrity="true">
+            <len>4</len>
+            <capacity>1200</capacity>
+            <in_limit>500</in_limit>
+            <sample>1</sample>
+            <arrest>0</arrest>
+          </conveyor>
+        </stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+        );
+        let p = parse(&xml);
+        let check = |p: &datamodel::Project| {
+            let c = find_stock(p, "belt")
+                .compat
+                .conveyor
+                .as_ref()
+                .expect("conveyor");
+            assert_eq!(c.transit_time, "4");
+            assert_eq!(c.capacity.as_deref(), Some("1200"));
+            assert_eq!(c.inflow_limit.as_deref(), Some("500"));
+            assert_eq!(c.sample.as_deref(), Some("1"));
+            assert_eq!(c.arrest.as_deref(), Some("0"));
+            assert!(c.discrete);
+            assert!(c.batch_integrity);
+            assert!(!c.one_at_a_time); // explicit one_at_a_time="false"
+            assert!(!c.exponential_leak);
+        };
+        check(&p);
+        check(&roundtrip(&p));
+    }
+
+    #[test]
+    fn plain_conveyor_defaults() {
+        let xml = wrap(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>i</inflow><outflow>o</outflow>
+          <conveyor><len>transit</len></conveyor>
+        </stock>
+        <flow name="i"><eqn>1</eqn></flow>
+        <flow name="o"><eqn>0</eqn></flow>"#,
+        );
+        let p = roundtrip(&parse(&xml));
+        let c = find_stock(&p, "belt")
+            .compat
+            .conveyor
+            .as_ref()
+            .expect("conveyor");
+        assert_eq!(c.transit_time, "transit");
+        assert_eq!(c.capacity, None);
+        assert!(!c.discrete);
+        assert!(c.one_at_a_time, "one_at_a_time defaults to true");
+        assert!(!c.exponential_leak);
+    }
+
+    #[test]
+    fn exponential_leak_attr_roundtrips() {
+        let xml = wrap(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>i</inflow><outflow>o</outflow>
+          <conveyor exponential_leak="true"><len>4</len></conveyor>
+        </stock>
+        <flow name="i"><eqn>1</eqn></flow>
+        <flow name="o"><eqn>0</eqn></flow>"#,
+        );
+        let p = roundtrip(&parse(&xml));
+        let c = find_stock(&p, "belt").compat.conveyor.as_ref().unwrap();
+        assert!(c.exponential_leak);
+    }
+
+    #[test]
+    fn leak_marker_plus_eqn_encoding() {
+        // Stella's form: a bare <leak/> marker; the fraction lives in <eqn>.
+        // Leakage.fraction stays None (the runtime falls back to the eqn).
+        let xml = wrap(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>i</inflow><outflow>o</outflow><outflow>attriting</outflow>
+          <conveyor><len>4</len></conveyor>
+        </stock>
+        <flow name="i"><eqn>1</eqn></flow>
+        <flow name="o"><eqn>0</eqn></flow>
+        <flow name="attriting"><eqn>0.1</eqn><non_negative/><leak/></flow>"#,
+        );
+        let p = parse(&xml);
+        let check = |p: &datamodel::Project| {
+            let f = find_flow(p, "attriting");
+            let l = f.compat.leakage.as_ref().expect("leakage");
+            assert_eq!(l.fraction, None, "bare <leak/> leaves fraction in the eqn");
+            assert!(!l.integers);
+            // the eqn (0.1) survives as the flow equation for round-trip + fallback
+            assert!(matches!(&f.equation, datamodel::Equation::Scalar(s) if s == "0.1"));
+        };
+        check(&p);
+        check(&roundtrip(&p));
+    }
+
+    #[test]
+    fn leak_value_bearing_encoding_and_zone() {
+        // The spec's value-bearing form with leak_integers + a zone.
+        let xml = wrap(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>i</inflow><outflow>o</outflow><outflow>attriting</outflow>
+          <conveyor><len>4</len></conveyor>
+        </stock>
+        <flow name="i"><eqn>1</eqn></flow>
+        <flow name="o"><eqn>0</eqn></flow>
+        <flow name="attriting" leak_start="0" leak_end="0.25"><leak>0.1</leak><leak_integers/></flow>"#,
+        );
+        let p = parse(&xml);
+        let check = |p: &datamodel::Project| {
+            let l = find_flow(p, "attriting")
+                .compat
+                .leakage
+                .as_ref()
+                .expect("leakage");
+            assert_eq!(l.fraction.as_deref(), Some("0.1"));
+            assert!(l.integers);
+            assert_eq!(l.zone_start.as_deref(), Some("0"));
+            assert_eq!(l.zone_end.as_deref(), Some("0.25"));
+        };
+        check(&p);
+        check(&roundtrip(&p));
+    }
+
+    #[test]
+    fn spreadflow_dist_roundtrips() {
+        let xml = wrap(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>infecting</inflow><outflow>o</outflow>
+          <conveyor><len>4</len></conveyor>
+        </stock>
+        <flow name="infecting" isee:spreadflow="dist"><eqn>1</eqn><isee:distrib_eq>profile</isee:distrib_eq></flow>
+        <flow name="o"><eqn>0</eqn></flow>"#,
+        );
+        let p = parse(&xml);
+        let check = |p: &datamodel::Project| {
+            let s = find_flow(p, "infecting")
+                .compat
+                .spreadflow
+                .as_ref()
+                .expect("spreadflow");
+            assert_eq!(*s, SpreadFlow::Dist("profile".to_string()));
+        };
+        check(&p);
+        check(&roundtrip(&p));
+    }
+
+    #[test]
+    fn spreadflow_even_and_source_roundtrip() {
+        let xml = wrap(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>a</inflow><inflow>b</inflow><outflow>o</outflow>
+          <conveyor><len>4</len></conveyor>
+        </stock>
+        <flow name="a" isee:spreadflow="even"><eqn>1</eqn></flow>
+        <flow name="b" isee:spreadflow="source"><eqn>1</eqn></flow>
+        <flow name="o"><eqn>0</eqn></flow>"#,
+        );
+        let p = roundtrip(&parse(&xml));
+        assert_eq!(
+            *find_flow(&p, "a").compat.spreadflow.as_ref().unwrap(),
+            SpreadFlow::Even
+        );
+        assert_eq!(
+            *find_flow(&p, "b").compat.spreadflow.as_ref().unwrap(),
+            SpreadFlow::Source
+        );
+    }
+
+    #[test]
+    fn minimal_conveyor_fixture_parses() {
+        let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+        let p = parse(xml);
+        let c = find_stock(&p, "Students")
+            .compat
+            .conveyor
+            .as_ref()
+            .expect("conveyor");
+        assert_eq!(c.transit_time, "4");
+        assert_eq!(c.capacity.as_deref(), Some("1200"));
+        // full round-trip preserves it
+        let c2ref = roundtrip(&p);
+        let c2 = find_stock(&c2ref, "Students")
+            .compat
+            .conveyor
+            .as_ref()
+            .unwrap();
+        assert_eq!(c2.transit_time, "4");
+        assert_eq!(c2.capacity.as_deref(), Some("1200"));
+    }
 }

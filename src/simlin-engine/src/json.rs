@@ -750,6 +750,7 @@ impl From<Stock> for datamodel::Stock {
                 .as_ref()
                 .and_then(|c| c.data_source.clone())
                 .map(data_source_from_json),
+            ..Default::default()
         };
         let equation = match stock.arrayed_equation {
             Some(arrayed) => {
@@ -835,6 +836,7 @@ impl From<Flow> for datamodel::Flow {
                 .as_ref()
                 .and_then(|c| c.data_source.clone())
                 .map(data_source_from_json),
+            ..Default::default()
         };
         let equation = match flow.arrayed_equation {
             Some(arrayed) => {
@@ -913,6 +915,7 @@ impl From<Auxiliary> for datamodel::Aux {
                 .as_ref()
                 .and_then(|c| c.data_source.clone())
                 .map(data_source_from_json),
+            ..Default::default()
         };
         let equation = match aux.arrayed_equation {
             Some(arrayed) => {

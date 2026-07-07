@@ -260,6 +260,72 @@ pub struct DataSource {
     pub cell: String,
 }
 
+/// A conveyor stock: material rides a fixed-length belt and exits after the
+/// transit time. See `docs/design/conveyors.md`. The fields hold XMILE
+/// expression strings (evaluated by the engine); `None` means the tag was
+/// absent and the documented default applies.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
+pub struct Conveyor {
+    /// `<len>`: transit time, in time units. Required.
+    pub transit_time: String,
+    /// `<capacity>`: max material on the belt (default INF).
+    pub capacity: Option<String>,
+    /// `<in_limit>`: max equation-driven inflow per time unit (default INF).
+    pub inflow_limit: Option<String>,
+    /// `<sample>`: when nonzero, re-latch the transit time (default: every DT).
+    pub sample: Option<String>,
+    /// `<arrest>`: when nonzero, freeze the belt and zero all flows (default: never).
+    pub arrest: Option<String>,
+    /// `discrete`: move whole units (batches) rather than a continuous stream.
+    pub discrete: bool,
+    /// `batch_integrity`: only whole upstream-queue batches may be taken.
+    pub batch_integrity: bool,
+    /// `one_at_a_time`: take only the front queue batch per DT (default true).
+    pub one_at_a_time: bool,
+    /// `exponential_leak`: exponential (vs linear) leakage for all leak flows.
+    pub exponential_leak: bool,
+    /// isee "Ignore losses from earlier leak zones" toggle (default false).
+    pub ignore_earlier_zone_losses: bool,
+}
+
+/// Marks a flow as a conveyor leakage outflow. See `docs/design/conveyors.md` §3.3, §5.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
+pub struct Leakage {
+    /// The leak fraction expression (`<leak>` content or a leak flow's `<eqn>`);
+    /// `None` for a bare `<leak/>` marker (leakage TBD, contributes zero).
+    pub fraction: Option<String>,
+    /// `<leak_integers/>`: leak only whole units.
+    pub integers: bool,
+    /// `leak_start`: fractional belt position where the leak zone starts (default 0).
+    pub zone_start: Option<String>,
+    /// `leak_end`: fractional belt position where the leak zone ends (default 1).
+    pub zone_end: Option<String>,
+}
+
+/// isee `isee:spreadflow` inflow-placement method. See `docs/design/conveyors.md` §8.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
+pub enum SpreadFlow {
+    /// All inflow lands at the entry slat (the XMILE default).
+    Beginning,
+    /// Equal amount at every belt position.
+    Even,
+    /// Content-proportional across the current belt.
+    Dest,
+    /// Distribution named by `<isee:distrib_eq>`.
+    Dist(String),
+    /// Mirror an upstream leak flow's per-slat leakage.
+    Source,
+}
+
+/// Per-variable metadata that is not part of the core equation: XMILE
+/// stock/flow options (`non_negative`, `<conveyor>`, leak/spread markers),
+/// Vensim `active_initial`, access/visibility, and data-source imports. These
+/// ride alongside `Stock`/`Flow`/`Aux`/`Module` so adding one does not churn
+/// every construction site. Conveyor/leak/spread live here for the same reason
+/// `non_negative` does: they are all optional XMILE stock/flow options.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Default, salsa::Update)]
 pub struct Compat {
@@ -268,6 +334,12 @@ pub struct Compat {
     pub can_be_module_input: bool,
     pub visibility: Visibility,
     pub data_source: Option<DataSource>,
+    /// Present on a stock iff it is a conveyor (`<conveyor>` block).
+    pub conveyor: Option<Conveyor>,
+    /// Present on a flow iff it is a conveyor leakage outflow.
+    pub leakage: Option<Leakage>,
+    /// Present on a conveyor inflow that selects a non-default placement.
+    pub spreadflow: Option<SpreadFlow>,
 }
 
 impl Compat {
@@ -277,6 +349,9 @@ impl Compat {
             && !self.can_be_module_input
             && self.visibility == Visibility::Private
             && self.data_source.is_none()
+            && self.conveyor.is_none()
+            && self.leakage.is_none()
+            && self.spreadflow.is_none()
     }
 }
 

@@ -77,12 +77,50 @@ message Variable {
     string cell = 5;
   };
 
+  // A conveyor stock's belt parameters. See docs/design/conveyors.md.
+  message Conveyor {
+    string transit_time = 1;            // <len> (required)
+    optional string capacity = 2;       // <capacity>
+    optional string inflow_limit = 3;   // <in_limit>
+    optional string sample = 4;         // <sample>
+    optional string arrest = 5;         // <arrest>
+    bool discrete = 6;
+    bool batch_integrity = 7;
+    bool one_at_a_time = 8;             // default true
+    bool exponential_leak = 9;
+    bool ignore_earlier_zone_losses = 10;
+  };
+
+  // Marks a flow as a conveyor leakage outflow.
+  message Leakage {
+    optional string fraction = 1;       // None for a bare <leak/> marker
+    bool integers = 2;                  // <leak_integers/>
+    optional string zone_start = 3;     // leak_start
+    optional string zone_end = 4;       // leak_end
+  };
+
+  // isee:spreadflow inflow placement method.
+  message SpreadFlow {
+    enum Method {
+      BEGINNING = 0;
+      EVEN = 1;
+      DEST = 2;
+      DIST = 3;
+      SOURCE = 4;
+    };
+    Method method = 1;
+    optional string distrib_eq = 2;     // graphical-function name for DIST
+  };
+
   message Compat {
     optional string active_initial = 1;
     optional bool non_negative = 2;
     optional bool can_be_module_input = 3;
     optional Visibility visibility = 4;
     optional DataSource data_source = 5;
+    optional Conveyor conveyor = 6;
+    optional Leakage leakage = 7;
+    optional SpreadFlow spreadflow = 8;
   };
 
   message Stock {
