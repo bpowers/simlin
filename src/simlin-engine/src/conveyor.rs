@@ -148,6 +148,14 @@ pub struct PhaseAResult {
     pub out_vol: f64,
     /// Per leak flow: volume leaked this DT.
     pub leak_vols: Vec<f64>,
+    /// Per leak flow, per belt slat (index 0 = exit): the volume that leak flow
+    /// shed from that slat this DT (so `leak_slat_vols[k]` sums to
+    /// `leak_vols[k]`). This is the per-slat detail a downstream `source`
+    /// placement mirrors (§8): the outer length is the leak-flow count, the
+    /// inner length is the belt length at leak time (empty when arrested, since
+    /// no leak ran). It is always populated for a non-arrested step, since the
+    /// cost is proportional to the belt the conveyor already carries.
+    pub leak_slat_vols: Vec<Vec<f64>>,
     /// This conveyor is arrested this step (Phase B is a no-op).
     pub arrested: bool,
     /// The exit is held (destination arrested): material accumulates at the
@@ -184,9 +192,12 @@ pub struct PhaseBInputs<'a> {
     /// apportions in this order). Already clamped to `max(0, rate)` by the
     /// caller (§4.4).
     pub eq_request_rates: &'a [f64],
-    /// Total conveyor-driven inflow *volume* (sum of upstream Phase A outflow/
-    /// leak volumes feeding this belt), admitted unconditionally (§4.3).
-    pub conv_vol: f64,
+    /// Conveyor-driven inflows as `(volume, placement)` pairs -- one per upstream
+    /// Phase-A outflow/leak feeding this belt, each admitted unconditionally
+    /// (§4.3) and placed by its own method (§8). Kept per-inflow rather than
+    /// lumped so a `source`-placed leak inflow can carry its own mirrored weight
+    /// vector independently of any sibling conveyor-driven inflow. Empty ⇒ none.
+    pub conv_inflows: &'a [(f64, Placement)],
     /// Current leak fraction per leak flow (for the inserted cohort's schedule).
     pub leak_fractions: &'a [f64],
     /// Instantaneous capacity (material), `f64::INFINITY` if unconstrained.
@@ -198,9 +209,6 @@ pub struct PhaseBInputs<'a> {
     /// Placement per equation-driven inflow, aligned to `eq_request_rates`.
     /// Empty ⇒ every inflow uses `Beginning` (the default).
     pub placements: &'a [Placement],
-    /// Placement for the lumped conveyor-driven volume (`Beginning` by default;
-    /// `Source` coupling is a separate build-sequence step).
-    pub conv_placement: Placement,
 }
 
 /// Phase B result: the admitted inflow rates this DT.
@@ -266,6 +274,18 @@ impl ConveyorState {
     /// transit shrink leaves a stale tail).
     pub fn belt_len(&self) -> usize {
         self.slats.len()
+    }
+
+    /// Entry depth `d = round(latched_transit / dt)` (§4.1/§6): the depth at
+    /// which the next inserted cohort lands. Equal to the `d` [`phase_b`] uses
+    /// for placement, so a caller building a per-step `dist`/`source` weight
+    /// vector (§8, weights indexed over `0..d`) reads it after [`phase_a`] has
+    /// latched but before [`phase_b`] inserts.
+    ///
+    /// [`phase_a`]: ConveyorState::phase_a
+    /// [`phase_b`]: ConveyorState::phase_b
+    pub fn entry_depth(&self) -> usize {
+        self.n_slats()
     }
 
     /// Content of slat `j` (0 = exit), or `None` if out of range -- the basis
@@ -618,11 +638,13 @@ impl ConveyorState {
         self.step_contents0 = self.contents();
         let n = self.n_leaks();
 
-        // Step 0: arrest -- evaluated before the latch (§4.3).
+        // Step 0: arrest -- evaluated before the latch (§4.3). No leak ran, so
+        // the per-slat breakdown is empty per leak flow (indexable by k).
         if inp.arrested {
             return PhaseAResult {
                 out_vol: 0.0,
                 leak_vols: vec![0.0; n],
+                leak_slat_vols: vec![Vec::new(); n],
                 arrested: true,
                 held: false,
             };
@@ -636,13 +658,15 @@ impl ConveyorState {
         }
 
         // Step 2: leak.
-        let leak_vols = self.leak_step(inp.leak_fractions, inp.leak_dest_arrested);
+        let (leak_vols, leak_slat_vols) =
+            self.leak_step(inp.leak_fractions, inp.leak_dest_arrested);
 
         // Step 3: exit (held if the primary destination is arrested).
         if inp.dest_arrested {
             return PhaseAResult {
                 out_vol: 0.0,
                 leak_vols,
+                leak_slat_vols,
                 arrested: false,
                 held: true,
             };
@@ -651,14 +675,22 @@ impl ConveyorState {
         PhaseAResult {
             out_vol,
             leak_vols,
+            leak_slat_vols,
             arrested: false,
             held: false,
         }
     }
 
-    /// §4.3 step 2 leak, split by leak model. Returns per-flow leaked volume and
-    /// mutates slat contents (and, for linear leakage, the travel windows).
-    fn leak_step(&mut self, fractions: &[f64], leak_dest_arrested: &[bool]) -> Vec<f64> {
+    /// §4.3 step 2 leak, split by leak model. Returns per-flow leaked volume,
+    /// the per-`(leak flow, slat)` breakdown (index 0 = exit; a downstream
+    /// `source` placement mirrors it, §8), and mutates slat contents (and, for
+    /// linear leakage, the travel windows). `slat_vols[k]` sums to
+    /// `leak_vols[k]` (conservation) after any integer-leak requantization.
+    fn leak_step(
+        &mut self,
+        fractions: &[f64],
+        leak_dest_arrested: &[bool],
+    ) -> (Vec<f64>, Vec<Vec<f64>>) {
         let n = self.n_leaks();
         debug_assert_eq!(
             fractions.len(),
@@ -667,6 +699,10 @@ impl ConveyorState {
         );
         let l = self.slats.len();
         let mut leak_vols = vec![0.0; n];
+        // Per-(leak flow, slat) shed detail, so `slat_vols[k][i]` is what flow k
+        // took from slat i this DT. Kept exactly in sync with the content
+        // subtractions below (including the integer-leak requantization).
+        let mut slat_vols = vec![vec![0.0; l]; n];
         // A leak flow whose destination is arrested is skipped entirely this
         // step (rate 0, content stays): fold it into an "effectively out of
         // zone" test so neither model leaks it nor consumes its window.
@@ -675,6 +711,9 @@ impl ConveyorState {
         if self.exponential_leak {
             // §5.2: rates add -- every flow computed from the same start-of-step
             // content; scaled down proportionally if the sum would overdrain.
+            // `i` indexes both `self.slats` (a VecDeque) and the per-slat column
+            // `slat_vols[k][i]`, so an index loop is the clean form.
+            #[allow(clippy::needless_range_loop)]
             for i in 0..l {
                 let c0 = self.slats[i].content;
                 let mut sheds = vec![0.0; n];
@@ -695,9 +734,10 @@ impl ConveyorState {
                 self.slats[i].content -= sum_sheds;
                 for k in 0..n {
                     leak_vols[k] += sheds[k];
+                    slat_vols[k][i] += sheds[k];
                 }
             }
-            return leak_vols;
+            return (leak_vols, slat_vols);
         }
 
         // §5.1 linear leakage. First compute the continuous per-(slat, flow)
@@ -722,6 +762,7 @@ impl ConveyorState {
                 self.slats[i].content -= shed;
                 self.slats[i].leak_window[k] -= use_;
                 leak_vols[k] += shed;
+                slat_vols[k][i] += shed;
                 if has_integers {
                     shed_by[i * n + k] = shed;
                 }
@@ -730,9 +771,9 @@ impl ConveyorState {
 
         if has_integers {
             // `n` is the leak-flow count, which is also `shed_by`'s row stride.
-            self.quantize_integer_leaks(n, &shed_by, &mut leak_vols);
+            self.quantize_integer_leaks(n, &shed_by, &mut leak_vols, &mut slat_vols);
         }
-        leak_vols
+        (leak_vols, slat_vols)
     }
 
     /// §5.4 integer leakage. The continuous shed for each integer flow was
@@ -743,15 +784,26 @@ impl ConveyorState {
     /// independent of the quantization). The integer+multi-flow priority
     /// interaction is a simlin-defined corner (the spec pins only the
     /// single-flow case).
-    fn quantize_integer_leaks(&mut self, n: usize, shed_by: &[f64], leak_vols: &mut [f64]) {
+    fn quantize_integer_leaks(
+        &mut self,
+        n: usize,
+        shed_by: &[f64],
+        leak_vols: &mut [f64],
+        slat_vols: &mut [Vec<f64>],
+    ) {
         let l = self.slats.len();
         for k in 0..n {
             if !self.leaks[k].integers {
                 continue;
             }
-            // Undo the continuous removal for this flow.
+            // Undo the continuous removal for this flow, both from content and
+            // from the per-slat breakdown (the whole-unit removals below become
+            // the authoritative per-slat detail for this flow). `i` indexes both
+            // `self.slats` and the per-slat column `slat_vols[k][i]`.
+            #[allow(clippy::needless_range_loop)]
             for i in 0..l {
                 self.slats[i].content += shed_by[i * n + k];
+                slat_vols[k][i] = 0.0;
             }
             self.leak_carry[k] += leak_vols[k];
             let whole = self.leak_carry[k].floor();
@@ -759,6 +811,7 @@ impl ConveyorState {
             // Remove `whole` units, exit-most in-zone slat first, clamped to
             // each slat's content. Undelivered units return to the carry.
             let mut remaining = whole;
+            #[allow(clippy::needless_range_loop)]
             for i in 0..l {
                 if remaining <= 0.0 {
                     break;
@@ -768,6 +821,7 @@ impl ConveyorState {
                 }
                 let take = remaining.min(self.slats[i].content);
                 self.slats[i].content -= take;
+                slat_vols[k][i] += take;
                 remaining -= take;
             }
             let delivered = whole - remaining;
@@ -791,12 +845,13 @@ impl ConveyorState {
 
         // Step 4: admit. Capacity credits the room freed by this DT's outflow
         // AND leak; conveyor-driven inflow is admitted unconditionally.
+        let conv_vol: f64 = inp.conv_inflows.iter().map(|(v, _)| v).sum();
         let leaked: f64 = inp.phase_a.leak_vols.iter().sum();
         let contents_after = self.step_contents0 - leaked - inp.phase_a.out_vol;
         let cap_room = if inp.capacity.is_infinite() {
             f64::INFINITY
         } else {
-            (inp.capacity - contents_after - inp.conv_vol).max(0.0)
+            (inp.capacity - contents_after - conv_vol).max(0.0)
         };
         let limit_vol = if inp.in_limit.is_infinite() {
             f64::INFINITY
@@ -827,7 +882,7 @@ impl ConveyorState {
             cleared.clone()
         };
         let eq_admitted: f64 = in_vols.iter().sum();
-        let admitted = inp.conv_vol + eq_admitted;
+        let admitted = conv_vol + eq_admitted;
 
         // Step 5: shift.
         self.shift(inp.phase_a.held);
@@ -844,7 +899,9 @@ impl ConveyorState {
         }
         let belt_len = self.slats.len();
         let mut shares = vec![0.0; belt_len];
-        self.add_placement_shares(&mut shares, inp.conv_vol, &inp.conv_placement, d, belt_len);
+        for (vol, placement) in inp.conv_inflows {
+            self.add_placement_shares(&mut shares, *vol, placement, d, belt_len);
+        }
         for (j, &vol) in in_vols.iter().enumerate() {
             let placement = inp.placements.get(j).unwrap_or(&Placement::Beginning);
             self.add_placement_shares(&mut shares, vol, placement, d, belt_len);

@@ -48,12 +48,11 @@ fn step_single(
     let pb = conv.phase_b(PhaseBInputs {
         phase_a: &pa,
         eq_request_rates: eq_rates,
-        conv_vol: 0.0,
+        conv_inflows: &[],
         leak_fractions: fractions,
         capacity,
         in_limit,
         placements: &[],
-        conv_placement: Placement::Beginning,
     });
     let delta = conv.contents() - contents0;
     let leaked: f64 = pa.leak_vols.iter().sum();
@@ -108,22 +107,20 @@ fn step_chain(
     let pb_a = a.phase_b(PhaseBInputs {
         phase_a: &pa_a,
         eq_request_rates: a_eq,
-        conv_vol: 0.0,
+        conv_inflows: &[],
         leak_fractions: &no,
         capacity: INF,
         in_limit: INF,
         placements: &[],
-        conv_placement: Placement::Beginning,
     });
     let pb_b = b.phase_b(PhaseBInputs {
         phase_a: &pa_b,
         eq_request_rates: &no,
-        conv_vol: pa_a.out_vol,
+        conv_inflows: &[(pa_a.out_vol, Placement::Beginning)],
         leak_fractions: &no,
         capacity: b_cap(b),
         in_limit: INF,
         placements: &[],
-        conv_placement: Placement::Beginning,
     });
     // Conservation for each conveyor.
     for (label, contents0, pa, admitted, conv) in [
@@ -735,12 +732,11 @@ fn insert_once(c: &mut ConveyorState, rate: f64, placement: Placement, transit: 
     c.phase_b(PhaseBInputs {
         phase_a: &pa,
         eq_request_rates: &[rate],
-        conv_vol: 0.0,
+        conv_inflows: &[],
         leak_fractions: &[],
         capacity: f64::INFINITY,
         in_limit: f64::INFINITY,
         placements: &[placement],
-        conv_placement: Placement::Beginning,
     });
     c.slat_contents()
 }
@@ -819,12 +815,11 @@ fn spread_dest_is_content_proportional() {
     c.phase_b(PhaseBInputs {
         phase_a: &pa,
         eq_request_rates: &[6.0],
-        conv_vol: 0.0,
+        conv_inflows: &[],
         leak_fractions: &[],
         capacity: f64::INFINITY,
         in_limit: f64::INFINITY,
         placements: &[Placement::Dest],
-        conv_placement: Placement::Beginning,
     });
     let after = c.slat_contents();
     let gained: f64 = after.iter().sum::<f64>() - (total - pa.out_vol);
@@ -838,4 +833,73 @@ fn spread_dest_is_content_proportional() {
         nonzero >= 2,
         "dest should spread across content, contents={after:?}"
     );
+}
+
+#[test]
+fn leak_slat_vols_sum_to_leak_vols() {
+    // The per-slat leak breakdown (used by downstream `source` placement, §8)
+    // must conserve: Σ_i leak_slat_vols[k][i] == leak_vols[k] for every leak
+    // flow k, under both a linear and an exponential leak, and with the belt at
+    // its non-trivial steady-state fill so multiple slats leak.
+    for exponential in [false, true] {
+        let mut c = ConveyorState::new(
+            0.25,
+            exponential,
+            false,
+            false,
+            vec![LeakConfig {
+                zone_start: 0.0,
+                zone_end: 1.0,
+                integers: false,
+            }],
+        );
+        let fracs = [0.2];
+        c.init_from_inflow(2.0, 100.0, &fracs);
+        let pa = c.phase_a(PhaseAInputs {
+            arrested: false,
+            sample: true,
+            transit: 2.0,
+            leak_fractions: &fracs,
+            dest_arrested: false,
+            leak_dest_arrested: &[false],
+        });
+        assert_eq!(pa.leak_slat_vols.len(), 1, "one leak flow");
+        let per_slat_sum: f64 = pa.leak_slat_vols[0].iter().sum();
+        assert!(
+            (per_slat_sum - pa.leak_vols[0]).abs() < 1e-12,
+            "exponential={exponential}: per-slat sum {per_slat_sum} != total {}",
+            pa.leak_vols[0]
+        );
+        assert!(pa.leak_vols[0] > 0.0, "the belt should be leaking");
+    }
+}
+
+#[test]
+fn arrested_leak_slat_vols_are_indexable_but_empty() {
+    // An arrested conveyor did no leak, so each leak flow's per-slat breakdown is
+    // empty -- but the outer vector is still indexable by leak-flow (a downstream
+    // source reads leak_slat_vols[k] without bounds fear).
+    let mut c = ConveyorState::new(
+        1.0,
+        false,
+        false,
+        false,
+        vec![LeakConfig {
+            zone_start: 0.0,
+            zone_end: 1.0,
+            integers: false,
+        }],
+    );
+    c.init_from_inflow(3.0, 10.0, &[0.1]);
+    let pa = c.phase_a(PhaseAInputs {
+        arrested: true,
+        sample: false,
+        transit: 3.0,
+        leak_fractions: &[0.1],
+        dest_arrested: false,
+        leak_dest_arrested: &[false],
+    });
+    assert!(pa.arrested);
+    assert_eq!(pa.leak_slat_vols.len(), 1);
+    assert!(pa.leak_slat_vols[0].is_empty());
 }
