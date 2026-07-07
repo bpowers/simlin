@@ -447,6 +447,11 @@ pub enum ErrorCode {
     /// Rejected loudly rather than silently placed at the entry
     /// (docs/design/conveyors.md §8).
     ConveyorSpreadflowUnsupported,
+    /// An arrayed conveyor stock (or one of its driven flows) is declared over a
+    /// dimension the project does not define, so the per-element belt layout
+    /// cannot be resolved. An internal-consistency guard on the arrayed-conveyor
+    /// expansion (docs/design/conveyors.md §10).
+    ConveyorArrayedDimensionUnresolved,
 }
 
 impl fmt::Display for ErrorCode {
@@ -518,6 +523,7 @@ impl fmt::Display for ErrorCode {
             ConveyorDrivenFlowRead => "conveyor_driven_flow_read",
             ConveyorNotExpanded => "conveyor_not_expanded",
             ConveyorSpreadflowUnsupported => "conveyor_spreadflow_unsupported",
+            ConveyorArrayedDimensionUnresolved => "conveyor_arrayed_dimension_unresolved",
         };
 
         write!(f, "{name}")

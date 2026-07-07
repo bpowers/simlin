@@ -31,12 +31,25 @@
 //! (the distribution graphical function or numeric array, resolved at expand
 //! time and sampled per step because the entry depth can vary), and `source`
 //! (mirroring an upstream leak's per-slat leakage, coupled by flow identity).
-//! Conveyors inside submodules, arrayed conveyors, and queue coupling are later
-//! build-sequence steps.
+//! It also handles **arrayed conveyors** (§10): an arrayed conveyor stock is
+//! `N_elem` independent belts, one per array element, each with its own
+//! `ConveyorState`, transit time, leak flows, capacity, and inflow limit. The
+//! synthesized parameter/fraction auxes and the driven-flow placeholders are
+//! made arrayed with the stock's dimensions (so each element gets its own
+//! slot), and [`resolve_plans`] flattens one arrayed [`ConveyorMeta`] into one
+//! [`ConveyorPlan`] per element -- reusing the scalar per-belt runtime pass
+//! unchanged (a scalar conveyor is the degenerate 1-element case). Because the
+//! datamodel's `Conveyor` block holds one expression per attribute, every
+//! element shares that expression (the apply-to-all arrayed form); a shared
+//! expression may still reference other arrayed variables to yield distinct
+//! per-element values. Per-`<element>`-block DISTINCT conveyor attributes are
+//! not representable in the datamodel, so they cannot arise here.
+//! Conveyors inside submodules, queue coupling, and container access
+//! (`conv[j]`, `SUM(conv)`) reading belt slats are later build-sequence steps.
 
 use std::collections::HashMap;
 
-use crate::common::{Canonical, ErrorCode, Ident, canonicalize};
+use crate::common::{Canonical, DimensionName, ErrorCode, Ident, canonicalize};
 use crate::conveyor::{
     ConveyorState, LeakConfig, PhaseAInputs, PhaseAResult, PhaseBInputs, Placement,
 };
@@ -111,6 +124,14 @@ pub struct ConveyorMeta {
     /// primary outflow feeds (for the held-exit rule, §4.3 step 3). `None` if
     /// the primary outflow feeds an ordinary stock/cloud.
     pub primary_dest_conveyor: Option<String>,
+    /// Per-element subscript suffixes for an arrayed conveyor (§10), in the same
+    /// row-major order the compiled offset map lays out an arrayed variable's
+    /// elements (`calc_flattened_offsets_incremental` via `SubscriptIterator`).
+    /// Each entry is the canonical `elem1,elem2` suffix so
+    /// [`resolve_plans`] can form the subscripted offset keys `name[elem]`. An
+    /// arrayed conveyor is `N_elem` independent belts, one per element; this is
+    /// empty for a scalar conveyor (the degenerate 1-belt case).
+    pub element_subscripts: Vec<String>,
 }
 
 /// A resolved leak flow: slot offsets plus static config.
@@ -349,22 +370,6 @@ fn flow_is_leak(model: &datamodel::Model, flow: &str) -> bool {
     })
 }
 
-/// The leak fraction expression for a leak flow: the value-bearing `<leak>` if
-/// present, else the flow's own equation (the bare-`<leak/>`-plus-`<eqn>` form,
-/// §3.3). Empty ⇒ "0" (a bare marker with no fraction leaks nothing).
-fn leak_fraction_expr(flow: &datamodel::Flow) -> String {
-    if let Some(leak) = &flow.compat.leakage
-        && let Some(frac) = &leak.fraction
-        && !frac.is_empty()
-    {
-        return frac.clone();
-    }
-    match &flow.equation {
-        Equation::Scalar(s) if !s.is_empty() => s.clone(),
-        _ => "0".to_string(),
-    }
-}
-
 /// Parse a leak-zone bound (`leak_start`/`leak_end`) as a constant, clamped to
 /// `[0, 1]`. A non-constant expression falls back to the default (zones are
 /// attributes; the vendored fixtures use constants).
@@ -433,6 +438,12 @@ pub fn expand_conveyors(
         };
         let stock_name = canon(&stock.ident);
 
+        // An arrayed conveyor is N_elem independent belts (§10). The stock's
+        // dimensions drive the synthesized auxes' shape and the per-element
+        // offset enumeration; empty for a scalar conveyor.
+        let stock_dims = equation_dims(&stock.equation);
+        let element_subscripts = element_subscripts_for_dims(&project, &stock_dims, &stock.ident)?;
+
         // Partition outflows into the primary (first non-leak) and leaks.
         let mut primary: Option<String> = None;
         let mut leak_metas = Vec::new();
@@ -443,20 +454,20 @@ pub fn expand_conveyors(
                     datamodel::Variable::Flow(f) if canon(&f.ident) == out_c => Some(f),
                     _ => None,
                 });
-                let (zone_start, zone_end, integers, frac_expr) = match flow_var {
+                let (zone_start, zone_end, integers, frac_eqn) = match flow_var {
                     Some(f) => {
                         let lk = f.compat.leakage.as_ref().unwrap();
                         (
                             parse_zone(&lk.zone_start, 0.0),
                             parse_zone(&lk.zone_end, 1.0),
                             lk.integers,
-                            leak_fraction_expr(f),
+                            leak_fraction_equation(f, &stock_dims),
                         )
                     }
-                    None => (0.0, 1.0, false, "0".to_string()),
+                    None => (0.0, 1.0, false, param_equation("0", &stock_dims)),
                 };
                 let frac_aux = leak_frac_name(&out_c);
-                new_auxes.push(make_aux(&frac_aux, &frac_expr));
+                new_auxes.push(make_aux_eqn(&frac_aux, frac_eqn));
                 driven_flows.push(out_c.clone());
                 leak_metas.push(LeakMeta {
                     flow: out_c,
@@ -483,16 +494,21 @@ pub fn expand_conveyors(
         };
         driven_flows.push(primary_out.clone());
 
-        // Synthesize the parameter auxes.
+        // Synthesize the parameter auxes, arrayed over the stock's dimensions
+        // for an arrayed conveyor so each element gets its own len/cap/... slot
+        // (§10); scalar for a scalar conveyor.
         let len_aux = param_aux_name(&stock_name, "len");
-        new_auxes.push(make_aux(&len_aux, &conv.transit_time));
+        new_auxes.push(make_aux_eqn(
+            &len_aux,
+            param_equation(&conv.transit_time, &stock_dims),
+        ));
         let mk = |field: &Option<String>,
                   param: &str,
                   out: &mut Vec<datamodel::Aux>|
          -> Option<String> {
             field.as_ref().map(|expr| {
                 let name = param_aux_name(&stock_name, param);
-                out.push(make_aux(&name, expr));
+                out.push(make_aux_eqn(&name, param_equation(expr, &stock_dims)));
                 name
             })
         };
@@ -540,6 +556,7 @@ pub fn expand_conveyors(
             leaks: leak_metas,
             inflows,
             primary_dest_conveyor,
+            element_subscripts,
         });
     }
 
@@ -596,7 +613,9 @@ pub fn expand_conveyors(
     for v in &mut model.variables {
         match v {
             datamodel::Variable::Flow(f) if driven_set.contains(&canon(&f.ident)) => {
-                f.equation = Equation::Scalar("0".to_string());
+                // Preserve the flow's array shape so an arrayed driven flow keeps
+                // its per-element slots (§10); the pass overwrites every slot.
+                f.equation = placeholder_zero_equation(&f.equation);
                 // The fraction now lives in a hidden aux; the flow slot is
                 // pass-driven, so its own leak/gf metadata plays no runtime role.
                 f.gf = None;
@@ -642,10 +661,12 @@ fn equation_scalar_strings(v: &datamodel::Variable) -> Vec<String> {
     }
 }
 
-fn make_aux(ident: &str, equation: &str) -> datamodel::Aux {
+/// Build a hidden synthesized aux carrying an arbitrary [`Equation`] (scalar for
+/// a scalar conveyor, `ApplyToAll`/`Arrayed` for an arrayed one, §10).
+fn make_aux_eqn(ident: &str, equation: Equation) -> datamodel::Aux {
     datamodel::Aux {
         ident: ident.to_string(),
-        equation: Equation::Scalar(equation.to_string()),
+        equation,
         documentation: String::new(),
         units: None,
         gf: None,
@@ -655,70 +676,205 @@ fn make_aux(ident: &str, equation: &str) -> datamodel::Aux {
     }
 }
 
+/// The synthesized-aux equation for a conveyor parameter expression (`<len>`,
+/// `<capacity>`, ...). The datamodel holds one expression per attribute, so an
+/// arrayed conveyor's parameter is the same apply-to-all expression across every
+/// element (§10); it can still reference arrayed variables to yield distinct
+/// per-element values. `dims` empty ⇒ a scalar aux.
+fn param_equation(expr: &str, dims: &[DimensionName]) -> Equation {
+    if dims.is_empty() {
+        Equation::Scalar(expr.to_string())
+    } else {
+        Equation::ApplyToAll(dims.to_vec(), expr.to_string())
+    }
+}
+
+/// The synthesized leak-fraction aux equation for a (possibly arrayed) leak flow
+/// (§5.1/§10). Prefers the explicit `<leak>` fraction (a single expression, made
+/// apply-to-all over the conveyor's dims); otherwise the flow's own equation
+/// carries the fraction (the bare-`<leak/>`-plus-`<eqn>` form) and its arrayed
+/// shape is preserved so a genuinely per-element fraction is not flattened. An
+/// empty fraction leaks nothing (`0`).
+fn leak_fraction_equation(flow: &datamodel::Flow, dims: &[DimensionName]) -> Equation {
+    if let Some(leak) = &flow.compat.leakage
+        && let Some(frac) = &leak.fraction
+        && !frac.is_empty()
+    {
+        return param_equation(frac, dims);
+    }
+    match &flow.equation {
+        Equation::Scalar(s) if !s.is_empty() => param_equation(s, dims),
+        Equation::ApplyToAll(d, s) if !s.is_empty() => Equation::ApplyToAll(d.clone(), s.clone()),
+        Equation::Arrayed(d, elems, default, except) => {
+            Equation::Arrayed(d.clone(), elems.clone(), default.clone(), *except)
+        }
+        _ => param_equation("0", dims),
+    }
+}
+
+/// The placeholder-`0` equation for a conveyor-driven flow, preserving the flow's
+/// array shape so an arrayed driven flow compiles to `N_elem` writable slots
+/// (one per belt) rather than collapsing to a single scalar slot (§10). The pass
+/// overwrites every slot each step, so the placeholder value never matters -- only
+/// the slot count does.
+fn placeholder_zero_equation(existing: &Equation) -> Equation {
+    match existing {
+        Equation::Scalar(_) => Equation::Scalar("0".to_string()),
+        Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, ..) => {
+            Equation::ApplyToAll(dims.clone(), "0".to_string())
+        }
+    }
+}
+
+/// The dimension names an arrayed conveyor stock (or driven flow) is declared
+/// over, in declaration order; empty for a scalar variable.
+fn equation_dims(equation: &Equation) -> Vec<DimensionName> {
+    match equation {
+        Equation::Scalar(_) => Vec::new(),
+        Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, ..) => dims.clone(),
+    }
+}
+
+/// Resolve the named dimensions of an arrayed conveyor to the runtime
+/// [`Dimension`](crate::dimensions::Dimension) list (with element names), in
+/// declaration order, then enumerate the per-element subscript suffixes in the
+/// SAME row-major order the compiled offset map uses
+/// (`calc_flattened_offsets_incremental` drives its element keys off the identical
+/// `SubscriptIterator`). Each returned suffix is the canonical `elem1,elem2`
+/// string. Returns an error if any dimension name is unknown in the project (an
+/// internal-consistency guard, §10).
+fn element_subscripts_for_dims(
+    project: &datamodel::Project,
+    dim_names: &[DimensionName],
+    stock: &str,
+) -> Result<Vec<String>, (ErrorCode, String)> {
+    if dim_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut dims = Vec::with_capacity(dim_names.len());
+    for name in dim_names {
+        let canon_name = canon(name);
+        let dim = project
+            .dimensions
+            .iter()
+            .find(|d| canon(&d.name) == canon_name)
+            .ok_or_else(|| {
+                (
+                    ErrorCode::ConveyorArrayedDimensionUnresolved,
+                    format!(
+                        "arrayed conveyor '{stock}' is declared over dimension '{name}', which \
+                         the project does not define"
+                    ),
+                )
+            })?;
+        dims.push(crate::dimensions::Dimension::from(dim));
+    }
+    Ok(crate::dimensions::SubscriptIterator::new(&dims)
+        .map(|subs| subs.join(","))
+        .collect())
+}
+
+/// The number of independent belts a conveyor meta expands to: `N_elem` for an
+/// arrayed conveyor (§10), 1 for a scalar one (the degenerate case, whose
+/// `element_subscripts` is empty).
+fn n_belts(meta: &ConveyorMeta) -> usize {
+    meta.element_subscripts.len().max(1)
+}
+
 /// Resolve [`ConveyorMeta`] names to data-buffer offsets using the compiled
-/// simulation's offset map. Returns `None` if any required name is missing
-/// (which would indicate an internal inconsistency between expansion and
-/// compilation) so the caller can fall back to a plain -- non-conveyor -- run.
+/// simulation's offset map, flattening each arrayed conveyor into ONE
+/// [`ConveyorPlan`] per array element (§10). An arrayed variable's elements
+/// occupy contiguous slots keyed `name[elem1,elem2]` in the offset map
+/// (`calc_flattened_offsets_incremental`), so element `e` resolves via the
+/// subscripted key built from `meta.element_subscripts[e]`; a scalar conveyor
+/// resolves its bare name and yields a single plan (so the per-belt runtime pass
+/// is identical to before). Each meta's belts occupy a contiguous flattened-plan
+/// range, so a held-exit destination (§4.3 step 3) links element `e` of one
+/// conveyor to element `e` of the downstream conveyor. Returns `None` if any
+/// required name is missing -- an internal inconsistency between expansion and
+/// compilation that [`build_compiled`] surfaces as a hard `NotSimulatable`
+/// error (there is no non-conveyor fallback: the model has conveyors).
 pub fn resolve_plans(
     metas: &[ConveyorMeta],
     offsets: &HashMap<Ident<Canonical>, usize>,
 ) -> Option<Vec<ConveyorPlan>> {
     let off =
         |name: &str| -> Option<usize> { offsets.get(&Ident::<Canonical>::new(name)).copied() };
-    // Stock-name -> plan index, for held-exit destination linkage.
-    let stock_to_idx: HashMap<&str, usize> = metas
-        .iter()
-        .enumerate()
-        .map(|(i, m)| (m.stock.as_str(), i))
-        .collect();
 
-    let mut plans = Vec::with_capacity(metas.len());
+    // Stock-name -> (base flattened-plan index, belt count). Each meta's belts
+    // are appended in order, so its range is [base, base + n_belts).
+    let mut stock_to_range: HashMap<&str, (usize, usize)> = HashMap::new();
+    let mut base = 0usize;
+    for m in metas {
+        stock_to_range.insert(m.stock.as_str(), (base, n_belts(m)));
+        base += n_belts(m);
+    }
+
+    let mut plans = Vec::with_capacity(base);
     for meta in metas {
-        let leaks = meta
-            .leaks
-            .iter()
-            .map(|l| {
-                Some(LeakPlan {
-                    flow_off: off(&l.flow)?,
-                    frac_off: off(&l.frac_aux)?,
-                    zone_start: l.zone_start,
-                    zone_end: l.zone_end,
-                    integers: l.integers,
-                    dest_conveyor: None, // leak-fed chains are a later step
+        for e in 0..n_belts(meta) {
+            // Element-aware offset resolver: the bare name for a scalar conveyor,
+            // the `name[elem]` subscripted key for element `e` of an arrayed one.
+            let eoff = |name: &str| -> Option<usize> {
+                if meta.element_subscripts.is_empty() {
+                    off(name)
+                } else {
+                    off(&format!("{}[{}]", name, meta.element_subscripts[e]))
+                }
+            };
+            let leaks = meta
+                .leaks
+                .iter()
+                .map(|l| {
+                    Some(LeakPlan {
+                        flow_off: eoff(&l.flow)?,
+                        frac_off: eoff(&l.frac_aux)?,
+                        zone_start: l.zone_start,
+                        zone_end: l.zone_end,
+                        integers: l.integers,
+                        dest_conveyor: None, // leak-fed chains are a later step
+                    })
                 })
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let inflows = meta
-            .inflows
-            .iter()
-            .map(|i| {
-                Some(InflowPlan {
-                    flow_off: off(&i.flow)?,
-                    conveyor_driven: i.conveyor_driven,
-                    placement: i.placement.clone(),
-                    dist: i.dist.clone(),
-                    source: i.source,
+                .collect::<Option<Vec<_>>>()?;
+            let inflows = meta
+                .inflows
+                .iter()
+                .map(|i| {
+                    Some(InflowPlan {
+                        flow_off: eoff(&i.flow)?,
+                        conveyor_driven: i.conveyor_driven,
+                        placement: i.placement.clone(),
+                        dist: i.dist.clone(),
+                        source: i.source,
+                    })
                 })
-            })
-            .collect::<Option<Vec<_>>>()?;
-        plans.push(ConveyorPlan {
-            stock_off: off(&meta.stock)?,
-            len_off: off(&meta.len_aux)?,
-            cap_off: meta.cap_aux.as_deref().and_then(off),
-            inlim_off: meta.inlim_aux.as_deref().and_then(off),
-            sample_off: meta.sample_aux.as_deref().and_then(off),
-            arrest_off: meta.arrest_aux.as_deref().and_then(off),
-            discrete: meta.discrete,
-            exponential_leak: meta.exponential_leak,
-            ignore_earlier_zone_losses: meta.ignore_earlier_zone_losses,
-            primary_out_off: off(&meta.primary_out)?,
-            leaks,
-            inflows,
-            primary_dest_conveyor: meta
-                .primary_dest_conveyor
-                .as_deref()
-                .and_then(|s| stock_to_idx.get(s).copied()),
-        });
+                .collect::<Option<Vec<_>>>()?;
+            // A held-exit destination links element `e` to the same element of
+            // the downstream conveyor. If the downstream has fewer elements
+            // (mismatched shapes, not element-wise coupled), leave it unlinked --
+            // cross-shape conveyor chaining is a later step.
+            let primary_dest_conveyor = meta.primary_dest_conveyor.as_deref().and_then(|stock| {
+                match stock_to_range.get(stock) {
+                    Some(&(dest_base, dest_n)) if e < dest_n => Some(dest_base + e),
+                    _ => None,
+                }
+            });
+            plans.push(ConveyorPlan {
+                stock_off: eoff(&meta.stock)?,
+                len_off: eoff(&meta.len_aux)?,
+                cap_off: meta.cap_aux.as_deref().and_then(&eoff),
+                inlim_off: meta.inlim_aux.as_deref().and_then(&eoff),
+                sample_off: meta.sample_aux.as_deref().and_then(&eoff),
+                arrest_off: meta.arrest_aux.as_deref().and_then(&eoff),
+                discrete: meta.discrete,
+                exponential_leak: meta.exponential_leak,
+                ignore_earlier_zone_losses: meta.ignore_earlier_zone_losses,
+                primary_out_off: eoff(&meta.primary_out)?,
+                leaks,
+                inflows,
+                primary_dest_conveyor,
+            });
+        }
     }
     Some(plans)
 }
@@ -1496,6 +1652,166 @@ mod tests {
             assert!(g.abs() < 1e-9, "step {i}: fallback outflow {g} should be 0");
         }
         assert!((out[20] - 250.0).abs() < 1e-4, "steady outflow {}", out[20]);
+    }
+
+    // ----- arrayed conveyors (§10) -----
+
+    #[test]
+    fn arrayed_conveyor_simulates_independent_belts() {
+        // An arrayed conveyor is N_elem independent belts (§10). `board` has two
+        // elements with DIFFERENT transit times (a=2, b=4, via the shared <len>
+        // referencing the arrayed `transit` aux) and DIFFERENT inflows (a=100,
+        // b=250). Each element must reach its own steady state and its own
+        // transit delay, proving the belts are independent.
+        //   belt[a]: transit 2 -> 8 slats, inflow 100 -> steady 200, out=100.
+        //   belt[b]: transit 4 -> 16 slats, inflow 250 -> steady 1000, out=250.
+        let xml = include_str!("../../../test/conveyors/arrayed_conveyor.xmile");
+        let project = parse(xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build arrayed conveyor vm");
+        vm.run_to_end().expect("run");
+
+        let belt_a = vm.get_series(&Ident::new("belt[a]")).expect("belt[a]");
+        let belt_b = vm.get_series(&Ident::new("belt[b]")).expect("belt[b]");
+        let out_a = vm
+            .get_series(&Ident::new("outflow_f[a]"))
+            .expect("outflow_f[a]");
+        let out_b = vm
+            .get_series(&Ident::new("outflow_f[b]"))
+            .expect("outflow_f[b]");
+        assert!(belt_a.len() > 40, "should have many saved steps");
+
+        // Independent transit delays: dt=0.25. belt[a] (8 slats) exits the first
+        // cohort at t=2 (step 8); belt[b] (16 slats) not until t=4 (step 16).
+        for (i, &g) in out_a.iter().enumerate().take(8) {
+            assert!(g.abs() < 1e-9, "belt[a] step {i}: outflow {g} should be 0");
+        }
+        for (i, &g) in out_b.iter().enumerate().take(16) {
+            assert!(g.abs() < 1e-9, "belt[b] step {i}: outflow {g} should be 0");
+        }
+        // belt[a] is already full/steady at step 8, but belt[b] (transit 4) is not
+        // yet -- so at step 8 the two belts are in DIFFERENT states, which is the
+        // whole point of independence.
+        assert!(
+            (out_a[8] - 100.0).abs() < 1e-6,
+            "belt[a] outflow at step 8 {} (want 100)",
+            out_a[8]
+        );
+        assert!(
+            out_b[8].abs() < 1e-9,
+            "belt[b] still filling at step 8, outflow {} (want 0)",
+            out_b[8]
+        );
+
+        // Independent steady states.
+        let last = belt_a.len() - 1;
+        assert!(
+            (belt_a[last] - 200.0).abs() < 1e-4,
+            "belt[a] steady contents {} (want 200)",
+            belt_a[last]
+        );
+        assert!(
+            (belt_b[last] - 1000.0).abs() < 1e-4,
+            "belt[b] steady contents {} (want 1000)",
+            belt_b[last]
+        );
+        assert!(
+            (out_a[last] - 100.0).abs() < 1e-6 && (out_b[last] - 250.0).abs() < 1e-6,
+            "steady outflows a={} b={} (want 100, 250)",
+            out_a[last],
+            out_b[last]
+        );
+    }
+
+    #[test]
+    fn arrayed_conveyor_expands_to_one_plan_per_element() {
+        // resolve_plans flattens an arrayed conveyor into one plan per element,
+        // each pointing at that element's contiguous data-buffer slots -- and the
+        // per-element stock/len/flow slots must be DISTINCT (independent belts).
+        let xml = include_str!("../../../test/conveyors/arrayed_conveyor.xmile");
+        let project = parse(xml);
+        let main = project.models[0].name.clone();
+        let (compiled, plans) = build_compiled(&project, &main).expect("build_compiled");
+        assert_eq!(plans.len(), 2, "two elements -> two flattened plans");
+        assert_ne!(
+            plans[0].stock_off, plans[1].stock_off,
+            "each element's belt reads a distinct stock slot"
+        );
+        assert_ne!(
+            plans[0].len_off, plans[1].len_off,
+            "each element has its own transit-time slot"
+        );
+        assert_ne!(
+            plans[0].primary_out_off, plans[1].primary_out_off,
+            "each element writes a distinct outflow slot"
+        );
+        // Sanity: the resolved offsets are real slots in the compiled buffer.
+        assert_eq!(
+            compiled.get_offset(&Ident::new("belt[a]")),
+            Some(plans[0].stock_off)
+        );
+        assert_eq!(
+            compiled.get_offset(&Ident::new("belt[b]")),
+            Some(plans[1].stock_off)
+        );
+    }
+
+    #[test]
+    fn arrayed_conveyor_with_shared_leak_conserves_per_element() {
+        // A shared linear leak fraction (0.2) applied apply-to-all across both
+        // elements. Each belt conserves independently: steady outflow = inflow *
+        // (1 - 0.2) = 0.8 * inflow, leak = 0.2 * inflow, per element.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>attriting</outflow>
+          <dimensions><dim name="board"/></dimensions>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f">
+          <element subscript="a"><eqn>100</eqn></element>
+          <element subscript="b"><eqn>250</eqn></element>
+          <dimensions><dim name="board"/></dimensions></flow>
+        <flow name="out_f"><dimensions><dim name="board"/></dimensions></flow>
+        <flow name="attriting"><eqn>0.2</eqn><leak/><dimensions><dim name="board"/></dimensions></flow>"#,
+        );
+        // wrap_model has no <dimensions>; inject the board dimension.
+        let xml = xml.replace(
+            "<model>",
+            "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build arrayed leak vm");
+        vm.run_to_end().expect("run");
+
+        let out_a = vm.get_series(&Ident::new("out_f[a]")).expect("out_f[a]");
+        let out_b = vm.get_series(&Ident::new("out_f[b]")).expect("out_f[b]");
+        let leak_a = vm
+            .get_series(&Ident::new("attriting[a]"))
+            .expect("attriting[a]");
+        let leak_b = vm
+            .get_series(&Ident::new("attriting[b]"))
+            .expect("attriting[b]");
+        let last = out_a.len() - 1;
+        assert!(
+            (out_a[last] - 80.0).abs() < 1e-3,
+            "belt[a] steady outflow {} (want 80)",
+            out_a[last]
+        );
+        assert!(
+            (out_b[last] - 200.0).abs() < 1e-3,
+            "belt[b] steady outflow {} (want 200)",
+            out_b[last]
+        );
+        assert!(
+            (leak_a[last] - 20.0).abs() < 1e-3,
+            "belt[a] steady leak {} (want 20)",
+            leak_a[last]
+        );
+        assert!(
+            (leak_b[last] - 50.0).abs() < 1e-3,
+            "belt[b] steady leak {} (want 50)",
+            leak_b[last]
+        );
     }
 
     #[test]
