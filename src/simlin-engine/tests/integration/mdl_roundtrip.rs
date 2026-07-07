@@ -1684,38 +1684,23 @@ const EXPECTED_NON_IDEMPOTENT: &[&str] = &[
     "test/test-models/tests/subscripted_xidz/test_subscripted_xidz.mdl",
     "test/test-models/tests/xidz_zidz/xidz_zidz.mdl",
     "test/test-models/tests/zeroled_decimals/test_zeroled_decimals.mdl",
-    // CRLF free-text accumulation (GH #849)
+    // CRLF free-text accumulation (GH #849). The free-text sanitization choke
+    // point (`mdl::writer::sanitize_free_text`) normalizes embedded carriage
+    // returns, so the fixtures whose ONLY non-idempotence was CR accumulation
+    // are now fixpoints and have been removed from this list. The entries that
+    // remain here still fail for a SEPARATE reason (a sketch-instability or
+    // arrayed-order diff co-occurring in the same file); the CR class alone no
+    // longer keeps any fixture non-idempotent.
     "test/metasd/WRLD3-03/wrld3-03.mdl",
     "test/metasd/bathtub-statistics/integration3.mdl",
     "test/metasd/covid19-us-homer/homer v8/Covid19US v8.mdl",
-    "test/metasd/critical-slowing/critical-slowing.mdl",
     "test/metasd/early-warnings-catastrophe/catastropeWarning2.mdl",
     "test/metasd/pink-noise/PinkNoise2010.mdl",
     "test/metasd/theil-statistics/Theil_2011.mdl",
     "test/metasd/wonderland/Wonderland3.mdl",
     "test/sdeverywhere/models/active_initial/active_initial.mdl",
-    "test/sdeverywhere/models/flatten/input1.mdl",
-    "test/sdeverywhere/models/flatten/input2.mdl",
-    "test/sdeverywhere/models/sir/model/sir.mdl",
-    "test/sdeverywhere/models/sir/sir.mdl",
     "test/test-models/samples/Query_file/Query_file.mdl",
-    "test/test-models/samples/SIR/SIR.mdl",
-    "test/test-models/samples/teacup/teacup.mdl",
-    // Uppercase `.MDL` twin of teacup; same CRLF free-text non-idempotence.
-    "test/test-models/tests/case_sensitive_extension/teacup-upper.MDL",
-    "test/test-models/tests/active_initial/test_active_initial.mdl",
     "test/test-models/tests/delay_pipeline/test_pipeline_delays.mdl",
-    "test/test-models/tests/euler_step_vs_saveper/test_euler_step_vs_saveper.mdl",
-    "test/test-models/tests/forecast/test_forecast.mdl",
-    "test/test-models/tests/limits/test_limits.mdl",
-    "test/test-models/tests/line_breaks/test_line_breaks.mdl",
-    "test/test-models/tests/macro_arrayed/test_macro_arrayed.mdl",
-    "test/test-models/tests/macro_clearn_ramp_from_to/test_macro_clearn_ramp_from_to.mdl",
-    "test/test-models/tests/macro_clearn_sample_until/test_macro_clearn_sample_until.mdl",
-    "test/test-models/tests/macro_clearn_sshape/test_macro_clearn_sshape.mdl",
-    "test/test-models/tests/macro_multi_output/test_macro_multi_output.mdl",
-    "test/test-models/tests/smooth_and_stock/test_smooth_and_stock.mdl",
-    "test/test-models/tests/variable_ranges/test_variable_ranges.mdl",
     // arrayed element order
     "test/metasd/social-network-valuation/groupon 1.mdl",
     "test/metasd/social-network-valuation/groupon 2.mdl",
@@ -1763,9 +1748,6 @@ const EXPECTED_NON_IDEMPOTENT: &[&str] = &[
     "test/sdeverywhere/models/allocate/allocate.mdl",
     "test/sdeverywhere/models/arrays_cname/arrays_cname.mdl",
     "test/sdeverywhere/models/arrays_varname/arrays_varname.mdl",
-    "test/sdeverywhere/models/longeqns/longeqns.mdl",
-    "test/sdeverywhere/models/prune/prune.mdl",
-    "test/sdeverywhere/models/sumif/sumif.mdl",
     "test/sdeverywhere/models/vector/vector.mdl",
     "test/test-models/tests/subscript_aggregation/test_subscript_aggregation.mdl",
     "test/test-models/tests/subscript_transposition/test_subscript_transposition.mdl",

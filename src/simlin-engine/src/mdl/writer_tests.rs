@@ -3033,6 +3033,250 @@ fn sketch_roundtrip_sanitizes_multiline_view_title() {
     );
 }
 
+// ---- Free-text sanitization choke point (GH #849) ----
+//
+// Free-text fields -- a variable's units/documentation, a group's name/doc,
+// a `22:` unit-equivalence token -- are NOT escaped by the reader, so any MDL
+// structural character emitted raw corrupts the file. These tests pin the
+// single `sanitize_free_text` choke point: structural characters are
+// neutralized (never silently dropped, which would invent phantom entries or
+// truncate the model) and embedded carriage returns are normalized so
+// multi-line free text round-trips as a fixpoint.
+
+/// The sorted variable idents of a parsed single-model project. Used to compare
+/// a structurally-hostile free-text field against a benign baseline: any
+/// phantom variable invented by an un-neutralized terminator makes the sets
+/// diverge, independent of how the writer's control variables are re-imported.
+fn variable_idents(project: &datamodel::Project) -> Vec<String> {
+    let mut idents: Vec<String> = project.models[0]
+        .variables
+        .iter()
+        .map(|v| v.get_ident().to_owned())
+        .collect();
+    idents.sort();
+    idents
+}
+
+#[test]
+fn doc_with_pipe_reparses_as_single_variable() {
+    // Confirmed corruption repro (GH #849): `|` is the MDL entry terminator, so
+    // a raw `|` in documentation ends the entry early and the trailing text
+    // re-parses as phantom variables (a `dmnl` aux, a `maybe 6 = TIME` aux).
+    let malicious = make_aux(
+        "cost",
+        "5",
+        Some("widgets"),
+        "cost is 5 | maybe 6 ~ per year",
+    );
+    let benign = make_aux("cost", "5", Some("widgets"), "cost is 5 maybe 6 per year");
+
+    let mal_mdl =
+        crate::mdl::project_to_mdl(&make_project(vec![make_model(vec![malicious])])).unwrap();
+    let ben_mdl =
+        crate::mdl::project_to_mdl(&make_project(vec![make_model(vec![benign])])).unwrap();
+
+    let mal = crate::mdl::parse_mdl(&mal_mdl).expect("sanitized MDL must re-parse");
+    let ben = crate::mdl::parse_mdl(&ben_mdl).expect("benign MDL must re-parse");
+
+    assert_eq!(
+        variable_idents(&mal),
+        variable_idents(&ben),
+        "a `|` in documentation must not invent phantom variables",
+    );
+    assert!(
+        mal.models[0]
+            .variables
+            .iter()
+            .any(|v| v.get_ident() == "cost"),
+        "the real `cost` aux must survive sanitization",
+    );
+}
+
+#[test]
+fn units_with_pipe_reparses_cleanly() {
+    // `|` terminating the entry is structural in the units field too.
+    let malicious = make_aux("cost", "5", Some("widgets|day"), "note");
+    let benign = make_aux("cost", "5", Some("widgets"), "note");
+
+    let mal_mdl =
+        crate::mdl::project_to_mdl(&make_project(vec![make_model(vec![malicious])])).unwrap();
+    let ben_mdl =
+        crate::mdl::project_to_mdl(&make_project(vec![make_model(vec![benign])])).unwrap();
+
+    let mal = crate::mdl::parse_mdl(&mal_mdl).expect("sanitized MDL must re-parse");
+    let ben = crate::mdl::parse_mdl(&ben_mdl).expect("benign MDL must re-parse");
+
+    assert_eq!(
+        variable_idents(&mal),
+        variable_idents(&ben),
+        "a `|` in units must not invent phantom variables",
+    );
+}
+
+#[test]
+fn doc_with_embedded_carriage_return_is_idempotent() {
+    // A CRLF-sourced multi-line doc carries an internal `\r`. Without line-ending
+    // normalization, the single end-of-file LF->CRLF pass turns `\r\n` into
+    // `\r\r\n`, growing a carriage return every write (GH #849 idempotence).
+    //
+    // The assertion targets the DOC FIELD, not the whole file: an unrelated,
+    // separately-allowlisted class (control-variable value substitution) makes
+    // this hand-built minimal project's control block non-idempotent, which
+    // would mask the doc-field fixpoint we are pinning here.
+    let doc_of = |project: &datamodel::Project| -> String {
+        match project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x")
+            .expect("x must survive")
+        {
+            Variable::Aux(a) => a.documentation.clone(),
+            _ => panic!("expected x to re-parse as an Aux"),
+        }
+    };
+
+    let var = make_aux("x", "5", Some("Units"), "line one\r\nline two");
+    let project = make_project(vec![make_model(vec![var])]);
+
+    let write1 = crate::mdl::project_to_mdl(&project).unwrap();
+    assert!(
+        !write1.contains("\r\r"),
+        "no doubled carriage returns in the output: {write1:?}",
+    );
+
+    let reparsed1 = crate::mdl::parse_mdl(&write1).expect("first write must re-parse");
+    let doc1 = doc_of(&reparsed1);
+    assert!(
+        !doc1.contains("\r\r"),
+        "the round-tripped doc must not accumulate carriage returns: {doc1:?}",
+    );
+
+    let write2 = crate::mdl::project_to_mdl(&reparsed1).unwrap();
+    let reparsed2 = crate::mdl::parse_mdl(&write2).expect("second write must re-parse");
+    assert_eq!(
+        doc1,
+        doc_of(&reparsed2),
+        "the multi-line doc field must be a round-trip fixpoint",
+    );
+}
+
+#[test]
+fn group_doc_with_pipe_does_not_corrupt_model() {
+    // The group banner's doc is skipped by `lexer::try_group_star` up to `|`, so
+    // a raw `|` in the doc ends the banner early and the remainder re-parses as
+    // a phantom variable.
+    let make = |group_doc: &str| {
+        let mut model = make_model(vec![
+            make_aux("x", "5", Some("Units"), "note"),
+            make_aux("y", "7", Some("Units"), "note"),
+        ]);
+        model.groups = vec![datamodel::ModelGroup {
+            name: "cluster".to_owned(),
+            doc: Some(group_doc.to_owned()),
+            parent: None,
+            members: vec!["x".to_owned()],
+            run_enabled: false,
+        }];
+        make_project(vec![model])
+    };
+
+    let mal_mdl = crate::mdl::project_to_mdl(&make("desc | with pipe \r\n and newline")).unwrap();
+    let ben_mdl = crate::mdl::project_to_mdl(&make("desc clean")).unwrap();
+
+    let mal = crate::mdl::parse_mdl(&mal_mdl).expect("sanitized MDL must re-parse");
+    let ben = crate::mdl::parse_mdl(&ben_mdl).expect("benign MDL must re-parse");
+
+    assert_eq!(
+        variable_idents(&mal),
+        variable_idents(&ben),
+        "a `|` in a group doc must not invent phantom variables",
+    );
+}
+
+#[test]
+fn unit_equivalence_with_comma_and_pipe_not_split() {
+    // A `22:` line splits its name/aliases on `,`, so a raw `,` in a unit name
+    // silently fractures it into extra aliases.
+    let mut project = make_project(vec![make_model(vec![make_aux(
+        "x",
+        "5",
+        Some("Units"),
+        "note",
+    )])]);
+    project.units = vec![Unit {
+        name: "kg,widget|thing".to_owned(),
+        equation: None,
+        disabled: false,
+        aliases: vec!["a,b".to_owned()],
+    }];
+
+    let mdl = crate::mdl::project_to_mdl(&project).unwrap();
+    let reparsed = crate::mdl::parse_mdl(&mdl).expect("sanitized MDL must re-parse");
+
+    assert_eq!(
+        reparsed.units.len(),
+        1,
+        "exactly one unit equivalence must survive",
+    );
+    let unit = &reparsed.units[0];
+    assert!(
+        !unit.name.contains(','),
+        "the comma must be neutralized, not left to split the name: {:?}",
+        unit.name,
+    );
+    assert_eq!(
+        unit.aliases.len(),
+        1,
+        "the comma must not fracture the name/alias into extra aliases: {:?}",
+        unit.aliases,
+    );
+}
+
+#[test]
+fn section_terminator_in_doc_does_not_truncate_model() {
+    // The literal `\\\---///` sequence ends the whole equations section; inside a
+    // doc it must not truncate the model and drop later variables.
+    let a = make_aux("a", "1", Some("U"), r"boom \\\---/// still going");
+    let b = make_aux("b", "2", Some("U"), "second var");
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![make_model(vec![a, b])])).unwrap();
+
+    let reparsed = crate::mdl::parse_mdl(&mdl).expect("sanitized MDL must re-parse");
+    let idents = variable_idents(&reparsed);
+    assert!(
+        idents.iter().any(|i| i == "a"),
+        "variable `a` (whose doc held the terminator) must survive: {idents:?}",
+    );
+    assert!(
+        idents.iter().any(|i| i == "b"),
+        "the section terminator in `a`'s doc must not drop later variable `b`: {idents:?}",
+    );
+}
+
+#[test]
+fn section_terminator_variants_in_units_do_not_truncate_model() {
+    // The units field is lexer-tokenized, and `check_eq_end` (lexer.rs) accepts
+    // BOTH the canonical three-backslash terminator AND a two-backslash variant.
+    // A units string carrying either run must be neutralized or it emits an
+    // EqEnd mid-equation and truncates the model. This is only reachable from a
+    // non-MDL source (XMILE / a hand-built datamodel), so build the units
+    // directly. Each variant is tested with a trailing variable that must
+    // survive.
+    for terminator in [r"\\\---///", r"\\---///", r"///---\\\", r"///---\\"] {
+        let units = format!("widgets {terminator} year");
+        let a = make_aux("a", "1", Some(&units), "doc");
+        let b = make_aux("b", "2", Some("U"), "second var");
+        let mdl = crate::mdl::project_to_mdl(&make_project(vec![make_model(vec![a, b])]))
+            .expect("write must succeed");
+        let reparsed = crate::mdl::parse_mdl(&mdl)
+            .unwrap_or_else(|e| panic!("units terminator {terminator:?} must re-parse: {e}"));
+        let idents = variable_idents(&reparsed);
+        assert!(
+            idents.iter().any(|i| i == "a") && idents.iter().any(|i| i == "b"),
+            "units terminator {terminator:?} must not truncate the model: {idents:?}",
+        );
+    }
+}
+
 #[test]
 fn sketch_roundtrip_preserves_flow_endpoints_with_nonadjacent_valve_uid() {
     let stock_a = Variable::Stock(Stock {

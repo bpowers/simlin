@@ -27,6 +27,146 @@ fn underbar_to_space(name: &str) -> String {
     name.replace('_', " ")
 }
 
+/// The section-terminator sequences that end the equations section early if
+/// they appear raw inside ANY free-text field, truncating the model. The
+/// canonical form uses three backslashes (`\\\---///` / `///---\\\`), but the
+/// lexer's `check_eq_end` (lexer.rs) ALSO accepts a two-backslash variant
+/// (`\\---///` / `///---\\`), which the units field -- being lexer-tokenized --
+/// is vulnerable to. `find_comment_terminator` only matches the three-backslash
+/// form, so comments are only vulnerable to the canonical variant, but the
+/// sanitizer neutralizes all four regardless of field for simplicity.
+///
+/// A three-backslash run contains the two-backslash run as a substring, so the
+/// pre-pass MUST replace the three-backslash forms FIRST (longest match) or a
+/// canonical run gets mangled into a stray backslash.
+const SECTION_TERMINATOR_OPEN: &str = "\\\\\\---///";
+const SECTION_TERMINATOR_CLOSE: &str = "///---\\\\\\";
+const SECTION_TERMINATOR_OPEN_SHORT: &str = "\\\\---///";
+const SECTION_TERMINATOR_CLOSE_SHORT: &str = "///---\\\\";
+
+/// How a free-text field treats internal line breaks.
+#[derive(Clone, Copy)]
+enum FreeTextLineMode {
+    /// Preserve internal line breaks, normalized to canonical LF -- a multi-line
+    /// comment / group-doc field is legal.
+    Multiline,
+    /// Collapse every line-break run to a single space -- the field must occupy
+    /// one physical line (a group-banner name, a `22:` settings token) or treats
+    /// line breaks as insignificant whitespace (a tokenized units field).
+    SingleLine,
+}
+
+/// The single choke point that neutralizes MDL structural characters in
+/// modeler-authored free text before it is embedded in the file. Every
+/// free-text sink (variable units/documentation, group name/doc, `22:`
+/// unit-equivalence tokens) routes through this so the policy lives in one
+/// place. GH #849.
+///
+/// ## What the reader treats as structure (see reader.rs / lexer.rs / settings.rs)
+///
+/// None of these fields are escaped on read, so any character the reader reads
+/// as structure corrupts the file if emitted raw:
+///
+/// - `|` (`Token::Pipe`) terminates a variable entry. In a `~`-comment it is
+///   found by `reader::find_comment_terminator` scanning RAW bytes; in a units
+///   field it is `SectionEnd::Pipe`; in a group banner `lexer::try_group_star`
+///   stops its skip-to-terminator scan on it. A raw `|` anywhere in a comment,
+///   units, group name, or group doc ends the construct early and the trailing
+///   remainder re-parses as phantom variables (the confirmed repro).
+/// - `~` (`Token::Tilde`) separates a variable's equation / units / comment.
+///   A raw `~` inside the *units* field is read as the second tilde and ends
+///   units early. (A `~` inside a `~`-comment is legal prose and is preserved,
+///   apart from the reader's trailing `:SUP`/`:SUPPLEMENTARY` flag heuristic --
+///   which is a feature, not corruption -- so comments do NOT list `~`.)
+/// - `\\\---///` and `///---\\\` terminate the whole equations section; either
+///   run inside any free-text field truncates the model.
+/// - `,` separates the name / aliases / equation of a `22:` unit-equivalence
+///   line (`settings::parse_unit_equivalence`); a line break ends the line.
+/// - A line break ends a group-banner name line (`try_group_star` stops the
+///   name at whitespace) and a `22:` settings line, so those fields are
+///   single-line.
+///
+/// ## Policy
+///
+/// Line endings are normalized LOSSLESSLY to canonical LF (`\r\n` and lone
+/// `\r` -> `\n`). `write_project` runs a single LF->CRLF pass at the very end,
+/// so normalizing here is what makes a field carrying `\r` (from a CRLF source
+/// or a prior round trip) a fixpoint instead of accumulating a carriage return
+/// every write (GH #849 idempotence).
+///
+/// Structural characters that have no escape in MDL free text are replaced with
+/// a documented safe substitute (never dropped silently): `|` -> `/` and the
+/// section-terminator runs plus the caller's field-specific separators
+/// (`extra_forbidden`: `~` in units, `,` in a `22:` token) -> a space. `|` maps
+/// to a NON-whitespace substitute so a field-final `|` cannot become a
+/// trim-sensitive trailing space in the reader-trimmed comment field (which
+/// would break idempotence). Substitution is preferred over erroring because
+/// the richer writer-diagnostics channel is a separate change (GH #856), so
+/// `project_to_mdl` keeps returning `Result<String>` here.
+fn sanitize_free_text(raw: &str, line_mode: FreeTextLineMode, extra_forbidden: &[char]) -> String {
+    // Neutralize the multi-char section-terminator runs first: the per-char
+    // pass below cannot recognize them, and replacing them with a space cannot
+    // re-form either run (neither contains a space).
+    // Replace the three-backslash (canonical) runs BEFORE the two-backslash
+    // variants: a canonical run contains the short run as a substring, so the
+    // reverse order would leave a stray backslash behind.
+    let pre = if raw.contains('\\') && (raw.contains("---///") || raw.contains("///---")) {
+        raw.replace(SECTION_TERMINATOR_OPEN, " ")
+            .replace(SECTION_TERMINATOR_CLOSE, " ")
+            .replace(SECTION_TERMINATOR_OPEN_SHORT, " ")
+            .replace(SECTION_TERMINATOR_CLOSE_SHORT, " ")
+    } else {
+        raw.to_owned()
+    };
+
+    let mut out = String::with_capacity(pre.len());
+    let mut prev_was_break = false;
+    let mut chars = pre.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            // Normalize CRLF and lone CR to the same break handling as LF; a
+            // following LF is consumed so CRLF collapses to a single break.
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                push_line_break(&mut out, line_mode, &mut prev_was_break);
+            }
+            '\n' => push_line_break(&mut out, line_mode, &mut prev_was_break),
+            '|' => {
+                out.push('/');
+                prev_was_break = false;
+            }
+            c if extra_forbidden.contains(&c) => {
+                out.push(' ');
+                prev_was_break = false;
+            }
+            c => {
+                out.push(c);
+                prev_was_break = false;
+            }
+        }
+    }
+    out
+}
+
+/// Emit a normalized line break for `sanitize_free_text`: a canonical LF for a
+/// multi-line field, or a single collapsed space for a single-line field.
+fn push_line_break(out: &mut String, line_mode: FreeTextLineMode, prev_was_break: &mut bool) {
+    match line_mode {
+        FreeTextLineMode::Multiline => {
+            // Preserve internal breaks exactly (do not collapse blank lines).
+            out.push('\n');
+        }
+        FreeTextLineMode::SingleLine => {
+            if !*prev_was_break {
+                out.push(' ');
+                *prev_was_break = true;
+            }
+        }
+    }
+}
+
 fn is_mdl_quoted_ident(name: &str) -> bool {
     let bytes = name.as_bytes();
     bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"'
@@ -1558,13 +1698,20 @@ fn write_arrayed_element_entries(
 }
 
 /// Append the `~\tunits\n\t~\tcomment\n\t|` trailer.
+///
+/// Both free-text fields route through `sanitize_free_text` (GH #849): a raw
+/// `~`/`|` in units, a `|` in the comment, an embedded section terminator, or an
+/// accumulated carriage return would otherwise corrupt or destabilize the file.
 fn write_units_and_comment(buf: &mut String, units: &Option<String>, doc: &str) {
     buf.push_str("\n\t~\t");
     if let Some(u) = units {
-        buf.push_str(u);
+        // Units are tokenized between the two `~`, so `~` (the field separator)
+        // is structural; line breaks are insignificant whitespace.
+        buf.push_str(&sanitize_free_text(u, FreeTextLineMode::SingleLine, &['~']));
     }
     buf.push_str("\n\t~\t");
-    buf.push_str(doc);
+    // The `~`-comment is raw text up to `|`; multi-line is legal.
+    buf.push_str(&sanitize_free_text(doc, FreeTextLineMode::Multiline, &[]));
     buf.push_str("\n\t|");
 }
 
@@ -2172,6 +2319,14 @@ fn max_sketch_uid(elements: &[ViewElement], valve_uids: &HashMap<i32, i32>) -> i
 
 /// MDL view titles are written on a single `*<title>` line.
 /// Collapse CR/LF runs so untrusted titles cannot break sketch structure.
+///
+/// This is deliberately NOT the `sanitize_free_text` equation-section choke
+/// point: a view title lives in the SKETCH section, whose structural rules
+/// differ (the sketch's own records use `|` as an intra-record field separator,
+/// e.g. the `$...|...|...` font line, so a `|` in a title is not the
+/// equation-entry terminator). Only the line-break collapse is shared in
+/// spirit; keeping this separate avoids applying equation-section escaping
+/// (`|`->`/`) to sketch text where `|` is not structural.
 fn sanitize_view_title_for_mdl(title: &str) -> String {
     let mut out = String::with_capacity(title.len());
     let mut prev_was_line_break = false;
@@ -3146,12 +3301,24 @@ impl MdlWriter {
             if group.name.eq_ignore_ascii_case("Control") {
                 continue;
             }
-            // Group marker
+            // Group marker. Both free-text fields route through the
+            // sanitization choke point (GH #849): the name is a single banner
+            // line (`try_group_star` stops it at whitespace), and the doc is
+            // skipped up to `|` -- so a raw `|` in either, an embedded section
+            // terminator, or a line break in the name would corrupt the file.
             write!(
                 self.buf,
                 "\n********************************************************\n\t.{}\n********************************************************~\n\t\t{}\n\t|\n",
-                underbar_to_space(&group.name),
-                group.doc.as_deref().unwrap_or(""),
+                sanitize_free_text(
+                    &underbar_to_space(&group.name),
+                    FreeTextLineMode::SingleLine,
+                    &[],
+                ),
+                sanitize_free_text(
+                    group.doc.as_deref().unwrap_or(""),
+                    FreeTextLineMode::Multiline,
+                    &[],
+                ),
             )
             .unwrap();
 
@@ -3440,18 +3607,25 @@ impl MdlWriter {
         // The 0x7F (DEL) between :L and <%^E!@ is required by Vensim's parser.
         self.buf.push_str(":L\x7F<%^E!@\n");
 
-        // Type 22: Unit equivalences
+        // Type 22: Unit equivalences. The name/equation/aliases are one
+        // physical `22:` line whose fields split on `,` (see
+        // `settings::parse_unit_equivalence`), so each free-text token routes
+        // through the sanitization choke point with `,` as its field separator
+        // (GH #849) -- a raw comma would otherwise fracture a name into extra
+        // aliases and a line break would truncate the line.
+        let sanitize_unit_field =
+            |s: &str| sanitize_free_text(s, FreeTextLineMode::SingleLine, &[',']);
         for unit in &project.units {
             if unit.disabled {
                 continue;
             }
             self.buf.push_str("22:");
             if let Some(eq) = &unit.equation {
-                write!(self.buf, "{},", eq).unwrap();
+                write!(self.buf, "{},", sanitize_unit_field(eq)).unwrap();
             }
-            self.buf.push_str(&unit.name);
+            self.buf.push_str(&sanitize_unit_field(&unit.name));
             for alias in &unit.aliases {
-                write!(self.buf, ",{}", alias).unwrap();
+                write!(self.buf, ",{}", sanitize_unit_field(alias)).unwrap();
             }
             self.buf.push('\n');
         }
