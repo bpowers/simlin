@@ -27,6 +27,146 @@ fn underbar_to_space(name: &str) -> String {
     name.replace('_', " ")
 }
 
+/// The section-terminator sequences that end the equations section early if
+/// they appear raw inside ANY free-text field, truncating the model. The
+/// canonical form uses three backslashes (`\\\---///` / `///---\\\`), but the
+/// lexer's `check_eq_end` (lexer.rs) ALSO accepts a two-backslash variant
+/// (`\\---///` / `///---\\`), which the units field -- being lexer-tokenized --
+/// is vulnerable to. `find_comment_terminator` only matches the three-backslash
+/// form, so comments are only vulnerable to the canonical variant, but the
+/// sanitizer neutralizes all four regardless of field for simplicity.
+///
+/// A three-backslash run contains the two-backslash run as a substring, so the
+/// pre-pass MUST replace the three-backslash forms FIRST (longest match) or a
+/// canonical run gets mangled into a stray backslash.
+const SECTION_TERMINATOR_OPEN: &str = "\\\\\\---///";
+const SECTION_TERMINATOR_CLOSE: &str = "///---\\\\\\";
+const SECTION_TERMINATOR_OPEN_SHORT: &str = "\\\\---///";
+const SECTION_TERMINATOR_CLOSE_SHORT: &str = "///---\\\\";
+
+/// How a free-text field treats internal line breaks.
+#[derive(Clone, Copy)]
+enum FreeTextLineMode {
+    /// Preserve internal line breaks, normalized to canonical LF -- a multi-line
+    /// comment / group-doc field is legal.
+    Multiline,
+    /// Collapse every line-break run to a single space -- the field must occupy
+    /// one physical line (a group-banner name, a `22:` settings token) or treats
+    /// line breaks as insignificant whitespace (a tokenized units field).
+    SingleLine,
+}
+
+/// The single choke point that neutralizes MDL structural characters in
+/// modeler-authored free text before it is embedded in the file. Every
+/// free-text sink (variable units/documentation, group name/doc, `22:`
+/// unit-equivalence tokens) routes through this so the policy lives in one
+/// place. GH #849.
+///
+/// ## What the reader treats as structure (see reader.rs / lexer.rs / settings.rs)
+///
+/// None of these fields are escaped on read, so any character the reader reads
+/// as structure corrupts the file if emitted raw:
+///
+/// - `|` (`Token::Pipe`) terminates a variable entry. In a `~`-comment it is
+///   found by `reader::find_comment_terminator` scanning RAW bytes; in a units
+///   field it is `SectionEnd::Pipe`; in a group banner `lexer::try_group_star`
+///   stops its skip-to-terminator scan on it. A raw `|` anywhere in a comment,
+///   units, group name, or group doc ends the construct early and the trailing
+///   remainder re-parses as phantom variables (the confirmed repro).
+/// - `~` (`Token::Tilde`) separates a variable's equation / units / comment.
+///   A raw `~` inside the *units* field is read as the second tilde and ends
+///   units early. (A `~` inside a `~`-comment is legal prose and is preserved,
+///   apart from the reader's trailing `:SUP`/`:SUPPLEMENTARY` flag heuristic --
+///   which is a feature, not corruption -- so comments do NOT list `~`.)
+/// - `\\\---///` and `///---\\\` terminate the whole equations section; either
+///   run inside any free-text field truncates the model.
+/// - `,` separates the name / aliases / equation of a `22:` unit-equivalence
+///   line (`settings::parse_unit_equivalence`); a line break ends the line.
+/// - A line break ends a group-banner name line (`try_group_star` stops the
+///   name at whitespace) and a `22:` settings line, so those fields are
+///   single-line.
+///
+/// ## Policy
+///
+/// Line endings are normalized LOSSLESSLY to canonical LF (`\r\n` and lone
+/// `\r` -> `\n`). `write_project` runs a single LF->CRLF pass at the very end,
+/// so normalizing here is what makes a field carrying `\r` (from a CRLF source
+/// or a prior round trip) a fixpoint instead of accumulating a carriage return
+/// every write (GH #849 idempotence).
+///
+/// Structural characters that have no escape in MDL free text are replaced with
+/// a documented safe substitute (never dropped silently): `|` -> `/` and the
+/// section-terminator runs plus the caller's field-specific separators
+/// (`extra_forbidden`: `~` in units, `,` in a `22:` token) -> a space. `|` maps
+/// to a NON-whitespace substitute so a field-final `|` cannot become a
+/// trim-sensitive trailing space in the reader-trimmed comment field (which
+/// would break idempotence). Substitution is preferred over erroring because
+/// the richer writer-diagnostics channel is a separate change (GH #856), so
+/// `project_to_mdl` keeps returning `Result<String>` here.
+fn sanitize_free_text(raw: &str, line_mode: FreeTextLineMode, extra_forbidden: &[char]) -> String {
+    // Neutralize the multi-char section-terminator runs first: the per-char
+    // pass below cannot recognize them, and replacing them with a space cannot
+    // re-form either run (neither contains a space).
+    // Replace the three-backslash (canonical) runs BEFORE the two-backslash
+    // variants: a canonical run contains the short run as a substring, so the
+    // reverse order would leave a stray backslash behind.
+    let pre = if raw.contains('\\') && (raw.contains("---///") || raw.contains("///---")) {
+        raw.replace(SECTION_TERMINATOR_OPEN, " ")
+            .replace(SECTION_TERMINATOR_CLOSE, " ")
+            .replace(SECTION_TERMINATOR_OPEN_SHORT, " ")
+            .replace(SECTION_TERMINATOR_CLOSE_SHORT, " ")
+    } else {
+        raw.to_owned()
+    };
+
+    let mut out = String::with_capacity(pre.len());
+    let mut prev_was_break = false;
+    let mut chars = pre.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            // Normalize CRLF and lone CR to the same break handling as LF; a
+            // following LF is consumed so CRLF collapses to a single break.
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                push_line_break(&mut out, line_mode, &mut prev_was_break);
+            }
+            '\n' => push_line_break(&mut out, line_mode, &mut prev_was_break),
+            '|' => {
+                out.push('/');
+                prev_was_break = false;
+            }
+            c if extra_forbidden.contains(&c) => {
+                out.push(' ');
+                prev_was_break = false;
+            }
+            c => {
+                out.push(c);
+                prev_was_break = false;
+            }
+        }
+    }
+    out
+}
+
+/// Emit a normalized line break for `sanitize_free_text`: a canonical LF for a
+/// multi-line field, or a single collapsed space for a single-line field.
+fn push_line_break(out: &mut String, line_mode: FreeTextLineMode, prev_was_break: &mut bool) {
+    match line_mode {
+        FreeTextLineMode::Multiline => {
+            // Preserve internal breaks exactly (do not collapse blank lines).
+            out.push('\n');
+        }
+        FreeTextLineMode::SingleLine => {
+            if !*prev_was_break {
+                out.push(' ');
+                *prev_was_break = true;
+            }
+        }
+    }
+}
+
 fn is_mdl_quoted_ident(name: &str) -> bool {
     let bytes = name.as_bytes();
     bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"'
@@ -87,10 +227,16 @@ fn escape_mdl_quoted_ident(name: &str) -> String {
 /// Format a canonical identifier for MDL output, preserving spaces and
 /// adding quotes when the bare form would not round-trip through MDL parsing.
 fn format_mdl_ident(name: &str) -> String {
-    let display = underbar_to_space(name);
-    if is_mdl_quoted_ident(&display) {
-        return display;
+    // An already-quoted identifier is literal to Vensim -- its interior is
+    // verbatim. Detect it BEFORE any transformation: running
+    // `underbar_to_space` over the whole string would turn interior
+    // underscores into spaces (changing which variable Vensim resolves,
+    // e.g. `"rate_of_change!"` vs `"rate of change!"`) and re-escaping would
+    // grow the escaping each pass. Pass it through unchanged (#846).
+    if is_mdl_quoted_ident(name) {
+        return name.to_string();
     }
+    let display = underbar_to_space(name);
     if needs_mdl_quoting(&display) {
         format!("\"{}\"", escape_mdl_quoted_ident(&display))
     } else {
@@ -188,9 +334,287 @@ fn mdl_bare_keyword(xmile_name: &str) -> Option<&'static str> {
     }
 }
 
+/// Numeric literal emitted for a genuine `pi` builtin reference. Vensim has no
+/// `PI` builtin and its parser rejects the zero-arg call `PI()`, so the writer
+/// substitutes a literal with enough precision to round-trip (#850). The value
+/// is f64 pi to full precision (17 significant digits), so it parses back to the
+/// exact same bit pattern the `pi` builtin would evaluate to.
+const PI_LITERAL: &str = "3.141592653589793";
+
+/// A single non-fatal degradation encountered while writing a Project to MDL.
+///
+/// The MDL surface cannot represent everything the datamodel can (see the
+/// module-level "Lossiness contract" note in `mdl/mod.rs`). Rather than fail
+/// the whole export or silently drop the affected data, the writer records an
+/// `ExportWarning` and emits the closest representable form. Callers that want
+/// to surface degradation to the user consume the warnings via
+/// [`crate::mdl::project_to_mdl_with_warnings`]; the plain
+/// [`crate::mdl::project_to_mdl`] discards them for the many callers that only
+/// need the text. Warnings are a side channel and never change the emitted
+/// text, so they do not affect the corpus round-trip ratchets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportWarning {
+    /// A specific, human-readable description naming the affected variable or
+    /// dimension (e.g. `graphical function for 'demand curve' uses discrete
+    /// interpolation, ...`).
+    pub message: String,
+}
+
+impl ExportWarning {
+    fn new(message: impl Into<String>) -> Self {
+        ExportWarning {
+            message: message.into(),
+        }
+    }
+}
+
+/// Model-scoped context threaded through the MDL expression printer so it can
+/// emit output its own parser accepts and that does not silently rebind
+/// identifiers.
+///
+/// Without it, `MdlPrintVisitor` is context-free and cannot tell a genuine
+/// 0-arity builtin (`pi`, `time`, `time_step`, ...) from a like-named user
+/// variable (the parser reifies BOTH into a zero-arg `Expr0::App`), nor recover
+/// the dimension a wildcard subscript `x[*]` reduces over (the importer dropped
+/// the `Dim!` bang form to a bare `*`).
+#[derive(Default)]
+pub struct WriterContext {
+    /// Canonical idents of the model's variables. A zero-arg-`App` reference
+    /// whose name appears here is a user variable shadowing the like-named
+    /// builtin, so it must be emitted as the identifier rather than the builtin.
+    var_idents: HashSet<String>,
+    /// Canonical variable ident -> its declared dimension names, in order.
+    /// Drives wildcard-subscript recovery: `SUM(a[*])` where `a` is declared
+    /// `a[DimA]` becomes `SUM(a[DimA!])` (Vensim's bang form).
+    var_dims: HashMap<String, Vec<String>>,
+    /// Canonical idents of standalone lookup-only variables whose graphical
+    /// function extrapolates. Vensim MDL has no definition-level extrapolate
+    /// flag: a lookup table is marked extrapolating only when a call site
+    /// references it via `TABXL` (see `mdl::convert` and xmutil's
+    /// `Expression::CheckTableUses`). So a `LOOKUP(table, x)` call to such a
+    /// table is emitted as `TABXL(table, x)` instead of the native
+    /// `table ( x )` form, which is what makes the table re-import as
+    /// Extrapolate rather than being silently clamped to Continuous (#854).
+    extrapolate_lookups: HashSet<String>,
+    /// Canonical dimension name -> its named element names (display form, in
+    /// declared order). Drives EXCEPT-default reconstruction (#858): the writer
+    /// needs the full declared element set of an arrayed variable's dimensions
+    /// to compute which elements the dropped `default_equation` covered.
+    /// Indexed dimensions are absent (they have no named elements to except).
+    dim_elements: HashMap<String, Vec<String>>,
+    /// Subset of `extrapolate_lookups` that is actually referenced by at least
+    /// one `LOOKUP(table, _)` call the printer rewrites to a kind-preserving
+    /// `TABXL`. A standalone extrapolating lookup NOT in this set has no call
+    /// site to mark it, so its kind silently clamps on re-import -- the writer
+    /// warns for exactly those (#854/#856).
+    referenced_extrapolate_lookups: HashSet<String>,
+}
+
+impl WriterContext {
+    /// Build from a model's variables and the project dimensions: index every
+    /// variable's canonical ident and, for arrayed / apply-to-all variables,
+    /// its declared dimensions; index each named dimension's element list.
+    fn from_model(model: &datamodel::Model, dimensions: &[datamodel::Dimension]) -> Self {
+        let mut var_idents = HashSet::new();
+        let mut var_dims = HashMap::new();
+        let mut extrapolate_lookups = HashSet::new();
+        for var in &model.variables {
+            let ident = var.get_ident().to_owned();
+            if let Some(dims) = declared_dims(var) {
+                var_dims.insert(ident.clone(), dims);
+            }
+            if var_is_extrapolating_lookup(var) {
+                extrapolate_lookups.insert(ident.clone());
+            }
+            var_idents.insert(ident);
+        }
+        let mut dim_elements = HashMap::new();
+        for dim in dimensions {
+            if let DimensionElements::Named(elems) = &dim.elements {
+                dim_elements.insert(crate::common::canonicalize(&dim.name).into(), elems.clone());
+            }
+        }
+        // Only scan for call sites when there is an extrapolating lookup to
+        // preserve -- the overwhelmingly common model has none, so this is a
+        // no-op there (and a one-time equation parse pass otherwise).
+        let referenced_extrapolate_lookups = if extrapolate_lookups.is_empty() {
+            HashSet::new()
+        } else {
+            collect_extrapolating_lookup_call_sites(model, &extrapolate_lookups)
+        };
+        WriterContext {
+            var_idents,
+            var_dims,
+            extrapolate_lookups,
+            dim_elements,
+            referenced_extrapolate_lookups,
+        }
+    }
+
+    /// The named elements (display form, declared order) of dimension `name`,
+    /// or `None` for an unknown or indexed dimension.
+    fn dim_named_elements(&self, name: &str) -> Option<&[String]> {
+        self.dim_elements
+            .get(crate::common::canonicalize(name).as_ref())
+            .map(Vec::as_slice)
+    }
+
+    /// True when `canonical` names a standalone lookup-only variable whose
+    /// graphical function extrapolates, so a `LOOKUP()` call to it must be
+    /// emitted as `TABXL()` to survive the round trip (#854).
+    fn is_extrapolating_lookup(&self, canonical: &str) -> bool {
+        self.extrapolate_lookups.contains(canonical)
+    }
+
+    /// True when `canonical` is a standalone extrapolating lookup that NO
+    /// `LOOKUP` call site references, so no kind-preserving `TABXL` is emitted
+    /// and its extrapolate kind would silently clamp to Continuous on
+    /// re-import. The writer warns for exactly these (#854/#856).
+    fn is_unreferenced_extrapolating_lookup(&self, canonical: &str) -> bool {
+        self.extrapolate_lookups.contains(canonical)
+            && !self.referenced_extrapolate_lookups.contains(canonical)
+    }
+
+    /// True when `canonical` names a declared model variable.
+    fn is_variable(&self, canonical: &str) -> bool {
+        self.var_idents.contains(canonical)
+    }
+
+    /// Declared dimension name at subscript position `pos` of the variable
+    /// `canonical_ident`, or `None` if the variable is scalar/absent or the
+    /// position is out of range (callers fall back to a bare `*`).
+    fn dim_at(&self, canonical_ident: &str, pos: usize) -> Option<&str> {
+        self.var_dims
+            .get(canonical_ident)
+            .and_then(|dims| dims.get(pos))
+            .map(String::as_str)
+    }
+}
+
+/// True when `var` is a standalone lookup-only table (empty / sentinel
+/// equation plus a graphical function) whose graphical function extrapolates.
+///
+/// Only the standalone (lookup-only) form is reported: an *embedded* `WITH
+/// LOOKUP` variable applies an inline, unnamed table that no `TABXL` call site
+/// can reference, so its Extrapolate kind is genuinely unrepresentable in MDL
+/// and is handled by an [`ExportWarning`] instead (see
+/// `warn_unrepresentable_gf_kinds`).
+fn var_is_extrapolating_lookup(var: &datamodel::Variable) -> bool {
+    let (gf, equation) = match var {
+        datamodel::Variable::Flow(f) => (f.gf.as_ref(), &f.equation),
+        datamodel::Variable::Aux(a) => (a.gf.as_ref(), &a.equation),
+        _ => return false,
+    };
+    let Some(gf) = gf else { return false };
+    if gf.kind != datamodel::GraphicalFunctionKind::Extrapolate {
+        return false;
+    }
+    matches!(equation, Equation::Scalar(eqn) if is_lookup_only_equation(eqn))
+}
+
+/// The set of `extrapolate_lookups` idents that some variable references via a
+/// `LOOKUP(table, _)` call -- i.e. exactly the calls the printer rewrites to a
+/// kind-preserving `TABXL`. A standalone extrapolating lookup absent from this
+/// set has no such call site, so its kind would silently clamp on re-import.
+fn collect_extrapolating_lookup_call_sites(
+    model: &datamodel::Model,
+    extrapolate_lookups: &HashSet<String>,
+) -> HashSet<String> {
+    let mut referenced = HashSet::new();
+    for var in &model.variables {
+        let Some(equation) = var.get_equation() else {
+            continue;
+        };
+        let mut texts: Vec<&str> = Vec::new();
+        match equation {
+            Equation::Scalar(s) => texts.push(s),
+            Equation::ApplyToAll(_, s) => texts.push(s),
+            Equation::Arrayed(_, elements, default, _) => {
+                texts.extend(elements.iter().map(|(_, eqn, _, _)| eqn.as_str()));
+                if let Some(d) = default {
+                    texts.push(d);
+                }
+            }
+        }
+        for text in texts {
+            if let Ok(Some(ast)) = Expr0::new(text, LexerType::Equation) {
+                collect_lookup_refs(&ast, extrapolate_lookups, &mut referenced);
+            }
+        }
+    }
+    referenced
+}
+
+/// Walk `expr`, recording into `referenced` the canonical ident of every
+/// `LOOKUP(table, _)` call whose bare-variable table argument names one of
+/// `extrapolate_lookups`. The `func == "lookup"` / bare-`Var` first-argument
+/// shape mirrors the printer's TABXL rewrite exactly, so this counts a call
+/// site iff a `TABXL` is actually emitted for it.
+fn collect_lookup_refs(
+    expr: &Expr0,
+    extrapolate_lookups: &HashSet<String>,
+    referenced: &mut HashSet<String>,
+) {
+    match expr {
+        Expr0::Const(_, _, _) | Expr0::Var(_, _) => {}
+        Expr0::App(UntypedBuiltinFn(func, args), _) => {
+            if func == "lookup"
+                && args.len() == 2
+                && let Expr0::Var(table, _) = &args[0]
+            {
+                let canon = crate::common::canonicalize(table.as_str());
+                if extrapolate_lookups.contains(canon.as_ref()) {
+                    referenced.insert(canon.into());
+                }
+            }
+            for a in args {
+                collect_lookup_refs(a, extrapolate_lookups, referenced);
+            }
+        }
+        Expr0::Subscript(_, indices, _) => {
+            for idx in indices {
+                match idx {
+                    IndexExpr0::Range(l, r, _) => {
+                        collect_lookup_refs(l, extrapolate_lookups, referenced);
+                        collect_lookup_refs(r, extrapolate_lookups, referenced);
+                    }
+                    IndexExpr0::Expr(e) => collect_lookup_refs(e, extrapolate_lookups, referenced),
+                    IndexExpr0::Wildcard(_)
+                    | IndexExpr0::StarRange(_, _)
+                    | IndexExpr0::DimPosition(_, _) => {}
+                }
+            }
+        }
+        Expr0::Op1(_, e, _) => collect_lookup_refs(e, extrapolate_lookups, referenced),
+        Expr0::Op2(_, l, r, _) => {
+            collect_lookup_refs(l, extrapolate_lookups, referenced);
+            collect_lookup_refs(r, extrapolate_lookups, referenced);
+        }
+        Expr0::If(c, t, f, _) => {
+            collect_lookup_refs(c, extrapolate_lookups, referenced);
+            collect_lookup_refs(t, extrapolate_lookups, referenced);
+            collect_lookup_refs(f, extrapolate_lookups, referenced);
+        }
+    }
+}
+
+/// The declared dimension names (in order) of an arrayed / apply-to-all
+/// variable, or `None` for a scalar or a `Module` (which has no equation).
+fn declared_dims(var: &datamodel::Variable) -> Option<Vec<String>> {
+    match var.get_equation()? {
+        Equation::Scalar(_) => None,
+        Equation::ApplyToAll(dims, _) => Some(dims.clone()),
+        Equation::Arrayed(dims, _, _, _) => Some(dims.clone()),
+    }
+}
+
 /// Map XMILE canonical function names back to their Vensim MDL equivalents.
 /// This inverts the `format_function_name()` table in `xmile_compat.rs`.
 /// The input is expected to already be lowercase (as stored in `Expr0::App`).
+///
+/// `init` is deliberately absent: its MDL name depends on arity (1-arg
+/// `INITIAL` vs 2-arg `ACTIVE INITIAL`), so it is dispatched at the call site
+/// where `args.len()` is known (#852).
 fn xmile_to_mdl_function_name(xmile_name: &str) -> String {
     match xmile_name {
         "smth1" => "SMOOTH".to_owned(),
@@ -200,7 +624,6 @@ fn xmile_to_mdl_function_name(xmile_name: &str) -> String {
         "delay3" => "DELAY3".to_owned(),
         "delayn" => "DELAY N".to_owned(),
         "smthn" => "SMOOTH N".to_owned(),
-        "init" => "ACTIVE INITIAL".to_owned(),
         "int" => "INTEGER".to_owned(),
         "lookupinv" => "LOOKUP INVERT".to_owned(),
         "uniform" => "RANDOM UNIFORM".to_owned(),
@@ -239,8 +662,24 @@ fn reorder_args(mdl_name: &str, mut args: Vec<String>) -> Vec<String> {
                 args[2] = mean;
                 args[3] = sd;
                 args[4] = seed;
+                args
+            } else if args.len() == 2 {
+                // Vensim has no 2-arg normal; RANDOM NORMAL requires all five
+                // args. Synthesize unbounded truncation bounds (Vensim's
+                // +/-1e38 infinities) and an auto seed so the result is a plain
+                // normal(mean, sd) (#852).
+                let mean = args[0].clone();
+                let sd = args[1].clone();
+                vec![
+                    format_f64(f64::NEG_INFINITY),
+                    format_f64(f64::INFINITY),
+                    mean,
+                    sd,
+                    "0".to_owned(),
+                ]
+            } else {
+                args
             }
-            args
         }
         _ => args,
     }
@@ -495,10 +934,16 @@ fn recognize_allocate(expr: &Expr0, walk: &mut impl FnMut(&Expr0) -> String) -> 
                     .map(|s| match s {
                         IndexExpr0::Wildcard(_) => dim_name.clone(),
                         IndexExpr0::Expr(e) => walk(e),
-                        other => {
-                            let mut v = MdlPrintVisitor;
-                            v.walk_index(other)
+                        // StarRange / Range / DimPosition: reuse the caller's
+                        // `walk` closure (which carries the WriterContext) for
+                        // any nested expression rather than spinning up a
+                        // context-free visitor. StarRange is a subrange
+                        // wildcard -> bang form (see `walk_index`).
+                        IndexExpr0::StarRange(id, _) => {
+                            format!("{}!", format_mdl_ident(id.as_str()))
                         }
+                        IndexExpr0::Range(l, r, _) => format!("{}:{}", walk(l), walk(r)),
+                        IndexExpr0::DimPosition(n, _) => format!("@{n}"),
                     })
                     .collect();
                 if let Some(IndexExpr0::StarRange(_, _)) = subs.last()
@@ -619,14 +1064,40 @@ fn recognize_vensim_patterns(
     None
 }
 
-struct MdlPrintVisitor;
+struct MdlPrintVisitor<'a> {
+    ctx: &'a WriterContext,
+}
 
-impl Visitor<String> for MdlPrintVisitor {
+impl MdlPrintVisitor<'_> {
+    /// Walk a subscript index at a known position of a known subscripted
+    /// variable. A wildcard here recovers Vensim's bang form `Dim!` from the
+    /// variable's declared dimension at that position; every other index kind
+    /// is position-independent and delegates to `walk_index` (#847).
+    fn walk_index_at(&mut self, expr: &IndexExpr0, subscripted: &str, pos: usize) -> String {
+        match expr {
+            IndexExpr0::Wildcard(_) => match self.ctx.dim_at(subscripted, pos) {
+                Some(dim) => format!("{}!", format_mdl_ident(dim)),
+                // No declared dimension for this position (scalar/absent var or
+                // out-of-range): leave a bare `*` -- a safe, if less faithful,
+                // fallback rather than a panic.
+                None => "*".to_string(),
+            },
+            other => self.walk_index(other),
+        }
+    }
+}
+
+impl Visitor<String> for MdlPrintVisitor<'_> {
     fn walk_index(&mut self, expr: &IndexExpr0) -> String {
         match expr {
             IndexExpr0::Wildcard(_) => "*".to_string(),
+            // A star-range `*:Dim` (Vensim `Dim.*`) is a subrange wildcard --
+            // "iterate over all of Dim" -- which in Vensim MDL is the bang form
+            // `Dim!`. Emitting `*:Dim` produces output the reader rejects, and
+            // renders the SAME construct differently from a recovered wildcard,
+            // so both are emitted as `Dim!` (#847).
             IndexExpr0::StarRange(id, _) => {
-                format!("*:{}", format_mdl_ident(id.as_str()))
+                format!("{}!", format_mdl_ident(id.as_str()))
             }
             IndexExpr0::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
             IndexExpr0::DimPosition(n, _) => format!("@{n}"),
@@ -643,11 +1114,27 @@ impl Visitor<String> for MdlPrintVisitor {
             Expr0::Const(s, _, _) => s.clone(),
             Expr0::Var(id, _) => format_mdl_ident(id.as_str()),
             Expr0::App(UntypedBuiltinFn(func, args), _) => {
-                // In MDL, TIME and DT are bare keywords (no parentheses).
-                if args.is_empty()
-                    && let Some(kw) = mdl_bare_keyword(func)
-                {
-                    return kw.to_owned();
+                if args.is_empty() {
+                    // The parser reifies a `pi`/`time`/`time_step`/... reference
+                    // into a zero-arg `App`, so a model variable that shadows
+                    // one of these builtin names is INDISTINGUISHABLE from the
+                    // builtin except via the variable set. A declared variable
+                    // wins: emit it as the identifier, not the builtin, so a
+                    // user aux named "Time Step" or "PI" does not silently
+                    // rebind to the simulation dt / lose its definition
+                    // (#853, #850).
+                    if self.ctx.is_variable(&crate::common::canonicalize(func)) {
+                        return format_mdl_ident(func);
+                    }
+                    // Vensim has no PI builtin and rejects the zero-arg call
+                    // `PI()`; emit a numeric literal instead (#850).
+                    if func == "pi" {
+                        return PI_LITERAL.to_owned();
+                    }
+                    // TIME/DT/... are bare keywords in Vensim (no parentheses).
+                    if let Some(kw) = mdl_bare_keyword(func) {
+                        return kw.to_owned();
+                    }
                 }
                 // Vensim lookup calls use `table_name ( input )` syntax
                 // rather than `LOOKUP(table_name, input)`.
@@ -657,11 +1144,31 @@ impl Visitor<String> for MdlPrintVisitor {
                 {
                     let table_name = format_mdl_ident(table_ident.as_str());
                     let input = self.walk(&args[1]);
+                    // An Extrapolate lookup table is marked extrapolating only
+                    // by a `TABXL` call site on re-import (MDL has no
+                    // definition-level flag), so emit the call as TABXL rather
+                    // than the native `table ( input )` form to preserve the
+                    // kind through the round trip (#854).
+                    if self
+                        .ctx
+                        .is_extrapolating_lookup(&crate::common::canonicalize(table_ident.as_str()))
+                    {
+                        return format!("TABXL({table_name}, {input})");
+                    }
                     return format!("{table_name} ( {input} )");
                 }
-                // safediv with 3+ args is XIDZ (3-arg form), not ZIDZ (2-arg)
+                // A few builtins map to different Vensim names by arity:
+                //   - safediv 3+ args -> XIDZ (3-arg), else ZIDZ (2-arg)
+                //   - init 1 arg -> INITIAL, else ACTIVE INITIAL (which
+                //     requires two args -- emitting it 1-arg is invalid) (#852)
                 let mdl_name = if func == "safediv" && args.len() >= 3 {
                     "XIDZ".to_owned()
+                } else if func == "init" {
+                    if args.len() == 1 {
+                        "INITIAL".to_owned()
+                    } else {
+                        "ACTIVE INITIAL".to_owned()
+                    }
                 } else {
                     xmile_to_mdl_function_name(func)
                 };
@@ -670,7 +1177,15 @@ impl Visitor<String> for MdlPrintVisitor {
                 format!("{}({})", mdl_name, reordered.join(", "))
             }
             Expr0::Subscript(id, args, _) => {
-                let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
+                // Canonicalize the subscripted variable's ident once so the
+                // wildcard-recovery lookup keys the same way `WriterContext`
+                // indexed the model's variables.
+                let canonical = crate::common::canonicalize(id.as_str());
+                let args: Vec<String> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, e)| self.walk_index_at(e, canonical.as_ref(), pos))
+                    .collect();
                 format!("{}[{}]", format_mdl_ident(id.as_str()), args.join(", "))
             }
             Expr0::Op1(op, l, _) => match op {
@@ -729,16 +1244,28 @@ impl Visitor<String> for MdlPrintVisitor {
     }
 }
 
-/// Convert an `Expr0` AST to MDL-format equation text.
+/// Convert an `Expr0` AST to MDL-format equation text, without model context.
+///
+/// Back-compat entry point (re-exported from `mdl/mod.rs`): equivalent to
+/// [`expr0_to_mdl_ctx`] with an empty [`WriterContext`], so wildcard subscripts
+/// fall back to a bare `*` and no identifier shadows a builtin. Production
+/// emission threads a real context via `expr0_to_mdl_ctx`.
 pub fn expr0_to_mdl(expr: &Expr0) -> String {
-    let mut visitor = MdlPrintVisitor;
+    expr0_to_mdl_ctx(expr, &WriterContext::default())
+}
+
+/// Convert an `Expr0` AST to MDL-format equation text using model context for
+/// wildcard-subscript recovery and builtin/variable disambiguation.
+pub fn expr0_to_mdl_ctx(expr: &Expr0, ctx: &WriterContext) -> String {
+    let mut visitor = MdlPrintVisitor { ctx };
     visitor.walk(expr)
 }
 
 /// Convert an XMILE equation string to MDL text via Expr0 round-trip.
 /// Falls back to the raw string (with underscores->spaces) on parse failure
-/// or empty input.
-fn equation_to_mdl(xmile_eqn: &str) -> String {
+/// or empty input. `ctx` supplies the model's variable/dimension knowledge so
+/// wildcard subscripts and shadowed builtins render correctly.
+fn equation_to_mdl(xmile_eqn: &str, ctx: &WriterContext) -> String {
     if xmile_eqn.is_empty() {
         return String::new();
     }
@@ -753,7 +1280,7 @@ fn equation_to_mdl(xmile_eqn: &str) -> String {
         return stripped.to_string();
     }
     match Expr0::new(xmile_eqn, LexerType::Equation) {
-        Ok(Some(ast)) => expr0_to_mdl(&ast),
+        Ok(Some(ast)) => expr0_to_mdl_ctx(&ast, ctx),
         // Fallback for unparseable equations; best-effort space conversion.
         _ => underbar_to_space(xmile_eqn),
     }
@@ -844,20 +1371,50 @@ fn format_f64(v: f64) -> String {
     }
 }
 
-/// Write a single MDL variable entry.
+/// Write a single MDL variable entry, without model context.
 ///
-/// The standard MDL format for a variable entry is:
-/// ```text
-/// Name=\n\tequation\n\t~\tunits\n\t~\tcomment\n\t|
-/// ```
+/// Back-compat wrapper (empty [`WriterContext`]); production emission uses
+/// [`write_variable_entry_ctx`] with a real context so wildcard subscripts and
+/// shadowed builtins in the equation render correctly.
 pub fn write_variable_entry(
     buf: &mut String,
     var: &datamodel::Variable,
     display_names: &HashMap<String, String>,
 ) {
+    write_variable_entry_ctx(buf, var, display_names, &WriterContext::default());
+}
+
+/// Write a single MDL variable entry using model context.
+///
+/// The standard MDL format for a variable entry is:
+/// ```text
+/// Name=\n\tequation\n\t~\tunits\n\t~\tcomment\n\t|
+/// ```
+///
+/// Back-compat wrapper that discards any [`ExportWarning`]s; production
+/// emission uses [`write_variable_entry_ctx_warn`] so lossy constructs are
+/// surfaced (#856).
+pub fn write_variable_entry_ctx(
+    buf: &mut String,
+    var: &datamodel::Variable,
+    display_names: &HashMap<String, String>,
+    ctx: &WriterContext,
+) {
+    write_variable_entry_ctx_warn(buf, var, display_names, ctx, &mut Vec::new());
+}
+
+/// Write a single MDL variable entry, recording any lossy degradations into
+/// `warnings` (#856). See [`write_variable_entry_ctx`] for the format.
+fn write_variable_entry_ctx_warn(
+    buf: &mut String,
+    var: &datamodel::Variable,
+    display_names: &HashMap<String, String>,
+    ctx: &WriterContext,
+    warnings: &mut Vec<ExportWarning>,
+) {
     match var {
         datamodel::Variable::Stock(s) => {
-            write_stock_variable(buf, s, display_names);
+            write_stock_variable(buf, s, display_names, ctx, warnings);
             return;
         }
         datamodel::Variable::Module(_) => return,
@@ -884,16 +1441,28 @@ pub fn write_variable_entry(
         _ => unreachable!(),
     };
 
+    let name = display_name_for_ident(ident, display_names);
+    warn_dropped_non_negative(&name, compat, warnings);
+    warn_unrepresentable_gf_kinds(&name, ident, equation, gf, ctx, warnings);
+
     let data_source_eqn = compat_get_direct_equation(compat);
     let effective_gf = if data_source_eqn.is_some() { None } else { gf };
-    let name = display_name_for_ident(ident, display_names);
 
     match equation {
         Equation::Scalar(eqn) => {
             let effective_eqn = data_source_eqn
                 .clone()
                 .unwrap_or_else(|| wrap_active_initial(eqn, compat));
-            write_single_entry(buf, &name, &effective_eqn, &[], units, doc, effective_gf);
+            write_single_entry(
+                buf,
+                &name,
+                &effective_eqn,
+                &[],
+                units,
+                doc,
+                effective_gf,
+                ctx,
+            );
         }
         Equation::ApplyToAll(dims, eqn) => {
             let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
@@ -908,12 +1477,153 @@ pub fn write_variable_entry(
                 units,
                 doc,
                 effective_gf,
+                ctx,
             );
         }
-        Equation::Arrayed(dims, elements, default_eq, _) => {
-            write_arrayed_entries(buf, &name, dims, elements, default_eq, units, doc);
+        Equation::Arrayed(dims, elements, default_eq, has_except_default) => {
+            write_arrayed_entries(
+                buf,
+                &name,
+                dims,
+                elements,
+                default_eq,
+                *has_except_default,
+                compat,
+                units,
+                doc,
+                ctx,
+                warnings,
+            );
         }
     }
+}
+
+/// Record a warning when a variable carries Vensim's `compat.non_negative`
+/// flag: the flag changes simulation semantics (the variable is clamped to be
+/// non-negative) but has no MDL equation-text representation, so it is dropped
+/// on export (#856).
+fn warn_dropped_non_negative(
+    name: &str,
+    compat: &datamodel::Compat,
+    warnings: &mut Vec<ExportWarning>,
+) {
+    if compat.non_negative {
+        warnings.push(ExportWarning::new(format!(
+            "'{name}' is marked non-negative (Vensim's :NA: / non-negative flag), \
+             which changes simulation semantics but has no MDL equation-text \
+             representation; the flag was dropped on export"
+        )));
+    }
+}
+
+/// Record a warning for a graphical-function kind that MDL cannot represent
+/// faithfully (#854):
+///
+/// - **Discrete** (`hold-last` / step interpolation) has no Vensim MDL
+///   equivalent; the table is exported as an ordinary piecewise-linear
+///   (continuous) lookup.
+/// - **Extrapolate** on an *embedded* `WITH LOOKUP` variable: the inline table
+///   is unnamed, so no `TABXL` call site can mark it extrapolating; it is
+///   exported clamped (continuous). A *standalone* Extrapolate lookup is
+///   handled losslessly by rewriting its call sites to `TABXL`
+///   ([`WriterContext::is_extrapolating_lookup`]) and so does NOT warn here.
+fn warn_unrepresentable_gf_kinds(
+    name: &str,
+    ident: &str,
+    equation: &Equation,
+    gf: Option<&GraphicalFunction>,
+    ctx: &WriterContext,
+    warnings: &mut Vec<ExportWarning>,
+) {
+    use datamodel::GraphicalFunctionKind::{Continuous, Discrete, Extrapolate};
+
+    // The scalar / apply-to-all graphical function (a per-element arrayed GF is
+    // inspected separately below against its own equation form).
+    if let Some(gf) = gf {
+        let is_standalone =
+            matches!(equation, Equation::Scalar(eqn) if is_lookup_only_equation(eqn));
+        // A standalone Extrapolate lookup normally round-trips via the TABXL
+        // rewrite of its LOOKUP call sites (#854) -- but only when a call site
+        // exists. An unreferenced (e.g. dead) table has none, so no TABXL is
+        // emitted and its kind clamps to Continuous on re-import; that must
+        // warn rather than be silently suppressed (#856).
+        let preserved_by_tabxl = is_standalone
+            && !ctx.is_unreferenced_extrapolating_lookup(&crate::common::canonicalize(ident));
+        match gf.kind {
+            Discrete => warnings.push(discrete_gf_warning(name)),
+            Extrapolate if !is_standalone => warnings.push(embedded_extrapolate_gf_warning(name)),
+            Extrapolate if !preserved_by_tabxl => {
+                warnings.push(unreferenced_extrapolate_gf_warning(name))
+            }
+            Continuous | Extrapolate => {}
+        }
+    }
+
+    if let Equation::Arrayed(_, elements, _, _) = equation {
+        for (elem_key, _elem_eqn, _comment, elem_gf) in elements {
+            let Some(elem_gf) = elem_gf else { continue };
+            let elem_name = format!("{name}[{}]", format_mdl_element_key(elem_key));
+            match elem_gf.kind {
+                Discrete => warnings.push(discrete_gf_warning(&elem_name)),
+                // The standalone-lookup TABXL rewrite only covers scalar
+                // lookup-only tables, so ANY Extrapolate on a per-element
+                // arrayed GF (standalone or embedded) is unpreserved here.
+                Extrapolate => warnings.push(ExportWarning::new(format!(
+                    "graphical function for '{elem_name}' extrapolates, but a \
+                     per-element arrayed lookup's extrapolate kind cannot be \
+                     preserved in MDL; exported clamped (continuous) instead"
+                ))),
+                Continuous => {}
+            }
+        }
+    }
+}
+
+/// Record warnings for the group banner's known reread lossiness (#856): the
+/// MDL group marker stores the name on a single line that the reader's
+/// `try_group_star` stops at the first whitespace, and the group doc is skipped
+/// entirely on re-import. So a multi-word (or underscored) group name is
+/// truncated to its first word, and any group documentation is dropped.
+fn warn_group_lossiness(group: &datamodel::ModelGroup, warnings: &mut Vec<ExportWarning>) {
+    let banner_name = underbar_to_space(&group.name);
+    if banner_name.contains(char::is_whitespace) {
+        warnings.push(ExportWarning::new(format!(
+            "group name '{}' contains spaces; Vensim MDL stores it on a single \
+             banner line and truncates it to its first word on re-import",
+            group.name
+        )));
+    }
+    if group.doc.as_deref().is_some_and(|d| !d.trim().is_empty()) {
+        warnings.push(ExportWarning::new(format!(
+            "documentation for group '{}' is dropped on re-import (Vensim MDL does \
+             not preserve group-marker documentation)",
+            group.name
+        )));
+    }
+}
+
+fn discrete_gf_warning(name: &str) -> ExportWarning {
+    ExportWarning::new(format!(
+        "graphical function for '{name}' uses discrete (hold-last) interpolation, \
+         which Vensim MDL cannot represent; exported as a continuous \
+         (piecewise-linear) lookup instead"
+    ))
+}
+
+fn embedded_extrapolate_gf_warning(name: &str) -> ExportWarning {
+    ExportWarning::new(format!(
+        "graphical function for '{name}' extrapolates, but it is an inline WITH \
+         LOOKUP whose table cannot be referenced by a TABXL call site; exported \
+         clamped (continuous) instead"
+    ))
+}
+
+fn unreferenced_extrapolate_gf_warning(name: &str) -> ExportWarning {
+    ExportWarning::new(format!(
+        "graphical function for '{name}' extrapolates, but its lookup table has \
+         no LOOKUP call site to emit as a kind-preserving TABXL; exported \
+         clamped (continuous) instead"
+    ))
 }
 
 fn compat_get_direct_equation(compat: &datamodel::Compat) -> Option<String> {
@@ -971,10 +1681,19 @@ fn compat_get_direct_equation(compat: &datamodel::Compat) -> Option<String> {
 /// The datamodel stores stocks with the initial value in `equation` and
 /// inflows/outflows as separate string vectors.  The MDL format requires
 /// `INTEG(net_flow, initial_value)`.
+///
+/// The stock's `compat` is honored the same way the aux/flow path honors it
+/// (#857): an ACTIVE INITIAL initial value is re-wrapped via
+/// [`wrap_active_initial`], and a GET DIRECT data-source initial is
+/// reconstructed via [`compat_get_direct_equation`]. Both would otherwise be
+/// silently lost, replacing the stock's real initial with the runtime
+/// expression alone.
 fn write_stock_variable(
     buf: &mut String,
     stock: &datamodel::Stock,
     display_names: &HashMap<String, String>,
+    ctx: &WriterContext,
+    warnings: &mut Vec<ExportWarning>,
 ) {
     let mut net_flow = String::new();
     for (i, inflow) in stock.inflows.iter().enumerate() {
@@ -992,13 +1711,26 @@ fn write_stock_variable(
     }
 
     let name = display_name_for_ident(&stock.ident, display_names);
+    warn_dropped_non_negative(&name, &stock.compat, warnings);
+
+    // Reconstruct the INITIAL value from the stock's compat the same way the
+    // aux/flow path does: a GET DIRECT data source takes precedence, otherwise
+    // an ACTIVE INITIAL wrap. The result is XMILE-form text (or the brace-
+    // stripped GET DIRECT form) that `equation_to_mdl` renders to MDL.
+    let data_source_eqn = compat_get_direct_equation(&stock.compat);
+    let stock_initial = |eqn: &str| -> String {
+        let initial_src = data_source_eqn
+            .clone()
+            .unwrap_or_else(|| wrap_active_initial(eqn, &stock.compat));
+        equation_to_mdl(&initial_src, ctx)
+    };
 
     match &stock.equation {
         Equation::Scalar(eqn) => write_stock_entry(
             buf,
             &name,
             &net_flow,
-            &equation_to_mdl(eqn),
+            &stock_initial(eqn),
             &[],
             &stock.units,
             &stock.documentation,
@@ -1009,13 +1741,13 @@ fn write_stock_variable(
                 buf,
                 &name,
                 &net_flow,
-                &equation_to_mdl(eqn),
+                &stock_initial(eqn),
                 &dim_names,
                 &stock.units,
                 &stock.documentation,
             );
         }
-        Equation::Arrayed(dims, elements, default_eq, _) => {
+        Equation::Arrayed(dims, elements, default_eq, has_except_default) => {
             write_arrayed_stock_entries(
                 buf,
                 &name,
@@ -1023,8 +1755,12 @@ fn write_stock_variable(
                 dims,
                 elements,
                 default_eq,
+                *has_except_default,
+                &stock.compat,
                 &stock.units,
                 &stock.documentation,
+                ctx,
+                warnings,
             );
         }
     }
@@ -1067,17 +1803,33 @@ fn write_arrayed_stock_entries(
     buf: &mut String,
     name: &str,
     net_flow: &str,
-    _dims: &[String],
+    dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
-    _default_equation: &Option<String>,
+    default_equation: &Option<String>,
+    has_except_default: bool,
+    compat: &datamodel::Compat,
     units: &Option<String>,
     doc: &str,
+    ctx: &WriterContext,
+    warnings: &mut Vec<ExportWarning>,
 ) {
-    let last_idx = elements.len().saturating_sub(1);
+    let entries = resolve_arrayed_entries(
+        name,
+        dims,
+        elements,
+        default_equation,
+        has_except_default,
+        ctx,
+        warnings,
+    );
 
-    for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
+    let last_idx = entries.len().saturating_sub(1);
+    for (i, (elem_name, raw_eqn, _comment, _gf)) in entries.iter().enumerate() {
         let elem_display = format_mdl_element_key(elem_name);
-        let initial = normalized_stock_initial(&equation_to_mdl(eqn));
+        // Wrap the per-element INITIAL with ACTIVE INITIAL when the stock
+        // carries that compat (#857), mirroring the scalar stock path.
+        let initial_src = wrap_active_initial(raw_eqn, compat);
+        let initial = normalized_stock_initial(&equation_to_mdl(&initial_src, ctx));
 
         write!(buf, "{name}[{elem_display}]=").unwrap();
         buf.push_str("\n\t");
@@ -1232,6 +1984,7 @@ fn wrap_equation_with_continuations(eqn: &str, max_line_len: usize) -> String {
 ///
 /// `name` is the pre-formatted display name (with original casing from
 /// view elements, or `format_mdl_ident` fallback).
+#[allow(clippy::too_many_arguments)]
 fn write_single_entry(
     buf: &mut String,
     name: &str,
@@ -1240,6 +1993,7 @@ fn write_single_entry(
     units: &Option<String>,
     doc: &str,
     gf: Option<&GraphicalFunction>,
+    ctx: &WriterContext,
 ) {
     let dim_suffix = if dims.is_empty() {
         String::new()
@@ -1259,7 +2013,7 @@ fn write_single_entry(
             // Embedded lookup: name=\n\tWITH LOOKUP(input, (body))
             let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
             write!(buf, "{name}{dim_suffix}{assign_op}").unwrap();
-            let mdl_eqn = equation_to_mdl(eqn);
+            let mdl_eqn = equation_to_mdl(eqn, ctx);
             buf.push_str("\n\tWITH LOOKUP(");
             buf.push_str(&mdl_eqn);
             buf.push_str(", ");
@@ -1268,7 +2022,7 @@ fn write_single_entry(
         }
     } else {
         let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-        let mdl_eqn = equation_to_mdl(eqn);
+        let mdl_eqn = equation_to_mdl(eqn, ctx);
 
         // Short, single-line equations use inline format with spaces around
         // the operator (e.g. `average repayment rate = 0.03`).  Longer or
@@ -1287,35 +2041,108 @@ fn write_single_entry(
     write_units_and_comment(buf, units, doc);
 }
 
-/// Write arrayed (per-element) entries.
+/// Write arrayed (per-element) entries, reconstructing a load-bearing EXCEPT
+/// default when one was dropped (#858).
 ///
-/// `default_equation` records EXCEPT metadata, but the datamodel may omit
-/// excepted elements entirely. Without full dimension membership information at
-/// this callsite, emitting `name[Dim...]=default` can incorrectly apply the
-/// default to omitted EXCEPT members. To preserve behavior, always emit explicit
-/// element entries and leave omitted elements implicit.
+/// When `has_except_default` is set, the datamodel's `default_equation` fills
+/// every *declared* element not explicitly listed (Vensim EXCEPT semantics; the
+/// AST layer applies it at compile time). The prior writer dropped it, so those
+/// implicit elements silently became 0 on re-import. Here we materialize each
+/// missing declared element as an explicit entry carrying the default equation,
+/// then emit the whole (explicit + filled) set in the importer's key-sorted
+/// order. That preserves the fill's effect AND is idempotent -- re-importing the
+/// output yields the same fully-listed element set, which re-writes identically.
+///
+/// Reconstruction is declined (kept explicit-only, with an [`ExportWarning`])
+/// when dimension membership is unavailable or the default references the
+/// variable's own dimensions (needing per-element substitution we do not
+/// perform); see [`plan_except_default`].
+#[allow(clippy::too_many_arguments)]
 fn write_arrayed_entries(
     buf: &mut String,
     name: &str,
-    _dims: &[String],
+    dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
-    _default_equation: &Option<String>,
+    default_equation: &Option<String>,
+    has_except_default: bool,
+    compat: &datamodel::Compat,
     units: &Option<String>,
     doc: &str,
+    ctx: &WriterContext,
+    warnings: &mut Vec<ExportWarning>,
 ) {
-    write_arrayed_element_entries(buf, name, elements, units, doc);
+    let entries = resolve_arrayed_entries(
+        name,
+        dims,
+        elements,
+        default_equation,
+        has_except_default,
+        ctx,
+        warnings,
+    );
+    write_arrayed_element_entries(buf, name, &entries, compat, units, doc, ctx);
 }
 
+/// Apply the EXCEPT-default plan and return the element list to emit: either
+/// the input elements unchanged, or the input plus the default-filled missing
+/// declared elements, sorted by key to match the importer (so the output is a
+/// re-import fixpoint). Pushes an [`ExportWarning`] when reconstruction is
+/// declined.
+fn resolve_arrayed_entries(
+    name: &str,
+    dims: &[String],
+    elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    default_equation: &Option<String>,
+    has_except_default: bool,
+    ctx: &WriterContext,
+    warnings: &mut Vec<ExportWarning>,
+) -> Vec<(String, String, Option<String>, Option<GraphicalFunction>)> {
+    match plan_except_default(
+        name,
+        dims,
+        elements,
+        default_equation,
+        has_except_default,
+        ctx,
+    ) {
+        ExceptDefaultPlan::None => elements.to_vec(),
+        ExceptDefaultPlan::Warn(msg) => {
+            warnings.push(ExportWarning::new(msg));
+            elements.to_vec()
+        }
+        ExceptDefaultPlan::Fill(missing) => {
+            let default = default_equation
+                .as_ref()
+                .expect("Fill plan implies a default equation is present");
+            let mut combined = elements.to_vec();
+            for key in missing {
+                combined.push((key, default.clone(), None, None));
+            }
+            // Match the importer's element ordering (it sorts by key) so a
+            // second write of the re-imported model is byte-identical.
+            combined.sort_by(|a, b| a.0.cmp(&b.0));
+            combined
+        }
+    }
+}
+
+/// Emit one MDL entry per arrayed element. A per-variable ACTIVE INITIAL wrap
+/// (`compat.active_initial`) is applied to every element equation (#857), the
+/// same way the Scalar / Apply-to-All paths wrap it.
 fn write_arrayed_element_entries(
     buf: &mut String,
     name: &str,
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    compat: &datamodel::Compat,
     units: &Option<String>,
     doc: &str,
+    ctx: &WriterContext,
 ) {
     let last_idx = elements.len().saturating_sub(1);
-    for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
+    for (i, (elem_name, raw_eqn, _comment, elem_gf)) in elements.iter().enumerate() {
         let elem_display = format_mdl_element_key(elem_name);
+        let eqn = wrap_active_initial(raw_eqn, compat);
+        let eqn = eqn.as_str();
 
         if let Some(gf) = elem_gf {
             if is_lookup_only_equation(eqn) {
@@ -1326,7 +2153,7 @@ fn write_arrayed_element_entries(
             } else {
                 let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
                 write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-                let mdl_eqn = equation_to_mdl(eqn);
+                let mdl_eqn = equation_to_mdl(eqn, ctx);
                 buf.push_str("\n\tWITH LOOKUP(");
                 buf.push_str(&mdl_eqn);
                 buf.push_str(", ");
@@ -1336,7 +2163,7 @@ fn write_arrayed_element_entries(
         } else {
             let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
             write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-            let mdl_eqn = equation_to_mdl(eqn);
+            let mdl_eqn = equation_to_mdl(eqn, ctx);
             let wrapped = wrap_equation_with_continuations(&mdl_eqn, 80);
             buf.push_str("\n\t");
             buf.push_str(&wrapped);
@@ -1350,14 +2177,138 @@ fn write_arrayed_element_entries(
     }
 }
 
+/// The action to take for an arrayed variable's EXCEPT `default_equation`.
+enum ExceptDefaultPlan {
+    /// No load-bearing default: emit explicit elements only (unchanged).
+    None,
+    /// The default fills these declared element keys (display form, comma-joined
+    /// per dimension) that are not explicitly listed.
+    Fill(Vec<String>),
+    /// Reconstruction is unsafe; keep explicit-only behavior and warn with this
+    /// message.
+    Warn(String),
+}
+
+/// Decide how to handle an arrayed variable's EXCEPT default on export (#858).
+///
+/// The default is load-bearing only when `has_except_default` is set (the AST
+/// layer applies it to declared elements not explicitly listed). We reconstruct
+/// it by materializing those missing declared elements, which needs the full
+/// declared element set (from [`WriterContext`]) and a default that does not
+/// itself reference the variable's dimensions (which we cannot substitute per
+/// element). When either is unavailable we decline and warn rather than emit
+/// possibly-wrong output.
+fn plan_except_default(
+    name: &str,
+    dims: &[String],
+    elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    default_equation: &Option<String>,
+    has_except_default: bool,
+    ctx: &WriterContext,
+) -> ExceptDefaultPlan {
+    if !has_except_default {
+        return ExceptDefaultPlan::None;
+    }
+    let Some(default) = default_equation.as_ref().filter(|d| !d.trim().is_empty()) else {
+        return ExceptDefaultPlan::Warn(format!(
+            "arrayed variable '{name}' has EXCEPT-default semantics but no default \
+             equation text; elements covered only by the default were dropped on export"
+        ));
+    };
+    let Some(declared) = declared_element_keys(dims, ctx) else {
+        return ExceptDefaultPlan::Warn(format!(
+            "arrayed variable '{name}' uses an EXCEPT default over a dimension whose \
+             named elements are unavailable to the writer; elements covered only by \
+             the default were dropped on export"
+        ));
+    };
+    let explicit: HashSet<String> = elements
+        .iter()
+        .map(|(k, _, _, _)| canonical_element_key(k))
+        .collect();
+    let missing: Vec<String> = declared
+        .into_iter()
+        .filter(|k| !explicit.contains(&canonical_element_key(k)))
+        .collect();
+    if missing.is_empty() {
+        // Every declared element is already explicit, so the default fills
+        // nothing; the flag is inert and the plain element list is faithful.
+        return ExceptDefaultPlan::None;
+    }
+    if default_references_dims(default, dims) {
+        return ExceptDefaultPlan::Warn(format!(
+            "arrayed variable '{name}' has an EXCEPT default equation that references \
+             its own dimensions and cannot be reconstructed per element; elements \
+             covered only by the default were dropped on export"
+        ));
+    }
+    ExceptDefaultPlan::Fill(missing)
+}
+
+/// The full declared element key set (display form, comma-joined per dimension)
+/// of an arrayed variable over `dims`, or `None` if any dimension is indexed or
+/// unknown (so has no named elements the writer can enumerate).
+fn declared_element_keys(dims: &[String], ctx: &WriterContext) -> Option<Vec<String>> {
+    let per_dim: Vec<&[String]> = dims
+        .iter()
+        .map(|d| ctx.dim_named_elements(d))
+        .collect::<Option<Vec<_>>>()?;
+    let mut keys = vec![String::new()];
+    for elems in per_dim {
+        let mut next = Vec::with_capacity(keys.len() * elems.len());
+        for prefix in &keys {
+            for e in elems {
+                if prefix.is_empty() {
+                    next.push(e.clone());
+                } else {
+                    next.push(format!("{prefix},{e}"));
+                }
+            }
+        }
+        keys = next;
+    }
+    Some(keys)
+}
+
+/// Canonicalize an element key (comma-joined per-dimension element names) for
+/// membership comparison, so a declared element and an explicit element key
+/// match regardless of casing / spacing.
+fn canonical_element_key(key: &str) -> String {
+    key.split(',')
+        .map(|p| crate::common::canonicalize(p.trim()).into_owned())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// True when the EXCEPT default equation references any of the variable's own
+/// declared dimensions as an identifier token -- meaning the default is
+/// per-element and would need substitution we do not perform, so it must not be
+/// materialized verbatim into element equations.
+fn default_references_dims(default: &str, dims: &[String]) -> bool {
+    let canon = crate::common::canonicalize(default);
+    let tokens: HashSet<&str> = canon
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|t| !t.is_empty())
+        .collect();
+    dims.iter()
+        .any(|d| tokens.contains(crate::common::canonicalize(d).as_ref()))
+}
+
 /// Append the `~\tunits\n\t~\tcomment\n\t|` trailer.
+///
+/// Both free-text fields route through `sanitize_free_text` (GH #849): a raw
+/// `~`/`|` in units, a `|` in the comment, an embedded section terminator, or an
+/// accumulated carriage return would otherwise corrupt or destabilize the file.
 fn write_units_and_comment(buf: &mut String, units: &Option<String>, doc: &str) {
     buf.push_str("\n\t~\t");
     if let Some(u) = units {
-        buf.push_str(u);
+        // Units are tokenized between the two `~`, so `~` (the field separator)
+        // is structural; line breaks are insignificant whitespace.
+        buf.push_str(&sanitize_free_text(u, FreeTextLineMode::SingleLine, &['~']));
     }
     buf.push_str("\n\t~\t");
-    buf.push_str(doc);
+    // The `~`-comment is raw text up to `|`; multi-line is legal.
+    buf.push_str(&sanitize_free_text(doc, FreeTextLineMode::Multiline, &[]));
     buf.push_str("\n\t|");
 }
 
@@ -1615,7 +2566,17 @@ fn build_multi_output_reconstructions(
 /// Indexed: `DimName: (1-N) ~~|`
 /// Mapped:  `DimName: Elem1, Elem2 -> MappedDim ~~|`
 /// Element-mapped: `DimName: A1, A2 -> MappedDim: B2, B1 ~~|`
+/// Back-compat wrapper that discards any [`ExportWarning`]s; production
+/// emission uses [`write_dimension_def_warn`] (#856).
 pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
+    write_dimension_def_warn(buf, dim, &mut Vec::new());
+}
+
+fn write_dimension_def_warn(
+    buf: &mut String,
+    dim: &datamodel::Dimension,
+    warnings: &mut Vec<ExportWarning>,
+) {
     let name = format_mdl_ident(&dim.name);
     write!(buf, "{name}:").unwrap();
 
@@ -1662,6 +2623,12 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
                         .iter()
                         .any(|(src, _)| !seen_sources.insert(src.as_str()));
                     if has_one_to_many {
+                        warnings.push(ExportWarning::new(format!(
+                            "dimension '{}' has a one-to-many element mapping to '{}' \
+                             that MDL positional notation cannot represent; exported as \
+                             a plain dimension-name mapping (element-level detail lost)",
+                            dim.name, mapping.target
+                        )));
                         format_mdl_ident(&mapping.target)
                     } else {
                         let mut sorted_map = mapping.element_map.clone();
@@ -1965,6 +2932,14 @@ fn max_sketch_uid(elements: &[ViewElement], valve_uids: &HashMap<i32, i32>) -> i
 
 /// MDL view titles are written on a single `*<title>` line.
 /// Collapse CR/LF runs so untrusted titles cannot break sketch structure.
+///
+/// This is deliberately NOT the `sanitize_free_text` equation-section choke
+/// point: a view title lives in the SKETCH section, whose structural rules
+/// differ (the sketch's own records use `|` as an intra-record field separator,
+/// e.g. the `$...|...|...` font line, so a `|` in a title is not the
+/// equation-entry terminator). Only the line-break collapse is shared in
+/// spirit; keeping this separate avoids applying equation-section escaping
+/// (`|`->`/`) to sketch text where `|` is not structural.
 fn sanitize_view_title_for_mdl(title: &str) -> String {
     let mut out = String::with_capacity(title.len());
     let mut prev_was_line_break = false;
@@ -2728,6 +3703,9 @@ fn split_view_on_groups<'a>(
 /// Stateful writer that accumulates the full MDL file text.
 pub struct MdlWriter {
     buf: String,
+    /// Non-fatal degradations accumulated during emission (#856). Returned
+    /// alongside the text from [`MdlWriter::write_project`].
+    warnings: Vec<ExportWarning>,
 }
 
 impl Default for MdlWriter {
@@ -2738,14 +3716,21 @@ impl Default for MdlWriter {
 
 impl MdlWriter {
     pub fn new() -> Self {
-        MdlWriter { buf: String::new() }
+        MdlWriter {
+            buf: String::new(),
+            warnings: Vec::new(),
+        }
     }
 
-    /// Orchestrate the full MDL file assembly and return the result.
+    /// Orchestrate the full MDL file assembly and return the text plus any
+    /// [`ExportWarning`]s recorded for lossy constructs.
     ///
     /// Vensim requires CRLF (`\r\n`) line endings, so the final output
     /// is converted from LF to CRLF before returning.
-    pub(super) fn write_project(mut self, project: &datamodel::Project) -> Result<String> {
+    pub(super) fn write_project(
+        mut self,
+        project: &datamodel::Project,
+    ) -> Result<(String, Vec<ExportWarning>)> {
         self.buf.push_str("{UTF-8}\n");
         // Macro definitions are top-level `:MACRO:` blocks emitted right
         // after `{UTF-8}` and before the dimension defs / main-model
@@ -2757,7 +3742,14 @@ impl MdlWriter {
         self.write_equations_section(model, project)?;
         self.write_sketch_section(&model.views);
         self.write_settings_section(project);
-        Ok(self.buf.replace('\n', "\r\n"))
+        // Collapse exact-duplicate warnings while preserving first-seen order,
+        // so a construct emitted from more than one path (or an incidental
+        // repeat) surfaces once rather than as stderr noise. Per-element
+        // warnings name distinct elements and are intentionally not collapsed
+        // here; aggregating those per variable is tracked separately.
+        let mut seen: HashSet<String> = HashSet::new();
+        self.warnings.retain(|w| seen.insert(w.message.clone()));
+        Ok((self.buf.replace('\n', "\r\n"), self.warnings))
     }
 
     /// Emit each macro-marked model as a `:MACRO: ... :END OF MACRO:` block.
@@ -2782,6 +3774,10 @@ impl MdlWriter {
             // model's own views; fall back to the underbar->space /
             // quoting helpers (the params/name are canonicalized idents).
             let display_names = build_display_name_map(&model.views);
+            // Context is scoped to the macro model so a body reference to a
+            // parameter or a body-local variable resolves against its own
+            // variable set (e.g. a wildcard subscript over a body variable).
+            let ctx = WriterContext::from_model(model, &project.dimensions);
 
             let params = spec
                 .parameters
@@ -2809,7 +3805,13 @@ impl MdlWriter {
                 if param_idents.contains(var.get_ident()) {
                     continue;
                 }
-                write_variable_entry(&mut self.buf, var, &display_names);
+                write_variable_entry_ctx_warn(
+                    &mut self.buf,
+                    var,
+                    &display_names,
+                    &ctx,
+                    &mut self.warnings,
+                );
                 self.buf.push('\n');
             }
 
@@ -2878,10 +3880,14 @@ impl MdlWriter {
     ) -> Result<()> {
         // 1. Dimension definitions
         for dim in &project.dimensions {
-            write_dimension_def(&mut self.buf, dim);
+            write_dimension_def_warn(&mut self.buf, dim, &mut self.warnings);
         }
 
         let display_names = build_display_name_map(&model.views);
+        // Model-scoped writer context: the variable set (for builtin/variable
+        // shadowing) and per-variable declared dimensions (for wildcard
+        // subscript recovery), threaded into every equation's printer.
+        let ctx = WriterContext::from_model(model, &project.dimensions);
 
         // Reconstruct each Phase-4-materialized multi-output cluster
         // (`<lhs> = <macro>(<args> : <bindings>)`) and collect the idents
@@ -2931,12 +3937,25 @@ impl MdlWriter {
             if group.name.eq_ignore_ascii_case("Control") {
                 continue;
             }
-            // Group marker
+            warn_group_lossiness(group, &mut self.warnings);
+            // Group marker. Both free-text fields route through the
+            // sanitization choke point (GH #849): the name is a single banner
+            // line (`try_group_star` stops it at whitespace), and the doc is
+            // skipped up to `|` -- so a raw `|` in either, an embedded section
+            // terminator, or a line break in the name would corrupt the file.
             write!(
                 self.buf,
                 "\n********************************************************\n\t.{}\n********************************************************~\n\t\t{}\n\t|\n",
-                underbar_to_space(&group.name),
-                group.doc.as_deref().unwrap_or(""),
+                sanitize_free_text(
+                    &underbar_to_space(&group.name),
+                    FreeTextLineMode::SingleLine,
+                    &[],
+                ),
+                sanitize_free_text(
+                    group.doc.as_deref().unwrap_or(""),
+                    FreeTextLineMode::Multiline,
+                    &[],
+                ),
             )
             .unwrap();
 
@@ -2949,7 +3968,13 @@ impl MdlWriter {
                     .iter()
                     .find(|v| v.get_ident() == member_ident)
                 {
-                    write_variable_entry(&mut self.buf, var, &display_names);
+                    write_variable_entry_ctx_warn(
+                        &mut self.buf,
+                        var,
+                        &display_names,
+                        &ctx,
+                        &mut self.warnings,
+                    );
                     self.buf.push('\n');
                 }
             }
@@ -2977,7 +4002,13 @@ impl MdlWriter {
         for entry in ungrouped {
             match entry {
                 UngroupedEntry::Variable(var) => {
-                    write_variable_entry(&mut self.buf, var, &display_names);
+                    write_variable_entry_ctx_warn(
+                        &mut self.buf,
+                        var,
+                        &display_names,
+                        &ctx,
+                        &mut self.warnings,
+                    );
                 }
                 UngroupedEntry::Reconstructed(_, text) => {
                     self.buf.push_str(text);
@@ -3225,18 +4256,25 @@ impl MdlWriter {
         // The 0x7F (DEL) between :L and <%^E!@ is required by Vensim's parser.
         self.buf.push_str(":L\x7F<%^E!@\n");
 
-        // Type 22: Unit equivalences
+        // Type 22: Unit equivalences. The name/equation/aliases are one
+        // physical `22:` line whose fields split on `,` (see
+        // `settings::parse_unit_equivalence`), so each free-text token routes
+        // through the sanitization choke point with `,` as its field separator
+        // (GH #849) -- a raw comma would otherwise fracture a name into extra
+        // aliases and a line break would truncate the line.
+        let sanitize_unit_field =
+            |s: &str| sanitize_free_text(s, FreeTextLineMode::SingleLine, &[',']);
         for unit in &project.units {
             if unit.disabled {
                 continue;
             }
             self.buf.push_str("22:");
             if let Some(eq) = &unit.equation {
-                write!(self.buf, "{},", eq).unwrap();
+                write!(self.buf, "{},", sanitize_unit_field(eq)).unwrap();
             }
-            self.buf.push_str(&unit.name);
+            self.buf.push_str(&sanitize_unit_field(&unit.name));
             for alias in &unit.aliases {
-                write!(self.buf, ",{}", alias).unwrap();
+                write!(self.buf, ",{}", sanitize_unit_field(alias)).unwrap();
             }
             self.buf.push('\n');
         }
@@ -3374,3 +4412,15 @@ fn build_name_map(elements: &[ViewElement]) -> HashMap<i32, &str> {
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 mod tests;
+
+// Split out of writer_tests.rs to stay under the per-file line cap (GH #645);
+// reuses the `tests` module's `make_*` fixture helpers.
+#[cfg(test)]
+#[path = "writer_lossiness_tests.rs"]
+mod lossiness_tests;
+
+// Property-based tests (own file per the per-file line cap; see the module's
+// header for the generator design and fixpoint conventions).
+#[cfg(test)]
+#[path = "writer_proptest.rs"]
+mod proptest_tests;

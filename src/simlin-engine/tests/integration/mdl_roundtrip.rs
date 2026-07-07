@@ -16,9 +16,11 @@ use simlin_engine::{mdl, xmile};
 //   - external data (GET DATA, GET XLS, etc.) -- external file references
 //   - ALLOCATE / INVERT MATRIX -- unsupported builtins
 //   - models with `inf` in unit ranges -- parser limitation
-//   - models with inline lookup definitions -- the writer emits lookup syntax
-//     that the parser cannot re-parse (known limitation)
-//   - xidz_zidz -- XIDZ 3-arg -> SAFEDIV argument count changes
+//
+// Note: `xidz_zidz`, `lookups`, and `lookups_inline` were previously excluded
+// (XIDZ 3-arg -> SAFEDIV argument-count drift, and inline lookup definitions the
+// writer emitted in a form the parser could not re-parse). All three now survive
+// the MDL -> Project -> MDL -> Project semantic roundtrip and are tested below.
 static TEST_MDL_MODELS: &[&str] = &[
     // simple scalar / math
     "test/test-models/tests/abs/test_abs.mdl",
@@ -31,6 +33,10 @@ static TEST_MDL_MODELS: &[&str] = &[
     "test/test-models/tests/constant_expressions/test_constant_expressions.mdl",
     "test/test-models/tests/number_handling/test_number_handling.mdl",
     "test/test-models/tests/zeroled_decimals/test_zeroled_decimals.mdl",
+    "test/test-models/tests/xidz_zidz/xidz_zidz.mdl",
+    // graphical functions / lookups
+    "test/test-models/tests/lookups/test_lookups.mdl",
+    "test/test-models/tests/lookups_inline/test_lookups_inline.mdl",
     // control flow / logic
     "test/test-models/tests/if_stmt/if_stmt.mdl",
     "test/test-models/tests/logicals/test_logicals.mdl",
@@ -1567,4 +1573,408 @@ fn mdl_format_roundtrip() {
             failures.join("\n")
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 6: corpus-wide writer "ratchet" gates
+// ---------------------------------------------------------------------------
+//
+// These two tests walk the whole `.mdl` corpus and pin the writer's current
+// behavior so it can only get better, never regress. They are ratchets, not
+// aspirational goals: each maintains an allowlist of the fixtures that the
+// writer currently mishandles, and asserts BOTH that no *un*listed fixture
+// misbehaves (catches regressions) AND that every listed fixture *still*
+// misbehaves (catches a fix that forgot to shrink the allowlist). A later
+// writer fix therefore MUST delete the entries it repairs, or the gate fails
+// loudly -- which is the whole point: the allowlists shrink to empty as the
+// writer is hardened (GH #851).
+//
+// Performance: the walk parses+writes ~230 fixtures in-process (never spawns
+// the CLI). Fixtures larger than `MAX_FIXTURE_BYTES` are skipped so a debug
+// build stays within the per-test "few seconds" budget; in practice this skips
+// only `C-LEARN` (1.4 MB). Every other corpus file (the largest re-parseable
+// one is ~195 KB) parses in tens of milliseconds, and the whole walk completes
+// in ~2 s on a debug build.
+
+/// Skip fixtures larger than this so the debug-build walk stays within the
+/// per-test time budget. Only `test/xmutil_test_models/C-LEARN` (1.4 MB)
+/// exceeds it today; every other corpus `.mdl` is comfortably under.
+const MAX_FIXTURE_BYTES: u64 = 200 * 1024;
+
+/// Minimum number of fixtures both ratchets must actually exercise. The ratchets
+/// only make *allowlisted* breakage loud; a reader- or source-side regression
+/// that made currently-clean, un-listed fixtures unparseable would silently
+/// shrink coverage with no signal. This floor turns that collapse into a loud
+/// failure. Set well below today's ~209 attempted/re-parseable so ordinary
+/// corpus edits don't trip it, but high enough to catch a real collapse.
+/// (Mirrors the `ltm_corpus_floor_gate` precedent.)
+const MIN_CORPUS_FIXTURES: usize = 200;
+
+/// Fixtures whose writer OUTPUT currently fails to re-parse. Calibrated
+/// empirically by running `corpus_reparse_ratchet` and recording the actual
+/// failures -- do NOT edit by guesswork.
+///
+/// This list is now EMPTY: the context-aware writer (`WriterContext` in
+/// `mdl::writer`) closed both former root causes.
+///
+///   - wildcard/subrange subscripts: `SUM(a[*])` (and `a[*:Dim]`) now recover
+///     Vensim's bang form `a[Dim!]` from the variable's declared dimensions
+///     instead of emitting the reader-rejected `*` / `*:Dim` (#847).
+///   - `PI()` builtin collision: a genuine `pi` builtin lowers to a numeric
+///     literal, and a user variable named `PI`/`pi` is emitted as that
+///     identifier -- neither produces the reader-rejected `PI()` (#850, #853).
+///
+/// Several fixtures cleared here still fail the IDEMPOTENCE ratchet for
+/// unrelated, pre-existing reasons (CRLF free-text accumulation #849, sketch
+/// connector instability); those are listed in `EXPECTED_NON_IDEMPOTENT`.
+const EXPECTED_REPARSE_FAILURES: &[&str] = &[];
+
+/// Re-parseable fixtures whose writer output is NOT a fixpoint: writing the
+/// re-parsed model a second time changes the text. Calibrated empirically by
+/// running `writer_output_idempotence_ratchet`. Grouped by the dominant
+/// observed diff class (a file may exhibit more than one; it is listed under
+/// its primary cause):
+///
+///   - sketch instability: the sketch (diagram) section is not a fixpoint --
+///     connector UIDs/ordering, coordinates, or element name-quoting shift on
+///     the second write. The equations are stable.
+///   - CRLF free-text accumulation: a multi-line comment/units/doc field
+///     gains an extra trailing carriage return each round -- the writer does
+///     not strip embedded `\r` from free text before re-emitting it (GH #849).
+///   - arrayed element order: the order of an arrayed variable's per-element
+///     sub-equations is not stable across a round trip.
+///   - builtin-call spacing: `SIZE(x)` is re-emitted as `SIZE ( x )`.
+///   - unary-minus parenthesization: `-x ^ y` is re-emitted as `-(x ^ y)`.
+///   - escape doubling: backslashes/quotes inside a quoted identifier are
+///     re-escaped on each pass, so the escaping grows.
+///   - control-variable value substitution: a reference to a control variable
+///     (`TIME STEP`) is replaced by its literal value on the second write.
+const EXPECTED_NON_IDEMPOTENT: &[&str] = &[
+    // sketch instability
+    "test/bobby/vdf/econ/mark2.mdl",
+    "test/sdeverywhere/models/smooth3/smooth3.mdl",
+    "test/test-models/samples/Population/Subscripted Population Model.mdl",
+    "test/test-models/samples/Roessler_Chaos/roessler_chaos.mdl",
+    "test/test-models/samples/Workforce/workforce.mdl",
+    "test/test-models/tests/arguments/test_arguments.mdl",
+    "test/test-models/tests/data_from_other_model/model_to_generate_data.mdl",
+    "test/test-models/tests/data_from_other_model/test_data_from_other_model.mdl",
+    "test/test-models/tests/delay_fixed/test_delay_fixed.mdl",
+    "test/test-models/tests/delays/test_delays.mdl",
+    "test/test-models/tests/except/test_except.mdl",
+    "test/test-models/tests/function_capitalization/test_function_capitalization.mdl",
+    "test/test-models/tests/logicals/test_logicals.mdl",
+    "test/test-models/tests/lookups_inline_bounded/test_lookups_inline_bounded.mdl",
+    "test/test-models/tests/macro_cross_reference/test_macro_cross_reference.mdl",
+    "test/test-models/tests/macro_expression/test_macro_expression.mdl",
+    "test/test-models/tests/macro_multi_expression/test_macro_multi_expression.mdl",
+    "test/test-models/tests/macro_multi_macros/test_macro_multi_macros.mdl",
+    "test/test-models/tests/macro_stock/test_macro_stock.mdl",
+    "test/test-models/tests/macro_trailing_definition/test_macro_trailing_definition.mdl",
+    "test/test-models/tests/rounding/test_rounding.mdl",
+    "test/test-models/tests/sample_if_true/test_sample_if_true.mdl",
+    "test/test-models/tests/smooth/test_smooth.mdl",
+    "test/test-models/tests/subrange_merge/test_subrange_merge.mdl",
+    "test/test-models/tests/subscript_multiples/test_multiple_subscripts.mdl",
+    "test/test-models/tests/subscript_selection/subscript_selection.mdl",
+    "test/test-models/tests/subscripted_if_then_else/test_subscripted_if_then_else.mdl",
+    "test/test-models/tests/subscripted_logicals/test_subscripted_logicals.mdl",
+    "test/test-models/tests/subscripted_lookups/test_subscripted_lookups.mdl",
+    "test/test-models/tests/subscripted_round/test_subscripted_round.mdl",
+    "test/test-models/tests/subscripted_xidz/test_subscripted_xidz.mdl",
+    "test/test-models/tests/xidz_zidz/xidz_zidz.mdl",
+    "test/test-models/tests/zeroled_decimals/test_zeroled_decimals.mdl",
+    // CRLF free-text accumulation (GH #849). The free-text sanitization choke
+    // point (`mdl::writer::sanitize_free_text`) normalizes embedded carriage
+    // returns, so the fixtures whose ONLY non-idempotence was CR accumulation
+    // are now fixpoints and have been removed from this list. The entries that
+    // remain here still fail for a SEPARATE reason (a sketch-instability or
+    // arrayed-order diff co-occurring in the same file); the CR class alone no
+    // longer keeps any fixture non-idempotent.
+    "test/metasd/WRLD3-03/wrld3-03.mdl",
+    "test/metasd/bathtub-statistics/integration3.mdl",
+    "test/metasd/covid19-us-homer/homer v8/Covid19US v8.mdl",
+    "test/metasd/early-warnings-catastrophe/catastropeWarning2.mdl",
+    "test/metasd/pink-noise/PinkNoise2010.mdl",
+    "test/metasd/theil-statistics/Theil_2011.mdl",
+    "test/metasd/wonderland/Wonderland3.mdl",
+    "test/sdeverywhere/models/active_initial/active_initial.mdl",
+    "test/test-models/samples/Query_file/Query_file.mdl",
+    "test/test-models/tests/delay_pipeline/test_pipeline_delays.mdl",
+    // arrayed element order
+    "test/metasd/social-network-valuation/groupon 1.mdl",
+    "test/metasd/social-network-valuation/groupon 2.mdl",
+    "test/metasd/social-network-valuation/groupon 3.mdl",
+    "test/test-models/tests/allocate_available/test_allocate_available.mdl",
+    "test/test-models/tests/allocate_by_priority/test_allocate_by_priority.mdl",
+    "test/test-models/tests/array_with_line_break/test_array_with_line_break.mdl",
+    "test/test-models/tests/invert_matrix/test_invert_matrix.mdl",
+    "test/test-models/tests/subscript_element_name/test_subscript_element_name.mdl",
+    "test/test-models/tests/subscript_mapping_simple/test_subscript_mapping_simple.mdl",
+    "test/test-models/tests/subscript_mapping_vensim/test_subscript_mapping_vensim.mdl",
+    "test/test-models/tests/subscripted_delays/test_subscripted_delays.mdl",
+    "test/test-models/tests/subscripted_smooth/test_subscripted_smooth.mdl",
+    "test/test-models/tests/tabbed_arrays/tabbed_arrays.mdl",
+    // builtin-call spacing (`SIZE(x)` -> `SIZE ( x )`)
+    "test/sdeverywhere/models/elmcount/elmcount.mdl",
+    "test/test-models/tests/elm_count/test_elm_count.mdl",
+    "test/test-models/tests/subscript_definition/test_subscript_definition.mdl",
+    // unary-minus parenthesization (`-x ^ y` -> `-(x ^ y)`)
+    "test/test-models/tests/arithmetics/test_arithmetics.mdl",
+    "test/test-models/tests/arithmetics_exp/test_arithmetics_exp.mdl",
+    // escape doubling inside quoted identifiers
+    "test/test-models/tests/special_characters/test_special_variable_names.mdl",
+    // control-variable value substitution (`TIME STEP` -> its literal value)
+    "test/test-models/tests/control_vars/test_control_vars.mdl",
+    // Newly re-parseable after the context-aware writer landed (#847/#850/#853):
+    // these fixtures used to fail the RE-PARSE ratchet (wildcard/subrange
+    // subscripts or a PI collision), so their idempotence was never measured.
+    // Now that they re-parse, a pre-existing non-idempotence surfaces -- almost
+    // entirely CRLF free-text accumulation (#849) and/or sketch connector
+    // control-point instability; the equations themselves round-trip. They are
+    // recorded here (not a regression: they were never in the idempotent set)
+    // and shrink as #849 and the sketch fixes land.
+    "test/metasd/FREE/FREE6/FREE6-corrected/conversion.mdl",
+    "test/metasd/FREE/FREE6/FREE6-corrected/conversion2.mdl",
+    "test/metasd/FREE/FREE6/FREE6-original/conversion.mdl",
+    "test/metasd/FREE/FREE6/FREE6-original/conversion2.mdl",
+    "test/metasd/FREE/FREE6/FREE6-original/free 6.mdl",
+    "test/metasd/beer-game/RealBeer4-Sterman13.mdl",
+    "test/metasd/industrial-dynamics/IDch15/IDch15d.mdl",
+    "test/metasd/interpolating-arrays/InterpolatingArrays.mdl",
+    "test/metasd/scientific-revolution/scirev7.mdl",
+    "test/metasd/scientific-revolution/scirev8.mdl",
+    "test/metasd/thyroid-dynamics/thyroid-2008-d.mdl",
+    "test/sdeverywhere/models/allocate/allocate.mdl",
+    "test/sdeverywhere/models/arrays_cname/arrays_cname.mdl",
+    "test/sdeverywhere/models/arrays_varname/arrays_varname.mdl",
+    "test/sdeverywhere/models/vector/vector.mdl",
+    "test/test-models/tests/subscript_aggregation/test_subscript_aggregation.mdl",
+    "test/test-models/tests/subscript_transposition/test_subscript_transposition.mdl",
+];
+
+/// Recursively collect every `.mdl` fixture under `test/`, returned as sorted,
+/// repo-relative paths (e.g. `test/test-models/tests/abs/test_abs.mdl`). Uses
+/// `std::fs` recursion only -- no extra dependency.
+fn collect_mdl_fixtures() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![std::path::PathBuf::from(resolve_path("test"))];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("mdl"))
+            {
+                let s = path.to_string_lossy();
+                // Convert the on-disk path (prefixed with the crate-relative
+                // `../../`) back to a repo-relative `test/...` path so it
+                // matches the allowlists above.
+                if let Some(idx) = s.find("test/") {
+                    out.push(s[idx..].to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// CORPUS RE-PARSE RATCHET. For every corpus `.mdl` whose SOURCE parses (a
+/// source that does not parse is skipped -- an external-data / GET DIRECT /
+/// missing-CSV issue is not the writer's fault), assert that the writer's
+/// output re-parses cleanly UNLESS the fixture is in `EXPECTED_REPARSE_FAILURES`.
+/// The assertion runs both directions so the allowlist can never go stale:
+///   (a) an un-listed fixture that fails to re-parse is a REGRESSION;
+///   (b) a listed fixture that now re-parses cleanly means a writer fix landed
+///       without shrinking the allowlist -- delete the entry.
+#[test]
+fn corpus_reparse_ratchet() {
+    // Fixtures whose source parsed (so a writer round trip was actually
+    // attempted) and, of those, the ones whose output failed to re-parse.
+    let mut attempted: HashSet<String> = HashSet::new();
+    let mut failed: HashSet<String> = HashSet::new();
+
+    for path in collect_mdl_fixtures() {
+        let file_path = resolve_path(&path);
+        let Ok(meta) = fs::metadata(&file_path) else {
+            continue;
+        };
+        if meta.len() > MAX_FIXTURE_BYTES {
+            continue;
+        }
+        let Ok(source) = fs::read_to_string(&file_path) else {
+            continue;
+        };
+        // A source that does not parse is a source-side / external-data issue,
+        // not a writer bug: skip it entirely.
+        let Ok(project) = mdl::parse_mdl(&source) else {
+            continue;
+        };
+        attempted.insert(path.clone());
+
+        // The output "re-parses cleanly" iff the writer produced text AND that
+        // text parses. A writer error (never observed today) counts as a
+        // failure because no re-parseable output exists.
+        let reparses = mdl::project_to_mdl(&project)
+            .ok()
+            .is_some_and(|output| mdl::parse_mdl(&output).is_ok());
+        if !reparses {
+            failed.insert(path);
+        }
+    }
+
+    // Coverage floor: a reader/source regression that silently unparsed most of
+    // the corpus would otherwise make this ratchet pass vacuously (it only
+    // asserts against the allowlist). Fail loudly if coverage collapses.
+    assert!(
+        attempted.len() >= MIN_CORPUS_FIXTURES,
+        "corpus re-parse ratchet only attempted {} fixtures (floor {}); the corpus walk or the \
+         shared MDL parser likely regressed",
+        attempted.len(),
+        MIN_CORPUS_FIXTURES,
+    );
+
+    let expected: HashSet<&str> = EXPECTED_REPARSE_FAILURES.iter().copied().collect();
+    let mut problems: Vec<String> = Vec::new();
+
+    // (a) Regressions: an attempted fixture not on the allowlist must re-parse.
+    for path in &failed {
+        if !expected.contains(path.as_str()) {
+            problems.push(format!(
+                "REGRESSION: {path} writer output no longer re-parses -- fix the writer \
+                 (do not add it to the allowlist)"
+            ));
+        }
+    }
+
+    // (b) Stale allowlist entries: every listed path must have been attempted
+    // and must still fail.
+    for &path in EXPECTED_REPARSE_FAILURES {
+        if !attempted.contains(path) {
+            problems.push(format!(
+                "STALE: allowlisted {path} was not attempted (source no longer parses, file \
+                 moved/renamed, or exceeds the size cap) -- remove it from EXPECTED_REPARSE_FAILURES"
+            ));
+        } else if !failed.contains(path) {
+            problems.push(format!(
+                "FIXED: allowlisted {path} now re-parses cleanly -- remove it from \
+                 EXPECTED_REPARSE_FAILURES"
+            ));
+        }
+    }
+
+    problems.sort();
+    assert!(
+        problems.is_empty(),
+        "corpus re-parse ratchet ({} attempted, {} currently failing):\n{}",
+        attempted.len(),
+        failed.len(),
+        problems.join("\n")
+    );
+}
+
+/// IDEMPOTENCE RATCHET. Over the re-parseable set (source parses, writer output
+/// parses), assert `write(parse(write(parse(x)))) == write(parse(x))` -- i.e.
+/// the writer's output is a fixpoint -- UNLESS the fixture is in
+/// `EXPECTED_NON_IDEMPOTENT`. Two-way, same contract as the re-parse ratchet:
+///   (a) an un-listed fixture whose second write differs is a REGRESSION;
+///   (b) a listed fixture that is now idempotent means a writer fix landed
+///       without shrinking the allowlist -- delete the entry.
+#[test]
+fn writer_output_idempotence_ratchet() {
+    // Re-parseable fixtures and, of those, the ones whose writer output is not
+    // a fixpoint.
+    let mut reparseable: HashSet<String> = HashSet::new();
+    let mut non_idempotent: HashSet<String> = HashSet::new();
+
+    for path in collect_mdl_fixtures() {
+        let file_path = resolve_path(&path);
+        let Ok(meta) = fs::metadata(&file_path) else {
+            continue;
+        };
+        if meta.len() > MAX_FIXTURE_BYTES {
+            continue;
+        }
+        let Ok(source) = fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let Ok(project1) = mdl::parse_mdl(&source) else {
+            continue;
+        };
+        let Ok(write1) = mdl::project_to_mdl(&project1) else {
+            continue;
+        };
+        // Idempotence is only defined over the re-parseable set: a fixture
+        // whose first output does not parse is the re-parse ratchet's job.
+        let Ok(project2) = mdl::parse_mdl(&write1) else {
+            continue;
+        };
+        reparseable.insert(path.clone());
+
+        let Ok(write2) = mdl::project_to_mdl(&project2) else {
+            // Writing an already-parsed model should never error; treat it as
+            // a non-idempotence so it surfaces rather than being swallowed.
+            non_idempotent.insert(path);
+            continue;
+        };
+        if write1 != write2 {
+            non_idempotent.insert(path);
+        }
+    }
+
+    // Coverage floor (see `corpus_reparse_ratchet`): guard against a silent
+    // collapse of the re-parseable set.
+    assert!(
+        reparseable.len() >= MIN_CORPUS_FIXTURES,
+        "idempotence ratchet only exercised {} re-parseable fixtures (floor {}); the corpus walk \
+         or the shared MDL pipeline likely regressed",
+        reparseable.len(),
+        MIN_CORPUS_FIXTURES,
+    );
+
+    let expected: HashSet<&str> = EXPECTED_NON_IDEMPOTENT.iter().copied().collect();
+    let mut problems: Vec<String> = Vec::new();
+
+    // (a) Regressions.
+    for path in &non_idempotent {
+        if !expected.contains(path.as_str()) {
+            problems.push(format!(
+                "REGRESSION: {path} writer output is no longer a fixpoint -- fix the writer \
+                 (do not add it to the allowlist)"
+            ));
+        }
+    }
+
+    // (b) Stale allowlist entries.
+    for &path in EXPECTED_NON_IDEMPOTENT {
+        if !reparseable.contains(path) {
+            problems.push(format!(
+                "STALE: allowlisted {path} is no longer in the re-parseable set (source or \
+                 writer output no longer parses, file moved, or exceeds the size cap) -- remove \
+                 it from EXPECTED_NON_IDEMPOTENT"
+            ));
+        } else if !non_idempotent.contains(path) {
+            problems.push(format!(
+                "FIXED: allowlisted {path} is now idempotent -- remove it from \
+                 EXPECTED_NON_IDEMPOTENT"
+            ));
+        }
+    }
+
+    problems.sort();
+    assert!(
+        problems.is_empty(),
+        "writer idempotence ratchet ({} re-parseable, {} non-idempotent):\n{}",
+        reparseable.len(),
+        non_idempotent.len(),
+        problems.join("\n")
+    );
 }

@@ -35,7 +35,8 @@ use simlin_engine::errors::{
 use simlin_engine::prost::Message;
 use simlin_engine::{Error, ErrorCode, Result, Results, Vm, datamodel, project_io, serde};
 use simlin_engine::{
-    load_csv, load_dat, open_vensim, open_vensim_with_data, open_xmile, to_mdl, to_xmile,
+    load_csv, load_dat, open_vensim, open_vensim_with_data, open_xmile, to_mdl_with_warnings,
+    to_xmile,
 };
 
 mod gen_stdlib;
@@ -693,8 +694,15 @@ fn main() {
                     }
                     Err(err) => die!("error converting to XMILE: {}", err),
                 },
-                OutputFormat::Mdl => match to_mdl(&project) {
-                    Ok(s) => s.into_bytes(),
+                OutputFormat::Mdl => match to_mdl_with_warnings(&project) {
+                    Ok((s, warnings)) => {
+                        // Print lossiness warnings to STDERR so they do not
+                        // corrupt the MDL when STDOUT is the output file (#856).
+                        for w in &warnings {
+                            eprintln!("warning: MDL export: {}", w.message);
+                        }
+                        s.into_bytes()
+                    }
                     Err(err) => die!("error converting to MDL: {}", err),
                 },
                 OutputFormat::Protobuf => {

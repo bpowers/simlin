@@ -37,6 +37,12 @@ pub fn to_mdl(project: &Project) -> Result<String> {
     mdl::project_to_mdl(project)
 }
 
+/// Convert to Vensim MDL text, also returning any [`mdl::ExportWarning`]s for
+/// constructs that could not be represented losslessly (#856).
+pub fn to_mdl_with_warnings(project: &Project) -> Result<(String, Vec<mdl::ExportWarning>)> {
+    mdl::project_to_mdl_with_warnings(project)
+}
+
 pub fn to_systems(project: &Project) -> Result<String> {
     systems::project_to_systems(project)
 }
