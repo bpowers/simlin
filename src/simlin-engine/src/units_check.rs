@@ -346,6 +346,73 @@ impl UnitEvaluator<'_> {
     }
 }
 
+/// The model's time unit as a `UnitMap` (`t`).
+///
+/// Resolves `sim_specs.time_units` (default `"time"`) through the unit
+/// context so an aliased time unit (e.g. `yr`/`year`) normalizes the same way
+/// a declared unit does; an undeclared time unit becomes a fresh base unit of
+/// that name. Shared by `check` (for the stock/flow `S/t` relationship) and by
+/// conveyor unit checking (docs/design/conveyors.md §9.8), which needs `t`,
+/// `S/t`, and `1/t` to check a conveyor block's parameters.
+pub fn model_time_units(ctx: &Context) -> UnitMap {
+    let time_units_name =
+        canonicalize(ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
+    ctx.lookup(&time_units_name)
+        .cloned()
+        .unwrap_or_else(|| [(time_units_name.clone(), 1)].iter().cloned().collect())
+}
+
+/// The synthetic `time` variable the `UnitEvaluator` uses to resolve
+/// `time`/`initial_time`/`final_time` references and the TIME/DT/... builtins.
+fn time_variable(ctx: &Context) -> Variable {
+    Variable::Var {
+        ident: Ident::new("time"),
+        ast: None,
+        init_ast: None,
+        eqn: None,
+        units: Some(model_time_units(ctx)),
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    }
+}
+
+/// Compute the concrete units of a standalone expression evaluated in the
+/// context of `model` (its variable references resolve to declared-or-inferred
+/// units, exactly as in `check`).
+///
+/// This exposes the internal `UnitEvaluator` for expressions that are NOT
+/// `model.variables` and so are never reached by `check`'s per-variable loop --
+/// specifically a conveyor block's parameter expressions (`<len>`,
+/// `<capacity>`, `<in_limit>`, leak fractions), which live as datamodel strings
+/// on the stock/flow `Compat` (docs/design/conveyors.md §9.8). The caller lowers
+/// each string to an `Expr2` in the model's context, then compares the returned
+/// `Units` against the unit the block position requires.
+///
+/// The returned verdict is the raw `UnitEvaluator::check` result: `Explicit(map)`
+/// for a determinate unit, `Constant` for a pure literal (compatible with any
+/// expected unit), or an error. A `ConsistencyError(DoesNotExist, ..)` means a
+/// dependency's units are unknown; callers skip that case, consistent with the
+/// rest of unit checking (a reference's units are `declared OR inferred`, and
+/// unknown ones are not an error).
+pub fn evaluate_expr_units(
+    ctx: &Context,
+    inferred_units: &HashMap<Ident<Canonical>, UnitMap>,
+    model: &ModelStage1,
+    expr: &Expr2,
+) -> UnitResult<Units> {
+    let evaluator = UnitEvaluator {
+        ctx,
+        model,
+        inferred_units,
+        time: time_variable(ctx),
+    };
+    evaluator.check(expr)
+}
+
 // check uses the model's variables' equations and unit definitions to
 // calculate the concrete units for each equation.  The outer result
 // indicates if we had a problem running the analysis.  The inner result
@@ -367,31 +434,14 @@ pub fn check(
     // for each variable, evaluate the equation given the unit context
     // if the result doesn't match the expected thing, accumulate an error
 
-    let time_units_name =
-        canonicalize(ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
-    let time_units: UnitMap = ctx
-        .lookup(&time_units_name)
-        .cloned()
-        .unwrap_or_else(|| [(time_units_name.clone(), 1)].iter().cloned().collect());
+    let time_units: UnitMap = model_time_units(ctx);
     let one_over_time: UnitMap = combine(UnitOp::Div, Default::default(), time_units.clone());
 
     let units = UnitEvaluator {
         ctx,
         model,
         inferred_units,
-        time: Variable::Var {
-            ident: Ident::new("time"),
-            ast: None,
-            init_ast: None,
-            eqn: None,
-            units: Some(time_units),
-            tables: vec![],
-            non_negative: false,
-            is_flow: false,
-            is_table_only: false,
-            errors: vec![],
-            unit_errors: vec![],
-        },
+        time: time_variable(ctx),
     };
 
     for (ident, var) in model.variables.iter() {

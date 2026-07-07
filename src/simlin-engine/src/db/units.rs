@@ -35,8 +35,9 @@ use crate::common::{Canonical, Ident};
 use crate::datamodel;
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel,
-    SourceProject, model_module_ident_context, parse_source_variable_with_module_context,
-    project_datamodel_dims, project_dimensions_context, project_units_context,
+    SourceProject, SourceVariable, model_module_ident_context,
+    parse_source_variable_with_module_context, project_datamodel_dims, project_dimensions_context,
+    project_units_context,
 };
 
 /// Collect the identifiers that must share units because they sit in the
@@ -444,6 +445,281 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
             .accumulate(db);
         }
     }
+
+    // Conveyor block parameter unit checks (docs/design/conveyors.md §9.8).
+    // These expressions live as datamodel strings on the stock/flow Compat, so
+    // `units_check::check`'s per-variable loop never sees them; we reach them
+    // here with the datamodel + lowering machinery already in hand. Runs after
+    // the ordinary unit check so a conveyor model's ordinary variables are still
+    // checked exactly as before.
+    if let Some(target_ms0) = all_s0.iter().find(|m| m.ident == target_ident) {
+        check_conveyor_param_units(
+            db,
+            model,
+            &model_name,
+            target_model,
+            target_ms0,
+            &models_s0,
+            dim_context,
+            dm_dims,
+            units_ctx,
+            &inferred_units,
+        );
+    }
+}
+
+/// Unit-check a model's conveyor block parameters (docs/design/conveyors.md
+/// §9.8). Best-effort/advisory: every mismatch is a `Warning`, never a hard
+/// error, so the model still simulates through `conveyor_compile::build_vm`.
+///
+/// A conveyor's `<len>`/`<capacity>`/`<in_limit>` and its leak flows' fractions
+/// are expression STRINGS on the stock/flow `datamodel::Compat`, not
+/// `ModelStage1` variables, so they must be parsed and lowered here to be
+/// unit-checked. We synthesize one hidden aux per parameter expression, lower
+/// them together in the target model's context (so their variable references
+/// resolve to real declared-or-inferred units), then compare each computed unit
+/// against the unit the block position requires, with the conveyor stock's
+/// declared units `S` and the model time unit `t`:
+///
+///   - `<len>`      : `t`   (transit time)
+///   - `<capacity>` : `S`   (max material on the belt)
+///   - `<in_limit>` : `S/t` (max inflow per time unit)
+///   - a LINEAR leak fraction      : dimensionless
+///   - an EXPONENTIAL leak rate     : `1/t`
+///
+/// `<sample>` and `<arrest>` are intentionally NOT checked: they are CONDITIONS
+/// evaluated for nonzero (a predicate like `TIME > 10` is dimensionless by
+/// design), so requiring `t` would reject valid expressions. Conveyor-driven
+/// flows (primary outflow, leaks, admitted inflows) carry `S/t` like any flow
+/// and are already unit-checked by the ordinary stock/flow path.
+///
+/// A conveyor stock with no declared units `S` skips ALL of its parameter
+/// checks -- `S` is the yardstick for capacity/in_limit -- consistent with the
+/// "unknown units are skipped" rule elsewhere in unit checking. Likewise a
+/// parameter whose expression reads a variable with unknown units is skipped
+/// (a `DoesNotExist` verdict), never reported as a mismatch.
+#[allow(clippy::too_many_arguments)]
+fn check_conveyor_param_units(
+    db: &dyn Db,
+    model: SourceModel,
+    model_name: &str,
+    target_model: &crate::model::ModelStage1,
+    target_ms0: &crate::model::ModelStage0,
+    models_s0: &HashMap<Ident<Canonical>, &crate::model::ModelStage0>,
+    dim_context: &crate::dimensions::DimensionsContext,
+    dm_dims: &[datamodel::Dimension],
+    units_ctx: &crate::units::Context,
+    inferred_units: &HashMap<Ident<Canonical>, crate::datamodel::UnitMap>,
+) {
+    use crate::ast::Ast;
+    use crate::common::{ErrorCode, UnitError};
+    use crate::datamodel::UnitMap;
+    use crate::units::{UnitOp, Units, combine};
+
+    // One synthesized parameter-expression aux awaiting unit checking.
+    struct SynthParam {
+        ident: Ident<Canonical>,
+        expected: UnitMap,
+        stock: String,
+        label: String,
+    }
+
+    let time_units = crate::units_check::model_time_units(units_ctx);
+
+    // Index the source variables by canonical ident so we can resolve a
+    // conveyor stock's declared units and follow its outflow names to the leak
+    // flows carrying leak fractions. Salsa inputs are Copy.
+    let src_by_canon: HashMap<Ident<Canonical>, SourceVariable> = model
+        .variables(db)
+        .values()
+        .map(|v| (Ident::new(v.ident(db)), *v))
+        .collect();
+
+    let mut synth_params: Vec<SynthParam> = Vec::new();
+    let mut synth_dm_vars: Vec<datamodel::Variable> = Vec::new();
+
+    // A synthetic parameter aux: scalar, no declared units (we compare its
+    // computed units manually), a reserved synthetic name that cannot collide
+    // with a user variable.
+    let push_param = |synth_params: &mut Vec<SynthParam>,
+                      synth_dm_vars: &mut Vec<datamodel::Variable>,
+                      key: &str,
+                      expr: &str,
+                      expected: UnitMap,
+                      stock: &str,
+                      label: &str| {
+        let ident_str = format!("$\u{205a}conveyor\u{205a}{key}");
+        let ident = Ident::new(&ident_str);
+        synth_dm_vars.push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident_str,
+            equation: datamodel::Equation::Scalar(expr.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+        synth_params.push(SynthParam {
+            ident,
+            expected,
+            stock: stock.to_string(),
+            label: label.to_string(),
+        });
+    };
+
+    for svar in model.variables(db).values() {
+        let compat = svar.compat(db);
+        let Some(conv) = &compat.conveyor else {
+            continue;
+        };
+        let stock_ident = Ident::new(svar.ident(db));
+        // The conveyor stock's declared units `S`. Without it we have no
+        // yardstick for capacity/in_limit, so skip this conveyor's checks.
+        let Some(stock_units) = target_model
+            .variables
+            .get(&stock_ident)
+            .and_then(|v| v.units())
+            .cloned()
+        else {
+            continue;
+        };
+        let stock_name = svar.ident(db).clone();
+
+        // `<len>` (transit time): expected `t`.
+        push_param(
+            &mut synth_params,
+            &mut synth_dm_vars,
+            &format!("{stock_name}\u{205a}len"),
+            &conv.transit_time,
+            time_units.clone(),
+            &stock_name,
+            "<len> (transit time)",
+        );
+        // `<capacity>`: expected `S`.
+        if let Some(capacity) = &conv.capacity {
+            push_param(
+                &mut synth_params,
+                &mut synth_dm_vars,
+                &format!("{stock_name}\u{205a}capacity"),
+                capacity,
+                stock_units.clone(),
+                &stock_name,
+                "<capacity>",
+            );
+        }
+        // `<in_limit>`: expected `S/t`.
+        if let Some(in_limit) = &conv.inflow_limit {
+            push_param(
+                &mut synth_params,
+                &mut synth_dm_vars,
+                &format!("{stock_name}\u{205a}in_limit"),
+                in_limit,
+                combine(UnitOp::Div, stock_units.clone(), time_units.clone()),
+                &stock_name,
+                "<in_limit>",
+            );
+        }
+
+        // Leak fractions on this conveyor's leak-marked outflows. A linear leak
+        // fraction is dimensionless; an exponential leak RATE is `1/t`. A bare
+        // `<leak/>` marker (fraction None) contributes zero and is not checked.
+        for out_name in svar.outflows(db) {
+            let Some(flow) = src_by_canon.get(&Ident::new(out_name)) else {
+                continue;
+            };
+            let Some(leak) = &flow.compat(db).leakage else {
+                continue;
+            };
+            let Some(fraction) = &leak.fraction else {
+                continue;
+            };
+            let (expected, label) = if conv.exponential_leak {
+                (
+                    combine(UnitOp::Div, UnitMap::new(), time_units.clone()),
+                    "exponential leak rate",
+                )
+            } else {
+                (UnitMap::new(), "linear leak fraction")
+            };
+            push_param(
+                &mut synth_params,
+                &mut synth_dm_vars,
+                &format!("{stock_name}\u{205a}leak\u{205a}{}", flow.ident(db)),
+                fraction,
+                expected,
+                &stock_name,
+                label,
+            );
+        }
+    }
+
+    if synth_params.is_empty() {
+        return;
+    }
+
+    // Lower every synthesized parameter aux in the target model's context. We
+    // build a throwaway augmented ModelStage1 rather than perturbing the real
+    // `target_model` (which drives inference and the ordinary unit check): the
+    // synthetic auxes must not add constraints to the model under analysis.
+    let mut aug_ms0 = target_ms0.clone();
+    for dm_var in &synth_dm_vars {
+        let mut dummy: Vec<datamodel::Variable> = Vec::new();
+        let vs0 = crate::variable::parse_var(dm_dims, dm_var, &mut dummy, units_ctx, |mi| {
+            Ok(Some(mi.clone()))
+        });
+        aug_ms0.variables.insert(Ident::new(vs0.ident()), vs0);
+    }
+    let scope = crate::model::ScopeStage0 {
+        models: models_s0,
+        dimensions: dim_context,
+        model_name: aug_ms0.ident.as_str(),
+    };
+    let aug_s1 = crate::model::ModelStage1::new(&scope, &aug_ms0);
+
+    for param in &synth_params {
+        // Extract the lowered parameter expression. A malformed expression has
+        // no AST (it surfaces as a separate compile error), so there is nothing
+        // to unit-check -- skip it.
+        let expr = match aug_s1.variables.get(&param.ident).and_then(|v| v.ast()) {
+            Some(Ast::Scalar(expr)) | Some(Ast::ApplyToAll(_, expr)) => expr,
+            _ => continue,
+        };
+
+        let diagnostic_detail =
+            match crate::units_check::evaluate_expr_units(units_ctx, inferred_units, &aug_s1, expr)
+            {
+                // A determinate unit that disagrees with what the block requires.
+                Ok(Units::Explicit(actual)) if actual != param.expected => Some(format!(
+                    "conveyor '{}' {}: computed units '{}' don't match the expected units '{}'",
+                    param.stock, param.label, actual, param.expected
+                )),
+                // Matches, or a pure constant (compatible with any expected unit).
+                Ok(_) => None,
+                // A dependency's units are unknown -- skip, not a dimensional error.
+                Err(UnitError::ConsistencyError(ErrorCode::DoesNotExist, _, _)) => None,
+                // An internal dimensional inconsistency in the expression itself
+                // (e.g. adding incompatible units); surface it against the conveyor.
+                Err(err) => Some(format!(
+                    "conveyor '{}' {}: {}",
+                    param.stock, param.label, err
+                )),
+            };
+
+        if let Some(detail) = diagnostic_detail {
+            CompilationDiagnostic(Diagnostic {
+                model: model_name.to_string(),
+                variable: Some(param.stock.clone()),
+                error: DiagnosticError::Unit(UnitError::ConsistencyError(
+                    ErrorCode::UnitMismatch,
+                    crate::builtins::Loc::default(),
+                    Some(detail),
+                )),
+                severity: DiagnosticSeverity::Warning,
+            })
+            .accumulate(db);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -485,5 +761,344 @@ mod tests {
         // Before the fix this panicked inside units_infer; now it returns
         // cleanly, skipping the dangling module's constraints.
         check_model_units(&db, sync.models["main"].source, sync.project);
+    }
+
+    // ── Conveyor block parameter unit checks (docs/design/conveyors.md §9.8) ──
+
+    /// Build a conveyor stock: an ordinary `datamodel::Stock` carrying a
+    /// `<conveyor>` block on its `Compat`.
+    #[allow(clippy::too_many_arguments)]
+    fn conveyor_stock(
+        ident: &str,
+        init: &str,
+        inflows: &[&str],
+        outflows: &[&str],
+        units: Option<&str>,
+        conv: crate::datamodel::Conveyor,
+    ) -> crate::datamodel::Variable {
+        let compat = crate::datamodel::Compat {
+            conveyor: Some(conv),
+            ..Default::default()
+        };
+        crate::datamodel::Variable::Stock(crate::datamodel::Stock {
+            ident: ident.to_string(),
+            equation: crate::datamodel::Equation::Scalar(init.to_string()),
+            documentation: String::new(),
+            units: units.map(|s| s.to_owned()),
+            inflows: inflows.iter().map(|s| s.to_string()).collect(),
+            outflows: outflows.iter().map(|s| s.to_string()).collect(),
+            ai_state: None,
+            uid: None,
+            compat,
+        })
+    }
+
+    /// A leak-marked outflow carrying a leak `fraction` expression.
+    fn leak_flow(ident: &str, fraction: &str) -> crate::datamodel::Variable {
+        let mut var = crate::testutils::x_flow(ident, "0", None);
+        if let crate::datamodel::Variable::Flow(flow) = &mut var {
+            flow.compat.leakage = Some(crate::datamodel::Leakage {
+                fraction: Some(fraction.to_string()),
+                integers: false,
+                zone_start: None,
+                zone_end: None,
+            });
+        }
+        var
+    }
+
+    /// A `<conveyor>` block with the given transit time and everything else at
+    /// its documented default.
+    fn conveyor_with_len(transit_time: &str) -> crate::datamodel::Conveyor {
+        crate::datamodel::Conveyor {
+            transit_time: transit_time.to_string(),
+            capacity: None,
+            inflow_limit: None,
+            sample: None,
+            arrest: None,
+            discrete: false,
+            batch_integrity: false,
+            one_at_a_time: true,
+            exponential_leak: false,
+            ignore_earlier_zone_losses: false,
+        }
+    }
+
+    /// The human-readable detail text of a `Unit` diagnostic (empty otherwise).
+    fn unit_detail(d: &Diagnostic) -> String {
+        match &d.error {
+            DiagnosticError::Unit(unit_err) => unit_err.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// Drive `check_model_units` over a project's `main` model and return the
+    /// conveyor unit diagnostics -- the `Unit` warnings whose detail names a
+    /// conveyor (so ordinary unit warnings are excluded).
+    fn conveyor_unit_warnings(project: &crate::datamodel::Project) -> Vec<Diagnostic> {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, project);
+        let source = sync.models["main"].source;
+        check_model_units::accumulated::<CompilationDiagnostic>(&db, source, sync.project)
+            .into_iter()
+            .map(|cd| cd.0.clone())
+            .filter(|d| unit_detail(d).contains("conveyor"))
+            .collect()
+    }
+
+    /// A conveyor project with one stock, an inflow, and a primary outflow.
+    fn conveyor_project(
+        stock: crate::datamodel::Variable,
+        extra: Vec<crate::datamodel::Variable>,
+    ) -> crate::datamodel::Project {
+        use crate::testutils::{x_flow, x_model, x_project};
+        let mut vars = vec![
+            stock,
+            x_flow("inflow", "250", None),
+            x_flow("graduating", "0", None),
+        ];
+        vars.extend(extra);
+        let model = x_model("main", vars);
+        x_project(sim_specs_with_units("month"), &[model])
+    }
+
+    #[test]
+    fn conveyor_capacity_wrong_units_warns() {
+        // <capacity> must match the stock's units S (widget). Here it reads a
+        // variable declared in `month`, so a mismatch warning naming the
+        // conveyor is produced.
+        let mut conv = conveyor_with_len("bad_len_ok");
+        conv.capacity = Some("bad_cap".to_string());
+        let stock = conveyor_stock(
+            "students",
+            "1000",
+            &["inflow"],
+            &["graduating"],
+            Some("widget"),
+            conv,
+        );
+        let extra = vec![
+            x_aux("bad_len_ok", "4", Some("month")), // len IS correct (month == t)
+            x_aux("bad_cap", "1200", Some("month")), // capacity WRONG (month != widget)
+        ];
+        let warnings = conveyor_unit_warnings(&conveyor_project(stock, extra));
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one conveyor unit warning, got: {warnings:?}"
+        );
+        let detail = unit_detail(&warnings[0]);
+        assert!(
+            detail.contains("students") && detail.contains("<capacity>"),
+            "warning should name the conveyor and the offending parameter: {detail}"
+        );
+    }
+
+    #[test]
+    fn conveyor_len_wrong_units_warns() {
+        // <len> is a transit time and must be in the model time unit t (month).
+        // Reading a variable declared in `widget` is a mismatch.
+        let stock = conveyor_stock(
+            "students",
+            "1000",
+            &["inflow"],
+            &["graduating"],
+            Some("widget"),
+            conveyor_with_len("bad_len"),
+        );
+        let extra = vec![x_aux("bad_len", "4", Some("widget"))];
+        let warnings = conveyor_unit_warnings(&conveyor_project(stock, extra));
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(unit_detail(&warnings[0]).contains("<len>"));
+    }
+
+    #[test]
+    fn conveyor_in_limit_wrong_units_warns() {
+        // <in_limit> is an inflow rate and must be S/t (widget/month). A plain
+        // `widget`-declared variable is a mismatch.
+        let mut conv = conveyor_with_len("len_ok");
+        conv.inflow_limit = Some("bad_limit".to_string());
+        let stock = conveyor_stock(
+            "students",
+            "1000",
+            &["inflow"],
+            &["graduating"],
+            Some("widget"),
+            conv,
+        );
+        let extra = vec![
+            x_aux("len_ok", "4", Some("month")),
+            x_aux("bad_limit", "500", Some("widget")),
+        ];
+        let warnings = conveyor_unit_warnings(&conveyor_project(stock, extra));
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(unit_detail(&warnings[0]).contains("<in_limit>"));
+    }
+
+    #[test]
+    fn conveyor_correct_units_produce_no_warning() {
+        // Every parameter reads a variable whose declared units match the block
+        // position exactly, so no conveyor unit warning is produced.
+        let mut conv = conveyor_with_len("len_ok");
+        conv.capacity = Some("cap_ok".to_string());
+        conv.inflow_limit = Some("limit_ok".to_string());
+        let stock = conveyor_stock(
+            "students",
+            "1000",
+            &["inflow"],
+            &["graduating"],
+            Some("widget"),
+            conv,
+        );
+        let extra = vec![
+            x_aux("len_ok", "4", Some("month")),
+            x_aux("cap_ok", "1200", Some("widget")),
+            x_aux("limit_ok", "500", Some("widget/month")),
+        ];
+        let warnings = conveyor_unit_warnings(&conveyor_project(stock, extra));
+        assert!(
+            warnings.is_empty(),
+            "correct conveyor units should not warn, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn conveyor_constant_parameters_produce_no_warning() {
+        // Bare numeric literals are unit-constants, compatible with any expected
+        // unit -- the common authoring case must never warn.
+        let mut conv = conveyor_with_len("4");
+        conv.capacity = Some("1200".to_string());
+        conv.inflow_limit = Some("500".to_string());
+        let stock = conveyor_stock(
+            "students",
+            "1000",
+            &["inflow"],
+            &["graduating"],
+            Some("widget"),
+            conv,
+        );
+        let warnings = conveyor_unit_warnings(&conveyor_project(stock, vec![]));
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn conveyor_sample_and_arrest_predicates_do_not_warn() {
+        // <sample>/<arrest> are CONDITIONS evaluated for nonzero. `TIME > 10` is
+        // dimensionless by design; requiring `t` would reject it, so they are
+        // deliberately not unit-checked.
+        let mut conv = conveyor_with_len("4");
+        conv.sample = Some("TIME > 10".to_string());
+        conv.arrest = Some("TIME > 20".to_string());
+        let stock = conveyor_stock(
+            "students",
+            "1000",
+            &["inflow"],
+            &["graduating"],
+            Some("widget"),
+            conv,
+        );
+        let warnings = conveyor_unit_warnings(&conveyor_project(stock, vec![]));
+        assert!(
+            warnings.is_empty(),
+            "sample/arrest predicates must not warn, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn conveyor_without_declared_stock_units_is_skipped() {
+        // With no declared units S on the conveyor stock there is no yardstick
+        // for capacity/in_limit, so ALL of its parameter checks are skipped --
+        // consistent with the "unknown units are skipped" rule.
+        let mut conv = conveyor_with_len("bad_len");
+        conv.capacity = Some("bad_cap".to_string());
+        let stock = conveyor_stock(
+            "students",
+            "1000",
+            &["inflow"],
+            &["graduating"],
+            None, // no S
+            conv,
+        );
+        let extra = vec![
+            x_aux("bad_len", "4", Some("widget")),
+            x_aux("bad_cap", "1200", Some("widget")),
+        ];
+        let warnings = conveyor_unit_warnings(&conveyor_project(stock, extra));
+        assert!(
+            warnings.is_empty(),
+            "a unitless conveyor stock skips all parameter checks, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn conveyor_unknown_parameter_dependency_is_skipped() {
+        // A parameter that reads a variable with UNKNOWN units (undeclared, not
+        // inferrable) yields a DoesNotExist verdict -- skipped, not a mismatch.
+        let mut conv = conveyor_with_len("4");
+        conv.capacity = Some("mystery".to_string());
+        let stock = conveyor_stock(
+            "students",
+            "1000",
+            &["inflow"],
+            &["graduating"],
+            Some("widget"),
+            conv,
+        );
+        // `mystery` has no declared units and nothing constrains it.
+        let extra = vec![
+            x_aux("mystery", "some_input", None),
+            x_aux("some_input", "3", None),
+        ];
+        let warnings = conveyor_unit_warnings(&conveyor_project(stock, extra));
+        assert!(
+            warnings.is_empty(),
+            "unknown parameter units should be skipped, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn conveyor_linear_leak_fraction_wrong_units_warns() {
+        // A LINEAR leak fraction is dimensionless; reading a `widget`-declared
+        // variable is a mismatch.
+        let stock = conveyor_stock(
+            "students",
+            "1000",
+            &["inflow"],
+            &["graduating", "attriting"],
+            Some("widget"),
+            conveyor_with_len("4"),
+        );
+        let extra = vec![
+            leak_flow("attriting", "bad_frac"),
+            x_aux("bad_frac", "0.1", Some("widget")),
+        ];
+        let warnings = conveyor_unit_warnings(&conveyor_project(stock, extra));
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(unit_detail(&warnings[0]).contains("leak"));
+    }
+
+    #[test]
+    fn conveyor_exponential_leak_rate_correct_units_no_warning() {
+        // With exponential_leak the leak number is a RATE (1/t). A variable
+        // declared as `1/month` matches, so no warning.
+        let mut conv = conveyor_with_len("4");
+        conv.exponential_leak = true;
+        let stock = conveyor_stock(
+            "students",
+            "1000",
+            &["inflow"],
+            &["graduating", "attriting"],
+            Some("widget"),
+            conv,
+        );
+        let extra = vec![
+            leak_flow("attriting", "rate_ok"),
+            x_aux("rate_ok", "0.1", Some("1/month")),
+        ];
+        let warnings = conveyor_unit_warnings(&conveyor_project(stock, extra));
+        assert!(
+            warnings.is_empty(),
+            "an exponential leak rate in 1/t must not warn, got: {warnings:?}"
+        );
     }
 }
