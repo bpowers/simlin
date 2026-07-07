@@ -458,7 +458,7 @@ fn non_lookup_function_emits_normally() {
 
 // ---- Task 1: Variable entry formatting (scalar) ----
 
-fn make_aux(ident: &str, eqn: &str, units: Option<&str>, doc: &str) -> Variable {
+pub(super) fn make_aux(ident: &str, eqn: &str, units: Option<&str>, doc: &str) -> Variable {
     Variable::Aux(Aux {
         ident: ident.to_owned(),
         equation: Equation::Scalar(eqn.to_owned()),
@@ -471,7 +471,7 @@ fn make_aux(ident: &str, eqn: &str, units: Option<&str>, doc: &str) -> Variable 
     })
 }
 
-fn make_stock(ident: &str, eqn: &str, units: Option<&str>, doc: &str) -> Variable {
+pub(super) fn make_stock(ident: &str, eqn: &str, units: Option<&str>, doc: &str) -> Variable {
     Variable::Stock(Stock {
         ident: ident.to_owned(),
         equation: Equation::Scalar(eqn.to_owned()),
@@ -1247,7 +1247,7 @@ fn module_variable_produces_no_output() {
 
 // ---- Phase 4 Task 1: Validation ----
 
-fn make_project(models: Vec<datamodel::Model>) -> datamodel::Project {
+pub(super) fn make_project(models: Vec<datamodel::Model>) -> datamodel::Project {
     datamodel::Project {
         name: "test".to_owned(),
         sim_specs: datamodel::SimSpecs {
@@ -1266,7 +1266,7 @@ fn make_project(models: Vec<datamodel::Model>) -> datamodel::Project {
     }
 }
 
-fn make_model(variables: Vec<Variable>) -> datamodel::Model {
+pub(super) fn make_model(variables: Vec<Variable>) -> datamodel::Model {
     datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
@@ -4216,9 +4216,12 @@ fn write_arrayed_with_default_equation_writes_explicit_elements() {
             ("A3".to_string(), "7".to_string(), None, None),
         ],
         &Some("7".to_string()),
+        false,
+        &Compat::default(),
         &None,
         "",
         &WriterContext::default(),
+        &mut Vec::new(),
     );
     assert!(
         !buf.contains("g[DimA]"),
@@ -4250,9 +4253,12 @@ fn write_arrayed_no_default_writes_all_elements() {
             ("A2".to_string(), "0".to_string(), None, None),
         ],
         &None,
+        false,
+        &Compat::default(),
         &None,
         "",
         &WriterContext::default(),
+        &mut Vec::new(),
     );
     assert!(
         !buf.contains(":EXCEPT:"),
@@ -4274,9 +4280,12 @@ fn write_arrayed_except_no_exceptions_all_default() {
             ("A2".to_string(), "5".to_string(), None, None),
         ],
         &Some("5".to_string()),
+        false,
+        &Compat::default(),
         &None,
         "",
         &WriterContext::default(),
+        &mut Vec::new(),
     );
     assert!(
         !buf.contains("k[DimA]"),
@@ -4299,9 +4308,12 @@ fn write_arrayed_except_with_omitted_elements_avoids_dimension_default() {
         &["DimA".to_string()],
         &[("A1".to_string(), "8".to_string(), None, None)],
         &Some("8".to_string()),
+        false,
+        &Compat::default(),
         &None,
         "",
         &WriterContext::default(),
+        &mut Vec::new(),
     );
 
     assert!(
@@ -5717,7 +5729,7 @@ fn ctx_with_arrayed_var(ident: &str, dims: &[&str]) -> WriterContext {
         uid: None,
         compat: Compat::default(),
     });
-    WriterContext::from_model(&make_model(vec![var]))
+    WriterContext::from_model(&make_model(vec![var]), &[])
 }
 
 #[test]
@@ -5784,7 +5796,7 @@ fn wildcard_subscript_without_context_falls_back_to_star() {
 
 /// A `WriterContext` for a single scalar variable named `ident`.
 fn ctx_with_scalar_var(ident: &str) -> WriterContext {
-    WriterContext::from_model(&make_model(vec![make_aux(ident, "0", None, "")]))
+    WriterContext::from_model(&make_model(vec![make_aux(ident, "0", None, "")]), &[])
 }
 
 #[test]
@@ -5826,7 +5838,7 @@ fn shadowed_reserved_name_roundtrips_via_write_variable_entry() {
         make_aux("time_step", "0.5", None, ""),
         make_aux("flow", "time_step * 2", None, ""),
     ]);
-    let ctx = WriterContext::from_model(&model);
+    let ctx = WriterContext::from_model(&model, &[]);
     let mut buf = String::new();
     let flow = &model.variables[1];
     write_variable_entry_ctx(&mut buf, flow, &HashMap::new(), &ctx);
@@ -5835,3 +5847,5 @@ fn shadowed_reserved_name_roundtrips_via_write_variable_entry() {
         "reference to user var 'Time Step' must stay an identifier: {buf}"
     );
 }
+
+// ---------------------------------------------------------------------------

@@ -126,7 +126,8 @@ pub use self::compat::open_vensim_xmutil;
 #[cfg(feature = "file_io")]
 pub use self::compat::{load_csv, load_dat};
 pub use self::compat::{
-    open_systems, open_vensim, open_vensim_with_data, open_xmile, to_mdl, to_systems, to_xmile,
+    open_systems, open_vensim, open_vensim_with_data, open_xmile, to_mdl, to_mdl_with_warnings,
+    to_systems, to_xmile,
 };
 #[cfg(feature = "file_io")]
 pub use self::data_provider::FilesystemDataProvider;

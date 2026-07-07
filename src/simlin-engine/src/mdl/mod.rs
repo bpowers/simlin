@@ -26,7 +26,7 @@ mod xmile_compat;
 pub use lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
 pub use normalizer::{NormalizerError, NormalizerErrorCode, Token, TokenNormalizer};
 pub use reader::{EquationReader, ReaderError};
-pub use writer::{WriterContext, expr0_to_mdl, expr0_to_mdl_ctx};
+pub use writer::{ExportWarning, WriterContext, expr0_to_mdl, expr0_to_mdl_ctx};
 
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::{Project, Variable};
@@ -48,7 +48,45 @@ use writer::MdlWriter;
 pub(crate) const LOOKUP_SENTINEL: &str = "0+0";
 
 /// Convert a Project to Vensim MDL text.
+///
+/// Thin wrapper over [`project_to_mdl_with_warnings`] that discards the
+/// lossiness warnings for the many callers that only need the text. Callers
+/// that want to surface degraded exports to the user should use the
+/// warnings-returning entry point instead.
 pub fn project_to_mdl(project: &Project) -> Result<String> {
+    project_to_mdl_with_warnings(project).map(|(text, _warnings)| text)
+}
+
+/// Convert a Project to Vensim MDL text, returning any [`ExportWarning`]s for
+/// constructs the MDL surface could not represent losslessly (#856).
+///
+/// # Lossiness contract
+///
+/// - **Hard errors** (`Err`): structural impossibilities -- a project with more
+///   than one non-macro model, an ordinary (non-macro) `Module` variable, or a
+///   macro-invocation cluster whose wiring was edited into an unreconstructable
+///   state. These would produce corrupt or meaningless `.mdl` and so fail
+///   loudly rather than warn.
+/// - **Warnings** (non-empty `Vec<ExportWarning>`): the export succeeded but a
+///   construct was degraded to the closest representable form. Today these are:
+///   a dropped `compat.non_negative` flag (changes Vensim sim semantics); a
+///   Discrete graphical function (no Vensim equivalent -- emitted continuous);
+///   an Extrapolate graphical function on an inline `WITH LOOKUP` (no `TABXL`
+///   call site can mark it -- emitted clamped); a one-to-many dimension element
+///   mapping (MDL positional notation cannot express it -- emitted as a plain
+///   name mapping); a multi-word group name (the reader truncates the banner at
+///   the first whitespace) or a group's documentation (dropped on re-import);
+///   and an EXCEPT default that could not be reconstructed (dimension
+///   membership unavailable, or the default references its own dimensions).
+///   Each names the affected variable, dimension, or group.
+/// - **Silently lossless**: everything else, including a *standalone*
+///   Extrapolate lookup table (its call sites are rewritten to `TABXL`, so the
+///   kind round-trips) and an EXCEPT default that IS reconstructed (its covered
+///   elements are materialized explicitly).
+///
+/// Warnings are a side channel: they never change the emitted text, so they do
+/// not affect the corpus round-trip ratchets.
+pub fn project_to_mdl_with_warnings(project: &Project) -> Result<(String, Vec<ExportWarning>)> {
     // MDL has no general multi-model representation, but a macro-marked model
     // is emitted as a `:MACRO:` block (not a separate model), so only the
     // *non-macro* models are subject to the single-model rule. An ordinary
