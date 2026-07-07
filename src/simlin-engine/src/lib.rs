@@ -71,6 +71,7 @@ mod project;
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[path = "project_io.gen.rs"]
 pub mod project_io;
+pub mod queue;
 #[doc(hidden)]
 pub mod rapidhash;
 mod results;
