@@ -26,7 +26,7 @@ mod xmile_compat;
 pub use lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
 pub use normalizer::{NormalizerError, NormalizerErrorCode, Token, TokenNormalizer};
 pub use reader::{EquationReader, ReaderError};
-pub use writer::expr0_to_mdl;
+pub use writer::{WriterContext, expr0_to_mdl, expr0_to_mdl_ctx};
 
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::{Project, Variable};

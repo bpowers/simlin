@@ -87,10 +87,16 @@ fn escape_mdl_quoted_ident(name: &str) -> String {
 /// Format a canonical identifier for MDL output, preserving spaces and
 /// adding quotes when the bare form would not round-trip through MDL parsing.
 fn format_mdl_ident(name: &str) -> String {
-    let display = underbar_to_space(name);
-    if is_mdl_quoted_ident(&display) {
-        return display;
+    // An already-quoted identifier is literal to Vensim -- its interior is
+    // verbatim. Detect it BEFORE any transformation: running
+    // `underbar_to_space` over the whole string would turn interior
+    // underscores into spaces (changing which variable Vensim resolves,
+    // e.g. `"rate_of_change!"` vs `"rate of change!"`) and re-escaping would
+    // grow the escaping each pass. Pass it through unchanged (#846).
+    if is_mdl_quoted_ident(name) {
+        return name.to_string();
     }
+    let display = underbar_to_space(name);
     if needs_mdl_quoting(&display) {
         format!("\"{}\"", escape_mdl_quoted_ident(&display))
     } else {
@@ -188,9 +194,86 @@ fn mdl_bare_keyword(xmile_name: &str) -> Option<&'static str> {
     }
 }
 
+/// Numeric literal emitted for a genuine `pi` builtin reference. Vensim has no
+/// `PI` builtin and its parser rejects the zero-arg call `PI()`, so the writer
+/// substitutes a literal with enough precision to round-trip (#850). The value
+/// is f64 pi to full precision (17 significant digits), so it parses back to the
+/// exact same bit pattern the `pi` builtin would evaluate to.
+const PI_LITERAL: &str = "3.141592653589793";
+
+/// Model-scoped context threaded through the MDL expression printer so it can
+/// emit output its own parser accepts and that does not silently rebind
+/// identifiers.
+///
+/// Without it, `MdlPrintVisitor` is context-free and cannot tell a genuine
+/// 0-arity builtin (`pi`, `time`, `time_step`, ...) from a like-named user
+/// variable (the parser reifies BOTH into a zero-arg `Expr0::App`), nor recover
+/// the dimension a wildcard subscript `x[*]` reduces over (the importer dropped
+/// the `Dim!` bang form to a bare `*`).
+#[derive(Default)]
+pub struct WriterContext {
+    /// Canonical idents of the model's variables. A zero-arg-`App` reference
+    /// whose name appears here is a user variable shadowing the like-named
+    /// builtin, so it must be emitted as the identifier rather than the builtin.
+    var_idents: HashSet<String>,
+    /// Canonical variable ident -> its declared dimension names, in order.
+    /// Drives wildcard-subscript recovery: `SUM(a[*])` where `a` is declared
+    /// `a[DimA]` becomes `SUM(a[DimA!])` (Vensim's bang form).
+    var_dims: HashMap<String, Vec<String>>,
+}
+
+impl WriterContext {
+    /// Build from a model's variables: index every variable's canonical ident
+    /// and, for arrayed / apply-to-all variables, its declared dimensions.
+    fn from_model(model: &datamodel::Model) -> Self {
+        let mut var_idents = HashSet::new();
+        let mut var_dims = HashMap::new();
+        for var in &model.variables {
+            let ident = var.get_ident().to_owned();
+            if let Some(dims) = declared_dims(var) {
+                var_dims.insert(ident.clone(), dims);
+            }
+            var_idents.insert(ident);
+        }
+        WriterContext {
+            var_idents,
+            var_dims,
+        }
+    }
+
+    /// True when `canonical` names a declared model variable.
+    fn is_variable(&self, canonical: &str) -> bool {
+        self.var_idents.contains(canonical)
+    }
+
+    /// Declared dimension name at subscript position `pos` of the variable
+    /// `canonical_ident`, or `None` if the variable is scalar/absent or the
+    /// position is out of range (callers fall back to a bare `*`).
+    fn dim_at(&self, canonical_ident: &str, pos: usize) -> Option<&str> {
+        self.var_dims
+            .get(canonical_ident)
+            .and_then(|dims| dims.get(pos))
+            .map(String::as_str)
+    }
+}
+
+/// The declared dimension names (in order) of an arrayed / apply-to-all
+/// variable, or `None` for a scalar or a `Module` (which has no equation).
+fn declared_dims(var: &datamodel::Variable) -> Option<Vec<String>> {
+    match var.get_equation()? {
+        Equation::Scalar(_) => None,
+        Equation::ApplyToAll(dims, _) => Some(dims.clone()),
+        Equation::Arrayed(dims, _, _, _) => Some(dims.clone()),
+    }
+}
+
 /// Map XMILE canonical function names back to their Vensim MDL equivalents.
 /// This inverts the `format_function_name()` table in `xmile_compat.rs`.
 /// The input is expected to already be lowercase (as stored in `Expr0::App`).
+///
+/// `init` is deliberately absent: its MDL name depends on arity (1-arg
+/// `INITIAL` vs 2-arg `ACTIVE INITIAL`), so it is dispatched at the call site
+/// where `args.len()` is known (#852).
 fn xmile_to_mdl_function_name(xmile_name: &str) -> String {
     match xmile_name {
         "smth1" => "SMOOTH".to_owned(),
@@ -200,7 +283,6 @@ fn xmile_to_mdl_function_name(xmile_name: &str) -> String {
         "delay3" => "DELAY3".to_owned(),
         "delayn" => "DELAY N".to_owned(),
         "smthn" => "SMOOTH N".to_owned(),
-        "init" => "ACTIVE INITIAL".to_owned(),
         "int" => "INTEGER".to_owned(),
         "lookupinv" => "LOOKUP INVERT".to_owned(),
         "uniform" => "RANDOM UNIFORM".to_owned(),
@@ -239,8 +321,24 @@ fn reorder_args(mdl_name: &str, mut args: Vec<String>) -> Vec<String> {
                 args[2] = mean;
                 args[3] = sd;
                 args[4] = seed;
+                args
+            } else if args.len() == 2 {
+                // Vensim has no 2-arg normal; RANDOM NORMAL requires all five
+                // args. Synthesize unbounded truncation bounds (Vensim's
+                // +/-1e38 infinities) and an auto seed so the result is a plain
+                // normal(mean, sd) (#852).
+                let mean = args[0].clone();
+                let sd = args[1].clone();
+                vec![
+                    format_f64(f64::NEG_INFINITY),
+                    format_f64(f64::INFINITY),
+                    mean,
+                    sd,
+                    "0".to_owned(),
+                ]
+            } else {
+                args
             }
-            args
         }
         _ => args,
     }
@@ -495,10 +593,16 @@ fn recognize_allocate(expr: &Expr0, walk: &mut impl FnMut(&Expr0) -> String) -> 
                     .map(|s| match s {
                         IndexExpr0::Wildcard(_) => dim_name.clone(),
                         IndexExpr0::Expr(e) => walk(e),
-                        other => {
-                            let mut v = MdlPrintVisitor;
-                            v.walk_index(other)
+                        // StarRange / Range / DimPosition: reuse the caller's
+                        // `walk` closure (which carries the WriterContext) for
+                        // any nested expression rather than spinning up a
+                        // context-free visitor. StarRange is a subrange
+                        // wildcard -> bang form (see `walk_index`).
+                        IndexExpr0::StarRange(id, _) => {
+                            format!("{}!", format_mdl_ident(id.as_str()))
                         }
+                        IndexExpr0::Range(l, r, _) => format!("{}:{}", walk(l), walk(r)),
+                        IndexExpr0::DimPosition(n, _) => format!("@{n}"),
                     })
                     .collect();
                 if let Some(IndexExpr0::StarRange(_, _)) = subs.last()
@@ -619,14 +723,40 @@ fn recognize_vensim_patterns(
     None
 }
 
-struct MdlPrintVisitor;
+struct MdlPrintVisitor<'a> {
+    ctx: &'a WriterContext,
+}
 
-impl Visitor<String> for MdlPrintVisitor {
+impl MdlPrintVisitor<'_> {
+    /// Walk a subscript index at a known position of a known subscripted
+    /// variable. A wildcard here recovers Vensim's bang form `Dim!` from the
+    /// variable's declared dimension at that position; every other index kind
+    /// is position-independent and delegates to `walk_index` (#847).
+    fn walk_index_at(&mut self, expr: &IndexExpr0, subscripted: &str, pos: usize) -> String {
+        match expr {
+            IndexExpr0::Wildcard(_) => match self.ctx.dim_at(subscripted, pos) {
+                Some(dim) => format!("{}!", format_mdl_ident(dim)),
+                // No declared dimension for this position (scalar/absent var or
+                // out-of-range): leave a bare `*` -- a safe, if less faithful,
+                // fallback rather than a panic.
+                None => "*".to_string(),
+            },
+            other => self.walk_index(other),
+        }
+    }
+}
+
+impl Visitor<String> for MdlPrintVisitor<'_> {
     fn walk_index(&mut self, expr: &IndexExpr0) -> String {
         match expr {
             IndexExpr0::Wildcard(_) => "*".to_string(),
+            // A star-range `*:Dim` (Vensim `Dim.*`) is a subrange wildcard --
+            // "iterate over all of Dim" -- which in Vensim MDL is the bang form
+            // `Dim!`. Emitting `*:Dim` produces output the reader rejects, and
+            // renders the SAME construct differently from a recovered wildcard,
+            // so both are emitted as `Dim!` (#847).
             IndexExpr0::StarRange(id, _) => {
-                format!("*:{}", format_mdl_ident(id.as_str()))
+                format!("{}!", format_mdl_ident(id.as_str()))
             }
             IndexExpr0::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
             IndexExpr0::DimPosition(n, _) => format!("@{n}"),
@@ -643,11 +773,27 @@ impl Visitor<String> for MdlPrintVisitor {
             Expr0::Const(s, _, _) => s.clone(),
             Expr0::Var(id, _) => format_mdl_ident(id.as_str()),
             Expr0::App(UntypedBuiltinFn(func, args), _) => {
-                // In MDL, TIME and DT are bare keywords (no parentheses).
-                if args.is_empty()
-                    && let Some(kw) = mdl_bare_keyword(func)
-                {
-                    return kw.to_owned();
+                if args.is_empty() {
+                    // The parser reifies a `pi`/`time`/`time_step`/... reference
+                    // into a zero-arg `App`, so a model variable that shadows
+                    // one of these builtin names is INDISTINGUISHABLE from the
+                    // builtin except via the variable set. A declared variable
+                    // wins: emit it as the identifier, not the builtin, so a
+                    // user aux named "Time Step" or "PI" does not silently
+                    // rebind to the simulation dt / lose its definition
+                    // (#853, #850).
+                    if self.ctx.is_variable(&crate::common::canonicalize(func)) {
+                        return format_mdl_ident(func);
+                    }
+                    // Vensim has no PI builtin and rejects the zero-arg call
+                    // `PI()`; emit a numeric literal instead (#850).
+                    if func == "pi" {
+                        return PI_LITERAL.to_owned();
+                    }
+                    // TIME/DT/... are bare keywords in Vensim (no parentheses).
+                    if let Some(kw) = mdl_bare_keyword(func) {
+                        return kw.to_owned();
+                    }
                 }
                 // Vensim lookup calls use `table_name ( input )` syntax
                 // rather than `LOOKUP(table_name, input)`.
@@ -659,9 +805,18 @@ impl Visitor<String> for MdlPrintVisitor {
                     let input = self.walk(&args[1]);
                     return format!("{table_name} ( {input} )");
                 }
-                // safediv with 3+ args is XIDZ (3-arg form), not ZIDZ (2-arg)
+                // A few builtins map to different Vensim names by arity:
+                //   - safediv 3+ args -> XIDZ (3-arg), else ZIDZ (2-arg)
+                //   - init 1 arg -> INITIAL, else ACTIVE INITIAL (which
+                //     requires two args -- emitting it 1-arg is invalid) (#852)
                 let mdl_name = if func == "safediv" && args.len() >= 3 {
                     "XIDZ".to_owned()
+                } else if func == "init" {
+                    if args.len() == 1 {
+                        "INITIAL".to_owned()
+                    } else {
+                        "ACTIVE INITIAL".to_owned()
+                    }
                 } else {
                     xmile_to_mdl_function_name(func)
                 };
@@ -670,7 +825,15 @@ impl Visitor<String> for MdlPrintVisitor {
                 format!("{}({})", mdl_name, reordered.join(", "))
             }
             Expr0::Subscript(id, args, _) => {
-                let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
+                // Canonicalize the subscripted variable's ident once so the
+                // wildcard-recovery lookup keys the same way `WriterContext`
+                // indexed the model's variables.
+                let canonical = crate::common::canonicalize(id.as_str());
+                let args: Vec<String> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, e)| self.walk_index_at(e, canonical.as_ref(), pos))
+                    .collect();
                 format!("{}[{}]", format_mdl_ident(id.as_str()), args.join(", "))
             }
             Expr0::Op1(op, l, _) => match op {
@@ -729,16 +892,28 @@ impl Visitor<String> for MdlPrintVisitor {
     }
 }
 
-/// Convert an `Expr0` AST to MDL-format equation text.
+/// Convert an `Expr0` AST to MDL-format equation text, without model context.
+///
+/// Back-compat entry point (re-exported from `mdl/mod.rs`): equivalent to
+/// [`expr0_to_mdl_ctx`] with an empty [`WriterContext`], so wildcard subscripts
+/// fall back to a bare `*` and no identifier shadows a builtin. Production
+/// emission threads a real context via `expr0_to_mdl_ctx`.
 pub fn expr0_to_mdl(expr: &Expr0) -> String {
-    let mut visitor = MdlPrintVisitor;
+    expr0_to_mdl_ctx(expr, &WriterContext::default())
+}
+
+/// Convert an `Expr0` AST to MDL-format equation text using model context for
+/// wildcard-subscript recovery and builtin/variable disambiguation.
+pub fn expr0_to_mdl_ctx(expr: &Expr0, ctx: &WriterContext) -> String {
+    let mut visitor = MdlPrintVisitor { ctx };
     visitor.walk(expr)
 }
 
 /// Convert an XMILE equation string to MDL text via Expr0 round-trip.
 /// Falls back to the raw string (with underscores->spaces) on parse failure
-/// or empty input.
-fn equation_to_mdl(xmile_eqn: &str) -> String {
+/// or empty input. `ctx` supplies the model's variable/dimension knowledge so
+/// wildcard subscripts and shadowed builtins render correctly.
+fn equation_to_mdl(xmile_eqn: &str, ctx: &WriterContext) -> String {
     if xmile_eqn.is_empty() {
         return String::new();
     }
@@ -753,7 +928,7 @@ fn equation_to_mdl(xmile_eqn: &str) -> String {
         return stripped.to_string();
     }
     match Expr0::new(xmile_eqn, LexerType::Equation) {
-        Ok(Some(ast)) => expr0_to_mdl(&ast),
+        Ok(Some(ast)) => expr0_to_mdl_ctx(&ast, ctx),
         // Fallback for unparseable equations; best-effort space conversion.
         _ => underbar_to_space(xmile_eqn),
     }
@@ -844,20 +1019,34 @@ fn format_f64(v: f64) -> String {
     }
 }
 
-/// Write a single MDL variable entry.
+/// Write a single MDL variable entry, without model context.
 ///
-/// The standard MDL format for a variable entry is:
-/// ```text
-/// Name=\n\tequation\n\t~\tunits\n\t~\tcomment\n\t|
-/// ```
+/// Back-compat wrapper (empty [`WriterContext`]); production emission uses
+/// [`write_variable_entry_ctx`] with a real context so wildcard subscripts and
+/// shadowed builtins in the equation render correctly.
 pub fn write_variable_entry(
     buf: &mut String,
     var: &datamodel::Variable,
     display_names: &HashMap<String, String>,
 ) {
+    write_variable_entry_ctx(buf, var, display_names, &WriterContext::default());
+}
+
+/// Write a single MDL variable entry using model context.
+///
+/// The standard MDL format for a variable entry is:
+/// ```text
+/// Name=\n\tequation\n\t~\tunits\n\t~\tcomment\n\t|
+/// ```
+pub fn write_variable_entry_ctx(
+    buf: &mut String,
+    var: &datamodel::Variable,
+    display_names: &HashMap<String, String>,
+    ctx: &WriterContext,
+) {
     match var {
         datamodel::Variable::Stock(s) => {
-            write_stock_variable(buf, s, display_names);
+            write_stock_variable(buf, s, display_names, ctx);
             return;
         }
         datamodel::Variable::Module(_) => return,
@@ -893,7 +1082,16 @@ pub fn write_variable_entry(
             let effective_eqn = data_source_eqn
                 .clone()
                 .unwrap_or_else(|| wrap_active_initial(eqn, compat));
-            write_single_entry(buf, &name, &effective_eqn, &[], units, doc, effective_gf);
+            write_single_entry(
+                buf,
+                &name,
+                &effective_eqn,
+                &[],
+                units,
+                doc,
+                effective_gf,
+                ctx,
+            );
         }
         Equation::ApplyToAll(dims, eqn) => {
             let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
@@ -908,10 +1106,11 @@ pub fn write_variable_entry(
                 units,
                 doc,
                 effective_gf,
+                ctx,
             );
         }
         Equation::Arrayed(dims, elements, default_eq, _) => {
-            write_arrayed_entries(buf, &name, dims, elements, default_eq, units, doc);
+            write_arrayed_entries(buf, &name, dims, elements, default_eq, units, doc, ctx);
         }
     }
 }
@@ -975,6 +1174,7 @@ fn write_stock_variable(
     buf: &mut String,
     stock: &datamodel::Stock,
     display_names: &HashMap<String, String>,
+    ctx: &WriterContext,
 ) {
     let mut net_flow = String::new();
     for (i, inflow) in stock.inflows.iter().enumerate() {
@@ -998,7 +1198,7 @@ fn write_stock_variable(
             buf,
             &name,
             &net_flow,
-            &equation_to_mdl(eqn),
+            &equation_to_mdl(eqn, ctx),
             &[],
             &stock.units,
             &stock.documentation,
@@ -1009,7 +1209,7 @@ fn write_stock_variable(
                 buf,
                 &name,
                 &net_flow,
-                &equation_to_mdl(eqn),
+                &equation_to_mdl(eqn, ctx),
                 &dim_names,
                 &stock.units,
                 &stock.documentation,
@@ -1025,6 +1225,7 @@ fn write_stock_variable(
                 default_eq,
                 &stock.units,
                 &stock.documentation,
+                ctx,
             );
         }
     }
@@ -1072,12 +1273,13 @@ fn write_arrayed_stock_entries(
     _default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
+    ctx: &WriterContext,
 ) {
     let last_idx = elements.len().saturating_sub(1);
 
     for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
         let elem_display = format_mdl_element_key(elem_name);
-        let initial = normalized_stock_initial(&equation_to_mdl(eqn));
+        let initial = normalized_stock_initial(&equation_to_mdl(eqn, ctx));
 
         write!(buf, "{name}[{elem_display}]=").unwrap();
         buf.push_str("\n\t");
@@ -1232,6 +1434,7 @@ fn wrap_equation_with_continuations(eqn: &str, max_line_len: usize) -> String {
 ///
 /// `name` is the pre-formatted display name (with original casing from
 /// view elements, or `format_mdl_ident` fallback).
+#[allow(clippy::too_many_arguments)]
 fn write_single_entry(
     buf: &mut String,
     name: &str,
@@ -1240,6 +1443,7 @@ fn write_single_entry(
     units: &Option<String>,
     doc: &str,
     gf: Option<&GraphicalFunction>,
+    ctx: &WriterContext,
 ) {
     let dim_suffix = if dims.is_empty() {
         String::new()
@@ -1259,7 +1463,7 @@ fn write_single_entry(
             // Embedded lookup: name=\n\tWITH LOOKUP(input, (body))
             let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
             write!(buf, "{name}{dim_suffix}{assign_op}").unwrap();
-            let mdl_eqn = equation_to_mdl(eqn);
+            let mdl_eqn = equation_to_mdl(eqn, ctx);
             buf.push_str("\n\tWITH LOOKUP(");
             buf.push_str(&mdl_eqn);
             buf.push_str(", ");
@@ -1268,7 +1472,7 @@ fn write_single_entry(
         }
     } else {
         let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-        let mdl_eqn = equation_to_mdl(eqn);
+        let mdl_eqn = equation_to_mdl(eqn, ctx);
 
         // Short, single-line equations use inline format with spaces around
         // the operator (e.g. `average repayment rate = 0.03`).  Longer or
@@ -1294,6 +1498,7 @@ fn write_single_entry(
 /// this callsite, emitting `name[Dim...]=default` can incorrectly apply the
 /// default to omitted EXCEPT members. To preserve behavior, always emit explicit
 /// element entries and leave omitted elements implicit.
+#[allow(clippy::too_many_arguments)]
 fn write_arrayed_entries(
     buf: &mut String,
     name: &str,
@@ -1302,8 +1507,9 @@ fn write_arrayed_entries(
     _default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
+    ctx: &WriterContext,
 ) {
-    write_arrayed_element_entries(buf, name, elements, units, doc);
+    write_arrayed_element_entries(buf, name, elements, units, doc, ctx);
 }
 
 fn write_arrayed_element_entries(
@@ -1312,6 +1518,7 @@ fn write_arrayed_element_entries(
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
     units: &Option<String>,
     doc: &str,
+    ctx: &WriterContext,
 ) {
     let last_idx = elements.len().saturating_sub(1);
     for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
@@ -1326,7 +1533,7 @@ fn write_arrayed_element_entries(
             } else {
                 let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
                 write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-                let mdl_eqn = equation_to_mdl(eqn);
+                let mdl_eqn = equation_to_mdl(eqn, ctx);
                 buf.push_str("\n\tWITH LOOKUP(");
                 buf.push_str(&mdl_eqn);
                 buf.push_str(", ");
@@ -1336,7 +1543,7 @@ fn write_arrayed_element_entries(
         } else {
             let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
             write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-            let mdl_eqn = equation_to_mdl(eqn);
+            let mdl_eqn = equation_to_mdl(eqn, ctx);
             let wrapped = wrap_equation_with_continuations(&mdl_eqn, 80);
             buf.push_str("\n\t");
             buf.push_str(&wrapped);
@@ -2782,6 +2989,10 @@ impl MdlWriter {
             // model's own views; fall back to the underbar->space /
             // quoting helpers (the params/name are canonicalized idents).
             let display_names = build_display_name_map(&model.views);
+            // Context is scoped to the macro model so a body reference to a
+            // parameter or a body-local variable resolves against its own
+            // variable set (e.g. a wildcard subscript over a body variable).
+            let ctx = WriterContext::from_model(model);
 
             let params = spec
                 .parameters
@@ -2809,7 +3020,7 @@ impl MdlWriter {
                 if param_idents.contains(var.get_ident()) {
                     continue;
                 }
-                write_variable_entry(&mut self.buf, var, &display_names);
+                write_variable_entry_ctx(&mut self.buf, var, &display_names, &ctx);
                 self.buf.push('\n');
             }
 
@@ -2882,6 +3093,10 @@ impl MdlWriter {
         }
 
         let display_names = build_display_name_map(&model.views);
+        // Model-scoped writer context: the variable set (for builtin/variable
+        // shadowing) and per-variable declared dimensions (for wildcard
+        // subscript recovery), threaded into every equation's printer.
+        let ctx = WriterContext::from_model(model);
 
         // Reconstruct each Phase-4-materialized multi-output cluster
         // (`<lhs> = <macro>(<args> : <bindings>)`) and collect the idents
@@ -2949,7 +3164,7 @@ impl MdlWriter {
                     .iter()
                     .find(|v| v.get_ident() == member_ident)
                 {
-                    write_variable_entry(&mut self.buf, var, &display_names);
+                    write_variable_entry_ctx(&mut self.buf, var, &display_names, &ctx);
                     self.buf.push('\n');
                 }
             }
@@ -2977,7 +3192,7 @@ impl MdlWriter {
         for entry in ungrouped {
             match entry {
                 UngroupedEntry::Variable(var) => {
-                    write_variable_entry(&mut self.buf, var, &display_names);
+                    write_variable_entry_ctx(&mut self.buf, var, &display_names, &ctx);
                 }
                 UngroupedEntry::Reconstructed(_, text) => {
                     self.buf.push_str(text);

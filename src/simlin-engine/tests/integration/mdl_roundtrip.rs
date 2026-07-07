@@ -1612,46 +1612,22 @@ const MIN_CORPUS_FIXTURES: usize = 200;
 
 /// Fixtures whose writer OUTPUT currently fails to re-parse. Calibrated
 /// empirically by running `corpus_reparse_ratchet` and recording the actual
-/// failures -- do NOT edit by guesswork. Grouped by root cause:
+/// failures -- do NOT edit by guesswork.
 ///
-///   - wildcard subscript `*`: the writer emits a wildcard subscript / range
-///     (e.g. `x[Dim!]` reductions rendered as `x[*]`) that the reader rejects
-///     with "expected symbol in subscript list, found *". This is the dominant
-///     writer defect and accounts for all but two entries.
-///   - `PI()` builtin collision: a user variable literally named `PI`/`pi` is
-///     written as the zero-argument builtin call `PI()`, which the reader
-///     rejects with "symbol call requires at least one argument".
-const EXPECTED_REPARSE_FAILURES: &[&str] = &[
-    // wildcard subscript `*`
-    "test/metasd/FREE/FREE6/FREE6-corrected/conversion.mdl",
-    "test/metasd/FREE/FREE6/FREE6-corrected/conversion2.mdl",
-    "test/metasd/FREE/FREE6/FREE6-original/conversion.mdl",
-    "test/metasd/FREE/FREE6/FREE6-original/conversion2.mdl",
-    "test/metasd/FREE/FREE6/FREE6-original/free 6.mdl",
-    "test/metasd/beer-game/RealBeer4-Sterman13.mdl",
-    "test/metasd/interpolating-arrays/InterpolatingArrays.mdl",
-    "test/metasd/scientific-revolution/scirev7.mdl",
-    "test/metasd/scientific-revolution/scirev8.mdl",
-    "test/sdeverywhere/models/allocate/allocate.mdl",
-    "test/sdeverywhere/models/arrays_cname/arrays_cname.mdl",
-    "test/sdeverywhere/models/arrays_varname/arrays_varname.mdl",
-    "test/sdeverywhere/models/except/except.mdl",
-    "test/sdeverywhere/models/except2/except2.mdl",
-    "test/sdeverywhere/models/extdata/extdata.mdl",
-    "test/sdeverywhere/models/longeqns/longeqns.mdl",
-    "test/sdeverywhere/models/prune/prune.mdl",
-    "test/sdeverywhere/models/sum/sum.mdl",
-    "test/sdeverywhere/models/sumif/sumif.mdl",
-    "test/sdeverywhere/models/vector/vector.mdl",
-    "test/sdeverywhere/models/vector_simple/vector_simple.mdl",
-    "test/test-models/tests/subscript_aggregation/test_subscript_aggregation.mdl",
-    "test/test-models/tests/subscript_switching/subscript_switching.mdl",
-    "test/test-models/tests/subscript_transposition/test_subscript_transposition.mdl",
-    "test/test-models/tests/vector_select/test_vector_select.mdl",
-    // `PI()` builtin collision
-    "test/metasd/industrial-dynamics/IDch15/IDch15d.mdl",
-    "test/metasd/thyroid-dynamics/thyroid-2008-d.mdl",
-];
+/// This list is now EMPTY: the context-aware writer (`WriterContext` in
+/// `mdl::writer`) closed both former root causes.
+///
+///   - wildcard/subrange subscripts: `SUM(a[*])` (and `a[*:Dim]`) now recover
+///     Vensim's bang form `a[Dim!]` from the variable's declared dimensions
+///     instead of emitting the reader-rejected `*` / `*:Dim` (#847).
+///   - `PI()` builtin collision: a genuine `pi` builtin lowers to a numeric
+///     literal, and a user variable named `PI`/`pi` is emitted as that
+///     identifier -- neither produces the reader-rejected `PI()` (#850, #853).
+///
+/// Several fixtures cleared here still fail the IDEMPOTENCE ratchet for
+/// unrelated, pre-existing reasons (CRLF free-text accumulation #849, sketch
+/// connector instability); those are listed in `EXPECTED_NON_IDEMPOTENT`.
+const EXPECTED_REPARSE_FAILURES: &[&str] = &[];
 
 /// Re-parseable fixtures whose writer output is NOT a fixpoint: writing the
 /// re-parsed model a second time changes the text. Calibrated empirically by
@@ -1765,6 +1741,34 @@ const EXPECTED_NON_IDEMPOTENT: &[&str] = &[
     "test/test-models/tests/special_characters/test_special_variable_names.mdl",
     // control-variable value substitution (`TIME STEP` -> its literal value)
     "test/test-models/tests/control_vars/test_control_vars.mdl",
+    // Newly re-parseable after the context-aware writer landed (#847/#850/#853):
+    // these fixtures used to fail the RE-PARSE ratchet (wildcard/subrange
+    // subscripts or a PI collision), so their idempotence was never measured.
+    // Now that they re-parse, a pre-existing non-idempotence surfaces -- almost
+    // entirely CRLF free-text accumulation (#849) and/or sketch connector
+    // control-point instability; the equations themselves round-trip. They are
+    // recorded here (not a regression: they were never in the idempotent set)
+    // and shrink as #849 and the sketch fixes land.
+    "test/metasd/FREE/FREE6/FREE6-corrected/conversion.mdl",
+    "test/metasd/FREE/FREE6/FREE6-corrected/conversion2.mdl",
+    "test/metasd/FREE/FREE6/FREE6-original/conversion.mdl",
+    "test/metasd/FREE/FREE6/FREE6-original/conversion2.mdl",
+    "test/metasd/FREE/FREE6/FREE6-original/free 6.mdl",
+    "test/metasd/beer-game/RealBeer4-Sterman13.mdl",
+    "test/metasd/industrial-dynamics/IDch15/IDch15d.mdl",
+    "test/metasd/interpolating-arrays/InterpolatingArrays.mdl",
+    "test/metasd/scientific-revolution/scirev7.mdl",
+    "test/metasd/scientific-revolution/scirev8.mdl",
+    "test/metasd/thyroid-dynamics/thyroid-2008-d.mdl",
+    "test/sdeverywhere/models/allocate/allocate.mdl",
+    "test/sdeverywhere/models/arrays_cname/arrays_cname.mdl",
+    "test/sdeverywhere/models/arrays_varname/arrays_varname.mdl",
+    "test/sdeverywhere/models/longeqns/longeqns.mdl",
+    "test/sdeverywhere/models/prune/prune.mdl",
+    "test/sdeverywhere/models/sumif/sumif.mdl",
+    "test/sdeverywhere/models/vector/vector.mdl",
+    "test/test-models/tests/subscript_aggregation/test_subscript_aggregation.mdl",
+    "test/test-models/tests/subscript_transposition/test_subscript_transposition.mdl",
 ];
 
 /// Recursively collect every `.mdl` fixture under `test/`, returned as sorted,

@@ -651,7 +651,7 @@ fn long_equation_variable_entry_uses_continuation() {
         "long equation should use multiline format: {buf}"
     );
     // The equation body should have a continuation if the MDL form exceeds 80 chars
-    let mdl_eqn = equation_to_mdl(long_eqn);
+    let mdl_eqn = equation_to_mdl(long_eqn, &WriterContext::default());
     if mdl_eqn.len() > 80 {
         assert!(
             buf.contains("\\\n\t\t"),
@@ -3974,6 +3974,7 @@ fn write_arrayed_with_default_equation_writes_explicit_elements() {
         &Some("7".to_string()),
         &None,
         "",
+        &WriterContext::default(),
     );
     assert!(
         !buf.contains("g[DimA]"),
@@ -4007,6 +4008,7 @@ fn write_arrayed_no_default_writes_all_elements() {
         &None,
         &None,
         "",
+        &WriterContext::default(),
     );
     assert!(
         !buf.contains(":EXCEPT:"),
@@ -4030,6 +4032,7 @@ fn write_arrayed_except_no_exceptions_all_default() {
         &Some("5".to_string()),
         &None,
         "",
+        &WriterContext::default(),
     );
     assert!(
         !buf.contains("k[DimA]"),
@@ -4054,6 +4057,7 @@ fn write_arrayed_except_with_omitted_elements_avoids_dimension_default() {
         &Some("8".to_string()),
         &None,
         "",
+        &WriterContext::default(),
     );
 
     assert!(
@@ -5399,4 +5403,191 @@ fn lookup_sentinel_constant_used_consistently() {
     assert!(is_lookup_only_equation("  0+0  "));
     assert!(!is_lookup_only_equation("TIME"));
     assert!(!is_lookup_only_equation("x + y"));
+}
+
+// ---------------------------------------------------------------------------
+// Context-aware expression printing (#847, #850, #853, #852, #846)
+// ---------------------------------------------------------------------------
+
+// ---- #850 PI(): genuine builtin -> numeric literal ----
+
+#[test]
+fn pi_builtin_emits_numeric_literal() {
+    // Vensim has no PI builtin and its parser rejects the zero-arg call `PI()`;
+    // a genuine `pi` reference must lower to a numeric literal.
+    let ast = Expr0::new("2 * PI", LexerType::Equation).unwrap().unwrap();
+    assert_eq!(expr0_to_mdl(&ast), "2 * 3.141592653589793");
+}
+
+// ---- #852 INITIAL arity: 1-arg -> INITIAL, 2-arg -> ACTIVE INITIAL ----
+
+#[test]
+fn function_rename_init_one_arg_emits_initial() {
+    // `INITIAL(x)` is the 1-arg form; emitting `ACTIVE INITIAL(x)` is invalid
+    // Vensim (ACTIVE INITIAL requires two arguments).
+    assert_mdl("init(x)", "INITIAL(x)");
+}
+
+#[test]
+fn function_rename_init_two_arg_still_active_initial() {
+    assert_mdl("init(x, 10)", "ACTIVE INITIAL(x, 10)");
+}
+
+#[test]
+fn normal_two_arg_synthesizes_five_arg_random_normal() {
+    // Vensim's RANDOM NORMAL requires 5 args (min, max, mean, sd, seed); the
+    // XMILE 2-arg `normal(mean, sd)` synthesizes unbounded bounds + auto seed.
+    assert_mdl(
+        "normal(mu, sigma)",
+        "RANDOM NORMAL(-1e+38, 1e+38, mu, sigma, 0)",
+    );
+}
+
+// ---- #846 quoted-ident interiors preserved verbatim ----
+
+#[test]
+fn quoted_ident_interior_preserved_verbatim() {
+    // An already-quoted identifier is literal to Vensim: interior underscores
+    // must NOT become spaces and the quotes must not be dropped.
+    assert_eq!(
+        format_mdl_ident(r#""rate_of_change!""#),
+        r#""rate_of_change!""#
+    );
+    assert_eq!(format_mdl_ident(r#""a_b c""#), r#""a_b c""#);
+}
+
+// ---- #847 wildcard subscript -> bang dimension ----
+
+/// A `WriterContext` for a single apply-to-all variable `ident[dims...]`.
+fn ctx_with_arrayed_var(ident: &str, dims: &[&str]) -> WriterContext {
+    let var = Variable::Aux(Aux {
+        ident: ident.to_owned(),
+        equation: Equation::ApplyToAll(
+            dims.iter().map(|d| (*d).to_owned()).collect(),
+            "0".to_owned(),
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    });
+    WriterContext::from_model(&make_model(vec![var]))
+}
+
+#[test]
+fn wildcard_subscript_recovers_bang_dimension() {
+    // SUM(a[*]) where a is declared a[dim_a] -> SUM(a[dim a!]) (#847).
+    let ast = Expr0::new("SUM(a[*])", LexerType::Equation)
+        .unwrap()
+        .unwrap();
+    let ctx = ctx_with_arrayed_var("a", &["dim_a"]);
+    assert_eq!(expr0_to_mdl_ctx(&ast, &ctx), "SUM(a[dim a!])");
+}
+
+#[test]
+fn wildcard_subscript_multi_dim_recovers_each_position() {
+    // Each wildcard recovers the declared dim at ITS position.
+    let ast = Expr0::new("SUM(m[*, *])", LexerType::Equation)
+        .unwrap()
+        .unwrap();
+    let ctx = ctx_with_arrayed_var("m", &["dim_a", "dim_b"]);
+    assert_eq!(expr0_to_mdl_ctx(&ast, &ctx), "SUM(m[dim a!, dim b!])");
+}
+
+#[test]
+fn wildcard_subscript_mixed_with_element_index() {
+    // A concrete element index at position 0 stays; the wildcard at position 1
+    // recovers the second declared dim.
+    let ast = Expr0::new("m[a1, *]", LexerType::Equation)
+        .unwrap()
+        .unwrap();
+    let ctx = ctx_with_arrayed_var("m", &["dim_a", "dim_b"]);
+    assert_eq!(expr0_to_mdl_ctx(&ast, &ctx), "m[a1, dim b!]");
+}
+
+#[test]
+fn star_range_subscript_renders_as_bang() {
+    // `input[*:sector]` / Vensim `input[sector.*]` is a subrange-wildcard --
+    // the SAME iterate-over-all meaning as a recovered wildcard -- so it must
+    // render as the bang `sector!`, not the invalid `*:sector` the reader
+    // rejects. Rendering both bang forms identically also makes output
+    // deterministic even when the importer classifies a `Dim!` subscript as
+    // `StarRange` on one pass and `Wildcard` on another (#847).
+    let expr = Expr0::Subscript(
+        RawIdent::new_from_str("input"),
+        vec![IndexExpr0::StarRange(
+            RawIdent::new_from_str("sector"),
+            Loc::default(),
+        )],
+        Loc::default(),
+    );
+    assert_eq!(expr0_to_mdl(&expr), "input[sector!]");
+}
+
+#[test]
+fn wildcard_subscript_without_context_falls_back_to_star() {
+    // With no model context (or an unknown/scalar variable), a wildcard stays a
+    // bare `*` rather than panicking.
+    let ast = Expr0::new("SUM(a[*])", LexerType::Equation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(expr0_to_mdl(&ast), "SUM(a[*])");
+}
+
+// ---- #850 / #853 builtin-vs-variable shadowing ----
+
+/// A `WriterContext` for a single scalar variable named `ident`.
+fn ctx_with_scalar_var(ident: &str) -> WriterContext {
+    WriterContext::from_model(&make_model(vec![make_aux(ident, "0", None, "")]))
+}
+
+#[test]
+fn pi_variable_shadows_builtin() {
+    // A model that declares a variable named PI: a `PI` reference is that
+    // variable, not the numeric literal (#850 overlap with #853).
+    let ast = Expr0::new("2 * PI", LexerType::Equation).unwrap().unwrap();
+    let ctx = ctx_with_scalar_var("pi");
+    assert_eq!(expr0_to_mdl_ctx(&ast, &ctx), "2 * pi");
+}
+
+#[test]
+fn reserved_name_not_shadowed_stays_keyword() {
+    // With no like-named variable, a `time_step` reference is the builtin
+    // keyword TIME STEP (existing behavior, preserved).
+    let ast = Expr0::new("time_step * 2", LexerType::Equation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(expr0_to_mdl(&ast), "TIME STEP * 2");
+}
+
+#[test]
+fn reserved_name_shadowed_by_variable_emits_identifier() {
+    // A user aux named "Time Step" referenced by another var must stay the
+    // identifier, not silently rebind to the simulation dt (#853).
+    let ast = Expr0::new("time_step * 2", LexerType::Equation)
+        .unwrap()
+        .unwrap();
+    let ctx = ctx_with_scalar_var("time_step");
+    assert_eq!(expr0_to_mdl_ctx(&ast, &ctx), "time step * 2");
+}
+
+#[test]
+fn shadowed_reserved_name_roundtrips_via_write_variable_entry() {
+    // End-to-end at the variable-entry level: a model with an aux "Time Step"
+    // and another aux "flow" that references it must NOT emit the TIME STEP
+    // builtin keyword for the reference.
+    let model = make_model(vec![
+        make_aux("time_step", "0.5", None, ""),
+        make_aux("flow", "time_step * 2", None, ""),
+    ]);
+    let ctx = WriterContext::from_model(&model);
+    let mut buf = String::new();
+    let flow = &model.variables[1];
+    write_variable_entry_ctx(&mut buf, flow, &HashMap::new(), &ctx);
+    assert!(
+        buf.contains("time step * 2") && !buf.contains("TIME STEP"),
+        "reference to user var 'Time Step' must stay an identifier: {buf}"
+    );
 }
