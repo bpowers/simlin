@@ -4288,3 +4288,9 @@ mod tests;
 #[cfg(test)]
 #[path = "writer_lossiness_tests.rs"]
 mod lossiness_tests;
+
+// Property-based tests (own file per the per-file line cap; see the module's
+// header for the generator design and fixpoint conventions).
+#[cfg(test)]
+#[path = "writer_proptest.rs"]
+mod proptest_tests;
