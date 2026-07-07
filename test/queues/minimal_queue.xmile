@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header>
+    <name>queue minimal</name>
+    <vendor>test</vendor>
+    <product version="1.0">test</product>
+    <options>
+      <uses_queue overflow="true"/>
+    </options>
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start>
+    <stop>12</stop>
+    <dt>0.25</dt>
+  </sim_specs>
+  <model>
+    <variables>
+      <stock name="waiting">
+        <eqn>0</eqn>
+        <inflow>arrivals</inflow>
+        <outflow>into_service</outflow>
+        <outflow>balk</outflow>
+        <queue/>
+      </stock>
+      <flow name="arrivals">
+        <eqn>10</eqn>
+        <non_negative/>
+      </flow>
+      <flow name="into_service">
+        <eqn>0</eqn>
+      </flow>
+      <flow name="balk">
+        <eqn>0</eqn>
+        <overflow/>
+      </flow>
+      <stock name="served">
+        <eqn>0</eqn>
+        <inflow>into_service</inflow>
+      </stock>
+    </variables>
+  </model>
+</xmile>

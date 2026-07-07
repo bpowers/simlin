@@ -7,8 +7,8 @@ use crate::datamodel::{
     Aux, Compat, Conveyor, DataSource, DataSourceKind, Dimension, DimensionElements,
     DimensionMapping, Dt, Equation, Extension, Flow, GraphicalFunction, GraphicalFunctionKind,
     GraphicalFunctionScale, Leakage, LoopMetadata, MacroSpec, Model, ModelGroup, Module,
-    ModuleReference, Project, Rect, SimMethod, SimSpecs, Source, SpreadFlow, Stock, StockFlow,
-    Unit, Variable, View, ViewElement, Visibility, view_element,
+    ModuleReference, Project, Queue, Rect, SimMethod, SimSpecs, Source, SpreadFlow, Stock,
+    StockFlow, Unit, Variable, View, ViewElement, Visibility, view_element,
 };
 use crate::project_io;
 
@@ -419,6 +419,15 @@ fn spreadflow_from_proto(s: project_io::variable::SpreadFlow) -> SpreadFlow {
     }
 }
 
+fn queue_to_proto(_q: &Queue) -> project_io::variable::Queue {
+    // A queue has no options (XMILE §4.2); the message is a bare marker.
+    project_io::variable::Queue {}
+}
+
+fn queue_from_proto(_q: project_io::variable::Queue) -> Queue {
+    Queue {}
+}
+
 fn compat_to_proto(compat: &Compat) -> Option<project_io::variable::Compat> {
     if compat.is_empty() {
         return None;
@@ -432,6 +441,8 @@ fn compat_to_proto(compat: &Compat) -> Option<project_io::variable::Compat> {
         conveyor: compat.conveyor.as_ref().map(conveyor_to_proto),
         leakage: compat.leakage.as_ref().map(leakage_to_proto),
         spreadflow: compat.spreadflow.as_ref().map(spreadflow_to_proto),
+        queue: compat.queue.as_ref().map(queue_to_proto),
+        overflow: compat.overflow,
     })
 }
 
@@ -460,6 +471,8 @@ fn compat_from_proto(
             conveyor: c.conveyor.map(conveyor_from_proto),
             leakage: c.leakage.map(leakage_from_proto),
             spreadflow: c.spreadflow.map(spreadflow_from_proto),
+            queue: c.queue.map(queue_from_proto),
+            overflow: c.overflow,
         },
         None => Compat {
             active_initial: legacy_ai,
@@ -472,6 +485,8 @@ fn compat_from_proto(
             conveyor: None,
             leakage: None,
             spreadflow: None,
+            queue: None,
+            overflow: false,
         },
     }
 }
@@ -898,6 +913,55 @@ fn test_stock_proto_legacy_only_deserialization() {
     assert!(stock.compat.non_negative);
     assert!(stock.compat.can_be_module_input);
     assert_eq!(stock.compat.visibility, Visibility::Public);
+}
+
+#[test]
+fn test_queue_compat_proto_roundtrip() {
+    // A queue stock: datamodel -> proto -> datamodel must survive byte-identical,
+    // mirroring the conveyor proto contract. `is_empty()` must see the queue.
+    let stock = Stock {
+        ident: "waiting".to_string(),
+        equation: Equation::Scalar("0".to_string()),
+        documentation: String::new(),
+        units: None,
+        inflows: vec!["arrivals".to_string()],
+        outflows: vec!["into_service".to_string(), "balk".to_string()],
+        compat: Compat {
+            queue: Some(Queue {}),
+            ..Compat::default()
+        },
+        ai_state: None,
+        uid: None,
+    };
+    assert!(
+        !stock.compat.is_empty(),
+        "queue must count as non-empty compat"
+    );
+    let actual = Stock::from(project_io::variable::Stock::from(stock.clone()));
+    assert_eq!(stock, actual);
+    assert!(actual.compat.queue.is_some());
+
+    // The overflow bool rides on the outflow's compat.
+    let flow = Flow {
+        ident: "balk".to_string(),
+        equation: Equation::Scalar("0".to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        compat: Compat {
+            overflow: true,
+            ..Compat::default()
+        },
+        ai_state: None,
+        uid: None,
+    };
+    assert!(
+        !flow.compat.is_empty(),
+        "overflow must count as non-empty compat"
+    );
+    let actual = Flow::from(project_io::variable::Flow::from(flow.clone()));
+    assert_eq!(flow, actual);
+    assert!(actual.compat.overflow);
 }
 
 impl From<Flow> for project_io::variable::Flow {
@@ -3190,6 +3254,8 @@ fn test_protobuf_backward_compat_old_protos() {
         conveyor: None,
         leakage: None,
         spreadflow: None,
+        queue: None,
+        overflow: false,
     };
     let compat = compat_from_proto(Some(old_compat), None, false, false, 0);
     assert_eq!(compat.data_source, None);

@@ -193,6 +193,22 @@ impl From<File> for datamodel::Project {
 
 impl From<datamodel::Project> for File {
     fn from(project: datamodel::Project) -> Self {
+        // Scan for queue stocks / overflow flows before we consume `models`, so
+        // the writer can re-emit the <uses_queue> header (docs/design/queues.md
+        // §3.1). The `<queue/>` block on the stock is the authoritative signal;
+        // the header is round-trip fidelity only, and carries overflow="true"
+        // when any queue outflow is an overflow.
+        let has_queue = project.models.iter().any(|m| {
+            m.variables
+                .iter()
+                .any(|v| matches!(v, datamodel::Variable::Stock(s) if s.compat.queue.is_some()))
+        });
+        let has_overflow = project.models.iter().any(|m| {
+            m.variables
+                .iter()
+                .any(|v| matches!(v, datamodel::Variable::Flow(f) if f.compat.overflow))
+        });
+
         // Partition models: macro-marked models become top-level <macro>
         // siblings of <model>; the rest stay as ordinary <model>s.
         let (macro_models, plain_models): (Vec<_>, Vec<_>) = project
@@ -215,20 +231,29 @@ impl From<datamodel::Project> for File {
 
         let macros: Vec<Macro> = macro_models.into_iter().map(Macro::from).collect();
 
-        // The <uses_macros> header option is emitted whenever the project
-        // contains at least one macro. Simlin does not support recursive
-        // macros and emits both attributes as fixed "false" -- a
-        // deterministic emission that keeps the byte-stable round-trip
-        // stable.
-        let options = if macros.is_empty() {
+        // Header <options>/<features>. <uses_macros> is emitted whenever the
+        // project contains a macro (Simlin supports neither recursive macros nor
+        // option filters, so both attributes are fixed "false"); <uses_queue> is
+        // emitted whenever the project contains a queue. Emission is
+        // deterministic so the round-trip stays byte-stable.
+        let mut features: Vec<Feature> = Vec::new();
+        if !macros.is_empty() {
+            features.push(Feature::UsesMacros {
+                recursive_macros: Some(false),
+                option_filters: Some(false),
+            });
+        }
+        if has_queue {
+            features.push(Feature::UsesQueue {
+                overflow: if has_overflow { Some(true) } else { None },
+            });
+        }
+        let options = if features.is_empty() {
             None
         } else {
             Some(Options {
                 namespace: None,
-                features: Some(vec![Feature::UsesMacros {
-                    recursive_macros: Some(false),
-                    option_filters: Some(false),
-                }]),
+                features: Some(features),
             })
         };
 
@@ -772,6 +797,16 @@ impl ToXml<XmlWriter> for Feature {
                     ("option_filters", opt_filters),
                 ];
                 write_tag_empty_with_attrs(writer, "uses_macros", attrs)
+            }
+            Feature::UsesQueue { overflow } => {
+                // Announce overflow="true" only when a queue outflow is an
+                // overflow; a plain queue emits a bare <uses_queue/>
+                // (docs/design/queues.md §3.1).
+                let mut attrs: Vec<(&str, &str)> = vec![];
+                if overflow.unwrap_or(false) {
+                    attrs.push(("overflow", "true"));
+                }
+                write_tag_empty_with_attrs(writer, "uses_queue", &attrs)
             }
             // The other features are not emitted by the writer today; the
             // round-trip never produces them, so this is unreachable in

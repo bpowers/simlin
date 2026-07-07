@@ -320,6 +320,16 @@ pub enum SpreadFlow {
     Source,
 }
 
+/// A queue stock: material waits in a FIFO of batches until something
+/// downstream is ready to accept it. See `docs/design/queues.md`. A bare marker
+/// with no options (XMILE §4.2: "Queues do not have any options"). It is kept a
+/// struct rather than a bool -- mirroring `Conveyor` -- so a future vendor
+/// attribute does not churn every construction site. `Debug` is `debug-derive`-
+/// gated exactly like its `Compat` siblings (`Conveyor`/`Leakage`/`SpreadFlow`).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
+pub struct Queue {}
+
 /// Per-variable metadata that is not part of the core equation: XMILE
 /// stock/flow options (`non_negative`, `<conveyor>`, leak/spread markers),
 /// Vensim `active_initial`, access/visibility, and data-source imports. These
@@ -340,6 +350,10 @@ pub struct Compat {
     pub leakage: Option<Leakage>,
     /// Present on a conveyor inflow that selects a non-default placement.
     pub spreadflow: Option<SpreadFlow>,
+    /// Present on a stock iff it is a queue (`<queue/>` marker). See docs/design/queues.md §10.1.
+    pub queue: Option<Queue>,
+    /// True on a queue outflow marked `<overflow/>`. See docs/design/queues.md §10.1.
+    pub overflow: bool,
 }
 
 impl Compat {
@@ -352,6 +366,8 @@ impl Compat {
             && self.conveyor.is_none()
             && self.leakage.is_none()
             && self.spreadflow.is_none()
+            && self.queue.is_none()
+            && !self.overflow
     }
 }
 

@@ -184,6 +184,12 @@ impl ToXml<XmlWriter> for Conveyor {
     }
 }
 
+/// The `<queue/>` marker on a queue stock. A bare marker with no options
+/// (XMILE §4.2; docs/design/queues.md §3.2). Present iff the stock is a queue.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
+pub struct Queue {}
+
 /// A `<leak>` element on a conveyor outflow. A bare `<leak/>` marker deserializes
 /// to `value: None` (the fraction is then carried by the flow's `<eqn>`); a
 /// value-bearing `<leak>expr</leak>` deserializes to `value: Some(expr)`.
@@ -208,6 +214,7 @@ pub struct Stock {
     pub outflows: Option<Vec<String>>,
     pub non_negative: Option<NonNegative>,
     pub conveyor: Option<Conveyor>,
+    pub queue: Option<Queue>,
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
     pub elements: Option<Vec<VarElement>>,
@@ -274,6 +281,10 @@ impl ToXml<XmlWriter> for Stock {
 
         if let Some(ref conveyor) = self.conveyor {
             conveyor.write_xml(writer)?;
+        }
+
+        if self.queue.is_some() {
+            write_tag_empty_with_attrs(writer, "queue", &[])?;
         }
 
         if let Some(ref ai_state) = self.ai_state {
@@ -406,6 +417,7 @@ impl From<Stock> for datamodel::Stock {
                 visibility: visibility(&stock.access),
                 data_source,
                 conveyor: stock.conveyor.map(conveyor_to_datamodel),
+                queue: stock.queue.map(|_| datamodel::Queue {}),
                 ..datamodel::Compat::default()
             },
             ai_state: ai_state_from(stock.ai_state),
@@ -466,6 +478,11 @@ impl From<datamodel::Stock> for Stock {
                 None
             },
             conveyor: stock.compat.conveyor.map(conveyor_from_datamodel),
+            queue: if stock.compat.queue.is_some() {
+                Some(Queue {})
+            } else {
+                None
+            },
             dimensions: match &stock.equation {
                 Equation::Scalar(..) => None,
                 Equation::ApplyToAll(dims, ..) => Some(VarDimensions {
@@ -521,6 +538,9 @@ pub struct Flow {
     pub units: Option<String>,
     pub gf: Option<Gf>,
     pub non_negative: Option<NonNegative>,
+    // A bare `<overflow/>` marker: this flow is a queue overflow outflow, active
+    // only when a higher-priority outflow is blocked (docs/design/queues.md §3.3).
+    pub overflow: Option<NonNegative>,
     // Conveyor leakage: a `<leak>`/`<leak/>` marks this flow as a leakage
     // outflow; `<leak_integers/>` restricts it to whole units; the leak zone is
     // given by the `leak_start`/`leak_end` attributes on the flow.
@@ -603,6 +623,10 @@ impl ToXml<XmlWriter> for Flow {
             write_tag(writer, "non_negative", "")?;
         }
 
+        if self.overflow.is_some() {
+            write_tag_empty_with_attrs(writer, "overflow", &[])?;
+        }
+
         if let Some(ref leak) = self.leak {
             match &leak.value {
                 Some(value) if !value.is_empty() => write_tag(writer, "leak", value)?,
@@ -645,6 +669,7 @@ impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
         let mut compat = extract_compat!(flow, flow.access);
         compat.non_negative = flow.non_negative.is_some();
+        compat.overflow = flow.overflow.is_some();
         compat.data_source = flow.data_source.as_ref().map(|ds| ds.to_datamodel());
         if flow.leak.is_some() {
             // A value-bearing `<leak>expr</leak>` supplies the fraction; a bare
@@ -738,6 +763,11 @@ impl From<datamodel::Flow> for Flow {
             units: flow.units,
             gf: flow.gf.map(Gf::from),
             non_negative: if flow.compat.non_negative {
+                Some(NonNegative {})
+            } else {
+                None
+            },
+            overflow: if flow.compat.overflow {
                 Some(NonNegative {})
             } else {
                 None
@@ -1041,6 +1071,7 @@ fn test_canonicalize_stock_inflows() {
         ]),
         non_negative: None,
         conveyor: None,
+        queue: None,
         dimensions: None,
         elements: None,
         access: None,
@@ -1097,6 +1128,7 @@ fn test_xml_stock_parsing() {
         outflows: Some(vec!["succumbing".to_string(), "succumbing_2".to_string()]),
         non_negative: None,
         conveyor: None,
+        queue: None,
         dimensions: None,
         elements: None,
         access: None,
@@ -1567,5 +1599,118 @@ mod conveyor_tests {
             .unwrap();
         assert_eq!(c2.transit_time, "4");
         assert_eq!(c2.capacity.as_deref(), Some("1200"));
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use crate::datamodel;
+    use crate::xmile::{project_from_reader, project_to_xmile};
+    use std::io::BufReader;
+
+    fn parse(xml: &str) -> datamodel::Project {
+        project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("parse")
+    }
+
+    fn roundtrip(project: &datamodel::Project) -> (String, datamodel::Project) {
+        let xml = project_to_xmile(project).expect("serialize");
+        let reparsed = parse(&xml);
+        (xml, reparsed)
+    }
+
+    fn find_stock<'a>(p: &'a datamodel::Project, name: &str) -> &'a datamodel::Stock {
+        p.models[0]
+            .variables
+            .iter()
+            .find_map(|v| match v {
+                datamodel::Variable::Stock(s) if s.ident == name => Some(s),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("stock {name} not found"))
+    }
+
+    fn find_flow<'a>(p: &'a datamodel::Project, name: &str) -> &'a datamodel::Flow {
+        p.models[0]
+            .variables
+            .iter()
+            .find_map(|v| match v {
+                datamodel::Variable::Flow(f) if f.ident == name => Some(f),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("flow {name} not found"))
+    }
+
+    /// The `test/queues/minimal_queue.xmile` fixture (a queue stock with a
+    /// primary + an `<overflow/>` outflow, plus `<uses_queue overflow="true"/>`)
+    /// survives read -> write -> read with the queue marker, the overflow
+    /// marker, AND the header preserved -- no data loss (queues.md §11 step 1).
+    #[test]
+    fn minimal_queue_fixture_roundtrips_without_loss() {
+        let xml = include_str!("../../../../test/queues/minimal_queue.xmile");
+        let p = parse(xml);
+
+        // The initial parse recognizes the queue block and the overflow marker.
+        assert!(
+            find_stock(&p, "waiting").compat.queue.is_some(),
+            "the <queue/> block must set compat.queue"
+        );
+        assert!(
+            find_flow(&p, "balk").compat.overflow,
+            "the <overflow/> marker must set compat.overflow"
+        );
+        assert!(
+            !find_flow(&p, "into_service").compat.overflow,
+            "the primary outflow is not an overflow"
+        );
+
+        // Read -> write -> read preserves the markers.
+        let (written, p2) = roundtrip(&p);
+        assert!(
+            find_stock(&p2, "waiting").compat.queue.is_some(),
+            "queue marker lost on round-trip"
+        );
+        assert!(
+            find_flow(&p2, "balk").compat.overflow,
+            "overflow marker lost on round-trip"
+        );
+
+        // The writer re-emits the block-level markers and the header.
+        assert!(
+            written.contains("<queue"),
+            "writer must emit <queue/>: {written}"
+        );
+        assert!(
+            written.contains("<overflow"),
+            "writer must emit <overflow/>: {written}"
+        );
+        assert!(
+            written.contains(r#"<uses_queue overflow="true"/>"#),
+            "writer must emit the <uses_queue overflow=\"true\"/> header: {written}"
+        );
+    }
+
+    /// A plain queue (no overflow outflow) emits a bare `<uses_queue/>` header,
+    /// never `overflow="true"`.
+    #[test]
+    fn plain_queue_header_has_no_overflow_attr() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="q"><eqn>0</eqn><outflow>o</outflow><queue/></stock>
+    <flow name="o"><eqn>0</eqn></flow>
+  </variables></model>
+</xmile>"#;
+        let p = parse(xml);
+        let written = project_to_xmile(&p).expect("serialize");
+        assert!(
+            written.contains("<uses_queue/>"),
+            "expected a bare <uses_queue/>: {written}"
+        );
+        assert!(
+            !written.contains("overflow"),
+            "a queue with no overflow outflow must not announce overflow: {written}"
+        );
     }
 }

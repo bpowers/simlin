@@ -112,6 +112,10 @@ message Variable {
     optional string distrib_eq = 2;     // graphical-function name for DIST
   };
 
+  // A queue stock has no options (XMILE §4.2). See docs/design/queues.md.
+  message Queue {
+  };
+
   message Compat {
     optional string active_initial = 1;
     optional bool non_negative = 2;
@@ -121,6 +125,8 @@ message Variable {
     optional Conveyor conveyor = 6;
     optional Leakage leakage = 7;
     optional SpreadFlow spreadflow = 8;
+    optional Queue queue = 9;         // present iff a queue stock (<queue/>)
+    bool overflow = 10;               // <overflow/> on a queue outflow
   };
 
   message Stock {
