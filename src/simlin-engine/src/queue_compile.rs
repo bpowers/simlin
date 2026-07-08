@@ -57,7 +57,9 @@
 //! `ConveyorQueueUpstreamNotDiscrete` requirement) and wires the coupling INTO the
 //! two plan sets (a `queue_coupled` conveyor inflow + a [`QueueOutflowKind::Coupled`]
 //! queue outflow), so no separate structure threads through the VM or libsimlin.
-//! The VM carries both side tables and runs [`run_coupled_passes`] between the
+//! The VM carries both side tables plus a [`CouplingTable`] derived from the
+//! plans once at attach time (the coupling is compile-time constant, so it is
+//! not rebuilt per step -- GH #878) and runs [`run_coupled_passes`] between the
 //! Flows and Stocks phases -- interleaving each coupled queue's serve between its
 //! conveyor's phase A and phase B (several queues MAY feed one discrete conveyor,
 //! served in the belt's `<inflow>` declaration order under a shared admission
@@ -1135,6 +1137,104 @@ fn apply_couplings(
     Some(())
 }
 
+/// A coupled queue serve wired to one conveyor (derived from the plans by
+/// [`CouplingTable::build`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CoupledServe {
+    queue: usize,
+    shared_flow_off: usize,
+    one_at_a_time: bool,
+    batch_integrity: bool,
+}
+
+/// The queue-conveyor coupling table [`run_coupled_passes`] reads each step:
+/// which queues are coupled to which conveyor, in what admission-priority
+/// order. The coupling is fixed at build time ([`apply_couplings`] stamps
+/// [`QueueOutflowKind::Coupled`] onto the plans exactly once), so the table is
+/// derived ONCE when the plans are attached to the VM
+/// ([`crate::vm::Vm::set_conveyor_plans`] / [`crate::vm::Vm::set_queue_plans`],
+/// both of which rebuild it so attachment order does not matter) rather than
+/// rebuilt every Euler step from the immutable plans (GH #878). It is a pure
+/// deterministic function of the two plan sets -- no extra state to keep
+/// consistent across libsimlin's reset, which re-derives it by re-attaching
+/// cloned plans.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CouplingTable {
+    /// Per conveyor-plan index: the queues coupled to that belt, ordered by the
+    /// belt's `<inflow>` declaration order (the admission priority).
+    coupling_for_conveyor: Vec<Vec<CoupledServe>>,
+    /// Per queue-plan index: served by the combined pass (true) or by the plain
+    /// uncoupled queue pass (false).
+    queue_is_coupled: Vec<bool>,
+    /// Any coupling at all? False selects [`run_coupled_passes`]' fast path
+    /// (the two independent passes, byte-identical to pre-coupling behavior).
+    any: bool,
+}
+
+impl CouplingTable {
+    /// Derive the coupling table from the two resolved plan sets. The `Coupled`
+    /// outflow kind carries the conveyor plan index + batch rules, so this is a
+    /// pure read of compile-time-constant data.
+    ///
+    /// A discrete conveyor MAY have MORE THAN ONE coupled queue -- several
+    /// queues' primary outflows feeding one belt as its equation-driven inflows
+    /// (the listed-order priority of conveyors.md §4.3 step 4 / §11). They are
+    /// served in the belt's `<inflow>` DECLARATION order (the admission
+    /// priority, matching how phase_b apportions equation-inflow clearance in
+    /// listed order), so each belt's list is sorted below by the shared flow's
+    /// position in that belt's `inflows` -- a deterministic, compile-time
+    /// order, NOT the queue-plan or HashMap iteration order.
+    pub fn build(
+        conv_plans: &[crate::conveyor_compile::ConveyorPlan],
+        queue_plans: &[QueuePlan],
+    ) -> Self {
+        let mut coupling_for_conveyor: Vec<Vec<CoupledServe>> = vec![Vec::new(); conv_plans.len()];
+        let mut queue_is_coupled = vec![false; queue_plans.len()];
+        let mut any = false;
+        for (qi, qp) in queue_plans.iter().enumerate() {
+            for op in &qp.outflows {
+                if let QueueOutflowKind::Coupled {
+                    conveyor,
+                    one_at_a_time,
+                    batch_integrity,
+                } = op.kind
+                    && conveyor < coupling_for_conveyor.len()
+                {
+                    coupling_for_conveyor[conveyor].push(CoupledServe {
+                        queue: qi,
+                        shared_flow_off: op.flow_off,
+                        one_at_a_time,
+                        batch_integrity,
+                    });
+                    queue_is_coupled[qi] = true;
+                    any = true;
+                }
+            }
+        }
+        // Order each conveyor's coupled serves by the belt's `<inflow>` declaration
+        // order so admission priority is deterministic and matches phase_b's
+        // listed-order apportionment (a shared flow always appears among the belt's
+        // inflows, so `position` resolves; the fallback keeps a would-be-missing slot
+        // last rather than panicking).
+        for (ci, serves) in coupling_for_conveyor.iter_mut().enumerate() {
+            if serves.len() > 1 {
+                let inflows = &conv_plans[ci].inflows;
+                serves.sort_by_key(|cs| {
+                    inflows
+                        .iter()
+                        .position(|inf| inf.flow_off == cs.shared_flow_off)
+                        .unwrap_or(usize::MAX)
+                });
+            }
+        }
+        CouplingTable {
+            coupling_for_conveyor,
+            queue_is_coupled,
+            any,
+        }
+    }
+}
+
 /// The combined queue-conveyor pass (queues.md §9), run once per Euler step
 /// between the Flows and Stocks phases in place of the separate conveyor
 /// ([`crate::conveyor_compile::run_pass`]) and queue ([`run_queue_pass`]) passes
@@ -1177,16 +1277,17 @@ fn apply_couplings(
 /// when a conveyor's mid-run `<sample>` re-latch would exceed the slat-count
 /// bound (§4.1, surfaced from [`crate::conveyor_compile::run_phase_a`]); the VM
 /// aborts the run with a simulation error.
-// The two side-table sets (plans + states), `curr`, `dt`, and the clock inputs
-// (`time`, `start`, `last_unit`) are all independent per-step inputs the VM
-// already holds separately; bundling them into a struct would only add an
-// indirection.
+// The two side-table sets (plans + states), the coupling table, `curr`, `dt`,
+// and the clock inputs (`time`, `start`, `last_unit`) are all independent
+// per-step inputs the VM already holds separately; bundling them into a struct
+// would only add an indirection.
 #[allow(clippy::too_many_arguments)]
 pub fn run_coupled_passes(
     conv_plans: &[crate::conveyor_compile::ConveyorPlan],
     conveyors: &mut [crate::conveyor::ConveyorState],
     queue_plans: &[QueuePlan],
     queues: &mut [crate::queue::QueueState],
+    coupling: &CouplingTable,
     curr: &mut [f64],
     dt: f64,
     time: f64,
@@ -1195,70 +1296,28 @@ pub fn run_coupled_passes(
 ) -> Result<(), (crate::common::ErrorCode, String)> {
     use crate::conveyor_compile as cc;
 
-    /// A coupled queue serve wired to one conveyor (derived from the plans).
-    #[derive(Clone, Copy)]
-    struct CoupledServe {
-        queue: usize,
-        shared_flow_off: usize,
-        one_at_a_time: bool,
-        batch_integrity: bool,
-    }
-
-    // Reconstruct the couplings from the queue plans (the `Coupled` outflow kind
-    // carries the conveyor plan index + batch rules): conveyor index -> the LIST
-    // of queues coupled to it, plus a mask of which queues are coupled (served
-    // here, skipped by the plain queue pass).
-    //
-    // A discrete conveyor MAY have MORE THAN ONE coupled queue -- several queues'
-    // primary outflows feeding one belt as its equation-driven inflows
-    // (the listed-order priority of conveyors.md §4.3 step 4 / §11). They are
-    // served in the belt's `<inflow>`
-    // DECLARATION order (the admission priority, matching how phase_b apportions
-    // equation-inflow clearance in listed order), so the list is sorted below by
-    // each shared flow's position in `conv_plans[c].inflows` -- a deterministic,
-    // compile-time order, NOT the queue-plan or HashMap iteration order.
-    let mut coupling_for_conveyor: Vec<Vec<CoupledServe>> = vec![Vec::new(); conv_plans.len()];
-    let mut queue_is_coupled = vec![false; queue_plans.len()];
-    let mut any = false;
-    for (qi, qp) in queue_plans.iter().enumerate() {
-        for op in &qp.outflows {
-            if let QueueOutflowKind::Coupled {
-                conveyor,
-                one_at_a_time,
-                batch_integrity,
-            } = op.kind
-                && conveyor < coupling_for_conveyor.len()
-            {
-                coupling_for_conveyor[conveyor].push(CoupledServe {
-                    queue: qi,
-                    shared_flow_off: op.flow_off,
-                    one_at_a_time,
-                    batch_integrity,
-                });
-                queue_is_coupled[qi] = true;
-                any = true;
-            }
-        }
-    }
-    // Order each conveyor's coupled serves by the belt's `<inflow>` declaration
-    // order so admission priority is deterministic and matches phase_b's
-    // listed-order apportionment (a shared flow always appears among the belt's
-    // inflows, so `position` resolves; the fallback keeps a would-be-missing slot
-    // last rather than panicking).
-    for (ci, serves) in coupling_for_conveyor.iter_mut().enumerate() {
-        if serves.len() > 1 {
-            let inflows = &conv_plans[ci].inflows;
-            serves.sort_by_key(|cs| {
-                inflows
-                    .iter()
-                    .position(|inf| inf.flow_off == cs.shared_flow_off)
-                    .unwrap_or(usize::MAX)
-            });
-        }
-    }
+    // The coupling is compile-time constant, so the caller derives `coupling`
+    // once at plan-attach time ([`CouplingTable::build`]) instead of rebuilding
+    // it here every step (GH #878). It must have been built from THESE plan
+    // sets; a stale table would index out of bounds or mis-route serves.
+    let CouplingTable {
+        coupling_for_conveyor,
+        queue_is_coupled,
+        any,
+    } = coupling;
+    debug_assert_eq!(
+        coupling_for_conveyor.len(),
+        conv_plans.len(),
+        "coupling table was not built from these conveyor plans"
+    );
+    debug_assert_eq!(
+        queue_is_coupled.len(),
+        queue_plans.len(),
+        "coupling table was not built from these queue plans"
+    );
 
     // Fast path: no coupling -> the two independent passes, byte-identical.
-    if !any {
+    if !*any {
         cc::run_pass(conv_plans, conveyors, curr, dt, time, start, last_unit)?;
         run_queue_pass(queue_plans, queues, curr, dt);
         return Ok(());
@@ -3091,6 +3150,67 @@ mod tests {
                 "step {t}: in_system = {in_system}"
             );
         }
+    }
+
+    /// Structural pin for the attach-time [`CouplingTable`] (GH #878): the table
+    /// derived once from the resolved plans must encode exactly the couplings
+    /// [`apply_couplings`] stamped onto them -- which queues are coupled, to
+    /// which belt, and in the belt's `<inflow>` declaration order (the admission
+    /// priority the behavioral two-queue tests above observe through the
+    /// simulation). The swap variant flips ONLY the serve order, proving the
+    /// order comes from the conveyor plan's inflow list, not queue-plan order.
+    #[test]
+    fn coupling_table_matches_plans_and_belt_inflow_order() {
+        for swap in [false, true] {
+            let project = two_queue_shared_belt_model(swap, false);
+            let main = project.models[0].name.clone();
+            let (compiled, conv_plans, queue_plans) = build_compiled(&project, &main).unwrap();
+            let table = CouplingTable::build(&conv_plans, &queue_plans);
+
+            assert!(table.any, "swap={swap}: couplings must be detected");
+            assert_eq!(
+                table.queue_is_coupled,
+                vec![true; queue_plans.len()],
+                "swap={swap}: both queues' primaries feed the belt"
+            );
+            assert_eq!(table.coupling_for_conveyor.len(), conv_plans.len());
+
+            // Exactly one belt, with both queues coupled to it in the belt's
+            // <inflow> declaration order: [into_belt_a, into_belt_b] normally,
+            // reversed when the model swaps the declaration order.
+            let off_a = *compiled.offsets.get(&Ident::new("into_belt_a")).unwrap();
+            let off_b = *compiled.offsets.get(&Ident::new("into_belt_b")).unwrap();
+            let serves = &table.coupling_for_conveyor[0];
+            assert_eq!(serves.len(), 2, "swap={swap}");
+            let want = if swap { [off_b, off_a] } else { [off_a, off_b] };
+            let got: Vec<usize> = serves.iter().map(|cs| cs.shared_flow_off).collect();
+            assert_eq!(got, want, "swap={swap}: serve order is belt inflow order");
+            // Each serve names the queue plan owning its shared flow slot, and
+            // carries the belt's batch rules (one_at_a_time=false in the fixture).
+            for cs in serves {
+                assert_eq!(
+                    queue_plans[cs.queue].outflows[0].flow_off, cs.shared_flow_off,
+                    "swap={swap}: serve must point at the owning queue's primary"
+                );
+                assert!(!cs.one_at_a_time, "swap={swap}");
+                assert!(!cs.batch_integrity, "swap={swap}");
+            }
+        }
+    }
+
+    /// An UNCOUPLED queue model derives an empty (fast-path) table, and the
+    /// derivation is deterministic: rebuilding from the same plans is identical,
+    /// so an attach-time table can never drift from a per-step rebuild.
+    #[test]
+    fn coupling_table_uncoupled_model_is_empty_and_deterministic() {
+        let project = parse(QUEUE_DRAIN);
+        let main = project.models[0].name.clone();
+        let (_compiled, conv_plans, queue_plans) = build_compiled(&project, &main).unwrap();
+        let table = CouplingTable::build(&conv_plans, &queue_plans);
+        assert!(!table.any);
+        assert_eq!(table.queue_is_coupled, vec![false]);
+        assert!(table.coupling_for_conveyor.is_empty());
+        assert_eq!(table, CouplingTable::build(&conv_plans, &queue_plans));
     }
 
     // ----- Part C: multiple outflows, priority, and overflow (§4.5/§5) -----

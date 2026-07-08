@@ -384,6 +384,14 @@ pub struct Vm {
     // initials-populated buffer on each `run_initials`.
     queue_plans: Vec<crate::queue_compile::QueuePlan>,
     queues: Vec<crate::queue::QueueState>,
+    // The queue-conveyor coupling table (docs/design/queues.md §9). The
+    // coupling is fixed at build time (apply_couplings stamps it onto the
+    // plans once), so the table is derived from the two plan sets whenever
+    // either is attached -- both setters rebuild it, so attachment order
+    // does not matter -- rather than rebuilt every Euler step (GH #878).
+    // Empty (any = false) for every uncoupled model, including a Vm whose
+    // setters were never called; reset() keeps the plans, so it stays valid.
+    coupling: crate::queue_compile::CouplingTable,
 }
 
 #[derive(Clone)]
@@ -744,6 +752,7 @@ impl Vm {
             conveyor_last_unit: i64::MIN,
             queue_plans: Vec::new(),
             queues: Vec::new(),
+            coupling: crate::queue_compile::CouplingTable::default(),
         })
     }
 
@@ -768,6 +777,11 @@ impl Vm {
             }
         }
         self.conveyor_plans = plans;
+        // Re-derive the coupling table from the (possibly updated) plan pair:
+        // the coupling is compile-time constant, so it is computed here once
+        // instead of every Euler step (GH #878).
+        self.coupling =
+            crate::queue_compile::CouplingTable::build(&self.conveyor_plans, &self.queue_plans);
     }
 
     /// Attach resolved queue plans (docs/design/queues.md §10.3). Called by the
@@ -784,6 +798,11 @@ impl Vm {
             }
         }
         self.queue_plans = plans;
+        // Same attach-time coupling-table derivation as set_conveyor_plans:
+        // both setters rebuild it so the result is independent of the order
+        // the two plan sets are attached in.
+        self.coupling =
+            crate::queue_compile::CouplingTable::build(&self.conveyor_plans, &self.queue_plans);
     }
 
     pub fn run_to_end(&mut self) -> Result<()> {
@@ -941,6 +960,7 @@ impl Vm {
                         &mut self.conveyors,
                         &self.queue_plans,
                         &mut self.queues,
+                        &self.coupling,
                         curr,
                         dt,
                         t,

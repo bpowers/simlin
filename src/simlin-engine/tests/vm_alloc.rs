@@ -71,6 +71,34 @@ fn build_scalar_model(stop: f64) -> Vm {
     Vm::new(compiled).unwrap()
 }
 
+/// A scalar uncoupled queue model (arrivals -> queue -> served), built through
+/// the special stock-type path so the VM runs the queue pass every step.
+fn build_queue_model(stop: f64) -> Vm {
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>alloc queue</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>{stop}</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting">
+      <eqn>0</eqn>
+      <inflow>arrivals</inflow>
+      <outflow>into_service</outflow>
+      <queue/>
+    </stock>
+    <flow name="arrivals"><eqn>10</eqn><non_negative/></flow>
+    <flow name="into_service"><eqn>0</eqn></flow>
+    <stock name="served"><eqn>0</eqn><inflow>into_service</inflow></stock>
+  </variables></model>
+</xmile>"#
+    );
+    let project =
+        simlin_engine::xmile::project_from_reader(&mut std::io::BufReader::new(xml.as_bytes()))
+            .unwrap();
+    let main = project.models[0].name.clone();
+    simlin_engine::queue_compile::build_vm(&project, &main).unwrap()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -101,6 +129,41 @@ fn run_to_zero_allocations() {
     assert_eq!(
         allocs_short, 0,
         "run_to should perform zero heap allocations, got {allocs_short}"
+    );
+}
+
+/// The per-DT loop of an (uncoupled) queue model must not allocate per step.
+///
+/// The queue-conveyor coupling is compile-time constant, so its table is
+/// derived once when the plans are attached to the VM (GH #878) -- before
+/// that fix `run_coupled_passes` rebuilt it (one heap allocation plus a scan)
+/// on EVERY Euler step, only for the no-coupling fast path to discard it.
+/// The queue side table itself reaches an allocation steady state (the FIFO's
+/// VecDeque retains capacity across the per-step admit/drain), so total
+/// allocations are a step-count-independent constant: a 10x longer run must
+/// allocate exactly as much as a short one.
+#[test]
+fn queue_model_allocations_do_not_scale_with_steps() {
+    let mut vm_short = build_queue_model(100.0);
+    let mut vm_long = build_queue_model(1000.0);
+
+    // Run initials outside the measured region (queue/belt side-table setup
+    // legitimately allocates once).
+    vm_short.run_initials().unwrap();
+    vm_long.run_initials().unwrap();
+
+    start_tracking();
+    vm_short.run_to_end().unwrap();
+    let allocs_short = stop_tracking();
+
+    start_tracking();
+    vm_long.run_to_end().unwrap();
+    let allocs_long = stop_tracking();
+
+    assert_eq!(
+        allocs_short, allocs_long,
+        "queue-model allocation count should not scale with step count \
+         (short={allocs_short}, long={allocs_long})"
     );
 }
 
