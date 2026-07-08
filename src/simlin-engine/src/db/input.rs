@@ -289,17 +289,39 @@ pub fn datamodel_variable_from_source(db: &dyn Db, var: SourceVariable) -> datam
     compat.can_be_module_input = can_be_module_input;
 
     match var.kind(db) {
-        SourceVariableKind::Stock => datamodel::Variable::Stock(datamodel::Stock {
-            ident,
-            equation,
-            documentation: String::new(),
-            units,
-            inflows: var.inflows(db).clone(),
-            outflows: var.outflows(db).clone(),
-            ai_state: None,
-            uid: None,
-            compat,
-        }),
+        SourceVariableKind::Stock => {
+            // A conveyor stock's <eqn> may be a §7.2 explicit init list
+            // ("100, 200, 300"), which is not a scalar expression. The special
+            // build path (conveyor_compile::expand_conveyors) parses the list
+            // and compiles the stock with a constant raw-sum placeholder;
+            // mirror that rewrite here so the salsa DIAGNOSTIC path (which
+            // parses the UN-expanded project) accepts exactly the equations
+            // the runtime accepts instead of flagging a valid list as a parse
+            // error. A malformed list (or a non-list) is left untouched: the
+            // ordinary parse diagnostic fires, and the special path adds the
+            // precise ConveyorInitListUnsupported rejection. The ordinary
+            // COMPILE path is unaffected -- it hard-rejects any un-expanded
+            // conveyor marker before using this equation.
+            let equation = if compat.conveyor.is_some() {
+                match crate::conveyor_compile::explicit_init_list(&ident, &equation) {
+                    Ok(Some((_values, placeholder))) => placeholder,
+                    _ => equation,
+                }
+            } else {
+                equation
+            };
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident,
+                equation,
+                documentation: String::new(),
+                units,
+                inflows: var.inflows(db).clone(),
+                outflows: var.outflows(db).clone(),
+                ai_state: None,
+                uid: None,
+                compat,
+            })
+        }
         SourceVariableKind::Flow => datamodel::Variable::Flow(datamodel::Flow {
             ident,
             equation,

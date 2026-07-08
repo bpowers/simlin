@@ -966,8 +966,13 @@ pub fn build_compiled(
         .map_err(|(code, msg)| Error::new(ErrorKind::Simulation, code, Some(msg)))?;
 
     // Euler-only. Report the conveyor code when a conveyor is present (so the
-    // conveyor path stays behavior-identical), otherwise the queue code.
-    if expanded.sim_specs.sim_method != datamodel::SimMethod::Euler {
+    // conveyor path stays behavior-identical), otherwise the queue code. Reads
+    // the EFFECTIVE root specs (the main model's sim_specs override preferred,
+    // matching the runtime's assemble rule) so a model-level RK override
+    // cannot evade the gate.
+    if crate::conveyor_compile::effective_sim_specs(&expanded, main_model).sim_method
+        != datamodel::SimMethod::Euler
+    {
         if !conv_metas.is_empty() {
             return Err(Error::new(
                 ErrorKind::Simulation,
@@ -1955,6 +1960,26 @@ mod tests {
         let project = parse(&xml);
         let main = project.models[0].name.clone();
         let err = build_vm(&project, &main).expect_err("RK4 queue must be rejected");
+        assert_eq!(err.code, ErrorCode::QueueNonEulerMethod);
+    }
+
+    #[test]
+    fn queue_under_model_level_rk4_override_is_rejected() {
+        // The Euler-only gate must read the ROOT MODEL's sim_specs override
+        // (the runtime prefers it -- assemble.rs's root rule), not just the
+        // project's: a model-level RK4 override would otherwise evade
+        // QueueNonEulerMethod and integrate the FIFO under RK.
+        let mut project = parse(QUEUE_DRAIN);
+        project.models[0].sim_specs = Some(datamodel::SimSpecs {
+            start: 0.0,
+            stop: 4.0,
+            dt: datamodel::Dt::Dt(0.25),
+            save_step: None,
+            sim_method: datamodel::SimMethod::RungeKutta4,
+            time_units: None,
+        });
+        let main = project.models[0].name.clone();
+        let err = build_vm(&project, &main).expect_err("model-level RK4 override must be rejected");
         assert_eq!(err.code, ErrorCode::QueueNonEulerMethod);
     }
 

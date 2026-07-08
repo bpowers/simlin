@@ -557,6 +557,15 @@ pub enum ErrorCode {
     /// while belt and FIFO advance under different rates): silent garbage with no
     /// diagnostic. Rejected loudly BEFORE either expansion, naming the stock.
     StockBothConveyorAndQueue,
+    /// A conveyor stock's initial `<eqn>` is a §7.2 explicit comma-separated
+    /// init list that cannot be used as written: an entry is not a numeric
+    /// constant (the list is evaluated once at belt-init time, so only
+    /// compile-time constants are supported), or the list appears in a
+    /// per-element `<element>` equation of an arrayed conveyor (only a scalar
+    /// or shared apply-to-all list is supported). Rejected loudly at
+    /// conveyor-expansion time rather than surfacing as an opaque equation
+    /// parse error on the stock (docs/design/conveyors.md §7.2).
+    ConveyorInitListUnsupported,
 }
 
 impl fmt::Display for ErrorCode {
@@ -641,6 +650,7 @@ impl fmt::Display for ErrorCode {
             QueueSecondaryOutflowToConveyor => "queue_secondary_outflow_to_conveyor",
             ConveyorMultipleNonLeakOutflows => "conveyor_multiple_non_leak_outflows",
             StockBothConveyorAndQueue => "stock_both_conveyor_and_queue",
+            ConveyorInitListUnsupported => "conveyor_init_list_unsupported",
         };
 
         write!(f, "{name}")

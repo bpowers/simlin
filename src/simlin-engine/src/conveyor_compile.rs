@@ -285,6 +285,15 @@ pub struct ConveyorMeta {
     /// arrayed conveyor is `N_elem` independent belts, one per element; this is
     /// empty for a scalar conveyor (the degenerate 1-belt case).
     pub element_subscripts: Vec<String>,
+    /// §7.2 explicit init list parsed from the stock's `<eqn>` (front first),
+    /// `None` for an ordinary §7.1 scalar init. An arrayed conveyor shares one
+    /// list across every element belt (the apply-to-all form; per-element
+    /// distinct lists are rejected at expansion). The expanded stock's `<eqn>`
+    /// was rewritten to a constant placeholder carrying the NORMALIZED belt
+    /// total ([`normalized_init_total`]); [`init_belts`] fills the belt from
+    /// these values and defensively re-writes the (identical) total into the
+    /// stock slot.
+    pub init_values: Option<Vec<f64>>,
 }
 
 /// A resolved leak flow: slot offsets plus static config.
@@ -347,6 +356,12 @@ pub struct ConveyorPlan {
     /// Index into the plan list of the downstream conveyor this conveyor's
     /// primary outflow feeds (for the held-exit rule); `None` otherwise.
     pub primary_dest_conveyor: Option<usize>,
+    /// §7.2 explicit init list (front first), `None` for §7.1 steady init.
+    /// [`init_belts`] fills the belt via `ConveyorState::init_explicit`; the
+    /// stock's compiled `<eqn>` already holds the same normalized total (the
+    /// expansion-time [`normalized_init_total`] placeholder), so the
+    /// write-back into `stock_off` is defense in depth.
+    pub init_values: Option<Vec<f64>>,
 }
 
 impl ConveyorPlan {
@@ -634,6 +649,306 @@ pub(crate) fn const_scalar_expr(expr: &str) -> Option<f64> {
     eval(&ast)
 }
 
+/// The outcome of probing a conveyor stock's initial `<eqn>` for the §7.2
+/// explicit comma-separated init-list form (docs/design/conveyors.md §7.2).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub(crate) enum InitListProbe {
+    /// Not list-shaped: no top-level comma structure. A comma inside a call or
+    /// subscript (`MAX(a, b)`, `arr[a, b]`) splits into fragments that do not
+    /// parse on their own, which is exactly how they are told apart from a
+    /// genuine list -- see [`probe_init_list`].
+    NotAList,
+    /// A well-formed §7.2 list: every entry a finite numeric constant, in
+    /// list order (front / soonest-to-exit first). At least two entries, or
+    /// one entry with a trailing comma ("5," -- the comma is what makes it a
+    /// list).
+    List(Vec<f64>),
+    /// List-shaped (comma-separated entries, each a well-formed expression)
+    /// but an entry is not a plain numeric literal. Carries the 0-based entry
+    /// index and its text for the diagnostic.
+    BadEntry(usize, String),
+}
+
+/// Probe an equation string for the §7.2 explicit init list: a comma-separated
+/// list of numeric constants ("100, 200, 300"). Tolerates whitespace around
+/// entries and a single trailing comma. Entries go through the real
+/// lexer/parser (via [`const_scalar_expr`]), so sign forms and parenthesized
+/// literals classify exactly like scalar equations do.
+///
+/// Disambiguation from ordinary equations: the grammar has no top-level comma,
+/// so splitting a NON-list equation on `,` always breaks at least one fragment
+/// into something that does not parse (`MAX(600, 300)` -> `MAX(600` / `300)`),
+/// which returns `NotAList` and leaves the equation for normal compilation. A
+/// split whose every fragment IS a well-formed expression can only have been a
+/// list, so a non-constant fragment there is a malformed list entry
+/// (`BadEntry`) to reject loudly -- the whole string cannot parse as a scalar
+/// equation either, and the §7.2-specific diagnostic beats an opaque parse
+/// error. Entries are constants only: the list is evaluated once at belt-init
+/// time (before the first step), not compiled into the bytecode, and both the
+/// spec's examples and isee's documentation ("a number of values") describe
+/// numeric lists.
+pub(crate) fn probe_init_list(eqn: &str) -> InitListProbe {
+    let trimmed = eqn.trim();
+    // Tolerate one trailing comma ("10, 20, 30,"). The trailing comma also
+    // makes a SINGLE entry a list ("5," -> a one-entry list whose entry
+    // repeats per time unit under §7.2 short-list normalization): the comma
+    // is what distinguishes a list from a §7.1 scalar, and without this rule
+    // "5," fell to an opaque parse error while "10, 20," was accepted.
+    let had_trailing_comma = trimmed.ends_with(',');
+    let trimmed = trimmed.strip_suffix(',').unwrap_or(trimmed);
+    let parts: Vec<&str> = trimmed.split(',').collect();
+    if parts.len() < 2 && !had_trailing_comma {
+        return InitListProbe::NotAList;
+    }
+    let mut values = Vec::with_capacity(parts.len());
+    let mut bad: Option<(usize, String)> = None;
+    for (i, part) in parts.iter().enumerate() {
+        let part = part.trim();
+        if let Some(v) = const_scalar_expr(part) {
+            values.push(v);
+            continue;
+        }
+        match crate::ast::Expr0::new(part, crate::lexer::LexerType::Equation) {
+            // A fragment that does not parse means the comma belonged to a
+            // larger expression: not a list at all.
+            Err(_) => return InitListProbe::NotAList,
+            // Well-formed but non-constant (`some_var`), or empty ("1,,2"):
+            // a malformed list entry. Keep scanning so a later unparseable
+            // fragment can still veto list-shape.
+            Ok(_) => {
+                if bad.is_none() {
+                    bad = Some((i, part.to_string()));
+                }
+            }
+        }
+    }
+    match bad {
+        Some((i, text)) => InitListProbe::BadEntry(i, text),
+        None => InitListProbe::List(values),
+    }
+}
+
+/// A resolved §7.2 explicit init list: the parsed values (front first) plus
+/// the constant raw-sum placeholder equation the expanded stock compiles with.
+pub(crate) type InitListRewrite = (Vec<f64>, Equation);
+
+/// The scalar-string half of [`InitListRewrite`]: parsed values plus the
+/// raw-sum placeholder text (shaped into an [`Equation`] by the caller).
+type InitListValues = (Vec<f64>, String);
+
+/// Resolve a conveyor stock's initial equation against the §7.2 explicit-list
+/// form. Returns `Ok(Some((values, placeholder)))` when the equation is a
+/// list: `values` is the parsed list (front first) for
+/// [`ConveyorState::init_explicit`], and `placeholder` is a constant RAW-SUM
+/// equation that merely makes the stock's `<eqn>` parseable (a comma list is
+/// not a scalar expression). The raw sum is fine for the parse-only salsa
+/// diagnostic path (`db::input::datamodel_variable_from_source` -- that
+/// equation is never simulated, and the LaTeX surface returns NULL for list
+/// stocks rather than rendering it); [`expand_conveyors`] does NOT use this
+/// placeholder value -- it swaps in the NORMALIZED belt total from
+/// [`normalized_init_total`], because init-time consumers evaluated before
+/// `init_belts` read the placeholder as the stock's initial value. `Ok(None)`
+/// when the equation is an ordinary §7.1 scalar init. `Err` when the list
+/// cannot be used as written: a non-constant entry, or a list inside a
+/// per-element `<element>` equation of an arrayed conveyor (per-element
+/// DISTINCT lists are not supported; only the scalar and shared apply-to-all
+/// forms are -- the same one-expression-per-attribute rule the conveyor block
+/// follows, §10). Shared by [`expand_conveyors`] and the diagnostic path so
+/// the editor's parse diagnostics accept exactly the lists the runtime
+/// accepts.
+pub(crate) fn explicit_init_list(
+    stock: &str,
+    equation: &Equation,
+) -> Result<Option<InitListRewrite>, (ErrorCode, String)> {
+    // Probe one scalar equation string: the parsed values plus the raw-sum
+    // placeholder text, `None` for a non-list, `Err` for a malformed list.
+    let scalar = |s: &str| -> Result<Option<InitListValues>, (ErrorCode, String)> {
+        match probe_init_list(s) {
+            InitListProbe::NotAList => Ok(None),
+            InitListProbe::List(values) => {
+                let sum: f64 = values.iter().sum();
+                if !sum.is_finite() {
+                    return Err((
+                        ErrorCode::ConveyorInitListUnsupported,
+                        format!(
+                            "conveyor '{stock}' has an explicit init list whose sum is not \
+                             finite; the initial belt contents must be finite"
+                        ),
+                    ));
+                }
+                Ok(Some((values, format!("{sum}"))))
+            }
+            InitListProbe::BadEntry(i, text) => Err((
+                ErrorCode::ConveyorInitListUnsupported,
+                format!(
+                    "conveyor '{stock}' has an explicit init list whose entry {} ('{text}') is \
+                     not a plain numeric literal; init-list entries must be plain numeric \
+                     literals (they are evaluated once at belt initialization, \
+                     docs/design/conveyors.md §7.2)",
+                    i + 1
+                ),
+            )),
+        }
+    };
+    match equation {
+        Equation::Scalar(s) => Ok(scalar(s)?.map(|(v, sum)| (v, Equation::Scalar(sum)))),
+        Equation::ApplyToAll(dims, s) => {
+            Ok(scalar(s)?.map(|(v, sum)| (v, Equation::ApplyToAll(dims.clone(), sum))))
+        }
+        Equation::Arrayed(_, elems, default, _) => {
+            let element_eqns = elems
+                .iter()
+                .map(|(_, eqn, _, _)| eqn.as_str())
+                .chain(default.as_deref());
+            for eqn in element_eqns {
+                if !matches!(probe_init_list(eqn), InitListProbe::NotAList) {
+                    return Err((
+                        ErrorCode::ConveyorInitListUnsupported,
+                        format!(
+                            "arrayed conveyor '{stock}' uses an explicit init list in a \
+                             per-element <element> equation; per-element init lists are not \
+                             supported -- use a scalar initial per element, or one shared \
+                             apply-to-all list for the whole array"
+                        ),
+                    ));
+                }
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Does this (conveyor-marked) stock equation carry a well-formed §7.2
+/// explicit init list? `pub` for equation-RENDERING surfaces (libsimlin's
+/// `simlin_model_get_latex_equation`): the salsa parse path substitutes a
+/// constant placeholder for a list `<eqn>` (to keep diagnostics clean), so a
+/// renderer working from the parsed AST would present the placeholder --
+/// with source-range annotations mapped into the placeholder text -- as if
+/// the user wrote it. Such surfaces must skip list stocks (no preview beats
+/// a confidently wrong one). Malformed lists return `false`: their equation
+/// is left un-substituted, so the ordinary parse failure already yields no
+/// AST to render.
+pub fn equation_has_explicit_init_list(equation: &Equation) -> bool {
+    matches!(explicit_init_list("", equation), Ok(Some(_)))
+}
+
+/// The sim specs the ROOT model actually runs under: the main model's own
+/// `sim_specs` override when present, else the project's. Mirrors the
+/// runtime's root rule EXACTLY (`db::assemble::assemble_simulation` "Build
+/// Specs, preferring model-level sim_specs override"; the §4.1 transit
+/// advisory in `db::diagnostic` applies the same preference to whichever
+/// model it is diagnosing, which coincides with this rule for the root
+/// model), so every
+/// compile-time consumer of dt / sim_method in the conveyor and queue build
+/// paths -- the §7.2 list-normalization probe and the Euler-only gates --
+/// reads the SAME specs the VM will execute with. Reading only
+/// `project.sim_specs` here let a model-level override diverge: a dt
+/// override skewed the normalized-total placeholder, and an RK4 override
+/// evaded the Euler gate.
+pub(crate) fn effective_sim_specs<'a>(
+    project: &'a datamodel::Project,
+    main_model: &str,
+) -> &'a datamodel::SimSpecs {
+    let main_canon = canon(main_model);
+    project
+        .models
+        .iter()
+        .find(|m| canon(&m.name) == main_canon)
+        .and_then(|m| m.sim_specs.as_ref())
+        .unwrap_or(&project.sim_specs)
+}
+
+/// The simulation `dt` as an f64, for expansion-time §7.2 normalization.
+/// Mirrors `results::Specs::from`'s `Dt::Reciprocal` handling (1/v) so the
+/// expansion and the runtime belt agree bit-for-bit on dt.
+fn sim_specs_dt(specs: &datamodel::SimSpecs) -> Result<f64, (ErrorCode, String)> {
+    let dt = match specs.dt {
+        datamodel::Dt::Dt(v) => v,
+        datamodel::Dt::Reciprocal(v) => 1.0 / v,
+    };
+    if dt.is_finite() && dt > 0.0 {
+        Ok(dt)
+    } else {
+        Err((
+            ErrorCode::BadSimSpecs,
+            format!("dt must be positive and finite, got {dt}"),
+        ))
+    }
+}
+
+/// The §7.2 NORMALIZED initial belt total, computed at EXPANSION time so the
+/// expanded stock's placeholder `<eqn>` carries the value the belt will
+/// actually hold. This is what every init-time consumer evaluated BEFORE
+/// `init_belts` -- a downstream conveyor's or queue's initial reading this
+/// stock, a belt parameter (`<len>`/`<capacity>`/leak fraction) referencing
+/// it, and every ordinary initial -- sees; a raw-list-sum placeholder leaked
+/// the un-normalized value into all of them whenever a per-time-unit list was
+/// truncated or extended (they run before the `init_belts` write-back and the
+/// reconcile pass only corrects the stock slot itself and re-runs INITIALS,
+/// not the already-filled belts/FIFOs).
+///
+/// Normalization is length-dependent (`values.len() == N` fills per slat; any
+/// other length is per time unit, truncated / last-entry-extended -- and for
+/// `dt > 1` a time-unit block can own no slat at all, dropping its entry), so
+/// the total is NOT re-derived arithmetically here: a leak-less probe
+/// [`ConveyorState`] runs the SAME `init_explicit` fill the runtime belt
+/// uses, making expansion/runtime drift structurally impossible (slat
+/// CONTENTS are independent of leak config at init; leaks only shape the
+/// cohort schedules). This requires a compile-time-constant transit time --
+/// a runtime `<len>` expression is rejected loudly, since without N neither
+/// the list-length interpretation nor the initial total is decidable before
+/// the run.
+fn normalized_init_total(
+    stock: &str,
+    conv: &datamodel::Conveyor,
+    values: &[f64],
+    dt: f64,
+) -> Result<f64, (ErrorCode, String)> {
+    let Some(transit) = const_scalar_expr(&conv.transit_time) else {
+        return Err((
+            ErrorCode::ConveyorInitListUnsupported,
+            format!(
+                "conveyor '{stock}' uses an explicit init list, but its transit time (<len> is \
+                 '{}') is not a plain numeric literal; a list-initialized conveyor's <len> must \
+                 be a plain numeric literal, because the list-length interpretation (one entry \
+                 per slat vs one per time unit) and the stock's initial total depend on the \
+                 slat count (docs/design/conveyors.md §7.2)",
+                conv.transit_time.trim()
+            ),
+        ));
+    };
+    if !transit.is_finite() || transit <= 0.0 {
+        // Same code + message shape as the runtime latch in [`init_belts`].
+        return Err((
+            ErrorCode::ConveyorTransitNotPositive,
+            format!("conveyor '{stock}' transit time must be positive and finite, got {transit}"),
+        ));
+    }
+    // The probe belt allocates `slat_count` slats; enforce the same §4.1
+    // bound the runtime latch enforces before allocating.
+    check_slat_bound(stock, transit, dt)?;
+    let mut probe = ConveyorState::new(
+        dt,
+        conv.exponential_leak,
+        conv.discrete,
+        conv.ignore_earlier_zone_losses,
+        vec![],
+    );
+    probe.init_explicit(transit, values, &[]);
+    let total = probe.contents();
+    if !total.is_finite() {
+        return Err((
+            ErrorCode::ConveyorInitListUnsupported,
+            format!(
+                "conveyor '{stock}' has an explicit init list whose normalized total is not \
+                 finite; the initial belt contents must be finite"
+            ),
+        ));
+    }
+    Ok(total)
+}
+
 /// §4.1 transit-quantization tolerance: `transit/dt` counts as an integer
 /// multiple when within 1e-9 of the belt's rounded slat count -- the exact
 /// threshold the spec states (`|T/DT − round(T/DT)| > 1e-9`,
@@ -737,6 +1052,17 @@ pub fn expand_conveyors(
     // so a synthesized container variable can be arrayed over the same dims.
     let mut conveyor_stock_dims: HashMap<String, Vec<DimensionName>> = HashMap::new();
 
+    // §7.2 explicit-list initials: canonical stock name -> the constant
+    // NORMALIZED-total placeholder equation Pass 2 rewrites the stock with (a
+    // comma list is not a scalar expression, so the expanded INTEG stock needs
+    // a compilable <eqn>). The placeholder carries the normalized belt total
+    // -- computed at expansion time by the same runtime fill init_belts runs
+    // ([`normalized_init_total`]) -- so every init-time consumer evaluated
+    // before init_belts (chained conveyor/queue initials, belt parameters,
+    // ordinary initials) sees the correct value; init_belts' write-back is
+    // pure defense in depth.
+    let mut init_list_rewrites: HashMap<String, Equation> = HashMap::new();
+
     let mut driven_flows: Vec<String> = Vec::new();
     for v in &model.variables {
         let datamodel::Variable::Stock(stock) = v else {
@@ -746,6 +1072,29 @@ pub fn expand_conveyors(
             continue;
         };
         let stock_name = canon(&stock.ident);
+
+        // §7.2 explicit init list on the stock's <eqn>: record the parsed
+        // values for belt init and queue the placeholder rewrite for Pass 2.
+        // A malformed list (non-constant entry, per-element placement,
+        // non-constant transit) is rejected loudly here rather than surfacing
+        // as an opaque parse error. The placeholder value is the NORMALIZED
+        // belt total, not the raw list sum -- see `normalized_init_total` for
+        // why (the raw sum leaked into every pre-init_belts consumer).
+        let init_values = match explicit_init_list(&stock.ident, &stock.equation)? {
+            Some((values, _raw_sum_placeholder)) => {
+                let dt = sim_specs_dt(effective_sim_specs(&project, main_model))?;
+                let total = normalized_init_total(&stock.ident, conv, &values, dt)?;
+                let placeholder = match &stock.equation {
+                    Equation::ApplyToAll(dims, _) => {
+                        Equation::ApplyToAll(dims.clone(), format!("{total}"))
+                    }
+                    _ => Equation::Scalar(format!("{total}")),
+                };
+                init_list_rewrites.insert(stock_name.clone(), placeholder);
+                Some(values)
+            }
+            None => None,
+        };
 
         // An arrayed conveyor is N_elem independent belts (§10). The stock's
         // dimensions drive the synthesized auxes' shape and the per-element
@@ -921,6 +1270,7 @@ pub fn expand_conveyors(
             containers: Vec::new(), // filled by the container-access rewrite below
             primary_dest_conveyor,
             element_subscripts,
+            init_values,
         });
     }
 
@@ -1121,6 +1471,13 @@ pub fn expand_conveyors(
                 f.compat.leakage = None;
             }
             datamodel::Variable::Stock(s) if s.compat.conveyor.is_some() => {
+                // A §7.2 explicit-list <eqn> compiles as its constant
+                // normalized-total placeholder (recorded in Pass 1); the belt
+                // itself fills from the meta's `init_values` in init_belts,
+                // whose write-back of the identical total is defense in depth.
+                if let Some(placeholder) = init_list_rewrites.remove(&canon(&s.ident)) {
+                    s.equation = placeholder;
+                }
                 // The belt is now driven by the pass; the expanded stock is an
                 // ordinary INTEG whose Δ = admitted - out - leak (the §4.3
                 // conservation identity), so drop the conveyor marker.
@@ -1949,6 +2306,9 @@ pub fn resolve_plans(
                 inflows,
                 containers,
                 primary_dest_conveyor,
+                // Every element belt of an arrayed conveyor shares the one
+                // apply-to-all list (§10 one-expression-per-attribute).
+                init_values: meta.init_values.clone(),
             });
         }
     }
@@ -2136,12 +2496,19 @@ fn check_slat_bound(name: &str, transit: f64, dt: f64) -> Result<(), (ErrorCode,
 }
 
 /// Build the conveyor side table from the initials-populated data buffer
-/// (`curr`), initializing each belt to its steady-state fill (§7.1) from the
-/// stock's initial value. The stock `<eqn>` was evaluated by the initials pass,
-/// so `curr[stock_off]` holds the scalar initial value `V`.
+/// (`curr`), initializing each belt either to its steady-state fill (§7.1)
+/// from the stock's initial value -- the stock `<eqn>` was evaluated by the
+/// initials pass, so `curr[stock_off]` holds the scalar initial value `V` --
+/// or, for a plan carrying a §7.2 explicit init list, directly from the list
+/// via [`ConveyorState::init_explicit`]. In the explicit case the stock's
+/// compiled `<eqn>` is the expansion-time normalized-total placeholder
+/// ([`normalized_init_total`], the same fill run here), so `curr[stock_off]`
+/// already holds the belt total; it is re-written anyway as defense in depth,
+/// and the caller (vm.rs `run_initials`) re-reconciles dependent initials and
+/// the `INIT()` snapshot from the slot.
 pub fn init_belts(
     plans: &[ConveyorPlan],
-    curr: &[f64],
+    curr: &mut [f64],
     dt: f64,
 ) -> Result<Vec<ConveyorState>, (ErrorCode, String)> {
     let mut states = Vec::with_capacity(plans.len());
@@ -2175,13 +2542,35 @@ pub fn init_belts(
             plan.ignore_earlier_zone_losses,
             leaks,
         );
-        let v = curr[plan.stock_off];
         let fracs: Vec<f64> = plan
             .leaks
             .iter()
             .map(|l| clamp_fraction(curr[l.frac_off], plan.exponential_leak))
             .collect();
-        state.init_steady(transit, v, &fracs);
+        match &plan.init_values {
+            Some(values) => {
+                state.init_explicit(transit, values, &fracs);
+                let total = state.contents();
+                // The expansion computed the stock's placeholder <eqn> with
+                // the SAME fill ([`normalized_init_total`] requires a
+                // compile-time-constant transit precisely so it can), so the
+                // initials-evaluated slot already holds this total and the
+                // write-back is defense in depth. The assert documents that
+                // contract; tolerance covers float-print round-tripping.
+                debug_assert!(
+                    (curr[plan.stock_off] - total).abs() <= 1e-9 * total.abs().max(1.0),
+                    "conveyor '{}': placeholder initial {} != normalized belt total {}",
+                    plan.name,
+                    curr[plan.stock_off],
+                    total
+                );
+                curr[plan.stock_off] = total;
+            }
+            None => {
+                let v = curr[plan.stock_off];
+                state.init_steady(transit, v, &fracs);
+            }
+        }
         states.push(state);
     }
     Ok(states)
@@ -2524,7 +2913,12 @@ pub fn build_compiled(
     use crate::common::{Error, ErrorKind};
     let (expanded, metas) = expand_conveyors(project, main_model)
         .map_err(|(code, msg)| Error::new(ErrorKind::Simulation, code, Some(msg)))?;
-    if !metas.is_empty() && expanded.sim_specs.sim_method != datamodel::SimMethod::Euler {
+    // The gate reads the EFFECTIVE root specs (model override preferred, like
+    // the runtime), not just the project's -- a model-level RK override must
+    // not evade the Euler-only rule.
+    if !metas.is_empty()
+        && effective_sim_specs(&expanded, main_model).sim_method != datamodel::SimMethod::Euler
+    {
         return Err(Error::new(
             ErrorKind::Simulation,
             ErrorCode::ConveyorNonEulerMethod,
@@ -4750,5 +5144,600 @@ mod tests {
         // -- the reset never slips a dt late nor double-fires.
         let series = run_discrete_in_limit_series(0.0, 50.0, 0.1);
         assert_discrete_pulses(&series, 0.1, 50);
+    }
+
+    // ---- §7.2 explicit per-slat / per-time-unit list initialization ----
+
+    /// [`wrap_model_specs`] with start pinned to 0, for §7.2 tests whose slat
+    /// arithmetic reads cleanest at dt = 1 or dt = 0.5.
+    fn wrap_model_init(vars: &str, dt: f64, stop: f64) -> String {
+        wrap_model_specs(vars, 0.0, stop, dt)
+    }
+
+    fn run_series(xml: &str, names: &[&str]) -> Vec<Vec<f64>> {
+        let project = parse(xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build");
+        vm.run_to_end().expect("run");
+        names
+            .iter()
+            .map(|n| vm.get_series(&Ident::new(n)).expect(n))
+            .collect()
+    }
+
+    #[test]
+    fn explicit_list_len_n_fills_slats_front_first() {
+        // §7.2 length-N form: transit 3, dt 1 -> N = 3 slats; "10, 20, 30"
+        // fills the belt directly, entry 1 at the front (exit) slat. With no
+        // inflow the belt drains front-first: 60 -> 50 -> 30 -> 0, and the
+        // driven outflow rate is 10, then 20, then 30.
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>10, 20, 30</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>3</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+            1.0,
+            5.0,
+        );
+        let series = run_series(&xml, &["belt", "out_f"]);
+        let (belt, out) = (&series[0], &series[1]);
+        for (i, want) in [60.0, 50.0, 30.0, 0.0, 0.0].iter().enumerate() {
+            assert!(
+                (belt[i] - want).abs() < 1e-9,
+                "belt[{i}] = {} (want {want})",
+                belt[i]
+            );
+        }
+        // out_f[i] is the driven rate during step [i, i+1): the front (exit)
+        // slat's 10 leaves first, then 20, then 30.
+        for (i, want) in [10.0, 20.0, 30.0].iter().enumerate() {
+            assert!(
+                (out[i] - want).abs() < 1e-9,
+                "out_f[{i}] = {} (want {want})",
+                out[i]
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_list_per_time_unit_spreads_continuous() {
+        // §7.2 per-time-unit form: transit 2, dt 0.5 -> N = 4 slats but
+        // U = floor(3 * 0.5) + 1 = 2 time-unit blocks, so a length-2 list is
+        // one entry PER TIME UNIT: [40, 80] spreads to [20, 20, 40, 40]
+        // (each block's entry split evenly across its slats on a continuous
+        // conveyor, so the outflow during unit u totals v_u). Belt series:
+        // 120 -> 100 -> 80 -> 40 -> 0.
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>40, 80</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>2</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+            0.5,
+            4.0,
+        );
+        let series = run_series(&xml, &["belt"]);
+        let belt = &series[0];
+        for (i, want) in [120.0, 100.0, 80.0, 40.0, 0.0].iter().enumerate() {
+            assert!(
+                (belt[i] - want).abs() < 1e-9,
+                "belt[{i}] = {} (want {want})",
+                belt[i]
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_list_short_list_normalizes_and_stock_reports_belt_total() {
+        // §7.2 normalization: transit 4, dt 1 -> N = U = 4; the length-2 list
+        // [10, 20] repeats its last entry -> [10, 20, 20, 20], total 70. The
+        // stock must report the NORMALIZED belt total (70) at t = 0, not the
+        // raw list sum (30) -- and both INIT(belt) and a dependent initial
+        // must see 70 (the post-belt-init reconcile).
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>10, 20</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <aux name="init_check"><eqn>INIT(belt)</eqn></aux>
+        <stock name="mirror"><eqn>belt</eqn></stock>"#,
+            1.0,
+            6.0,
+        );
+        let series = run_series(&xml, &["belt", "init_check", "mirror"]);
+        let (belt, init_check, mirror) = (&series[0], &series[1], &series[2]);
+        assert!(
+            (belt[0] - 70.0).abs() < 1e-9,
+            "belt[0] = {} (want the normalized belt total 70, not the raw sum 30)",
+            belt[0]
+        );
+        for (i, &v) in init_check.iter().enumerate() {
+            assert!(
+                (v - 70.0).abs() < 1e-9,
+                "init_check[{i}] = {v} (want INIT(belt) = 70)"
+            );
+        }
+        assert!(
+            (mirror[0] - 70.0).abs() < 1e-9,
+            "mirror[0] = {} (a dependent initial must see the belt total 70)",
+            mirror[0]
+        );
+    }
+
+    #[test]
+    fn explicit_list_long_list_truncates() {
+        // §7.2 normalization: transit 2, dt 1 -> N = U = 2; the length-3 list
+        // [10, 20, 30] truncates to [10, 20], total 30 (raw sum 60).
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>10, 20, 30</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>2</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+            1.0,
+            4.0,
+        );
+        let series = run_series(&xml, &["belt"]);
+        let belt = &series[0];
+        assert!(
+            (belt[0] - 30.0).abs() < 1e-9,
+            "belt[0] = {} (want the truncated total 30, not the raw sum 60)",
+            belt[0]
+        );
+        assert!((belt[1] - 20.0).abs() < 1e-9, "belt[1] = {}", belt[1]);
+        assert!(belt[2].abs() < 1e-9, "belt[2] = {}", belt[2]);
+    }
+
+    #[test]
+    fn explicit_list_tolerates_whitespace_and_trailing_comma() {
+        // Stella-authored lists may carry spaces and a trailing comma; both are
+        // accepted (transit 3, dt 1 -> the length-3 direct fill of 60 total).
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn> 10 ,20,  30, </eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>3</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+            1.0,
+            4.0,
+        );
+        let series = run_series(&xml, &["belt"]);
+        assert!(
+            (series[0][0] - 60.0).abs() < 1e-9,
+            "belt[0] = {} (want 60)",
+            series[0][0]
+        );
+    }
+
+    #[test]
+    fn explicit_list_negative_entries_flow_through() {
+        // The spec is silent on sign; scalar init (§7.1) accepts any V, so the
+        // list form does too -- a negative entry rides the belt and exits as a
+        // negative outflow rather than being silently clamped.
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>-10, 20</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>2</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+            1.0,
+            4.0,
+        );
+        let series = run_series(&xml, &["belt", "out_f"]);
+        let (belt, out) = (&series[0], &series[1]);
+        assert!((belt[0] - 10.0).abs() < 1e-9, "belt[0] = {}", belt[0]);
+        assert!(
+            (out[0] - -10.0).abs() < 1e-9,
+            "out_f[0] = {} (the front slat's -10 exits first)",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn explicit_list_non_constant_entry_rejected() {
+        // A list-shaped <eqn> with a non-constant entry is rejected loudly at
+        // expansion time (naming the entry), never silently steady-state
+        // initialized and never surfaced as an opaque parse error.
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>10, some_var, 30</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>3</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <aux name="some_var"><eqn>20</eqn></aux>"#,
+            1.0,
+            4.0,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let err = build_vm(&project, &main).expect_err("non-constant list entry must be rejected");
+        assert_eq!(err.code, ErrorCode::ConveyorInitListUnsupported);
+        let details = err.get_details().unwrap_or_default();
+        assert!(
+            details.contains("some_var"),
+            "diagnostic should name the offending entry: {details}"
+        );
+    }
+
+    #[test]
+    fn function_call_initial_is_not_mistaken_for_list() {
+        // A scalar initial CONTAINING commas inside a call ("MAX(600, 300)") is
+        // an ordinary §7.1 scalar init, not a §7.2 list: the belt steady-fills
+        // to 600 and holds (inflow 150 = 600 / transit 4 keeps it steady).
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>MAX(600, 300)</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>150</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+            1.0,
+            8.0,
+        );
+        let series = run_series(&xml, &["belt"]);
+        for (i, &b) in series[0].iter().enumerate() {
+            assert!(
+                (b - 600.0).abs() < 1e-6,
+                "belt[{i}] = {b} (want steady 600)"
+            );
+        }
+    }
+
+    #[test]
+    fn arrayed_a2a_explicit_list_shared_across_belts() {
+        // An apply-to-all arrayed conveyor shares one list across every element
+        // belt (the same one-expression-per-attribute rule as <len>, §10):
+        // both belts fill [10, 20] and drain independently.
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>10, 20</eqn>
+          <inflow>in_f</inflow><outflow>out_f</outflow>
+          <dimensions><dim name="board"/></dimensions>
+          <conveyor><len>2</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+        <flow name="out_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>"#,
+            1.0,
+            4.0,
+        )
+        .replace(
+            "<model>",
+            "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+        );
+        let series = run_series(&xml, &["belt[a]", "belt[b]"]);
+        for (name, belt) in [("belt[a]", &series[0]), ("belt[b]", &series[1])] {
+            for (i, want) in [30.0, 20.0, 0.0].iter().enumerate() {
+                assert!(
+                    (belt[i] - want).abs() < 1e-9,
+                    "{name}[{i}] = {} (want {want})",
+                    belt[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arrayed_per_element_explicit_list_rejected() {
+        // A per-element <element> equation carrying a list is rejected loudly:
+        // only the scalar and shared apply-to-all list forms are supported
+        // (never a silent parse error or a steady-init fallback).
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt">
+          <inflow>in_f</inflow><outflow>out_f</outflow>
+          <dimensions><dim name="board"/></dimensions>
+          <element subscript="a"><eqn>10, 20</eqn></element>
+          <element subscript="b"><eqn>5</eqn></element>
+          <conveyor><len>2</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+        <flow name="out_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>"#,
+            1.0,
+            4.0,
+        )
+        .replace(
+            "<model>",
+            "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let err = build_vm(&project, &main).expect_err("per-element list must be rejected");
+        assert_eq!(err.code, ErrorCode::ConveyorInitListUnsupported);
+    }
+
+    #[test]
+    fn explicit_list_survives_xmile_roundtrip() {
+        // The reader must preserve the list <eqn> verbatim on the datamodel
+        // (the expansion rewrites only its private clone) and the writer must
+        // re-emit it, so a §7.2 model round-trips losslessly.
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>10, 20, 30</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>3</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+            1.0,
+            4.0,
+        );
+        let project = parse(&xml);
+        let stock_eqn = project.models[0]
+            .variables
+            .iter()
+            .find_map(|v| match v {
+                datamodel::Variable::Stock(s) if s.ident == "belt" => Some(s.equation.clone()),
+                _ => None,
+            })
+            .expect("belt stock");
+        assert_eq!(stock_eqn, Equation::Scalar("10, 20, 30".to_string()));
+
+        // Building a VM must not mutate the caller's project.
+        let main = project.models[0].name.clone();
+        build_vm(&project, &main).expect("build");
+        let after = project.models[0]
+            .variables
+            .iter()
+            .find_map(|v| match v {
+                datamodel::Variable::Stock(s) if s.ident == "belt" => Some(s.equation.clone()),
+                _ => None,
+            })
+            .expect("belt stock");
+        assert_eq!(after, Equation::Scalar("10, 20, 30".to_string()));
+
+        let out = crate::compat::to_xmile(&project).expect("to_xmile");
+        assert!(
+            out.contains("10, 20, 30"),
+            "writer must re-emit the list eqn: {out}"
+        );
+    }
+
+    #[test]
+    fn explicit_list_produces_no_error_diagnostics() {
+        // The editor diagnostic path parses the UN-expanded project; a valid
+        // §7.2 list initial must not surface as a spurious equation parse
+        // error there (the runtime path accepts it, so diagnostics must too).
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>10, 20, 30</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>3</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+            1.0,
+            4.0,
+        );
+        let project = parse(&xml);
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+        let diags = crate::db::collect_all_diagnostics(&db, sync.project);
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "a valid explicit-list initial must not produce Error diagnostics: {errors:?}"
+        );
+    }
+
+    /// The list conveyor every placeholder-leak regression below builds on:
+    /// transit 4, dt 1 -> N = U = 4; the short list [10, 20] normalizes to
+    /// [10, 20, 20, 20] = 70 while its RAW sum is 30. Any init-time consumer
+    /// that sees 30 instead of 70 reproduces the leak.
+    const LIST_BELT_A: &str = r#"
+        <stock name="belt_a"><eqn>10, 20</eqn><inflow>in_a</inflow><outflow>out_a</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_a"><eqn>0</eqn></flow>
+        <flow name="out_a"><eqn>0</eqn></flow>"#;
+
+    #[test]
+    fn chained_conveyor_initialized_from_list_stock_sees_normalized_total() {
+        // A SECOND conveyor whose scalar initial reads the list stock must
+        // steady-fill from the normalized total (70), not the raw list sum
+        // (30): belt init runs BEFORE the post-init reconcile, so a raw-sum
+        // placeholder would fill belt_b's belt from 30 while the reconcile
+        // bumps its STOCK slot to 70 -- a belt permanently inconsistent with
+        // its own stock (stock stuck at 40 with an empty belt, conservation
+        // violated). A correct fill is 70 spread over 2 slats: [35, 35], so
+        // the series drains 70 -> 35 -> 0 and the outflow returns the full 70.
+        let vars = format!(
+            r#"{LIST_BELT_A}
+        <stock name="belt_b"><eqn>belt_a</eqn><inflow>in_b</inflow><outflow>out_b</outflow>
+          <conveyor><len>2</len></conveyor></stock>
+        <flow name="in_b"><eqn>0</eqn></flow>
+        <flow name="out_b"><eqn>0</eqn></flow>"#
+        );
+        let xml = wrap_model_init(&vars, 1.0, 6.0);
+        let series = run_series(&xml, &["belt_b", "out_b"]);
+        let (belt_b, out_b) = (&series[0], &series[1]);
+        for (i, want) in [70.0, 35.0, 0.0, 0.0].iter().enumerate() {
+            assert!(
+                (belt_b[i] - want).abs() < 1e-9,
+                "belt_b[{i}] = {} (want {want}); belt/stock inconsistent",
+                belt_b[i]
+            );
+        }
+        let drained: f64 = out_b[0] + out_b[1];
+        assert!(
+            (drained - 70.0).abs() < 1e-9,
+            "outflow must return the full normalized 70, got {drained}"
+        );
+    }
+
+    #[test]
+    fn queue_seeded_from_list_stock_sees_normalized_total() {
+        // A queue whose initial reads the list stock seeds its FIFO in
+        // init_queues, which runs after belt init but reads the stock slot the
+        // INITIALS pass wrote -- so a raw-sum placeholder seeds a 30 batch
+        // while the reconcile reports the stock as 70: SUM(waiting) and
+        // waiting disagree at t = 0. Both must be the normalized 70.
+        let vars = format!(
+            r#"{LIST_BELT_A}
+        <stock name="waiting"><eqn>belt_a</eqn><inflow>arrivals</inflow><outflow>into_service</outflow>
+          <queue/></stock>
+        <flow name="arrivals"><eqn>0</eqn><non_negative/></flow>
+        <flow name="into_service"><eqn>0</eqn></flow>
+        <aux name="q_total"><eqn>SUM(waiting)</eqn></aux>"#
+        );
+        let xml = wrap_model_init(&vars, 1.0, 4.0);
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = crate::queue_compile::build_vm(&project, &main).expect("build");
+        vm.run_to_end().expect("run");
+        let waiting = vm.get_series(&Ident::new("waiting")).expect("waiting");
+        let q_total = vm.get_series(&Ident::new("q_total")).expect("q_total");
+        assert!(
+            (waiting[0] - 70.0).abs() < 1e-9,
+            "waiting[0] = {} (want 70)",
+            waiting[0]
+        );
+        assert!(
+            (q_total[0] - 70.0).abs() < 1e-9,
+            "SUM(waiting)[0] = {} (want 70; the FIFO batch must match the stock)",
+            q_total[0]
+        );
+    }
+
+    #[test]
+    fn transit_reading_list_stock_uses_normalized_total() {
+        // A conveyor whose <len> references the list stock evaluates it in the
+        // pre-init_belts Flows run -- before any write-back -- so a raw-sum
+        // placeholder yields transit 30/35 ~= 0.86 (1 slat) instead of
+        // 70/35 = 2 (2 slats). With 2 slats a steady 70 drains [35, 35].
+        let vars = format!(
+            r#"{LIST_BELT_A}
+        <stock name="belt_c"><eqn>70</eqn><inflow>in_c</inflow><outflow>out_c</outflow>
+          <conveyor><len>belt_a / 35</len></conveyor></stock>
+        <flow name="in_c"><eqn>0</eqn></flow>
+        <flow name="out_c"><eqn>0</eqn></flow>"#
+        );
+        let xml = wrap_model_init(&vars, 1.0, 6.0);
+        let series = run_series(&xml, &["belt_c"]);
+        let belt_c = &series[0];
+        for (i, want) in [70.0, 35.0, 0.0].iter().enumerate() {
+            assert!(
+                (belt_c[i] - want).abs() < 1e-9,
+                "belt_c[{i}] = {} (want {want}; transit must see 70/35 = 2)",
+                belt_c[i]
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_list_with_non_constant_transit_rejected() {
+        // The list-length interpretation (per-slat vs per-time-unit) and the
+        // stock's compile-time initial total both depend on the slat count, so
+        // a list-initialized conveyor requires a compile-time-constant
+        // <len>. A runtime transit expression is rejected loudly.
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>10, 20</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>tt</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <aux name="tt"><eqn>4</eqn></aux>"#,
+            1.0,
+            4.0,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let err = build_vm(&project, &main).expect_err("non-literal transit must be rejected");
+        assert_eq!(err.code, ErrorCode::ConveyorInitListUnsupported);
+        let details = err.get_details().unwrap_or_default();
+        assert!(
+            details.contains("numeric literal"),
+            "diagnostic should explain the literal-transit requirement: {details}"
+        );
+    }
+
+    #[test]
+    fn model_sim_specs_dt_override_drives_list_normalization() {
+        // The runtime prefers the ROOT MODEL's sim_specs override over the
+        // project's (assemble.rs "preferring model-level sim_specs"), so the
+        // expansion-time §7.2 probe must read the same dt. Project dt = 1 but
+        // the model overrides dt = 1.5: transit 2 at dt 1.5 -> N =
+        // round(2/1.5) = 1 slat, U = 1, so the 2-entry list truncates to [10]
+        // and the stock must report 10. A probe reading PROJECT dt (1) sizes
+        // N = 2 (direct fill) and bakes 30 into the placeholder -- caught by
+        // the init_belts debug_assert in debug, silent divergence in release.
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>10, 20</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>2</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+            1.0,
+            6.0,
+        );
+        let mut project = parse(&xml);
+        project.models[0].sim_specs = Some(datamodel::SimSpecs {
+            start: 0.0,
+            stop: 6.0,
+            dt: datamodel::Dt::Dt(1.5),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        });
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build");
+        vm.run_to_end().expect("run");
+        let belt = vm.get_series(&Ident::new("belt")).expect("belt");
+        assert!(
+            (belt[0] - 10.0).abs() < 1e-9,
+            "belt[0] = {} (want 10, the dt-1.5 one-slat truncation; a project-dt probe bakes 30)",
+            belt[0]
+        );
+    }
+
+    #[test]
+    fn model_sim_specs_rk4_override_rejected_for_conveyor() {
+        // The Euler-only gate must read the ROOT MODEL's sim_specs override,
+        // not just the project's: a model-level RK4 override would otherwise
+        // evade ConveyorNonEulerMethod and integrate the belt under RK.
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>2</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+            1.0,
+            4.0,
+        );
+        let mut project = parse(&xml);
+        project.models[0].sim_specs = Some(datamodel::SimSpecs {
+            start: 0.0,
+            stop: 4.0,
+            dt: datamodel::Dt::Dt(0.25),
+            save_step: None,
+            sim_method: datamodel::SimMethod::RungeKutta4,
+            time_units: None,
+        });
+        let main = project.models[0].name.clone();
+        let err = build_vm(&project, &main).expect_err("model-level RK4 override must be rejected");
+        assert_eq!(err.code, ErrorCode::ConveyorNonEulerMethod);
+    }
+
+    #[test]
+    fn explicit_list_single_entry_with_trailing_comma() {
+        // "5," is a one-entry list (the trailing comma is what makes it a
+        // list): per §7.2 short-list normalization the single entry repeats
+        // for every time unit -> [5, 5, 5] on a 3-slat dt-1 belt, total 15.
+        // Before this was handled it fell through to an opaque parse error
+        // while "10, 20," was accepted.
+        let xml = wrap_model_init(
+            r#"
+        <stock name="belt"><eqn>5,</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>3</len></conveyor></stock>
+        <flow name="in_f"><eqn>0</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+            1.0,
+            5.0,
+        );
+        let series = run_series(&xml, &["belt"]);
+        let belt = &series[0];
+        for (i, want) in [15.0, 10.0, 5.0, 0.0].iter().enumerate() {
+            assert!(
+                (belt[i] - want).abs() < 1e-9,
+                "belt[{i}] = {} (want {want})",
+                belt[i]
+            );
+        }
     }
 }

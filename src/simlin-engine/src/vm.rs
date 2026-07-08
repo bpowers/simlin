@@ -1520,19 +1520,33 @@ impl Vm {
         // runlist is deterministic and topologically complete, so a second pass
         // recomputes identical values), and re-running with an empty skip set for a
         // container-free model would be a no-op -- so the pass is gated on the
-        // presence of container slots. `prev_values` needs no analogous fix:
-        // PREVIOUS() returns its fallback on the first step (use_prev_fallback --
-        // correct, no prior step exists), and thereafter prev_values is seeded only
-        // by run_to's end-of-step copy_from_slice, which already captures the
-        // no-flow container slot.
-        let container_offsets: std::collections::HashSet<usize> = self
+        // presence of slots needing reconciliation. `prev_values` needs no
+        // analogous fix: PREVIOUS() returns its fallback on the first step
+        // (use_prev_fallback -- correct, no prior step exists), and thereafter
+        // prev_values is seeded only by run_to's end-of-step copy_from_slice,
+        // which already captures the no-flow container slot.
+        //
+        // A §7.2 explicit-list conveyor stock joins the skip set defensively:
+        // its compiled <eqn> is the expansion-time NORMALIZED-total
+        // placeholder (conveyor_compile::normalized_init_total runs the same
+        // fill init_belts does), so init_belts' write-back normally changes
+        // nothing -- but if the two ever diverged, skipping the stock keeps
+        // the belt-derived total authoritative and the re-run + re-snapshot
+        // propagate it to dependent initials and INIT().
+        let reconcile_skip_offsets: std::collections::HashSet<usize> = self
             .conveyor_plans
             .iter()
             .flat_map(|p| p.containers.iter())
             .chain(self.queue_plans.iter().flat_map(|p| p.containers.iter()))
             .map(|c| c.off)
+            .chain(
+                self.conveyor_plans
+                    .iter()
+                    .filter(|p| p.init_values.is_some())
+                    .map(|p| p.stock_off),
+            )
             .collect();
-        if !container_offsets.is_empty() {
+        if !reconcile_skip_offsets.is_empty() {
             let root_idx = self.sliced_sim.root_idx;
             let mut init_state = EvalState {
                 stack: &mut self.stack,
@@ -1554,7 +1568,7 @@ impl Vm {
                 module_inputs,
                 curr,
                 next,
-                &container_offsets,
+                &reconcile_skip_offsets,
             );
             let curr_start = self.curr_chunk * self.n_slots;
             self.initial_values

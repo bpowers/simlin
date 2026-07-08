@@ -672,6 +672,34 @@ fn explicit_list_init_per_time_unit_continuous() {
     assert!((c.contents() - 120.0).abs() < 1e-9);
 }
 
+// ---------- explicit per-time-unit list init (§7.2, non-N length, discrete) ----------
+#[test]
+fn explicit_list_init_per_time_unit_discrete() {
+    // T=2, DT=.5 -> N=4, U=2 blocks. A DISCRETE conveyor places
+    // each block's whole entry at the block's deepest slat ("start of each time
+    // unit" semantics, §7.2 / §6.4 rule 3) instead of spreading it.
+    let mut c = ConveyorState::new(0.5, false, true, false, vec![]);
+    c.init_explicit(2.0, &[40.0, 80.0], &[]);
+    assert_eq!(c.slat_contents(), vec![0.0, 40.0, 0.0, 80.0]);
+    assert!((c.contents() - 120.0).abs() < 1e-9);
+}
+
+// ---------- explicit list normalization (§7.2: truncate extra, repeat last) ----------
+#[test]
+fn explicit_list_init_normalizes_short_and_long_lists() {
+    // T=4, DT=1 -> N=4, U=4. A short list repeats its last entry: [10, 20] ->
+    // [10, 20, 20, 20] (total 70, NOT the raw sum 30).
+    let mut c = ConveyorState::new(1.0, false, false, false, vec![]);
+    c.init_explicit(4.0, &[10.0, 20.0], &[]);
+    assert_eq!(c.slat_contents(), vec![10.0, 20.0, 20.0, 20.0]);
+    assert!((c.contents() - 70.0).abs() < 1e-9);
+
+    // T=2, DT=1 -> N=2, U=2. A long list truncates: [10, 20, 30] -> [10, 20].
+    let mut c = ConveyorState::new(1.0, false, false, false, vec![]);
+    c.init_explicit(2.0, &[10.0, 20.0, 30.0], &[]);
+    assert_eq!(c.slat_contents(), vec![10.0, 20.0]);
+}
+
 // ---------- continuous conveyor + integer leak: fractional slats, whole-unit leaks ----------
 #[test]
 fn continuous_integer_leak_reports_whole_units() {

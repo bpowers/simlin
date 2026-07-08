@@ -770,6 +770,15 @@ Each filled slat gets the linear-leak schedule of a cohort that entered at the
 belt entry and traveled to its position, as in [§7.1](#71-scalar-initial-value-steady-state-fill)
 step 3.
 
+Beware thousands separators: under comma-list semantics `1,000` is a two-entry
+list (`1` and `000`), never the number one thousand — write `1000`. simlin
+additionally requires a list-initialized conveyor's transit time (`<len>`) to
+be a compile-time constant and rejects a runtime expression loudly: the
+list-length interpretation above (per-slat vs per-time-unit) and the stock's
+initial total both depend on the slat count `N`, which the compiler must know
+so that every initialization-time reader of the stock (a chained conveyor or
+queue initial, another belt's parameters) sees the normalized total.
+
 ## 8. Inflow placement (spread inputs)
 
 The default XMILE conveyor places all admitted inflow at the entry (depth `d`).
