@@ -6,7 +6,7 @@ the Rust serde expectations in libsimlin.
 
 from __future__ import annotations
 
-from dataclasses import MISSING, fields
+from dataclasses import MISSING, fields, replace
 from typing import TYPE_CHECKING, Any, Union
 
 if TYPE_CHECKING:
@@ -15,12 +15,15 @@ if TYPE_CHECKING:
 import cattrs
 
 from .json_types import (
+    SPREADFLOW_TYPES,
     AliasViewElement,
     ArrayedEquation,
     Auxiliary,
     AuxiliaryViewElement,
     CloudViewElement,
     Compat,
+    Conveyor,
+    DataSource,
     DeleteVariable,
     DeleteView,
     Dimension,
@@ -34,6 +37,7 @@ from .json_types import (
     JsonModelPatch,
     JsonProjectOperation,
     JsonProjectPatch,
+    Leakage,
     LinkPoint,
     LinkViewElement,
     LoopMetadata,
@@ -44,11 +48,13 @@ from .json_types import (
     ModuleReference,
     ModuleViewElement,
     Project,
+    Queue,
     Rect,
     RenameVariable,
     SetLoopName,
     SetSimSpecs,
     SimSpecs,
+    SpreadFlow,
     Stock,
     StockViewElement,
     Unit,
@@ -486,13 +492,100 @@ def _create_converter() -> cattrs.Converter:
     conv.register_structure_hook(AliasViewElement, structure_alias_view_element)
     conv.register_structure_hook(FlowPoint, structure_flow_point)
 
-    # Compat: structure from camelCase JSON
+    # DataSource / Conveyor / Leakage / Queue: structure from camelCase JSON
+    def structure_data_source(d: dict[str, Any], _: type) -> DataSource:
+        return DataSource(
+            kind=d["kind"],
+            file=d["file"],
+            tab_or_delimiter=d["tabOrDelimiter"],
+            row_or_col=d["rowOrCol"],
+            cell=d["cell"],
+        )
+
+    conv.register_structure_hook(DataSource, structure_data_source)
+
+    def structure_conveyor(d: dict[str, Any], _: type) -> Conveyor:
+        return Conveyor(
+            transit_time=d["transitTime"],
+            capacity=d.get("capacity"),
+            inflow_limit=d.get("inflowLimit"),
+            sample=d.get("sample"),
+            arrest=d.get("arrest"),
+            discrete=d.get("discrete", False),
+            batch_integrity=d.get("batchIntegrity", False),
+            one_at_a_time=d.get("oneAtATime", False),
+            exponential_leak=d.get("exponentialLeak", False),
+            ignore_earlier_zone_losses=d.get("ignoreEarlierZoneLosses", False),
+        )
+
+    conv.register_structure_hook(Conveyor, structure_conveyor)
+
+    def structure_leakage(d: dict[str, Any], _: type) -> Leakage:
+        return Leakage(
+            fraction=d.get("fraction"),
+            integers=d.get("integers", False),
+            zone_start=d.get("zoneStart"),
+            zone_end=d.get("zoneEnd"),
+        )
+
+    conv.register_structure_hook(Leakage, structure_leakage)
+
+    conv.register_structure_hook(Queue, lambda d, _: Queue())
+
+    # SpreadFlow is adjacently tagged in Rust serde ({"type": ..., and
+    # "distribution": ... only for the "dist" variant}); mirror that exactly
+    # rather than going through the generic omit-default machinery, and
+    # validate the tag so a typo fails loudly instead of round-tripping.
+    def _check_spreadflow(sf_type: str, distribution: str | None) -> None:
+        if sf_type not in SPREADFLOW_TYPES:
+            valid = ", ".join(SPREADFLOW_TYPES)
+            raise ValueError(f"Unknown spreadflow type: {sf_type!r}. Expected one of: {valid}")
+        if sf_type == "dist" and distribution is None:
+            raise ValueError("spreadflow type 'dist' requires a distribution")
+
+    def unstructure_spreadflow(sf: SpreadFlow) -> dict[str, Any]:
+        _check_spreadflow(sf.type, sf.distribution)
+        if sf.type == "dist":
+            return {"type": "dist", "distribution": sf.distribution}
+        return {"type": sf.type}
+
+    def structure_spreadflow(d: dict[str, Any], _: type) -> SpreadFlow:
+        sf_type = d["type"]
+        distribution = d.get("distribution")
+        _check_spreadflow(sf_type, distribution)
+        # A stray distribution on a non-dist variant is not part of the wire
+        # format; drop it so unstructure(structure(x)) is canonical.
+        return SpreadFlow(type=sf_type, distribution=distribution if sf_type == "dist" else None)
+
+    conv.register_unstructure_hook(SpreadFlow, unstructure_spreadflow)
+    conv.register_structure_hook(SpreadFlow, structure_spreadflow)
+
+    # Compat: structure from camelCase JSON. The nested-object checks are
+    # `is not None` rather than truthiness: a marker-only leakage or queue
+    # serializes as {} (falsy) and must NOT be dropped.
     def structure_compat(d: dict[str, Any], _: type) -> Compat:
+        data_source = (
+            conv.structure(d["dataSource"], DataSource) if d.get("dataSource") is not None else None
+        )
+        conveyor = (
+            conv.structure(d["conveyor"], Conveyor) if d.get("conveyor") is not None else None
+        )
+        leakage = conv.structure(d["leakage"], Leakage) if d.get("leakage") is not None else None
+        spreadflow = (
+            conv.structure(d["spreadflow"], SpreadFlow) if d.get("spreadflow") is not None else None
+        )
+        queue = Queue() if d.get("queue") is not None else None
         return Compat(
             active_initial=d.get("activeInitial"),
             non_negative=d.get("nonNegative", False),
             can_be_module_input=d.get("canBeModuleInput", False),
             is_public=d.get("isPublic", False),
+            data_source=data_source,
+            conveyor=conveyor,
+            leakage=leakage,
+            spreadflow=spreadflow,
+            queue=queue,
+            overflow=d.get("overflow", False),
         )
 
     conv.register_structure_hook(Compat, structure_compat)
@@ -507,6 +600,13 @@ def _create_converter() -> cattrs.Converter:
         Module: {"name", "model_name"},
         SimSpecs: {"start_time", "end_time", "dt", "method"},
         Compat: set(),
+        # DataSource's five fields have no defaults, so they are always
+        # emitted; Conveyor requires only transitTime; a Leakage or Queue with
+        # all fields default serializes as {} (the marker-only encodings).
+        DataSource: set(),
+        Conveyor: {"transit_time"},
+        Leakage: set(),
+        Queue: set(),
         ArrayedEquation: {"dimensions"},
         ElementEquation: {"subscript", "equation"},
         ModuleReference: {"src", "dst"},
@@ -541,7 +641,7 @@ def _create_converter() -> cattrs.Converter:
         compat = None
         compat_dict = d.get("compat")
         if compat_dict:
-            compat = Compat(active_initial=compat_dict.get("activeInitial"))
+            compat = conv.structure(compat_dict, Compat)
         return ElementEquation(
             subscript=d["subscript"],
             equation=d.get("equation", ""),
@@ -559,12 +659,13 @@ def _create_converter() -> cattrs.Converter:
         compat = None
         compat_dict = d.get("compat")
         if compat_dict:
-            compat = Compat(active_initial=compat_dict.get("activeInitial"))
+            compat = conv.structure(compat_dict, Compat)
         return ArrayedEquation(
             dimensions=d.get("dimensions", []),
             equation=d.get("equation"),
             compat=compat,
             elements=elements,
+            has_except_default=d.get("hasExceptDefault"),
         )
 
     conv.register_structure_hook(ArrayedEquation, structure_arrayed_equation)
@@ -575,33 +676,38 @@ def _create_converter() -> cattrs.Converter:
         lambda d, _: ModuleReference(src=d["src"], dst=d["dst"]),
     )
 
+    _empty_compat = Compat()
+
+    def _structure_merged_compat(d: dict[str, Any]) -> Compat | None:
+        """Structure a variable's compat, OR-merging legacy top-level booleans.
+
+        Old code never writes compat booleans and new code never writes
+        top-level booleans, so both cannot be meaningfully set at once; OR is
+        safe and handles the transitional case where compat exists only for
+        activeInitial alongside top-level boolean flags.
+
+        Uses dataclasses.replace on the fully-structured Compat rather than
+        rebuilding it field-by-field, so every non-legacy field (dataSource,
+        conveyor, leakage, spreadflow, queue, overflow) is preserved -- the
+        old rebuild silently dropped them (GH #882). An all-default result
+        normalizes to None so an absent compat stays absent on the wire.
+        """
+        compat_dict = d.get("compat")
+        base = conv.structure(compat_dict, Compat) if compat_dict else _empty_compat
+        merged = replace(
+            base,
+            non_negative=d.get("nonNegative", False) or base.non_negative,
+            can_be_module_input=d.get("canBeModuleInput", False) or base.can_be_module_input,
+            is_public=d.get("isPublic", False) or base.is_public,
+        )
+        return None if merged == _empty_compat else merged
+
     # Stock: handle nested types
     def structure_stock(d: dict[str, Any], _: type) -> Stock:
         arrayed_equation = None
         if d.get("arrayedEquation"):
             arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
-        compat = None
-        compat_dict = d.get("compat")
-        if compat_dict:
-            compat = conv.structure(compat_dict, Compat)
-        # OR-merge legacy top-level fields with compat booleans.  Old code
-        # never writes compat booleans and new code never writes top-level
-        # booleans, so both cannot be meaningfully set at once; OR is safe
-        # and handles the transitional case where compat exists only for
-        # activeInitial alongside top-level boolean flags.
-        nn = d.get("nonNegative", False) or (compat.non_negative if compat else False)
-        cbmi = d.get("canBeModuleInput", False) or (compat.can_be_module_input if compat else False)
-        is_pub = d.get("isPublic", False) or (compat.is_public if compat else False)
-        ai = compat.active_initial if compat else None
-        if nn or cbmi or is_pub or ai is not None:
-            compat = Compat(
-                active_initial=ai,
-                non_negative=nn,
-                can_be_module_input=cbmi,
-                is_public=is_pub,
-            )
-        else:
-            compat = None
+        compat = _structure_merged_compat(d)
         return Stock(
             name=d["name"],
             inflows=d.get("inflows", []),
@@ -624,23 +730,7 @@ def _create_converter() -> cattrs.Converter:
         arrayed_equation = None
         if d.get("arrayedEquation"):
             arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
-        compat = None
-        compat_dict = d.get("compat")
-        if compat_dict:
-            compat = conv.structure(compat_dict, Compat)
-        nn = d.get("nonNegative", False) or (compat.non_negative if compat else False)
-        cbmi = d.get("canBeModuleInput", False) or (compat.can_be_module_input if compat else False)
-        is_pub = d.get("isPublic", False) or (compat.is_public if compat else False)
-        ai = compat.active_initial if compat else None
-        if nn or cbmi or is_pub or ai is not None:
-            compat = Compat(
-                active_initial=ai,
-                non_negative=nn,
-                can_be_module_input=cbmi,
-                is_public=is_pub,
-            )
-        else:
-            compat = None
+        compat = _structure_merged_compat(d)
         return Flow(
             name=d["name"],
             uid=d.get("uid", 0),
@@ -662,21 +752,7 @@ def _create_converter() -> cattrs.Converter:
         arrayed_equation = None
         if d.get("arrayedEquation"):
             arrayed_equation = conv.structure(d["arrayedEquation"], ArrayedEquation)
-        compat = None
-        compat_dict = d.get("compat")
-        if compat_dict:
-            compat = conv.structure(compat_dict, Compat)
-        cbmi = d.get("canBeModuleInput", False) or (compat.can_be_module_input if compat else False)
-        is_pub = d.get("isPublic", False) or (compat.is_public if compat else False)
-        ai = compat.active_initial if compat else None
-        if cbmi or is_pub or ai is not None:
-            compat = Compat(
-                active_initial=ai,
-                can_be_module_input=cbmi,
-                is_public=is_pub,
-            )
-        else:
-            compat = None
+        compat = _structure_merged_compat(d)
         return Auxiliary(
             name=d["name"],
             uid=d.get("uid", 0),
@@ -693,21 +769,7 @@ def _create_converter() -> cattrs.Converter:
     # Module: handle references list
     def structure_module(d: dict[str, Any], _: type) -> Module:
         references = [conv.structure(ref, ModuleReference) for ref in d.get("references", [])]
-        compat = None
-        compat_dict = d.get("compat")
-        if compat_dict:
-            compat = conv.structure(compat_dict, Compat)
-        cbmi = d.get("canBeModuleInput", False) or (compat.can_be_module_input if compat else False)
-        is_pub = d.get("isPublic", False) or (compat.is_public if compat else False)
-        ai = compat.active_initial if compat else None
-        if cbmi or is_pub or ai is not None:
-            compat = Compat(
-                active_initial=ai,
-                can_be_module_input=cbmi,
-                is_public=is_pub,
-            )
-        else:
-            compat = None
+        compat = _structure_merged_compat(d)
         return Module(
             name=d["name"],
             model_name=d["modelName"],

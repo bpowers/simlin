@@ -32,13 +32,96 @@ class GraphicalFunction:
 
 
 @dataclass
+class DataSource:
+    """External data reference (GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT).
+
+    Mirrors the Rust ``json::JsonDataSource``: all five fields are required
+    strings on the wire.
+    """
+
+    kind: str
+    file: str
+    tab_or_delimiter: str
+    row_or_col: str
+    cell: str
+
+
+@dataclass
+class Conveyor:
+    """A conveyor stock's options. Mirrors the Rust ``json::Conveyor``.
+
+    Fields hold XMILE expression strings; ``None``/``False`` means the option
+    was absent on the wire (the documented default applies).
+    """
+
+    transit_time: str
+    capacity: str | None = None
+    inflow_limit: str | None = None
+    sample: str | None = None
+    arrest: str | None = None
+    discrete: bool = False
+    batch_integrity: bool = False
+    one_at_a_time: bool = False
+    exponential_leak: bool = False
+    ignore_earlier_zone_losses: bool = False
+
+
+@dataclass
+class Leakage:
+    """Marks a flow as a conveyor leakage outflow. Mirrors ``json::Leakage``.
+
+    A marker-only leakage (all fields default) serializes as ``{}``: the leak
+    fraction then comes from the flow's equation rather than an explicit
+    ``fraction``.
+    """
+
+    fraction: str | None = None
+    integers: bool = False
+    zone_start: str | None = None
+    zone_end: str | None = None
+
+
+# The five valid SpreadFlow variants, as serialized by the Rust
+# `json::SpreadFlow` enum (serde `rename_all = "snake_case"`).
+SPREADFLOW_TYPES = ("beginning", "even", "dest", "dist", "source")
+
+
+@dataclass
+class SpreadFlow:
+    """Conveyor inflow-placement method. Mirrors the Rust ``json::SpreadFlow``.
+
+    Adjacently tagged on the wire: ``{"type": "..."}`` for the payload-free
+    variants and ``{"type": "dist", "distribution": "..."}`` for ``dist``
+    (``distribution`` is required exactly when ``type`` is ``"dist"``).
+    """
+
+    type: str
+    distribution: str | None = None
+
+
+@dataclass
+class Queue:
+    """A queue stock marker. Mirrors ``json::Queue``: serializes as ``{}``."""
+
+
+@dataclass
 class Compat:
-    """Vensim compatibility options for a variable."""
+    """Vensim/XMILE compatibility options for a variable.
+
+    The conveyor/queue fields ride on stocks; leakage/spreadflow/overflow on
+    flows. Mirrors the Rust ``json::Compat``.
+    """
 
     active_initial: str | None = None
     non_negative: bool = False
     can_be_module_input: bool = False
     is_public: bool = False
+    data_source: DataSource | None = None
+    conveyor: Conveyor | None = None
+    leakage: Leakage | None = None
+    spreadflow: SpreadFlow | None = None
+    queue: Queue | None = None
+    overflow: bool = False
 
 
 @dataclass
@@ -53,12 +136,19 @@ class ElementEquation:
 
 @dataclass
 class ArrayedEquation:
-    """Equation structure for arrayed/subscripted variables."""
+    """Equation structure for arrayed/subscripted variables.
+
+    ``has_except_default`` is only meaningful alongside ``equation``: ``True``
+    means the shared equation is an EXCEPT default that element equations
+    override (mirrors the Rust ``hasExceptDefault``, ``Option<bool>`` -- absent
+    on the wire when there is no default equation).
+    """
 
     dimensions: list[str] = field(default_factory=list)
     equation: str | None = None
     compat: Compat | None = None
     elements: list[ElementEquation] | None = None
+    has_except_default: bool | None = None
 
 
 @dataclass
