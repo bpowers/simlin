@@ -611,6 +611,71 @@ fn parse_zone(expr: &Option<String>, default: f64) -> f64 {
     }
 }
 
+/// Evaluate a conveyor-block expression (`<len>`, a leak fraction) as a
+/// compile-time scalar constant: a numeric literal, optionally under unary
+/// sign(s) or parentheses. Anything else -- a variable reference, arithmetic,
+/// a builtin call, a parse error -- returns `None`: its value is only known at
+/// runtime, and the §4.1/§5.1 compile-time advisories must produce no false
+/// positives for runtime expressions (docs/design/conveyors.md §4.1, §5.1).
+/// Going through the real lexer/parser (rather than `str::parse::<f64>`) means
+/// whitespace, comments, and sign forms are classified exactly like the
+/// equation the runtime will evaluate.
+pub(crate) fn const_scalar_expr(expr: &str) -> Option<f64> {
+    use crate::ast::{Expr0, UnaryOp};
+    fn eval(ast: &Expr0) -> Option<f64> {
+        match ast {
+            Expr0::Const(_, v, _) => Some(*v),
+            Expr0::Op1(UnaryOp::Positive, inner, _) => eval(inner),
+            Expr0::Op1(UnaryOp::Negative, inner, _) => eval(inner).map(|v| -v),
+            _ => None,
+        }
+    }
+    let ast = Expr0::new(expr, crate::lexer::LexerType::Equation).ok()??;
+    eval(&ast)
+}
+
+/// §4.1 transit-quantization tolerance: `transit/dt` counts as an integer
+/// multiple when within 1e-9 of the belt's rounded slat count -- the exact
+/// threshold the spec states (`|T/DT − round(T/DT)| > 1e-9`,
+/// docs/design/conveyors.md §4.1). An absolute tolerance on the RATIO keeps
+/// binary-representation noise (e.g. `0.3 / 0.1 = 2.9999999999999996`, ~4e-16
+/// off) from warning on a transit the modeler wrote as an exact multiple,
+/// while any humanly-intended fraction of a slat (>= 1e-9 of dt) still warns.
+pub(crate) const TRANSIT_RATIO_TOLERANCE: f64 = 1e-9;
+
+/// §5.1 leak-fraction-sum tolerance: constant linear fractions warn only when
+/// their sum exceeds `1 + 1e-9`, so a sum the modeler wrote as exactly 1
+/// (legal: the primary outflow is then 0) never warns off f64 rounding.
+pub(crate) const LEAK_FRACTION_SUM_TOLERANCE: f64 = 1e-9;
+
+/// §4.1: the DT-quantized belt geometry for a compile-time-constant transit
+/// time. Returns `Some((slats, effective_transit))` -- with `slats` computed
+/// by the same [`crate::conveyor::slat_count`] the runtime belt uses
+/// (round-half-away-from-zero, clamped to >= 1) and `effective_transit =
+/// slats * dt` -- when `transit` is NOT an integer multiple of `dt` within
+/// [`TRANSIT_RATIO_TOLERANCE`]. Returns `None` when quantization is exact, or
+/// when either input is outside the positive finite domain: a non-positive or
+/// non-finite transit is [`ErrorCode::ConveyorTransitNotPositive`]'s job at
+/// the runtime latch, and an invalid dt is a sim-specs problem -- neither
+/// should masquerade as a quantization advisory.
+///
+/// Deliberate spec-letter divergence: for `0 < transit/dt < 1e-9` the spec's
+/// literal `|T/DT - round(T/DT)|` formula is silent (round gives 0, within
+/// tolerance), but comparing against the CLAMPED slat count (1) warns with
+/// effective transit = dt -- which is what the run actually does.
+pub(crate) fn transit_dt_mismatch(transit: f64, dt: f64) -> Option<(usize, f64)> {
+    if !(transit.is_finite() && transit > 0.0 && dt.is_finite() && dt > 0.0) {
+        return None;
+    }
+    let slats = crate::conveyor::slat_count(transit, dt);
+    let ratio = transit / dt;
+    if (ratio - slats as f64).abs() > TRANSIT_RATIO_TOLERANCE {
+        Some((slats, slats as f64 * dt))
+    } else {
+        None
+    }
+}
+
 /// Expand every conveyor in `main_model` of `project` into hidden parameter
 /// auxes plus placeholder-equation driven flows, returning the modified project
 /// and one [`ConveyorMeta`] per conveyor. A project with no conveyors is
@@ -1622,26 +1687,72 @@ fn param_equation(expr: &str, dims: &[DimensionName]) -> Equation {
     }
 }
 
+/// The resolved source of a leak flow's fraction: §3.3's two encodings, in
+/// the order [`leak_fraction_source`] applies them. `Debug` is
+/// `debug-derive`-gated because the `FlowEquation` variant borrows a
+/// [`datamodel::Equation`], whose own `Debug` is gated the same way (and
+/// libsimlin builds the engine with `default-features = false`).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub(crate) enum LeakFractionSource<'a> {
+    /// A non-empty value-bearing `<leak>expr</leak>` fraction (one shared
+    /// expression; for an arrayed conveyor it is applied to all elements).
+    Explicit(&'a str),
+    /// A bare `<leak/>` marker: the flow's own `<eqn>` carries the fraction
+    /// -- the encoding real Stella files use (docs/design/conveyors.md §3.3).
+    FlowEquation(&'a Equation),
+    /// No fraction anywhere (a bare marker on an empty-equation flow): a
+    /// valid "leakage, fraction TBD" state contributing zero leakage until a
+    /// fraction is supplied (§3.3).
+    Absent,
+}
+
+/// Resolve which expression carries a leak flow's fraction, in the §3.3
+/// order: a non-empty explicit `<leak>` fraction wins; otherwise the flow's
+/// own non-empty `<eqn>` carries it. SHARED by the runtime expansion
+/// ([`leak_fraction_equation`]) and the §5.1 compile-time advisory
+/// (`crate::db::diagnostic::emit_conveyor_spec_warnings`) so the two
+/// resolutions cannot drift -- a fraction the runtime would apply is exactly
+/// a fraction the advisory sums.
+pub(crate) fn leak_fraction_source<'a>(
+    leakage: Option<&'a datamodel::Leakage>,
+    equation: &'a Equation,
+) -> LeakFractionSource<'a> {
+    if let Some(leak) = leakage
+        && let Some(frac) = &leak.fraction
+        && !frac.is_empty()
+    {
+        return LeakFractionSource::Explicit(frac);
+    }
+    match equation {
+        Equation::Scalar(s) | Equation::ApplyToAll(_, s) if !s.is_empty() => {
+            LeakFractionSource::FlowEquation(equation)
+        }
+        // A per-element equation always carries fractions (element entries),
+        // even when its default is None.
+        Equation::Arrayed(..) => LeakFractionSource::FlowEquation(equation),
+        _ => LeakFractionSource::Absent,
+    }
+}
+
 /// The synthesized leak-fraction aux equation for a (possibly arrayed) leak flow
 /// (§5.1/§10). Prefers the explicit `<leak>` fraction (a single expression, made
 /// apply-to-all over the conveyor's dims); otherwise the flow's own equation
 /// carries the fraction (the bare-`<leak/>`-plus-`<eqn>` form) and its arrayed
 /// shape is preserved so a genuinely per-element fraction is not flattened. An
-/// empty fraction leaks nothing (`0`).
+/// empty fraction leaks nothing (`0`). The which-expression decision is the
+/// shared [`leak_fraction_source`]; only the array-shaping lives here.
 fn leak_fraction_equation(flow: &datamodel::Flow, dims: &[DimensionName]) -> Equation {
-    if let Some(leak) = &flow.compat.leakage
-        && let Some(frac) = &leak.fraction
-        && !frac.is_empty()
-    {
-        return param_equation(frac, dims);
-    }
-    match &flow.equation {
-        Equation::Scalar(s) if !s.is_empty() => param_equation(s, dims),
-        Equation::ApplyToAll(d, s) if !s.is_empty() => Equation::ApplyToAll(d.clone(), s.clone()),
-        Equation::Arrayed(d, elems, default, except) => {
-            Equation::Arrayed(d.clone(), elems.clone(), default.clone(), *except)
-        }
-        _ => param_equation("0", dims),
+    match leak_fraction_source(flow.compat.leakage.as_ref(), &flow.equation) {
+        LeakFractionSource::Explicit(frac) => param_equation(frac, dims),
+        LeakFractionSource::FlowEquation(eqn) => match eqn {
+            Equation::Scalar(s) => param_equation(s, dims),
+            Equation::ApplyToAll(d, s) => Equation::ApplyToAll(d.clone(), s.clone()),
+            Equation::Arrayed(d, elems, default, except) => {
+                Equation::Arrayed(d.clone(), elems.clone(), default.clone(), *except)
+            }
+        },
+        LeakFractionSource::Absent => param_equation("0", dims),
     }
 }
 
@@ -1852,8 +1963,13 @@ fn is_nonzero(v: f64) -> bool {
 }
 
 /// §4.4 leak-fraction hygiene: linear fractions clamp to `[0, 1]`, exponential
-/// rates to `[0, ∞)`, NaN ⇒ 0.
-fn clamp_fraction(v: f64, exponential: bool) -> f64 {
+/// rates to `[0, ∞)`, NaN ⇒ 0. `pub(crate)` because the §5.1 compile-time
+/// advisory (`db::diagnostic::emit_conveyor_spec_warnings`) applies the SAME
+/// per-fraction hygiene to each constant term before summing -- in particular
+/// the NaN ⇒ 0 rule: `f64::clamp` PROPAGATES NaN, so an unshared clamp would
+/// let a literal `nan` fraction poison the sum into silence while the runtime
+/// zeroes it and leaks the other fractions at full rate.
+pub(crate) fn clamp_fraction(v: f64, exponential: bool) -> f64 {
     if v.is_nan() {
         0.0
     } else if exponential {
@@ -2911,6 +3027,106 @@ mod tests {
     fn source_weights_empty_inputs_are_all_zero() {
         assert_eq!(source_weights(&[], 3), vec![0.0, 0.0, 0.0]);
         assert_eq!(source_weights(&[1.0, 2.0], 0), Vec::<f64>::new());
+    }
+
+    // ----- compile-time spec advisories (§4.1 / §5.1 pure helpers) -----
+
+    #[test]
+    fn const_scalar_expr_accepts_literals_and_signs() {
+        assert_eq!(const_scalar_expr("1.3"), Some(1.3));
+        assert_eq!(const_scalar_expr(" 4 "), Some(4.0));
+        assert_eq!(const_scalar_expr("-2.5"), Some(-2.5));
+        assert_eq!(const_scalar_expr("+0.5"), Some(0.5));
+        // Parentheses vanish at parse; the inner literal is still a constant.
+        assert_eq!(const_scalar_expr("(1.5)"), Some(1.5));
+    }
+
+    #[test]
+    fn const_scalar_expr_rejects_runtime_expressions() {
+        // A variable reference, arithmetic, a builtin, an empty equation, and
+        // a parse error are all runtime/unknowable -- no compile-time value,
+        // so the advisories that consume this must stay silent (§4.1/§5.1).
+        assert_eq!(const_scalar_expr("transit_var"), None);
+        assert_eq!(const_scalar_expr("1 + 2"), None);
+        assert_eq!(const_scalar_expr("TIME"), None);
+        assert_eq!(const_scalar_expr("MAX(1, 2)"), None);
+        assert_eq!(const_scalar_expr(""), None);
+        assert_eq!(const_scalar_expr("1 +"), None);
+    }
+
+    #[test]
+    fn transit_dt_mismatch_flags_non_multiples() {
+        // The §4.1 example: 1.3 / 0.25 = 5.2 rounds half-away to 5 slats, an
+        // effective transit of 1.25.
+        assert_eq!(transit_dt_mismatch(1.3, 0.25), Some((5, 1.25)));
+        // Half-away rounding mirror of slat_count: 1.5 / 1 rounds UP to 2.
+        assert_eq!(transit_dt_mismatch(1.5, 1.0), Some((2, 2.0)));
+        // A sub-dt transit clamps to one slat (slat_count's >= 1 clamp), so
+        // the effective transit is a full dt.
+        assert_eq!(transit_dt_mismatch(0.1, 0.25), Some((1, 0.25)));
+    }
+
+    #[test]
+    fn transit_dt_mismatch_exact_multiples_are_clean() {
+        assert_eq!(transit_dt_mismatch(4.0, 0.25), None);
+        assert_eq!(transit_dt_mismatch(1.0, 1.0), None);
+        // Binary-representation noise stays below the 1e-9 ratio tolerance:
+        // 0.3 / 0.1 is 2.9999999999999996 in f64 but an exact multiple in
+        // intent, and must not warn.
+        assert_eq!(transit_dt_mismatch(0.3, 0.1), None);
+    }
+
+    #[test]
+    fn leak_fraction_source_resolves_the_two_encodings_in_runtime_order() {
+        let leak = |fraction: Option<&str>| datamodel::Leakage {
+            fraction: fraction.map(str::to_string),
+            integers: false,
+            zone_start: None,
+            zone_end: None,
+        };
+        let scalar = |s: &str| Equation::Scalar(s.to_string());
+
+        // A non-empty explicit `<leak>` fraction wins over the flow's <eqn>.
+        assert_eq!(
+            leak_fraction_source(Some(&leak(Some("0.7"))), &scalar("0.5")),
+            LeakFractionSource::Explicit("0.7")
+        );
+        // A bare `<leak/>` marker (fraction None) falls back to the flow's
+        // own <eqn> -- the encoding real Stella files use (§3.3).
+        let eqn = scalar("0.5");
+        assert_eq!(
+            leak_fraction_source(Some(&leak(None)), &eqn),
+            LeakFractionSource::FlowEquation(&eqn)
+        );
+        // An EMPTY explicit fraction is treated like an absent one.
+        assert_eq!(
+            leak_fraction_source(Some(&leak(Some(""))), &eqn),
+            LeakFractionSource::FlowEquation(&eqn)
+        );
+        // A truly bare marker on an empty-equation flow: no fraction at all.
+        assert_eq!(
+            leak_fraction_source(Some(&leak(None)), &scalar("")),
+            LeakFractionSource::Absent
+        );
+        // A per-element equation always carries fractions.
+        let arrayed = Equation::Arrayed(vec!["d1".to_string()], vec![], None, false);
+        assert_eq!(
+            leak_fraction_source(Some(&leak(None)), &arrayed),
+            LeakFractionSource::FlowEquation(&arrayed)
+        );
+    }
+
+    #[test]
+    fn transit_dt_mismatch_out_of_domain_inputs_are_other_diagnostics_jobs() {
+        // Non-positive / non-finite transit is ConveyorTransitNotPositive's
+        // domain at the runtime latch; an invalid dt is a sim-specs problem.
+        assert_eq!(transit_dt_mismatch(0.0, 0.25), None);
+        assert_eq!(transit_dt_mismatch(-1.0, 0.25), None);
+        assert_eq!(transit_dt_mismatch(f64::INFINITY, 0.25), None);
+        assert_eq!(transit_dt_mismatch(f64::NAN, 0.25), None);
+        assert_eq!(transit_dt_mismatch(4.0, 0.0), None);
+        assert_eq!(transit_dt_mismatch(4.0, -0.25), None);
+        assert_eq!(transit_dt_mismatch(4.0, f64::NAN), None);
     }
 
     // ----- end-to-end dist / source placement -----

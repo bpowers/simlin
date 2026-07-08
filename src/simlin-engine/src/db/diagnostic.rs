@@ -69,7 +69,12 @@ pub enum DiagnosticError {
 ///    internally), and a compile-failure warning for any LTM synthetic
 ///    variable whose fragment fails to compile. Gated on `ltm_enabled` so
 ///    we don't run LTM synthesis on projects that never requested it.
-/// 4. When LTM is enabled, `emit_conveyor_ltm_degraded_warnings` and
+/// 4. `emit_conveyor_spec_warnings` -- the unconditional compile-time
+///    conveyor advisories: `ConveyorTransitNotDtMultiple` (a constant transit
+///    time that is not an integer multiple of dt) and
+///    `ConveyorLeakFractionsExceedOne` (constant linear leak fractions
+///    summing above 1), docs/design/conveyors.md §4.1 / §5.1.
+/// 5. When LTM is enabled, `emit_conveyor_ltm_degraded_warnings` and
 ///    `emit_queue_ltm_degraded_warnings` -- one `Warning` per conveyor stock
 ///    and per queue stock in THIS model, because LTM's flow-to-stock link-score
 ///    formula assumes plain INTEG but both are non-INTEG stock types
@@ -139,6 +144,18 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // the port reads its default -- a quietly-wrong simulation. The salsa path
     // had lost the legacy `BadModuleInputDst`/`BadModuleInputSrc` check.
     model_module_wiring_diagnostics(db, model, project);
+
+    // Conveyor compile-time spec advisories (docs/design/conveyors.md §4.1 /
+    // §5.1): the DT-quantized-transit and constant-leak-fractions-sum
+    // Warnings. Unconditional -- NOT inside the `ltm_enabled` gate below --
+    // because they describe the simulation itself, not an analysis overlay.
+    // Emitted from this per-model trigger for the same exactly-once reason as
+    // the LTM-degraded twins, and because the special conveyor/queue build
+    // path (`queue_compile::build_compiled`) returns a single hard `Err` with
+    // no warnings channel: the salsa accumulator is the only route a
+    // conveyor Warning can take to `collect_all_diagnostics` /
+    // `simlin_project_get_errors` (GH #873).
+    emit_conveyor_spec_warnings(db, model, project);
 
     // When LTM is enabled, also trigger the LTM diagnostic pass so that
     // diagnostics accumulated by the LTM pipeline surface through
@@ -277,6 +294,218 @@ fn emit_queue_ltm_degraded_warnings(db: &dyn Db, model: SourceModel) {
             severity: DiagnosticSeverity::Warning,
         })
         .accumulate(db);
+    }
+}
+
+/// Emit the two spec-mandated compile-time conveyor advisories for each
+/// conveyor stock in `model`, Warning severity (docs/design/conveyors.md
+/// §9.8 table; GH #873):
+///
+/// - [`ErrorCode::ConveyorTransitNotDtMultiple`] (§4.1): a compile-time-
+///   constant transit time that is not an integer multiple of dt. The belt is
+///   DT-quantized (`conveyor::slat_count` rounds half away from zero and
+///   clamps to >= 1), so the message names the conveyor and reports the
+///   effective transit time `slats * dt` the run will actually use. A
+///   non-constant `<len>` expression gets no warning -- its value is only
+///   known at runtime, where the latch path validates it separately
+///   (`ConveyorTransitNotPositive` / `ConveyorTransitTooLong`).
+/// - [`ErrorCode::ConveyorLeakFractionsExceedOne`] (§5.1): the conveyor's
+///   compile-time-constant LINEAR leak fractions sum above 1 (the §5.1
+///   constraint is `Σ f_k <= 1`; at runtime the step-2 content clamp
+///   under-leaks the LATER flows, exactly the "later leakages may get less"
+///   behavior isee documents). Each flow's fraction is resolved through the
+///   shared `conveyor_compile::leak_fraction_source` -- an explicit `<leak>`
+///   fraction wins, else the flow's own `<eqn>` carries it (the
+///   bare-`<leak/>`-plus-`<eqn>` encoding real Stella files use, §3.3) -- so
+///   the advisory sums exactly the fractions the runtime applies. Exponential
+///   conveyors are skipped entirely: §5.2 rates are per-time-unit and
+///   overlapping rates ADD by design, so a sum above 1 is legal there. Each
+///   constant term is clamped to `[0, 1]` before summing, mirroring the
+///   runtime's per-fraction `clamp_fraction` (a negative constant contributes
+///   zero leakage at runtime, so it must not cancel other fractions out of
+///   the sum; an over-1 constant caps at 1). Non-constant fractions are
+///   excluded, which can never produce a false positive: they too clamp to
+///   `>= 0` at runtime, so the summed constant subset is a lower bound on the
+///   runtime total.
+///
+/// dt resolution mirrors `assemble_simulation`'s root rule: THIS model's
+/// `model_sim_specs` override wins when present, else the project sim specs.
+/// A non-positive/non-finite dt emits nothing (invalid sim specs are another
+/// diagnostic's concern, and `transit_dt_mismatch` guards the domain).
+///
+/// Unconditional -- unlike the LTM-degraded twins above, these advisories
+/// describe the simulation itself. Emitted from the `model_all_diagnostics`
+/// per-model trigger (drained exactly once per model, never invoked across
+/// module edges) because the special conveyor/queue build path
+/// (`queue_compile::build_compiled`) returns a single hard `Err` with no
+/// warnings channel: this accumulator is the only route to
+/// `collect_all_diagnostics` / `simlin_project_get_errors`. Carried as a
+/// `Model` error with the specific code (not `Assembly`) so the advisory
+/// never surfaces as a misleading `NotSimulatable`; conveyors are visited in
+/// sorted-name order for deterministic accumulation.
+fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceProject) {
+    use crate::common::{Error, ErrorCode, ErrorKind};
+    use crate::conveyor_compile::{
+        LEAK_FRACTION_SUM_TOLERANCE, LeakFractionSource, clamp_fraction, const_scalar_expr,
+        leak_fraction_source, transit_dt_mismatch,
+    };
+    use salsa::Accumulator;
+
+    let source_vars = model.variables(db);
+    let mut conveyors: Vec<&SourceVariable> = source_vars
+        .values()
+        .filter(|sv| sv.compat(db).conveyor.is_some())
+        .collect();
+    if conveyors.is_empty() {
+        return;
+    }
+    conveyors.sort_unstable_by_key(|sv| sv.ident(db));
+
+    // Per-model dt: THIS model's sim_specs override, else the project's. This
+    // matches `assemble_simulation`'s rule when this model is the simulated
+    // ROOT; for a module-instantiated SUBMODEL the executed dt would be the
+    // root's, which can differ from this per-model resolution -- but a
+    // conveyor in a submodel is rejected at sim time
+    // (`ConveyorInSubmodelUnsupported`, compile_project_incremental), so no
+    // runnable configuration can disagree with the dt used here today.
+    let dt = {
+        let dt_spec = if let Some(ref model_specs) = *model.model_sim_specs(db) {
+            model_specs.dt.clone()
+        } else {
+            project.sim_specs(db).dt.clone()
+        };
+        match dt_spec {
+            crate::datamodel::Dt::Dt(v) => v,
+            crate::datamodel::Dt::Reciprocal(v) => 1.0 / v,
+        }
+    };
+
+    let model_name = model.name(db);
+    let emit = |stock: &str, code: ErrorCode, msg: String| {
+        CompilationDiagnostic(Diagnostic {
+            model: model_name.clone(),
+            variable: Some(stock.to_string()),
+            error: DiagnosticError::Model(Error::new(ErrorKind::Model, code, Some(msg))),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    };
+
+    for svar in conveyors {
+        let compat = svar.compat(db);
+        let Some(conv) = &compat.conveyor else {
+            continue;
+        };
+        let stock_name = svar.ident(db);
+
+        // §4.1: constant transit time that is not an integer multiple of dt.
+        if let Some(transit) = const_scalar_expr(&conv.transit_time)
+            && let Some((slats, effective)) = transit_dt_mismatch(transit, dt)
+        {
+            // For a transit within ~5e-5 of dt (or of the effective transit)
+            // the trimmed display renders the values as the SAME string --
+            // "transit time 0.3333 is not an integer multiple of dt 0.3333"
+            // is self-contradictory. Fall back to the full round-trip form
+            // for all three so the reader can see why the warning fired
+            // (shortest-round-trip display is injective on doubles, and
+            // transit == dt exactly can never warn, so full forms always
+            // disambiguate).
+            let (t_str, dt_str, eff_str) = {
+                let t = fmt_diag_value(transit);
+                let d = fmt_diag_value(dt);
+                let e = fmt_diag_value(effective);
+                if t == d || t == e {
+                    (
+                        format!("{transit}"),
+                        format!("{dt}"),
+                        format!("{effective}"),
+                    )
+                } else {
+                    (t, d, e)
+                }
+            };
+            let slat_word = if slats == 1 { "slat" } else { "slats" };
+            emit(
+                stock_name,
+                ErrorCode::ConveyorTransitNotDtMultiple,
+                format!(
+                    "conveyor '{stock_name}' transit time {t_str} is not an integer \
+                     multiple of dt {dt_str}: the belt is quantized to {slats} \
+                     {slat_word}, an effective transit time of {eff_str} \
+                     (docs/design/conveyors.md \u{00A7}4.1)"
+                ),
+            );
+        }
+
+        // §5.1: constant linear leak fractions summing above 1.
+        if !conv.exponential_leak {
+            let sum: f64 = svar
+                .outflows(db)
+                .iter()
+                .filter_map(|out_name| {
+                    // Outflow entries carry the display form; the variables
+                    // map is keyed canonically.
+                    let canon = crate::canonicalize(out_name);
+                    let flow = source_vars.get(canon.as_ref())?;
+                    // Resolve which expression carries this flow's fraction
+                    // through the SAME helper the runtime expansion uses
+                    // (explicit `<leak>` fraction, else the flow's own
+                    // `<eqn>` -- the encoding real Stella files use, §3.3).
+                    // A truly bare marker (Absent) leaks nothing; an
+                    // `Arrayed` per-element fraction has no single scalar
+                    // expression and is excluded like any non-constant.
+                    let expr = match leak_fraction_source(
+                        Some(flow.compat(db).leakage.as_ref()?),
+                        flow.equation(db),
+                    ) {
+                        LeakFractionSource::Explicit(e) => e,
+                        LeakFractionSource::FlowEquation(
+                            crate::datamodel::Equation::Scalar(s)
+                            | crate::datamodel::Equation::ApplyToAll(_, s),
+                        ) => s,
+                        _ => return None,
+                    };
+                    // Apply the runtime's OWN per-fraction hygiene to each
+                    // constant term (`clamp_fraction`, linear arm): clamp to
+                    // [0, 1] -- a negative constant contributes zero leakage,
+                    // so it must not cancel other fractions out of the sum --
+                    // and NaN maps to 0, because `f64::clamp` PROPAGATES NaN
+                    // and a literal `nan` fraction would otherwise poison the
+                    // whole sum into silence while the runtime zeroes it and
+                    // leaks the rest at full rate.
+                    const_scalar_expr(expr).map(|v| clamp_fraction(v, false))
+                })
+                .sum();
+            if sum > 1.0 + LEAK_FRACTION_SUM_TOLERANCE {
+                emit(
+                    stock_name,
+                    ErrorCode::ConveyorLeakFractionsExceedOne,
+                    format!(
+                        "conveyor '{stock_name}' constant linear leak fractions sum to {}, \
+                         exceeding 1: later leak flows will receive less than their declared \
+                         fraction, and the primary outflow may be fully starved \
+                         (docs/design/conveyors.md \u{00A7}5.1)",
+                        fmt_diag_value(sum),
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// Format an f64 for an advisory message: up to 4 decimal places with
+/// trailing zeros (and a bare trailing dot) trimmed, so an accumulated-sum
+/// artifact like `0.7 + 0.2 + 0.4 = 1.2999999999999998` reads as "1.3"
+/// instead of the shortest-round-trip tail. Falls back to the full `{}` form
+/// when 4 decimals would materially distort the value (relative error above
+/// 1e-3, e.g. a tiny transit like 1e-5 must not display as "0"). Display
+/// only -- the untrimmed value never feeds back into computation.
+fn fmt_diag_value(v: f64) -> String {
+    let fixed = format!("{v:.4}");
+    let trimmed = fixed.trim_end_matches('0').trim_end_matches('.');
+    match trimmed.parse::<f64>() {
+        Ok(r) if (r - v).abs() <= 1e-3 * v.abs() => trimmed.to_string(),
+        _ => format!("{v}"),
     }
 }
 

@@ -1536,3 +1536,514 @@ fn test_diagnostics_stable_across_incremental_loop_metadata_change() {
          before={n_before}, after={n_after}; after diags: {after:?}"
     );
 }
+
+// ---- Conveyor compile-time spec advisories (conveyors.md §4.1 / §5.1) ----
+//
+// `ConveyorTransitNotDtMultiple` and `ConveyorLeakFractionsExceedOne` are the
+// two Warning-level compile diagnostics docs/design/conveyors.md mandates
+// (§9.8 table). The special conveyor/queue build path
+// (`queue_compile::build_compiled`) returns a single hard `Err` with no
+// warnings channel, so -- like the LTM-degraded twins -- they are emitted from
+// the per-model `model_all_diagnostics` trigger, which sees the UN-expanded
+// conveyor via `compat.conveyor`, and reach `collect_all_diagnostics` /
+// `simlin_project_get_errors`. Unlike the LTM twins they are NOT gated on
+// `ltm_enabled`: they describe the simulation itself (GH #873).
+
+/// A one-model project with a conveyor stock `belt` (transit expression
+/// `transit`, linear or exponential leakage per `exponential_leak`) and one
+/// leak-marked outflow per entry of `leak_fractions`, under project dt `dt`.
+/// `extra_aux` adds a plain constant aux for the non-constant-expression
+/// fixtures to reference.
+fn conveyor_spec_project(
+    transit: &str,
+    dt: datamodel::Dt,
+    exponential_leak: bool,
+    leak_fractions: &[&str],
+    extra_aux: Option<(&str, &str)>,
+) -> datamodel::Project {
+    let empty_flow = |ident: &str, eqn: &str, compat: datamodel::Compat| {
+        datamodel::Variable::Flow(datamodel::Flow {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Scalar(eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat,
+        })
+    };
+
+    let mut outflows = vec!["out_f".to_string()];
+    for i in 0..leak_fractions.len() {
+        outflows.push(format!("leak_{i}"));
+    }
+
+    let mut variables = vec![
+        datamodel::Variable::Stock(datamodel::Stock {
+            ident: "belt".to_string(),
+            equation: datamodel::Equation::Scalar("1000".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["in_f".to_string()],
+            outflows,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                conveyor: Some(datamodel::Conveyor {
+                    transit_time: transit.to_string(),
+                    capacity: None,
+                    inflow_limit: None,
+                    sample: None,
+                    arrest: None,
+                    discrete: false,
+                    batch_integrity: false,
+                    one_at_a_time: true,
+                    exponential_leak,
+                    ignore_earlier_zone_losses: false,
+                }),
+                ..Default::default()
+            },
+        }),
+        // Primary outflow: pass-driven, no equation.
+        empty_flow("out_f", "", datamodel::Compat::default()),
+        empty_flow("in_f", "10", datamodel::Compat::default()),
+    ];
+    for (i, frac) in leak_fractions.iter().enumerate() {
+        variables.push(empty_flow(
+            &format!("leak_{i}"),
+            "",
+            datamodel::Compat {
+                leakage: Some(datamodel::Leakage {
+                    fraction: Some(frac.to_string()),
+                    integers: false,
+                    zone_start: None,
+                    zone_end: None,
+                }),
+                ..Default::default()
+            },
+        ));
+    }
+    if let Some((name, eqn)) = extra_aux {
+        variables.push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: name.to_string(),
+            equation: datamodel::Equation::Scalar(eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    }
+
+    datamodel::Project {
+        name: "conveyor_spec".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 12.0,
+            dt,
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// The Warning-severity `Model` diagnostics carrying `code`, in accumulation
+/// order.
+fn conveyor_spec_warnings(diags: &[Diagnostic], code: crate::common::ErrorCode) -> Vec<Diagnostic> {
+    diags
+        .iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(&d.error, DiagnosticError::Model(err) if err.code == code)
+        })
+        .cloned()
+        .collect()
+}
+
+/// The bare details string of a `Model` diagnostic.
+fn model_diag_details(d: &Diagnostic) -> String {
+    match &d.error {
+        DiagnosticError::Model(err) => err.get_details().unwrap_or_default(),
+        other => panic!("expected a Model diagnostic, got {other:?}"),
+    }
+}
+
+/// §4.1: a compile-time-constant transit time that is not an integer multiple
+/// of dt warns once, naming the conveyor and reporting the effective
+/// (DT-quantized) transit time. 1.3 at dt 0.25 quantizes to 5 slats
+/// (round-half-away), an effective transit of 1.25.
+#[test]
+fn test_conveyor_transit_not_dt_multiple_warns() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let project = conveyor_spec_project("1.3", datamodel::Dt::Dt(0.25), false, &[], None);
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorTransitNotDtMultiple);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one transit-quantization warning; got: {diags:?}"
+    );
+    let w = &warnings[0];
+    assert_eq!(
+        w.variable.as_deref(),
+        Some("belt"),
+        "the warning must be attributed to the conveyor stock"
+    );
+    let details = model_diag_details(w);
+    assert!(
+        details.contains("belt"),
+        "the message must name the conveyor: {details}"
+    );
+    assert!(
+        details.contains("1.25"),
+        "the message must report the effective transit time 1.25: {details}"
+    );
+}
+
+/// §4.1 negative: an exact integer multiple (4 at dt 0.25 -> 16 slats) emits
+/// no quantization warning.
+#[test]
+fn test_conveyor_transit_dt_multiple_no_warning() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &[], None);
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert!(
+        conveyor_spec_warnings(&diags, ErrorCode::ConveyorTransitNotDtMultiple).is_empty(),
+        "an exact dt multiple must not warn; got: {diags:?}"
+    );
+}
+
+/// §4.1 non-constant: a `<len>` expression that is not a compile-time
+/// constant (here a variable reference) gets no warning -- its value is only
+/// known at runtime, and a false positive is worse than silence.
+#[test]
+fn test_conveyor_transit_non_constant_no_warning() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let project = conveyor_spec_project(
+        "t_len",
+        datamodel::Dt::Dt(0.25),
+        false,
+        &[],
+        Some(("t_len", "1.3")),
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert!(
+        conveyor_spec_warnings(&diags, ErrorCode::ConveyorTransitNotDtMultiple).is_empty(),
+        "a non-constant transit expression must not warn; got: {diags:?}"
+    );
+}
+
+/// §4.1 dt resolution: a model-level `sim_specs` override wins over the
+/// project specs, mirroring `assemble_simulation`'s root rule. Transit 1.5 is
+/// an exact multiple of the project dt 0.25 (no warning there) but not of the
+/// model-level dt 1 -- and 1.5 rounds half-away UP to 2 slats, an effective
+/// transit of 2.
+#[test]
+fn test_conveyor_transit_warning_uses_model_sim_specs_override() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let mut project = conveyor_spec_project("1.5", datamodel::Dt::Dt(0.25), false, &[], None);
+    project.models[0].sim_specs = Some(datamodel::SimSpecs {
+        start: 0.0,
+        stop: 12.0,
+        dt: datamodel::Dt::Dt(1.0),
+        save_step: None,
+        sim_method: datamodel::SimMethod::Euler,
+        time_units: None,
+    });
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorTransitNotDtMultiple);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the model-level dt override must drive the check; got: {diags:?}"
+    );
+    let details = model_diag_details(&warnings[0]);
+    assert!(
+        details.contains("effective transit time of 2"),
+        "1.5 at dt 1 must quantize half-away to 2 slats (effective 2): {details}"
+    );
+}
+
+/// §5.1: constant LINEAR leak fractions summing above 1 (0.7 + 0.5 = 1.2)
+/// warn once per conveyor, naming the stock and reporting the sum.
+#[test]
+fn test_conveyor_leak_fractions_exceed_one_warns() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &["0.7", "0.5"], None);
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one leak-fraction-sum warning; got: {diags:?}"
+    );
+    let w = &warnings[0];
+    assert_eq!(
+        w.variable.as_deref(),
+        Some("belt"),
+        "the warning must be attributed to the conveyor stock"
+    );
+    let details = model_diag_details(w);
+    assert!(
+        details.contains("belt") && details.contains("1.2"),
+        "the message must name the conveyor and report the sum 1.2: {details}"
+    );
+}
+
+/// §3.3's OTHER leak encoding -- the one real Stella files use: a bare
+/// `<leak/>` marker with the fraction in the flow's own `<eqn>` (the XMILE
+/// reader leaves `Leakage.fraction` None; the runtime's
+/// `leak_fraction_equation` falls back to the flow equation). The §5.1 sum
+/// must resolve fractions in the same order the runtime does, or this
+/// encoding silently escapes the check.
+#[test]
+fn test_conveyor_leak_marker_eqn_form_warns() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let mut project =
+        conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &["0.7", "0.5"], None);
+    // Re-encode both leaks in the marker+<eqn> form: move each fraction into
+    // the flow's own equation and leave the `<leak/>` marker bare.
+    for var in &mut project.models[0].variables {
+        if let datamodel::Variable::Flow(f) = var
+            && let Some(leak) = &mut f.compat.leakage
+        {
+            f.equation =
+                datamodel::Equation::Scalar(leak.fraction.take().expect("fixture fraction"));
+        }
+    }
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the marker+eqn leak encoding must be summed exactly like the explicit \
+         <leak> fraction form; got: {diags:?}"
+    );
+    let details = model_diag_details(&warnings[0]);
+    assert!(
+        details.contains("belt") && details.contains("1.2"),
+        "the message must name the conveyor and report the sum 1.2: {details}"
+    );
+}
+
+/// §5.1 runtime mirror: the runtime clamps each LINEAR fraction to [0, 1]
+/// (`clamp_fraction`), so a negative constant contributes 0 leakage -- it
+/// must not be allowed to cancel other fractions out of the compile-time
+/// sum. 0.7 + 0.5 + (-0.5) sums raw to 0.7 (silent) but leaks 1.2 at
+/// runtime: the per-term clamp must warn.
+#[test]
+fn test_conveyor_leak_negative_fraction_clamped_like_runtime() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let project = conveyor_spec_project(
+        "4",
+        datamodel::Dt::Dt(0.25),
+        false,
+        &["0.7", "0.5", "-0.5"],
+        None,
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a negative constant fraction must clamp to 0 (runtime behavior), not \
+         cancel the others out of the sum; got: {diags:?}"
+    );
+    let details = model_diag_details(&warnings[0]);
+    assert!(
+        details.contains("1.2"),
+        "the reported sum must be the runtime-clamped 1.2: {details}"
+    );
+}
+
+/// §5.1 NaN hygiene: `nan` is a reserved lexer keyword parsing to a NaN
+/// constant, and `f64::clamp` PROPAGATES NaN -- an unguarded per-term clamp
+/// would turn the whole sum NaN and suppress the warning for the entire
+/// conveyor (`NaN > 1 + tol` is false), while the runtime's `clamp_fraction`
+/// maps NaN to 0 and genuinely leaks the other 1.2. The NaN term must
+/// contribute 0, exactly like the runtime.
+#[test]
+fn test_conveyor_leak_nan_fraction_contributes_zero() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let project = conveyor_spec_project(
+        "4",
+        datamodel::Dt::Dt(0.25),
+        false,
+        &["0.7", "0.5", "nan"],
+        None,
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a NaN constant fraction must contribute 0 (runtime clamp_fraction \
+         behavior), not poison the sum into silence; got: {diags:?}"
+    );
+    let details = model_diag_details(&warnings[0]);
+    assert!(
+        details.contains("1.2"),
+        "the reported sum must be the NaN-excluded 1.2: {details}"
+    );
+}
+
+/// Display disambiguation: for a transit within ~5e-5 of dt, the trimmed
+/// 4-decimal display renders transit, dt, and effective transit as the SAME
+/// string ("transit time 0.3333 is not an integer multiple of dt 0.3333 ...
+/// effective transit time of 0.3333" -- self-contradictory). When the trimmed
+/// transit collides with the trimmed dt or effective value, all three fall
+/// back to the full round-trip form so the reader can see why the warning
+/// fired. Also pins the singular "1 slat" grammar.
+#[test]
+fn test_conveyor_transit_warning_display_disambiguates_near_dt() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let project =
+        conveyor_spec_project("0.33333", datamodel::Dt::Reciprocal(3.0), false, &[], None);
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorTransitNotDtMultiple);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "0.33333 at dt 1/3 (ratio 0.99999) must warn; got: {diags:?}"
+    );
+    let details = model_diag_details(&warnings[0]);
+    assert!(
+        details.contains("transit time 0.33333 ") && details.contains("dt 0.3333333333333333"),
+        "colliding trimmed displays must fall back to full round-trip forms \
+         so transit and dt are distinguishable: {details}"
+    );
+    assert!(
+        details.contains("1 slat,"),
+        "a single-slat belt must read '1 slat', not '1 slats': {details}"
+    );
+}
+
+/// Cosmetic: the reported sum is trimmed to a sensible precision. The f64
+/// sequential sum 0.7 + 0.2 + 0.4 is 1.2999999999999998; the message must
+/// read "1.3", not the full shortest-round-trip tail.
+#[test]
+fn test_conveyor_leak_fraction_sum_display_is_trimmed() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let project = conveyor_spec_project(
+        "4",
+        datamodel::Dt::Dt(0.25),
+        false,
+        &["0.7", "0.2", "0.4"],
+        None,
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "0.7 + 0.2 + 0.4 sums above 1 and must warn; got: {diags:?}"
+    );
+    let details = model_diag_details(&warnings[0]);
+    assert!(
+        details.contains("sum to 1.3,") && !details.contains("1.2999999999999998"),
+        "the sum must display trimmed (1.3), not with the f64 round-trip tail: {details}"
+    );
+}
+
+/// §5.1 negative: fractions summing to exactly 1 are legal (isee: "with a
+/// leak fraction of 1, there will be no outflow") -- no warning.
+#[test]
+fn test_conveyor_leak_fractions_at_most_one_no_warning() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &["0.5", "0.5"], None);
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert!(
+        conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne).is_empty(),
+        "fractions summing to exactly 1 must not warn; got: {diags:?}"
+    );
+}
+
+/// §5.2: exponential leaks are per-time RATES, not fractions of the cohort --
+/// overlapping rates ADD by design, so a sum above 1 is legal and the §5.1
+/// check must skip an exponential conveyor entirely.
+#[test]
+fn test_conveyor_leak_fractions_exponential_no_warning() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), true, &["0.7", "0.5"], None);
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert!(
+        conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne).is_empty(),
+        "exponential leak rates must not trip the linear-fraction-sum warning; got: {diags:?}"
+    );
+}
+
+/// §5.1 non-constant: a runtime leak-fraction expression is excluded from the
+/// sum (fractions clamp to [0, 1] at runtime, so the constant subset is a
+/// lower bound and skipping the runtime one can never hide a warning that the
+/// constants alone justify). Here the constant subset is 0.7 <= 1: no warning.
+#[test]
+fn test_conveyor_leak_fraction_non_constant_excluded() {
+    use crate::common::ErrorCode;
+    let db = SimlinDb::default();
+    let project = conveyor_spec_project(
+        "4",
+        datamodel::Dt::Dt(0.25),
+        false,
+        &["0.7", "frac_x"],
+        Some(("frac_x", "0.6")),
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert!(
+        conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne).is_empty(),
+        "a non-constant fraction must be excluded from the compile-time sum; got: {diags:?}"
+    );
+}

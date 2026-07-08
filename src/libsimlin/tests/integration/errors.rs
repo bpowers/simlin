@@ -1153,6 +1153,119 @@ fn test_get_errors_no_conveyor_ltm_degraded_when_ltm_not_requested() {
     }
 }
 
+/// The two spec-mandated compile-time conveyor advisories -- transit time not
+/// an integer multiple of dt (docs/design/conveyors.md §4.1) and constant
+/// linear leak fractions summing above 1 (§5.1) -- must reach callers through
+/// `simlin_project_get_errors` as Warning-severity details, with NO sim
+/// created: they ride the same salsa diagnostic accumulator as the unit
+/// warnings (the special conveyor build path returns a single hard error and
+/// has no warnings channel). Transit 1.3 at dt 0.25 quantizes to 5 slats, an
+/// effective transit of 1.25; leak fractions 0.7 + 0.5 sum to 1.2. The two
+/// leak flows deliberately use BOTH §3.3 encodings -- `leak_a` the explicit
+/// `<leak>0.7</leak>` fraction, `leak_b` a bare `<leak/>` marker with the
+/// fraction in the flow's own `<eqn>` (the form real Stella files use) -- so
+/// the sum only exceeds 1 when both encodings resolve.
+#[test]
+fn test_get_errors_surfaces_conveyor_spec_warnings() {
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header>
+    <name>conveyor spec warnings</name>
+    <vendor>test</vendor>
+    <product version="1.0">test</product>
+    <options><uses_conveyor/></options>
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start>
+    <stop>12</stop>
+    <dt>0.25</dt>
+  </sim_specs>
+  <model>
+    <variables>
+      <stock name="belt">
+        <eqn>1000</eqn>
+        <inflow>in_f</inflow>
+        <outflow>out_f</outflow>
+        <outflow>leak_a</outflow>
+        <outflow>leak_b</outflow>
+        <conveyor>
+          <len>1.3</len>
+        </conveyor>
+      </stock>
+      <flow name="in_f">
+        <eqn>10</eqn>
+      </flow>
+      <flow name="out_f">
+      </flow>
+      <flow name="leak_a">
+        <leak>0.7</leak>
+      </flow>
+      <flow name="leak_b">
+        <eqn>0.5</eqn>
+        <leak/>
+      </flow>
+    </variables>
+  </model>
+</xmile>"#;
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse conveyor spec-warning fixture");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "the conveyor spec warnings must surface without any sim being created"
+        );
+
+        let count = simlin_error_get_detail_count(all_errors);
+        let details = simlin_error_get_details(all_errors);
+        let slice = std::slice::from_raw_parts(details, count);
+        // Returns the found detail's OWN message so the value assertions
+        // below are scoped to it -- a whole-error-object contains-check would
+        // be tautological (e.g. "1.2" is a substring of the transit
+        // message's "1.25").
+        let find = |needle: &str| {
+            slice.iter().find_map(|d| {
+                if d.message.is_null() {
+                    return None;
+                }
+                let msg = CStr::from_ptr(d.message).to_str().ok()?;
+                msg.contains(needle).then(|| (d, msg.to_string()))
+            })
+        };
+
+        let (transit, transit_msg) = find("not an integer multiple")
+            .expect("the ConveyorTransitNotDtMultiple warning must be present");
+        assert_eq!(
+            transit.severity,
+            SimlinErrorSeverity::Warning,
+            "the transit-quantization advisory must carry Warning severity through the FFI"
+        );
+        assert!(
+            transit_msg.contains("effective transit time of 1.25"),
+            "the transit warning must report the effective transit time 1.25: {transit_msg}"
+        );
+
+        let (leaks, leak_msg) = find("leak fractions")
+            .expect("the ConveyorLeakFractionsExceedOne warning must be present");
+        assert_eq!(
+            leaks.severity,
+            SimlinErrorSeverity::Warning,
+            "the leak-fraction-sum advisory must carry Warning severity through the FFI"
+        );
+        assert!(
+            leak_msg.contains("sum to 1.2,"),
+            "the leak warning must report the fraction sum 1.2: {leak_msg}"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_project_unref(proj);
+    }
+}
+
 /// The honest LTM contract for conveyor/queue models: even with
 /// `enable_ltm = true`, the sim is created WITHOUT LTM instrumentation (the
 /// documented degradation), so `simlin_sim_get_ltm_mode` reports `Disabled`.
