@@ -66,16 +66,15 @@
 
 use std::collections::HashMap;
 
-use crate::common::{Canonical, DimensionName, ErrorCode, Ident, canonicalize};
+use crate::common::{Canonical, DimensionName, ErrorCode, Ident};
 use crate::conveyor_compile::{
-    ContainerMeta, ContainerNaming, ContainerPlan, ContainerVarSpec, container_value_from_slice,
-    element_subscripts_for_dims, make_container_stock, rewrite_container_equation,
+    ContainerMeta, ContainerNaming, ContainerPlan, ContainerVarSpec, canon,
+    container_value_from_slice, element_offset, element_subscripts_for_dims, equation_dims,
+    find_driven_flow_read, main_model_has_stock, n_elements, placeholder_zero_equation,
+    resolve_container_plans, rewrite_model_container_equations, set_variable_equation,
+    synthesize_container_stocks,
 };
 use crate::datamodel::{self, Equation};
-
-fn canon(name: &str) -> String {
-    canonicalize(name).into_owned()
-}
 
 /// The downstream target a queue outflow drains into (docs/design/queues.md §4).
 /// [`expand_queues`] produces only [`QueueOutflowKind::Unconstrained`]; the
@@ -205,59 +204,7 @@ impl QueuePlan {
 /// stock-type build path) instead of the ordinary incremental compile. Mirrors
 /// [`crate::conveyor_compile::project_has_conveyor`].
 pub fn project_has_queue(project: &datamodel::Project, main_model: &str) -> bool {
-    let main_canon = canon(main_model);
-    project.models.iter().any(|m| {
-        canon(&m.name) == main_canon
-            && m.variables
-                .iter()
-                .any(|v| matches!(v, datamodel::Variable::Stock(s) if s.compat.queue.is_some()))
-    })
-}
-
-/// The placeholder-`0` equation for a queue-driven outflow, preserving the flow's
-/// array shape (so a future arrayed queue's driven flow keeps its per-element
-/// slots). The pass overwrites the slot(s) each step, so the placeholder value
-/// never matters -- only the slot count does. Mirrors
-/// [`crate::conveyor_compile`]'s placeholder helper.
-fn placeholder_zero_equation(existing: &Equation) -> Equation {
-    match existing {
-        Equation::Scalar(_) => Equation::Scalar("0".to_string()),
-        Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, ..) => {
-            Equation::ApplyToAll(dims.clone(), "0".to_string())
-        }
-    }
-}
-
-/// The dimension names a variable's equation is declared over (empty = scalar).
-fn equation_dims(equation: &Equation) -> Vec<crate::common::DimensionName> {
-    match equation {
-        Equation::Scalar(_) => Vec::new(),
-        Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, ..) => dims.clone(),
-    }
-}
-
-/// The scalar equation strings of a variable (one for a `Scalar`/`ApplyToAll`,
-/// each element plus the default for an `Arrayed`), used to scan for references
-/// to queue-driven outflows. A `Module` carries no equation. Mirrors the private
-/// helper of the same name in [`crate::conveyor_compile`].
-fn equation_scalar_strings(v: &datamodel::Variable) -> Vec<String> {
-    let eqn = match v {
-        datamodel::Variable::Stock(s) => &s.equation,
-        datamodel::Variable::Flow(f) => &f.equation,
-        datamodel::Variable::Aux(a) => &a.equation,
-        datamodel::Variable::Module(_) => return Vec::new(),
-    };
-    match eqn {
-        Equation::Scalar(s) => vec![s.clone()],
-        Equation::ApplyToAll(_, s) => vec![s.clone()],
-        Equation::Arrayed(_, elems, default, _) => {
-            let mut out: Vec<String> = elems.iter().map(|(_, s, _, _)| s.clone()).collect();
-            if let Some(d) = default {
-                out.push(d.clone());
-            }
-            out
-        }
-    }
+    main_model_has_stock(project, main_model, |s| s.compat.queue.is_some())
 }
 
 /// Validate every `<overflow/>` marker in `model` (docs/design/queues.md §3.3,
@@ -359,11 +306,7 @@ pub fn expand_queues(
 
     // Fast path: no queue anywhere in the main model. Return the project
     // unchanged so a conveyor-only or plain model compiles byte-identically.
-    let has_queue = main
-        .variables
-        .iter()
-        .any(|v| matches!(v, datamodel::Variable::Stock(s) if s.compat.queue.is_some()));
-    if !has_queue {
+    if !project_has_queue(project, main_model) {
         return Ok((project.clone(), Vec::new()));
     }
 
@@ -440,7 +383,10 @@ pub fn expand_queues(
     // Reject any equation that READS a queue driven outflow by name: the queue
     // pass runs after the flows phase, so a reader would see the pre-pass
     // placeholder 0 instead of the served rate. Loud error, never silent (§2
-    // "Driven outflow"), mirroring the conveyor `ConveyorDrivenFlowRead` scan.
+    // "Driven outflow"). The scan is the SHARED `find_driven_flow_read` the
+    // conveyor `ConveyorDrivenFlowRead` rejection uses (sorted iteration keeps
+    // the named flow deterministic when an equation reads several); only the
+    // error code and wording are queue-specific.
     //
     // Boundaries (identical to the conveyor scan):
     // - a driven outflow's OWN placeholder equation is not a reader (skipped);
@@ -449,31 +395,19 @@ pub fn expand_queues(
     //   via INTEG is CORRECT (the Stocks phase runs after the pass) and is not
     //   rejected.
     {
-        let model = &project.models[model_idx];
-        for v in &model.variables {
-            let self_name = canon(v.get_ident());
-            if driven.contains(&self_name) {
-                continue; // a driven flow's own placeholder equation is not a reader
-            }
-            for eqn in equation_scalar_strings(v) {
-                let Ok(Some(ast)) = crate::ast::Expr0::new(&eqn, crate::lexer::LexerType::Equation)
-                else {
-                    continue;
-                };
-                for driven_flow in &driven {
-                    if ast.get_var_loc(driven_flow).is_some() {
-                        return Err((
-                            ErrorCode::QueueDrivenFlowRead,
-                            format!(
-                                "variable '{}' references queue-driven flow '{driven_flow}'; a \
-                                 queue outflow cannot be read by another equation (it is computed \
-                                 after the flows phase)",
-                                v.get_ident()
-                            ),
-                        ));
-                    }
-                }
-            }
+        let mut driven_sorted: Vec<String> = driven.iter().cloned().collect();
+        driven_sorted.sort_unstable();
+        if let Some((var, driven_flow)) =
+            find_driven_flow_read(&project.models[model_idx], &driven, &driven_sorted)
+        {
+            return Err((
+                ErrorCode::QueueDrivenFlowRead,
+                format!(
+                    "variable '{var}' references queue-driven flow '{driven_flow}'; a \
+                     queue outflow cannot be read by another equation (it is computed \
+                     after the flows phase)"
+                ),
+            ));
         }
     }
 
@@ -490,46 +424,22 @@ pub fn expand_queues(
     // extra to rewrite after this loop.
     let mut container_specs: std::collections::BTreeMap<String, ContainerVarSpec> =
         std::collections::BTreeMap::new();
-    let mut rewritten_equations: HashMap<String, Equation> = HashMap::new();
-    {
-        let model = &project.models[model_idx];
-        for v in &model.variables {
-            if driven.contains(&canon(v.get_ident())) {
-                continue;
-            }
-            let eqn = match v {
-                datamodel::Variable::Stock(s) => &s.equation,
-                datamodel::Variable::Flow(f) => &f.equation,
-                datamodel::Variable::Aux(a) => &a.equation,
-                datamodel::Variable::Module(_) => continue,
-            };
-            if let Some(new_eqn) = rewrite_container_equation(
-                eqn,
-                &queue_dims,
-                &ContainerNaming::QUEUE,
-                &mut container_specs,
-            )? {
-                rewritten_equations.insert(canon(v.get_ident()), new_eqn);
-            }
-        }
-    }
+    let mut rewritten_equations: HashMap<String, Equation> = rewrite_model_container_equations(
+        &project.models[model_idx],
+        &driven,
+        &queue_dims,
+        &ContainerNaming::QUEUE,
+        &mut container_specs,
+    )?;
 
     // Attach each container variable to its queue's meta and synthesize the hidden
     // container stock (arrayed over the queue's dims when arrayed).
-    let mut container_stocks: Vec<datamodel::Stock> = Vec::new();
-    for (name, spec) in &container_specs {
-        let dims = queue_stock_dims
-            .get(&spec.owner_stock)
-            .cloned()
-            .unwrap_or_default();
-        container_stocks.push(make_container_stock(name, &dims));
-        if let Some(meta) = metas.iter_mut().find(|m| m.stock == spec.owner_stock) {
-            meta.containers.push(ContainerMeta {
-                name: name.clone(),
-                kind: spec.kind.clone(),
-            });
-        }
-    }
+    let container_stocks =
+        synthesize_container_stocks(&container_specs, &queue_stock_dims, |owner, cm| {
+            if let Some(meta) = metas.iter_mut().find(|m| m.stock == owner) {
+                meta.containers.push(cm);
+            }
+        });
 
     // Pass 2 (mutable): apply the container-rewritten equations, give every driven
     // outflow a `0` placeholder equation so it compiles to a writable slot
@@ -542,12 +452,7 @@ pub fn expand_queues(
     let model = &mut project.models[model_idx];
     for v in &mut model.variables {
         if let Some(new_eqn) = rewritten_equations.remove(&canon(v.get_ident())) {
-            match v {
-                datamodel::Variable::Stock(s) => s.equation = new_eqn,
-                datamodel::Variable::Flow(f) => f.equation = new_eqn,
-                datamodel::Variable::Aux(a) => a.equation = new_eqn,
-                datamodel::Variable::Module(_) => {}
-            }
+            set_variable_equation(v, new_eqn);
         }
         match v {
             datamodel::Variable::Flow(f) if driven.contains(&canon(&f.ident)) => {
@@ -574,13 +479,6 @@ pub fn expand_queues(
     Ok((project, metas))
 }
 
-/// The number of independent FIFOs a queue meta expands to: `N_elem` for an
-/// arrayed queue (§6), 1 for a scalar one (the degenerate case, whose
-/// `element_subscripts` is empty). Mirrors `conveyor_compile::n_belts`.
-fn n_queues(meta: &QueueMeta) -> usize {
-    meta.element_subscripts.len().max(1)
-}
-
 /// Resolve [`QueueMeta`] names to data-buffer offsets using the compiled
 /// simulation's offset map (docs/design/queues.md §10.3), flattening each arrayed
 /// queue into ONE [`QueuePlan`] per array element (§6). An arrayed variable's
@@ -597,21 +495,16 @@ pub fn resolve_plans(
     metas: &[QueueMeta],
     offsets: &HashMap<Ident<Canonical>, usize>,
 ) -> Option<Vec<QueuePlan>> {
-    let off =
-        |name: &str| -> Option<usize> { offsets.get(&Ident::<Canonical>::new(name)).copied() };
-    let total: usize = metas.iter().map(n_queues).sum();
+    let total: usize = metas
+        .iter()
+        .map(|m| n_elements(&m.element_subscripts))
+        .sum();
     let mut plans = Vec::with_capacity(total);
     for meta in metas {
-        for e in 0..n_queues(meta) {
+        for e in 0..n_elements(&meta.element_subscripts) {
             // Element-aware offset resolver: the bare name for a scalar queue, the
             // `name[elem]` subscripted key for element `e` of an arrayed one.
-            let eoff = |name: &str| -> Option<usize> {
-                if meta.element_subscripts.is_empty() {
-                    off(name)
-                } else {
-                    off(&format!("{}[{}]", name, meta.element_subscripts[e]))
-                }
-            };
+            let eoff = |name: &str| element_offset(offsets, &meta.element_subscripts, e, name);
             let inflow_offs = meta
                 .inflows
                 .iter()
@@ -631,16 +524,7 @@ pub fn resolve_plans(
             // Container variables read this FIFO (§8). The container stock is
             // arrayed over the queue's dims, so element `e` of the container
             // resolves to FIFO `e` via the same element-aware offset lookup.
-            let containers = meta
-                .containers
-                .iter()
-                .map(|c| {
-                    Some(ContainerPlan {
-                        off: eoff(&c.name)?,
-                        kind: c.kind.clone(),
-                    })
-                })
-                .collect::<Option<Vec<_>>>()?;
+            let containers = resolve_container_plans(&meta.containers, eoff)?;
             plans.push(QueuePlan {
                 stock_off: eoff(&meta.stock)?,
                 inflow_offs,
@@ -1217,14 +1101,8 @@ fn apply_couplings(
         let qm = queue_metas
             .iter()
             .find(|m| m.outflows.iter().any(|o| o.flow == spec.shared_flow))?;
-        let n = n_queues(qm);
-        for e in 0..n {
-            let key = if qm.element_subscripts.is_empty() {
-                spec.shared_flow.clone()
-            } else {
-                format!("{}[{}]", spec.shared_flow, qm.element_subscripts[e])
-            };
-            let off = offsets.get(&Ident::<Canonical>::new(&key)).copied()?;
+        for e in 0..n_elements(&qm.element_subscripts) {
+            let off = element_offset(offsets, &qm.element_subscripts, e, &spec.shared_flow)?;
             coupled_slots.insert(off, (spec.one_at_a_time, spec.batch_integrity));
         }
     }

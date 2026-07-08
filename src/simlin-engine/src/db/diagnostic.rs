@@ -177,125 +177,112 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     }
 }
 
-/// Emit one `ConveyorLtmDegraded` `Warning` per conveyor stock in `model`
-/// (docs/design/conveyors.md §9.6).
+/// Shared emitter behind the conveyor/queue LTM-degraded advisories: one
+/// `Warning` per stock in `model` whose `Compat` carries the owner's marker
+/// (`has_marker`).
 ///
-/// A conveyor is a stock with non-INTEG dynamics: material rides a
-/// fixed-length belt and exits after the transit time, so the change from
-/// t-1 to t is NOT `dt * inflow(t-1)`. LTM's flow-to-stock link-score
-/// numerator (`PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))`) assumes plain INTEG
-/// under Euler, so any link or loop score touching a conveyor stock would be
-/// silently wrong. The salsa DIAGNOSTIC path never expands the conveyor into
-/// its hidden auxes + native pass (only the special-stock build path
-/// `queue_compile::build_vm` does, which CLEARS the marker), so
-/// `compat.conveyor` is still present here and
-/// the stock would be scored as plain INTEG. Degrade LOUDLY rather than emit a
-/// silently-wrong score.
+/// Both stock types have non-INTEG dynamics -- a conveyor's material rides a
+/// fixed-length belt and exits after the transit time, a queue is a FIFO of
+/// batches whose outflow is demand-driven -- so the change from t-1 to t is
+/// NOT `dt * inflow(t-1)`. LTM's flow-to-stock link-score numerator
+/// (`PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))`) assumes plain INTEG under
+/// Euler, so any link or loop score touching such a stock would be silently
+/// wrong. The salsa DIAGNOSTIC path never expands either stock type into its
+/// hidden variables + native pass (only the special-stock build path
+/// `queue_compile::build_vm` does, which CLEARS the marker), so the `Compat`
+/// marker is still present here and the stock would be scored as plain INTEG.
+/// Degrade LOUDLY rather than emit a silently-wrong score.
 ///
-/// This lives in `model_all_diagnostics` -- NOT inside `model_ltm_variables`
-/// -- specifically because `model_all_diagnostics` is drained exactly ONCE per
-/// model by `collect_all_diagnostics` and is never invoked transitively across
-/// module edges. `model_ltm_variables(parent)` reaches `model_ltm_variables(child)`
-/// through module-composite link scoring, so a conveyor in a module-referenced
-/// sub-model would have its `model_ltm_variables` memo (with the accumulated
-/// warning) in BOTH the parent's and the child's accumulator DFS -- reported
-/// twice. Emitting from this per-model trigger fires exactly once per conveyor
+/// The callers live in `model_all_diagnostics` -- NOT inside
+/// `model_ltm_variables` -- specifically because `model_all_diagnostics` is
+/// drained exactly ONCE per model by `collect_all_diagnostics` and is never
+/// invoked transitively across module edges. `model_ltm_variables(parent)`
+/// reaches `model_ltm_variables(child)` through module-composite link scoring,
+/// so a special stock in a module-referenced sub-model would have its
+/// `model_ltm_variables` memo (with the accumulated warning) in BOTH the
+/// parent's and the child's accumulator DFS -- reported twice (the
+/// cross-module double-drain that #866 tracks for the `model_ltm_variables`
+/// warnings). Emitting from the per-model trigger fires exactly once per stock
 /// regardless of module nesting.
 ///
-/// Only under LTM: the sole caller is `model_all_diagnostics`'s existing
-/// `ltm_enabled` branch. Carried as a `Model` error with the specific
-/// `ErrorCode::ConveyorLtmDegraded` rather than `Assembly` (which
-/// `errors::format_diagnostic` surfaces as the misleading `NotSimulatable`
-/// code) so this analysis-only advisory never makes the project look
-/// non-simulatable. Names are sorted so multiple conveyors accumulate in a
-/// deterministic order.
-fn emit_conveyor_ltm_degraded_warnings(db: &dyn Db, model: SourceModel) {
-    use crate::common::{Error, ErrorCode, ErrorKind};
+/// Only under LTM: the sole callers sit in `model_all_diagnostics`'s existing
+/// `ltm_enabled` branch. Carried as a `Model` error with the owner's specific
+/// `code` rather than `Assembly` (which `errors::format_diagnostic` surfaces
+/// as the misleading `NotSimulatable` code) so this analysis-only advisory
+/// never makes the project look non-simulatable. Names are sorted so multiple
+/// stocks accumulate in a deterministic order.
+///
+/// `noun` (`conveyor`/`queue`), `dynamics_detail` (an optional parenthetical
+/// after "non-INTEG dynamics"), and `doc_ref` shape the message per owner; the
+/// wording is otherwise identical by construction.
+fn emit_ltm_degraded_warnings(
+    db: &dyn Db,
+    model: SourceModel,
+    has_marker: impl Fn(&crate::datamodel::Compat) -> bool,
+    code: crate::common::ErrorCode,
+    noun: &str,
+    dynamics_detail: &str,
+    doc_ref: &str,
+) {
+    use crate::common::{Error, ErrorKind};
     use salsa::Accumulator;
 
-    let mut conveyor_names: Vec<String> = model
+    let mut names: Vec<String> = model
         .variables(db)
         .values()
-        .filter(|sv| sv.compat(db).conveyor.is_some())
+        .filter(|sv| has_marker(sv.compat(db)))
         .map(|sv| sv.ident(db).clone())
         .collect();
-    conveyor_names.sort_unstable();
+    names.sort_unstable();
 
     let model_name = model.name(db);
-    for name in conveyor_names {
+    for name in names {
         let msg = format!(
-            "LTM (Loops That Matter) analysis over conveyor stock '{name}' is degraded: a \
-             conveyor is a stock with non-INTEG dynamics, but the flow-to-stock link-score \
-             numerator `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` assumes plain INTEG under \
-             Euler, so any link or loop score touching '{name}' may be wrong.  Treat scores \
-             involving this conveyor as advisory (docs/design/conveyors.md \u{00A7}9.6)."
+            "LTM (Loops That Matter) analysis over {noun} stock '{name}' is degraded: a {noun} \
+             is a stock with non-INTEG dynamics{dynamics_detail}, but the flow-to-stock \
+             link-score numerator `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` assumes plain \
+             INTEG under Euler, so any link or loop score touching '{name}' may be wrong.  \
+             Treat scores involving this {noun} as advisory ({doc_ref})."
         );
         CompilationDiagnostic(Diagnostic {
             model: model_name.clone(),
             variable: Some(name),
-            error: DiagnosticError::Model(Error::new(
-                ErrorKind::Model,
-                ErrorCode::ConveyorLtmDegraded,
-                Some(msg),
-            )),
+            error: DiagnosticError::Model(Error::new(ErrorKind::Model, code, Some(msg))),
             severity: DiagnosticSeverity::Warning,
         })
         .accumulate(db);
     }
 }
 
+/// Emit one `ConveyorLtmDegraded` `Warning` per conveyor stock in `model`
+/// (docs/design/conveyors.md §9.6). See [`emit_ltm_degraded_warnings`] for the
+/// shared rationale (non-INTEG dynamics vs. LTM's INTEG assumption, and why
+/// the emission site is the per-model `model_all_diagnostics` trigger).
+fn emit_conveyor_ltm_degraded_warnings(db: &dyn Db, model: SourceModel) {
+    emit_ltm_degraded_warnings(
+        db,
+        model,
+        |c| c.conveyor.is_some(),
+        crate::common::ErrorCode::ConveyorLtmDegraded,
+        "conveyor",
+        "",
+        "docs/design/conveyors.md \u{00A7}9.6",
+    );
+}
+
 /// Emit one `QueueLtmDegraded` `Warning` per queue stock in `model`
-/// (docs/design/queues.md §10.5).
-///
-/// A queue, like a conveyor, is a stock with non-INTEG dynamics (a FIFO of
-/// batches whose outflow is demand-driven, not `dt * inflow(t-1)`), so LTM's
-/// flow-to-stock link-score numerator -- which assumes plain INTEG under Euler
-/// -- makes any score touching a queue stock silently wrong. The salsa
-/// diagnostic path never expands the queue (only `queue_compile::build_vm`
-/// does, clearing the marker), so `compat.queue` is still present here.
-///
-/// Emitted from this per-model trigger -- NOT `model_ltm_variables` -- for the
-/// same reason as the conveyor twin above: `model_all_diagnostics` is drained
-/// exactly once per model and is never invoked transitively across module
-/// edges, so a queue in a module-referenced sub-model warns exactly once rather
-/// than being double-reported (the cross-module double-drain that #866 tracks
-/// for the `model_ltm_variables` warnings). A `Model` error carrying the real
-/// `ErrorCode::QueueLtmDegraded` (not `Assembly`) keeps this advisory a Warning
-/// that never makes the project look non-simulatable; names are sorted for a
-/// deterministic accumulation order.
+/// (docs/design/queues.md §10.5). See [`emit_ltm_degraded_warnings`] for the
+/// shared rationale; the queue-specific nuance is only the FIFO wording.
 fn emit_queue_ltm_degraded_warnings(db: &dyn Db, model: SourceModel) {
-    use crate::common::{Error, ErrorCode, ErrorKind};
-    use salsa::Accumulator;
-
-    let mut queue_names: Vec<String> = model
-        .variables(db)
-        .values()
-        .filter(|sv| sv.compat(db).queue.is_some())
-        .map(|sv| sv.ident(db).clone())
-        .collect();
-    queue_names.sort_unstable();
-
-    let model_name = model.name(db);
-    for name in queue_names {
-        let msg = format!(
-            "LTM (Loops That Matter) analysis over queue stock '{name}' is degraded: a queue is \
-             a stock with non-INTEG dynamics (a FIFO of batches), but the flow-to-stock \
-             link-score numerator `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` assumes plain INTEG \
-             under Euler, so any link or loop score touching '{name}' may be wrong.  Treat scores \
-             involving this queue as advisory (docs/design/queues.md \u{00A7}10.5)."
-        );
-        CompilationDiagnostic(Diagnostic {
-            model: model_name.clone(),
-            variable: Some(name),
-            error: DiagnosticError::Model(Error::new(
-                ErrorKind::Model,
-                ErrorCode::QueueLtmDegraded,
-                Some(msg),
-            )),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
-    }
+    emit_ltm_degraded_warnings(
+        db,
+        model,
+        |c| c.queue.is_some(),
+        crate::common::ErrorCode::QueueLtmDegraded,
+        "queue",
+        " (a FIFO of batches)",
+        "docs/design/queues.md \u{00A7}10.5",
+    );
 }
 
 /// Emit the two spec-mandated compile-time conveyor advisories for each
