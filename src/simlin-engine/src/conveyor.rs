@@ -898,6 +898,45 @@ impl ConveyorState {
 
     // ----- phase B: admit, shift, insert (§4.3 steps 4-6) -----
 
+    /// The `(cap_room, limit_vol)` admission headroom for this DT, shared by
+    /// [`phase_b`](ConveyorState::phase_b) and
+    /// [`admission_budget`](ConveyorState::admission_budget). The queue coupling
+    /// is only correct if the budget a coupled queue is sized against
+    /// (`admission_budget`) uses the exact formulas phase_b then admits with --
+    /// phase_b admits the queue-supplied conveyor volume unconditionally, so a
+    /// drifted budget would put over-capacity/over-limit material on the belt
+    /// with no error. Sharing one derivation makes that invariant structural.
+    ///
+    /// `conv_vol` is the conveyor-driven volume charged against capacity room:
+    /// phase_b passes ALL unconditionally-admitted inflow volume; the budget
+    /// caller excludes the queue-supplied volume it is sizing. For the inflow
+    /// limit, a discrete conveyor draws down a per-time-unit budget (`in_carry`
+    /// accumulates within the time unit); a continuous one gets `in_limit * dt`
+    /// each DT. A coupled conveyor is always discrete (the compiler enforces
+    /// `ConveyorQueueUpstreamNotDiscrete`), so for `admission_budget` the
+    /// continuous branch is defense in depth.
+    fn admission_room(
+        &self,
+        contents_after: f64,
+        capacity: f64,
+        in_limit: f64,
+        conv_vol: f64,
+    ) -> (f64, f64) {
+        let cap_room = if capacity.is_infinite() {
+            f64::INFINITY
+        } else {
+            (capacity - contents_after - conv_vol).max(0.0)
+        };
+        let limit_vol = if in_limit.is_infinite() {
+            f64::INFINITY
+        } else if self.discrete {
+            (in_limit - self.in_carry).max(0.0)
+        } else {
+            in_limit * self.dt
+        };
+        (cap_room, limit_vol)
+    }
+
     pub fn phase_b(&mut self, inp: PhaseBInputs) -> PhaseBResult {
         let dt = self.dt;
         let n_inflows = inp.eq_request_rates.len();
@@ -914,18 +953,8 @@ impl ConveyorState {
         let conv_vol: f64 = inp.conv_inflows.iter().map(|(v, _)| v).sum();
         let leaked: f64 = inp.phase_a.leak_vols.iter().sum();
         let contents_after = self.step_contents0 - leaked - inp.phase_a.out_vol;
-        let cap_room = if inp.capacity.is_infinite() {
-            f64::INFINITY
-        } else {
-            (inp.capacity - contents_after - conv_vol).max(0.0)
-        };
-        let limit_vol = if inp.in_limit.is_infinite() {
-            f64::INFINITY
-        } else if self.discrete {
-            (inp.in_limit - self.in_carry).max(0.0)
-        } else {
-            inp.in_limit * dt
-        };
+        let (cap_room, limit_vol) =
+            self.admission_room(contents_after, inp.capacity, inp.in_limit, conv_vol);
 
         // Apportion the clearance across inflows in listed order.
         let mut rem_cap = cap_room;
@@ -1002,9 +1031,9 @@ impl ConveyorState {
     /// conveyor's [`phase_a`](ConveyorState::phase_a) (which snapshots
     /// `step_contents0` and frees belt room via leaks/exit) and BEFORE its
     /// [`phase_b`](ConveyorState::phase_b), so the coupled queue can size how much
-    /// it serves. Uses the SAME `cap_room`/`limit_vol` formulas phase_b applies to
-    /// equation-driven inflows, so the coupled admission obeys capacity and the
-    /// (discrete) per-time-unit inflow limit identically.
+    /// it serves. Shares [`admission_room`](ConveyorState::admission_room) with
+    /// phase_b, so the coupled admission obeys capacity and the (discrete)
+    /// per-time-unit inflow limit identically to what phase_b then admits.
     ///
     /// `other_conv_vol` is the sum of the OTHER unconditionally-admitted
     /// conveyor-driven inflow volumes this DT (a conveyor chain feeding the same
@@ -1024,22 +1053,8 @@ impl ConveyorState {
         }
         let leaked: f64 = phase_a.leak_vols.iter().sum();
         let contents_after = self.step_contents0 - leaked - phase_a.out_vol;
-        let cap_room = if capacity.is_infinite() {
-            f64::INFINITY
-        } else {
-            (capacity - contents_after - other_conv_vol).max(0.0)
-        };
-        // A conveyor with a queue upstream is always discrete (the compiler
-        // enforces `ConveyorQueueUpstreamNotDiscrete`), so `limit_vol` uses the
-        // discrete per-time-unit budget; the continuous branch is defense in
-        // depth so the formula stays identical to phase_b for any caller.
-        let limit_vol = if in_limit.is_infinite() {
-            f64::INFINITY
-        } else if self.discrete {
-            (in_limit - self.in_carry).max(0.0)
-        } else {
-            in_limit * self.dt
-        };
+        let (cap_room, limit_vol) =
+            self.admission_room(contents_after, capacity, in_limit, other_conv_vol);
         cap_room.min(limit_vol)
     }
 
