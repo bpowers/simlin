@@ -706,7 +706,19 @@ pub unsafe extern "C" fn simlin_sim_clear_values(
     }
 }
 
-/// Sets the value for a variable at the last saved timestep by offset
+/// Sets the value for a simple-constant variable at the last saved timestep
+/// by data-buffer offset.
+///
+/// This edits the LAST ROW of the saved results table in place -- it is only
+/// usable after `simlin_sim_run_to_end` has produced results, and it does NOT
+/// stage an override for the next `simlin_sim_reset` (use
+/// `simlin_sim_set_value` for the persistent-override contract).
+///
+/// The offset is validated the same way `simlin_sim_set_value` validates a
+/// name: only a simple-constant offset (per the compiled simulation's
+/// overridable-constant set, which excludes conveyor/queue pass-driven flows)
+/// is writable; any computed variable's offset rejects with `BadOverride` so
+/// saved simulation output cannot be silently rewritten.
 ///
 /// # Safety
 /// - `sim` must be a valid pointer to a SimlinSim
@@ -720,6 +732,13 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
     clear_out_error(out_error);
     let sim_ref = ffi_try!(out_error, require_sim(sim));
     let mut state = sim_ref.state.lock().unwrap();
+    // Results only exist after a successful run, which requires a successful
+    // compile, so `compiled` is always Some alongside `results`; treating a
+    // missing CompiledSimulation as "not a constant" keeps the gate fail-safe.
+    let is_constant_offset = state
+        .compiled
+        .as_ref()
+        .is_some_and(|compiled| compiled.is_constant_offset(offset));
     if let Some(ref mut results) = state.results {
         if results.step_count == 0 || offset >= results.step_size {
             store_error(
@@ -731,15 +750,30 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
             );
             return;
         }
+        if !is_constant_offset {
+            // Same gate as simlin_sim_set_value / Vm::set_value_by_offset:
+            // computed columns (flows, stocks, LTM scores, conveyor/queue
+            // pass-driven flows) are simulation output, not inputs, and must
+            // not be silently rewritable in the saved results.
+            let err = engine::Error {
+                code: engine::ErrorCode::BadOverride,
+                kind: engine::ErrorKind::Simulation,
+                details: Some(format!(
+                    "cannot set value of offset {}: not a simple constant",
+                    offset
+                )),
+            };
+            store_ffi_error(out_error, ffi_error_from_engine(&err));
+            return;
+        }
         let idx = (results.step_count - 1) * results.step_size + offset;
         if let Some(slot) = results.data.get_mut(idx) {
             *slot = val;
-            // Mutating a `loop_score` slot in place would silently
-            // stale any cached partition denominator that summed it.
-            // The cache is keyed by partition, not offset, so without
-            // knowing which partition this offset belongs to we
-            // invalidate the whole map -- correct and cheap (the next
-            // FFI call repopulates lazily).
+            // Defensive invalidation: only constant slots are writable now,
+            // and a constant is never a `loop_score` input to the cached
+            // partition denominators -- but clearing the cache is cheap (the
+            // next FFI call repopulates lazily) and keeps this write path
+            // trivially safe against future loosening of the gate.
             state.cached_partition_denominators.clear();
             return;
         }

@@ -1489,7 +1489,19 @@ void simlin_sim_set_value(SimlinSim *sim, const char *name, double val, SimlinEr
 // - `sim` must be a valid pointer to a SimlinSim
 void simlin_sim_clear_values(SimlinSim *sim, SimlinError **out_error);
 
-// Sets the value for a variable at the last saved timestep by offset
+// Sets the value for a simple-constant variable at the last saved timestep
+// by data-buffer offset.
+//
+// This edits the LAST ROW of the saved results table in place -- it is only
+// usable after `simlin_sim_run_to_end` has produced results, and it does NOT
+// stage an override for the next `simlin_sim_reset` (use
+// `simlin_sim_set_value` for the persistent-override contract).
+//
+// The offset is validated the same way `simlin_sim_set_value` validates a
+// name: only a simple-constant offset (per the compiled simulation's
+// overridable-constant set, which excludes conveyor/queue pass-driven flows)
+// is writable; any computed variable's offset rejects with `BadOverride` so
+// saved simulation output cannot be silently rewritten.
 //
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim

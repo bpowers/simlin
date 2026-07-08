@@ -35,6 +35,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
   - `simlin_sim_{ref,unref}()` - Reference counting
   - `simlin_sim_run_to()`, `simlin_sim_run_to_end()`, `simlin_sim_reset()`
   - `simlin_sim_get_value()`, `simlin_sim_set_value()`, `simlin_sim_get_series()`, `simlin_sim_get_initial_value()`
+  - `simlin_sim_set_value_by_offset()` - Edits the LAST SAVED RESULTS ROW for a simple-constant offset (post-`run_to_end` only; does not stage an override for reset). Gated on `CompiledSimulation::is_constant_offset`, the same overridable-constant set `simlin_sim_set_value` validates against -- computed columns and conveyor/queue pass-driven flows (retracted per GH #871) reject with `BadOverride`
 
 ### Model queries
 
