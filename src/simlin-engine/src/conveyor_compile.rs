@@ -552,11 +552,26 @@ fn parse_dist_array(spec: &str) -> Option<Vec<f64>> {
     Some(out)
 }
 
-/// Is the flow named `flow` (canonical) a conveyor leak outflow in `model`?
-fn flow_is_leak(model: &datamodel::Model, flow: &str) -> bool {
-    model.variables.iter().any(|v| match v {
-        datamodel::Variable::Flow(f) => canon(&f.ident) == flow && f.compat.leakage.is_some(),
-        _ => false,
+/// The leak-carrying flow named `flow` (canonical) in `model`, with its
+/// leakage, if any; a conveyor outflow is a leak iff this returns `Some`.
+///
+/// Leak DETECTION and flow FETCH are deliberately one lookup: two variables can
+/// share a canonical ident (the XMILE reader sorts by canonical ident but never
+/// dedups, and canonicalization also collapses case/whitespace/underscores), and
+/// only some of them may carry `<leak/>`. Detecting leak-ness with an any() scan
+/// over every same-canonical flow but then fetching the FIRST canon-matching
+/// flow panicked (unwrap on its absent leakage) when only a LATER twin carried
+/// the marker (GH #870). Skipping leak-less twins here guarantees the returned
+/// flow is the one whose `<leak/>` made the outflow a leak.
+fn find_leak_flow<'a>(
+    model: &'a datamodel::Model,
+    flow: &str,
+) -> Option<(&'a datamodel::Flow, &'a datamodel::Leakage)> {
+    model.variables.iter().find_map(|v| match v {
+        datamodel::Variable::Flow(f) if canon(&f.ident) == flow => {
+            f.compat.leakage.as_ref().map(|lk| (f, lk))
+        }
+        _ => None,
     })
 }
 
@@ -659,23 +674,13 @@ pub fn expand_conveyors(
         let mut leak_metas = Vec::new();
         for out in &stock.outflows {
             let out_c = canon(out);
-            if flow_is_leak(model, &out_c) {
-                let flow_var = model.variables.iter().find_map(|vv| match vv {
-                    datamodel::Variable::Flow(f) if canon(&f.ident) == out_c => Some(f),
-                    _ => None,
-                });
-                let (zone_start, zone_end, integers, frac_eqn) = match flow_var {
-                    Some(f) => {
-                        let lk = f.compat.leakage.as_ref().unwrap();
-                        (
-                            parse_zone(&lk.zone_start, 0.0),
-                            parse_zone(&lk.zone_end, 1.0),
-                            lk.integers,
-                            leak_fraction_equation(f, &stock_dims),
-                        )
-                    }
-                    None => (0.0, 1.0, false, param_equation("0", &stock_dims)),
-                };
+            if let Some((leak_flow, lk)) = find_leak_flow(model, &out_c) {
+                let (zone_start, zone_end, integers, frac_eqn) = (
+                    parse_zone(&lk.zone_start, 0.0),
+                    parse_zone(&lk.zone_end, 1.0),
+                    lk.integers,
+                    leak_fraction_equation(leak_flow, &stock_dims),
+                );
                 let frac_aux = leak_frac_name(&out_c);
                 new_auxes.push(make_aux_eqn(&frac_aux, frac_eqn));
                 param_origins.insert(
@@ -2567,6 +2572,69 @@ mod tests {
             "steady leak {} (want 50)",
             leak[last]
         );
+    }
+
+    #[test]
+    fn duplicate_canonical_leak_flow_expands_without_panic() {
+        // Two flows canonicalize to the same ident ('Attrition'/'attrition');
+        // the XMILE reader stable-sorts by canonical ident but never dedups,
+        // so the leak-LESS twin sits first in document order. Detecting
+        // leak-ness with an any() scan over every same-canonical flow but then
+        // fetching the FIRST canon-matching flow and unwrapping its leakage
+        // panicked here (GH #870); the fetch must select the same flow that
+        // made the outflow a leak.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>Attrition</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <flow name="Attrition"><eqn>1</eqn></flow>
+        <flow name="attrition"><eqn>0.2</eqn><leak/></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let (expanded, metas) = expand_conveyors(&project, &main).expect("expand");
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].leaks.len(), 1, "outflow must be treated as a leak");
+        assert_eq!(metas[0].leaks[0].flow, "attrition");
+        // The synthesized fraction aux must come from the leak-carrying twin's
+        // equation (0.2), never the leak-less twin's (1).
+        let frac_aux = leak_frac_name("attrition");
+        let frac_eqn = expanded.models[0].variables.iter().find_map(|v| match v {
+            datamodel::Variable::Aux(a) if a.ident == frac_aux => Some(a.equation.clone()),
+            _ => None,
+        });
+        assert_eq!(frac_eqn, Some(Equation::Scalar("0.2".to_string())));
+    }
+
+    #[test]
+    fn duplicate_canonical_leak_flow_selects_leak_twin_regardless_of_order() {
+        // Same duplicate pair with the leak-carrying twin FIRST in document
+        // order. This ordering never panicked, but it must resolve to the
+        // identical interpretation as the reversed ordering above: the leak
+        // twin supplies the fraction, whichever side of the duplicate it is.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>Attrition</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <flow name="attrition"><eqn>0.2</eqn><leak/></flow>
+        <flow name="Attrition"><eqn>1</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let (expanded, metas) = expand_conveyors(&project, &main).expect("expand");
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].leaks.len(), 1, "outflow must be treated as a leak");
+        assert_eq!(metas[0].leaks[0].flow, "attrition");
+        let frac_aux = leak_frac_name("attrition");
+        let frac_eqn = expanded.models[0].variables.iter().find_map(|v| match v {
+            datamodel::Variable::Aux(a) if a.ident == frac_aux => Some(a.equation.clone()),
+            _ => None,
+        });
+        assert_eq!(frac_eqn, Some(Equation::Scalar("0.2".to_string())));
     }
 
     #[test]
