@@ -7,6 +7,8 @@
  * with the same operations and expected results as api.test.ts.
  */
 
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

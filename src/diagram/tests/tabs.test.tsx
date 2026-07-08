@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent, screen } from '@testing-library/react';
 import { Tabs, Tab } from '../components/Tabs';
@@ -35,7 +37,7 @@ describe('Tabs', () => {
   });
 
   test('calls onChange with the index of the clicked tab', () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     render(
       <Tabs value={0} onChange={onChange} aria-label="selector">
         <Tab label="First" />
@@ -52,7 +54,7 @@ describe('Tabs', () => {
   });
 
   test('does not call onChange when selecting the already-selected tab', () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     render(
       <Tabs value={0} onChange={onChange} aria-label="selector">
         <Tab label="First" />
@@ -88,7 +90,7 @@ describe('Tabs', () => {
   });
 
   test('ignores null/false children when assigning tab indices', () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     const lookupTab = false;
     render(
       <Tabs value={0} onChange={onChange} aria-label="selector">

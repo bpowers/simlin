@@ -13,7 +13,7 @@
     // TS6 changed the default from "all installed @types" to []. These are the
     // globals-only packages this program relies on; @types/katex and friends are
     // still resolved through ordinary imports and need no entry here.
-    "types": ["node", "jest"],
+    "types": ["node"],
     // Self-referencing paths that swap in the Node flavor of the two
     // platform-specific modules. They override the repo-wide "@simlin/*"
     // mapping, so they resolve relative to this file (see tsconfig.base.json).

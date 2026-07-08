@@ -2,9 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-/**
- * @jest-environment jsdom
- */
+import { describe, test, expect, rs } from '@rstest/core';
 
 import * as React from 'react';
 import { render, fireEvent, screen } from '@testing-library/react';
@@ -140,13 +138,13 @@ function makeViewElement(ident: string): ViewElement {
 
 function defaultCallbacks() {
   return {
-    onDelete: jest.fn(),
-    onModelReferenceChange: jest.fn(),
-    onUnitsDocsChange: jest.fn(),
-    onDrillIntoModule: jest.fn(),
-    onCreateModel: jest.fn(),
-    onDuplicateModel: jest.fn(),
-    onReferencesChange: jest.fn(),
+    onDelete: rs.fn(),
+    onModelReferenceChange: rs.fn(),
+    onUnitsDocsChange: rs.fn(),
+    onDrillIntoModule: rs.fn(),
+    onCreateModel: rs.fn(),
+    onDuplicateModel: rs.fn(),
+    onReferencesChange: rs.fn(),
   };
 }
 

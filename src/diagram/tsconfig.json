@@ -4,15 +4,15 @@
     "rootDir": ".",
     "outDir": "lib",
     "module": "commonjs",
+    // No "types" entry: since TS6 it defaults to [] rather than every installed
+    // @types package, and nothing here needs ambient globals -- test helpers are
+    // imported from @rstest/core, and ResizeObserver now comes from lib.dom
+    // (so @types/resize-observer-browser is gone).
     "lib": [
       "es2020",
       "dom",
       "dom.iterable"
-    ],
-    // Since TS6 "types" defaults to []. ts-jest type-checks tests/ against this
-    // config, so Jest's globals must stay reachable. Note ResizeObserver comes
-    // from lib.dom now, so @types/resize-observer-browser is not listed.
-    "types": ["jest"]
+    ]
   },
   "include": [
     "**/*.ts",

@@ -18,19 +18,17 @@
     "helmet": "^8.1.0"
   },
   "devDependencies": {
+    "@rstest/core": "^0.11.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/google-protobuf": "^3.15.12",
-    "@types/jest": "^30.0.0",
     "@types/node": "^25.2.0",
     "@typescript-eslint/eslint-plugin": "^8.63.0",
     "@typescript-eslint/parser": "^8.63.0",
     "@typescript/native": "npm:typescript@^7.0.2",
     "eslint": "^9.39.2",
     "eslint-config-prettier": "^10.1.8",
-    "jest": "^30.2.0",
     "prettier": "^3.8.1",
-    "ts-jest": "^29.4.6",
     "typescript": "npm:@typescript/typescript6@^6.0.2"
   },
   "scripts": {
@@ -40,7 +38,7 @@
     "prepublishOnly": "pnpm build",
     "clean": "rm -rf ./lib",
     "build": "tsc -p tsconfig.json",
-    "test": "jest",
+    "test": "rstest run",
     "start": "node lib/index.js",
     "start:backend": "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8092; export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099; export GCLOUD_PROJECT=simlin; pnpm build && exec node lib/index.js"
   }

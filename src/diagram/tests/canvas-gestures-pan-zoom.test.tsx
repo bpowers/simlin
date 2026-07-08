@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Reconciler-level gesture tests for canvas pan, pinch-zoom, and momentum of the
 // React `Canvas` (Piece 1a; see
@@ -18,6 +14,9 @@
 // the momentum rAF loop both read the clock, so a "stationary" release is modeled
 // by ticking past the 40ms stop window before pointer-up, and a flick by
 // releasing immediately after a fast move.
+
+import { describe, it, expect } from '@rstest/core';
+import type { Mock } from '@rstest/core';
 
 import {
   dispatchWheel,
@@ -35,7 +34,7 @@ interface ViewBoxCall {
   zoom: number;
 }
 
-function lastViewBox(fn: jest.Mock): ViewBoxCall | undefined {
+function lastViewBox(fn: Mock): ViewBoxCall | undefined {
   const calls = fn.mock.calls;
   const last = calls[calls.length - 1];
   if (!last) {

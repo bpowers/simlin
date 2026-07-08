@@ -12,6 +12,8 @@
 // within the engine's parity tolerance. There is no real Worker/jsdom here;
 // testEnvironment is node.
 
+import { describe, it, expect, beforeAll, afterAll } from '@rstest/core';
+
 import { readFileSync } from 'fs';
 import { join } from 'path';
 

@@ -2,14 +2,17 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
+
 import * as React from 'react';
 import { act, render, screen, waitFor, fireEvent } from '@testing-library/react';
 
 import { App } from './App';
 import type { ListProjectsResponse } from './api';
 
-function makeListFetch(body: ListProjectsResponse): jest.Mock {
-  return jest.fn().mockResolvedValue({
+function makeListFetch(body: ListProjectsResponse): Mock {
+  return rs.fn().mockResolvedValue({
     ok: true,
     status: 200,
     json: async () => body,
@@ -298,7 +301,7 @@ describe('App shell', () => {
     // Three fetches: list, GET for selected path's editor, and a GET for
     // the renamed path's editor (because EditorHost re-mounts on path change).
     // After the rename, the editor uses the new path name when refetching.
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -361,7 +364,7 @@ describe('App shell', () => {
   });
 
   test('updates the projects list and keeps the unaffected selection when projectRenamed targets a different path', async () => {
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -429,7 +432,7 @@ describe('App shell', () => {
     // beyond serverVersion, a third refetch fires. After the rename
     // (which carries liveVersion forward under the new key), no
     // additional refetch should fire.
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -538,7 +541,7 @@ describe('App shell', () => {
     // First fetch is the project list. Second is the GET for the
     // selected project (initial mount). Third is the GET refetch
     // triggered by the disk-source live advance.
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -605,7 +608,7 @@ describe('App shell', () => {
     // Both fixes land together: process events for unseen paths even
     // at version 0, and refresh the projects list when the path is not
     // in the current `projects`.
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -655,7 +658,7 @@ describe('App shell', () => {
   });
 
   test('does not show the disk toast when the change came from the user', async () => {
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,

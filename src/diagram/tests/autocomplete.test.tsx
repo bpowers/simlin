@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent, screen, waitFor, act, createEvent } from '@testing-library/react';
 import Autocomplete from '../components/Autocomplete';
@@ -138,7 +140,7 @@ describe('Autocomplete', () => {
   test('scrolls the keyboard-highlighted option into view', async () => {
     // jsdom does not implement scrollIntoView, so install a stub to observe the
     // call (the component guards with optional chaining for exactly this reason).
-    const scrollFn = jest.fn();
+    const scrollFn = rs.fn();
     (HTMLElement.prototype as unknown as { scrollIntoView: unknown }).scrollIntoView = scrollFn;
     try {
       render(
@@ -196,7 +198,7 @@ describe('Autocomplete', () => {
   });
 
   test('commits the highlighted option on keyboard blur (tab away)', () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     render(
       <Autocomplete
         value={null}
@@ -219,7 +221,7 @@ describe('Autocomplete', () => {
   });
 
   test('does not commit the highlight on a pointer-driven blur (mouse or touch)', () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     render(
       <Autocomplete
         value={null}
@@ -303,7 +305,7 @@ describe('Autocomplete', () => {
   });
 
   test('clearOnEscape clears selection on Escape key', async () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     render(
       <Autocomplete
         value="apple"
@@ -356,7 +358,7 @@ describe('Autocomplete dropdown positioning', () => {
       y: 100,
       toJSON: () => ({}),
     };
-    const rectMock = jest.fn(() => ({ ...rect }) as DOMRect);
+    const rectMock = rs.fn(() => ({ ...rect }) as DOMRect);
     wrapper.getBoundingClientRect = rectMock;
 
     // Typing opens the dropdown; the position is computed from the rect.
@@ -407,7 +409,7 @@ describe('Autocomplete dropdown positioning', () => {
       y: 100,
       toJSON: () => ({}),
     };
-    wrapper.getBoundingClientRect = jest.fn(() => ({ ...rect }) as DOMRect);
+    wrapper.getBoundingClientRect = rs.fn(() => ({ ...rect }) as DOMRect);
 
     fireEvent.change(screen.getByTestId('autocomplete-input'), { target: { value: 'ap' } });
     await waitFor(() => {

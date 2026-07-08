@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Editor-level keyboard shortcuts beyond undo/redo, and the graceful
 // details-panel degradation for a model/view divergence:
@@ -19,11 +15,18 @@
 //     panel opens; it degrades to no panel so the element can still be
 //     selected and keyboard-deleted (the repair path).
 
+import { describe, it, expect, beforeEach, afterEach, rs } from '@rstest/core';
+
 import { TextEncoder, TextDecoder } from 'util';
 Object.assign(globalThis, { TextEncoder, TextDecoder });
 
 import * as React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
+
+// Mock factories are hoisted above the imports and so cannot close over `React`
+// above. This attribute is rstest's synchronous stand-in for jest.requireActual:
+// the binding resolves to the real module and is hoisted alongside the factory.
+import * as react from 'react' with { rstest: 'importActual' };
 
 import type { StockFlowView, Variable } from '@simlin/core/datamodel';
 
@@ -31,8 +34,7 @@ import { ProjectController, type ProjectSnapshot } from '../project-controller';
 import type { CanvasProps } from '../drawing/Canvas';
 
 // Mock SpeedDial as in editor-tool-deselect.test.ts so tools are queryable.
-jest.mock('../components/SpeedDial', () => {
-  const react = jest.requireActual('react') as typeof import('react');
+rs.mock('../components/SpeedDial', () => {
   return {
     __esModule: true,
     default: (p: { children?: React.ReactNode; onClick?: (e: unknown) => void }) =>
@@ -60,7 +62,7 @@ jest.mock('../components/SpeedDial', () => {
 // Capture the live Canvas props so tests can drive selection callbacks and
 // observe the selection the Editor passes back down.
 let canvasProps: CanvasProps | undefined;
-jest.mock('../drawing/Canvas', () => ({
+rs.mock('../drawing/Canvas', () => ({
   __esModule: true,
   Canvas: (p: CanvasProps) => {
     canvasProps = p;
@@ -71,10 +73,9 @@ jest.mock('../drawing/Canvas', () => ({
 
 // The details panel itself is not under test; render a marker so tests can
 // assert presence/absence without pulling in the full VariableDetails tree.
-jest.mock('../VariableDetails', () => ({
+rs.mock('../VariableDetails', () => ({
   __esModule: true,
   VariableDetails: () => {
-    const react = jest.requireActual('react') as typeof import('react');
     return react.createElement('div', { 'data-testid': 'variable-details' });
   },
 }));
@@ -191,23 +192,23 @@ describe('Editor keyboard shortcuts', () => {
     canvasProps = undefined;
     applyPatchCalls = [];
     updateViewCalls = [];
-    jest.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
-    jest.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
-    jest.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
-    jest.spyOn(ProjectController.prototype, 'getEngine').mockReturnValue({} as never);
-    jest.spyOn(ProjectController.prototype, 'applyPatchOrReportError').mockImplementation(async (patch) => {
+    rs.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
+    rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
+    rs.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
+    rs.spyOn(ProjectController.prototype, 'getEngine').mockReturnValue({} as never);
+    rs.spyOn(ProjectController.prototype, 'applyPatchOrReportError').mockImplementation(async (patch) => {
       applyPatchCalls.push(patch);
       return true;
     });
-    jest.spyOn(ProjectController.prototype, 'updateView').mockImplementation(async (view) => {
+    rs.spyOn(ProjectController.prototype, 'updateView').mockImplementation(async (view) => {
       updateViewCalls.push(view);
     });
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    rs.restoreAllMocks();
   });
 
   function selectUid(uid: number): void {

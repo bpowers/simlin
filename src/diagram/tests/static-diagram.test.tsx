@@ -6,6 +6,8 @@
 // module (pulled in transitively via StaticDiagram's engine import) uses them
 // at import time. Polyfill from Node's util before importing anything
 // engine-backed.
+import { describe, test, expect, beforeEach, rs } from '@rstest/core';
+
 import { TextEncoder, TextDecoder } from 'util';
 Object.assign(globalThis, { TextEncoder, TextDecoder });
 
@@ -14,6 +16,12 @@ import { render, act, waitFor } from '@testing-library/react';
 
 import { projectFromJson, Project } from '@simlin/core/datamodel';
 import type { JsonProject } from '@simlin/engine';
+
+// The mock factory is hoisted above the imports, so it cannot close over an
+// ordinary import binding. This attribute is rstest's synchronous stand-in for
+// jest.requireActual: it resolves to the unmocked module and hoists with the
+// factory, letting us keep every export but openProtobuf.
+import * as actualEngine from '@simlin/engine' with { rstest: 'importActual' };
 
 import { validProjectJson } from './fake-engine';
 
@@ -30,21 +38,18 @@ interface FakeEngineProject {
 let pendingOpen: { resolve: (p: FakeEngineProject) => void } | undefined;
 let disposeCalls = 0;
 
-jest.mock('@simlin/engine', () => {
-  const actual = jest.requireActual('@simlin/engine');
-  return {
-    ...actual,
-    Project: {
-      ...actual.Project,
-      openProtobuf: jest.fn(
-        () =>
-          new Promise<FakeEngineProject>((resolve) => {
-            pendingOpen = { resolve };
-          }),
-      ),
-    },
-  };
-});
+rs.mock('@simlin/engine', () => ({
+  ...actualEngine,
+  Project: {
+    ...actualEngine.Project,
+    openProtobuf: rs.fn(
+      () =>
+        new Promise<FakeEngineProject>((resolve) => {
+          pendingOpen = { resolve };
+        }),
+    ),
+  },
+}));
 
 function makeFakeEngineProject(): FakeEngineProject {
   return {
@@ -62,7 +67,7 @@ function makeFakeEngineProject(): FakeEngineProject {
 // Canvas so the test exercises StaticDiagram's own branches; record the
 // `project` it receives so we can assert the data-attach behavior.
 let lastCanvasProject: Project | undefined;
-jest.mock('../drawing/Canvas', () => ({
+rs.mock('../drawing/Canvas', () => ({
   Canvas: (props: { project: Project }): React.ReactElement => {
     lastCanvasProject = props.project;
     return <svg data-testid="canvas-stub" />;
@@ -144,7 +149,7 @@ describe('StaticDiagram', () => {
   });
 
   test('unmounting before the load resolves runs the cancelled guard (no setProject warning)', async () => {
-    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const errorSpy = rs.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const { unmount } = render(<StaticDiagram projectPbBase64="" />);
       await waitFor(() => expect(pendingOpen).not.toBeUndefined());

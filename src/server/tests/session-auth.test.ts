@@ -8,6 +8,8 @@
 // minted while passport was a dependency), sessionAuth() deserializes
 // the user onto req.user, and DELETE /session clears the cookie.
 
+import { describe, it, expect } from '@rstest/core';
+
 import express from 'express';
 import { seshcookie } from '../seshcookie/seshcookie';
 import http from 'http';

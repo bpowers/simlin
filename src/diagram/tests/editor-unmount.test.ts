@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Regression tests for the Editor's controller lifecycle.
 //
@@ -25,6 +21,9 @@
 // rendering a real <Editor> through @testing-library/react and spying on the
 // controller's openInitialProject/dispose -- never reaching into instance
 // internals. openInitialProject/dispose are stubbed so the tests stay off WASM.
+
+import { describe, it, expect, beforeEach, afterEach, rs } from '@rstest/core';
+import type { MockInstance } from '@rstest/core';
 
 import { TextEncoder, TextDecoder } from 'util';
 Object.assign(globalThis, { TextEncoder, TextDecoder });
@@ -52,19 +51,19 @@ function makeProps(): EditorProps {
 }
 
 describe('Editor controller lifecycle', () => {
-  let openSpy: jest.SpyInstance;
-  let disposeSpy: jest.SpyInstance;
+  let openSpy: MockInstance;
+  let disposeSpy: MockInstance;
 
   beforeEach(() => {
     // The controller's openInitialProject opens a real engine; stub it so the
     // tests stay off WASM. dispose is the contract we assert on unmount.
-    openSpy = jest.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
-    disposeSpy = jest.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
+    openSpy = rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
+    disposeSpy = rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    rs.restoreAllMocks();
   });
 
   it('opens the project on mount and disposes the controller on unmount', () => {

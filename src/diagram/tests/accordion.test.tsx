@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent, screen } from '@testing-library/react';
 import { Accordion, AccordionSummary, AccordionDetails } from '../components/Accordion';
@@ -54,7 +56,7 @@ describe('Accordion', () => {
   });
 
   test('controlled mode reflects the expanded prop and does not self-toggle', () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     renderAccordion({ expanded: false, onChange });
     const trigger = screen.getByRole('button', { name: /summary/i });
 
@@ -65,7 +67,7 @@ describe('Accordion', () => {
   });
 
   test('disabled does not toggle or fire onChange', () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     renderAccordion({ disabled: true, onChange });
     const trigger = screen.getByRole('button', { name: /summary/i });
     expect(trigger).toHaveProperty('disabled', true);

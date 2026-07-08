@@ -13,7 +13,7 @@ import CircularProgress from './components/CircularProgress';
 import { ErrorBoundary } from './ErrorBoundary';
 import { HostedWebEditorError, ProjectEndpoint, loadProject, saveProject } from './hosted-web-editor-core';
 // Imported as a namespace so the delete-flow navigation and DELETE go through
-// `core.*`, which a test can intercept with jest.spyOn (jsdom's
+// `core.*`, which a test can intercept with a spy (jsdom's
 // window.location.assign is itself non-spyable).
 import * as core from './hosted-web-editor-core';
 

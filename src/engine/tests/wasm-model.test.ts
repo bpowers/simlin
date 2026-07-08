@@ -10,6 +10,8 @@
 // (the wasm blob mirrors the VM opcode-for-opcode). The default (no-engine)
 // path must keep behaving exactly as the VM does today.
 
+import { describe, it, expect, beforeAll, afterAll } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

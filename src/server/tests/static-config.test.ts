@@ -2,24 +2,33 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect, beforeAll, afterEach, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
+
 import * as path from 'path';
 import * as os from 'os';
 
 import { getStaticDirectory, validateStaticDirectory, StaticConfigError } from '../static-config';
 
-const actualFs = jest.requireActual<typeof import('fs')>('fs');
-
-jest.mock('fs', () => {
-  const actual = jest.requireActual<typeof import('fs')>('fs');
-  return {
-    ...actual,
-    existsSync: jest.fn(actual.existsSync),
-  };
-});
+// `{ spy: true }` wraps every export in a spy that still calls through, which is
+// what the old `{ ...actual, existsSync: jest.fn(actual.existsSync) }` factory
+// did by hand. A factory cannot be used: it is hoisted above the imports (so it
+// cannot close over one), rstest rejects async factories, and the synchronous
+// escape hatch -- `import ... with { rstest: 'importActual' }` -- needs an ES
+// module target, while this package's program emits CommonJS and type-checks its
+// own tests. Hoisted above the `fs` import below, exactly as jest.mock was.
+rs.mock('fs', { spy: true });
 
 import * as fs from 'fs';
 
-const existsSyncMock = fs.existsSync as jest.MockedFunction<typeof fs.existsSync>;
+// Tests that stub existsSync fall back on the real implementation, which must be
+// the unmocked one or the stub would recurse into itself.
+let actualFs: typeof import('fs');
+beforeAll(async () => {
+  actualFs = await rs.importActual<typeof import('fs')>('fs');
+});
+
+const existsSyncMock = fs.existsSync as unknown as Mock<typeof fs.existsSync>;
 
 describe('Static file configuration', () => {
   describe('getStaticDirectory', () => {

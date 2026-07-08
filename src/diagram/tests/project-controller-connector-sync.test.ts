@@ -1,15 +1,13 @@
-/**
- * @jest-environment node
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Verifies ProjectController.attachConnectorErrors wiring: after a rebuild, the
 // active model's variables carry connectorErrors derived from the engine's
 // getIncomingLinks and the sketch connectors, and engine failures degrade
 // gracefully.
+
+import { describe, it, expect } from '@rstest/core';
 
 import type { LinkViewElement, StockFlowView, Variable } from '@simlin/core/datamodel';
 import { ErrorCode } from '@simlin/core/datamodel';

@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Tool deselection behavior (regressed in 5191a9b6, which dropped the
 // selectedTool clearing from handleDialClick): the user expects that
@@ -16,11 +12,18 @@
 // SpeedDial's FAB and action buttons, and read each tool's `selected` flag
 // (surfaced as data-selected on the mocked SpeedDialAction button).
 
+import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
+
 import { TextEncoder, TextDecoder } from 'util';
 Object.assign(globalThis, { TextEncoder, TextDecoder });
 
 import * as React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
+
+// Mock factories are hoisted above the imports and so cannot close over `React`
+// above. This attribute is rstest's synchronous stand-in for jest.requireActual:
+// the binding resolves to the real module and is hoisted alongside the factory.
+import * as react from 'react' with { rstest: 'importActual' };
 
 import { ProjectController, type ProjectSnapshot } from '../project-controller';
 
@@ -28,8 +31,7 @@ import { ProjectController, type ProjectSnapshot } from '../project-controller';
 // queryable. The FAB carries aria-label "dial-fab" and fires the dial's
 // onClick (handleDialClick); each action surfaces its title as aria-label and
 // its `selected` flag as data-selected, and fires its onClick handler.
-jest.mock('../components/SpeedDial', () => {
-  const react = jest.requireActual('react') as typeof import('react');
+rs.mock('../components/SpeedDial', () => {
   return {
     __esModule: true,
     default: (p: { children?: React.ReactNode; onClick?: (e: unknown) => void }) =>
@@ -56,7 +58,7 @@ jest.mock('../components/SpeedDial', () => {
 
 // Canvas mounts a ResizeObserver and reads SVG geometry jsdom lacks; this test
 // exercises only the toolbar, so stub Canvas to a null renderer.
-jest.mock('../drawing/Canvas', () => ({
+rs.mock('../drawing/Canvas', () => ({
   __esModule: true,
   Canvas: () => null,
   inCreationUid: -2,
@@ -114,15 +116,15 @@ const toolSelected = (title: string): boolean => screen.getByLabelText(title).ge
 
 describe('Editor tool deselection', () => {
   beforeEach(() => {
-    jest.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
-    jest.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
-    jest.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
+    rs.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
+    rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
+    rs.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    rs.restoreAllMocks();
   });
 
   test('no tool is selected on load', () => {

@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent, waitFor, act } from '@testing-library/react';
 import Drawer from '../components/Drawer';
@@ -369,7 +371,7 @@ describe('Drawer focus trap', () => {
     panel.focus();
 
     // Tab should not move focus outside
-    const preventDefaultSpy = jest.fn();
+    const preventDefaultSpy = rs.fn();
     const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true });
     Object.defineProperty(event, 'preventDefault', { value: preventDefaultSpy });
 

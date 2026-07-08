@@ -8,6 +8,8 @@
 // to unit tests but very visible to users: when theme tokens went missing
 // the whole diagram rendered with black SVG fills.
 
+import { describe, it, expect } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

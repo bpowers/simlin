@@ -9,6 +9,9 @@
  * when dispose is called on Project, Model, and Sim objects.
  */
 
+import { describe, it, expect, beforeAll, beforeEach, afterEach, rs } from '@rstest/core';
+import type { MockInstance } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -80,10 +83,10 @@ function createRejectingBackend(): EngineBackend {
 }
 
 describe('dispose warns on async backend errors', () => {
-  let warnSpy: jest.SpyInstance;
+  let warnSpy: MockInstance;
 
   beforeEach(() => {
-    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    warnSpy = rs.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {

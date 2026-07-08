@@ -2,6 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
+
 import { Request, Response } from 'express';
 
 import { createDeleteProjectHandler, DeleteProjectHandlerDeps } from '../route-handlers';
@@ -25,7 +28,7 @@ function mockProject(id: string, ownerId?: string): MockProjectRecord {
 
 interface MockDeps {
   deps: DeleteProjectHandlerDeps;
-  projectFindOne: jest.Mock;
+  projectFindOne: Mock;
   projectDeleteCalls: Array<{ projectId: string; currentFileId: string | undefined }>;
   previewDeleteCalls: string[];
 }
@@ -35,7 +38,7 @@ function mockDeps(
 ): MockDeps {
   const projectDeleteCalls: Array<{ projectId: string; currentFileId: string | undefined }> = [];
   const previewDeleteCalls: string[] = [];
-  const projectFindOne = jest.fn().mockResolvedValue(opts.project);
+  const projectFindOne = rs.fn().mockResolvedValue(opts.project);
   return {
     projectFindOne,
     projectDeleteCalls,
@@ -46,14 +49,14 @@ function mockDeps(
           findOne: projectFindOne,
         },
         preview: {
-          deleteOne: jest.fn(async (id: string) => {
+          deleteOne: rs.fn(async (id: string) => {
             previewDeleteCalls.push(id);
             if (opts.previewDeleteRejects) {
               throw new Error('preview delete failed');
             }
           }),
         },
-        deleteProjectAndFiles: jest.fn(async (projectId: string, currentFileId: string | undefined) => {
+        deleteProjectAndFiles: rs.fn(async (projectId: string, currentFileId: string | undefined) => {
           projectDeleteCalls.push({ projectId, currentFileId });
           if (opts.projectDeleteRejects) {
             throw new Error('project delete failed');
@@ -74,11 +77,11 @@ function mockResponse(): MockResponse {
   let code: number | undefined;
   let body: unknown;
   const res = {
-    status: jest.fn((c: number) => {
+    status: rs.fn((c: number) => {
       code = c;
       return res;
     }),
-    json: jest.fn((b: unknown) => {
+    json: rs.fn((b: unknown) => {
       body = b;
       return res;
     }),

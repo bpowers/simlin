@@ -1,5 +1,7 @@
 'use strict';
 
+const { describe, test, expect, beforeEach, afterEach } = require('@rstest/core');
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -112,10 +114,7 @@ describe('walkDir', () => {
     fs.writeFileSync(path.join(tmpDir, 'b.css'), 'b');
 
     const result = walkDir(tmpDir);
-    expect(result.sort()).toEqual([
-      path.join(tmpDir, 'a.js'),
-      path.join(tmpDir, 'b.css'),
-    ].sort());
+    expect(result.sort()).toEqual([path.join(tmpDir, 'a.js'), path.join(tmpDir, 'b.css')].sort());
   });
 
   test('returns files recursively', () => {
@@ -125,10 +124,7 @@ describe('walkDir', () => {
     fs.writeFileSync(path.join(sub, 'nested.js'), 'n');
 
     const result = walkDir(tmpDir);
-    expect(result.sort()).toEqual([
-      path.join(tmpDir, 'root.js'),
-      path.join(sub, 'nested.js'),
-    ].sort());
+    expect(result.sort()).toEqual([path.join(tmpDir, 'root.js'), path.join(sub, 'nested.js')].sort());
   });
 
   test('returns empty array for empty directory', () => {
@@ -194,7 +190,7 @@ describe('measureFileSizesBeforeBuild', () => {
     const result = measureFileSizesBeforeBuild(tmpDir);
     expect(result.root).toBe(tmpDir);
     // JS and CSS should be measured (hash stripped from key).
-    // Use array syntax because jest interprets dots as nested paths.
+    // Use array syntax because the runner interprets dots as nested paths.
     expect(result.sizes).toHaveProperty(['main.js']);
     expect(result.sizes).toHaveProperty(['main.css']);
     // PNG should not appear
@@ -233,7 +229,7 @@ describe('printFileSizesAfterBuild', () => {
 
   function makeStats(assetNames) {
     return {
-      assets: assetNames.map(name => ({ name })),
+      assets: assetNames.map((name) => ({ name })),
     };
   }
 

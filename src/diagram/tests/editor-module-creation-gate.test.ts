@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // The Editor's getEditorControls() renders the SpeedDial toolbar. Module
 // CREATION is the one tool gated behind the `moduleCreationEnabled` prop: the
@@ -19,19 +15,25 @@
 // action children unconditionally (the real one only renders them while open),
 // letting us query each tool by the aria-label its SpeedDialAction sets.
 
+import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
+
 import { TextEncoder, TextDecoder } from 'util';
 Object.assign(globalThis, { TextEncoder, TextDecoder });
 
 import * as React from 'react';
 import { act, render, screen } from '@testing-library/react';
 
+// Mock factories are hoisted above the imports and so cannot close over `React`
+// above. This attribute is rstest's synchronous stand-in for jest.requireActual:
+// the binding resolves to the real module and is hoisted alongside the factory.
+import * as react from 'react' with { rstest: 'importActual' };
+
 import { ProjectController, type ProjectSnapshot } from '../project-controller';
 
 // Render the SpeedDial's action children unconditionally (the real component
 // hides them until the dial is open) and surface each SpeedDialAction as a
 // button carrying its title as the aria-label, so tools are queryable by name.
-jest.mock('../components/SpeedDial', () => {
-  const react = jest.requireActual('react') as typeof import('react');
+rs.mock('../components/SpeedDial', () => {
   return {
     __esModule: true,
     default: (p: { children?: React.ReactNode }) => react.createElement('div', null, p.children),
@@ -42,13 +44,13 @@ jest.mock('../components/SpeedDial', () => {
 
 // Canvas mounts a ResizeObserver and reads SVG geometry jsdom lacks; this test
 // exercises only the toolbar, so stub Canvas to a null renderer.
-jest.mock('../drawing/Canvas', () => ({
+rs.mock('../drawing/Canvas', () => ({
   __esModule: true,
   Canvas: () => null,
   inCreationUid: -2,
 }));
 
-// Import the Editor AFTER jest.mock so it binds to the stubs.
+// Import the Editor AFTER rs.mock so it binds to the stubs.
 import { Editor, type EditorProps } from '../Editor';
 
 function makeSnapshot(): ProjectSnapshot {
@@ -104,15 +106,15 @@ function renderEditor(props: EditorProps): void {
 
 describe('Editor module-creation tool gating', () => {
   beforeEach(() => {
-    jest.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
-    jest.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
-    jest.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
+    rs.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
+    rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
+    rs.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    rs.restoreAllMocks();
   });
 
   test('shows the Module tool when module creation is explicitly enabled', () => {

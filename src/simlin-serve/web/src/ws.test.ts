@@ -2,10 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
+
 import { UpdatesSocket } from './ws';
 import type { WsMessage } from './ws';
 
-// Hand-rolled WebSocket double. We avoid `jest-websocket-mock` so the test
+// Hand-rolled WebSocket double. We avoid a WebSocket-mock library so the test
 // suite stays dependency-light and so we have direct control over the timing
 // of `onopen`/`onmessage`/`onclose`/`onerror` from individual tests. Each
 // MockWebSocket records its construction URL.
@@ -71,7 +73,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  jest.useRealTimers();
+  rs.useRealTimers();
   if (originalWebSocket) {
     globalThis.WebSocket = originalWebSocket;
   } else {
@@ -95,7 +97,7 @@ describe('UpdatesSocket', () => {
   });
 
   test('parses incoming messages and forwards them to onMessage', () => {
-    const onMessage = jest.fn<void, [WsMessage]>();
+    const onMessage = rs.fn<(msg: WsMessage) => void>();
     const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
@@ -120,7 +122,7 @@ describe('UpdatesSocket', () => {
   });
 
   test('parses projectRemoved frames and forwards them to onMessage', () => {
-    const onMessage = jest.fn<void, [WsMessage]>();
+    const onMessage = rs.fn<(msg: WsMessage) => void>();
     const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
@@ -141,7 +143,7 @@ describe('UpdatesSocket', () => {
   });
 
   test('drops projectRemoved frames missing the path field', () => {
-    const onMessage = jest.fn<void, [WsMessage]>();
+    const onMessage = rs.fn<(msg: WsMessage) => void>();
     const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
@@ -153,7 +155,7 @@ describe('UpdatesSocket', () => {
   });
 
   test('parses projectRenamed frames and forwards them to onMessage', () => {
-    const onMessage = jest.fn<void, [WsMessage]>();
+    const onMessage = rs.fn<(msg: WsMessage) => void>();
     const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
@@ -176,7 +178,7 @@ describe('UpdatesSocket', () => {
   });
 
   test('drops projectRenamed frames missing required fields', () => {
-    const onMessage = jest.fn<void, [WsMessage]>();
+    const onMessage = rs.fn<(msg: WsMessage) => void>();
     const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
@@ -190,7 +192,7 @@ describe('UpdatesSocket', () => {
   });
 
   test('ignores message frames whose body is not valid JSON without throwing', () => {
-    const onMessage = jest.fn<void, [WsMessage]>();
+    const onMessage = rs.fn<(msg: WsMessage) => void>();
     const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
@@ -202,36 +204,36 @@ describe('UpdatesSocket', () => {
   });
 
   test('reconnects with 1s/2s/5s backoff after consecutive close events', () => {
-    jest.useFakeTimers();
+    rs.useFakeTimers();
 
-    const onMessage = jest.fn<void, [WsMessage]>();
+    const onMessage = rs.fn<(msg: WsMessage) => void>();
     const socket = new UpdatesSocket(onMessage);
     expect(MockWebSocket.instances).toHaveLength(1);
 
     // First close: should schedule a reconnect at 1s.
     MockWebSocket.instances[0].emitClose();
-    jest.advanceTimersByTime(999);
+    rs.advanceTimersByTime(999);
     expect(MockWebSocket.instances).toHaveLength(1);
-    jest.advanceTimersByTime(1);
+    rs.advanceTimersByTime(1);
     expect(MockWebSocket.instances).toHaveLength(2);
 
     // Second consecutive close (no successful message in between): 2s backoff.
     MockWebSocket.instances[1].emitClose();
-    jest.advanceTimersByTime(1999);
+    rs.advanceTimersByTime(1999);
     expect(MockWebSocket.instances).toHaveLength(2);
-    jest.advanceTimersByTime(1);
+    rs.advanceTimersByTime(1);
     expect(MockWebSocket.instances).toHaveLength(3);
 
     // Third consecutive close: capped at 5s.
     MockWebSocket.instances[2].emitClose();
-    jest.advanceTimersByTime(4999);
+    rs.advanceTimersByTime(4999);
     expect(MockWebSocket.instances).toHaveLength(3);
-    jest.advanceTimersByTime(1);
+    rs.advanceTimersByTime(1);
     expect(MockWebSocket.instances).toHaveLength(4);
 
     // Fourth consecutive close: still capped at 5s.
     MockWebSocket.instances[3].emitClose();
-    jest.advanceTimersByTime(5000);
+    rs.advanceTimersByTime(5000);
     expect(MockWebSocket.instances).toHaveLength(5);
 
     socket.close();
@@ -245,9 +247,9 @@ describe('UpdatesSocket', () => {
     // reset, MAX_CONSECUTIVE_FAILURES (10) is reachable across a
     // workday of quiet-then-drop cycles, after which the socket flips
     // to permanent 'dead' with no recovery path.
-    jest.useFakeTimers();
+    rs.useFakeTimers();
 
-    const onMessage = jest.fn<void, [WsMessage]>();
+    const onMessage = rs.fn<(msg: WsMessage) => void>();
     const socket = new UpdatesSocket(onMessage);
 
     // Cycle: open → close, with NO message in between, repeatedly. If
@@ -257,7 +259,7 @@ describe('UpdatesSocket', () => {
       const ws = MockWebSocket.instances[cycle];
       ws.open();
       ws.emitClose();
-      jest.advanceTimersByTime(5000);
+      rs.advanceTimersByTime(5000);
     }
 
     // With the fix, every cycle resets to 0 on open, so we never hit
@@ -269,17 +271,17 @@ describe('UpdatesSocket', () => {
   });
 
   test('resets backoff after a successful message before the next close', () => {
-    jest.useFakeTimers();
+    rs.useFakeTimers();
 
-    const onMessage = jest.fn<void, [WsMessage]>();
+    const onMessage = rs.fn<(msg: WsMessage) => void>();
     const socket = new UpdatesSocket(onMessage);
 
     // Drive backoff up via two consecutive closes.
     MockWebSocket.instances[0].emitClose();
-    jest.advanceTimersByTime(1000);
+    rs.advanceTimersByTime(1000);
     expect(MockWebSocket.instances).toHaveLength(2);
     MockWebSocket.instances[1].emitClose();
-    jest.advanceTimersByTime(2000);
+    rs.advanceTimersByTime(2000);
     expect(MockWebSocket.instances).toHaveLength(3);
 
     // Receive a successful message: backoff resets.
@@ -290,30 +292,30 @@ describe('UpdatesSocket', () => {
 
     // Next close should schedule at 1s, not 5s.
     MockWebSocket.instances[2].emitClose();
-    jest.advanceTimersByTime(999);
+    rs.advanceTimersByTime(999);
     expect(MockWebSocket.instances).toHaveLength(3);
-    jest.advanceTimersByTime(1);
+    rs.advanceTimersByTime(1);
     expect(MockWebSocket.instances).toHaveLength(4);
 
     socket.close();
   });
 
   test('error events also trigger backoff reconnect', () => {
-    jest.useFakeTimers();
+    rs.useFakeTimers();
 
     const socket = new UpdatesSocket(() => {
       // unused
     });
     MockWebSocket.instances[0].emitError();
     MockWebSocket.instances[0].emitClose();
-    jest.advanceTimersByTime(1000);
+    rs.advanceTimersByTime(1000);
     expect(MockWebSocket.instances).toHaveLength(2);
 
     socket.close();
   });
 
   test('close() prevents further reconnect attempts', () => {
-    jest.useFakeTimers();
+    rs.useFakeTimers();
 
     const socket = new UpdatesSocket(() => {
       // unused
@@ -323,7 +325,7 @@ describe('UpdatesSocket', () => {
     // Even if the underlying socket emits a close, no new connection
     // should be created.
     MockWebSocket.instances[0].emitClose();
-    jest.advanceTimersByTime(10_000);
+    rs.advanceTimersByTime(10_000);
     expect(MockWebSocket.instances).toHaveLength(1);
   });
 

@@ -5,6 +5,8 @@
 // jsdom does not provide TextEncoder/TextDecoder, but the engine's memory
 // module (pulled in transitively via errorCodeDescription) uses them at import
 // time. Polyfill from Node's util before importing anything engine-backed.
+import { describe, test, expect } from '@rstest/core';
+
 import { TextEncoder, TextDecoder } from 'util';
 Object.assign(globalThis, { TextEncoder, TextDecoder });
 

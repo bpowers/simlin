@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect, afterEach } from '@rstest/core';
+
 import { isReady, configureWasm, resetWasm } from '@simlin/engine';
 import { initializeServerDependencies, ServerInitError } from '../server-init';
 

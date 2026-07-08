@@ -8,20 +8,22 @@
 // Firebase or the real app. Exit-on-failure matters because a zombie
 // process that never binds the port hangs a GAE instance until the
 // port-bind timeout instead of recycling immediately.
-jest.mock('../app', () => ({
-  createApp: jest.fn(() => Promise.reject(new Error('boot failed: engine WASM missing'))),
+rs.mock('../app', () => ({
+  createApp: rs.fn(() => Promise.reject(new Error('boot failed: engine WASM missing'))),
 }));
-jest.mock('../logger', () => ({
-  error: jest.fn(),
-  info: jest.fn(),
-  warn: jest.fn(),
+rs.mock('../logger', () => ({
+  error: rs.fn(),
+  info: rs.fn(),
+  warn: rs.fn(),
 }));
+
+import { describe, it, expect, rs } from '@rstest/core';
 
 import * as logger from '../logger';
 
 describe('server boot failure', () => {
   it('logs the error and exits non-zero when createApp rejects', async () => {
-    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const exit = rs.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     try {
       await import('../index');
 

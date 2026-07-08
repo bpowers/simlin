@@ -13,3 +13,10 @@
 
 - Target 95%+ code coverage for new code.
 - Follow the functional core, imperative shell pattern to ensure as much logic as possible is in easily testable pure functions.
+- Tests run on [Rstest](https://rstest.rs/), configured per package in `rstest.config.mts`. `pnpm test` runs them all; `pnpm -C src/<pkg> exec rstest run <filter>` runs a subset.
+- **Test globals are off.** Import what you use: `import { describe, it, expect, rs } from '@rstest/core';`. `rs` is the mocking/timer namespace (`rs.fn`, `rs.spyOn`, `rs.mock`, `rs.useFakeTimers`, ...).
+- `Mock<T>`'s type argument is the whole *function signature*, not the return type: `rs.fn<(msg: WsMessage) => void>()`. Jest's two-argument `jest.Mock<Return, Args>` has no equivalent.
+- A `rs.mock` factory is hoisted above the imports, so it cannot close over one, and async factories are rejected. To keep part of the real module, pull it in with `import * as actual from 'mod' with { rstest: 'importActual' };` -- the synchronous stand-in for `jest.requireActual`. Import attributes need an ES module target, so this cannot be used in `src/server` (its program emits CommonJS and type-checks its own tests); reach for `rs.mock('mod', { spy: true })` there.
+- Rstest has no `@jest-environment` docblock. A package that needs both environments declares them as `projects` in its config (see `src/diagram/rstest.config.mts`).
+- jsdom + `@testing-library/react` packages need a setup file: RTL only self-registers its `afterEach(cleanup)` when `afterEach` is a global, and `waitFor` only drives fake timers when a global `jest` object exists. See `src/app/tests/setup-testing-library.ts`.
+- Test files are **not** type-checked (`isolatedModules` makes the toolchain transpile-only). Tracked in [#899](https://github.com/bpowers/simlin/issues/899).

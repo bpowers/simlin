@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Issue #529 (rescoped): the Editor handlers that mutate `selection` directly
 // (delete, create, flow/link attach, navigation) must honor the same
@@ -21,6 +17,8 @@
 // composes it. This test pins both the pure logic and the observable render
 // consequence in the real Editor (Canvas + VariableDetails mocked; a real
 // ProjectController whose engine-touching methods are stubbed).
+
+import { describe, it, expect, beforeEach, afterEach, rs } from '@rstest/core';
 
 import { TextEncoder, TextDecoder } from 'util';
 Object.assign(globalThis, { TextEncoder, TextDecoder });
@@ -52,11 +50,11 @@ const projectJson = JSON.stringify({
 // (if either) is showing without depending on their internals. The errors panel
 // (ErrorDetails) is model-level and independent of the selection; the variable
 // panel (VariableDetails) is selection-tied.
-jest.mock('../VariableDetails', () => ({
+rs.mock('../VariableDetails', () => ({
   __esModule: true,
   VariableDetails: () => React.createElement('div', { 'data-testid': 'var-details' }),
 }));
-jest.mock('../ErrorDetails', () => ({
+rs.mock('../ErrorDetails', () => ({
   __esModule: true,
   ErrorDetails: () => React.createElement('div', { 'data-testid': 'error-details' }),
 }));
@@ -64,7 +62,7 @@ jest.mock('../ErrorDetails', () => ({
 // A clickable stand-in for the Status dot so a test can open the errors panel
 // (its onClick is the Editor's handleStatusClick, which toggles showDetails to
 // 'errors'). The real Status renders an <svg><circle> that is awkward to target.
-jest.mock('../Status', () => ({
+rs.mock('../Status', () => ({
   __esModule: true,
   Status: ({ onClick }: { onClick: () => void }) =>
     React.createElement('button', { 'data-testid': 'status-toggle', onClick }),
@@ -80,7 +78,7 @@ interface CapturedCanvasProps {
   onCreateVariable: (element: unknown) => Promise<void> | void;
 }
 let capturedCanvasProps: CapturedCanvasProps | undefined;
-jest.mock('../drawing/Canvas', () => ({
+rs.mock('../drawing/Canvas', () => ({
   __esModule: true,
   Canvas: (p: CapturedCanvasProps) => {
     capturedCanvasProps = p;
@@ -161,23 +159,23 @@ describe('Editor empty-selection invariant (issue #529)', () => {
   beforeEach(() => {
     capturedCanvasProps = undefined;
     snapshot = makeSnapshot();
-    jest.spyOn(ProjectController.prototype, 'getSnapshot').mockImplementation(() => snapshot);
+    rs.spyOn(ProjectController.prototype, 'getSnapshot').mockImplementation(() => snapshot);
     // The Editor drives everything here through the captured Canvas handlers,
     // so the controller subscription is never fired; return a no-op unsubscribe.
-    jest.spyOn(ProjectController.prototype, 'subscribe').mockImplementation(() => () => {});
-    jest.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
+    rs.spyOn(ProjectController.prototype, 'subscribe').mockImplementation(() => () => {});
+    rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
     // The delete/create handlers bail if the engine hasn't opened; the mocked
     // openInitialProject never opens one, so stub getEngine truthy and stub the
     // patch/view methods the handlers await so they proceed to their setState.
-    jest.spyOn(ProjectController.prototype, 'getEngine').mockReturnValue({} as never);
-    jest.spyOn(ProjectController.prototype, 'applyPatchOrReportError').mockResolvedValue(true);
-    jest.spyOn(ProjectController.prototype, 'updateView').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'getEngine').mockReturnValue({} as never);
+    rs.spyOn(ProjectController.prototype, 'applyPatchOrReportError').mockResolvedValue(true);
+    rs.spyOn(ProjectController.prototype, 'updateView').mockResolvedValue(undefined);
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    rs.restoreAllMocks();
   });
 
   function openVariableDetails(): void {

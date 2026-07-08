@@ -7,53 +7,52 @@
 // handleClose, which submitted the PATCH without checking the agreement.
 // These tests pin the gate: no terms, no PATCH.
 
-jest.mock(
-  '@simlin/diagram',
-  () => {
-    const React = require('react');
-    // eslint-disable-next-line react/display-name
-    const Pass = (name: string) => (props: { children?: React.ReactNode }) =>
-      React.createElement('div', { 'data-component': name }, props.children);
-    const Button = ({
-      children,
-      onClick,
-      disabled,
-    }: {
-      children?: React.ReactNode;
-      onClick?: () => void;
-      disabled?: boolean;
-    } & Record<string, unknown>) => React.createElement('button', { onClick, disabled }, children);
-    const TextField = ({
-      label,
-      onChange,
-      onKeyPress,
-    }: {
-      label?: string;
-      onChange?: (e: unknown) => void;
-      onKeyPress?: (e: unknown) => void;
-    } & Record<string, unknown>) => React.createElement('input', { 'aria-label': label, onChange, onKeyPress });
-    const Checkbox = ({ checked, onChange }: { checked?: boolean; onChange?: (checked: boolean) => void }) =>
-      React.createElement('input', {
-        type: 'checkbox',
-        checked: !!checked,
-        onChange: (e: { target: { checked: boolean } }) => onChange && onChange(e.target.checked),
-      });
-    const FormControlLabel = ({ control, label }: { control?: React.ReactNode; label?: React.ReactNode }) =>
-      React.createElement('label', null, control, label);
-    return {
-      Button,
-      Dialog: Pass('Dialog'),
-      DialogActions: Pass('DialogActions'),
-      DialogContent: Pass('DialogContent'),
-      DialogContentText: Pass('DialogContentText'),
-      DialogTitle: Pass('DialogTitle'),
-      TextField,
-      FormControlLabel,
-      Checkbox,
-    };
-  },
-  { virtual: true },
-);
+rs.mock('@simlin/diagram', () => {
+  const React = require('react');
+  // eslint-disable-next-line react/display-name
+  const Pass = (name: string) => (props: { children?: React.ReactNode }) =>
+    React.createElement('div', { 'data-component': name }, props.children);
+  const Button = ({
+    children,
+    onClick,
+    disabled,
+  }: {
+    children?: React.ReactNode;
+    onClick?: () => void;
+    disabled?: boolean;
+  } & Record<string, unknown>) => React.createElement('button', { onClick, disabled }, children);
+  const TextField = ({
+    label,
+    onChange,
+    onKeyPress,
+  }: {
+    label?: string;
+    onChange?: (e: unknown) => void;
+    onKeyPress?: (e: unknown) => void;
+  } & Record<string, unknown>) => React.createElement('input', { 'aria-label': label, onChange, onKeyPress });
+  const Checkbox = ({ checked, onChange }: { checked?: boolean; onChange?: (checked: boolean) => void }) =>
+    React.createElement('input', {
+      type: 'checkbox',
+      checked: !!checked,
+      onChange: (e: { target: { checked: boolean } }) => onChange && onChange(e.target.checked),
+    });
+  const FormControlLabel = ({ control, label }: { control?: React.ReactNode; label?: React.ReactNode }) =>
+    React.createElement('label', null, control, label);
+  return {
+    Button,
+    Dialog: Pass('Dialog'),
+    DialogActions: Pass('DialogActions'),
+    DialogContent: Pass('DialogContent'),
+    DialogContentText: Pass('DialogContentText'),
+    DialogTitle: Pass('DialogTitle'),
+    TextField,
+    FormControlLabel,
+    Checkbox,
+  };
+});
+
+import { describe, it, expect, afterEach, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
 
 import * as React from 'react';
 import { render, fireEvent, screen, waitFor } from '@testing-library/react';
@@ -63,8 +62,8 @@ import { User } from '../User';
 
 const user = { id: 'temp-123', displayName: 'Alice' } as unknown as User;
 
-function mockFetch(): jest.Mock {
-  const mock = jest.fn(async () => ({ status: 200, json: async () => ({}) }));
+function mockFetch(): Mock {
+  const mock = rs.fn(async () => ({ status: 200, json: async () => ({}) }));
   (globalThis as { fetch?: unknown }).fetch = mock;
   return mock;
 }

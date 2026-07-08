@@ -12,6 +12,8 @@
  * needs a live instance and is covered by the DirectBackend integration tests.
  */
 
+import { describe, it, expect, rs } from '@rstest/core';
+
 import { parseWasmLayout, readStridedSeries, WasmLayout } from '../src/internal/wasmgen';
 
 const textEncoder = new TextEncoder();
@@ -290,10 +292,15 @@ describe('readStridedSeries', () => {
     // allocation of exactly nChunks elements (no intermediate arrays).
     const RealFloat64Array = Float64Array;
     const allocations: Array<number> = [];
-    const spy = jest.spyOn(global, 'Float64Array').mockImplementation(function (this: unknown, arg: number) {
+    // rstest's Mock<T> requires T to have a call signature, which
+    // Float64ArrayConstructor (new-only) does not; view the global as the
+    // one-arg factory this test replaces it with. Calling the mock with `new`
+    // still yields the object the implementation returns.
+    const globalWithFloat64Array = global as unknown as { Float64Array: (arg: number) => Float64Array };
+    const spy = rs.spyOn(globalWithFloat64Array, 'Float64Array').mockImplementation((arg: number) => {
       allocations.push(arg);
       return new RealFloat64Array(arg);
-    } as unknown as typeof Float64Array);
+    });
 
     try {
       const series = readStridedSeries(buffer, layout, 0);

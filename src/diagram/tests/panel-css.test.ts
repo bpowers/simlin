@@ -17,6 +17,8 @@
 //    them, so a long equation needs both a .base override and a horizontal
 //    scroll fallback on .eqnPreview to stay within the card.
 
+import { describe, it, expect } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

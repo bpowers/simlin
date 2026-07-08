@@ -8,6 +8,8 @@
 // theme.css tokens so a single edit (or the dark-mode pass) reaches every
 // surface, instead of literals silently creeping back in.
 
+import { describe, it, expect } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

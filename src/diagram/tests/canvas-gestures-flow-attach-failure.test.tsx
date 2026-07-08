@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Regression tests for the create-flow name-edit crash (issue #820 / the
 // getElementByUid crash surfaced during the #819 review).
@@ -30,6 +26,8 @@
 // throw). A cancel can only be issued against a RENDERED editor, which only
 // renders when the element resolves -- so a cancel is never issued against an
 // unresolved phantom, and the cancel branch is dereference-free regardless.
+
+import { describe, it, expect } from '@rstest/core';
 
 import { act, fireEvent } from '@testing-library/react';
 

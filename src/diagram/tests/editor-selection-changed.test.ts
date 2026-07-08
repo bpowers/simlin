@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Verifies the onSelectionChanged prop fires after each *committed* selection
 // change with the canonical-ident array, but NOT on initial mount.
@@ -23,6 +19,8 @@
 // flow through the documented Canvas -> Editor contract (the Canvas is mocked
 // to capture the onSetSelection handler) and asserts on the host's
 // onSelectionChanged callback -- never reaching into instance internals.
+
+import { describe, it, expect, beforeEach, afterEach, rs } from '@rstest/core';
 
 import { TextEncoder, TextDecoder } from 'util';
 Object.assign(globalThis, { TextEncoder, TextDecoder });
@@ -65,7 +63,7 @@ interface CapturedCanvasProps {
   onSetSelection: (sel: ReadonlySet<number>) => void;
 }
 let capturedCanvasProps: CapturedCanvasProps | undefined;
-jest.mock('../drawing/Canvas', () => ({
+rs.mock('../drawing/Canvas', () => ({
   __esModule: true,
   Canvas: (p: CapturedCanvasProps) => {
     capturedCanvasProps = p;
@@ -112,20 +110,20 @@ describe('Editor onSelectionChanged (post-commit effect)', () => {
     capturedCanvasProps = undefined;
     listener = undefined;
     snapshot = makeSnapshot();
-    jest.spyOn(ProjectController.prototype, 'getSnapshot').mockImplementation(() => snapshot);
-    jest.spyOn(ProjectController.prototype, 'subscribe').mockImplementation((l: () => void) => {
+    rs.spyOn(ProjectController.prototype, 'getSnapshot').mockImplementation(() => snapshot);
+    rs.spyOn(ProjectController.prototype, 'subscribe').mockImplementation((l: () => void) => {
       listener = l;
       return () => {
         listener = undefined;
       };
     });
-    jest.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
+    rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    rs.restoreAllMocks();
   });
 
   function renderEditor(cb?: (idents: string[]) => void): void {
@@ -151,13 +149,13 @@ describe('Editor onSelectionChanged (post-commit effect)', () => {
   }
 
   it('does not fire on initial mount', () => {
-    const callback = jest.fn();
+    const callback = rs.fn();
     renderEditor(callback);
     expect(callback).not.toHaveBeenCalled();
   });
 
   it('invokes onSelectionChanged with the canonical idents after the selection commits', () => {
-    const callback = jest.fn();
+    const callback = rs.fn();
     renderEditor(callback);
 
     setSelection(new Set([1, 2]));
@@ -167,7 +165,7 @@ describe('Editor onSelectionChanged (post-commit effect)', () => {
   });
 
   it('passes an empty array when the selection becomes empty', () => {
-    const callback = jest.fn();
+    const callback = rs.fn();
     renderEditor(callback);
 
     setSelection(new Set([1]));
@@ -183,7 +181,7 @@ describe('Editor onSelectionChanged (post-commit effect)', () => {
     // A re-render that commits a content-identical but distinct Set (the
     // undo/navigate-back restoredSelection scenario) must NOT re-notify the
     // host: the guard uses setsEqual, not reference equality.
-    const callback = jest.fn();
+    const callback = rs.fn();
     renderEditor(callback);
 
     setSelection(new Set([1]));
@@ -204,7 +202,7 @@ describe('Editor onSelectionChanged (post-commit effect)', () => {
     // The undo-driven navigation reset clears selection/details/tool via the
     // navReset effect, never routing through handleSelection. The post-commit
     // selection effect still observes the committed clear and notifies the host.
-    const callback = jest.fn();
+    const callback = rs.fn();
     renderEditor(callback);
 
     setSelection(new Set([1]));

@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent } from '@testing-library/react';
 
@@ -13,22 +15,22 @@ function fillOf(container: HTMLElement): string | null {
 
 describe('Status', () => {
   test('renders a green circle when status is ok', () => {
-    const { container } = render(<Status status="ok" onClick={jest.fn()} />);
+    const { container } = render(<Status status="ok" onClick={rs.fn()} />);
     expect(fillOf(container)).toBe('#2e7d32');
   });
 
   test('renders a red circle when status is error', () => {
-    const { container } = render(<Status status="error" onClick={jest.fn()} />);
+    const { container } = render(<Status status="error" onClick={rs.fn()} />);
     expect(fillOf(container)).toBe('#c62828');
   });
 
   test('renders a grey circle when status is disabled', () => {
-    const { container } = render(<Status status="disabled" onClick={jest.fn()} />);
+    const { container } = render(<Status status="disabled" onClick={rs.fn()} />);
     expect(fillOf(container)).toBe('#bdbdbd');
   });
 
   test('clicking the circle invokes onClick', () => {
-    const onClick = jest.fn();
+    const onClick = rs.fn();
     const { container } = render(<Status status="ok" onClick={onClick} />);
     fireEvent.click(container.querySelector('circle')!);
     expect(onClick).toHaveBeenCalledTimes(1);

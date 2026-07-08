@@ -8,6 +8,8 @@
 // every wasm-engine operation is driven identically to the VM path and compared
 // within the engine's existing simulation tolerance.
 
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

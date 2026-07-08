@@ -3,6 +3,8 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 // Test our in-tree Dark2 palette implementation
+import { describe, it, expect } from '@rstest/core';
+
 import { Dark2 } from '../colors';
 
 describe('Dark2 palette', () => {

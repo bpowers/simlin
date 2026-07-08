@@ -48,14 +48,14 @@ C-LEARN currently uses builtins that are not yet implemented in the bytecode com
 
 `@simlin/engine` can run a model on two backends: the libsimlin VM or a compiled WebAssembly blob. This benchmark compares their **simulation (eval) time** through the public `Model.simulate({ engine })` API, on fishbanks, WORLD3, and C-LEARN.
 
-It is a [jest](https://jestjs.io/) test gated behind `RUN_BENCH` so it stays out of the default `pnpm test` (a full C-LEARN run on both engines exceeds the per-test time budget):
+It is an [rstest](https://rstest.rs/) test gated behind `RUN_BENCH` so it stays out of the default `pnpm test` (a full C-LEARN run on both engines exceeds the per-test time budget):
 
 ```bash
 # Run all three models on both engines
-RUN_BENCH=1 pnpm -C src/engine exec jest backend-bench
+RUN_BENCH=1 pnpm -C src/engine exec rstest run backend-bench
 
 # Subset the models (comma-separated: fishbanks, wrld3, clearn)
-RUN_BENCH=1 BENCH_MODELS=fishbanks,wrld3 pnpm -C src/engine exec jest backend-bench
+RUN_BENCH=1 BENCH_MODELS=fishbanks,wrld3 pnpm -C src/engine exec rstest run backend-bench
 ```
 
 It prints a markdown table of the warm **median** eval time per engine plus the wasm/VM ratio.

@@ -8,15 +8,8 @@ a copyright header.  The canonical line-comment format is:
     // Use of this source code is governed by the Apache License,
     // Version 2.0, that can be found in the LICENSE file.
 
-Files that need a @jest-environment directive use a block comment:
-
-    /**
-     * @jest-environment node
-     *
-     * Copyright 2026 The Simlin Authors. All rights reserved.
-     * Use of this source code is governed by the Apache License,
-     * Version 2.0, that can be found in the LICENSE file.
-     */
+The copyright line is matched in any comment style, so a file that must open
+with a block comment for other reasons still passes.
 
 Run with --fix to automatically update or add headers.
 Exit code 0 on success, 1 on any violation.

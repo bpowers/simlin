@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -140,7 +142,7 @@ describe('renderToPNG worker orchestration', () => {
     // its slot, the follow-up success render below would never start.
     // allSettled (not sequential awaits) so every rejection has a handler
     // attached from the start -- both timers fire together, and a rejection
-    // that lands before its `await` would otherwise be flagged by jest as an
+    // that lands before its `await` would otherwise be flagged by the runner as an
     // unhandled rejection.
     const hung = await Promise.allSettled([
       renderToPNG(makeFile(new Uint8Array([1])), { workerScript: fixture('worker-hang.js'), timeoutMs: 150 }),

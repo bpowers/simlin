@@ -16,6 +16,8 @@
 // src/simlin-engine/src/patch.rs). Any wire field datamodel.ts fails to
 // round-trip is therefore dropped the moment the user edits an unrelated field.
 
+import { describe, it, expect, beforeAll } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

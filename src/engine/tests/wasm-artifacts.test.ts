@@ -15,6 +15,8 @@
  * ships megabytes of dead rasterization code to every visitor.
  */
 
+import { describe, it, expect } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

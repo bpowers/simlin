@@ -2,6 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect, beforeEach, afterEach, rs } from '@rstest/core';
+import type { MockInstance } from '@rstest/core';
+
 import * as React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 
@@ -12,12 +15,12 @@ function Boom({ message }: { message: string }): React.ReactElement {
 }
 
 describe('ErrorBoundary', () => {
-  let consoleErrorSpy: jest.SpyInstance;
+  let consoleErrorSpy: MockInstance;
 
   beforeEach(() => {
     // React logs the caught error (and our componentDidCatch logs too).
     // Silence both so the expected error doesn't clutter test output.
-    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    consoleErrorSpy = rs.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -42,7 +45,7 @@ describe('ErrorBoundary', () => {
   });
 
   it('exposes the stack and copies a formatted report including host context', () => {
-    const writeText = jest.fn().mockResolvedValue(undefined);
+    const writeText = rs.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
 
     render(

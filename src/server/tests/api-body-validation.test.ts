@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect } from '@rstest/core';
+
 import { validateCreateProjectBody, validateUserPatchBody } from '../api-validation';
 
 // Regression coverage for issue #691: after the body-parser 1 -> 2 upgrade,

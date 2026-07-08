@@ -12,6 +12,8 @@
 //    segment; atan2(0, 0) === 0 used to force a zero-length final segment's
 //    arrowhead to point right regardless of the flow's real orientation.
 
+import { describe, it, expect } from '@rstest/core';
+
 import { finalSegmentAngle, retractFinalPointIntoCloud } from '../drawing/Flow';
 import { CloudRadius } from '../drawing/default';
 

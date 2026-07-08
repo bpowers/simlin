@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -31,7 +33,7 @@ function readPngDimensions(png: Uint8Array): { width: number; height: number } {
 
 // Drive the server's preview generation pipeline:
 // XMILE -> engine -> protobuf, then the worker's real pipeline function
-// (renderProjectToPng) run in-process so ts-jest tests the current source
+// (renderProjectToPng) run in-process so the test exercises the current source
 // rather than a compiled copy or an inline duplicate of the pipeline.
 async function generatePreview(modelName: string): Promise<Uint8Array> {
   const xmile = loadDefaultProject(modelName);

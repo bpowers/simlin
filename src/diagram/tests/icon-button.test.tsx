@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent, screen } from '@testing-library/react';
 import IconButton from '../components/IconButton';
@@ -17,7 +19,7 @@ describe('IconButton', () => {
   });
 
   test('calls onClick when clicked', () => {
-    const onClick = jest.fn();
+    const onClick = rs.fn();
     render(
       <IconButton aria-label="test" onClick={onClick}>
         ★
@@ -28,7 +30,7 @@ describe('IconButton', () => {
   });
 
   test('does not call onClick when disabled', () => {
-    const onClick = jest.fn();
+    const onClick = rs.fn();
     render(
       <IconButton aria-label="test" onClick={onClick} disabled>
         ★

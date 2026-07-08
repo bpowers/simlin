@@ -9,6 +9,8 @@
  * The API should be idiomatic TypeScript and mirror the pysimlin API for consistency.
  */
 
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

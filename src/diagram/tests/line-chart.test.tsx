@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, beforeAll, afterAll, beforeEach, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent } from '@testing-library/react';
 import { LineChart, ChartSeries } from '../LineChart';
@@ -76,8 +78,8 @@ afterAll(() => {
 
 // Mock setPointerCapture / releasePointerCapture on elements
 beforeEach(() => {
-  Element.prototype.setPointerCapture = jest.fn();
-  Element.prototype.releasePointerCapture = jest.fn();
+  Element.prototype.setPointerCapture = rs.fn();
+  Element.prototype.releasePointerCapture = rs.fn();
 });
 
 const simpleSeries: ChartSeries[] = [
@@ -314,9 +316,9 @@ describe('LineChart tooltip', () => {
 
 describe('LineChart drag interaction', () => {
   test('calls onDragStart on pointerdown when drag enabled', () => {
-    const onDragStart = jest.fn();
-    const onDragEnd = jest.fn();
-    const onPointDrag = jest.fn();
+    const onDragStart = rs.fn();
+    const onDragEnd = rs.fn();
+    const onPointDrag = rs.fn();
 
     const { container } = render(
       <LineChart
@@ -336,7 +338,7 @@ describe('LineChart drag interaction', () => {
   });
 
   test('calls setPointerCapture on pointerdown when drag enabled', () => {
-    const onPointDrag = jest.fn();
+    const onPointDrag = rs.fn();
 
     const { container } = render(
       <LineChart height={300} series={simpleSeries} yDomain={[0, 30]} onPointDrag={onPointDrag} />,
@@ -349,8 +351,8 @@ describe('LineChart drag interaction', () => {
   });
 
   test('calls onPointDrag on pointermove while dragging', () => {
-    const onPointDrag = jest.fn();
-    const onDragStart = jest.fn();
+    const onPointDrag = rs.fn();
+    const onDragStart = rs.fn();
 
     const { container } = render(
       <LineChart
@@ -375,7 +377,7 @@ describe('LineChart drag interaction', () => {
   });
 
   test('clamps drag newY to yDomain', () => {
-    const onPointDrag = jest.fn();
+    const onPointDrag = rs.fn();
 
     const { container } = render(
       <LineChart height={300} series={simpleSeries} yDomain={[0, 30]} onPointDrag={onPointDrag} />,
@@ -395,7 +397,7 @@ describe('LineChart drag interaction', () => {
   });
 
   test('calls releasePointerCapture on pointerup', () => {
-    const onPointDrag = jest.fn();
+    const onPointDrag = rs.fn();
 
     const { container } = render(
       <LineChart height={300} series={simpleSeries} yDomain={[0, 30]} onPointDrag={onPointDrag} />,
@@ -409,7 +411,7 @@ describe('LineChart drag interaction', () => {
   });
 
   test('calls releasePointerCapture on pointercancel', () => {
-    const onPointDrag = jest.fn();
+    const onPointDrag = rs.fn();
 
     const { container } = render(
       <LineChart height={300} series={simpleSeries} yDomain={[0, 30]} onPointDrag={onPointDrag} />,
@@ -423,9 +425,9 @@ describe('LineChart drag interaction', () => {
   });
 
   test('calls onDragEnd on pointerup', () => {
-    const onDragStart = jest.fn();
-    const onDragEnd = jest.fn();
-    const onPointDrag = jest.fn();
+    const onDragStart = rs.fn();
+    const onDragEnd = rs.fn();
+    const onPointDrag = rs.fn();
 
     const { container } = render(
       <LineChart
@@ -446,7 +448,7 @@ describe('LineChart drag interaction', () => {
   });
 
   test('does not call onPointDrag when not dragging', () => {
-    const onPointDrag = jest.fn();
+    const onPointDrag = rs.fn();
 
     const { container } = render(
       <LineChart height={300} series={simpleSeries} yDomain={[0, 30]} onPointDrag={onPointDrag} />,
@@ -460,8 +462,8 @@ describe('LineChart drag interaction', () => {
   });
 
   test('resets drag state on pointercancel', () => {
-    const onDragEnd = jest.fn();
-    const onPointDrag = jest.fn();
+    const onDragEnd = rs.fn();
+    const onPointDrag = rs.fn();
 
     const { container } = render(
       <LineChart

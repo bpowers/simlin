@@ -10,6 +10,8 @@
 // fixture is a small, well-known feedback model (one stock, one flow, three
 // auxes) where the LTM analysis surfaces nontrivial per-link scores.
 
+import { describe, it, expect, beforeAll, afterAll } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

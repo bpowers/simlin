@@ -2,6 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
+
 import * as React from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 
@@ -10,8 +13,8 @@ import type { GetProjectResponse, JsonProjectData } from '../api';
 import { Editor as EditorMock } from '../test-utils/diagram-mock';
 import type { ClientWsMessage, UpdatesSocket } from '../ws';
 
-function makeFetchResolving(response: GetProjectResponse, status = 200): jest.Mock {
-  return jest.fn().mockResolvedValue({
+function makeFetchResolving(response: GetProjectResponse, status = 200): Mock {
+  return rs.fn().mockResolvedValue({
     ok: status >= 200 && status < 400,
     status,
     json: async () => response,
@@ -111,7 +114,7 @@ describe('EditorHost', () => {
   });
 
   test('renders an error banner on fetch failure', async () => {
-    globalThis.fetch = jest.fn().mockResolvedValue({
+    globalThis.fetch = rs.fn().mockResolvedValue({
       ok: false,
       status: 404,
       json: async () => ({ error: 'not found' }),
@@ -125,7 +128,7 @@ describe('EditorHost', () => {
 
   test('onSave POSTs the project JSON and resolves with the new version', async () => {
     // First call (GET): the initial fetch. Second call (POST): the save.
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -168,7 +171,7 @@ describe('EditorHost', () => {
   });
 
   test('onSave invokes onPathRedirect when the server returns a different path', async () => {
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -186,7 +189,7 @@ describe('EditorHost', () => {
       });
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
-    const onPathRedirect = jest.fn();
+    const onPathRedirect = rs.fn();
     render(<EditorHost path="population.mdl" onPathRedirect={onPathRedirect} />);
 
     await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
@@ -202,7 +205,7 @@ describe('EditorHost', () => {
   });
 
   test('onSave does not invoke onPathRedirect when the server keeps the same path', async () => {
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -220,7 +223,7 @@ describe('EditorHost', () => {
       });
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
-    const onPathRedirect = jest.fn();
+    const onPathRedirect = rs.fn();
     render(<EditorHost path="teacup.stmx" onPathRedirect={onPathRedirect} />);
 
     await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
@@ -235,7 +238,7 @@ describe('EditorHost', () => {
 
   test('on 409, refetches GET, invokes onConflict with the latest state, and throws a friendly error (AC3.6)', async () => {
     // 1) initial GET, 2) POST returns 409, 3) refetch GET returns the latest.
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -266,7 +269,7 @@ describe('EditorHost', () => {
       });
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
-    const onConflict = jest.fn();
+    const onConflict = rs.fn();
     render(<EditorHost path="teacup.stmx" onConflict={onConflict} />);
 
     await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
@@ -284,7 +287,7 @@ describe('EditorHost', () => {
   });
 
   test('on 422, throws a formatted error containing each validation detail', async () => {
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -343,7 +346,7 @@ describe('EditorHost', () => {
   });
 
   test('on 422 with no details, throws a generic save-failed error', async () => {
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -369,7 +372,7 @@ describe('EditorHost', () => {
   });
 
   test('on 409 without an onConflict callback, EditorHost re-renders with the latest payload', async () => {
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -416,7 +419,7 @@ describe('EditorHost', () => {
   });
 
   test('refetches and remounts the Editor when liveVersion advances past state.version', async () => {
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -457,7 +460,7 @@ describe('EditorHost', () => {
     // EditorHost knows about version 1 (via the save's POST response),
     // a subsequent WS echo with liveVersion=1 must NOT trigger a refetch
     // — this is the loop-prevention requirement.
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -504,7 +507,7 @@ describe('EditorHost', () => {
   });
 
   test('liveVersion=0 default does not trigger a refetch on initial render', async () => {
-    const fetchMock = jest.fn().mockResolvedValueOnce({
+    const fetchMock = rs.fn().mockResolvedValueOnce({
       ok: true,
       status: 200,
       json: async () => ({
@@ -524,7 +527,7 @@ describe('EditorHost', () => {
   });
 
   test('liveVersion does not trigger a refetch when no path is selected', async () => {
-    const fetchMock = jest.fn();
+    const fetchMock = rs.fn();
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     const { rerender } = render(<EditorHost path={null} liveVersion={0} />);
@@ -533,7 +536,7 @@ describe('EditorHost', () => {
   });
 
   test('shows a "model was updated on disk" toast when liveSource is disk', async () => {
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -568,7 +571,7 @@ describe('EditorHost', () => {
   });
 
   test('does not show the disk toast when liveSource is user', async () => {
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -604,7 +607,7 @@ describe('EditorHost', () => {
     // while simultaneously delivering a disk event whose liveVersion=1 was
     // meant for path A. The toast must NOT appear because the event belongs
     // to a path that is no longer active.
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -646,9 +649,9 @@ describe('EditorHost', () => {
   });
 
   test('disk toast auto-dismisses after the timeout', async () => {
-    jest.useFakeTimers();
+    rs.useFakeTimers();
     try {
-      const fetchMock = jest
+      const fetchMock = rs
         .fn()
         .mockResolvedValueOnce({
           ok: true,
@@ -686,12 +689,12 @@ describe('EditorHost', () => {
       // Advance past the 5s auto-dismiss window. Use act so React flushes
       // the resulting state update synchronously.
       act(() => {
-        jest.advanceTimersByTime(5000);
+        rs.advanceTimersByTime(5000);
       });
 
       expect(screen.queryByRole('status')).toBeNull();
     } finally {
-      jest.useRealTimers();
+      rs.useRealTimers();
     }
   });
 
@@ -726,7 +729,7 @@ describe('EditorHost', () => {
   });
 
   test('emits projectFocused for the new path when path changes', async () => {
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -758,7 +761,7 @@ describe('EditorHost', () => {
     // recognize the path-change case where liveVersion already matches
     // the version the host is holding, and skip the refetch — otherwise
     // the editor remounts unnecessarily and loses in-flight state.
-    const fetchMock = jest.fn().mockResolvedValue({
+    const fetchMock = rs.fn().mockResolvedValue({
       ok: true,
       status: 200,
       json: async () => ({ json: '{"v":0}', version: 0, source_format: 'stmx' }),
@@ -790,7 +793,7 @@ describe('EditorHost', () => {
     // Sanity check the symmetric case: a real path swap to a path with a
     // newer live version triggers the refetch as before. Without this,
     // the rename optimization could mask broken refetch behavior.
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -860,7 +863,7 @@ describe('EditorHost', () => {
   });
 
   test('debounces selectionChanged frames and emits the latest idents (AC6.2)', async () => {
-    jest.useFakeTimers();
+    rs.useFakeTimers();
     try {
       globalThis.fetch = makeFetchResolving({
         json: '{}',
@@ -885,28 +888,28 @@ describe('EditorHost', () => {
       // Second selection arrives 50ms later; the in-flight timer should
       // be cancelled and rescheduled with the newer idents.
       act(() => {
-        jest.advanceTimersByTime(50);
+        rs.advanceTimersByTime(50);
       });
       onSelectionChanged?.(['a', 'b']);
 
       // 150ms after the SECOND call (so 200ms total) the debounce fires
       // exactly once with the latest payload.
       act(() => {
-        jest.advanceTimersByTime(149);
+        rs.advanceTimersByTime(149);
       });
       expect(sent).toEqual([]);
       act(() => {
-        jest.advanceTimersByTime(1);
+        rs.advanceTimersByTime(1);
       });
 
       expect(sent).toEqual([{ type: 'selectionChanged', path: 'a.stmx', variableIdents: ['a', 'b'] }]);
     } finally {
-      jest.useRealTimers();
+      rs.useRealTimers();
     }
   });
 
   test('cancels pending selectionChanged on unmount', async () => {
-    jest.useFakeTimers();
+    rs.useFakeTimers();
     try {
       globalThis.fetch = makeFetchResolving({
         json: '{}',
@@ -929,12 +932,12 @@ describe('EditorHost', () => {
       // cleared so no stale send() lands after the host is gone.
       unmount();
       act(() => {
-        jest.advanceTimersByTime(500);
+        rs.advanceTimersByTime(500);
       });
 
       expect(sent).toEqual([]);
     } finally {
-      jest.useRealTimers();
+      rs.useRealTimers();
     }
   });
 
@@ -944,9 +947,9 @@ describe('EditorHost', () => {
     // pending frame must NOT fire under B's path: emitting A's idents
     // against B produces phantom MCP notifications referencing identifiers
     // that may not exist in B at all.
-    jest.useFakeTimers();
+    rs.useFakeTimers();
     try {
-      const fetchMock = jest
+      const fetchMock = rs
         .fn()
         .mockResolvedValueOnce({
           ok: true,
@@ -972,26 +975,26 @@ describe('EditorHost', () => {
 
       // Inside the debounce window, swap to path B before the timer fires.
       act(() => {
-        jest.advanceTimersByTime(50);
+        rs.advanceTimersByTime(50);
       });
       rerender(<EditorHost path="b.stmx" socket={socket} />);
       sent.length = 0; // discard the projectFocused frame from the swap
 
       // Advance past the 150ms debounce. The pending timer fires.
       act(() => {
-        jest.advanceTimersByTime(150);
+        rs.advanceTimersByTime(150);
       });
 
       // No selection frame should be emitted: A's idents do not belong to
       // B's namespace, and the selection was never re-fired against B.
       expect(sent.filter((m) => m.type === 'selectionChanged')).toEqual([]);
     } finally {
-      jest.useRealTimers();
+      rs.useRealTimers();
     }
   });
 
   test('selectionChanged uses the current path when emitted', async () => {
-    jest.useFakeTimers();
+    rs.useFakeTimers();
     try {
       globalThis.fetch = makeFetchResolving({
         json: '{}',
@@ -1009,7 +1012,7 @@ describe('EditorHost', () => {
 
       EditorMock.lastProps?.onSelectionChanged?.(['teacup_temperature']);
       act(() => {
-        jest.advanceTimersByTime(150);
+        rs.advanceTimersByTime(150);
       });
 
       expect(sent).toEqual([
@@ -1020,12 +1023,12 @@ describe('EditorHost', () => {
         },
       ]);
     } finally {
-      jest.useRealTimers();
+      rs.useRealTimers();
     }
   });
 
   test('does not crash when onSelectionChanged fires without a socket', async () => {
-    jest.useFakeTimers();
+    rs.useFakeTimers();
     try {
       globalThis.fetch = makeFetchResolving({
         json: '{}',
@@ -1041,12 +1044,12 @@ describe('EditorHost', () => {
 
       EditorMock.lastProps?.onSelectionChanged?.(['a']);
       act(() => {
-        jest.advanceTimersByTime(150);
+        rs.advanceTimersByTime(150);
       });
       // No assertion required — the test passes if no exception is
       // thrown when the optional socket is absent.
     } finally {
-      jest.useRealTimers();
+      rs.useRealTimers();
     }
   });
 
@@ -1054,7 +1057,7 @@ describe('EditorHost', () => {
     // Five selection events arrive at 100ms intervals. The debounce window
     // is 150ms so each event resets the timer. After 500ms total only one
     // frame should be sent, carrying the idents from the final event.
-    jest.useFakeTimers();
+    rs.useFakeTimers();
     try {
       globalThis.fetch = makeFetchResolving({
         json: '{}',
@@ -1077,7 +1080,7 @@ describe('EditorHost', () => {
       for (let i = 1; i <= 5; i++) {
         onSelectionChanged?.([`v${i}`]);
         act(() => {
-          jest.advanceTimersByTime(100);
+          rs.advanceTimersByTime(100);
         });
       }
 
@@ -1087,13 +1090,13 @@ describe('EditorHost', () => {
 
       // Advance past the 150ms debounce window from the last event.
       act(() => {
-        jest.advanceTimersByTime(50);
+        rs.advanceTimersByTime(50);
       });
 
       expect(sent).toHaveLength(1);
       expect(sent[0]).toEqual({ type: 'selectionChanged', path: 'a.stmx', variableIdents: ['v5'] });
     } finally {
-      jest.useRealTimers();
+      rs.useRealTimers();
     }
   });
 
@@ -1109,7 +1112,7 @@ describe('EditorHost', () => {
       resolveConflictRefetch = resolve;
     });
 
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -1186,7 +1189,7 @@ describe('EditorHost', () => {
       resolvePost = resolve;
     });
 
-    const fetchMock = jest
+    const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
         ok: true,
