@@ -9,7 +9,7 @@ use simlin::*;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{self as engine};
 
-use crate::common::open_project_from_datamodel;
+use crate::common::{expect_no_error, open_project_from_datamodel};
 
 #[test]
 fn test_project_apply_patch_commits() {
@@ -706,19 +706,7 @@ fn test_project_apply_patch_set_sim_specs() {
             &mut out_error,
         );
 
-        if !out_error.is_null() {
-            let err_code = simlin_error_get_code(out_error);
-            let err_msg = simlin_error_get_message(out_error);
-            let msg_str = if !err_msg.is_null() {
-                std::ffi::CStr::from_ptr(err_msg)
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                "no message".to_string()
-            };
-            simlin_error_free(out_error);
-            panic!("error setting sim specs: {:?} - {}", err_code, msg_str);
-        }
+        expect_no_error(out_error, "setSimSpecs patch");
         assert!(collected_errors.is_null());
 
         let new_start = (*proj).datamodel.lock().unwrap().sim_specs.start;
@@ -792,19 +780,7 @@ fn test_project_apply_patch_project_and_model_ops() {
             &mut out_error,
         );
 
-        if !out_error.is_null() {
-            let err_code = simlin_error_get_code(out_error);
-            let err_msg = simlin_error_get_message(out_error);
-            let msg_str = if !err_msg.is_null() {
-                std::ffi::CStr::from_ptr(err_msg)
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                "no message".to_string()
-            };
-            simlin_error_free(out_error);
-            panic!("error with combined ops: {:?} - {}", err_code, msg_str);
-        }
+        expect_no_error(out_error, "combined project+model ops patch");
         assert!(collected_errors.is_null());
 
         let new_stop = (*proj).datamodel.lock().unwrap().sim_specs.stop;
@@ -1172,29 +1148,18 @@ fn test_apply_patch_multiple_ops_per_model() {
 fn test_apply_patch_xmile_empty_equation_allow_errors() {
     // Reproduces the WASM test scenario: open a XMILE model and apply a patch
     // with an empty equation variable, with allow_errors = true.
+    // Hard failure, not a skip: a silently skipped fixture turns this test
+    // into a no-op pass (GH #897).
     let teacup_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../src/pysimlin/tests/fixtures/teacup.stmx");
-    if !teacup_path.exists() {
-        eprintln!("missing teacup.stmx fixture; skipping");
-        return;
-    }
-    let data = std::fs::read(&teacup_path).unwrap();
+    let data = std::fs::read(&teacup_path)
+        .unwrap_or_else(|e| panic!("teacup.stmx fixture must exist at {teacup_path:?}: {e}"));
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
         let proj =
             simlin_project_open_xmile(data.as_ptr(), data.len(), &mut err as *mut *mut SimlinError);
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project_open_xmile failed: {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project_open_xmile");
         assert!(!proj.is_null());
 
         // Apply a patch adding an auxiliary with an empty equation, allow_errors=true
@@ -1226,20 +1191,7 @@ fn test_apply_patch_xmile_empty_equation_allow_errors() {
         );
 
         // Should succeed because allow_errors is true
-        if !out_error.is_null() {
-            let code = simlin_error_get_code(out_error);
-            let msg_ptr = simlin_error_get_message(out_error);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(out_error);
-            panic!(
-                "expected no error when allow_errors=true, got {:?}: {}",
-                code, msg
-            );
-        }
+        expect_no_error(out_error, "apply_patch with allow_errors=true");
 
         if !collected_errors.is_null() {
             simlin_error_free(collected_errors);
@@ -1253,13 +1205,12 @@ fn test_apply_patch_xmile_empty_equation_allow_errors() {
 fn test_apply_patch_xmile_empty_equation_reject() {
     // Reproduces the WASM test scenario: open a XMILE model and apply a patch
     // with an empty equation variable, with allow_errors = false (should reject).
+    // Hard failure, not a skip: a silently skipped fixture turns this test
+    // into a no-op pass (GH #897).
     let teacup_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../src/pysimlin/tests/fixtures/teacup.stmx");
-    if !teacup_path.exists() {
-        eprintln!("missing teacup.stmx fixture; skipping");
-        return;
-    }
-    let data = std::fs::read(&teacup_path).unwrap();
+    let data = std::fs::read(&teacup_path)
+        .unwrap_or_else(|e| panic!("teacup.stmx fixture must exist at {teacup_path:?}: {e}"));
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1587,13 +1538,12 @@ fn test_apply_patch_upsert_view_fast_path() {
 /// in the diagram editor (panning the canvas).
 #[test]
 fn test_apply_patch_upsert_view_xmile_model() {
+    // Hard failure, not a skip: a silently skipped fixture turns this test
+    // into a no-op pass (GH #897).
     let teacup_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../src/pysimlin/tests/fixtures/teacup.stmx");
-    if !teacup_path.exists() {
-        eprintln!("missing teacup.stmx fixture; skipping");
-        return;
-    }
-    let data = std::fs::read(&teacup_path).unwrap();
+    let data = std::fs::read(&teacup_path)
+        .unwrap_or_else(|e| panic!("teacup.stmx fixture must exist at {teacup_path:?}: {e}"));
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1640,20 +1590,7 @@ fn test_apply_patch_upsert_view_xmile_model() {
             &mut out_error,
         );
 
-        if !out_error.is_null() {
-            let code = simlin_error_get_code(out_error);
-            let msg_ptr = simlin_error_get_message(out_error);
-            let msg = if msg_ptr.is_null() {
-                "(null)"
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(out_error);
-            panic!(
-                "upsertView patch on xmile model should not fail: code={:?}, msg={}",
-                code, msg
-            );
-        }
+        expect_no_error(out_error, "upsertView patch on xmile model");
 
         if !collected.is_null() {
             simlin_error_free(collected);
@@ -1715,20 +1652,7 @@ fn test_apply_patch_upsert_view_does_not_panic() {
             &mut out_error,
         );
 
-        if !out_error.is_null() {
-            let code = simlin_error_get_code(out_error);
-            let msg_ptr = simlin_error_get_message(out_error);
-            let msg = if msg_ptr.is_null() {
-                "(null)"
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(out_error);
-            panic!(
-                "upsertView patch should not fail: code={:?}, msg={}",
-                code, msg
-            );
-        }
+        expect_no_error(out_error, "upsertView patch");
 
         if !collected.is_null() {
             simlin_error_free(collected);
@@ -1772,20 +1696,7 @@ fn test_apply_patch_upsert_view_does_not_panic() {
             &mut out_error,
         );
 
-        if !out_error.is_null() {
-            let code = simlin_error_get_code(out_error);
-            let msg_ptr = simlin_error_get_message(out_error);
-            let msg = if msg_ptr.is_null() {
-                "(null)"
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(out_error);
-            panic!(
-                "second upsertView patch should not fail: code={:?}, msg={}",
-                code, msg
-            );
-        }
+        expect_no_error(out_error, "second upsertView patch");
 
         if !collected.is_null() {
             simlin_error_free(collected);

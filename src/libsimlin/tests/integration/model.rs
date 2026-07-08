@@ -12,7 +12,7 @@ use simlin::*;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{self as engine};
 
-use crate::common::open_project_from_datamodel;
+use crate::common::{expect_no_error, open_project_from_datamodel};
 
 #[test]
 fn test_model_get_latex_equation() {
@@ -944,17 +944,7 @@ fn test_model_functions() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         // Test simlin_project_get_model_count
@@ -1011,10 +1001,7 @@ fn test_model_functions() {
             ptr::null(),
             &mut err_get_model_default as *mut *mut SimlinError,
         );
-        if !err_get_model_default.is_null() {
-            simlin_error_free(err_get_model_default);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model_default, "get_model");
         assert!(!model_default.is_null());
         assert_eq!((*model_default).model_name.as_str(), "model1");
 

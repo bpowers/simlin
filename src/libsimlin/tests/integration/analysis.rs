@@ -11,6 +11,8 @@ use simlin::*;
 use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
 
+use crate::common::expect_no_error;
+
 #[test]
 fn test_get_incoming_links() {
     // Create a project with a flow that depends on a rate and a stock using TestProject
@@ -34,17 +36,7 @@ fn test_get_incoming_links() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         let mut err_get_model: *mut SimlinError = ptr::null_mut();
@@ -53,10 +45,7 @@ fn test_get_incoming_links() {
             ptr::null(),
             &mut err_get_model as *mut *mut SimlinError,
         );
-        if !err_get_model.is_null() {
-            simlin_error_free(err_get_model);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model, "get_model");
         assert!(!model.is_null());
         err = ptr::null_mut();
         let sim = simlin_sim_new(model, false, &mut err as *mut *mut SimlinError);
@@ -281,17 +270,7 @@ fn test_get_incoming_links_with_private_variables() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         let mut err_get_model: *mut SimlinError = ptr::null_mut();
@@ -300,10 +279,7 @@ fn test_get_incoming_links_with_private_variables() {
             ptr::null(),
             &mut err_get_model as *mut *mut SimlinError,
         );
-        if !err_get_model.is_null() {
-            simlin_error_free(err_get_model);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model, "get_model");
         assert!(!model.is_null());
 
         // Test getting incoming links for 'smoothed' variable
@@ -400,17 +376,7 @@ fn test_get_incoming_links_nested_private_vars() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         let mut err_get_model: *mut SimlinError = ptr::null_mut();
@@ -419,10 +385,7 @@ fn test_get_incoming_links_nested_private_vars() {
             ptr::null(),
             &mut err_get_model as *mut *mut SimlinError,
         );
-        if !err_get_model.is_null() {
-            simlin_error_free(err_get_model);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model, "get_model");
         assert!(!model.is_null());
 
         // Test smooth1 dependencies - should resolve to base_input and delay1
@@ -544,17 +507,7 @@ fn test_analyze_get_links() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         // Test without LTM enabled - should get structural links only
@@ -564,10 +517,7 @@ fn test_analyze_get_links() {
             ptr::null(),
             &mut err_get_model as *mut *mut SimlinError,
         );
-        if !err_get_model.is_null() {
-            simlin_error_free(err_get_model);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model, "get_model");
         assert!(!model.is_null());
         err = ptr::null_mut();
         let sim = simlin_sim_new(model, false, &mut err as *mut *mut SimlinError);
@@ -630,10 +580,7 @@ fn test_analyze_get_links() {
             ptr::null(),
             &mut err_get_model_ltm as *mut *mut SimlinError,
         );
-        if !err_get_model_ltm.is_null() {
-            simlin_error_free(err_get_model_ltm);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model_ltm, "get_model");
         assert!(!model_ltm.is_null());
         err = ptr::null_mut();
         let sim_ltm = simlin_sim_new(model_ltm, true, &mut err as *mut *mut SimlinError);
@@ -871,10 +818,7 @@ fn test_analyze_get_links_no_loops() {
             ptr::null(),
             &mut err_get_model as *mut *mut SimlinError,
         );
-        if !err_get_model.is_null() {
-            simlin_error_free(err_get_model);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model, "get_model");
         assert!(!model.is_null());
         err = ptr::null_mut();
         let sim = simlin_sim_new(model, false, &mut err as *mut *mut SimlinError);
@@ -951,10 +895,7 @@ fn test_analyze_get_relative_loop_score_renamed() {
             ptr::null(),
             &mut err_get_model as *mut *mut SimlinError,
         );
-        if !err_get_model.is_null() {
-            simlin_error_free(err_get_model);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model, "get_model");
         assert!(!model.is_null());
         err = ptr::null_mut();
         let sim = simlin_sim_new(model, true, &mut err as *mut *mut SimlinError); // Enable LTM for relative loop scores

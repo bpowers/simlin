@@ -13,7 +13,7 @@ use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{self as engine};
 
-use crate::common::open_project_from_datamodel;
+use crate::common::{expect_error_code, expect_no_error, open_project_from_datamodel};
 
 /// Interactive set/get against a live VM: run part-way, override a simple
 /// constant, and read the new value back.
@@ -265,10 +265,7 @@ fn test_concurrent_project_ref_unref() {
             &mut err as *mut *mut SimlinError,
         );
 
-        if !err.is_null() {
-            simlin_error_free(err);
-            panic!("failed to create project");
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         // Add many references from multiple threads
@@ -323,10 +320,7 @@ fn test_concurrent_model_creation() {
             &mut err as *mut *mut SimlinError,
         );
 
-        if !err.is_null() {
-            simlin_error_free(err);
-            panic!("failed to create project");
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         const NUM_THREADS: usize = 8;
@@ -411,20 +405,14 @@ fn test_concurrent_sim_operations() {
             &mut err as *mut *mut SimlinError,
         );
 
-        if !err.is_null() {
-            simlin_error_free(err);
-            panic!("failed to create project");
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         // Get model
         let mut err_model: *mut SimlinError = ptr::null_mut();
         let model =
             simlin_project_get_model(proj, ptr::null(), &mut err_model as *mut *mut SimlinError);
-        if !err_model.is_null() {
-            simlin_error_free(err_model);
-            panic!("failed to get model");
-        }
+        expect_no_error(err_model, "get_model");
 
         const NUM_THREADS: usize = 5;
         let mut handles = vec![];
@@ -493,10 +481,7 @@ fn test_stress_ref_counting() {
             &mut err as *mut *mut SimlinError,
         );
 
-        if !err.is_null() {
-            simlin_error_free(err);
-            panic!("failed to create project");
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         const NUM_THREADS: usize = 20;
@@ -600,16 +585,7 @@ unsafe fn assert_sim_value(sim: *mut SimlinSim, name: &str, expected: f64, tol: 
         &mut out,
         &mut err as *mut *mut SimlinError,
     );
-    if !err.is_null() {
-        let msg_ptr = simlin_error_get_message(err);
-        let msg = if !msg_ptr.is_null() {
-            CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
-        } else {
-            ""
-        };
-        simlin_error_free(err);
-        panic!("get_value('{}') failed: {}", name, msg);
-    }
+    expect_no_error(err, &format!("get_value('{name}')"));
     assert!(
         (out - expected).abs() <= tol,
         "get_value('{}') = {}, expected {} (tol={})",
@@ -624,32 +600,14 @@ unsafe fn assert_sim_value(sim: *mut SimlinSim, name: &str, expected: f64, tol: 
 unsafe fn run_to_end(sim: *mut SimlinSim) {
     let mut err: *mut SimlinError = ptr::null_mut();
     simlin_sim_run_to_end(sim, &mut err as *mut *mut SimlinError);
-    if !err.is_null() {
-        let msg_ptr = simlin_error_get_message(err);
-        let msg = if !msg_ptr.is_null() {
-            CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
-        } else {
-            ""
-        };
-        simlin_error_free(err);
-        panic!("run_to_end failed: {}", msg);
-    }
+    expect_no_error(err, "run_to_end");
 }
 
 /// Helper: reset the sim and assert success.
 unsafe fn reset_sim(sim: *mut SimlinSim) {
     let mut err: *mut SimlinError = ptr::null_mut();
     simlin_sim_reset(sim, &mut err as *mut *mut SimlinError);
-    if !err.is_null() {
-        let msg_ptr = simlin_error_get_message(err);
-        let msg = if !msg_ptr.is_null() {
-            CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
-        } else {
-            ""
-        };
-        simlin_error_free(err);
-        panic!("reset failed: {}", msg);
-    }
+    expect_no_error(err, "reset");
 }
 
 /// Helper: get the time series for a variable, returning a Vec<f64>.
@@ -666,46 +624,9 @@ unsafe fn get_series_vec(sim: *mut SimlinSim, name: &str, max_len: usize) -> Vec
         &mut written,
         &mut err as *mut *mut SimlinError,
     );
-    if !err.is_null() {
-        let msg_ptr = simlin_error_get_message(err);
-        let msg = if !msg_ptr.is_null() {
-            CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
-        } else {
-            ""
-        };
-        simlin_error_free(err);
-        panic!("get_series('{}') failed: {}", name, msg);
-    }
+    expect_no_error(err, &format!("get_series('{name}')"));
     buf.truncate(written);
     buf
-}
-
-/// Helper: consume `err`, panicking with `ctx` if it is non-null.
-///
-/// Copies the message out of the error BEFORE freeing it: reading the
-/// message pointer after `simlin_error_free` is a use-after-free (an earlier
-/// revision of these tests did exactly that and printed garbage on failure).
-unsafe fn expect_no_error(err: *mut SimlinError, ctx: &str) {
-    if err.is_null() {
-        return;
-    }
-    let code = simlin_error_get_code(err);
-    let msg_ptr = simlin_error_get_message(err);
-    let msg = if msg_ptr.is_null() {
-        String::new()
-    } else {
-        CStr::from_ptr(msg_ptr).to_string_lossy().into_owned()
-    };
-    simlin_error_free(err);
-    panic!("{ctx} failed with error {code:?}: {msg}");
-}
-
-/// Helper: assert `err` is non-null and carries exactly `expected`; frees it.
-unsafe fn expect_error_code(err: *mut SimlinError, expected: SimlinErrorCode, ctx: &str) {
-    assert!(!err.is_null(), "{ctx}: expected an error but got success");
-    let code = simlin_error_get_code(err);
-    simlin_error_free(err);
-    assert_eq!(code, expected, "{ctx}: unexpected error code");
 }
 
 /// Helper: resolve a variable's data-buffer offset via `simlin_sim_get_offset`.
@@ -1312,17 +1233,7 @@ fn test_sim_lifecycle() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
         let mut err_get_model: *mut SimlinError = ptr::null_mut();
         let model = simlin_project_get_model(
@@ -1330,10 +1241,7 @@ fn test_sim_lifecycle() {
             ptr::null(),
             &mut err_get_model as *mut *mut SimlinError,
         );
-        if !err_get_model.is_null() {
-            simlin_error_free(err_get_model);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model, "get_model");
         assert!(!model.is_null());
         // Project ref count should have increased when model was created
         assert_eq!((*proj).ref_count.load(Ordering::SeqCst), 2);
@@ -1389,17 +1297,7 @@ fn test_ltm_enabled_sim() {
             buf.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("project open failed with error {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "project open");
         assert!(!proj.is_null());
 
         let mut err_get_model: *mut SimlinError = ptr::null_mut();
@@ -1408,10 +1306,7 @@ fn test_ltm_enabled_sim() {
             ptr::null(),
             &mut err_get_model as *mut *mut SimlinError,
         );
-        if !err_get_model.is_null() {
-            simlin_error_free(err_get_model);
-            panic!("get_model failed");
-        }
+        expect_no_error(err_get_model, "get_model");
         assert!(!model.is_null());
 
         // Create simulation with LTM enabled
@@ -1516,17 +1411,7 @@ fn test_mark2_mdl_simulates_through_ffi() {
             data.len(),
             &mut err as *mut *mut SimlinError,
         );
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("open_vensim failed: {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "open_vensim");
         assert!(!proj.is_null());
 
         err = ptr::null_mut();
@@ -1536,32 +1421,12 @@ fn test_mark2_mdl_simulates_through_ffi() {
 
         err = ptr::null_mut();
         let sim = simlin_sim_new(model, false, &mut err as *mut *mut SimlinError);
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("sim_new failed: {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "sim_new");
         assert!(!sim.is_null());
 
         err = ptr::null_mut();
         simlin_sim_run_to_end(sim, &mut err as *mut *mut SimlinError);
-        if !err.is_null() {
-            let code = simlin_error_get_code(err);
-            let msg_ptr = simlin_error_get_message(err);
-            let msg = if msg_ptr.is_null() {
-                ""
-            } else {
-                CStr::from_ptr(msg_ptr).to_str().unwrap()
-            };
-            simlin_error_free(err);
-            panic!("run_to_end failed: {:?}: {}", code, msg);
-        }
+        expect_no_error(err, "run_to_end");
 
         simlin_sim_unref(sim);
         simlin_model_unref(model);
