@@ -279,6 +279,152 @@ describe('ACTIVE INITIAL under arrayedEquation.compat', () => {
   });
 });
 
+describe('conveyor and queue compat markers', () => {
+  // The engine's JSON schema (json.rs Compat) carries conveyor/queue markers on
+  // stocks and leakage/spreadflow/overflow markers on flows. The editor
+  // re-serializes a variable as a FULL upsert on any edit (see Editor.tsx), so
+  // datamodel.ts must round-trip them or editing an unrelated field of a
+  // conveyor/queue model silently demotes it to a plain stock-and-flow model.
+  const fullConveyorJson = {
+    transitTime: '5',
+    capacity: '100',
+    inflowLimit: '10',
+    sample: 'TIME > 3',
+    arrest: '2',
+    discrete: true,
+    batchIntegrity: true,
+    oneAtATime: true,
+    exponentialLeak: true,
+    ignoreEarlierZoneLosses: true,
+  };
+
+  it('stockFromJson reads compat.conveyor with every option', () => {
+    const stock = stockFromJson({
+      name: 'belt',
+      inflows: ['loading'],
+      outflows: ['shipping'],
+      compat: { conveyor: fullConveyorJson },
+    });
+    expect(stock.conveyor).toEqual({
+      transitTime: '5',
+      capacity: '100',
+      inflowLimit: '10',
+      sample: 'TIME > 3',
+      arrest: '2',
+      discrete: true,
+      batchIntegrity: true,
+      oneAtATime: true,
+      exponentialLeak: true,
+      ignoreEarlierZoneLosses: true,
+    });
+    expect(stock.queue).toBe(false);
+  });
+
+  it('stockFromJson applies absent-option defaults matching the Rust reader', () => {
+    const stock = stockFromJson({
+      name: 'belt',
+      inflows: [],
+      outflows: [],
+      compat: { conveyor: { transitTime: '4' } },
+    });
+    expect(stock.conveyor).toEqual({
+      transitTime: '4',
+      capacity: undefined,
+      inflowLimit: undefined,
+      sample: undefined,
+      arrest: undefined,
+      discrete: false,
+      batchIntegrity: false,
+      oneAtATime: false,
+      exponentialLeak: false,
+      ignoreEarlierZoneLosses: false,
+    });
+  });
+
+  it('stock conveyor round-trips through toJson, omitting default-valued options', () => {
+    const stock = stockFromJson({
+      name: 'belt',
+      inflows: [],
+      outflows: [],
+      compat: { conveyor: { transitTime: '4', discrete: true } },
+    });
+    const json = stockToJson(stock);
+    // Mirror the Rust serializer's skip_serializing_if: absent options and
+    // false booleans are omitted, not written as null/false.
+    expect(json.compat?.conveyor).toStrictEqual({ transitTime: '4', discrete: true });
+    expect(stockFromJson(json).conveyor).toEqual(stock.conveyor);
+  });
+
+  it('stock queue marker round-trips as the empty-object wire marker', () => {
+    const stock = stockFromJson({ name: 'backlog', inflows: [], outflows: [], compat: { queue: {} } });
+    expect(stock.queue).toBe(true);
+    const json = stockToJson(stock);
+    expect(json.compat?.queue).toStrictEqual({});
+    expect(stockFromJson(json).queue).toBe(true);
+  });
+
+  it('a plain stock emits no conveyor/queue compat', () => {
+    const stock = stockFromJson({ name: 'pop', inflows: [], outflows: [] });
+    expect(stock.conveyor).toBeUndefined();
+    expect(stock.queue).toBe(false);
+    const json = stockToJson(stock);
+    expect(json.compat).toBeUndefined();
+  });
+
+  it('flowFromJson reads compat.leakage with every option', () => {
+    const flow = flowFromJson({
+      name: 'leak',
+      compat: { leakage: { fraction: '0.1', integers: true, zoneStart: '0', zoneEnd: '1' } },
+    });
+    expect(flow.leakage).toEqual({ fraction: '0.1', integers: true, zoneStart: '0', zoneEnd: '1' });
+  });
+
+  it('flow leakage round-trips through toJson, omitting default-valued options', () => {
+    const flow = flowFromJson({ name: 'leak', compat: { leakage: { fraction: '0.1' } } });
+    expect(flow.leakage).toEqual({ fraction: '0.1', integers: false, zoneStart: undefined, zoneEnd: undefined });
+    const json = flowToJson(flow);
+    expect(json.compat?.leakage).toStrictEqual({ fraction: '0.1' });
+    expect(flowFromJson(json).leakage).toEqual(flow.leakage);
+  });
+
+  it('an options-free leakage marker still round-trips', () => {
+    // <leak/> with no attributes is a valid XMILE leakage marker; dropping the
+    // empty object would demote the flow to a plain outflow.
+    const flow = flowFromJson({ name: 'leak', compat: { leakage: {} } });
+    expect(flow.leakage).toEqual({ fraction: undefined, integers: false, zoneStart: undefined, zoneEnd: undefined });
+    const json = flowToJson(flow);
+    expect(json.compat?.leakage).toStrictEqual({});
+  });
+
+  it('flow spreadflow round-trips every variant', () => {
+    const variants = [
+      { type: 'beginning' },
+      { type: 'even' },
+      { type: 'dest' },
+      { type: 'dist', distribution: '1 + 2' },
+      { type: 'source' },
+    ] as const;
+    for (const variant of variants) {
+      const flow = flowFromJson({ name: 'loading', compat: { spreadflow: variant } });
+      expect(flow.spreadflow).toEqual(variant);
+      const json = flowToJson(flow);
+      expect(json.compat?.spreadflow).toStrictEqual(variant);
+    }
+  });
+
+  it('flow overflow marker round-trips and false is omitted', () => {
+    const flow = flowFromJson({ name: 'spill', compat: { overflow: true } });
+    expect(flow.overflow).toBe(true);
+    const json = flowToJson(flow);
+    expect(json.compat?.overflow).toBe(true);
+    expect(flowFromJson(json).overflow).toBe(true);
+
+    const plain = flowFromJson({ name: 'rate' });
+    expect(plain.overflow).toBe(false);
+    expect(flowToJson(plain).compat).toBeUndefined();
+  });
+});
+
 describe('Flow', () => {
   it('should roundtrip correctly', () => {
     const flow: Flow = {

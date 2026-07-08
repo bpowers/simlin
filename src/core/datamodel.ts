@@ -23,6 +23,9 @@ import {
   type JsonArrayedEquation,
   type JsonElementEquation,
   type JsonDataSource,
+  type JsonConveyor,
+  type JsonLeakage,
+  type JsonSpreadFlow,
   type JsonView,
   type JsonViewElement,
   type JsonStockViewElement,
@@ -217,6 +220,144 @@ export function dataSourceToJson(ds: DataSource): JsonDataSource {
     rowOrCol: ds.rowOrCol,
     cell: ds.cell,
   };
+}
+
+// Conveyor/queue markers (XMILE stock/flow options). Carried on a variable's
+// compat so an edit to any other field does not silently demote a conveyor or
+// queue model to a plain stock-and-flow model -- the same fidelity contract as
+// activeInitial/dataSource (see tests/datamodel-roundtrip-e2e.test.ts). The
+// wire shapes are defined by the Rust json::{Conveyor, Leakage, SpreadFlow,
+// Queue} serializers (src/simlin-engine/src/json.rs): conveyor and queue ride
+// on stocks; leakage, spreadflow, and overflow ride on flows. The Rust JSON
+// reader also accepts these fields on auxes/modules (its Compat struct is
+// uniform), but no importer or editor ever produces them there, so Aux and
+// Module deliberately do not carry them.
+
+// A conveyor stock's belt parameters. String fields hold XMILE expressions;
+// an undefined optional / false boolean means the option was absent (the
+// documented default applies -- NOTE oneAtATime's absent-means-false caveat on
+// the engine's JsonConveyor).
+export interface Conveyor {
+  readonly transitTime: string;
+  readonly capacity: string | undefined;
+  readonly inflowLimit: string | undefined;
+  readonly sample: string | undefined;
+  readonly arrest: string | undefined;
+  readonly discrete: boolean;
+  readonly batchIntegrity: boolean;
+  readonly oneAtATime: boolean;
+  readonly exponentialLeak: boolean;
+  readonly ignoreEarlierZoneLosses: boolean;
+}
+
+export function conveyorFromJson(json: JsonConveyor): Conveyor {
+  return {
+    transitTime: json.transitTime,
+    capacity: json.capacity,
+    inflowLimit: json.inflowLimit,
+    sample: json.sample,
+    arrest: json.arrest,
+    discrete: json.discrete ?? false,
+    batchIntegrity: json.batchIntegrity ?? false,
+    oneAtATime: json.oneAtATime ?? false,
+    exponentialLeak: json.exponentialLeak ?? false,
+    ignoreEarlierZoneLosses: json.ignoreEarlierZoneLosses ?? false,
+  };
+}
+
+// Mirror the Rust serializer's skip_serializing_if: absent options and false
+// booleans are omitted from the wire form rather than written as null/false.
+export function conveyorToJson(c: Conveyor): JsonConveyor {
+  const result: JsonConveyor = { transitTime: c.transitTime };
+  if (c.capacity !== undefined) {
+    result.capacity = c.capacity;
+  }
+  if (c.inflowLimit !== undefined) {
+    result.inflowLimit = c.inflowLimit;
+  }
+  if (c.sample !== undefined) {
+    result.sample = c.sample;
+  }
+  if (c.arrest !== undefined) {
+    result.arrest = c.arrest;
+  }
+  if (c.discrete) {
+    result.discrete = true;
+  }
+  if (c.batchIntegrity) {
+    result.batchIntegrity = true;
+  }
+  if (c.oneAtATime) {
+    result.oneAtATime = true;
+  }
+  if (c.exponentialLeak) {
+    result.exponentialLeak = true;
+  }
+  if (c.ignoreEarlierZoneLosses) {
+    result.ignoreEarlierZoneLosses = true;
+  }
+  return result;
+}
+
+// Marks a flow as a conveyor leakage outflow. All options may be absent (an
+// attribute-free <leak/> is valid XMILE), so the marker's presence -- not any
+// field -- is what makes the flow a leak.
+export interface Leakage {
+  readonly fraction: string | undefined;
+  readonly integers: boolean;
+  readonly zoneStart: string | undefined;
+  readonly zoneEnd: string | undefined;
+}
+
+export function leakageFromJson(json: JsonLeakage): Leakage {
+  return {
+    fraction: json.fraction,
+    integers: json.integers ?? false,
+    zoneStart: json.zoneStart,
+    zoneEnd: json.zoneEnd,
+  };
+}
+
+export function leakageToJson(l: Leakage): JsonLeakage {
+  const result: JsonLeakage = {};
+  if (l.fraction !== undefined) {
+    result.fraction = l.fraction;
+  }
+  if (l.integers) {
+    result.integers = true;
+  }
+  if (l.zoneStart !== undefined) {
+    result.zoneStart = l.zoneStart;
+  }
+  if (l.zoneEnd !== undefined) {
+    result.zoneEnd = l.zoneEnd;
+  }
+  return result;
+}
+
+// Conveyor inflow-placement method; the dist variant carries its distribution
+// equation. Structurally identical to the wire JsonSpreadFlow, but core keeps
+// its own (readonly) type like every other datamodel type so in-memory values
+// stay decoupled from wire objects.
+export type SpreadFlow =
+  | { readonly type: 'beginning' }
+  | { readonly type: 'even' }
+  | { readonly type: 'dest' }
+  | { readonly type: 'dist'; readonly distribution: string }
+  | { readonly type: 'source' };
+
+export function spreadFlowFromJson(json: JsonSpreadFlow): SpreadFlow {
+  if (json.type === 'dist') {
+    return { type: 'dist', distribution: json.distribution };
+  }
+  return { type: json.type };
+}
+
+export function spreadFlowToJson(sf: SpreadFlow): JsonSpreadFlow {
+  if (sf.type === 'dist') {
+    return { type: 'dist', distribution: sf.distribution };
+  }
+  return { type: sf.type };
 }
 
 // Equation types
@@ -420,6 +561,18 @@ export interface Stock {
   readonly activeInitial: string | undefined;
   // External-data reference (Vensim GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT).
   readonly dataSource: DataSource | undefined;
+  // Conveyor belt parameters: present iff this stock is a conveyor. Optional
+  // (like connectorErrors) so the many Stock literals that predate conveyors
+  // stay valid; absent and undefined are equivalent ("not a conveyor").
+  readonly conveyor?: Conveyor | undefined;
+  // Queue marker: true iff this stock is a queue. The wire form is an
+  // empty-object marker (json::Queue, which carries no options -- XMILE §4.2),
+  // so a boolean loses nothing here; toJson re-emits the {} marker. Optional
+  // like conveyor; absent and false are equivalent. json.rs deliberately
+  // keeps Queue a struct so a vendor attribute can land later -- if a field
+  // is ever added there, this boolean becomes a new loss point and must be
+  // widened to a mirrored object type at the same time.
+  readonly queue?: boolean;
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
@@ -442,6 +595,16 @@ export interface Flow {
   readonly isPublic: boolean;
   readonly activeInitial: string | undefined;
   readonly dataSource: DataSource | undefined;
+  // Conveyor leakage marker: present iff this flow is a conveyor leakage
+  // outflow. Optional (like connectorErrors) so pre-conveyor Flow literals
+  // stay valid; absent and undefined are equivalent.
+  readonly leakage?: Leakage | undefined;
+  // Conveyor inflow-placement method (isee:spreadflow); present iff this flow
+  // selects a non-default placement into a conveyor. Optional like leakage.
+  readonly spreadflow?: SpreadFlow | undefined;
+  // Queue overflow marker (<overflow/> on a queue outflow). Optional like
+  // leakage; absent and false are equivalent.
+  readonly overflow?: boolean;
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
@@ -452,6 +615,9 @@ export interface Flow {
   readonly uid: number | undefined;
 }
 
+// Aux deliberately carries no conveyor/queue markers: the engine's JSON reader
+// accepts them on an aux only because its Compat struct is uniform, but no
+// importer or editor ever produces them there (they are stock/flow options).
 export interface Aux {
   readonly type: 'aux';
   readonly ident: string;
@@ -495,7 +661,8 @@ export interface Module {
   readonly references: readonly ModuleReference[];
   // The engine reads only canBeModuleInput, isPublic, and dataSource out of a
   // module's compat (From<Module> in json.rs uses defaults for the rest), so
-  // ACTIVE INITIAL and nonNegative are intentionally absent here.
+  // ACTIVE INITIAL, nonNegative, and the conveyor/queue markers are
+  // intentionally absent here.
   readonly canBeModuleInput: boolean;
   readonly isPublic: boolean;
   readonly dataSource: DataSource | undefined;
@@ -553,6 +720,8 @@ export function stockFromJson(json: JsonStock): Stock {
     isPublic: json.compat?.isPublic || json.isPublic || false,
     activeInitial: json.compat?.activeInitial,
     dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
+    conveyor: json.compat?.conveyor ? conveyorFromJson(json.compat.conveyor) : undefined,
+    queue: json.compat?.queue !== undefined,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -610,6 +779,19 @@ export function stockToJson(stock: Stock): JsonStock {
     }
     result.compat.dataSource = dataSourceToJson(stock.dataSource);
   }
+  if (stock.conveyor) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.conveyor = conveyorToJson(stock.conveyor);
+  }
+  if (stock.queue) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    // The queue marker's wire form is a bare empty object (json::Queue).
+    result.compat.queue = {};
+  }
   if (stock.documentation) {
     result.documentation = stock.documentation;
   }
@@ -641,6 +823,9 @@ export function flowFromJson(json: JsonFlow): Flow {
     // equation's compat (a legacy/native JSON shape the engine reader accepts).
     activeInitial: json.compat?.activeInitial || json.arrayedEquation?.compat?.activeInitial,
     dataSource: json.compat?.dataSource ? dataSourceFromJson(json.compat.dataSource) : undefined,
+    leakage: json.compat?.leakage ? leakageFromJson(json.compat.leakage) : undefined,
+    spreadflow: json.compat?.spreadflow ? spreadFlowFromJson(json.compat.spreadflow) : undefined,
+    overflow: json.compat?.overflow ?? false,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -698,6 +883,24 @@ export function flowToJson(flow: Flow): JsonFlow {
       result.compat = {};
     }
     result.compat.dataSource = dataSourceToJson(flow.dataSource);
+  }
+  if (flow.leakage) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.leakage = leakageToJson(flow.leakage);
+  }
+  if (flow.spreadflow) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.spreadflow = spreadFlowToJson(flow.spreadflow);
+  }
+  if (flow.overflow) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.overflow = true;
   }
   if (flow.documentation) {
     result.documentation = flow.documentation;

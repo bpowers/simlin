@@ -1,7 +1,5 @@
 # @simlin/core
 
-Last verified: 2026-05-15
-
 Shared data models and common utilities used by both frontend and backend TypeScript packages.
 
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
@@ -19,8 +17,10 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 ## Contracts
 
 - `Stock`, `Flow`, and `Aux` interfaces all carry `canBeModuleInput` and `isPublic` boolean fields. These are read from `compat` in JSON deserialization and written back to `compat` when true. The fields control which variables appear as module input/output ports in the diagram editor.
+- The full engine `compat` field set round-trips through `datamodel.ts`: `activeInitial`, `nonNegative`, `canBeModuleInput`, `isPublic`, `dataSource`, plus the conveyor/queue markers -- `conveyor`/`queue` on `Stock`, `leakage`/`spreadflow`/`overflow` on `Flow`. This is load-bearing: the editor re-serializes a variable as a FULL upsert on any edit (`Editor.tsx` via `stockToJson`/`flowToJson`/`auxToJson`), so any compat field the conversion drops is silently stripped from the model the moment an unrelated field is edited. `Aux` and `Module` deliberately omit the conveyor markers (the engine's uniform Compat accepts them there, but no importer or editor produces them on those kinds).
 - `Model.macroSpec?: MacroSpec` (`parameters`/`primaryOutput`/`additionalOutputs`) is set exactly when the model is a callable macro template (imported `:MACRO:` / XMILE `<macro>`). `macroSpecFromJson`/`macroSpecToJson` round-trip it; `additionalOutputs` is omitted from JSON when empty. Consumers gate macro-marked models out of module-reference UI (`@simlin/diagram`'s `isMacroModel`).
 
 ## Tests
 
-- `tests/datamodel.test.ts` -- Data model tests (includes round-trip serialization for `canBeModuleInput`/`isPublic`)
+- `tests/datamodel.test.ts` -- Data model tests (includes round-trip serialization for `canBeModuleInput`/`isPublic` and the conveyor/queue compat markers)
+- `tests/datamodel-roundtrip-e2e.test.ts` -- Drives the REAL WASM engine serializer to pin the editor's full-upsert fidelity contract (skips when the engine build is absent)
