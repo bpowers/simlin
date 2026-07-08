@@ -184,14 +184,17 @@ impl ContainerNaming {
 /// publish passes. `vec` is exit-first slat volumes for a conveyor or
 /// front-to-back batch volumes for a queue; the index/reducer math is identical.
 /// The reducer conventions match the VM's array reducers (`vm.rs`): `Sum` -> 0 on
-/// an empty container, every other reducer -> NaN; `Size` is the element count.
+/// an empty container, every other reducer -> NaN; `Size` is the element count;
+/// `Stddev` is the POPULATION standard deviation (divisor N, not N-1).
 /// `Slat(j)` is 1-based; `j` outside `[1, len]` yields NaN.
 ///
-/// The conveyor pass does NOT use this (its own [`container_value`] reads
-/// `ConveyorState::contents`/`belt_len` directly, so conveyor numerics stay
-/// byte-identical); the queue pass drives it over `QueueState::batch_contents`,
-/// where `total == Σ batch_contents` and `batch_count == batch_contents.len()`
-/// hold exactly, so the two agree with the queue's own accessors.
+/// The conveyor pass drives this over `ConveyorState::slat_contents` -- where
+/// `contents() == Σ slat_contents()` holds exactly and the slat count is
+/// `slat_contents().len()`, so the published values agree with the belt's own
+/// accessors --
+/// and the queue pass over `QueueState::batch_contents`, where
+/// `total == Σ batch_contents` and `batch_count == batch_contents.len()` hold
+/// the same way.
 pub(crate) fn container_value_from_slice(vec: &[f64], kind: &ContainerKind) -> f64 {
     match kind {
         ContainerKind::Slat(j) => {
@@ -2677,43 +2680,6 @@ pub fn init_belts(
     Ok(states)
 }
 
-/// Compute one container-access result from a belt's current (start-of-step)
-/// state (§10). The reducer conventions match the VM's array reducers (`vm.rs`):
-/// `Sum` -> 0 on an empty belt, every other reducer -> NaN; `Size` is the
-/// physical belt length. `Slat(j)` is 1-based from the exit; `j` outside
-/// `[1, L]` yields NaN.
-fn container_value(state: &ConveyorState, kind: &ContainerKind) -> f64 {
-    match kind {
-        ContainerKind::Slat(j) => {
-            if *j < 1 {
-                f64::NAN
-            } else {
-                state.slat_content(*j - 1).unwrap_or(f64::NAN)
-            }
-        }
-        ContainerKind::Size => state.belt_len() as f64,
-        ContainerKind::Sum => state.contents(),
-        ContainerKind::Mean | ContainerKind::Min | ContainerKind::Max | ContainerKind::Stddev => {
-            let slats = state.slat_contents();
-            if slats.is_empty() {
-                return f64::NAN;
-            }
-            match kind {
-                ContainerKind::Mean => slats.iter().sum::<f64>() / slats.len() as f64,
-                ContainerKind::Min => slats.iter().copied().fold(f64::INFINITY, f64::min),
-                ContainerKind::Max => slats.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                ContainerKind::Stddev => {
-                    let n = slats.len() as f64;
-                    let mean = slats.iter().sum::<f64>() / n;
-                    let var = slats.iter().map(|v| (v - mean).powf(2.0)).sum::<f64>() / n;
-                    var.sqrt()
-                }
-                _ => unreachable!("outer match restricts kind"),
-            }
-        }
-    }
-}
-
 /// Publish each conveyor's container-access results into their data-buffer slots
 /// (§10). Called at STEP-START -- before the Flows phase in the Euler loop and
 /// after belt initialization in `run_initials` -- so the published values
@@ -2721,14 +2687,26 @@ fn container_value(state: &ConveyorState, kind: &ContainerKind) -> f64 {
 /// step). Each container variable is a hidden no-flow STOCK, so the Flows phase
 /// never recomputes its slot and the Stocks phase leaves it unchanged: the value
 /// is visible to Flows-phase readers and survives the whole step.
+///
+/// The container value is computed by the SHARED [`container_value_from_slice`]
+/// over the belt's exit-first slat vector: `conv[j]` (1-based from the exit)
+/// maps to `slat_contents()[j-1]`, the reducers to the slat-volume vector, and
+/// `SIZE` to the physical belt length. The one `slat_contents()` allocation per
+/// belt is hoisted out of the per-container loop (and skipped entirely for a
+/// belt with no containers), mirroring
+/// [`crate::queue_compile::publish_queue_container_values`].
 pub fn publish_container_values(
     plans: &[ConveyorPlan],
     states: &[ConveyorState],
     curr: &mut [f64],
 ) {
     for (plan, state) in plans.iter().zip(states.iter()) {
+        if plan.containers.is_empty() {
+            continue;
+        }
+        let slats = state.slat_contents();
         for c in &plan.containers {
-            curr[c.off] = container_value(state, &c.kind);
+            curr[c.off] = container_value_from_slice(&slats, &c.kind);
         }
     }
 }
@@ -4146,6 +4124,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn container_value_from_slice_pins_belt_conventions() {
+        // The conveyor publish pass drives the SHARED container_value_from_slice
+        // over ConveyorState::slat_contents(); this pins the per-kind numerics
+        // it relies on. A physically EMPTY belt (zero slats) is unreachable
+        // through belt init (init_steady always builds >= 1 slat), so the
+        // empty-container conventions -- Sum -> 0 (additive identity), Size -> 0,
+        // Mean/Min/Max/Stddev -> NaN, any Slat index -> NaN, matching the VM's
+        // empty array reducers (`vm.rs`) -- are pinned here at the unit level.
+        let empty_belt = ConveyorState::new(0.25, false, false, false, Vec::new());
+        let slats = empty_belt.slat_contents();
+        assert!(slats.is_empty(), "a fresh belt has zero slats");
+        assert_eq!(container_value_from_slice(&slats, &ContainerKind::Sum), 0.0);
+        assert_eq!(
+            container_value_from_slice(&slats, &ContainerKind::Size),
+            0.0
+        );
+        for kind in [
+            ContainerKind::Mean,
+            ContainerKind::Min,
+            ContainerKind::Max,
+            ContainerKind::Stddev,
+            ContainerKind::Slat(1),
+        ] {
+            assert!(
+                container_value_from_slice(&slats, &kind).is_nan(),
+                "{kind:?} over an empty belt is NaN"
+            );
+        }
+        // A non-uniform vector with hand-computed oracles: Slat(j) is 1-based
+        // with both out-of-range sides NaN, and Stddev is the POPULATION
+        // standard deviation (divisor N, not N-1).
+        let v = [1.0, 2.0, 3.0, 4.0];
+        assert_eq!(container_value_from_slice(&v, &ContainerKind::Slat(1)), 1.0);
+        assert_eq!(container_value_from_slice(&v, &ContainerKind::Slat(4)), 4.0);
+        assert!(container_value_from_slice(&v, &ContainerKind::Slat(0)).is_nan());
+        assert!(container_value_from_slice(&v, &ContainerKind::Slat(5)).is_nan());
+        assert_eq!(container_value_from_slice(&v, &ContainerKind::Sum), 10.0);
+        assert_eq!(container_value_from_slice(&v, &ContainerKind::Mean), 2.5);
+        assert_eq!(container_value_from_slice(&v, &ContainerKind::Size), 4.0);
+        assert_eq!(container_value_from_slice(&v, &ContainerKind::Min), 1.0);
+        assert_eq!(container_value_from_slice(&v, &ContainerKind::Max), 4.0);
+        // mean 2.5 -> squared deviations (2.25, 0.25, 0.25, 2.25) -> var 1.25.
+        let stddev = container_value_from_slice(&v, &ContainerKind::Stddev);
+        assert!(
+            (stddev - 1.25f64.sqrt()).abs() < 1e-12,
+            "population stddev sqrt(1.25), got {stddev}"
+        );
     }
 
     #[test]

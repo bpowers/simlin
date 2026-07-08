@@ -340,12 +340,6 @@ impl ConveyorState {
         self.slats.iter().map(|s| s.content).sum()
     }
 
-    /// Current physical belt length in slats (can exceed `n_slats` after a
-    /// transit shrink leaves a stale tail).
-    pub fn belt_len(&self) -> usize {
-        self.slats.len()
-    }
-
     /// Entry depth `d = round(latched_transit / dt)` (§4.1/§6): the depth at
     /// which the next inserted cohort lands. Equal to the `d` [`phase_b`] uses
     /// for placement, so a caller building a per-step `dist`/`source` weight
@@ -358,8 +352,10 @@ impl ConveyorState {
         self.n_slats()
     }
 
-    /// Content of slat `j` (0 = exit), or `None` if out of range -- the basis
-    /// for 1-based `conveyor[j]` container access (§10).
+    /// Content of slat `j` (0 = exit), or `None` if out of range. Container
+    /// access (§10) reads the whole belt via [`Self::slat_contents`] +
+    /// `container_value_from_slice`; this single-slat accessor remains for
+    /// tests probing individual slats.
     pub fn slat_content(&self, j: usize) -> Option<f64> {
         self.slats.get(j).map(|s| s.content)
     }
