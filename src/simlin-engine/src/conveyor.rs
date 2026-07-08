@@ -929,6 +929,68 @@ impl ConveyorState {
         }
     }
 
+    // ----- queue-conveyor coupling (§6.3/§11, queues.md §9) -----
+
+    /// The admission budget `req = min(cap_room, limit_vol)` a queue directly
+    /// upstream may supply this DT (conveyors.md §6.3/§11). Computed AFTER this
+    /// conveyor's [`phase_a`](ConveyorState::phase_a) (which snapshots
+    /// `step_contents0` and frees belt room via leaks/exit) and BEFORE its
+    /// [`phase_b`](ConveyorState::phase_b), so the coupled queue can size how much
+    /// it serves. Uses the SAME `cap_room`/`limit_vol` formulas phase_b applies to
+    /// equation-driven inflows, so the coupled admission obeys capacity and the
+    /// (discrete) per-time-unit inflow limit identically.
+    ///
+    /// `other_conv_vol` is the sum of the OTHER unconditionally-admitted
+    /// conveyor-driven inflow volumes this DT (a conveyor chain feeding the same
+    /// belt), EXCLUDING the queue-supplied volume itself -- it is what we are
+    /// sizing, so it must not pre-charge its own capacity room. An arrested
+    /// conveyor requests nothing (the belt is frozen; the queue holds). Does NOT
+    /// mutate belt state.
+    pub fn admission_budget(
+        &self,
+        phase_a: &PhaseAResult,
+        capacity: f64,
+        in_limit: f64,
+        other_conv_vol: f64,
+    ) -> f64 {
+        if phase_a.arrested {
+            return 0.0;
+        }
+        let leaked: f64 = phase_a.leak_vols.iter().sum();
+        let contents_after = self.step_contents0 - leaked - phase_a.out_vol;
+        let cap_room = if capacity.is_infinite() {
+            f64::INFINITY
+        } else {
+            (capacity - contents_after - other_conv_vol).max(0.0)
+        };
+        // A conveyor with a queue upstream is always discrete (the compiler
+        // enforces `ConveyorQueueUpstreamNotDiscrete`), so `limit_vol` uses the
+        // discrete per-time-unit budget; the continuous branch is defense in
+        // depth so the formula stays identical to phase_b for any caller.
+        let limit_vol = if in_limit.is_infinite() {
+            f64::INFINITY
+        } else if self.discrete {
+            (in_limit - self.in_carry).max(0.0)
+        } else {
+            in_limit * self.dt
+        };
+        cap_room.min(limit_vol)
+    }
+
+    /// Debit the discrete per-time-unit inflow-limit budget by a queue-coupled
+    /// admission of `vol` (§6.3/§11). The coupled volume enters the belt through
+    /// the unconditional conveyor-driven inflow path (phase_b's `conv_inflows`),
+    /// which never touches `in_carry`, so the coupling records the consumption
+    /// here -- otherwise every DT within a time unit would see the full `in_limit`
+    /// budget and admit more than the limit permits. A continuous conveyor has no
+    /// per-time-unit carry (`limit_vol = in_limit * dt` each DT), so this is a
+    /// no-op there; a coupled conveyor is always discrete.
+    pub fn consume_inflow_budget(&mut self, vol: f64) {
+        if self.discrete {
+            self.in_carry += vol;
+        }
+    }
+
     /// Distribute an admitted `volume` across belt slats per `placement` (§8),
     /// adding the per-slat shares into `shares` (length `belt_len`, index 0 =
     /// exit). `d` is the entry depth. Each placement conserves volume exactly

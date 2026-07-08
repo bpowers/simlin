@@ -27,23 +27,28 @@
 //! ordinary Stocks phase produces exactly the total the [`QueueState`] side
 //! table holds (admit added `Σ f_in · dt`, serve removed `Σ f_out · dt`).
 //!
-//! Scope: this phase handles a SCALAR queue whose outflow(s) target a cloud or a
-//! regular (non-conveyor) stock -- the UNCONSTRAINED case (§4.3), which empties
-//! the queue every DT. Container access (§8), arrayed queues (§6), overflow with
-//! a blocked primary (§4.5), and the queue-conveyor coupling (§9) are later
-//! build-sequence steps (docs/design/queues.md §11); the structures here leave
-//! room for them ([`QueueOutflowKind`] gains a conveyor-coupled variant, and the
-//! per-outflow plan generalizes to N belts). An `<overflow/>` outflow to a
-//! cloud/stock with NO upstream conveyor is served here as an ordinary
-//! unconstrained sibling: with nothing to block the primary, the overflow drains
-//! nothing (§4.5), which the priority-order serve produces naturally (the first
-//! outflow empties the queue; the rest remove nothing, §4.3).
+//! Scope: an UNCONSTRAINED queue whose outflow(s) target a cloud or a regular
+//! (non-conveyor) stock empties the queue every DT (§4.3); a queue whose primary
+//! outflow feeds a discrete conveyor is COUPLED (§9), served under the batch rules
+//! in the combined pass ([`run_coupled_passes`]). Container access (§8) and
+//! arrayed queues (§6) are supported; overflow with a blocked primary (§4.5) is
+//! the remaining build-sequence step. An `<overflow/>` outflow to a cloud/stock
+//! with NO upstream conveyor is served here as an ordinary unconstrained sibling:
+//! with nothing to block the primary, the overflow drains nothing (§4.5), which
+//! the priority-order serve produces naturally (the first outflow empties the
+//! queue; the rest remove nothing, §4.3).
 //!
-//! Queues and conveyors COEXIST: a model may contain both (the eventual coupling
-//! is the whole point), so the unified [`build_compiled`] / [`build_vm`] here
-//! expand conveyors first, then queues, compile ONCE, and resolve BOTH plan sets
-//! against the same offset map. The VM carries both side tables and runs both
-//! passes between the Flows and Stocks phases.
+//! Queues and conveyors COEXIST and COUPLE: the unified [`build_compiled`] /
+//! [`build_vm`] here expand conveyors first, then queues, compile ONCE, resolve
+//! BOTH plan sets against the same offset map, and then [`apply_couplings`]
+//! detects each queue outflow that feeds a discrete conveyor (enforcing the
+//! `ConveyorQueueUpstreamNotDiscrete` requirement) and wires the coupling INTO the
+//! two plan sets (a `queue_coupled` conveyor inflow + a [`QueueOutflowKind::Coupled`]
+//! queue outflow), so no separate structure threads through the VM or libsimlin.
+//! The VM carries both side tables and runs [`run_coupled_passes`] between the
+//! Flows and Stocks phases -- interleaving a coupled queue's serve between its
+//! conveyor's phase A and phase B, and delegating to the two independent passes
+//! when nothing is coupled.
 
 use std::collections::HashMap;
 
@@ -59,17 +64,38 @@ fn canon(name: &str) -> String {
 }
 
 /// The downstream target a queue outflow drains into (docs/design/queues.md §4).
-/// This phase only produces [`QueueOutflowKind::Unconstrained`]; the
-/// conveyor-coupled variant (§4.4/§9) slots in at the coupling build step.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// [`expand_queues`] produces only [`QueueOutflowKind::Unconstrained`]; the
+/// coupling resolution ([`apply_couplings`]) rewrites a queue outflow that feeds
+/// a discrete conveyor to [`QueueOutflowKind::Coupled`] (§4.4/§9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueOutflowKind {
     /// A cloud or a regular (non-conveyor) stock: the outflow always empties the
     /// queue (§4.3).
     Unconstrained,
+    /// A discrete conveyor directly downstream (§4.4/§9): the shared flow is BOTH
+    /// this queue's primary outflow AND the conveyor's single equation-driven
+    /// inflow. It is served in the combined queue-conveyor pass
+    /// ([`run_coupled_passes`]) -- the conveyor sizes an admission budget `req`
+    /// from its capacity/inflow-limit and this queue supplies from the front under
+    /// the batch rules -- NOT by the unconstrained [`run_queue_pass`].
+    Coupled {
+        /// Index into the CONVEYOR plan list of the coupled discrete conveyor
+        /// (resolved by matching the shared flow slot). The combined pass sizes
+        /// `req` from this conveyor's belt after its phase A.
+        conveyor: usize,
+        /// `one_at_a_time` from the conveyor's block (default true): take at most
+        /// the single front batch per DT (conveyors.md §11).
+        one_at_a_time: bool,
+        /// `batch_integrity` from the conveyor's block (default false): never
+        /// split a batch (conveyors.md §11).
+        batch_integrity: bool,
+    },
 }
 
 /// A queue outflow's synthesized metadata: the driven flow's canonical name plus
-/// its target kind (all [`QueueOutflowKind::Unconstrained`] this phase).
+/// its target kind. [`expand_queues`] always records `Unconstrained` here; a
+/// coupling is detected and stamped onto the resolved [`QueueOutflowPlan`] later
+/// (by [`apply_couplings`]), since it needs the compiled conveyor plan indices.
 ///
 /// `Debug` is derived UNCONDITIONALLY (like [`crate::conveyor_compile::InflowMeta`]):
 /// these metas are pure compile-time data (never in the VM's `debug-derive`-gated
@@ -476,7 +502,7 @@ pub fn resolve_plans(
                 .map(|o| {
                     Some(QueueOutflowPlan {
                         flow_off: eoff(&o.flow)?,
-                        kind: o.kind.clone(),
+                        kind: o.kind,
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
@@ -543,6 +569,18 @@ pub fn run_queue_pass(
     dt: f64,
 ) {
     for (plan, state) in plans.iter().zip(states.iter_mut()) {
+        // A coupled queue (its outflow feeds a discrete conveyor) is served
+        // wholesale -- admit AND serve -- by the combined queue-conveyor pass
+        // ([`run_coupled_passes`]), so skip it here to avoid a double admit (§9).
+        // A conveyor-free queue has no coupled outflow, so this never fires on the
+        // uncoupled path (byte-identical to before the coupling landed).
+        if plan
+            .outflows
+            .iter()
+            .any(|o| matches!(o.kind, QueueOutflowKind::Coupled { .. }))
+        {
+            continue;
+        }
         // Step 1: admit Σ inflow rates as one batch (each clamped >= 0 inside
         // `admit`; multiple inflows sum, §4.2 step 1).
         let inflow_rate: f64 = plan.inflow_offs.iter().map(|&o| curr[o]).sum();
@@ -553,6 +591,8 @@ pub fn run_queue_pass(
         for outflow in &plan.outflows {
             let removed = match outflow.kind {
                 QueueOutflowKind::Unconstrained => state.serve_unconstrained(),
+                // Unreachable: a plan with any Coupled outflow was skipped above.
+                QueueOutflowKind::Coupled { .. } => continue,
             };
             curr[outflow.flow_off] = removed / dt;
         }
@@ -623,12 +663,20 @@ pub fn build_compiled(
 )> {
     use crate::common::{Error, ErrorKind};
 
-    // Expand conveyors first, then queues on the result. Order is independent
-    // this phase (queues are always unconstrained, so they never read a conveyor
-    // marker); the coupling step will revisit this ordering.
+    // Expand conveyors first, then queues on the result. The expansions are
+    // order-independent (neither reads the other's marker); the coupling is
+    // detected AFTER both expansions from the two meta sets (see below).
     let (expanded, conv_metas) = crate::conveyor_compile::expand_conveyors(project, main_model)
         .map_err(|(code, msg)| Error::new(ErrorKind::Simulation, code, Some(msg)))?;
     let (expanded, queue_metas) = expand_queues(&expanded, main_model)
+        .map_err(|(code, msg)| Error::new(ErrorKind::Simulation, code, Some(msg)))?;
+
+    // Detect queue-conveyor couplings (§9): a queue outflow that is a discrete
+    // conveyor's equation-driven inflow. Reads the `discrete`/`one_at_a_time`/
+    // `batch_integrity` attributes from the ORIGINAL project (the expanded clone
+    // has cleared the conveyor block) and enforces the discrete requirement
+    // (`ConveyorQueueUpstreamNotDiscrete`) BEFORE compiling.
+    let coupling_specs = detect_coupling_specs(project, main_model, &conv_metas, &queue_metas)
         .map_err(|(code, msg)| Error::new(ErrorKind::Simulation, code, Some(msg)))?;
 
     // Euler-only. Report the conveyor code when a conveyor is present (so the
@@ -654,7 +702,7 @@ pub fn build_compiled(
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &expanded, None);
     let compiled = crate::db::compile_project_incremental(&db, sync.project, main_model)?;
 
-    let conveyor_plans = if conv_metas.is_empty() {
+    let mut conveyor_plans = if conv_metas.is_empty() {
         Vec::new()
     } else {
         crate::conveyor_compile::resolve_plans(&conv_metas, &compiled.offsets).ok_or_else(|| {
@@ -665,7 +713,7 @@ pub fn build_compiled(
             )
         })?
     };
-    let queue_plans = if queue_metas.is_empty() {
+    let mut queue_plans = if queue_metas.is_empty() {
         Vec::new()
     } else {
         resolve_plans(&queue_metas, &compiled.offsets).ok_or_else(|| {
@@ -677,7 +725,314 @@ pub fn build_compiled(
         })?
     };
 
+    // Resolve the detected couplings against the offset map: mark each coupled
+    // conveyor inflow `queue_coupled` (so phase_b admits it unconditionally) and
+    // rewrite the matching queue outflow to `Coupled` (so the combined pass serves
+    // it under the batch rules). The coupling rides ENTIRELY inside the two plan
+    // sets -- no separate structure to thread -- so libsimlin's reset re-attaches
+    // it by re-attaching the plans, and the VM reconstructs it each step.
+    if !coupling_specs.is_empty() {
+        apply_couplings(
+            &coupling_specs,
+            &queue_metas,
+            &mut conveyor_plans,
+            &mut queue_plans,
+            &compiled.offsets,
+        )
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::Simulation,
+                ErrorCode::NotSimulatable,
+                Some(
+                    "internal error: queue-conveyor coupling references an unresolved slot"
+                        .to_string(),
+                ),
+            )
+        })?;
+    }
+
     Ok((compiled, conveyor_plans, queue_plans))
+}
+
+/// One detected queue-conveyor coupling at the metadata (name) level: the shared
+/// flow (the queue's primary outflow == the conveyor's single equation-driven
+/// inflow) plus the batch rules read from the conveyor's block (§9). Resolved to
+/// slot offsets by [`apply_couplings`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CouplingSpec {
+    /// Canonical name of the shared flow.
+    shared_flow: String,
+    one_at_a_time: bool,
+    batch_integrity: bool,
+}
+
+/// The `one_at_a_time` / `batch_integrity` attributes of the conveyor stock named
+/// `stock_canon` (canonical) in `main_model` of the ORIGINAL `project` (whose
+/// conveyor block is still present -- the expanded clone cleared it). Returns the
+/// XMILE defaults `(one_at_a_time = true, batch_integrity = false)` when the block
+/// or the stock is absent.
+fn conveyor_batch_rules(
+    project: &datamodel::Project,
+    main_model: &str,
+    stock_canon: &str,
+) -> (bool, bool) {
+    let main_canon = canon(main_model);
+    for m in &project.models {
+        if canon(&m.name) != main_canon {
+            continue;
+        }
+        for v in &m.variables {
+            if let datamodel::Variable::Stock(s) = v
+                && canon(&s.ident) == stock_canon
+                && let Some(c) = &s.compat.conveyor
+            {
+                return (c.one_at_a_time, c.batch_integrity);
+            }
+        }
+    }
+    (true, false)
+}
+
+/// Detect every queue-conveyor coupling in `main_model` (§9): a queue outflow that
+/// is a conveyor's equation-driven inflow (`!conveyor_driven` -- i.e. NOT itself a
+/// conveyor's driven outflow). Enforces the discrete requirement: a queue directly
+/// upstream of a NON-discrete conveyor is a loud
+/// [`ErrorCode::ConveyorQueueUpstreamNotDiscrete`] error (queues.md §9,
+/// conveyors.md §11). The batch rules are read from the (discrete) conveyor's
+/// block. A queue outflow to a cloud/regular stock matches no conveyor inflow and
+/// stays unconstrained (Phase 3 behavior unchanged).
+fn detect_coupling_specs(
+    project: &datamodel::Project,
+    main_model: &str,
+    conv_metas: &[crate::conveyor_compile::ConveyorMeta],
+    queue_metas: &[QueueMeta],
+) -> Result<Vec<CouplingSpec>, (ErrorCode, String)> {
+    let mut specs = Vec::new();
+    for qm in queue_metas {
+        for out in &qm.outflows {
+            // A coupled shared flow is the conveyor's SINGLE equation-driven
+            // inflow: a conveyor inflow that is not itself conveyor-driven.
+            let Some(cm) = conv_metas.iter().find(|cm| {
+                cm.inflows
+                    .iter()
+                    .any(|inf| inf.flow == out.flow && !inf.conveyor_driven)
+            }) else {
+                continue; // outflow to a cloud/regular stock: unconstrained
+            };
+            if !cm.discrete {
+                return Err((
+                    ErrorCode::ConveyorQueueUpstreamNotDiscrete,
+                    format!(
+                        "queue '{}' is directly upstream of conveyor '{}', which must be discrete \
+                         (a queue feeds a conveyor only through the discrete batch-admission rules)",
+                        qm.stock, cm.stock
+                    ),
+                ));
+            }
+            let (one_at_a_time, batch_integrity) =
+                conveyor_batch_rules(project, main_model, &cm.stock);
+            specs.push(CouplingSpec {
+                shared_flow: out.flow.clone(),
+                one_at_a_time,
+                batch_integrity,
+            });
+        }
+    }
+    Ok(specs)
+}
+
+/// Resolve each [`CouplingSpec`] against the compiled offset map, mutating the two
+/// plan sets so the coupling rides inside them (§9): every element slot of a
+/// shared flow marks its conveyor inflow `queue_coupled` and rewrites its queue
+/// outflow to [`QueueOutflowKind::Coupled`] carrying the conveyor plan index +
+/// batch rules. Handles a scalar coupling (one slot) and -- since it enumerates
+/// the queue meta's `element_subscripts` -- an arrayed one (one coupling per
+/// element, requiring the queue and conveyor to share the element's slot).
+/// Returns `None` if any shared flow slot is missing from the offset map or no
+/// conveyor inflow claims it (an expansion/compilation inconsistency the caller
+/// surfaces as `NotSimulatable`).
+fn apply_couplings(
+    specs: &[CouplingSpec],
+    queue_metas: &[QueueMeta],
+    conveyor_plans: &mut [crate::conveyor_compile::ConveyorPlan],
+    queue_plans: &mut [QueuePlan],
+    offsets: &HashMap<Ident<Canonical>, usize>,
+) -> Option<()> {
+    // Every shared-flow element slot -> its batch rules. An arrayed queue's N
+    // FIFOs each couple to belt `e` at the shared flow's element-`e` slot.
+    let mut coupled_slots: HashMap<usize, (bool, bool)> = HashMap::new();
+    for spec in specs {
+        let qm = queue_metas
+            .iter()
+            .find(|m| m.outflows.iter().any(|o| o.flow == spec.shared_flow))?;
+        let n = n_queues(qm);
+        for e in 0..n {
+            let key = if qm.element_subscripts.is_empty() {
+                spec.shared_flow.clone()
+            } else {
+                format!("{}[{}]", spec.shared_flow, qm.element_subscripts[e])
+            };
+            let off = offsets.get(&Ident::<Canonical>::new(&key)).copied()?;
+            coupled_slots.insert(off, (spec.one_at_a_time, spec.batch_integrity));
+        }
+    }
+
+    // Mark each coupled conveyor inflow and remember which conveyor plan owns each
+    // shared slot (so the queue outflow can name it).
+    let mut slot_to_conveyor: HashMap<usize, usize> = HashMap::new();
+    for (ci, cp) in conveyor_plans.iter_mut().enumerate() {
+        for inf in &mut cp.inflows {
+            if coupled_slots.contains_key(&inf.flow_off) {
+                inf.queue_coupled = true;
+                slot_to_conveyor.insert(inf.flow_off, ci);
+            }
+        }
+    }
+
+    // Rewrite each coupled queue outflow to `Coupled { conveyor, rules }`.
+    for qp in queue_plans.iter_mut() {
+        for op in &mut qp.outflows {
+            if let Some(&(one_at_a_time, batch_integrity)) = coupled_slots.get(&op.flow_off) {
+                let conveyor = *slot_to_conveyor.get(&op.flow_off)?;
+                op.kind = QueueOutflowKind::Coupled {
+                    conveyor,
+                    one_at_a_time,
+                    batch_integrity,
+                };
+            }
+        }
+    }
+    Some(())
+}
+
+/// The combined queue-conveyor pass (queues.md §9), run once per Euler step
+/// between the Flows and Stocks phases in place of the separate conveyor
+/// ([`crate::conveyor_compile::run_pass`]) and queue ([`run_queue_pass`]) passes
+/// whenever the model has any coupling. Ordering (the whole point of the combined
+/// pass): every conveyor's Phase A runs first (leak + exit, freeing belt room),
+/// then for each conveyor -- if a queue is coupled to it -- the queue's serve is
+/// interleaved BEFORE that conveyor's Phase B:
+///
+/// 1. size the conveyor's admission budget `req = min(cap_room, limit_vol)` from
+///    ITS Phase A result ([`crate::conveyor_compile::coupled_admission_budget`]);
+/// 2. admit the queue's inflow (§4.2 step 1);
+/// 3. serve `taken <= req` from the front under the batch rules
+///    ([`crate::queue::QueueState::take_for_conveyor`]);
+/// 4. debit the discrete inflow budget by `taken`
+///    ([`crate::conveyor::ConveyorState::consume_inflow_budget`]);
+/// 5. write the shared flow slot to `taken / dt` -- this is BOTH the queue's
+///    driven outflow rate AND the conveyor's admitted inflow rate, so the ordinary
+///    Stocks phase integrates the queue stock `-taken` and the conveyor stock
+///    `+taken` from the SAME slot (conservation on both stocks);
+/// 6. run the conveyor's Phase B, which routes the shared flow through the
+///    unconditional `conv_inflows` path (it is `queue_coupled`) and inserts
+///    `taken` onto the belt at the entry depth.
+///
+/// Uncoupled conveyors run their ordinary Phase B and uncoupled queues their
+/// ordinary admit-then-serve. When there is NO coupling this delegates to the two
+/// independent passes, byte-identical to the pre-coupling behavior.
+// The two side-table sets (plans + states), `curr`, `dt`, and the two clock
+// inputs (`time`, `last_unit`) are all independent per-step inputs the VM already
+// holds separately; bundling them into a struct would only add an indirection.
+#[allow(clippy::too_many_arguments)]
+pub fn run_coupled_passes(
+    conv_plans: &[crate::conveyor_compile::ConveyorPlan],
+    conveyors: &mut [crate::conveyor::ConveyorState],
+    queue_plans: &[QueuePlan],
+    queues: &mut [crate::queue::QueueState],
+    curr: &mut [f64],
+    dt: f64,
+    time: f64,
+    last_unit: &mut i64,
+) {
+    use crate::conveyor_compile as cc;
+
+    /// A coupled queue serve wired to one conveyor (derived from the plans).
+    #[derive(Clone, Copy)]
+    struct CoupledServe {
+        queue: usize,
+        shared_flow_off: usize,
+        one_at_a_time: bool,
+        batch_integrity: bool,
+    }
+
+    // Reconstruct the couplings from the queue plans (the `Coupled` outflow kind
+    // carries the conveyor plan index + batch rules): conveyor index -> its serve,
+    // plus a mask of which queues are coupled (served here, skipped by the plain
+    // queue pass).
+    let mut coupling_for_conveyor: Vec<Option<CoupledServe>> = vec![None; conv_plans.len()];
+    let mut queue_is_coupled = vec![false; queue_plans.len()];
+    let mut any = false;
+    for (qi, qp) in queue_plans.iter().enumerate() {
+        for op in &qp.outflows {
+            if let QueueOutflowKind::Coupled {
+                conveyor,
+                one_at_a_time,
+                batch_integrity,
+            } = op.kind
+                && conveyor < coupling_for_conveyor.len()
+            {
+                coupling_for_conveyor[conveyor] = Some(CoupledServe {
+                    queue: qi,
+                    shared_flow_off: op.flow_off,
+                    one_at_a_time,
+                    batch_integrity,
+                });
+                queue_is_coupled[qi] = true;
+                any = true;
+            }
+        }
+    }
+
+    // Fast path: no coupling -> the two independent passes, byte-identical.
+    if !any {
+        cc::run_pass(conv_plans, conveyors, curr, dt, time, last_unit);
+        run_queue_pass(queue_plans, queues, curr, dt);
+        return;
+    }
+
+    // Phase A over every conveyor (frees belt room, writes driven outflow rates).
+    let pa = cc::run_phase_a(conv_plans, conveyors, curr, dt, time, last_unit);
+
+    // Per conveyor: interleave the coupled queue's serve between phase A and B.
+    for i in 0..conv_plans.len() {
+        if let Some(cs) = coupling_for_conveyor[i] {
+            // Size the budget from THIS conveyor's phase A (belt room), admit the
+            // queue's inflow, then serve up to `req` under the batch rules.
+            let req = cc::coupled_admission_budget(&conv_plans[i], &conveyors[i], &pa[i], curr, dt);
+            let inflow_rate: f64 = queue_plans[cs.queue]
+                .inflow_offs
+                .iter()
+                .map(|&o| curr[o])
+                .sum();
+            queues[cs.queue].admit(inflow_rate, dt);
+            let taken =
+                queues[cs.queue].take_for_conveyor(req, cs.one_at_a_time, cs.batch_integrity);
+            // Debit the discrete per-time-unit budget (the coupled volume bypasses
+            // phase_b's equation-inflow accounting), then publish the shared rate:
+            // BOTH the queue outflow and the conveyor inflow integrate from it.
+            conveyors[i].consume_inflow_budget(taken);
+            curr[cs.shared_flow_off] = taken / dt;
+        }
+        cc::conveyor_phase_b_one(i, conv_plans, conveyors, &pa, curr, dt);
+    }
+
+    // Serve the uncoupled queues (coupled ones were fully served above).
+    for (qi, (plan, state)) in queue_plans.iter().zip(queues.iter_mut()).enumerate() {
+        if queue_is_coupled[qi] {
+            continue;
+        }
+        let inflow_rate: f64 = plan.inflow_offs.iter().map(|&o| curr[o]).sum();
+        state.admit(inflow_rate, dt);
+        for outflow in &plan.outflows {
+            let removed = match outflow.kind {
+                QueueOutflowKind::Unconstrained => state.serve_unconstrained(),
+                // A queue with a Coupled outflow is masked out above.
+                QueueOutflowKind::Coupled { .. } => continue,
+            };
+            curr[outflow.flow_off] = removed / dt;
+        }
+    }
 }
 
 /// Build a runnable [`Vm`](crate::vm::Vm) for `project`, wiring up conveyor AND
@@ -1302,6 +1657,280 @@ mod tests {
                 ErrorCode::ConveyorContainerAccessUnsupported,
                 "reader '{reader}'"
             );
+        }
+    }
+
+    // ----- Part B: queue-conveyor coupling (§9 / conveyors.md §11) -----
+
+    /// A queue feeding a discrete conveyor whose capacity throttles admission.
+    /// `transit=100` (nothing exits during the short sim), `capacity=10`,
+    /// `arrivals=4/time`, `one_at_a_time="false"`, `batch_integrity="false"`, so
+    /// each DT the conveyor requests `req = 10 - belt` and the queue supplies
+    /// `min(Q, req)` from the front. Belt fills to capacity and blocks; batches
+    /// then WAIT in the queue.
+    const QUEUE_TO_DISCRETE_CONVEYOR: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>coupling</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>5</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting">
+      <eqn>0</eqn>
+      <inflow>arrivals</inflow>
+      <outflow>into_belt</outflow>
+      <queue/>
+    </stock>
+    <flow name="arrivals"><eqn>4</eqn><non_negative/></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <stock name="belt">
+      <eqn>0</eqn>
+      <inflow>into_belt</inflow>
+      <outflow>graduating</outflow>
+      <conveyor discrete="true" one_at_a_time="false" batch_integrity="false">
+        <len>100</len><capacity>10</capacity>
+      </conveyor>
+    </stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+  </variables></model>
+</xmile>"#;
+
+    #[test]
+    fn queue_feeding_discrete_conveyor_waits_at_capacity_and_conserves() {
+        let project = parse(QUEUE_TO_DISCRETE_CONVEYOR);
+        let vm = build_run(&project);
+        let waiting = vm.get_series(&Ident::new("waiting")).unwrap();
+        let belt = vm.get_series(&Ident::new("belt")).unwrap();
+        let into_belt = vm.get_series(&Ident::new("into_belt")).unwrap();
+
+        // Hand-computed oracle (start-of-step stock values; step-t flow rate):
+        //   step:      0    1    2    3    4    5
+        //   belt(0):   0    4    8   10   10   10   (fills to capacity, then holds)
+        //   waiting:   0    0    0    2    6   10   (batches wait once belt is full)
+        //   into_belt: 4    4    2    0    0    0   (served volume / dt)
+        let want_belt = [0.0, 4.0, 8.0, 10.0, 10.0, 10.0];
+        let want_waiting = [0.0, 0.0, 0.0, 2.0, 6.0, 10.0];
+        let want_into = [4.0, 4.0, 2.0, 0.0, 0.0, 0.0];
+        for i in 0..6 {
+            assert!(
+                (belt[i] - want_belt[i]).abs() < 1e-9,
+                "belt[{i}] = {}",
+                belt[i]
+            );
+            assert!(
+                (waiting[i] - want_waiting[i]).abs() < 1e-9,
+                "waiting[{i}] = {}",
+                waiting[i]
+            );
+            assert!(
+                (into_belt[i] - want_into[i]).abs() < 1e-9,
+                "into_belt[{i}] = {}",
+                into_belt[i]
+            );
+        }
+
+        // Conservation on BOTH stocks each step: nothing exits the belt (transit
+        // 100 >> sim length), so belt + waiting == cumulative arrivals (4 per
+        // completed step). At the start of step t, t steps have completed.
+        for t in 0..6 {
+            let in_system = belt[t] + waiting[t];
+            let arrived = 4.0 * t as f64;
+            assert!(
+                (in_system - arrived).abs() < 1e-9,
+                "step {t}: belt+waiting = {in_system}, arrived = {arrived}"
+            );
+        }
+    }
+
+    /// Build the coupling model with a time-varying capacity (`5` until t=3, then
+    /// `100`) that lets a two-batch backlog accumulate before opening up, so the
+    /// `one_at_a_time` distinction is observable at t=4: all-at-once drains all
+    /// three whole batches in one DT, one-at-a-time takes only the front batch.
+    fn coupling_backlog_model(one_at_a_time: bool) -> datamodel::Project {
+        let oa = if one_at_a_time { "true" } else { "false" };
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>c</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow><outflow>into_belt</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>5</eqn><non_negative/></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <aux name="cap"><eqn>IF TIME >= 3 THEN 100 ELSE 5</eqn></aux>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true" one_at_a_time="{oa}" batch_integrity="false">
+        <len>100</len><capacity>cap</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+  </variables></model>
+</xmile>"#
+        );
+        parse(&xml)
+    }
+
+    #[test]
+    fn coupling_one_at_a_time_takes_at_most_front_batch() {
+        // Backlog Q=[5,5] accrues over t=0..2 (cap 5, belt full). At t=3 cap opens
+        // to 100 so req=95: all-at-once drains all three 5-batches (belt -> 20);
+        // one-at-a-time takes only the front 5 (belt -> 10). Both conserve
+        // (cumulative arrivals 20 = belt + waiting).
+        let all = build_run(&coupling_backlog_model(false));
+        let oaat = build_run(&coupling_backlog_model(true));
+        let belt_all = all.get_series(&Ident::new("belt")).unwrap();
+        let belt_oaat = oaat.get_series(&Ident::new("belt")).unwrap();
+        let wait_all = all.get_series(&Ident::new("waiting")).unwrap();
+        let wait_oaat = oaat.get_series(&Ident::new("waiting")).unwrap();
+
+        assert!(
+            (belt_all[4] - 20.0).abs() < 1e-9,
+            "all-at-once belt[4] = {}",
+            belt_all[4]
+        );
+        assert!(
+            (belt_oaat[4] - 10.0).abs() < 1e-9,
+            "one-at-a-time belt[4] = {}",
+            belt_oaat[4]
+        );
+        // Conservation for both at t=4 (4 completed steps * 5 = 20 in system).
+        assert!((belt_all[4] + wait_all[4] - 20.0).abs() < 1e-9);
+        assert!((belt_oaat[4] + wait_oaat[4] - 20.0).abs() < 1e-9);
+    }
+
+    /// Coupling model parameterised on `batch_integrity`, capacity 10, arrivals 4.
+    fn coupling_integrity_model(batch_integrity: bool) -> datamodel::Project {
+        let bi = if batch_integrity { "true" } else { "false" };
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>c</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>5</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow><outflow>into_belt</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>4</eqn><non_negative/></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true" one_at_a_time="true" batch_integrity="{bi}">
+        <len>100</len><capacity>10</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+  </variables></model>
+</xmile>"#
+        );
+        parse(&xml)
+    }
+
+    #[test]
+    fn coupling_batch_integrity_never_splits_the_front_batch() {
+        // arrivals=4/step. Without integrity the belt splits a 4-batch to reach
+        // capacity 10 (belt: 0,4,8,10,...). With integrity the 4-batch cannot fit
+        // the 2 room left at belt=8, so it waits and the belt STOPS at 8.
+        let split = build_run(&coupling_integrity_model(false));
+        let whole = build_run(&coupling_integrity_model(true));
+        let belt_split = split.get_series(&Ident::new("belt")).unwrap();
+        let belt_whole = whole.get_series(&Ident::new("belt")).unwrap();
+        let wait_whole = whole.get_series(&Ident::new("waiting")).unwrap();
+
+        // Splitting reaches capacity 10; integrity caps at 8 (2 room, 4-batch).
+        assert!(
+            (belt_split[3] - 10.0).abs() < 1e-9,
+            "split belt[3] = {}",
+            belt_split[3]
+        );
+        for (t, &b) in belt_whole.iter().enumerate().take(6).skip(3) {
+            assert!((b - 8.0).abs() < 1e-9, "integrity belt[{t}] = {b}");
+        }
+        // Conservation with integrity: belt + waiting == cumulative arrivals.
+        for t in 0..6 {
+            assert!(
+                (belt_whole[t] + wait_whole[t] - 4.0 * t as f64).abs() < 1e-9,
+                "integrity step {t}: {} + {}",
+                belt_whole[t],
+                wait_whole[t]
+            );
+        }
+    }
+
+    #[test]
+    fn coupling_respects_discrete_inflow_limit_across_sub_unit_dts() {
+        // No capacity limit, but in_limit=3 PER TIME UNIT, dt=0.5 (two DTs per time
+        // unit). The discrete budget `in_carry` accumulates the queue's coupled
+        // admission and resets only at integer time boundaries, so the belt admits
+        // at most 3 per time unit even though the queue offers 10/time. This
+        // exercises `ConveyorState::consume_inflow_budget` (the coupled volume
+        // bypasses phase_b's equation-inflow accounting).
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>c</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>2</stop><dt>0.5</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow><outflow>into_belt</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>10</eqn><non_negative/></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true" one_at_a_time="false" batch_integrity="false">
+        <len>100</len><in_limit>3</in_limit></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let vm = build_run(&project);
+        let belt = vm.get_series(&Ident::new("belt")).unwrap();
+        let waiting = vm.get_series(&Ident::new("waiting")).unwrap();
+        // saved times 0,0.5,1.0,1.5,2.0 (dt=0.5). 3/time-unit admitted; the second
+        // DT of each unit has spent the budget so it admits nothing.
+        let want_belt = [0.0, 3.0, 3.0, 6.0, 6.0];
+        for (i, &w) in want_belt.iter().enumerate() {
+            assert!((belt[i] - w).abs() < 1e-9, "belt[{i}] = {}", belt[i]);
+        }
+        // Conservation: 5 arrives per DT, belt + waiting == 5 * completed DTs.
+        for (t, (&b, &q)) in belt.iter().zip(waiting.iter()).enumerate() {
+            assert!(
+                (b + q - 5.0 * t as f64).abs() < 1e-9,
+                "step {t}: belt {b} + waiting {q}"
+            );
+        }
+    }
+
+    #[test]
+    fn queue_upstream_of_non_discrete_conveyor_is_rejected() {
+        // A queue feeding a NON-discrete (continuous) conveyor is a loud
+        // ConveyorQueueUpstreamNotDiscrete error (§9 / conveyors.md §11): the
+        // batch-admission rules are only defined for a discrete conveyor.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>c</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow><outflow>into_belt</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>4</eqn><non_negative/></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor><len>4</len><capacity>10</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let main = project.models[0].name.clone();
+        let err = build_vm(&project, &main).expect_err("non-discrete conveyor must be rejected");
+        assert_eq!(err.code, ErrorCode::ConveyorQueueUpstreamNotDiscrete);
+    }
+
+    #[test]
+    fn coupled_queue_reset_reproduces_the_run() {
+        // reset() must re-seed both side tables and re-derive the coupling from the
+        // re-attached plans, reproducing the coupled trajectory exactly.
+        let project = parse(QUEUE_TO_DISCRETE_CONVEYOR);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).unwrap();
+        vm.run_to_end().unwrap();
+        let first = vm.get_series(&Ident::new("belt")).unwrap().to_vec();
+        vm.reset();
+        vm.run_to_end().unwrap();
+        let second = vm.get_series(&Ident::new("belt")).unwrap();
+        for (i, (&a, &b)) in first.iter().zip(second.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-12, "reset diverged at {i}: {a} vs {b}");
         }
     }
 }

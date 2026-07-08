@@ -866,8 +866,11 @@ impl Vm {
                     // rates, then Stocks integrate every stock -- including the
                     // conveyor and queue stocks -- from those rates
                     // (docs/design/conveyors.md §4.3/§9.3, docs/design/queues.md
-                    // §4.1). The two passes are independent this phase (the
-                    // coupling is a later step); conveyor runs first, then queue.
+                    // §4.1/§9). `run_coupled_passes` runs the conveyor and queue
+                    // passes; when a queue feeds a discrete conveyor it interleaves
+                    // that queue's serve between the conveyor's phase A and phase B
+                    // (the coupling), and otherwise delegates to the two
+                    // independent passes byte-identically.
                     Self::eval(
                         &self.sliced_sim,
                         &mut state,
@@ -879,19 +882,15 @@ impl Vm {
                         next,
                     );
                     let t = curr[TIME_OFF];
-                    crate::conveyor_compile::run_pass(
+                    crate::queue_compile::run_coupled_passes(
                         &self.conveyor_plans,
                         &mut self.conveyors,
-                        curr,
-                        dt,
-                        t,
-                        &mut self.conveyor_last_unit,
-                    );
-                    crate::queue_compile::run_queue_pass(
                         &self.queue_plans,
                         &mut self.queues,
                         curr,
                         dt,
+                        t,
+                        &mut self.conveyor_last_unit,
                     );
                     Self::eval(
                         &self.sliced_sim,

@@ -303,6 +303,16 @@ pub struct InflowPlan {
     pub dist: Option<DistProfile>,
     /// `source` placement (§8): mirror an upstream leak by flow identity.
     pub source: bool,
+    /// True iff this inflow is the shared flow of a queue-conveyor coupling: it
+    /// is a queue's primary outflow that this (discrete) conveyor admits
+    /// unconditionally (queues.md §9 / conveyors.md §11). The combined queue pass
+    /// writes its slot to `served / dt` and debits the discrete inflow budget
+    /// BEFORE phase_b, so phase_b routes it through the unconditional
+    /// `conv_inflows` path (like a conveyor-driven inflow) rather than treating it
+    /// as an equation-driven request (which would re-quantize it). Set by
+    /// [`crate::queue_compile`]'s coupling resolution, `false` for every ordinary
+    /// inflow -- so a conveyor-only model is byte-identical.
+    pub queue_coupled: bool,
 }
 
 /// A fully-resolved conveyor: data-buffer slot offsets for the VM's pass.
@@ -1598,6 +1608,9 @@ pub fn resolve_plans(
                         placement: i.placement.clone(),
                         dist: i.dist.clone(),
                         source: i.source,
+                        // Set later by queue-conveyor coupling resolution; every
+                        // ordinary inflow resolves un-coupled.
+                        queue_coupled: false,
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
@@ -1901,6 +1914,13 @@ pub fn publish_container_values(
 /// `curr` and writes the conveyor-driven flow rates back into `curr`, so that
 /// ordinary stock integration then advances every stock (including the conveyor
 /// stocks) using the pass-computed rates.
+///
+/// Composed of [`run_phase_a`] (leak + exit over all belts) then
+/// [`conveyor_phase_b_one`] per belt (admit + shift + insert). The two halves are
+/// public so the queue-conveyor combined pass ([`crate::queue_compile`]) can
+/// interleave a coupled queue's serve BETWEEN a conveyor's phase A and phase B
+/// (queues.md §9) while a conveyor-only model runs this exact composition,
+/// byte-identical to the pre-coupling single-function pass.
 pub fn run_pass(
     plans: &[ConveyorPlan],
     states: &mut [ConveyorState],
@@ -1909,6 +1929,27 @@ pub fn run_pass(
     time: f64,
     last_unit: &mut i64,
 ) {
+    let pa = run_phase_a(plans, states, curr, dt, time, last_unit);
+    for i in 0..plans.len() {
+        conveyor_phase_b_one(i, plans, states, &pa, curr, dt);
+    }
+}
+
+/// Phase A over all conveyors (§4.3 steps 0-3): reset the discrete inflow budget
+/// at an integer time boundary, then leak + exit each belt from its own
+/// start-of-step state, writing the driven-outflow (primary + leak) rates into
+/// `curr` for downstream Phase B and stock integration. Returns the per-conveyor
+/// [`PhaseAResult`]s (indexed by plan). No phase reads another conveyor's
+/// same-phase result, so this is order-free (conveyor chains/cycles need no
+/// topological ordering).
+pub fn run_phase_a(
+    plans: &[ConveyorPlan],
+    states: &mut [ConveyorState],
+    curr: &mut [f64],
+    dt: f64,
+    time: f64,
+    last_unit: &mut i64,
+) -> Vec<PhaseAResult> {
     // Discrete per-time-unit in_limit budget resets at integer time boundaries.
     let unit = time.floor() as i64;
     if unit != *last_unit {
@@ -1961,62 +2002,117 @@ pub fn run_pass(
         }
         pa.push(r);
     }
+    pa
+}
 
-    // Phase B over all conveyors: admit + shift + insert.
-    for (i, plan) in plans.iter().enumerate() {
-        // The just-latched entry depth `d` (§4.1/§6). `dist`/`source` weight
-        // vectors span `0..d`, so they are recomputed here every step -- a
-        // time-varying transit changes `d`, hence the placement geometry.
-        let d = states[i].entry_depth();
-        // Split inflows in listed order into conveyor-driven `(volume, placement)`
-        // pairs (admitted unconditionally) and equation-driven rates + their
-        // placements. Conveyor-driven slots already hold the upstream Phase-A
-        // rates written above.
-        let mut eq_rates: Vec<f64> = Vec::new();
-        let mut placements: Vec<Placement> = Vec::new();
-        let mut conv_inflows: Vec<(f64, Placement)> = Vec::new();
-        for inf in &plan.inflows {
-            if inf.conveyor_driven {
-                let vol = curr[inf.flow_off] * dt;
-                conv_inflows.push((vol, conv_inflow_placement(inf, plans, &pa, d)));
-            } else {
-                eq_rates.push(curr[inf.flow_off]);
-                placements.push(eq_inflow_placement(inf, d));
-            }
-        }
-        let capacity = plan
-            .cap_off
-            .map(|o| clamp_cap(curr[o]))
-            .unwrap_or(f64::INFINITY);
-        let in_limit = plan
-            .inlim_off
-            .map(|o| clamp_cap(curr[o]))
-            .unwrap_or(f64::INFINITY);
-        let fracs: Vec<f64> = plan
-            .leaks
-            .iter()
-            .map(|l| clamp_fraction(curr[l.frac_off], plan.exponential_leak))
-            .collect();
-        let pb = states[i].phase_b(PhaseBInputs {
-            phase_a: &pa[i],
-            eq_request_rates: &eq_rates,
-            conv_inflows: &conv_inflows,
-            leak_fractions: &fracs,
-            capacity,
-            in_limit,
-            placements: &placements,
-        });
-        // Write admitted equation-driven inflow rates back (in listed order;
-        // conveyor-driven inflow slots already hold the correct upstream rate).
-        let mut admitted = pb.in_vols.iter();
-        for inf in &plan.inflows {
-            if !inf.conveyor_driven
-                && let Some(v) = admitted.next()
-            {
-                curr[inf.flow_off] = v / dt;
-            }
+/// Phase B for conveyor `i` (§4.3 steps 4-6): admit inflows (conveyor-driven and
+/// queue-coupled ones unconditionally, equation-driven ones clamped to
+/// capacity/inflow-limit), shift, and insert, writing the admitted
+/// equation-driven inflow rates back into `curr`. `pa` is the full Phase A result
+/// vector (a `source`-placed inflow mirrors an upstream belt's Phase A leak).
+///
+/// A queue-coupled inflow (`queue_coupled`, §11) is routed with the
+/// conveyor-driven inflows into the unconditional `conv_inflows` path: the
+/// combined queue pass has already written its `curr` slot to `served / dt` and
+/// debited the discrete inflow budget, so it must NOT be re-clamped or
+/// re-quantized as an equation request, and its slot must NOT be overwritten by
+/// the write-back below (it carries the shared queue-outflow == conveyor-inflow
+/// rate both stocks integrate).
+pub fn conveyor_phase_b_one(
+    i: usize,
+    plans: &[ConveyorPlan],
+    states: &mut [ConveyorState],
+    pa: &[PhaseAResult],
+    curr: &mut [f64],
+    dt: f64,
+) {
+    let plan = &plans[i];
+    // The just-latched entry depth `d` (§4.1/§6). `dist`/`source` weight
+    // vectors span `0..d`, so they are recomputed here every step -- a
+    // time-varying transit changes `d`, hence the placement geometry.
+    let d = states[i].entry_depth();
+    // Split inflows in listed order into unconditionally-admitted `(volume,
+    // placement)` pairs (conveyor-driven chains AND queue-coupled shared flows)
+    // and equation-driven rates + their placements. Both unconditional kinds
+    // already hold the correct rate in their slot (an upstream Phase-A rate, or
+    // the combined queue pass's served rate).
+    let mut eq_rates: Vec<f64> = Vec::new();
+    let mut placements: Vec<Placement> = Vec::new();
+    let mut conv_inflows: Vec<(f64, Placement)> = Vec::new();
+    for inf in &plan.inflows {
+        if inf.conveyor_driven || inf.queue_coupled {
+            let vol = curr[inf.flow_off] * dt;
+            conv_inflows.push((vol, conv_inflow_placement(inf, plans, pa, d)));
+        } else {
+            eq_rates.push(curr[inf.flow_off]);
+            placements.push(eq_inflow_placement(inf, d));
         }
     }
+    let capacity = plan
+        .cap_off
+        .map(|o| clamp_cap(curr[o]))
+        .unwrap_or(f64::INFINITY);
+    let in_limit = plan
+        .inlim_off
+        .map(|o| clamp_cap(curr[o]))
+        .unwrap_or(f64::INFINITY);
+    let fracs: Vec<f64> = plan
+        .leaks
+        .iter()
+        .map(|l| clamp_fraction(curr[l.frac_off], plan.exponential_leak))
+        .collect();
+    let pb = states[i].phase_b(PhaseBInputs {
+        phase_a: &pa[i],
+        eq_request_rates: &eq_rates,
+        conv_inflows: &conv_inflows,
+        leak_fractions: &fracs,
+        capacity,
+        in_limit,
+        placements: &placements,
+    });
+    // Write admitted equation-driven inflow rates back (in listed order;
+    // conveyor-driven AND queue-coupled slots already hold the correct rate).
+    let mut admitted = pb.in_vols.iter();
+    for inf in &plan.inflows {
+        if !inf.conveyor_driven
+            && !inf.queue_coupled
+            && let Some(v) = admitted.next()
+        {
+            curr[inf.flow_off] = v / dt;
+        }
+    }
+}
+
+/// Compute the admission budget `req = min(cap_room, limit_vol)` a queue directly
+/// upstream of conveyor `plan` (belt `state`) may supply this DT (§6.3/§11),
+/// reading this conveyor's `<capacity>`/`<in_limit>` from `curr` and sizing
+/// against its Phase A result `pa` (freed belt room). The queue-coupled inflow
+/// itself is EXCLUDED from `conv_vol` (it is what we are sizing); other
+/// conveyor-driven chain inflows are charged. Does NOT mutate belt state; the
+/// combined queue pass ([`crate::queue_compile`]) calls this between phase A and
+/// phase B, then serves the queue up to `req`.
+pub fn coupled_admission_budget(
+    plan: &ConveyorPlan,
+    state: &ConveyorState,
+    pa: &PhaseAResult,
+    curr: &[f64],
+    dt: f64,
+) -> f64 {
+    let capacity = plan
+        .cap_off
+        .map(|o| clamp_cap(curr[o]))
+        .unwrap_or(f64::INFINITY);
+    let in_limit = plan
+        .inlim_off
+        .map(|o| clamp_cap(curr[o]))
+        .unwrap_or(f64::INFINITY);
+    let other_conv_vol: f64 = plan
+        .inflows
+        .iter()
+        .filter(|inf| inf.conveyor_driven)
+        .map(|inf| curr[inf.flow_off] * dt)
+        .sum();
+    state.admission_budget(pa, capacity, in_limit, other_conv_vol)
 }
 
 /// Compile `project` and resolve its conveyor plans, returning the compiled

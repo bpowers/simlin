@@ -168,6 +168,81 @@ impl QueueState {
         removed
     }
 
+    /// Serve a downstream discrete conveyor's admission budget `req` under the
+    /// batch rules (queues.md §9 / conveyors.md §11), popping and returning the
+    /// volume actually supplied from the FRONT (always `<= req`, so the conveyor
+    /// can admit it unconditionally -- it already fits its capacity/inflow-limit
+    /// room). Batches the conveyor cannot take remain at the front and WAIT (a
+    /// queue `<overflow/>` may later drain them -- §4.5, a later phase).
+    ///
+    /// The four `one_at_a_time` x `batch_integrity` cases (conveyors.md §11):
+    /// - `(true, false)` -- take from the SINGLE front batch, splitting it to
+    ///   `req` when the batch is larger: `take = min(req, front)`.
+    /// - `(true, true)` -- take the single front batch ONLY if it fully fits
+    ///   (`front <= req`), else nothing (it waits).
+    /// - `(false, false)` -- take as many whole front batches as fit, splitting
+    ///   the boundary batch: exactly [`take_from_front(req)`](QueueState::take_from_front).
+    /// - `(false, true)` -- take whole front batches that FULLY fit within `req`,
+    ///   as many as fit, stopping at the first that would not fully fit.
+    ///
+    /// `req <= 0` (an arrested / full conveyor, or a NaN capacity clamped to 0)
+    /// and an empty queue both return 0, leaving the batch list unchanged. The
+    /// module invariant `Σ batches == total` is preserved: every branch removes
+    /// exactly the returned volume from the front.
+    pub fn take_for_conveyor(
+        &mut self,
+        req: f64,
+        one_at_a_time: bool,
+        batch_integrity: bool,
+    ) -> f64 {
+        // `NaN.max(0.0) == 0.0` in IEEE, so a NaN request degrades to "take
+        // nothing" rather than propagating NaN into the belt.
+        let req = req.max(0.0);
+        if req <= 0.0 {
+            return 0.0;
+        }
+        match (one_at_a_time, batch_integrity) {
+            (true, false) => {
+                // Split the single front batch to `req` when it is larger.
+                let Some(front) = self.batches.front().copied() else {
+                    return 0.0;
+                };
+                self.take_from_front(front.min(req))
+            }
+            (true, true) => {
+                // The single front batch, whole, only if it fully fits.
+                let Some(front) = self.batches.front().copied() else {
+                    return 0.0;
+                };
+                if front <= req {
+                    self.take_from_front(front)
+                } else {
+                    0.0
+                }
+            }
+            (false, false) => {
+                // Whole front batches that fit, splitting the boundary batch.
+                self.take_from_front(req)
+            }
+            (false, true) => {
+                // Whole front batches that FULLY fit; stop at the first that
+                // would not (never split).
+                let mut removed = 0.0;
+                let mut budget = req;
+                while let Some(&front) = self.batches.front() {
+                    if front <= budget {
+                        self.batches.pop_front();
+                        removed += front;
+                        budget -= front;
+                    } else {
+                        break;
+                    }
+                }
+                removed
+            }
+        }
+    }
+
     // ----- container access (§8, mirrors ConveyorState) -----
 
     /// The current batch-volume vector, front-to-back, for array builtins over a
@@ -460,5 +535,124 @@ mod tests {
         assert!(approx_eq(q.total(), independent_sum));
         assert_eq!(contents, vec![1.0, 5.0]);
         assert!(approx_eq(q.total(), 6.0));
+    }
+
+    // ----- take_for_conveyor: the four batch rules (§9 / conveyors.md §11) -----
+
+    /// Build a queue with an explicit front-to-back batch list (front = first),
+    /// bypassing admit so the four-rule tests read as hand-authored oracles.
+    fn queue_with_batches(batches: &[f64]) -> QueueState {
+        let mut q = QueueState::init_empty();
+        for &b in batches {
+            q.batches.push_back(b);
+        }
+        q
+    }
+
+    #[test]
+    fn take_for_conveyor_one_at_a_time_split_takes_min_of_front_and_req() {
+        // (true, false): take from the SINGLE front batch, splitting it to req.
+        // req 3 < front 5 -> take 3, leaving 2 as the new front; the second batch
+        // is untouched even though it would fit within a larger budget.
+        let mut q = queue_with_batches(&[5.0, 4.0]);
+        let taken = q.take_for_conveyor(3.0, true, false);
+        assert!(approx_eq(taken, 3.0));
+        assert_eq!(q.batch_contents(), vec![2.0, 4.0]);
+
+        // req 10 >= front 5 -> take the WHOLE front batch only (one at a time),
+        // NOT the following batch, even though both would fit.
+        let mut q = queue_with_batches(&[5.0, 4.0]);
+        let taken = q.take_for_conveyor(10.0, true, false);
+        assert!(approx_eq(taken, 5.0));
+        assert_eq!(q.batch_contents(), vec![4.0]);
+    }
+
+    #[test]
+    fn take_for_conveyor_one_at_a_time_integrity_blocks_a_too_large_front() {
+        // (true, true): take the single front batch only if it fully fits.
+        // front 5 > req 3 -> take nothing; the batch waits, unchanged.
+        let mut q = queue_with_batches(&[5.0, 4.0]);
+        let taken = q.take_for_conveyor(3.0, true, true);
+        assert_eq!(taken, 0.0);
+        assert_eq!(q.batch_contents(), vec![5.0, 4.0]);
+
+        // front 5 <= req 5 -> take the whole front batch (no split), leaving the
+        // second batch even though the remaining room would hold part of it.
+        let mut q = queue_with_batches(&[5.0, 4.0]);
+        let taken = q.take_for_conveyor(5.0, true, true);
+        assert!(approx_eq(taken, 5.0));
+        assert_eq!(q.batch_contents(), vec![4.0]);
+    }
+
+    #[test]
+    fn take_for_conveyor_all_at_once_split_takes_whole_batches_then_splits() {
+        // (false, false): take whole front batches that fit, splitting the
+        // boundary batch. req 8: pop 5 (whole), take 3 of the 4-batch -> 1 left.
+        let mut q = queue_with_batches(&[5.0, 4.0, 6.0]);
+        let taken = q.take_for_conveyor(8.0, false, false);
+        assert!(approx_eq(taken, 8.0));
+        assert_eq!(q.batch_contents(), vec![1.0, 6.0]);
+    }
+
+    #[test]
+    fn take_for_conveyor_all_at_once_integrity_takes_whole_fitting_batches_only() {
+        // (false, true): take whole front batches that FULLY fit; stop at the
+        // first that would not. req 8: pop 5 (fits), then 4 > remaining 3 -> stop.
+        let mut q = queue_with_batches(&[5.0, 4.0, 6.0]);
+        let taken = q.take_for_conveyor(8.0, false, true);
+        assert!(approx_eq(taken, 5.0));
+        assert_eq!(q.batch_contents(), vec![4.0, 6.0]);
+
+        // req 9 fits both 5 and 4 exactly (5+4 <= 9), the 6-batch does not.
+        let mut q = queue_with_batches(&[5.0, 4.0, 6.0]);
+        let taken = q.take_for_conveyor(9.0, false, true);
+        assert!(approx_eq(taken, 9.0));
+        assert_eq!(q.batch_contents(), vec![6.0]);
+    }
+
+    #[test]
+    fn take_for_conveyor_zero_or_negative_req_takes_nothing() {
+        // req == 0 (conveyor full / arrested) and req < 0 both hold the queue.
+        for &(oa, bi) in &[(true, false), (true, true), (false, false), (false, true)] {
+            let mut q = queue_with_batches(&[5.0, 4.0]);
+            assert_eq!(q.take_for_conveyor(0.0, oa, bi), 0.0);
+            assert_eq!(q.batch_contents(), vec![5.0, 4.0]);
+            let mut q = queue_with_batches(&[5.0, 4.0]);
+            assert_eq!(q.take_for_conveyor(-2.0, oa, bi), 0.0);
+            assert_eq!(q.batch_contents(), vec![5.0, 4.0]);
+        }
+    }
+
+    #[test]
+    fn take_for_conveyor_empty_queue_takes_nothing() {
+        for &(oa, bi) in &[(true, false), (true, true), (false, false), (false, true)] {
+            let mut q = QueueState::init_empty();
+            assert_eq!(q.take_for_conveyor(10.0, oa, bi), 0.0);
+            assert_eq!(q.batch_count(), 0);
+        }
+    }
+
+    #[test]
+    fn take_for_conveyor_preserves_sigma_equals_total() {
+        // Every branch removes exactly the returned volume from the front, so
+        // `total()` after == `total()` before − taken, and the batch vector's
+        // independent sum agrees.
+        for &(oa, bi, req) in &[
+            (true, false, 3.0),
+            (true, true, 6.0),
+            (false, false, 8.0),
+            (false, true, 9.0),
+        ] {
+            let mut q = queue_with_batches(&[5.0, 4.0, 6.0]);
+            let before = q.total();
+            let taken = q.take_for_conveyor(req, oa, bi);
+            let after = q.total();
+            let independent: f64 = q.batch_contents().iter().sum();
+            assert!(approx_eq(after, independent), "Σ batches == total");
+            assert!(
+                approx_eq(before - taken, after),
+                "conservation: before − taken == after"
+            );
+        }
     }
 }
