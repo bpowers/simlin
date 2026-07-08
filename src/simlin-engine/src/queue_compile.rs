@@ -181,6 +181,25 @@ pub struct QueuePlan {
     pub containers: Vec<ContainerPlan>,
 }
 
+impl QueuePlan {
+    /// Every data-buffer slot the queue pass WRITES each step: the driven
+    /// outflow rates (the serve paths) and the published container-access
+    /// values ([`publish_queue_container_values`]). Pass-owned slots must not
+    /// be overridable -- the placeholder `0` a driven outflow compiled to is
+    /// overwritten every step, so an accepted override would be silently
+    /// ineffective (GH #871). Mirrors
+    /// [`crate::conveyor_compile::ConveyorPlan::pass_written_offsets`],
+    /// including why containers are listed and why INFLOW slots are not: the
+    /// pass reads each inflow as the admit request (clamping negatives in
+    /// place), so a constant-inflow override is a genuine input each step.
+    pub fn pass_written_offsets(&self) -> impl Iterator<Item = usize> + '_ {
+        self.outflows
+            .iter()
+            .map(|o| o.flow_off)
+            .chain(self.containers.iter().map(|c| c.off))
+    }
+}
+
 /// Does the named model in `project` contain any queue stock? A cheap predicate a
 /// caller uses to decide whether to route through [`build_vm`] (the special
 /// stock-type build path) instead of the ordinary incremental compile. Mirrors
@@ -967,7 +986,7 @@ pub fn build_compiled(
 
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &expanded, None);
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, main_model)?;
+    let mut compiled = crate::db::compile_project_incremental(&db, sync.project, main_model)?;
 
     let mut conveyor_plans = if conv_metas.is_empty() {
         Vec::new()
@@ -1016,6 +1035,22 @@ pub fn build_compiled(
                 ),
             )
         })?;
+    }
+
+    // Pass-written slots (driven outflows, leaks, containers) must not be
+    // overridable constants: their placeholder `0` equations compile to
+    // AssignConstCurr, but the passes overwrite the slots every step, so an
+    // accepted override would be silently ineffective (GH #871). Retracting
+    // them HERE -- on the CompiledSimulation callers cache -- is what makes
+    // libsimlin's no-VM `is_constant_offset` validation (after run_to_end
+    // consumed the VM) reject exactly like the live VM does; the Vm repeats
+    // the retraction when plans are attached, as defense for a directly
+    // assembled Vm.
+    for plan in &conveyor_plans {
+        compiled.exclude_overridable_offsets(plan.pass_written_offsets());
+    }
+    for plan in &queue_plans {
+        compiled.exclude_overridable_offsets(plan.pass_written_offsets());
     }
 
     Ok((compiled, conveyor_plans, queue_plans))
@@ -1779,6 +1814,67 @@ mod tests {
             })
             .unwrap();
         assert_eq!(outflow.equation, Equation::Scalar("0".to_string()));
+    }
+
+    #[test]
+    fn set_value_on_pass_driven_queue_slots_rejected() {
+        // GH #871 (queue side): the expansion rewrites the driven outflow to a
+        // placeholder `0` that compiles to an overridable AssignConstCurr, but
+        // the queue pass overwrites the slot every step -- so an accepted
+        // override would be silently ineffective. It must be rejected like any
+        // computed flow. The pass-published container stock rejects too (a
+        // stock was never overridable; pinned so the "every pass-written slot
+        // rejects" invariant stays explicit). An equation-driven INFLOW is a
+        // genuine pass input (the admit request), so its constant override
+        // stays accepted and changes the served rate.
+        let project = parse(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>queue override</name><vendor>test</vendor><product version="1.0">test</product></header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start><stop>4</stop><dt>0.25</dt>
+  </sim_specs>
+  <model><variables>
+    <stock name="waiting">
+      <eqn>0</eqn>
+      <inflow>arrivals</inflow>
+      <outflow>into_service</outflow>
+      <queue/>
+    </stock>
+    <flow name="arrivals"><eqn>10</eqn></flow>
+    <flow name="into_service"><eqn>0</eqn></flow>
+    <stock name="served"><eqn>0</eqn><inflow>into_service</inflow></stock>
+    <aux name="backlog"><eqn>SUM(waiting)</eqn></aux>
+  </variables></model>
+</xmile>"#,
+        );
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build queue vm");
+
+        for name in ["into_service", "$queue$sum$waiting"] {
+            let err = vm.set_value(&Ident::new(name), 999.0).unwrap_err();
+            assert_eq!(
+                err.code,
+                crate::common::ErrorCode::BadOverride,
+                "set_value('{name}') must be rejected"
+            );
+        }
+
+        vm.set_value(&Ident::new("arrivals"), 4.0)
+            .expect("inflow override must be accepted");
+        vm.run_to_end().expect("run");
+        // The queue is a faithful pass-through, so the served rate follows the
+        // OVERRIDDEN inflow -- proof the inflow override is a real input while
+        // the rejected outflow override left no trace.
+        let served = vm
+            .get_series(&Ident::new("into_service"))
+            .expect("into_service");
+        for (i, &o) in served.iter().enumerate() {
+            assert!(
+                (o - 4.0).abs() < 1e-9,
+                "step {i}: into_service={o} (want 4)"
+            );
+        }
     }
 
     #[test]

@@ -1805,6 +1805,118 @@ fn test_queue_model_simulates_via_ffi() {
     }
 }
 
+/// GH #871: `simlin_sim_set_value` on a pass-driven conveyor flow must be
+/// rejected with `BadOverride` on BOTH validation paths -- the live-VM path
+/// (`Vm::set_value`) and the post-`run_to_end` path (which validates against
+/// the cached `CompiledSimulation`) -- instead of being silently accepted and
+/// then overwritten by the conveyor pass every step. Because both paths
+/// reject, no override is ever recorded in `SimState.overrides`, so a
+/// subsequent reset cannot smuggle a stale one back in.
+#[test]
+fn test_set_value_on_conveyor_driven_flow_rejected() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    unsafe {
+        let (proj, model, sim) = create_test_sim(&datamodel);
+        let c_name = CString::new("graduating").unwrap();
+
+        // Live-VM path.
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_set_value(
+            sim,
+            c_name.as_ptr(),
+            999.0,
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(
+            !err.is_null(),
+            "override of a belt-driven flow must be rejected"
+        );
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadOverride);
+        simlin_error_free(err);
+
+        // The rejected override leaves no trace: the run is belt-driven (the
+        // fixture is at steady state, graduating == 250 every step).
+        run_to_end(sim);
+        let graduating = get_series_vec(sim, "graduating", 4096);
+        for (i, &g) in graduating.iter().enumerate().skip(1) {
+            assert!(
+                (g - 250.0).abs() < 1e-6,
+                "step {i}: graduating={g} (want 250)"
+            );
+        }
+
+        // No-VM path: run_to_end consumed the VM, so set_value now validates
+        // against the cached CompiledSimulation -- it must reject identically.
+        err = ptr::null_mut();
+        simlin_sim_set_value(
+            sim,
+            c_name.as_ptr(),
+            999.0,
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(
+            !err.is_null(),
+            "post-run override of a belt-driven flow must be rejected"
+        );
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadOverride);
+        simlin_error_free(err);
+
+        // Reset recreates the VM and re-applies recorded overrides; none were
+        // recorded, so it succeeds and a re-run reproduces the belt-driven run.
+        reset_sim(sim);
+        run_to_end(sim);
+        let graduating2 = get_series_vec(sim, "graduating", 4096);
+        assert_eq!(graduating, graduating2, "reset+rerun diverged");
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// GH #871 (queue side): `simlin_sim_set_value` on a queue-driven outflow must
+/// be rejected with `BadOverride`, and the run stays queue-driven (the fixture
+/// is a pass-through queue, `into_service` == the constant inflow 10).
+#[test]
+fn test_set_value_on_queue_driven_outflow_rejected() {
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse queue_drain.xmile");
+    unsafe {
+        let (proj, model, sim) = create_test_sim(&datamodel);
+        let c_name = CString::new("into_service").unwrap();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_set_value(
+            sim,
+            c_name.as_ptr(),
+            999.0,
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(
+            !err.is_null(),
+            "override of a queue-driven outflow must be rejected"
+        );
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadOverride);
+        simlin_error_free(err);
+
+        run_to_end(sim);
+        let into_service = get_series_vec(sim, "into_service", 4096);
+        for (i, &o) in into_service.iter().enumerate() {
+            assert!(
+                (o - 10.0).abs() < 1e-9,
+                "step {i}: into_service={o} (want 10)"
+            );
+        }
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// End-to-end FFI proof (F12) that a stock marked as BOTH a conveyor and a queue
 /// is rejected -- loudly, naming the stock -- through the production
 /// `simlin_sim_new` path, rather than silently building both a conveyor and a

@@ -349,6 +349,32 @@ pub struct ConveyorPlan {
     pub primary_dest_conveyor: Option<usize>,
 }
 
+impl ConveyorPlan {
+    /// Every data-buffer slot the conveyor pass WRITES each step: the driven
+    /// primary-outflow and leak rates ([`run_phase_a`]) and the published
+    /// container-access values ([`publish_container_values`]). These slots are
+    /// pass-owned -- the placeholder `0` equation the expansion gave each
+    /// driven flow compiles to an `AssignConstCurr` the pass overwrites every
+    /// step -- so a constant override on one of them could never affect the
+    /// simulation and must be rejected instead of silently accepted (GH #871).
+    /// The container slots are no-flow stocks (never classified overridable),
+    /// but they are included so this method's contract stays "every
+    /// pass-written slot" rather than depending on how the placeholder stock
+    /// happens to compile.
+    ///
+    /// Equation-driven INFLOW slots are deliberately absent: the pass reads
+    /// their Flows-phase value as the requested rate (writing back only the
+    /// admitted rate), so an override on a constant inflow is a genuine input
+    /// each step. A conveyor-driven or queue-coupled inflow's slot is the
+    /// upstream belt's primary outflow / the queue's driven outflow, covered
+    /// by that owning plan.
+    pub fn pass_written_offsets(&self) -> impl Iterator<Item = usize> + '_ {
+        std::iter::once(self.primary_out_off)
+            .chain(self.leaks.iter().map(|l| l.flow_off))
+            .chain(self.containers.iter().map(|c| c.off))
+    }
+}
+
 fn canon(name: &str) -> String {
     canonicalize(name).into_owned()
 }
@@ -2391,7 +2417,7 @@ pub fn build_compiled(
     }
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &expanded, None);
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, main_model)?;
+    let mut compiled = crate::db::compile_project_incremental(&db, sync.project, main_model)?;
     let plans = if metas.is_empty() {
         Vec::new()
     } else {
@@ -2403,6 +2429,13 @@ pub fn build_compiled(
             )
         })?
     };
+    // Retract the pass-written slots from the overridable-constant set, for
+    // the same reason (and with the same caller contract) as the unified
+    // [`crate::queue_compile::build_compiled`] -- see the comment there
+    // (GH #871).
+    for plan in &plans {
+        compiled.exclude_overridable_offsets(plan.pass_written_offsets());
+    }
     Ok((compiled, plans))
 }
 
@@ -2572,6 +2605,115 @@ mod tests {
             "steady leak {} (want 50)",
             leak[last]
         );
+    }
+
+    /// The leak model shared by the GH #871 override tests: primary outflow
+    /// `out_f`, leak `attriting` (f=0.2), plus a container-access aux so a
+    /// synthesized container stock (`$conv$sum$belt`) exists.
+    fn override_leak_model() -> String {
+        wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>attriting</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <flow name="attriting"><eqn>0.2</eqn><leak/></flow>
+        <aux name="on_belt"><eqn>SUM(belt)</eqn></aux>"#,
+        )
+    }
+
+    #[test]
+    fn set_value_on_pass_driven_conveyor_slots_rejected() {
+        // GH #871: expansion rewrites every conveyor-driven flow to a
+        // placeholder `0`, which compiles to an overridable AssignConstCurr.
+        // Without the pass-driven exclusion, set_value on the primary outflow
+        // or a leak silently succeeds -- but the conveyor pass overwrites the
+        // slot every step, so the override never affects the simulation. It
+        // must instead be rejected like any other computed flow. The container
+        // stock's slot is pass-published too and is rejected for the same
+        // reason (a stock was never overridable; pinning it here keeps the
+        // "every pass-written slot rejects" invariant explicit).
+        let project = parse(&override_leak_model());
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build");
+
+        for name in ["out_f", "attriting", "$conv$sum$belt"] {
+            let err = vm.set_value(&Ident::new(name), 999.0).unwrap_err();
+            assert_eq!(
+                err.code,
+                ErrorCode::BadOverride,
+                "set_value('{name}') must be rejected"
+            );
+        }
+
+        // The rejected overrides leave no trace: the run is belt-driven
+        // (S3 steady state: out 200, leak 50) and get_series reports it.
+        vm.run_to_end().expect("run");
+        let out = vm.get_series(&Ident::new("out_f")).expect("out_f");
+        let leak = vm.get_series(&Ident::new("attriting")).expect("attriting");
+        let last = out.len() - 1;
+        assert!(
+            (out[last] - 200.0).abs() < 1e-4,
+            "steady outflow {} (want 200)",
+            out[last]
+        );
+        assert!(
+            (leak[last] - 50.0).abs() < 1e-4,
+            "steady leak {} (want 50)",
+            leak[last]
+        );
+    }
+
+    #[test]
+    fn set_value_on_equation_driven_inflow_remains_effective() {
+        // An equation-driven inflow is a genuine pass INPUT: the Flows phase
+        // computes the requested rate and the pass admits against it (writing
+        // back only the admitted rate). A constant-inflow override must
+        // therefore stay accepted AND change the simulation -- this pins that
+        // the GH #871 rejection covers only pass-WRITTEN slots, not pass
+        // inputs. With in_f overridden to 100 and leak f=0.2, the S3 steady
+        // state scales to out 80 / leak 20.
+        let project = parse(&override_leak_model());
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build");
+        vm.set_value(&Ident::new("in_f"), 100.0)
+            .expect("inflow override must be accepted");
+        vm.run_to_end().expect("run");
+        let out = vm.get_series(&Ident::new("out_f")).expect("out_f");
+        let leak = vm.get_series(&Ident::new("attriting")).expect("attriting");
+        let last = out.len() - 1;
+        assert!(
+            (out[last] - 80.0).abs() < 1e-4,
+            "steady outflow {} (want 80 = 100 * 0.8)",
+            out[last]
+        );
+        assert!(
+            (leak[last] - 20.0).abs() < 1e-4,
+            "steady leak {} (want 20 = 100 * 0.2)",
+            leak[last]
+        );
+    }
+
+    #[test]
+    fn directly_assembled_vm_rejects_pass_driven_overrides() {
+        // Defense-in-depth for GH #871: a Vm assembled by hand from an
+        // UNSCRUBBED CompiledSimulation (bypassing build_compiled's exclusion)
+        // must still reject pass-driven slots, because set_conveyor_plans
+        // itself retracts them from the overridable-constant set.
+        let project = parse(&override_leak_model());
+        let main = project.models[0].name.clone();
+        let (expanded, metas) = expand_conveyors(&project, &main).expect("expand");
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &expanded, None);
+        let compiled =
+            crate::db::compile_project_incremental(&db, sync.project, &main).expect("compile");
+        let plans = resolve_plans(&metas, &compiled.offsets).expect("resolve");
+        let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+        vm.set_conveyor_plans(plans);
+        let err = vm.set_value(&Ident::new("out_f"), 999.0).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadOverride);
+        let err = vm.set_value(&Ident::new("attriting"), 999.0).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadOverride);
     }
 
     #[test]

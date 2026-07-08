@@ -228,13 +228,34 @@ impl CompiledSimulation {
         self.cached_constant_info.contains_key(&off)
     }
 
+    /// Retract `offsets` from the overridable-constant set (GH #871).
+    ///
+    /// The conveyor/queue build path calls this with every pass-written slot:
+    /// the expansion compiles each pass-driven flow to a placeholder
+    /// `AssignConstCurr 0`, which the flows-phase classification above would
+    /// otherwise treat as an overridable constant -- but the conveyor/queue
+    /// pass overwrites those slots every step, so an accepted override could
+    /// never affect the simulation. Retracting them makes `set_value` /
+    /// `is_constant_offset` reject them with `BadOverride`, exactly like any
+    /// other computed flow.
+    pub(crate) fn exclude_overridable_offsets(&mut self, offsets: impl IntoIterator<Item = usize>) {
+        for off in offsets {
+            self.cached_constant_info.remove(&off);
+        }
+    }
+
     /// The full set of overridable constant offsets (absolute data-buffer
     /// offsets), i.e. every offset for which [`is_constant_offset`] is true.
     /// These are the offsets with an `AssignConstCurr` in some module's flows
-    /// phase (see `collect_constant_info`); `set_value`/`set_value_by_offset`
-    /// accept exactly these. The wasm backend reads this to size and initialize
-    /// its constants-override region so a blob's `set_value` accepts the same
-    /// set the VM does.
+    /// phase (see `collect_constant_info`), minus any the special conveyor/
+    /// queue build path retracted via [`exclude_overridable_offsets`] (a
+    /// conveyor/queue model never reaches the wasm backend, so the wasmgen
+    /// parity assertion only ever sees the un-retracted set);
+    /// `set_value`/`set_value_by_offset` accept exactly these. The wasm
+    /// backend reads this to size and initialize its constants-override region
+    /// so a blob's `set_value` accepts the same set the VM does.
+    ///
+    /// [`exclude_overridable_offsets`]: Self::exclude_overridable_offsets
     ///
     /// [`is_constant_offset`]: Self::is_constant_offset
     pub(crate) fn constant_offsets(&self) -> impl Iterator<Item = usize> + '_ {
@@ -515,6 +536,13 @@ impl CompiledSlicedSimulation {
 /// (stocks with constant initials are not overridable). For each such offset,
 /// ALL bytecode locations across flows, stocks, and initials are collected so
 /// that a single `set_value` call mutates every literal that feeds that offset.
+///
+/// The special conveyor/queue build path subsequently RETRACTS the pass-written
+/// slots from this set (`CompiledSimulation::exclude_overridable_offsets` /
+/// `Vm::set_conveyor_plans` / `Vm::set_queue_plans`): a pass-driven flow's
+/// placeholder `0` matches the AssignConstCurr rule here, but the per-step pass
+/// overwrites its slot, so an override on it must reject rather than silently
+/// do nothing (GH #871).
 fn collect_constant_info(
     modules: &HashMap<ModuleKey, CompiledModule>,
     module_key: &ModuleKey,
@@ -726,6 +754,19 @@ impl Vm {
     /// unaffected.
     pub fn set_conveyor_plans(&mut self, plans: Vec<crate::conveyor_compile::ConveyorPlan>) {
         self.conveyor_last_unit = self.specs.start.floor() as i64;
+        // Pass-written slots (driven outflows, leaks, containers) must not be
+        // overridable: their placeholder `0` compiles to AssignConstCurr, but
+        // the conveyor pass overwrites them every step, so an accepted
+        // override would be silently ineffective (GH #871). The build path
+        // already retracts them from the compiled sim's constant info (so the
+        // no-VM `is_constant_offset` check agrees); repeating the retraction
+        // here makes a Vm assembled directly from an unscrubbed
+        // CompiledSimulation reject too.
+        for plan in &plans {
+            for off in plan.pass_written_offsets() {
+                self.constant_info.remove(&off);
+            }
+        }
         self.conveyor_plans = plans;
     }
 
@@ -735,6 +776,13 @@ impl Vm {
     /// the plan list empty, so ordinary models are unaffected. The FIFO side
     /// table is (re)built in `run_initials`, so nothing else is set here.
     pub fn set_queue_plans(&mut self, plans: Vec<crate::queue_compile::QueuePlan>) {
+        // Same pass-written override retraction as set_conveyor_plans (GH
+        // #871): the queue pass owns the driven outflow + container slots.
+        for plan in &plans {
+            for off in plan.pass_written_offsets() {
+                self.constant_info.remove(&off);
+            }
+        }
         self.queue_plans = plans;
     }
 
