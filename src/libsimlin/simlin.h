@@ -1399,6 +1399,17 @@ void simlin_project_render_png(SimlinProject *project,
 
 // Creates a new simulation context
 //
+// `enable_ltm` requests Loops That Matter instrumentation. For an ordinary
+// model this produces a sim whose results carry the LTM link/loop-score
+// series. For a model containing a conveyor or queue stock, LTM is a
+// documented degradation: the flow-to-stock link-score formula assumes plain
+// INTEG under Euler, which neither special stock is, so the sim is created
+// WITHOUT LTM instrumentation and `simlin_sim_get_ltm_mode` reports
+// `Disabled`. `enable_ltm = true` is still honored as a request in that case:
+// `simlin_project_get_errors` will surface a `ConveyorLtmDegraded` /
+// `QueueLtmDegraded` `Warning` naming the offending stock, so the caller learns
+// why scores are absent instead of the request being silently dropped.
+//
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
 SimlinSim *simlin_sim_new(SimlinModel *model, bool enable_ltm, SimlinError **out_error);

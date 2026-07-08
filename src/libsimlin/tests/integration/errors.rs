@@ -994,3 +994,207 @@ fn test_get_errors_auto_flip_warning_has_warning_severity() {
         simlin_project_unref(proj);
     }
 }
+
+// ---------------------------------------------------------------------------
+// F13: enable_ltm on a conveyor/queue model must latch ltm_requested so the
+// ConveyorLtmDegraded / QueueLtmDegraded warnings (docs/design/conveyors.md
+// §9.6, queues.md §10.5) become reachable through simlin_project_get_errors.
+//
+// A conveyor/queue model compiles through the dedicated special-stock build
+// path, which supplies the VM without LTM instrumentation -- LTM over a
+// non-INTEG stock is a documented degradation. Before the fix that branch
+// short-circuited the incremental-compile block that holds the sole
+// ltm_requested latch, so enable_ltm=true was silently honored-as-disabled:
+// the caller asked for analysis, got a sim with no LTM data, AND the degraded
+// warning that exists precisely for these models never reached get_errors
+// (ltm_requested stayed false, so the LtmEnabledGuard harvest never ran).
+// ---------------------------------------------------------------------------
+
+/// After an LTM-enabled sim is created on a conveyor model, `get_errors` must
+/// surface the `ConveyorLtmDegraded` warning naming the conveyor stock. RED
+/// before the latch fix: no diagnostic is reachable at all.
+#[test]
+fn test_get_errors_surfaces_conveyor_ltm_degraded_warning_after_ltm_sim() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // Sanity: before any LTM sim, the degraded warning must be absent (the
+        // project has not requested LTM, so it pays no LTM cost).
+        let mut e0: *mut SimlinError = ptr::null_mut();
+        let pre = simlin_project_get_errors(proj, &mut e0 as *mut *mut SimlinError);
+        assert!(e0.is_null());
+        if !pre.is_null() {
+            assert!(
+                !any_detail_message_contains(pre, "is degraded"),
+                "the degraded warning must be absent before any LTM sim is created"
+            );
+            simlin_error_free(pre);
+        }
+
+        let mut me: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut me as *mut *mut SimlinError);
+        assert!(me.is_null());
+        assert!(!model.is_null());
+
+        // Create an LTM-enabled sim; this must latch the LTM request even
+        // though the special build supplies a non-LTM VM.
+        let mut se: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut se as *mut *mut SimlinError);
+        assert!(se.is_null(), "LTM conveyor sim creation should succeed");
+        assert!(!sim.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "get_errors must return the conveyor LTM-degraded warning"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "conveyor stock")
+                && any_detail_message_contains(all_errors, "is degraded"),
+            "the ConveyorLtmDegraded warning must be reachable via get_errors after an LTM sim"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The queue twin of the conveyor test above: after an LTM-enabled sim on a
+/// queue model, `get_errors` must surface the `QueueLtmDegraded` warning.
+#[test]
+fn test_get_errors_surfaces_queue_ltm_degraded_warning_after_ltm_sim() {
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse queue_drain.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut me: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut me as *mut *mut SimlinError);
+        assert!(me.is_null());
+        assert!(!model.is_null());
+
+        let mut se: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut se as *mut *mut SimlinError);
+        assert!(se.is_null(), "LTM queue sim creation should succeed");
+        assert!(!sim.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "get_errors must return the queue LTM-degraded warning"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "queue stock")
+                && any_detail_message_contains(all_errors, "is degraded"),
+            "the QueueLtmDegraded warning must be reachable via get_errors after an LTM sim"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The latch must not fire spuriously: a conveyor sim created with
+/// `enable_ltm = false` must NOT surface the degraded warning through
+/// `get_errors` (the project never requested LTM, so it pays no LTM cost).
+#[test]
+fn test_get_errors_no_conveyor_ltm_degraded_when_ltm_not_requested() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut me: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut me as *mut *mut SimlinError);
+        assert!(me.is_null());
+        assert!(!model.is_null());
+
+        // A NON-LTM sim must leave ltm_requested false.
+        let mut se: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut se as *mut *mut SimlinError);
+        assert!(se.is_null());
+        assert!(!sim.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        if !all_errors.is_null() {
+            assert!(
+                !any_detail_message_contains(all_errors, "is degraded"),
+                "the degraded warning must not surface when LTM was never requested"
+            );
+            simlin_error_free(all_errors);
+        }
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The honest LTM contract for conveyor/queue models: even with
+/// `enable_ltm = true`, the sim is created WITHOUT LTM instrumentation (the
+/// documented degradation), so `simlin_sim_get_ltm_mode` reports `Disabled`.
+/// The latch fix makes the degraded *warning* reachable via get_errors, but it
+/// must not fabricate an LTM mode. Pins the mode contract for both enable_ltm
+/// values and both special-stock types; this holds before and after the fix.
+#[test]
+fn test_conveyor_and_queue_ltm_sim_report_disabled_ltm_mode() {
+    for (xml, label) in [
+        (
+            include_str!("../../../../test/conveyors/minimal_conveyor.xmile") as &str,
+            "conveyor",
+        ),
+        (
+            include_str!("../../../../test/queues/queue_drain.xmile") as &str,
+            "queue",
+        ),
+    ] {
+        let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+            .unwrap_or_else(|_| panic!("parse {label} fixture"));
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut me: *mut SimlinError = ptr::null_mut();
+            let model =
+                simlin_project_get_model(proj, ptr::null(), &mut me as *mut *mut SimlinError);
+            assert!(me.is_null());
+            assert!(!model.is_null());
+
+            for enable_ltm in [false, true] {
+                let mut se: *mut SimlinError = ptr::null_mut();
+                let sim = simlin_sim_new(model, enable_ltm, &mut se as *mut *mut SimlinError);
+                assert!(se.is_null(), "{label} sim creation should succeed");
+                assert!(!sim.is_null());
+
+                let mut mode_err: *mut SimlinError = ptr::null_mut();
+                let mode = simlin_sim_get_ltm_mode(sim, &mut mode_err as *mut *mut SimlinError);
+                assert!(mode_err.is_null());
+                assert_eq!(
+                    mode,
+                    SimlinLtmMode::Disabled,
+                    "{label} model must report Disabled LTM mode (enable_ltm={enable_ltm}): LTM \
+                     over a non-INTEG stock is a documented degradation, not an active mode"
+                );
+
+                simlin_sim_unref(sim);
+            }
+
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+}

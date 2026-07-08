@@ -32,6 +32,17 @@ fn is_internal_var(name: &str) -> bool {
 
 /// Creates a new simulation context
 ///
+/// `enable_ltm` requests Loops That Matter instrumentation. For an ordinary
+/// model this produces a sim whose results carry the LTM link/loop-score
+/// series. For a model containing a conveyor or queue stock, LTM is a
+/// documented degradation: the flow-to-stock link-score formula assumes plain
+/// INTEG under Euler, which neither special stock is, so the sim is created
+/// WITHOUT LTM instrumentation and `simlin_sim_get_ltm_mode` reports
+/// `Disabled`. `enable_ltm = true` is still honored as a request in that case:
+/// `simlin_project_get_errors` will surface a `ConveyorLtmDegraded` /
+/// `QueueLtmDegraded` `Warning` naming the offending stock, so the caller learns
+/// why scores are absent instead of the request being silently dropped.
+///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
 #[no_mangle]
@@ -102,8 +113,40 @@ pub unsafe extern "C" fn simlin_sim_new(
         captured_loop_element_index,
         captured_ltm_mode,
     ): CompileSnapshot = if conveyor_build.is_some() {
-        // The conveyor path (below) supplies the VM; skip the incremental
-        // compile entirely and provide neutral LTM snapshots.
+        // The conveyor/queue special build (below) supplies the VM from its own
+        // private db, bypassing the salsa incremental compile entirely -- so LTM
+        // instrumentation is never generated for these models and the sim is
+        // created WITHOUT it (captured_ltm_mode is None, get_ltm_mode reports
+        // Disabled). LTM over a conveyor/queue is a documented degradation
+        // (docs/design/conveyors.md §9.6, queues.md §10.5): the flow-to-stock
+        // link-score formula assumes plain INTEG under Euler, and neither
+        // special stock is INTEG.
+        //
+        // But enable_ltm=true must still be HONORED as a request: latch
+        // ltm_requested so simlin_project_get_errors re-enables LTM for its
+        // diagnostic harvest and surfaces the ConveyorLtmDegraded /
+        // QueueLtmDegraded warning explaining why scores are absent. Without the
+        // latch the caller asked for analysis and silently got nothing --
+        // indistinguishable from "no loops found" -- and the warnings that exist
+        // precisely for these models were unreachable through the FFI. The latch
+        // is stored under the db lock (the same lock get_errors takes for its
+        // transient LtmEnabledGuard re-enable) so it is ordered against a
+        // concurrent get_errors, mirroring the ordinary branch below.
+        //
+        // We intentionally do NOT call set_project_ltm_enabled here. The special
+        // build never consults the salsa ltm_enabled input, so setting it would
+        // instrument nothing; and the ordinary branch always resets that input
+        // to false before returning, so leaving it false is already the
+        // consistent post-sim_new db state across both branches. get_errors
+        // flips it transiently via LtmEnabledGuard based purely on the
+        // ltm_requested latch, so the persistent flag value at rest is
+        // irrelevant to whether the degraded warnings are harvested.
+        if enable_ltm {
+            let _db = project_ref.db.lock().unwrap();
+            project_ref
+                .ltm_requested
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         (
             Err(engine::Error {
                 kind: engine::ErrorKind::Simulation,
