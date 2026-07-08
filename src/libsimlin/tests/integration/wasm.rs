@@ -483,6 +483,92 @@ fn compile_to_wasm_unsupported_ltm_model_surfaces_error() {
     }
 }
 
+/// GH #884: a conveyor or queue model surfaces a clean typed `SimlinError`
+/// from `simlin_model_compile_to_wasm` whose message states the wasm-backend
+/// limitation ("not yet supported by the wasm backend") -- not the
+/// engine-internal `ConveyorNotExpanded`/`QueueNotExpanded` guard text, which
+/// directs the reader at a VM-only build entry point that produces no wasm
+/// blob. Both output buffers stay NULL, and there is no panic and no silent
+/// VM fallback. The same fixtures simulate fine through `simlin_sim_new`
+/// (pinned by the special-stock tests in `simulation.rs`), so this is a
+/// wasm-backend-only limitation. Engine-level twin:
+/// `conveyor_and_queue_models_rejected_up_front` (wasmgen `module.rs` tests).
+#[test]
+fn compile_to_wasm_conveyor_and_queue_models_surface_error() {
+    let fixtures: [(&str, &str); 2] = [
+        (
+            include_str!("../../../../test/conveyors/minimal_conveyor.xmile"),
+            "conveyor",
+        ),
+        (
+            include_str!("../../../../test/queues/queue_drain.xmile"),
+            "queue",
+        ),
+    ];
+    for (xml, what) in fixtures {
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let project = simlin_project_open_xmile(xml.as_ptr(), xml.len(), &mut err);
+            assert!(
+                err.is_null(),
+                "open_xmile must succeed for the {what} fixture"
+            );
+            assert!(!project.is_null());
+
+            let model_name = std::ffi::CString::new("main").unwrap();
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(project, model_name.as_ptr(), &mut err);
+            assert!(
+                err.is_null(),
+                "get_model must succeed for the {what} fixture"
+            );
+            assert!(!model.is_null());
+
+            let mut out_wasm: *mut u8 = ptr::null_mut();
+            let mut out_wasm_len: usize = 0;
+            let mut out_layout: *mut u8 = ptr::null_mut();
+            let mut out_layout_len: usize = 0;
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_model_compile_to_wasm(
+                model,
+                false,
+                false,
+                &mut out_wasm,
+                &mut out_wasm_len,
+                &mut out_layout,
+                &mut out_layout_len,
+                &mut err,
+            );
+
+            assert!(!err.is_null(), "a {what} model must set out_error");
+            let msg_ptr = simlin_error_get_message(err);
+            assert!(!msg_ptr.is_null(), "the error must carry a message");
+            let msg = std::ffi::CStr::from_ptr(msg_ptr).to_str().unwrap();
+            assert!(
+                msg.contains("not yet supported by the wasm backend") && msg.contains(what),
+                "the error must state the wasm-backend {what} limitation, got: {msg}"
+            );
+            assert!(
+                !msg.contains("build_vm") && !msg.contains("build_sim"),
+                "the wasm-path error must not direct the caller at a VM-only \
+                 build entry point, got: {msg}"
+            );
+            assert!(
+                out_wasm.is_null() && out_wasm_len == 0,
+                "wasm buffer stays NULL on error"
+            );
+            assert!(
+                out_layout.is_null() && out_layout_len == 0,
+                "layout buffer stays NULL on error"
+            );
+
+            simlin_error_free(err);
+            simlin_model_unref(model);
+            simlin_project_unref(project);
+        }
+    }
+}
+
 /// NULL output pointers are rejected with an error rather than a crash.
 #[test]
 fn compile_to_wasm_null_outputs_error() {

@@ -1262,6 +1262,17 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
 /// (DELAY FIXED, GET DATA) is `#[ignore]`d and never reaches this hook, so it
 /// stays out of scope. A supported-but-divergent model panics inside
 /// `ensure_wasm_matches`.
+///
+/// Conveyor/queue fixtures (`test/conveyors/`, `test/queues/`) must NOT be
+/// routed through `simulate_path`/`simulate_mdl_path`: they simulate only via
+/// the VM special-stock build path (`queue_compile::build_sim`), and the wasm
+/// backend rejects them up front as `Unsupported` (GH #884) -- so a conveyor
+/// fixture added to this corpus would first panic in `compile_vm` (the
+/// `ConveyorNotExpanded`/`QueueNotExpanded` guard fires before this hook even
+/// runs), not fail mysteriously here. Their coverage lives in the
+/// `conveyor_compile`/`queue_compile` in-crate tests, and the wasm-side loud
+/// reject is pinned by `conveyor_and_queue_models_rejected_up_front`
+/// (wasmgen `module.rs` tests).
 fn wasm_parity_hook(
     datamodel: &simlin_engine::datamodel::Project,
     expected: &Results,

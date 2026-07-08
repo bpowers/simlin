@@ -23,8 +23,9 @@
 //! `Apply` builtin, the view/reducer/iteration/vector ops, scalar/array
 //! lookups), Euler/RK2/RK4 integration, and nested modules (incl. SMOOTH/DELAY
 //! stdlib expansions) are in place. A genuine runtime view range
-//! (`ViewRangeDynamic`) or array unrolling past the per-function budget returns
-//! `WasmGenError::Unsupported`.
+//! (`ViewRangeDynamic`), array unrolling past the per-function budget, or a
+//! conveyor/queue model (the per-step side-table passes are implemented only
+//! in the bytecode VM, GH #884) returns `WasmGenError::Unsupported`.
 
 mod alloc;
 mod lookup;
@@ -45,8 +46,9 @@ use std::fmt;
 ///
 /// The backend covers the full scalar + array opcode set, Euler/RK2/RK4
 /// integration, and nested modules (including SMOOTH/DELAY stdlib expansions).
-/// A genuine runtime view range (`ViewRangeDynamic`) or array unrolling past the
-/// per-function budget returns `Unsupported` rather than silently emitting an
+/// A genuine runtime view range (`ViewRangeDynamic`), array unrolling past the
+/// per-function budget, or a conveyor/queue model (the special-stock passes are
+/// VM-only, GH #884) returns `Unsupported` rather than silently emitting an
 /// incorrect module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WasmGenError {

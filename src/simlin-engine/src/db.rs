@@ -1099,8 +1099,9 @@ pub fn compile_project_incremental(
                         ConveyorNotExpanded,
                         format!(
                             "conveyor stock '{}' reached the ordinary compile path un-expanded; \
-                             conveyor simulation must go through the special-stock build path \
-                             (queue_compile::build_vm)",
+                             conveyor simulation is only supported by the bytecode VM, which \
+                             routes through the special-stock build path (queue_compile::build_sim) \
+                             -- the wasm backend does not lower conveyors",
                             source_var.ident(db)
                         )
                     );
@@ -1123,7 +1124,9 @@ pub fn compile_project_incremental(
                         QueueNotExpanded,
                         format!(
                             "queue stock '{}' reached the ordinary compile path un-expanded; \
-                             queue simulation must go through queue_compile::build_vm",
+                             queue simulation is only supported by the bytecode VM, which \
+                             routes through the special-stock build path (queue_compile::build_sim) \
+                             -- the wasm backend does not lower queues",
                             source_var.ident(db)
                         )
                     );
