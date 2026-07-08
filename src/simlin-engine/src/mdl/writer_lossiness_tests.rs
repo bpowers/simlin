@@ -8,10 +8,23 @@
 
 use super::tests::{make_aux, make_model, make_project, make_stock};
 use crate::datamodel::{
-    self, Aux, Compat, Equation, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
-    Variable,
+    self, Aux, Compat, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
+    GraphicalFunctionScale, Variable,
 };
 use crate::mdl::{ExportWarning, project_to_mdl_with_warnings};
+
+fn make_flow(ident: &str, eqn: &str) -> Variable {
+    Variable::Flow(Flow {
+        ident: ident.to_owned(),
+        equation: Equation::Scalar(eqn.to_owned()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    })
+}
 /// Build a graphical function with a specific interpolation kind.
 fn make_gf_kind(kind: GraphicalFunctionKind) -> GraphicalFunction {
     GraphicalFunction {
@@ -455,6 +468,157 @@ fn group_multiword_name_and_doc_warn() {
     assert!(
         message_mentioning(&warnings, "documentation for group").is_some(),
         "group doc drop must warn: {warnings:?}"
+    );
+}
+
+// ---- #887: conveyor/queue compat dropped on export ----
+
+/// A conveyor block with only the required transit time set.
+fn minimal_conveyor() -> datamodel::Conveyor {
+    datamodel::Conveyor {
+        transit_time: "4".to_owned(),
+        capacity: None,
+        inflow_limit: None,
+        sample: None,
+        arrest: None,
+        discrete: false,
+        batch_integrity: false,
+        one_at_a_time: true,
+        exponential_leak: false,
+        ignore_earlier_zone_losses: false,
+    }
+}
+
+#[test]
+fn conveyor_stock_warns_and_still_parses() {
+    let mut stock = make_stock("students", "1000", None, "");
+    if let Variable::Stock(s) = &mut stock {
+        s.inflows = vec!["matriculating".to_owned()];
+        s.outflows = vec!["graduating".to_owned()];
+        s.compat.conveyor = Some(minimal_conveyor());
+    }
+    let inflow = make_flow("matriculating", "250");
+    let outflow = make_flow("graduating", "0");
+    let project = make_project(vec![make_model(vec![stock, inflow, outflow])]);
+
+    let (mdl, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    let w = message_mentioning(&warnings, "students").expect("conveyor warning expected");
+    assert!(
+        w.message.contains("conveyor") && w.message.contains("INTEG"),
+        "warning should say the conveyor became a plain INTEG stock: {}",
+        w.message
+    );
+    // The degraded export must still be valid MDL.
+    crate::mdl::parse_mdl(&mdl).expect("exported MDL must reparse");
+}
+
+#[test]
+fn queue_stock_warns() {
+    let mut stock = make_stock("backlog", "0", None, "");
+    if let Variable::Stock(s) = &mut stock {
+        s.inflows = vec!["arriving".to_owned()];
+        s.compat.queue = Some(datamodel::Queue {});
+    }
+    let inflow = make_flow("arriving", "5");
+    let project = make_project(vec![make_model(vec![stock, inflow])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "backlog").expect("queue warning expected");
+    assert!(
+        w.message.contains("queue") && w.message.contains("INTEG"),
+        "warning should say the queue became a plain INTEG stock: {}",
+        w.message
+    );
+}
+
+#[test]
+fn leak_flow_explicit_fraction_warns() {
+    // The `<leak>0.1</leak>` encoding: the fraction rides in compat.leakage.
+    let mut flow = make_flow("dropping_out", "");
+    if let Variable::Flow(f) = &mut flow {
+        f.compat.leakage = Some(datamodel::Leakage {
+            fraction: Some("0.1".to_owned()),
+            integers: false,
+            zone_start: None,
+            zone_end: None,
+        });
+    }
+    let project = make_project(vec![make_model(vec![flow])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "dropping out").expect("leak warning expected");
+    assert!(
+        w.message.contains("leak"),
+        "warning should name the leak marker: {}",
+        w.message
+    );
+}
+
+#[test]
+fn leak_flow_bare_marker_warns() {
+    // The bare `<leak/>` marker encoding: the fraction lives in the flow's
+    // own equation and compat.leakage.fraction is None.
+    let mut flow = make_flow("evaporating", "0.05");
+    if let Variable::Flow(f) = &mut flow {
+        f.compat.leakage = Some(datamodel::Leakage {
+            fraction: None,
+            integers: false,
+            zone_start: None,
+            zone_end: None,
+        });
+    }
+    let project = make_project(vec![make_model(vec![flow])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "evaporating").expect("leak warning expected");
+    assert!(
+        w.message.contains("leak"),
+        "warning should name the leak marker: {}",
+        w.message
+    );
+}
+
+#[test]
+fn spreadflow_flow_warns() {
+    let mut flow = make_flow("loading", "10");
+    if let Variable::Flow(f) = &mut flow {
+        f.compat.spreadflow = Some(datamodel::SpreadFlow::Even);
+    }
+    let project = make_project(vec![make_model(vec![flow])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "loading").expect("spreadflow warning expected");
+    assert!(
+        w.message.contains("placement"),
+        "warning should name the inflow-placement marker: {}",
+        w.message
+    );
+}
+
+#[test]
+fn overflow_flow_warns() {
+    let mut flow = make_flow("spilling", "0");
+    if let Variable::Flow(f) = &mut flow {
+        f.compat.overflow = true;
+    }
+    let project = make_project(vec![make_model(vec![flow])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "spilling").expect("overflow warning expected");
+    assert!(
+        w.message.contains("overflow"),
+        "warning should name the overflow marker: {}",
+        w.message
+    );
+}
+
+#[test]
+fn plain_stock_and_flow_do_not_warn() {
+    // A conveyor-free stock/flow pair must export with no new warnings.
+    let mut stock = make_stock("level", "100", None, "");
+    if let Variable::Stock(s) = &mut stock {
+        s.inflows = vec!["filling".to_owned()];
+    }
+    let flow = make_flow("filling", "3");
+    let project = make_project(vec![make_model(vec![stock, flow])]);
+    assert!(
+        warnings_of(&project).is_empty(),
+        "an ordinary stock/flow model must export with no warnings"
     );
 }
 

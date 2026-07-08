@@ -1443,6 +1443,7 @@ fn write_variable_entry_ctx_warn(
 
     let name = display_name_for_ident(ident, display_names);
     warn_dropped_non_negative(&name, compat, warnings);
+    warn_dropped_conveyor_compat(&name, compat, warnings);
     warn_unrepresentable_gf_kinds(&name, ident, equation, gf, ctx, warnings);
 
     let data_source_eqn = compat_get_direct_equation(compat);
@@ -1512,6 +1513,58 @@ fn warn_dropped_non_negative(
             "'{name}' is marked non-negative (Vensim's :NA: / non-negative flag), \
              which changes simulation semantics but has no MDL equation-text \
              representation; the flag was dropped on export"
+        )));
+    }
+}
+
+/// Record warnings for conveyor/queue compat markers that Vensim MDL cannot
+/// represent at all (#887): Vensim has no conveyor or queue primitive, so a
+/// conveyor/queue stock exports as a plain INTEG stock and a leak / spreadflow
+/// / overflow flow exports as an ordinary flow -- materially different
+/// dynamics (a first-order stock instead of a pipeline delay / discrete
+/// queue). The fields are checked in a fixed order (conveyor, queue, leakage,
+/// spreadflow, overflow) so warning order is deterministic; a variable
+/// carrying several markers gets one warning per marker in that order (the
+/// engine rejects a stock marked both conveyor and queue, but flow-marker
+/// combinations are not rejected anywhere).
+fn warn_dropped_conveyor_compat(
+    name: &str,
+    compat: &datamodel::Compat,
+    warnings: &mut Vec<ExportWarning>,
+) {
+    if compat.conveyor.is_some() {
+        warnings.push(ExportWarning::new(format!(
+            "'{name}' is a conveyor stock, which Vensim MDL cannot represent; \
+             its conveyor semantics (transit time, capacity, leakage routing) \
+             were dropped and it was exported as a plain INTEG stock"
+        )));
+    }
+    if compat.queue.is_some() {
+        warnings.push(ExportWarning::new(format!(
+            "'{name}' is a queue stock, which Vensim MDL cannot represent; \
+             its FIFO queue semantics were dropped and it was exported as a \
+             plain INTEG stock"
+        )));
+    }
+    if compat.leakage.is_some() {
+        warnings.push(ExportWarning::new(format!(
+            "'{name}' is a conveyor leakage flow, which Vensim MDL cannot \
+             represent; the leak marker (and any leak fraction) was dropped \
+             and it was exported as an ordinary flow"
+        )));
+    }
+    if compat.spreadflow.is_some() {
+        warnings.push(ExportWarning::new(format!(
+            "'{name}' selects a conveyor inflow placement (spreadflow), which \
+             Vensim MDL cannot represent; the marker was dropped and it was \
+             exported as an ordinary flow"
+        )));
+    }
+    if compat.overflow {
+        warnings.push(ExportWarning::new(format!(
+            "'{name}' is a queue overflow outflow, which Vensim MDL cannot \
+             represent; the marker was dropped and it was exported as an \
+             ordinary flow"
         )));
     }
 }
@@ -1712,6 +1765,7 @@ fn write_stock_variable(
 
     let name = display_name_for_ident(&stock.ident, display_names);
     warn_dropped_non_negative(&name, &stock.compat, warnings);
+    warn_dropped_conveyor_compat(&name, &stock.compat, warnings);
 
     // Reconstruct the INITIAL value from the stock's compat the same way the
     // aux/flow path does: a GET DIRECT data source takes precedence, otherwise
