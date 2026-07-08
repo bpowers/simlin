@@ -99,6 +99,50 @@ fn build_queue_model(stop: f64) -> Vm {
     simlin_engine::queue_compile::build_vm(&project, &main).unwrap()
 }
 
+/// A scalar conveyor with an `even`-placed inflow and two LINEAR leaks -- the
+/// GH #879 dominant case: every step inserts O(d) non-zero placement shares
+/// (d = transit / dt entry-path slats), each of which used to re-run the
+/// share-independent cohort-schedule work with fresh allocations.
+fn build_conveyor_model(stop: f64, transit: f64) -> Vm {
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>alloc conveyor</name><vendor>t</vendor><product version="1.0">t</product>
+    <options><uses_conveyor/></options></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>{stop}</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="belt">
+      <eqn>0</eqn>
+      <inflow>in_f</inflow>
+      <outflow>out_f</outflow>
+      <outflow>leak_a</outflow>
+      <outflow>leak_b</outflow>
+      <conveyor><len>{transit}</len></conveyor>
+    </stock>
+    <flow name="in_f" isee:spreadflow="even"><eqn>10</eqn></flow>
+    <flow name="out_f"><eqn>0</eqn></flow>
+    <flow name="leak_a"><eqn>0.05</eqn><leak/></flow>
+    <flow name="leak_b"><eqn>0.03</eqn><leak/></flow>
+  </variables></model>
+</xmile>"#
+    );
+    let project =
+        simlin_engine::xmile::project_from_reader(&mut std::io::BufReader::new(xml.as_bytes()))
+            .unwrap();
+    let main = project.models[0].name.clone();
+    simlin_engine::queue_compile::build_vm(&project, &main).unwrap()
+}
+
+/// Run a conveyor model to the end (initials excluded) and return the number of
+/// heap allocations the per-DT loop performed.
+fn conveyor_run_allocs(stop: f64, transit: f64) -> usize {
+    let mut vm = build_conveyor_model(stop, transit);
+    vm.run_initials().unwrap();
+    start_tracking();
+    vm.run_to_end().unwrap();
+    stop_tracking()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -164,6 +208,45 @@ fn queue_model_allocations_do_not_scale_with_steps() {
         allocs_short, allocs_long,
         "queue-model allocation count should not scale with step count \
          (short={allocs_short}, long={allocs_long})"
+    );
+}
+
+/// The conveyor pass's per-step allocation count must be independent of the
+/// entry depth `d` and constant per step (GH #879).
+///
+/// The dominant hot-loop defect was in `phase_b`'s insert loop: an `even`
+/// (or `dist`/`dest`) placement on a linear-leak belt produces one non-zero
+/// share per entry-path slat, and each share's cohort-schedule computation
+/// re-ran the share-independent `zone_start_retained`/`m_entry` work -- O(d)
+/// allocations and O(d^2 * n) work per belt per step. With that work hoisted,
+/// the pass still allocates a small CONSTANT number of scratch vectors per
+/// step (per-step `PhaseAResult`/shares/fraction buffers), so the invariants
+/// asserted are:
+///
+/// 1. the per-step allocation count does not scale with `d` (same step count,
+///    4x the belt depth, identical totals), and
+/// 2. the total is exactly linear in the step count (three stops in
+///    arithmetic progression yield equal deltas).
+#[test]
+fn conveyor_pass_allocations_do_not_scale_with_belt_depth_or_steps() {
+    // (1) share-count independence: same steps, different entry depth.
+    let allocs_shallow = conveyor_run_allocs(200.0, 64.0);
+    let allocs_deep = conveyor_run_allocs(200.0, 256.0);
+    assert_eq!(
+        allocs_shallow, allocs_deep,
+        "conveyor per-step allocations must not scale with entry depth \
+         (d=64: {allocs_shallow}, d=256: {allocs_deep})"
+    );
+
+    // (2) linearity in steps: equal step deltas -> equal allocation deltas.
+    let a_short = conveyor_run_allocs(100.0, 256.0);
+    let a_mid = conveyor_run_allocs(550.0, 256.0);
+    let a_long = conveyor_run_allocs(1000.0, 256.0);
+    assert_eq!(
+        a_mid - a_short,
+        a_long - a_mid,
+        "conveyor allocations must be linear in step count \
+         (short={a_short}, mid={a_mid}, long={a_long})"
     );
 }
 

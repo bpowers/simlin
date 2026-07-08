@@ -447,40 +447,6 @@ impl ConveyorState {
         r
     }
 
-    /// §5.1 cohort schedule: `basis_k = A * r_k / M_k(d)`,
-    /// `window_k = basis_k * min(M_k(d_c), M_k(d))`. `entry_depth` is the entry
-    /// depth `d`; `own_depth` is the cohort's insertion depth `d_c` (equal to
-    /// `d` for default placement). Returns `(basis, window)` per leak flow;
-    /// exponential leakage carries no per-cohort state (all zeros).
-    fn cohort_schedule(
-        &self,
-        volume: f64,
-        belt_len: usize,
-        entry_depth: usize,
-        own_depth: usize,
-        fractions: &[f64],
-    ) -> (Vec<f64>, Vec<f64>) {
-        let n = self.n_leaks();
-        let mut basis = vec![0.0; n];
-        let mut window = vec![0.0; n];
-        if self.exponential_leak {
-            return (basis, window);
-        }
-        let r = self.zone_start_retained(belt_len, entry_depth, fractions);
-        for k in 0..n {
-            let m_entry = self.zone_count_from(k, belt_len, entry_depth);
-            let b = if m_entry > 0 {
-                volume * r[k] / m_entry as f64
-            } else {
-                0.0
-            };
-            basis[k] = b;
-            let m_own = self.zone_count_from(k, belt_len, own_depth);
-            window[k] = b * m_own.min(m_entry) as f64;
-        }
-        (basis, window)
-    }
-
     // ----- initialization (§7.1) -----
 
     /// Scalar steady-state fill (§7.1): distribute `v` across the belt at the
@@ -779,10 +745,15 @@ impl ConveyorState {
             // content; scaled down proportionally if the sum would overdrain.
             // `i` indexes both `self.slats` (a VecDeque) and the per-slat column
             // `slat_vols[k][i]`, so an index loop is the clean form.
+            // One shed-per-flow scratch reused across slats (refilled with 0.0
+            // each iteration, so values match a per-slat fresh Vec exactly): a
+            // fresh allocation per slat made the allocation count scale with
+            // the belt length every step (GH #879).
+            let mut sheds = vec![0.0; n];
             #[allow(clippy::needless_range_loop)]
             for i in 0..l {
                 let c0 = self.slats[i].content;
-                let mut sheds = vec![0.0; n];
+                sheds.fill(0.0);
                 for k in 0..n {
                     if self.in_zone(i, l, k) && !arrested(k) {
                         sheds[k] = c0 * fractions[k] * self.dt;
@@ -794,7 +765,7 @@ impl ConveyorState {
                         *s *= c0 / tot;
                     }
                 } else if c0 <= 0.0 {
-                    sheds = vec![0.0; n];
+                    sheds.fill(0.0);
                 }
                 let sum_sheds: f64 = sheds.iter().sum();
                 self.slats[i].content -= sum_sheds;
@@ -987,7 +958,7 @@ impl ConveyorState {
         // across slats per its placement (§8) into per-slat shares. Because a
         // cohort's leak schedule is linear in its volume, shares that land on
         // the same slat (same insertion depth d_c = i+1) merge exactly into one
-        // cohort_schedule call -- so we accumulate a per-slat total then insert.
+        // schedule computation -- so we accumulate a per-slat total then insert.
         let d = self.n_slats();
         while self.slats.len() < d {
             self.slats.push_back(Slat::empty(self.n_leaks()));
@@ -1001,19 +972,76 @@ impl ConveyorState {
             let placement = inp.placements.get(j).unwrap_or(&Placement::Beginning);
             self.add_placement_shares(&mut shares, vol, placement, d, belt_len);
         }
-        for (i, &share) in shares.iter().enumerate() {
-            if share == 0.0 {
-                continue;
-            }
-            // The share's own insertion depth is d_c = i + 1 (§8): a mid-belt
-            // share's leak budget is prorated to the zone slats it will traverse.
-            let (basis, window) =
-                self.cohort_schedule(share, belt_len, d, i + 1, inp.leak_fractions);
-            let tgt = &mut self.slats[i];
-            tgt.content += share;
-            for k in 0..self.leaks.len() {
-                tgt.leak_basis[k] += basis[k];
-                tgt.leak_window[k] += window[k];
+        // §5.1 cohort schedule per inserted share: `basis_k = A * r_k / M_k(d)`,
+        // `window_k = basis_k * min(M_k(d_c), M_k(d))`, where the share's own
+        // insertion depth is d_c = i + 1 (§8): a mid-belt share's leak budget
+        // is prorated to the zone slats it will traverse. The share-INDEPENDENT
+        // pieces -- the retained profile `r_k` and the entry-path zone count
+        // `M_k(d)` -- are hoisted out of the per-slat loop: an Even/Dist/Dest
+        // placement has O(d) non-zero shares, and recomputing them per share
+        // made the insert O(d^2 * n) work with O(d) allocations per step
+        // (GH #879). Nothing this loop mutates (slat contents and schedules)
+        // feeds `r_k` or `M_k`, so computing them once with the identical
+        // expressions yields bit-identical values.
+        //
+        // A quiescent step (every share zero: nothing was admitted this DT)
+        // skips the whole block: with all-zero shares every loop iteration
+        // takes the zero-share `continue`, and the running `m_own` prefix is
+        // read only by the insert arms, so the entire body -- hoisted work
+        // included -- is dead. Gating it keeps an idle belt at the old
+        // do-nothing per-step cost instead of paying the hoisted
+        // O(belt_len * n) scan and its two allocations every step.
+        if shares.iter().any(|&s| s != 0.0) {
+            let n = self.n_leaks();
+            let (r, m_entry) = if self.exponential_leak {
+                // Exponential leakage carries no per-cohort state (§5.1): every
+                // schedule contribution below is +0.0, so the profile is unused.
+                (Vec::new(), Vec::new())
+            } else {
+                let r = self.zone_start_retained(belt_len, d, inp.leak_fractions);
+                let m_entry: Vec<usize> = (0..n)
+                    .map(|k| self.zone_count_from(k, belt_len, d))
+                    .collect();
+                (r, m_entry)
+            };
+            // Running in-zone prefix count: after the update at slat `i`,
+            // `m_own[k] == zone_count_from(k, belt_len, i + 1) == M_k(d_c)`.
+            // Integer counting, so it is exactly the value a per-share scan
+            // computed. Updated for every slat (before the zero-share skip) so
+            // the prefix stays aligned with `i`.
+            let mut m_own = vec![0usize; n];
+            for (i, &share) in shares.iter().enumerate() {
+                for (k, m) in m_own.iter_mut().enumerate() {
+                    if self.in_zone(i, belt_len, k) {
+                        *m += 1;
+                    }
+                }
+                if share == 0.0 {
+                    continue;
+                }
+                let tgt = &mut self.slats[i];
+                tgt.content += share;
+                if self.exponential_leak {
+                    // Keep the `+= 0.0` the all-zero schedule performed: adding
+                    // +0.0 normalizes a stored -0.0 basis/window (possible from
+                    // a negative initial value scaled by a zero unit basis) to
+                    // +0.0, so skipping the adds would change the stored bit
+                    // pattern.
+                    for k in 0..n {
+                        tgt.leak_basis[k] += 0.0;
+                        tgt.leak_window[k] += 0.0;
+                    }
+                } else {
+                    for k in 0..n {
+                        let b = if m_entry[k] > 0 {
+                            share * r[k] / m_entry[k] as f64
+                        } else {
+                            0.0
+                        };
+                        tgt.leak_basis[k] += b;
+                        tgt.leak_window[k] += b * m_own[k].min(m_entry[k]) as f64;
+                    }
+                }
             }
         }
 

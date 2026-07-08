@@ -330,6 +330,15 @@ pub struct InflowPlan {
     pub dist: Option<DistProfile>,
     /// `source` placement (§8): mirror an upstream leak by flow identity.
     pub source: bool,
+    /// The upstream leak a `source` inflow mirrors, as `(plan index, leak
+    /// index)` into the resolved plan list -- precomputed by [`resolve_plans`]
+    /// (the flow-identity match is a pure function of the compile-time-constant
+    /// plans, like the queue [`crate::queue_compile::CouplingTable`], GH #878)
+    /// so the per-step pass reads it instead of rescanning every plan's leak
+    /// list. `None` when `source` is false, or when no upstream leak shares
+    /// this inflow's slot (the `source` placement then falls back to
+    /// `Beginning`).
+    pub source_leak: Option<(usize, usize)>,
     /// True iff this inflow is the shared flow of a queue-conveyor coupling: it
     /// is a queue's primary outflow that this (discrete) conveyor admits
     /// unconditionally (queues.md §9 / conveyors.md §11). The combined queue pass
@@ -2374,6 +2383,9 @@ pub fn resolve_plans(
                         placement: i.placement.clone(),
                         dist: i.dist.clone(),
                         source: i.source,
+                        // Filled by the post-pass below once every plan's leak
+                        // offsets are known.
+                        source_leak: None,
                         // Set later by queue-conveyor coupling resolution; every
                         // ordinary inflow resolves un-coupled.
                         queue_coupled: false,
@@ -2414,6 +2426,21 @@ pub fn resolve_plans(
                 // apply-to-all list (§10 one-expression-per-attribute).
                 init_values: meta.init_values.clone(),
             });
+        }
+    }
+    // Resolve each `source` inflow's upstream-leak coupling now that every
+    // plan's leak offsets exist (§8): the flow-identity match reads only
+    // compile-time-constant plan data, so precomputing it here (GH #878-style)
+    // spares the per-step pass an all-plans rescan per source inflow. Later
+    // queue-coupling resolution only flips `queue_coupled` flags and rewrites
+    // queue outflow kinds -- it never changes leak offsets or plan order -- so
+    // the resolved indices stay valid.
+    for pi in 0..plans.len() {
+        for fi in 0..plans[pi].inflows.len() {
+            if plans[pi].inflows[fi].source {
+                let hit = find_upstream_leak(&plans, plans[pi].inflows[fi].flow_off);
+                plans[pi].inflows[fi].source_leak = hit;
+            }
         }
     }
     Some(plans)
@@ -2467,6 +2494,13 @@ fn clamp_cap(v: f64) -> f64 {
 /// (`x_i = 1 - (i+0.5)/d`), clamped to `[0, ∞)`. `Placement::Dist` normalizes
 /// these to shares; all-zero weights make it fall back to `Beginning`. A `d` of
 /// 0 yields an empty vector (also a `Beginning` fallback).
+///
+/// Rebuilt each step (one `d`-length allocation per dist inflow -- a constant
+/// allocation COUNT, unlike the per-share blowup GH #879 fixed): the weights
+/// are a pure function of `(profile, d)`, and `d` is the just-latched entry
+/// depth, which a `<sample>`d time-varying transit changes mid-run -- so the
+/// vector cannot be precomputed at plan time. A `d`-keyed memo would be safe
+/// but needs mutable per-inflow state the pass deliberately does not carry.
 fn dist_weights(profile: &DistProfile, d: usize) -> Vec<f64> {
     (0..d)
         .map(|i| {
@@ -2512,16 +2546,57 @@ fn source_weights(up_slat_leak: &[f64], d: usize) -> Vec<f64> {
         }
         let y = 1.0 - (j as f64 + 0.5) / l_up as f64;
         // Nearest target slat by |x_i - y|; iterating i ascending with a strict
-        // `<` keeps the smaller i (nearer the exit) on an exact tie.
-        let mut best_i = 0usize;
+        // `<` keeps the smaller i (nearer the exit) on an exact tie. Scanning
+        // all d target slats per source slat made this O(L_up * d) every step
+        // (GH #879); instead only a +-2 window around the exact-arithmetic
+        // optimum is scanned, with the IDENTICAL float distance expressions and
+        // the same ascending strict-`<` selection, so the chosen index is
+        // bit-for-bit the full scan's.
+        //
+        // Why the window suffices: in exact arithmetic
+        // |x_i - y| = |(2j+1)*d - (2i+1)*L_up| / (2 * L_up * d), an integer
+        // numerator that steps by 2*L_up per increment of i. The unconstrained
+        // real minimizer therefore lies within 1 of q0 = floor(t / (2*L_up))
+        // (t = (2j+1)*d), and any i two or more steps from it has a real
+        // distance at least 1/d above the minimum. The float distances below
+        // differ from the real ones by only a few ULP of 1 (~1e-15), far under
+        // that 1/d >= 1e-6 gap (d and L_up are bounded by
+        // `conveyor::MAX_SLATS_PER_BELT`), so no index outside the window can
+        // tie or beat the window's float minimum; exact float ties INSIDE the
+        // window resolve by the same first-wins ascending scan. The
+        // debug_assert re-runs the full scan to pin the equivalence in every
+        // debug/test build. u64 keeps `t` exact on 32-bit targets (wasm).
+        let t = (2 * j as u64 + 1) * d as u64;
+        let q0 = (t / (2 * l_up as u64)).min(d as u64 - 1) as usize;
+        let lo = q0.saturating_sub(2);
+        let hi = (q0 + 2).min(d - 1);
+        let mut best_i = lo;
         let mut best_dist = f64::INFINITY;
-        for i in 0..d {
+        for i in lo..=hi {
             let x_i = 1.0 - (i as f64 + 0.5) / d as f64;
             let dist = (x_i - y).abs();
             if dist < best_dist {
                 best_dist = dist;
                 best_i = i;
             }
+        }
+        #[cfg(debug_assertions)]
+        {
+            let mut full_best = 0usize;
+            let mut full_dist = f64::INFINITY;
+            for i in 0..d {
+                let x_i = 1.0 - (i as f64 + 0.5) / d as f64;
+                let dist = (x_i - y).abs();
+                if dist < full_dist {
+                    full_dist = dist;
+                    full_best = i;
+                }
+            }
+            debug_assert_eq!(
+                best_i, full_best,
+                "windowed nearest-slat search must match the full scan \
+                 (j={j}, L_up={l_up}, d={d})"
+            );
         }
         weights[best_i] += q;
     }
@@ -2532,7 +2607,9 @@ fn source_weights(up_slat_leak: &[f64], d: usize) -> Vec<f64> {
 /// data-buffer slot `flow_off` -- the flow-identity coupling a `source` inflow
 /// uses (§8). `None` when the slot is not an upstream leak (e.g. it is a primary
 /// outflow, or an ordinary flow), in which case `source` falls back to
-/// `Beginning`.
+/// `Beginning`. Called once per source inflow at plan-resolution time
+/// ([`resolve_plans`] stores the result on [`InflowPlan::source_leak`]), not in
+/// the per-step pass.
 fn find_upstream_leak(plans: &[ConveyorPlan], flow_off: usize) -> Option<(usize, usize)> {
     plans.iter().enumerate().find_map(|(u, p)| {
         p.leaks
@@ -2553,16 +2630,12 @@ fn eq_inflow_placement(inf: &InflowPlan, d: usize) -> Placement {
 }
 
 /// The run-time [`Placement`] for a conveyor-driven inflow (§8). `source`
-/// mirrors the matched upstream leak's per-slat leakage; `dist` samples its
-/// profile; everything else uses the static placement.
-fn conv_inflow_placement(
-    inf: &InflowPlan,
-    plans: &[ConveyorPlan],
-    pa: &[PhaseAResult],
-    d: usize,
-) -> Placement {
+/// mirrors the matched upstream leak's per-slat leakage (via the
+/// [`InflowPlan::source_leak`] pair [`resolve_plans`] precomputed); `dist`
+/// samples its profile; everything else uses the static placement.
+fn conv_inflow_placement(inf: &InflowPlan, pa: &[PhaseAResult], d: usize) -> Placement {
     if inf.source {
-        return match find_upstream_leak(plans, inf.flow_off) {
+        return match inf.source_leak {
             Some((u, k)) => Placement::Dist(source_weights(&pa[u].leak_slat_vols[k], d)),
             None => Placement::Beginning,
         };
@@ -2892,7 +2965,7 @@ pub fn conveyor_phase_b_one(
     for inf in &plan.inflows {
         if inf.conveyor_driven || inf.queue_coupled {
             let vol = curr[inf.flow_off] * dt;
-            conv_inflows.push((vol, conv_inflow_placement(inf, plans, pa, d)));
+            conv_inflows.push((vol, conv_inflow_placement(inf, pa, d)));
         } else {
             eq_rates.push(curr[inf.flow_off]);
             placements.push(eq_inflow_placement(inf, d));
@@ -3440,6 +3513,68 @@ mod tests {
     fn source_weights_empty_inputs_are_all_zero() {
         assert_eq!(source_weights(&[], 3), vec![0.0, 0.0, 0.0]);
         assert_eq!(source_weights(&[1.0, 2.0], 0), Vec::<f64>::new());
+    }
+
+    /// The original full-scan `source_weights` (pre-GH #879), kept as the
+    /// explicit oracle for the windowed nearest-slat search: every upstream
+    /// slat volume lands at the target slat minimizing the float distance
+    /// `|x_i - y|`, first-wins (ties toward the exit) over an ascending scan
+    /// of ALL `d` slats.
+    fn source_weights_full_scan(up_slat_leak: &[f64], d: usize) -> Vec<f64> {
+        let mut weights = vec![0.0; d];
+        let l_up = up_slat_leak.len();
+        if d == 0 || l_up == 0 {
+            return weights;
+        }
+        for (j, &q) in up_slat_leak.iter().enumerate() {
+            if q == 0.0 {
+                continue;
+            }
+            let y = 1.0 - (j as f64 + 0.5) / l_up as f64;
+            let mut best_i = 0usize;
+            let mut best_dist = f64::INFINITY;
+            for i in 0..d {
+                let x_i = 1.0 - (i as f64 + 0.5) / d as f64;
+                let dist = (x_i - y).abs();
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_i = i;
+                }
+            }
+            weights[best_i] += q;
+        }
+        weights
+    }
+
+    #[test]
+    fn source_weights_windowed_search_matches_full_scan_across_geometries() {
+        // The windowed nearest-slat search must be bit-for-bit the full scan
+        // across diverse belt geometries: 1-slat belts, small primes,
+        // exact-multiple ratios (which produce exact float ties, exercising
+        // the first-wins tie rule), coprime near-tie ratios, and larger
+        // prime/composite pairs. Every upstream slat carries a distinct
+        // nonzero volume so each `j` exercises the window, and exact
+        // `assert_eq!` on the vectors pins bit-identity (equal picked indices
+        // imply identical accumulation order).
+        let sizes: &[usize] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 16, 25, 32, 48, 64, 100, 128];
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        for &l_up in sizes {
+            for &d in sizes {
+                pairs.push((l_up, d));
+            }
+        }
+        // Larger geometries: primes near 1000 (dense near-ties), a 1:2 exact
+        // multiple, and strongly asymmetric belts in both directions.
+        pairs.extend([(997, 1009), (1009, 997), (500, 1000), (3, 1009), (997, 4)]);
+
+        for (l_up, d) in pairs {
+            let up: Vec<f64> = (0..l_up).map(|j| 0.5 + j as f64 * 1.25).collect();
+            assert_eq!(
+                source_weights(&up, d),
+                source_weights_full_scan(&up, d),
+                "windowed search diverged from full scan at L_up={l_up}, d={d}"
+            );
+        }
     }
 
     // ----- compile-time spec advisories (§4.1 / §5.1 pure helpers) -----
