@@ -595,6 +595,11 @@ pub fn expand_conveyors(
     let mut metas = Vec::new();
     // Collect new auxes to append after we finish borrowing the model's vars.
     let mut new_auxes: Vec<datamodel::Aux> = Vec::new();
+    // Synthesized-aux canonical name -> (conveyor display name, human-readable
+    // parameter label). Lets the driven-flow-read scan name the conveyor PARAMETER
+    // an offending reference came from instead of the internal `$conv$...` aux
+    // name, which is meaningless to a modeler.
+    let mut param_origins: HashMap<String, (String, String)> = HashMap::new();
 
     // Find the model index.
     let model_idx = project
@@ -669,6 +674,10 @@ pub fn expand_conveyors(
                 };
                 let frac_aux = leak_frac_name(&out_c);
                 new_auxes.push(make_aux_eqn(&frac_aux, frac_eqn));
+                param_origins.insert(
+                    frac_aux.clone(),
+                    (stock.ident.clone(), format!("leak fraction for '{out}'")),
+                );
                 driven_flows.push(out_c.clone());
                 // Which conveyor (if any) does this leak flow feed? Resolved the
                 // same way as the primary's held-exit destination (below): a leak
@@ -712,6 +721,7 @@ pub fn expand_conveyors(
             &len_aux,
             param_equation(&conv.transit_time, &stock_dims),
         ));
+        param_origins.insert(len_aux.clone(), (stock.ident.clone(), "<len>".to_string()));
         let mk = |field: &Option<String>,
                   param: &str,
                   out: &mut Vec<datamodel::Aux>|
@@ -726,6 +736,16 @@ pub fn expand_conveyors(
         let inlim_aux = mk(&conv.inflow_limit, "inlim", &mut new_auxes);
         let sample_aux = mk(&conv.sample, "sample", &mut new_auxes);
         let arrest_aux = mk(&conv.arrest, "arrest", &mut new_auxes);
+        for (aux, label) in [
+            (&cap_aux, "<capacity>"),
+            (&inlim_aux, "<in_limit>"),
+            (&sample_aux, "<sample>"),
+            (&arrest_aux, "<arrest>"),
+        ] {
+            if let Some(name) = aux {
+                param_origins.insert(name.clone(), (stock.ident.clone(), label.to_string()));
+            }
+        }
 
         let inflows = stock
             .inflows
@@ -778,6 +798,12 @@ pub fn expand_conveyors(
             inflow.conveyor_driven = driven_set.contains(&inflow.flow);
         }
     }
+    // A sorted view of the driven flows: the reference scans below return on the
+    // first match, so iterating a sorted list keeps the diagnostic (which flow is
+    // named when an equation reads more than one) deterministic across runs.
+    let mut driven_sorted: Vec<String> = driven_flows;
+    driven_sorted.sort_unstable();
+    driven_sorted.dedup();
 
     // Reject any equation that reads a conveyor-driven flow by name: the pass
     // runs after the flows phase, so a reader would see the pre-pass placeholder
@@ -792,25 +818,55 @@ pub fn expand_conveyors(
             if driven_set.contains(&self_name) {
                 continue; // a driven flow's own placeholder equation is not a reader
             }
-            for eqn in equation_scalar_strings(v) {
-                let Ok(Some(ast)) = crate::ast::Expr0::new(&eqn, crate::lexer::LexerType::Equation)
-                else {
-                    continue;
-                };
-                for driven in &driven_set {
-                    if ast.get_var_loc(driven).is_some() {
-                        return Err((
-                            ErrorCode::ConveyorDrivenFlowRead,
-                            format!(
-                                "variable '{}' references conveyor-driven flow '{driven}'; a \
-                                 conveyor outflow/leak cannot be read by another equation \
-                                 (it is computed after the flows phase)",
-                                v.get_ident()
-                            ),
-                        ));
-                    }
-                }
+            if let Some(driven) =
+                first_driven_flow_referenced(&equation_scalar_strings(v), &driven_sorted)
+            {
+                return Err((
+                    ErrorCode::ConveyorDrivenFlowRead,
+                    format!(
+                        "variable '{}' references conveyor-driven flow '{driven}'; a \
+                         conveyor outflow/leak cannot be read by another equation \
+                         (it is computed after the flows phase)",
+                        v.get_ident()
+                    ),
+                ));
             }
+        }
+    }
+
+    // The conveyor's OWN parameter (`<len>`/`<capacity>`/`<in_limit>`/`<sample>`/
+    // `<arrest>`) and leak-fraction expressions were lifted into `$conv$...` auxes
+    // during Pass 1 and are not appended to `model.variables` until Pass 2, so the
+    // loop above did not scan them. They are ordinary auxes computed IN the Flows
+    // phase, so a reference to a conveyor-driven flow reads the same placeholder 0
+    // -- silently zeroing capacity, never arresting the belt, sampling a condition
+    // a step early, and so on. Scan them here too, naming the conveyor PARAMETER
+    // the reference came from (the synthetic `$conv$...` aux name is internal).
+    //
+    // Uniform treatment against the full driven set is correct even for a
+    // bare-`<leak/>` fraction aux derived from the leak flow's OWN `<eqn>` that
+    // references that same leak flow: the aux still reads the flow's placeholder-0
+    // slot in the Flows phase, so rejecting it is exactly right (there is no
+    // legitimate self-reference to carve out). This runs before the container-
+    // access rewrite below mutates the aux equations, so it sees the raw parameter
+    // strings; a container access like `SUM(belt)` names the belt STOCK, never a
+    // driven flow, so it is not a false positive here.
+    for aux in &new_auxes {
+        if let Some(driven) =
+            first_driven_flow_referenced(&equation_strings(&aux.equation), &driven_sorted)
+        {
+            let (conveyor, label) = param_origins
+                .get(&aux.ident)
+                .cloned()
+                .unwrap_or_else(|| (aux.ident.clone(), "parameter".to_string()));
+            return Err((
+                ErrorCode::ConveyorDrivenFlowRead,
+                format!(
+                    "conveyor '{conveyor}' {label} references conveyor-driven flow \
+                     '{driven}'; a conveyor outflow/leak cannot be read by a conveyor \
+                     parameter (it is computed after the flows phase)"
+                ),
+            ));
         }
     }
 
@@ -961,6 +1017,14 @@ fn equation_scalar_strings(v: &datamodel::Variable) -> Vec<String> {
         datamodel::Variable::Aux(a) => &a.equation,
         datamodel::Variable::Module(_) => return Vec::new(),
     };
+    equation_strings(eqn)
+}
+
+/// The scalar equation strings of one [`Equation`] (the single expression of a
+/// `Scalar`/`ApplyToAll`, or every element plus the default of an `Arrayed`).
+/// Shared by [`equation_scalar_strings`] and the synthesized-aux driven-flow scan
+/// (whose auxes are bare `Aux` values, not `datamodel::Variable`s).
+fn equation_strings(eqn: &Equation) -> Vec<String> {
     match eqn {
         Equation::Scalar(s) => vec![s.clone()],
         Equation::ApplyToAll(_, s) => vec![s.clone()],
@@ -972,6 +1036,28 @@ fn equation_scalar_strings(v: &datamodel::Variable) -> Vec<String> {
             out
         }
     }
+}
+
+/// Scan `equations` (the scalar equation strings of one variable/aux) for a
+/// reference to any pass-driven flow in `driven_sorted` (sorted for a
+/// deterministic first-match), returning the first driven-flow name referenced.
+/// A scalar string that does not parse is skipped -- an unparseable equation is a
+/// separate diagnostic the ordinary compile path raises; the point here is purely
+/// to catch a syntactically-valid reference to a pass-driven flow, which would
+/// read the flow's Flows-phase placeholder 0 instead of the belt-driven rate
+/// (docs/design/conveyors.md §4.3).
+fn first_driven_flow_referenced(equations: &[String], driven_sorted: &[String]) -> Option<String> {
+    for eqn in equations {
+        let Ok(Some(ast)) = crate::ast::Expr0::new(eqn, crate::lexer::LexerType::Equation) else {
+            continue;
+        };
+        for driven in driven_sorted {
+            if ast.get_var_loc(driven).is_some() {
+                return Some(driven.clone());
+            }
+        }
+    }
+    None
 }
 
 /// The container (conveyor or queue) and access a supported container
@@ -3645,6 +3731,133 @@ mod tests {
         let main = project.models[0].name.clone();
         let err = build_vm(&project, &main).expect_err("reading a driven flow must be rejected");
         assert_eq!(err.code, ErrorCode::ConveyorDrivenFlowRead);
+    }
+
+    #[test]
+    fn conveyor_capacity_reading_driven_flow_is_rejected() {
+        // A conveyor PARAMETER expression (here `<capacity>`) that references a
+        // conveyor-driven flow (`attriting`, the belt's own leak outflow) escapes
+        // the ordinary reader scan because the parameter is lifted into a hidden
+        // aux appended only after that scan. It would silently compute from the
+        // flow's Flows-phase placeholder 0 -- capacity 0, belt admits nothing, no
+        // error. Expansion must reject it loudly, naming the conveyor PARAMETER
+        // (not the internal `$conv$...` aux name) and the flow.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>attriting</outflow>
+          <conveyor><len>4</len><capacity>attriting * 20</capacity></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <flow name="attriting"><eqn>0.2</eqn><leak/></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let err = build_vm(&project, &main)
+            .expect_err("a capacity reading a driven flow must be rejected");
+        assert_eq!(err.code, ErrorCode::ConveyorDrivenFlowRead);
+        let msg = err.get_details().unwrap_or_default();
+        assert!(
+            msg.contains("belt") && msg.contains("<capacity>") && msg.contains("attriting"),
+            "message should name the conveyor, the parameter, and the driven flow: {msg}"
+        );
+    }
+
+    #[test]
+    fn conveyor_parameters_reading_driven_flow_are_rejected() {
+        // Every conveyor parameter (`<len>`/`<capacity>`/`<in_limit>`/`<sample>`/
+        // `<arrest>`) is lifted into a hidden aux; a reference to a driven flow in
+        // ANY of them is the same placeholder-0 hazard (a zeroed cap/len, a never-
+        // arrested belt, a sample/arrest condition read a step early). The scan
+        // must cover all of them and name the offending parameter.
+        for (label, block) in [
+            ("<len>", "<len>attriting * 10</len>"),
+            (
+                "<capacity>",
+                "<len>4</len><capacity>attriting * 20</capacity>",
+            ),
+            ("<in_limit>", "<len>4</len><in_limit>attriting</in_limit>"),
+            ("<sample>", "<len>4</len><sample>attriting</sample>"),
+            ("<arrest>", "<len>4</len><arrest>attriting</arrest>"),
+        ] {
+            let xml = wrap_model(&format!(
+                r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>attriting</outflow>
+          <conveyor>{block}</conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <flow name="attriting"><eqn>0.2</eqn><leak/></flow>"#,
+            ));
+            let project = parse(&xml);
+            let main = project.models[0].name.clone();
+            let err = build_vm(&project, &main).expect_err(&format!(
+                "parameter {label} reading a driven flow must be rejected"
+            ));
+            assert_eq!(
+                err.code,
+                ErrorCode::ConveyorDrivenFlowRead,
+                "parameter {label} should be rejected"
+            );
+            let msg = err.get_details().unwrap_or_default();
+            assert!(
+                msg.contains("belt") && msg.contains(label) && msg.contains("attriting"),
+                "parameter {label}: message should name the conveyor, the parameter, and the flow: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn conveyor_leak_fraction_reading_driven_flow_is_rejected() {
+        // A leak's FRACTION is also lifted into a hidden aux. An explicit
+        // `<leak>expr</leak>` fraction that references another driven flow (here
+        // the primary outflow `out_f`) reads its placeholder 0 in the Flows phase
+        // -- a silently-zeroed leak rate. Reject it, naming the leak flow.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>1000</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>attriting</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <flow name="attriting"><eqn>0</eqn><leak>out_f * 0.001</leak></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let err = build_vm(&project, &main)
+            .expect_err("a leak fraction reading a driven flow must be rejected");
+        assert_eq!(err.code, ErrorCode::ConveyorDrivenFlowRead);
+        let msg = err.get_details().unwrap_or_default();
+        assert!(
+            msg.contains("belt") && msg.contains("attriting") && msg.contains("out_f"),
+            "message should name the conveyor, the leak flow, and the driven flow: {msg}"
+        );
+    }
+
+    #[test]
+    fn conveyor_capacity_referencing_ordinary_aux_compiles_and_simulates() {
+        // Negative control: a capacity that references an ORDINARY (non-driven)
+        // aux is fine -- the aux is computed in the Flows phase like any other, so
+        // the belt sees the real capacity. `cap_base * 2 = 600` plateaus contents
+        // at 600, exactly like a literal `<capacity>600</capacity>` (S5).
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>4</len><capacity>cap_base * 2</capacity></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <aux name="cap_base"><eqn>300</eqn></aux>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build");
+        vm.run_to_end().expect("run");
+        let belt = vm.get_series(&Ident::new("belt")).expect("belt");
+        for (i, &b) in belt.iter().enumerate() {
+            assert!(b <= 600.0 + 1e-6, "step {i}: contents {b} exceeds capacity");
+        }
+        assert!(
+            (belt[belt.len() - 1] - 600.0).abs() < 1e-6,
+            "plateaus at 600: {}",
+            belt[belt.len() - 1]
+        );
     }
 
     // ----- slat-count bound (§4.1): a hostile/typo'd <len> must never
