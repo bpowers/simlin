@@ -1081,6 +1081,22 @@ pub fn compile_project_incremental(
                     )
                 );
             }
+            // Queue stocks are likewise simulated only through the queue build
+            // path (`queue_compile::build_vm`), which expands each FIFO into an
+            // ordinary INTEG stock + driven outflows and CLEARS the queue marker.
+            // A surviving marker means the model reached the ordinary compile
+            // path un-expanded; integrating it as a plain stock would silently
+            // mis-simulate, so reject it loudly (docs/design/queues.md §10.3).
+            if source_var.compat(db).queue.is_some() {
+                return crate::sim_err!(
+                    QueueNotExpanded,
+                    format!(
+                        "queue stock '{}' reached the ordinary compile path un-expanded; \
+                         queue simulation must go through queue_compile::build_vm",
+                        source_var.ident(db)
+                    )
+                );
+            }
         }
     }
     // `assemble_simulation` is salsa-tracked, returning an `Arc` so its return

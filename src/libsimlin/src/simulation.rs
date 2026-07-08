@@ -51,23 +51,29 @@ pub unsafe extern "C" fn simlin_sim_new(
     let project_ptr = model_ref.project;
     let project_ref = &*project_ptr;
 
-    // Conveyor models compile through the dedicated conveyor build path, which
-    // expands each belt into hidden parameter auxes plus a native VM pass. That
-    // path uses a private db (bypassing the incremental salsa db) and does not
-    // participate in LTM (conveyor + LTM is a documented degradation), so it is
-    // taken ONLY when the model actually contains a conveyor. The ordinary
-    // incremental compile below deliberately rejects an un-expanded conveyor.
-    type ConveyorBuild = std::result::Result<
+    // Conveyor AND queue models compile through the dedicated special-stock-type
+    // build path (`queue_compile::build_compiled`), which expands each belt/FIFO
+    // into hidden auxes + driven flows plus a native VM pass. That path uses a
+    // private db (bypassing the incremental salsa db) and does not participate in
+    // LTM (conveyor/queue + LTM is a documented degradation), so it is taken ONLY
+    // when the model actually contains a conveyor or a queue. The ordinary
+    // incremental compile below deliberately rejects an un-expanded conveyor or
+    // queue. A model with both carries both plan sets from the single build.
+    type SpecialBuild = std::result::Result<
         (
             engine::CompiledSimulation,
             Vec<engine::conveyor_compile::ConveyorPlan>,
+            Vec<engine::queue_compile::QueuePlan>,
         ),
         engine::Error,
     >;
-    let conveyor_build: Option<ConveyorBuild> = {
+    let conveyor_build: Option<SpecialBuild> = {
         let datamodel = project_ref.datamodel.lock().unwrap();
-        if engine::conveyor_compile::project_has_conveyor(&datamodel, &model_ref.model_name) {
-            Some(engine::conveyor_compile::build_compiled(
+        let has_conveyor =
+            engine::conveyor_compile::project_has_conveyor(&datamodel, &model_ref.model_name);
+        let has_queue = engine::queue_compile::project_has_queue(&datamodel, &model_ref.model_name);
+        if has_conveyor || has_queue {
+            Some(engine::queue_compile::build_compiled(
                 &datamodel,
                 &model_ref.model_name,
             ))
@@ -210,27 +216,42 @@ pub unsafe extern "C" fn simlin_sim_new(
         }
     };
 
-    let (compiled, vm, vm_error, conveyor_plans) = if let Some(result) = conveyor_build {
-        // Conveyor path: build the VM and attach its plans. The compiled sim
-        // AND the plans are both cached so reset() can recreate the VM (which
-        // consumes itself via into_results on run) and re-attach the pass.
+    let (compiled, vm, vm_error, conveyor_plans, queue_plans) = if let Some(result) = conveyor_build
+    {
+        // Special-stock path: build the VM and attach BOTH plan sets. The
+        // compiled sim AND the plans are all cached so reset() can recreate the
+        // VM (which consumes itself via into_results on run) and re-attach the
+        // passes. Empty plan sets are harmless (the VM guards on non-empty).
         match result {
-            Ok((compiled, plans)) => match Vm::new(compiled.clone()) {
+            Ok((compiled, conv_plans, q_plans)) => match Vm::new(compiled.clone()) {
                 Ok(mut vm) => {
-                    vm.set_conveyor_plans(plans.clone());
-                    (Some(compiled), Some(vm), None, Some(plans))
+                    vm.set_conveyor_plans(conv_plans.clone());
+                    vm.set_queue_plans(q_plans.clone());
+                    (
+                        Some(compiled),
+                        Some(vm),
+                        None,
+                        Some(conv_plans),
+                        Some(q_plans),
+                    )
                 }
-                Err(err) => (Some(compiled), None, Some(err), Some(plans)),
+                Err(err) => (
+                    Some(compiled),
+                    None,
+                    Some(err),
+                    Some(conv_plans),
+                    Some(q_plans),
+                ),
             },
-            Err(err) => (None, None, Some(err), None),
+            Err(err) => (None, None, Some(err), None, None),
         }
     } else {
         match incremental_result {
             Ok(compiled) => match Vm::new(compiled.clone()) {
-                Ok(vm) => (Some(compiled), Some(vm), None, None),
-                Err(err) => (Some(compiled), None, Some(err), None),
+                Ok(vm) => (Some(compiled), Some(vm), None, None, None),
+                Err(err) => (Some(compiled), None, Some(err), None, None),
             },
-            Err(err) => (None, None, Some(err), None),
+            Err(err) => (None, None, Some(err), None, None),
         }
     };
 
@@ -249,6 +270,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             ltm_mode: captured_ltm_mode,
             cached_partition_denominators: HashMap::new(),
             conveyor_plans,
+            queue_plans,
         }),
         ref_count: AtomicUsize::new(1),
     });
@@ -393,9 +415,13 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
         // Recreate VM from cached compiled simulation
         match Vm::new(compiled.clone()) {
             Ok(mut new_vm) => {
-                // Re-attach the conveyor pass dropped by the plain Vm::new.
+                // Re-attach the conveyor + queue passes dropped by the plain
+                // Vm::new (a model may carry both).
                 if let Some(ref plans) = state.conveyor_plans {
                     new_vm.set_conveyor_plans(plans.clone());
+                }
+                if let Some(ref plans) = state.queue_plans {
+                    new_vm.set_queue_plans(plans.clone());
                 }
                 for (&off, &val) in &state.overrides {
                     if let Err(err) = new_vm.set_value_by_offset(off, val) {

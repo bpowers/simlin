@@ -292,6 +292,9 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::ConveyorSpreadflowUnsupported => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorArrayedDimensionUnresolved => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorContainerAccessUnsupported => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueNotExpanded => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueNonEulerMethod => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueDrivenFlowRead => SimlinErrorCode::Generic,
         }
     }
 }
@@ -474,6 +477,12 @@ pub(crate) struct SimState {
     /// from `compiled`; a plain `Vm::new(compiled)` would drop the conveyor
     /// pass, so reset re-attaches these plans to the recreated VM.
     pub(crate) conveyor_plans: Option<Vec<engine::conveyor_compile::ConveyorPlan>>,
+    /// Resolved queue plans for a queue model (`None`/empty otherwise). Cached
+    /// alongside `conveyor_plans` for the same reason: `reset` recreates the VM
+    /// from `compiled`, and a plain `Vm::new(compiled)` would drop the queue
+    /// pass, so reset re-attaches these plans. A model with both conveyors and
+    /// queues carries both plan sets.
+    pub(crate) queue_plans: Option<Vec<engine::queue_compile::QueuePlan>>,
 }
 
 /// Opaque simulation structure

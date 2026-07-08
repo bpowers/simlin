@@ -462,6 +462,26 @@ pub enum ErrorCode {
     /// `MEAN` -> the belt total) or erroring opaquely
     /// (docs/design/conveyors.md §10).
     ConveyorContainerAccessUnsupported,
+    /// A queue stock reached the ordinary compile path without being expanded by
+    /// the queue build path (`queue_compile::build_vm`). Queue simulation is only
+    /// wired through that entry point; any other path would integrate the FIFO as
+    /// a plain stock and silently mis-simulate, so it is rejected (mirrors
+    /// [`ConveyorNotExpanded`], docs/design/queues.md §10.3).
+    QueueNotExpanded,
+    /// A queue is present under RK2/RK4 integration. The per-DT admit-then-serve
+    /// batch model is defined per-DT and has no meaning under Runge-Kutta
+    /// substeps, so queues require Euler (mirrors [`ConveyorNonEulerMethod`],
+    /// docs/design/queues.md §10.3).
+    QueueNonEulerMethod,
+    /// Another equation references a queue-driven outflow by name. The queue pass
+    /// runs after the flows phase, so such a reader would read the pre-pass
+    /// placeholder 0 rather than the served rate. Rejected loudly rather than
+    /// silently mis-computed (mirrors [`ConveyorDrivenFlowRead`],
+    /// docs/design/queues.md §2 "Driven outflow"). The structural
+    /// `<inflow>`/`<outflow>` stock linkage is NOT a reference and is not caught
+    /// here: a stock fed by the driven outflow via INTEG is correct (the Stocks
+    /// phase runs after the pass).
+    QueueDrivenFlowRead,
 }
 
 impl fmt::Display for ErrorCode {
@@ -535,6 +555,9 @@ impl fmt::Display for ErrorCode {
             ConveyorSpreadflowUnsupported => "conveyor_spreadflow_unsupported",
             ConveyorArrayedDimensionUnresolved => "conveyor_arrayed_dimension_unresolved",
             ConveyorContainerAccessUnsupported => "conveyor_container_access_unsupported",
+            QueueNotExpanded => "queue_not_expanded",
+            QueueNonEulerMethod => "queue_non_euler_method",
+            QueueDrivenFlowRead => "queue_driven_flow_read",
         };
 
         write!(f, "{name}")

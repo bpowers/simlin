@@ -354,6 +354,15 @@ pub struct Vm {
     // Last integer time unit seen by the conveyor pass, for the discrete
     // per-time-unit in_limit budget reset (§6.3).
     conveyor_last_unit: i64,
+    // Queue support (docs/design/queues.md §10.3). Empty for every non-queue
+    // model, and all queue logic is guarded on a non-empty plan list -- so an
+    // ordinary simulation runs with zero overhead and byte-identical behavior.
+    // Queues and conveyors coexist: a model may carry both plan sets and both
+    // side tables, and both passes run in the same between-Flows-and-Stocks slot.
+    // `queues` is the per-queue FIFO side table (§4.1), rebuilt from the
+    // initials-populated buffer on each `run_initials`.
+    queue_plans: Vec<crate::queue_compile::QueuePlan>,
+    queues: Vec<crate::queue::QueueState>,
 }
 
 #[derive(Clone)]
@@ -705,6 +714,8 @@ impl Vm {
             conveyor_plans: Vec::new(),
             conveyors: Vec::new(),
             conveyor_last_unit: i64::MIN,
+            queue_plans: Vec::new(),
+            queues: Vec::new(),
         })
     }
 
@@ -716,6 +727,15 @@ impl Vm {
     pub fn set_conveyor_plans(&mut self, plans: Vec<crate::conveyor_compile::ConveyorPlan>) {
         self.conveyor_last_unit = self.specs.start.floor() as i64;
         self.conveyor_plans = plans;
+    }
+
+    /// Attach resolved queue plans (docs/design/queues.md §10.3). Called by the
+    /// queue-aware build path ([`crate::queue_compile::build_vm`]) after ordinary
+    /// compilation resolves the queue stock/flow slots. A plain `Vm::new` leaves
+    /// the plan list empty, so ordinary models are unaffected. The FIFO side
+    /// table is (re)built in `run_initials`, so nothing else is set here.
+    pub fn set_queue_plans(&mut self, plans: Vec<crate::queue_compile::QueuePlan>) {
+        self.queue_plans = plans;
     }
 
     pub fn run_to_end(&mut self) -> Result<()> {
@@ -732,6 +752,14 @@ impl Vm {
             return sim_err!(
                 ConveyorNonEulerMethod,
                 "conveyors require Euler integration".to_string()
+            );
+        }
+        // Queues are Euler-only for the same reason (docs/design/queues.md §10.3):
+        // the per-DT admit-then-serve model has no meaning under RK substeps.
+        if !self.queue_plans.is_empty() && !matches!(self.specs.method, Method::Euler) {
+            return sim_err!(
+                QueueNonEulerMethod,
+                "queues require Euler integration".to_string()
             );
         }
         self.run_initials()?;
@@ -806,11 +834,15 @@ impl Vm {
                     break;
                 }
 
-                if self.conveyor_plans.is_empty() {
+                if self.conveyor_plans.is_empty() && self.queue_plans.is_empty() {
                     Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
                 } else {
-                    // Publish container-access values (§10) at STEP-START, before
-                    // the flows phase: they reflect the belt as left by the
+                    // Conveyors and/or queues run their native passes between the
+                    // Flows and Stocks phases (empty plan lists make each a no-op,
+                    // so a model with only one kind pays nothing for the other).
+                    //
+                    // Publish conveyor container-access values (§10) at STEP-START,
+                    // before the flows phase: they reflect the belt as left by the
                     // previous step (= start-of-step) and, because each container
                     // variable is a no-flow stock, survive the flows/stocks phases
                     // unchanged so Flows-phase readers see the start-of-step value.
@@ -819,12 +851,14 @@ impl Vm {
                         &self.conveyors,
                         curr,
                     );
-                    // The conveyor pass runs between flows and stocks: flows
-                    // compute the belt inputs (transit, capacity, leak
-                    // fractions, requested inflow rates), the pass advances the
-                    // belts and writes the driven flow rates, then stocks
-                    // integrate every stock -- including the conveyor stocks --
-                    // from those rates (docs/design/conveyors.md §4.3, §9.3).
+                    // Flows compute the pass inputs (belt transit/capacity/leak
+                    // fractions and requested inflow rates; queue inflow rates),
+                    // the passes advance the side tables and write the driven flow
+                    // rates, then Stocks integrate every stock -- including the
+                    // conveyor and queue stocks -- from those rates
+                    // (docs/design/conveyors.md §4.3/§9.3, docs/design/queues.md
+                    // §4.1). The two passes are independent this phase (the
+                    // coupling is a later step); conveyor runs first, then queue.
                     Self::eval(
                         &self.sliced_sim,
                         &mut state,
@@ -843,6 +877,12 @@ impl Vm {
                         dt,
                         t,
                         &mut self.conveyor_last_unit,
+                    );
+                    crate::queue_compile::run_queue_pass(
+                        &self.queue_plans,
+                        &mut self.queues,
+                        curr,
+                        dt,
                     );
                     Self::eval(
                         &self.sliced_sim,
@@ -1369,6 +1409,18 @@ impl Vm {
                 curr,
             );
             self.conveyor_last_unit = spec_start.floor() as i64;
+        }
+
+        // Initialize the queue side tables (docs/design/queues.md §7). Unlike
+        // conveyors, a queue needs NO extra Flows evaluation: its only dynamic
+        // init input is the stock's initial value `V`, which the initials pass
+        // already wrote into `curr[stock_off]` (the stock's own `<eqn>` is in the
+        // initials runlist). Reads `curr` only (never mutates it), so its
+        // placement after the `initial_values` snapshot keeps INIT() pure.
+        if !self.queue_plans.is_empty() {
+            let (curr, _next) =
+                borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
+            self.queues = crate::queue_compile::init_queues(&self.queue_plans, curr);
         }
 
         self.did_initials = true;

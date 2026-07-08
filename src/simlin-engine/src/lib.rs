@@ -72,6 +72,7 @@ mod project;
 #[path = "project_io.gen.rs"]
 pub mod project_io;
 pub mod queue;
+pub mod queue_compile;
 #[doc(hidden)]
 pub mod rapidhash;
 mod results;

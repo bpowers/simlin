@@ -1764,3 +1764,43 @@ fn test_conveyor_model_simulates_via_ffi() {
         simlin_project_unref(proj);
     }
 }
+
+/// End-to-end FFI proof that a queue model simulates through the production
+/// `simlin_sim_new` path (which routes queues through the unified special-stock
+/// build path). The fixture is a scalar queue -> stock with a constant inflow and
+/// an unconstrained outflow, so the queue is a faithful pass-through: `waiting`
+/// holds ~0 and `into_service` equals the constant inflow (10) every step.
+#[test]
+fn test_queue_model_simulates_via_ffi() {
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse queue_drain.xmile");
+    unsafe {
+        let (proj, model, sim) = create_test_sim(&datamodel);
+        run_to_end(sim);
+        let waiting = get_series_vec(sim, "waiting", 4096);
+        assert!(
+            waiting.len() > 10,
+            "expected many steps, got {}",
+            waiting.len()
+        );
+        for (i, &w) in waiting.iter().enumerate() {
+            assert!(w.abs() < 1e-9, "step {i}: waiting={w} (want ~0)");
+        }
+        let into_service = get_series_vec(sim, "into_service", 4096);
+        for (i, &o) in into_service.iter().enumerate() {
+            assert!(
+                (o - 10.0).abs() < 1e-9,
+                "step {i}: into_service={o} (want 10)"
+            );
+        }
+        // reset + rerun must reproduce the run (queue side table re-seeded).
+        reset_sim(sim);
+        run_to_end(sim);
+        let waiting2 = get_series_vec(sim, "waiting", 4096);
+        assert_eq!(waiting, waiting2, "reset+rerun diverged");
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
