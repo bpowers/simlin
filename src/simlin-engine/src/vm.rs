@@ -867,10 +867,11 @@ impl Vm {
                     // conveyor and queue stocks -- from those rates
                     // (docs/design/conveyors.md §4.3/§9.3, docs/design/queues.md
                     // §4.1/§9). `run_coupled_passes` runs the conveyor and queue
-                    // passes; when a queue feeds a discrete conveyor it interleaves
-                    // that queue's serve between the conveyor's phase A and phase B
-                    // (the coupling), and otherwise delegates to the two
-                    // independent passes byte-identically.
+                    // passes; when queues feed a discrete conveyor it interleaves
+                    // each coupled queue's serve (in the belt's inflow declaration
+                    // order) between that conveyor's phase A and phase B, and
+                    // otherwise delegates to the two independent passes
+                    // byte-identically.
                     Self::eval(
                         &self.sliced_sim,
                         &mut state,

@@ -2091,12 +2091,25 @@ pub fn conveyor_phase_b_one(
 /// conveyor-driven chain inflows are charged. Does NOT mutate belt state; the
 /// combined queue pass ([`crate::queue_compile`]) calls this between phase A and
 /// phase B, then serves the queue up to `req`.
+///
+/// `prior_coupled_vol` is the total volume EARLIER-served coupled queues already
+/// committed to this same belt this DT, when several queues feed one discrete
+/// conveyor (conveyors.md §6.4 rule 1 / §11). Their material has not yet inserted
+/// (phase B runs after all coupled serves), so `contents_after` cannot see it;
+/// charging it here to the CAPACITY room lets each successive queue size against
+/// the room its predecessors took. The per-time-unit inflow-limit side is charged
+/// separately -- each serve calls [`ConveyorState::consume_inflow_budget`], which
+/// advances `in_carry` so the next `admission_budget` sees the reduced
+/// `limit_vol` -- so it must NOT be double-charged here (it feeds only the
+/// capacity arm). A single coupled queue passes `0.0` and gets the pre-existing
+/// behavior byte-for-byte.
 pub fn coupled_admission_budget(
     plan: &ConveyorPlan,
     state: &ConveyorState,
     pa: &PhaseAResult,
     curr: &[f64],
     dt: f64,
+    prior_coupled_vol: f64,
 ) -> f64 {
     let capacity = plan
         .cap_off
@@ -2111,7 +2124,8 @@ pub fn coupled_admission_budget(
         .iter()
         .filter(|inf| inf.conveyor_driven)
         .map(|inf| curr[inf.flow_off] * dt)
-        .sum();
+        .sum::<f64>()
+        + prior_coupled_vol;
     state.admission_budget(pa, capacity, in_limit, other_conv_vol)
 }
 

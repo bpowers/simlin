@@ -54,9 +54,11 @@
 //! two plan sets (a `queue_coupled` conveyor inflow + a [`QueueOutflowKind::Coupled`]
 //! queue outflow), so no separate structure threads through the VM or libsimlin.
 //! The VM carries both side tables and runs [`run_coupled_passes`] between the
-//! Flows and Stocks phases -- interleaving a coupled queue's serve between its
-//! conveyor's phase A and phase B, and delegating to the two independent passes
-//! when nothing is coupled.
+//! Flows and Stocks phases -- interleaving each coupled queue's serve between its
+//! conveyor's phase A and phase B (several queues MAY feed one discrete conveyor,
+//! served in the belt's `<inflow>` declaration order under a shared admission
+//! budget -- the listed-order admission priority of conveyors.md §4.3 step 4 /
+//! §11), and delegating to the two independent passes when nothing is coupled.
 
 use std::collections::HashMap;
 
@@ -1118,27 +1120,38 @@ fn apply_couplings(
 /// ([`crate::conveyor_compile::run_pass`]) and queue ([`run_queue_pass`]) passes
 /// whenever the model has any coupling. Ordering (the whole point of the combined
 /// pass): every conveyor's Phase A runs first (leak + exit, freeing belt room),
-/// then for each conveyor -- if a queue is coupled to it -- the queue's serve is
-/// interleaved BEFORE that conveyor's Phase B:
+/// then for each conveyor -- for each queue coupled to it, in the belt's
+/// `<inflow>` DECLARATION order -- the queue's serve is interleaved BEFORE that
+/// conveyor's Phase B:
 ///
 /// 1. size the conveyor's admission budget `req = min(cap_room, limit_vol)` from
-///    ITS Phase A result ([`crate::conveyor_compile::coupled_admission_budget`]);
+///    ITS Phase A result ([`crate::conveyor_compile::coupled_admission_budget`]),
+///    charging the volume any earlier-served coupled queue already committed to
+///    this belt this DT (`prior_coupled_vol`) so the shared capacity room is not
+///    double-spent;
 /// 2. admit the queue's inflow (§4.2 step 1);
 /// 3. serve `taken <= req` from the front under the batch rules
 ///    ([`crate::queue::QueueState::take_for_conveyor`]);
 /// 4. debit the discrete inflow budget by `taken`
-///    ([`crate::conveyor::ConveyorState::consume_inflow_budget`]);
+///    ([`crate::conveyor::ConveyorState::consume_inflow_budget`]) -- this also
+///    advances the shared per-time-unit `in_carry` the NEXT coupled queue sees;
 /// 5. write the shared flow slot to `taken / dt` -- this is BOTH the queue's
 ///    driven outflow rate AND the conveyor's admitted inflow rate, so the ordinary
 ///    Stocks phase integrates the queue stock `-taken` and the conveyor stock
 ///    `+taken` from the SAME slot (conservation on both stocks);
-/// 6. run the conveyor's Phase B, which routes the shared flow through the
-///    unconditional `conv_inflows` path (it is `queue_coupled`) and inserts
-///    `taken` onto the belt at the entry depth.
+/// 6. after all its coupled queues are served, run the conveyor's Phase B, which
+///    routes each shared flow through the unconditional `conv_inflows` path (it is
+///    `queue_coupled`) and inserts `taken` onto the belt at the entry depth.
 ///
-/// Uncoupled conveyors run their ordinary Phase B and uncoupled queues their
-/// ordinary admit-then-serve. When there is NO coupling this delegates to the two
-/// independent passes, byte-identical to the pre-coupling behavior.
+/// Several queues feeding one discrete conveyor reuse the spec's listed-order
+/// admission priority (conveyors.md §4.3 step 4 / §11; §6.4 rule 1's per-inflow
+/// apportionment governs the equation-driven QUANTIZED case, which coupled takes
+/// bypass): the belt's `<inflow>` order is the admission priority, and each
+/// successive queue's budget subtracts what its predecessors took (the capacity
+/// arm via `prior_coupled_vol`, the inflow-limit arm via `in_carry`). Uncoupled conveyors run their ordinary Phase B and
+/// uncoupled queues their ordinary admit-then-serve. When there is NO coupling
+/// this delegates to the two independent passes, byte-identical to the
+/// pre-coupling behavior.
 // The two side-table sets (plans + states), `curr`, `dt`, and the two clock
 // inputs (`time`, `last_unit`) are all independent per-step inputs the VM already
 // holds separately; bundling them into a struct would only add an indirection.
@@ -1165,10 +1178,19 @@ pub fn run_coupled_passes(
     }
 
     // Reconstruct the couplings from the queue plans (the `Coupled` outflow kind
-    // carries the conveyor plan index + batch rules): conveyor index -> its serve,
-    // plus a mask of which queues are coupled (served here, skipped by the plain
-    // queue pass).
-    let mut coupling_for_conveyor: Vec<Option<CoupledServe>> = vec![None; conv_plans.len()];
+    // carries the conveyor plan index + batch rules): conveyor index -> the LIST
+    // of queues coupled to it, plus a mask of which queues are coupled (served
+    // here, skipped by the plain queue pass).
+    //
+    // A discrete conveyor MAY have MORE THAN ONE coupled queue -- several queues'
+    // primary outflows feeding one belt as its equation-driven inflows
+    // (the listed-order priority of conveyors.md §4.3 step 4 / §11). They are
+    // served in the belt's `<inflow>`
+    // DECLARATION order (the admission priority, matching how phase_b apportions
+    // equation-inflow clearance in listed order), so the list is sorted below by
+    // each shared flow's position in `conv_plans[c].inflows` -- a deterministic,
+    // compile-time order, NOT the queue-plan or HashMap iteration order.
+    let mut coupling_for_conveyor: Vec<Vec<CoupledServe>> = vec![Vec::new(); conv_plans.len()];
     let mut queue_is_coupled = vec![false; queue_plans.len()];
     let mut any = false;
     for (qi, qp) in queue_plans.iter().enumerate() {
@@ -1180,7 +1202,7 @@ pub fn run_coupled_passes(
             } = op.kind
                 && conveyor < coupling_for_conveyor.len()
             {
-                coupling_for_conveyor[conveyor] = Some(CoupledServe {
+                coupling_for_conveyor[conveyor].push(CoupledServe {
                     queue: qi,
                     shared_flow_off: op.flow_off,
                     one_at_a_time,
@@ -1189,6 +1211,22 @@ pub fn run_coupled_passes(
                 queue_is_coupled[qi] = true;
                 any = true;
             }
+        }
+    }
+    // Order each conveyor's coupled serves by the belt's `<inflow>` declaration
+    // order so admission priority is deterministic and matches phase_b's
+    // listed-order apportionment (a shared flow always appears among the belt's
+    // inflows, so `position` resolves; the fallback keeps a would-be-missing slot
+    // last rather than panicking).
+    for (ci, serves) in coupling_for_conveyor.iter_mut().enumerate() {
+        if serves.len() > 1 {
+            let inflows = &conv_plans[ci].inflows;
+            serves.sort_by_key(|cs| {
+                inflows
+                    .iter()
+                    .position(|inf| inf.flow_off == cs.shared_flow_off)
+                    .unwrap_or(usize::MAX)
+            });
         }
     }
 
@@ -1202,18 +1240,33 @@ pub fn run_coupled_passes(
     // Phase A over every conveyor (frees belt room, writes driven outflow rates).
     let pa = cc::run_phase_a(conv_plans, conveyors, curr, dt, time, last_unit);
 
-    // Per conveyor: interleave the coupled queue's serve between phase A and B.
+    // Per conveyor: interleave each coupled queue's serve between phase A and B,
+    // in the belt's <inflow> declaration order. `prior_coupled_vol` accumulates the
+    // volume earlier queues already committed to this belt this DT, so each
+    // successive queue sizes its budget against the room its predecessors took (the
+    // capacity arm; the per-time-unit inflow-limit arm is charged by
+    // `consume_inflow_budget` advancing `in_carry`).
     for i in 0..conv_plans.len() {
-        if let Some(cs) = coupling_for_conveyor[i] {
+        let mut prior_coupled_vol = 0.0;
+        for cs in &coupling_for_conveyor[i] {
             let qi = cs.queue;
-            // Size the budget from THIS conveyor's phase A (belt room), admit the
-            // queue's inflow, then serve up to `req` under the batch rules.
-            let req = cc::coupled_admission_budget(&conv_plans[i], &conveyors[i], &pa[i], curr, dt);
+            // Size the budget from THIS conveyor's phase A (belt room minus what
+            // earlier coupled queues took), admit the queue's inflow, then serve up
+            // to `req` under the batch rules.
+            let req = cc::coupled_admission_budget(
+                &conv_plans[i],
+                &conveyors[i],
+                &pa[i],
+                curr,
+                dt,
+                prior_coupled_vol,
+            );
             admit_inflows(&queue_plans[qi].inflow_offs, &mut queues[qi], curr, dt);
             // Measure the batch-policy desire BEFORE the finite-`req` take mutates
             // the front (§4.5): the redirectable volume an <overflow/> sibling may
             // claim is `desire − taken` -- exactly the front material capacity /
-            // inflow-limit / arrest blocked the primary from taking.
+            // inflow-limit / arrest (here including the SHARED budget an earlier
+            // queue already spent) blocked the primary from taking.
             let desire = queues[qi].conveyor_desire(cs.one_at_a_time);
             let taken = queues[qi].take_for_conveyor(req, cs.one_at_a_time, cs.batch_integrity);
             let redirectable = (desire - taken).max(0.0);
@@ -1232,6 +1285,7 @@ pub fn run_coupled_passes(
                 curr,
                 dt,
             );
+            prior_coupled_vol += taken;
         }
         cc::conveyor_phase_b_one(i, conv_plans, conveyors, &pa, curr, dt);
     }
@@ -2417,6 +2471,238 @@ mod tests {
         let second = vm.get_series(&Ident::new("belt")).unwrap();
         for (i, (&a, &b)) in first.iter().zip(second.iter()).enumerate() {
             assert!((a - b).abs() < 1e-12, "reset diverged at {i}: {a} vs {b}");
+        }
+    }
+
+    // ----- Part D: MULTIPLE queues coupled to ONE discrete conveyor (§9 /
+    // conveyors.md §4.3 step 4, §11) -----
+
+    /// Two queues (`waiting_a`, `waiting_b`), each with its own arrivals, whose
+    /// PRIMARY outflows both feed ONE discrete belt as its two equation-driven
+    /// inflows (`into_belt_a`, `into_belt_b`). Several queues feeding one discrete
+    /// conveyor reuse the listed-order admission priority of conveyors.md §4.3
+    /// step 4 / §11: the belt's `<inflow>` DECLARATION ORDER is the admission priority.
+    ///
+    /// `in_limit = 6` per time unit (capacity INF, transit 100 so nothing exits)
+    /// throttles the SHARED per-time-unit budget: with arrivals of 4 each, the
+    /// higher-priority queue always fits its 4 and the lower-priority one gets only
+    /// the 2 the shared budget leaves. `swap` reverses the belt's `<inflow>` order
+    /// (so `waiting_b` gets priority instead), proving the order is the conveyor's
+    /// inflow order -- NOT queue-plan or HashMap iteration order. `overflow` gives
+    /// the LOWER-priority queue (`waiting_b`) an `<overflow/>` sibling draining the
+    /// shared-budget-blocked (redirectable) volume to `balked_b`, so it exercises
+    /// redirectable accounting measured against the shared budget (§4.5).
+    fn two_queue_shared_belt_model(swap: bool, overflow: bool) -> datamodel::Project {
+        // The belt lists its two coupled inflows in this order; `swap` flips it.
+        let (first, second) = if swap {
+            ("into_belt_b", "into_belt_a")
+        } else {
+            ("into_belt_a", "into_belt_b")
+        };
+        // The overflow always sits on `waiting_b` (the second-declared queue), so
+        // the overflow variant is only meaningful when `waiting_b` is throttled --
+        // i.e. `swap = false`.
+        let (b_outflows, balk_flow, balked_stock) = if overflow {
+            (
+                "<outflow>into_belt_b</outflow><outflow>balk_b</outflow>",
+                r#"<flow name="balk_b"><eqn>0</eqn><overflow/></flow>"#,
+                r#"<stock name="balked_b"><eqn>0</eqn><inflow>balk_b</inflow></stock>"#,
+            )
+        } else {
+            ("<outflow>into_belt_b</outflow>", "", "")
+        };
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>two queues</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting_a"><eqn>0</eqn><inflow>arrivals_a</inflow><outflow>into_belt_a</outflow><queue/></stock>
+    <flow name="arrivals_a"><eqn>4</eqn><non_negative/></flow>
+    <flow name="into_belt_a"><eqn>0</eqn></flow>
+    <stock name="waiting_b"><eqn>0</eqn><inflow>arrivals_b</inflow>{b_outflows}<queue/></stock>
+    <flow name="arrivals_b"><eqn>4</eqn><non_negative/></flow>
+    <flow name="into_belt_b"><eqn>0</eqn></flow>
+    {balk_flow}
+    {balked_stock}
+    <stock name="belt"><eqn>0</eqn>
+      <inflow>{first}</inflow><inflow>{second}</inflow>
+      <outflow>graduating</outflow>
+      <conveyor discrete="true" one_at_a_time="false" batch_integrity="false">
+        <len>100</len><in_limit>6</in_limit></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+  </variables></model>
+</xmile>"#
+        );
+        parse(&xml)
+    }
+
+    #[test]
+    fn two_queues_into_one_conveyor_both_drain_by_priority_and_conserve() {
+        // The reproduction of the two-queue-coupling starvation bug: BOTH queues
+        // must be served. `waiting_a`'s inflow is declared first, so it has
+        // admission priority: it drains its full 4 each step (shared budget 6),
+        // and `waiting_b` gets only the 2 the shared per-time-unit budget leaves,
+        // so it grows by 2 each step. Before the fix, the second-reconstructed
+        // coupling overwrote the first and `waiting_a` was never served: its
+        // `into_belt_a` stayed frozen at 0 and its stock grew by 4 every step.
+        let vm = build_run(&two_queue_shared_belt_model(false, false));
+        let wa = vm.get_series(&Ident::new("waiting_a")).unwrap();
+        let wb = vm.get_series(&Ident::new("waiting_b")).unwrap();
+        let belt = vm.get_series(&Ident::new("belt")).unwrap();
+        let ia = vm.get_series(&Ident::new("into_belt_a")).unwrap();
+        let ib = vm.get_series(&Ident::new("into_belt_b")).unwrap();
+
+        // Hand oracle (start-of-step stocks; step-t flow rates). Budget resets each
+        // integer time unit, so the pattern repeats every step:
+        //   waiting_a: fully drained every step (priority, 4 <= budget 6)
+        //   waiting_b: +2 per step (gets the residual 2 of the shared budget)
+        //   belt:      +6 per step (4 + 2), nothing exits (transit 100)
+        let want_wa = [0.0, 0.0, 0.0, 0.0, 0.0];
+        let want_wb = [0.0, 2.0, 4.0, 6.0, 8.0];
+        let want_belt = [0.0, 6.0, 12.0, 18.0, 24.0];
+        let want_ia = [4.0, 4.0, 4.0, 4.0, 4.0];
+        let want_ib = [2.0, 2.0, 2.0, 2.0, 2.0];
+        for i in 0..5 {
+            assert!(
+                (wa[i] - want_wa[i]).abs() < 1e-9,
+                "waiting_a[{i}] = {}",
+                wa[i]
+            );
+            assert!(
+                (wb[i] - want_wb[i]).abs() < 1e-9,
+                "waiting_b[{i}] = {}",
+                wb[i]
+            );
+            assert!(
+                (belt[i] - want_belt[i]).abs() < 1e-9,
+                "belt[{i}] = {}",
+                belt[i]
+            );
+            assert!(
+                (ia[i] - want_ia[i]).abs() < 1e-9,
+                "into_belt_a[{i}] = {}",
+                ia[i]
+            );
+            assert!(
+                (ib[i] - want_ib[i]).abs() < 1e-9,
+                "into_belt_b[{i}] = {}",
+                ib[i]
+            );
+        }
+
+        // Total conservation: 8 arrives per completed step (4 + 4). Nothing exits
+        // the belt, so belt + waiting_a + waiting_b == cumulative arrivals.
+        for t in 0..5 {
+            let in_system = belt[t] + wa[t] + wb[t];
+            let arrived = 8.0 * t as f64;
+            assert!(
+                (in_system - arrived).abs() < 1e-9,
+                "step {t}: belt+wa+wb = {in_system}, arrived = {arrived}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_queue_priority_follows_conveyor_inflow_order_not_queue_order() {
+        // Swapping the belt's <inflow> DECLARATION order flips the priority: now
+        // `waiting_b` (declared first) drains fully and `waiting_a` (declared
+        // second) is throttled to the residual 2 -- the exact mirror image of the
+        // non-swapped run. The queue VARIABLE order in the model is unchanged
+        // (`waiting_a` still precedes `waiting_b`), so this pins that admission
+        // priority is the CONVEYOR's inflow order, not queue-plan/HashMap order.
+        let vm = build_run(&two_queue_shared_belt_model(true, false));
+        let wa = vm.get_series(&Ident::new("waiting_a")).unwrap();
+        let wb = vm.get_series(&Ident::new("waiting_b")).unwrap();
+        let ia = vm.get_series(&Ident::new("into_belt_a")).unwrap();
+        let ib = vm.get_series(&Ident::new("into_belt_b")).unwrap();
+
+        let want_wa = [0.0, 2.0, 4.0, 6.0, 8.0]; // now throttled
+        let want_wb = [0.0, 0.0, 0.0, 0.0, 0.0]; // now priority
+        let want_ia = [2.0, 2.0, 2.0, 2.0, 2.0];
+        let want_ib = [4.0, 4.0, 4.0, 4.0, 4.0];
+        for i in 0..5 {
+            assert!(
+                (wa[i] - want_wa[i]).abs() < 1e-9,
+                "waiting_a[{i}] = {}",
+                wa[i]
+            );
+            assert!(
+                (wb[i] - want_wb[i]).abs() < 1e-9,
+                "waiting_b[{i}] = {}",
+                wb[i]
+            );
+            assert!(
+                (ia[i] - want_ia[i]).abs() < 1e-9,
+                "into_belt_a[{i}] = {}",
+                ia[i]
+            );
+            assert!(
+                (ib[i] - want_ib[i]).abs() < 1e-9,
+                "into_belt_b[{i}] = {}",
+                ib[i]
+            );
+        }
+    }
+
+    #[test]
+    fn two_queue_overflow_drains_shared_budget_blocked_volume() {
+        // `waiting_b` is the throttled (lower-priority) queue and has an
+        // `<overflow/>` sibling. Its redirectable volume each step is what the
+        // SHARED per-time-unit budget (already debited by `waiting_a`'s priority
+        // take) blocked it from admitting: desire 4 (all-at-once) minus taken 2 =
+        // 2. The overflow drains exactly that 2 to `balked_b`, so `waiting_b`
+        // stays EMPTY and the excess accumulates in `balked_b`. This is the
+        // redirectable accounting measured against the shared budget (§4.5).
+        let vm = build_run(&two_queue_shared_belt_model(false, true));
+        let wa = vm.get_series(&Ident::new("waiting_a")).unwrap();
+        let wb = vm.get_series(&Ident::new("waiting_b")).unwrap();
+        let belt = vm.get_series(&Ident::new("belt")).unwrap();
+        let balk = vm.get_series(&Ident::new("balk_b")).unwrap();
+        let balked = vm.get_series(&Ident::new("balked_b")).unwrap();
+
+        let want_wa = [0.0, 0.0, 0.0, 0.0, 0.0];
+        let want_wb = [0.0, 0.0, 0.0, 0.0, 0.0]; // overflow keeps it empty
+        let want_belt = [0.0, 6.0, 12.0, 18.0, 24.0];
+        let want_balk = [2.0, 2.0, 2.0, 2.0, 2.0];
+        let want_balked = [0.0, 2.0, 4.0, 6.0, 8.0];
+        for i in 0..5 {
+            assert!(
+                (wa[i] - want_wa[i]).abs() < 1e-9,
+                "waiting_a[{i}] = {}",
+                wa[i]
+            );
+            assert!(
+                (wb[i] - want_wb[i]).abs() < 1e-9,
+                "waiting_b[{i}] = {}",
+                wb[i]
+            );
+            assert!(
+                (belt[i] - want_belt[i]).abs() < 1e-9,
+                "belt[{i}] = {}",
+                belt[i]
+            );
+            assert!(
+                (balk[i] - want_balk[i]).abs() < 1e-9,
+                "balk_b[{i}] = {}",
+                balk[i]
+            );
+            assert!(
+                (balked[i] - want_balked[i]).abs() < 1e-9,
+                "balked_b[{i}] = {}",
+                balked[i]
+            );
+        }
+
+        // Conservation with the overflow sink: belt + waiting_a + waiting_b +
+        // balked_b == cumulative arrivals (8 per completed step).
+        for t in 0..5 {
+            let in_system = belt[t] + wa[t] + wb[t] + balked[t];
+            assert!(
+                (in_system - 8.0 * t as f64).abs() < 1e-9,
+                "step {t}: in_system = {in_system}"
+            );
         }
     }
 
