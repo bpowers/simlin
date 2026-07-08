@@ -520,6 +520,19 @@ pub enum ErrorCode {
     /// simulation is currently supported only in the main model (mirrors
     /// [`ConveyorInSubmodelUnsupported`], docs/design/queues.md §10.3).
     QueueInSubmodelUnsupported,
+    /// A queue outflow OTHER THAN the primary (first, highest-priority) feeds a
+    /// conveyor -- an `<overflow/>` sibling or a second ordinary outflow whose
+    /// destination is a conveyor stock. Only a queue's first outflow may feed a
+    /// conveyor (docs/design/queues.md §4.4/§9): the combined queue-conveyor pass
+    /// couples exactly the primary, so a secondary conveyor destination is neither
+    /// discipline-guarded nor served under the batch rules. The spec sketches an
+    /// overflow-to-conveyor (§4.5) but does not define how a secondary's
+    /// redirectable budget interleaves with a (possibly distinct) second belt's
+    /// admission budget, so it is rejected loudly at coupling-detection time rather
+    /// than silently mis-accounted (which desyncs the queue FIFO / belt stock from
+    /// its side table). Fires whether the destination conveyor is discrete or
+    /// continuous, and whether the secondary is an overflow or an ordinary outflow.
+    QueueSecondaryOutflowToConveyor,
 }
 
 impl fmt::Display for ErrorCode {
@@ -601,6 +614,7 @@ impl fmt::Display for ErrorCode {
             QueueLtmDegraded => "queue_ltm_degraded",
             ConveyorInSubmodelUnsupported => "conveyor_in_submodel_unsupported",
             QueueInSubmodelUnsupported => "queue_in_submodel_unsupported",
+            QueueSecondaryOutflowToConveyor => "queue_secondary_outflow_to_conveyor",
         };
 
         write!(f, "{name}")

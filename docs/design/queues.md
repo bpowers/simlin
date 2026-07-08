@@ -385,6 +385,7 @@ New / reused diagnostics (`ErrorCode`):
 | `QueueNonEulerMethod` | Error | any queue present under RK2/RK4 |
 | `ConveyorQueueUpstreamNotDiscrete` | Error | queue directly upstream of a non-discrete conveyor (already defined; now reachable) |
 | `QueueOverflowNotOnQueue` | Error | `<overflow/>` on a non-queue-outflow, or on a queue's first outflow |
+| `QueueSecondaryOutflowToConveyor` | Error | a queue outflow other than the first feeds a conveyor (constrained secondary/overflow service is deferred; only the primary may couple) |
 | `QueueLtmDegraded` | Warning | LTM requested on a model containing a queue |
 
 **Unit checking.** A queue outflow carries `S/t` like any flow; the queue stock

@@ -300,6 +300,7 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::QueueLtmDegraded => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorInSubmodelUnsupported => SimlinErrorCode::Generic,
             engine::ErrorCode::QueueInSubmodelUnsupported => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueSecondaryOutflowToConveyor => SimlinErrorCode::Generic,
         }
     }
 }

@@ -42,9 +42,13 @@
 //! outflow drains the whole remainder (§5.4). An `<overflow/>` behind an UNCONSTRAINED
 //! primary (no upstream conveyor) drains nothing: the primary is never blocked, so
 //! redirectable = 0 (§4.5). A SECONDARY outflow bound to a conveyor (a constrained
-//! overflow or second constrained ordinary outflow) is a documented limitation:
-//! [`detect_coupling_specs`] couples only the primary, so such an outflow is not
-//! served under the batch rules.
+//! overflow or a second constrained ordinary outflow) is REJECTED at
+//! coupling-detection time ([`ErrorCode::QueueSecondaryOutflowToConveyor`]): only
+//! the primary may feed a conveyor, and serving a secondary to a (possibly distinct)
+//! second belt under the batch rules is a deferred feature (§4.5 sketches it but
+//! leaves the redirectable-vs-admission-budget interleave undefined), so it is a
+//! loud error rather than silently mis-accounted. Every secondary reaching
+//! [`serve_secondary_outflows`] therefore targets a cloud or regular stock.
 //!
 //! Queues and conveyors COEXIST and COUPLE: the unified [`build_compiled`] /
 //! [`build_vm`] here expand conveyors first, then queues, compile ONCE, resolve
@@ -667,14 +671,11 @@ pub fn init_queues(plans: &[QueuePlan], curr: &[f64]) -> Vec<crate::queue::Queue
 ///   redirectable budget (nothing is left to redirect).
 ///
 /// The primary (index 0) is served by the caller (`serve_unconstrained` for an
-/// uncoupled queue, `take_for_conveyor` for a coupled one), so this skips it. A
-/// SECONDARY outflow bound to a conveyor is a documented limitation: it is never
-/// coupled ([`detect_coupling_specs`] couples only the primary), so it appears here
-/// as `Unconstrained` and, when the primary is coupled and redirectable > 0, would
-/// drain the blocked volume to a cloud rather than onto its belt under the batch
-/// rules. In practice this only matters for a second CONSTRAINED overflow (a rare
-/// XMILE construct); an unconstrained primary leaves redirectable = 0 so the
-/// secondary is idle regardless.
+/// uncoupled queue, `take_for_conveyor` for a coupled one), so this skips it. Every
+/// secondary reaching here targets a cloud or regular stock: a secondary whose
+/// destination is a conveyor is rejected up front by [`detect_coupling_specs`]
+/// ([`ErrorCode::QueueSecondaryOutflowToConveyor`]), so none is ever coupled or
+/// belt-bound at this point.
 fn serve_secondary_outflows(
     outflows: &[QueueOutflowPlan],
     state: &mut crate::queue::QueueState,
@@ -1005,28 +1006,67 @@ fn conveyor_batch_rules(
 /// conveyors.md §11). The batch rules are read from the (discrete) conveyor's
 /// block. A queue outflow to a cloud/regular stock matches no conveyor inflow and
 /// stays unconstrained (Phase 3 behavior unchanged).
+///
+/// Only a queue's PRIMARY (first, highest-priority) outflow may feed a conveyor
+/// (§4.4/§9): the combined pass ([`run_coupled_passes`]) couples exactly the
+/// primary. A SECONDARY outflow whose destination is a conveyor -- an `<overflow/>`
+/// sibling (§4.5) or a second ordinary competing outflow (§5.4) -- is rejected here
+/// with [`ErrorCode::QueueSecondaryOutflowToConveyor`]. Left uncoupled it would
+/// escape the discrete guard AND write its served rate into a slot the destination
+/// belt's phase B independently treats as an equation-driven inflow, silently
+/// desyncing the queue FIFO / belt stock from its side table. The spec sketches an
+/// overflow-to-conveyor (§4.5, "an overflow to another conveyor is itself
+/// constrained by that conveyor") but does not define how a secondary's
+/// redirectable budget interleaves with a (possibly distinct) second belt's
+/// admission budget, so faithfully serving it is a deferred feature rejected loudly
+/// rather than mis-accounted. The rejection is independent of the destination
+/// conveyor's `discrete`-ness and of whether the primary itself feeds a conveyor.
 fn detect_coupling_specs(
     project: &datamodel::Project,
     main_model: &str,
     conv_metas: &[crate::conveyor_compile::ConveyorMeta],
     queue_metas: &[QueueMeta],
 ) -> Result<Vec<CouplingSpec>, (ErrorCode, String)> {
+    // The conveyor (if any) whose SINGLE equation-driven inflow is `flow`: a
+    // conveyor inflow named `flow` that is not itself conveyor-driven. This is the
+    // "directly upstream" relation for both the primary coupling and the secondary
+    // rejection below.
+    let conveyor_fed_by = |flow: &str| -> Option<&crate::conveyor_compile::ConveyorMeta> {
+        conv_metas.iter().find(|cm| {
+            cm.inflows
+                .iter()
+                .any(|inf| inf.flow == flow && !inf.conveyor_driven)
+        })
+    };
+
     let mut specs = Vec::new();
     for qm in queue_metas {
-        // Only the PRIMARY (first, highest-priority) outflow couples to a conveyor
-        // (§4.4/§9). A secondary outflow feeding a conveyor -- a constrained
-        // overflow or a second constrained ordinary outflow -- is a documented
-        // limitation (§4.5/§5.4): it is not coupled here, so it is not served by the
-        // combined pass under the batch rules. Restricting to the primary also keeps
-        // one coupling per queue, so a queue is served exactly once per DT.
+        // Reject any SECONDARY outflow feeding a conveyor before considering the
+        // primary coupling: only the primary may feed a conveyor (§4.4/§9). This
+        // fires for an overflow OR an ordinary secondary, and regardless of whether
+        // the destination conveyor is discrete -- neither is served under the batch
+        // rules, so both would silently mis-account (see the module-level rustdoc).
+        for out in qm.outflows.iter().skip(1) {
+            if let Some(cm) = conveyor_fed_by(&out.flow) {
+                return Err((
+                    ErrorCode::QueueSecondaryOutflowToConveyor,
+                    format!(
+                        "queue '{}' outflow '{}' feeds conveyor '{}', but only a queue's first \
+                         (highest-priority) outflow may feed a conveyor; a secondary outflow or \
+                         overflow to a conveyor is not supported",
+                        qm.stock, out.flow, cm.stock
+                    ),
+                ));
+            }
+        }
+
+        // The PRIMARY outflow couples to a conveyor (§4.4/§9). Restricting the
+        // coupling to the primary keeps one coupling per queue, so a queue is served
+        // exactly once per DT.
         if let Some(out) = qm.outflows.first() {
             // A coupled shared flow is the conveyor's SINGLE equation-driven
             // inflow: a conveyor inflow that is not itself conveyor-driven.
-            let Some(cm) = conv_metas.iter().find(|cm| {
-                cm.inflows
-                    .iter()
-                    .any(|inf| inf.flow == out.flow && !inf.conveyor_driven)
-            }) else {
+            let Some(cm) = conveyor_fed_by(&out.flow) else {
                 continue; // primary outflow to a cloud/regular stock: unconstrained
             };
             if !cm.discrete {
@@ -2502,6 +2542,194 @@ mod tests {
         assert_eq!(err.code, ErrorCode::ConveyorQueueUpstreamNotDiscrete);
     }
 
+    // ----- F10: a SECONDARY queue outflow feeding a conveyor is rejected -----
+    //
+    // Only a queue's PRIMARY (first, highest-priority) outflow may feed a conveyor
+    // (§4.4/§9). The combined pass couples exactly the primary, so a secondary
+    // outflow (an <overflow/> sibling or a second ordinary outflow) whose target is
+    // a conveyor escapes the discrete guard AND is not served under the batch rules
+    // -- its served rate lands in a slot the destination belt's phase_b independently
+    // treats as an equation-driven inflow, silently desyncing the queue FIFO / belt
+    // stock from its side table. Rejected loudly at coupling-detection time.
+
+    /// Build a queue model through the special path and return the rejection.
+    fn build_vm_reject(xml: &str) -> crate::common::Error {
+        let project = parse(xml);
+        let main = project.models[0].name.clone();
+        build_vm(&project, &main).expect_err("model must be rejected")
+    }
+
+    #[test]
+    fn queue_secondary_ordinary_outflow_to_discrete_conveyor_is_rejected() {
+        // Primary `spill` drains to a regular stock (unconstrained); a SECOND
+        // ordinary outflow `into_belt` feeds a DISCRETE conveyor. Only the primary
+        // may feed a conveyor, so this is a loud QueueSecondaryOutflowToConveyor
+        // naming the queue, the offending outflow, and the conveyor.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>c</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow>
+      <outflow>spill</outflow><outflow>into_belt</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>4</eqn><non_negative/></flow>
+    <flow name="spill"><eqn>0</eqn></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <stock name="sink"><eqn>0</eqn><inflow>spill</inflow></stock>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true"><len>100</len><capacity>10</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let err = build_vm_reject(xml);
+        assert_eq!(err.code, ErrorCode::QueueSecondaryOutflowToConveyor);
+        let details = err.details.expect("a diagnostic message");
+        assert!(details.contains("waiting"), "names the queue: {details}");
+        assert!(
+            details.contains("into_belt"),
+            "names the outflow: {details}"
+        );
+        assert!(details.contains("belt"), "names the conveyor: {details}");
+    }
+
+    #[test]
+    fn queue_secondary_outflow_to_continuous_conveyor_is_rejected() {
+        // Same shape, but the destination is a CONTINUOUS (non-discrete) conveyor.
+        // Before this guard even the discrete requirement never examined it (only
+        // the primary was), so a secondary feeding a continuous conveyor raised NO
+        // error at all. It must now be rejected too.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>c</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow>
+      <outflow>spill</outflow><outflow>into_belt</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>4</eqn><non_negative/></flow>
+    <flow name="spill"><eqn>0</eqn></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <stock name="sink"><eqn>0</eqn><inflow>spill</inflow></stock>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor><len>4</len><capacity>10</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let err = build_vm_reject(xml);
+        assert_eq!(err.code, ErrorCode::QueueSecondaryOutflowToConveyor);
+    }
+
+    #[test]
+    fn queue_overflow_outflow_to_conveyor_is_rejected() {
+        // The secondary is an <overflow/> outflow feeding a discrete conveyor. The
+        // spec sketches an overflow-to-conveyor (§4.5) but does not define the
+        // combined-pass interleave, so it is a deferred feature rejected loudly (not
+        // silently mis-served).
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>c</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow>
+      <outflow>into_service</outflow><outflow>balk</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>4</eqn><non_negative/></flow>
+    <flow name="into_service"><eqn>0</eqn></flow>
+    <flow name="balk"><eqn>0</eqn><overflow/></flow>
+    <stock name="served"><eqn>0</eqn><inflow>into_service</inflow></stock>
+    <stock name="belt"><eqn>0</eqn><inflow>balk</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true"><len>100</len><capacity>10</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let err = build_vm_reject(xml);
+        assert_eq!(err.code, ErrorCode::QueueSecondaryOutflowToConveyor);
+        let details = err.details.expect("a diagnostic message");
+        assert!(details.contains("balk"), "names the overflow: {details}");
+        assert!(details.contains("belt"), "names the conveyor: {details}");
+    }
+
+    #[test]
+    fn queue_primary_and_secondary_to_two_different_conveyors_is_rejected() {
+        // The verdict's exact two-conveyor scenario: the primary feeds discrete
+        // conveyor A (a valid coupling) and the SECONDARY feeds discrete conveyor B.
+        // The secondary must be rejected -- naming conveyor B -- even though the
+        // primary coupling is itself well-formed.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>c</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow>
+      <outflow>into_belt_a</outflow><outflow>into_belt_b</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>4</eqn><non_negative/></flow>
+    <flow name="into_belt_a"><eqn>0</eqn></flow>
+    <flow name="into_belt_b"><eqn>0</eqn></flow>
+    <stock name="belt_a"><eqn>0</eqn><inflow>into_belt_a</inflow><outflow>grad_a</outflow>
+      <conveyor discrete="true"><len>100</len><capacity>10</capacity></conveyor></stock>
+    <flow name="grad_a"><eqn>0</eqn></flow>
+    <stock name="sink_a"><eqn>0</eqn><inflow>grad_a</inflow></stock>
+    <stock name="belt_b"><eqn>0</eqn><inflow>into_belt_b</inflow><outflow>grad_b</outflow>
+      <conveyor discrete="true"><len>100</len><capacity>10</capacity></conveyor></stock>
+    <flow name="grad_b"><eqn>0</eqn></flow>
+    <stock name="sink_b"><eqn>0</eqn><inflow>grad_b</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let err = build_vm_reject(xml);
+        assert_eq!(err.code, ErrorCode::QueueSecondaryOutflowToConveyor);
+        let details = err.details.expect("a diagnostic message");
+        assert!(
+            details.contains("into_belt_b"),
+            "names the outflow: {details}"
+        );
+        assert!(details.contains("belt_b"), "names conveyor B: {details}");
+    }
+
+    #[test]
+    fn queue_primary_to_conveyor_with_ordinary_secondary_to_stock_compiles() {
+        // Negative control: the SUPPORTED coupled shape. The primary feeds a
+        // discrete conveyor and a secondary ordinary outflow drains the post-primary
+        // front to a REGULAR STOCK (not a conveyor). The guard targets conveyor
+        // destinations only, so this must still compile and simulate.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>c</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>5</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow>
+      <outflow>into_belt</outflow><outflow>spill</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>4</eqn><non_negative/></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <flow name="spill"><eqn>0</eqn></flow>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true"><len>100</len><capacity>10</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+    <stock name="sink"><eqn>0</eqn><inflow>spill</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main)
+            .expect("primary->conveyor + ordinary secondary->stock must compile");
+        vm.run_to_end()
+            .expect("coupled queue with a stock-bound secondary runs");
+        // The queue conserves: nothing exits the belt (transit 100 >> sim), so
+        // belt + waiting + sink == cumulative arrivals every step.
+        let belt = vm.get_series(&Ident::new("belt")).unwrap();
+        let waiting = vm.get_series(&Ident::new("waiting")).unwrap();
+        let sink = vm.get_series(&Ident::new("sink")).unwrap();
+        for t in 0..belt.len() {
+            let total = belt[t] + waiting[t] + sink[t];
+            assert!(
+                (total - 4.0 * t as f64).abs() < 1e-9,
+                "step {t}: belt+waiting+sink = {total}, arrived = {}",
+                4.0 * t as f64
+            );
+        }
+    }
+
     #[test]
     fn coupled_queue_reset_reproduces_the_run() {
         // reset() must re-seed both side tables and re-derive the coupling from the
@@ -3098,9 +3326,10 @@ mod tests {
         // (zero) budget and drains what the first left -- 0 here (both unconstrained).
         // This pins the redirectable-budget threading through the overflow priority
         // order. A chain where the second drains a NONZERO remainder requires the
-        // first overflow to be capacity-limited (a constrained/conveyor overflow --
-        // a documented limitation); the desire−taken budget mechanism is unit-tested
-        // in `queue::tests::redirectable_is_desire_minus_taken_across_the_batch_rules`.
+        // first overflow to be capacity-limited (a constrained/conveyor overflow,
+        // now loudly rejected as QueueSecondaryOutflowToConveyor); the desire−taken
+        // budget mechanism is unit-tested in
+        // `queue::tests::redirectable_is_desire_minus_taken_across_the_batch_rules`.
         let xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
   <header><name>chain</name><vendor>t</vendor><product version="1.0">t</product></header>
