@@ -1805,6 +1805,47 @@ fn test_queue_model_simulates_via_ffi() {
     }
 }
 
+/// Mid-run inspection of pass-driven flows via the FFI: after a partial
+/// `simlin_sim_run_to`, `simlin_sim_get_value` reads the live VM's resting
+/// curr chunk. That chunk's #625 Flows-only re-eval used to re-execute each
+/// pass-driven flow's placeholder `AssignConstCurr 0`, so a conveyor primary
+/// outflow or queue outflow read 0 mid-run even though the saved series held
+/// the pass-computed rate. Both fixtures are at steady state, so the expected
+/// resting values are unambiguous: graduating == 250, into_service == 10.
+#[test]
+fn test_mid_run_get_value_reads_pass_driven_rates() {
+    // Conveyor: minimal_conveyor is at steady state (init 1000 == 250 * 4).
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    unsafe {
+        let (proj, model, sim) = create_test_sim(&datamodel);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_run_to(sim, 6.0, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "run_to(6.0) failed");
+        assert_sim_value(sim, "graduating", 250.0, 1e-6);
+        assert_sim_value(sim, "students", 1000.0, 1e-6);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+
+    // Queue: queue_drain is a faithful pass-through (into_service == 10).
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse queue_drain.xmile");
+    unsafe {
+        let (proj, model, sim) = create_test_sim(&datamodel);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_run_to(sim, 2.0, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "run_to(2.0) failed");
+        assert_sim_value(sim, "into_service", 10.0, 1e-9);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// GH #871: `simlin_sim_set_value` on a pass-driven conveyor flow must be
 /// rejected with `BadOverride` on BOTH validation paths -- the live-VM path
 /// (`Vm::set_value`) and the post-`run_to_end` path (which validates against

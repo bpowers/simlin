@@ -1538,6 +1538,88 @@ mod tests {
         assert!(vm.get_series(&Ident::new("waiting")).is_some());
     }
 
+    #[test]
+    fn mid_run_get_value_reads_queue_served_rate() {
+        // The queue twin of the conveyor `mid_run_get_value_matches_saved_series`
+        // test: after a partial run, the #625 resting-curr Flows re-eval used to
+        // re-execute the driven outflow's placeholder `AssignConstCurr 0`, so a
+        // mid-run get_value_now of `into_service` read 0 instead of the served
+        // rate (the pass-through queue serves the constant inflow, 10, every
+        // step). The resting chunk must hold exactly what the resumed run saves
+        // for the same time (dt == save_step == 0.25: resting t=2.25 is row 9).
+        let project = parse(QUEUE_DRAIN);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build queue vm");
+
+        let names = ["into_service", "waiting", "arrivals"];
+        let offs: Vec<usize> = names
+            .iter()
+            .map(|n| vm.get_offset(&Ident::new(n)).expect("offset"))
+            .collect();
+
+        vm.run_to(2.0).expect("run_to 2");
+        let mid: Vec<f64> = offs.iter().map(|&o| vm.get_value_now(o)).collect();
+        assert!(
+            (mid[0] - 10.0).abs() < 1e-9,
+            "mid-run into_service {} (want 10, the served rate)",
+            mid[0]
+        );
+
+        vm.run_to_end().expect("run");
+        for (i, name) in names.iter().enumerate() {
+            let series = vm.get_series(&Ident::new(name)).expect(name);
+            assert_eq!(
+                series[9], mid[i],
+                "{name}: mid-run read {} != saved row {}",
+                mid[i], series[9]
+            );
+        }
+    }
+
+    /// Assert that a run segmented by mid-run rests produces BIT-identical
+    /// saved series to an uninterrupted run, for EVERY variable -- the queue /
+    /// coupled twin of `conveyor_compile`'s helper of the same name: the #625
+    /// resting-curr pass preview must have no side effect on the real FIFO /
+    /// belt side tables (no double-advance), or every subsequent row shifts.
+    fn assert_segmented_run_identical(project: &datamodel::Project, rests: &[f64]) {
+        let main = project.models[0].name.clone();
+        let mut seg = build_vm(project, &main).expect("build segmented vm");
+        for &t in rests {
+            seg.run_to(t).expect("segmented run_to");
+        }
+        seg.run_to_end().expect("segmented run_to_end");
+        let mut full = build_vm(project, &main).expect("build full vm");
+        full.run_to_end().expect("full run_to_end");
+
+        for name in full.names_as_strs() {
+            let ident = Ident::new(&name);
+            let a = full.get_series(&ident).expect("full series");
+            let b = seg.get_series(&ident).expect("segmented series");
+            assert_eq!(a.len(), b.len(), "{name}: series length");
+            for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "{name} step {i}: full {x} != segmented {y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn segmented_run_is_bit_identical_to_uninterrupted() {
+        assert_segmented_run_identical(&parse(QUEUE_DRAIN), &[1.0, 3.0]);
+    }
+
+    #[test]
+    fn coupled_segmented_run_is_bit_identical_to_uninterrupted() {
+        // Queue -> discrete conveyor coupling: the resting preview runs the
+        // COMBINED pass (admit + coupled serve + phase B) on cloned side
+        // tables, so two mid-run rests -- one while the belt is filling, one
+        // after it reaches capacity -- must not perturb the saved series.
+        assert_segmented_run_identical(&parse(QUEUE_TO_DISCRETE_CONVEYOR), &[1.0, 3.0]);
+    }
+
     /// F2: `build_sim` on an ordinary model (no special stock) is exactly the
     /// incremental compile path -- it succeeds and yields a runnable VM without
     /// touching the special build.
@@ -2564,6 +2646,48 @@ mod tests {
             assert!(
                 (in_system - arrived).abs() < 1e-9,
                 "step {t}: belt+waiting = {in_system}, arrived = {arrived}"
+            );
+        }
+    }
+
+    #[test]
+    fn coupled_mid_run_get_value_matches_saved_series() {
+        // The COUPLED twin of `mid_run_get_value_reads_queue_served_rate`: the
+        // resting preview must run the COMBINED queue-conveyor pass (admit +
+        // coupled serve + phase B on cloned side tables), not just the two
+        // independent passes. Rest at t=3 (run_to(2.0), dt == save_step == 1),
+        // where the hand-computed oracle above pins a fully-blocked shared
+        // flow: the belt sits at capacity (10), two units wait in the queue,
+        // and into_belt = 0 -- so a placeholder-zero read is only trustworthy
+        // because waiting/belt pin the surrounding state, and the saved-row
+        // equality check pins every slot exactly.
+        let project = parse(QUEUE_TO_DISCRETE_CONVEYOR);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build coupled vm");
+
+        let names = ["into_belt", "waiting", "belt", "graduating", "arrivals"];
+        let offs: Vec<usize> = names
+            .iter()
+            .map(|n| vm.get_offset(&Ident::new(n)).expect("offset"))
+            .collect();
+
+        vm.run_to(2.0).expect("run_to 2");
+        let mid: Vec<f64> = offs.iter().map(|&o| vm.get_value_now(o)).collect();
+        assert!(
+            mid[0].abs() < 1e-9,
+            "mid-run into_belt {} (want 0: belt at capacity)",
+            mid[0]
+        );
+        assert!((mid[1] - 2.0).abs() < 1e-9, "mid-run waiting {}", mid[1]);
+        assert!((mid[2] - 10.0).abs() < 1e-9, "mid-run belt {}", mid[2]);
+
+        vm.run_to_end().expect("run");
+        for (i, name) in names.iter().enumerate() {
+            let series = vm.get_series(&Ident::new(name)).expect(name);
+            assert_eq!(
+                series[3], mid[i],
+                "{name}: mid-run read {} != saved row {}",
+                mid[i], series[3]
             );
         }
     }

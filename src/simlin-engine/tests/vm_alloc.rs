@@ -220,22 +220,30 @@ fn queue_model_allocations_do_not_scale_with_steps() {
 /// re-ran the share-independent `zone_start_retained`/`m_entry` work -- O(d)
 /// allocations and O(d^2 * n) work per belt per step. With that work hoisted,
 /// the pass still allocates a small CONSTANT number of scratch vectors per
-/// step (per-step `PhaseAResult`/shares/fraction buffers), so the invariants
-/// asserted are:
+/// step (per-step `PhaseAResult`/shares/fraction buffers).
 ///
-/// 1. the per-step allocation count does not scale with `d` (same step count,
-///    4x the belt depth, identical totals), and
+/// `run_to` additionally pays a ONE-TIME per-call cost outside the per-DT
+/// loop: the #625 resting-curr pass preview clones the belt side tables
+/// (O(d) allocations, proportional to state the belt already holds) so a
+/// mid-run read sees pass-computed rates without double-advancing the belts.
+/// Every comparison below therefore differences two runs at the same depth,
+/// cancelling the run-constant preview cost while still catching any
+/// PER-STEP allocation that scales with `d` or with the step count:
+///
+/// 1. the per-step allocation count does not scale with `d` (equal step
+///    deltas at 4x the belt depth yield identical allocation deltas), and
 /// 2. the total is exactly linear in the step count (three stops in
 ///    arithmetic progression yield equal deltas).
 #[test]
 fn conveyor_pass_allocations_do_not_scale_with_belt_depth_or_steps() {
-    // (1) share-count independence: same steps, different entry depth.
-    let allocs_shallow = conveyor_run_allocs(200.0, 64.0);
-    let allocs_deep = conveyor_run_allocs(200.0, 256.0);
+    // (1) share-count independence: the same step-count delta at different
+    // entry depths must allocate identically per step.
+    let delta_shallow = conveyor_run_allocs(400.0, 64.0) - conveyor_run_allocs(200.0, 64.0);
+    let delta_deep = conveyor_run_allocs(400.0, 256.0) - conveyor_run_allocs(200.0, 256.0);
     assert_eq!(
-        allocs_shallow, allocs_deep,
+        delta_shallow, delta_deep,
         "conveyor per-step allocations must not scale with entry depth \
-         (d=64: {allocs_shallow}, d=256: {allocs_deep})"
+         (d=64: {delta_shallow}, d=256: {delta_deep})"
     );
 
     // (2) linearity in steps: equal step deltas -> equal allocation deltas.
