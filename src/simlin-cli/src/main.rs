@@ -33,7 +33,7 @@ use simlin_engine::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, format_diagnostic, format_simulation_error,
 };
 use simlin_engine::prost::Message;
-use simlin_engine::{Error, ErrorCode, Result, Results, Vm, datamodel, project_io, serde};
+use simlin_engine::{Error, ErrorCode, Result, Results, build_sim, datamodel, project_io, serde};
 use simlin_engine::{
     load_csv, load_dat, open_vensim, open_vensim_with_data, open_xmile, to_mdl_with_warnings,
     to_xmile,
@@ -456,10 +456,13 @@ fn collect_diagnostics_as_formatted(
 fn run_simulation(
     db: &SimlinDb,
     source_project: SourceProject,
+    project: &DatamodelProject,
     model_name: &str,
 ) -> StdResult<Results, Error> {
-    let compiled = compile_project_incremental(db, source_project, model_name)?;
-    let mut vm = Vm::new(compiled)?;
+    // `build_sim` routes conveyor/queue models through their special expansion
+    // build path and ordinary models through the incremental compile, so the CLI
+    // simulates the special stock types instead of tripping the NotExpanded guard.
+    let mut vm = build_sim(db, source_project, project, model_name)?;
     vm.run_to_end()?;
     Ok(vm.into_results())
 }
@@ -477,7 +480,7 @@ fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
     let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
     let formatted = collect_diagnostics_as_formatted(&db, sync_state.project, &sync_state);
     report_formatted_errors(&formatted);
-    match run_simulation(&db, sync_state.project, "main") {
+    match run_simulation(&db, sync_state.project, project, "main") {
         Ok(results) => results,
         Err(err) => {
             handle_simulation_error(&err, &formatted);
@@ -511,7 +514,7 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
         report_formatted_errors(&formatted);
 
         set_project_ltm_enabled(&mut db, source_project, true);
-        match run_simulation(&db, source_project, "main") {
+        match run_simulation(&db, source_project, project, "main") {
             Ok(results) => return results,
             Err(err) => {
                 handle_simulation_error(&err, &formatted);
@@ -522,7 +525,7 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
 
         // LTM failed, fall back to non-LTM incremental simulation.
         set_project_ltm_enabled(&mut db, source_project, false);
-        match run_simulation(&db, source_project, "main") {
+        match run_simulation(&db, source_project, project, "main") {
             Ok(results) => return results,
             Err(err) => {
                 handle_simulation_error(&err, &formatted);
@@ -769,7 +772,7 @@ mod open_vensim_model_tests {
     fn run_to_first_row(project: &DatamodelProject) -> Results {
         let mut db = SimlinDb::default();
         let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
-        run_simulation(&db, sync_state.project, "main")
+        run_simulation(&db, sync_state.project, project, "main")
             .unwrap_or_else(|e| panic!("simulation failed: {e}"))
     }
 
@@ -867,6 +870,37 @@ mod open_vensim_model_tests {
             msg.contains("no DataProvider configured"),
             "stdin must use the null provider (no FilesystemDataProvider built); \
              expected the 'no DataProvider configured' error, got: {msg}"
+        );
+    }
+
+    /// F2 regression: a queue model must simulate through the CLI's
+    /// `run_simulation` entry point, not only through `simlin_sim_new`. Before
+    /// the `build_sim` dispatch, `compile_project_incremental` hit the
+    /// `QueueNotExpanded` guard and `run_simulation` errored on a model the FFI
+    /// simulates fine.
+    #[test]
+    fn simulate_queue_model_via_run_simulation() {
+        let xml = include_str!("../../../test/queues/queue_drain.xmile");
+        let project = open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+            .expect("parse queue_drain.xmile");
+        let results = run_to_first_row(&project);
+        assert!(
+            results.step_count > 0,
+            "queue model must produce simulation results"
+        );
+    }
+
+    /// F2 regression twin for a conveyor model.
+    #[test]
+    fn simulate_conveyor_model_via_run_simulation() {
+        let xml = include_str!("../../../test/conveyors/minimal_conveyor.xmile");
+        let project = open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+            .expect("parse minimal_conveyor.xmile");
+        let results = run_to_first_row(&project);
+        // The minimal conveyor holds Students at its steady state of 1000.
+        assert!(
+            (scalar_value(&results, "students") - 1000.0).abs() < 1e-6,
+            "conveyor model must simulate to steady state"
         );
     }
 }

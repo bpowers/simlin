@@ -10,7 +10,7 @@
 
 use serde::Deserialize;
 use simlin_engine::common::ErrorCode;
-use simlin_engine::{self as engine, Vm};
+use simlin_engine::{self as engine};
 use std::ptr;
 
 use crate::errors;
@@ -541,11 +541,11 @@ pub(crate) unsafe fn apply_project_patch_internal(
     let staged_diags = engine::db::collect_all_diagnostics(&db, staged_sp);
 
     // Attempt compilation + VM validation to detect assembly-level errors
-    // that are not captured by per-variable diagnostics.
-    let sim_error = match engine::db::compile_project_incremental(&db, staged_sp, "main") {
-        Ok(compiled) => Vm::new(compiled).err(),
-        Err(err) => Some(err),
-    };
+    // that are not captured by per-variable diagnostics. `build_sim` routes a
+    // staged conveyor/queue datamodel through its special expansion build path,
+    // so a valid special-stock edit is not rejected (and rolled back) by the
+    // ordinary compile path's NotExpanded guard.
+    let sim_error = engine::build_sim(&db, staged_sp, &staged_datamodel, "main").err();
 
     let all_errors =
         gather_error_details_with_db(&db, staged_sp, sim_error.as_ref(), &staged_datamodel);

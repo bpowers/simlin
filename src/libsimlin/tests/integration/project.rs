@@ -795,6 +795,47 @@ fn test_is_simulatable_invalid_project() {
     }
 }
 
+/// F2 regression: `simlin_project_is_simulatable` must return true for a model
+/// that contains a queue stock. Before the `build_sim` dispatch, the ordinary
+/// `compile_project_incremental` path hit the `QueueNotExpanded` guard, so this
+/// returned false for a model that `simlin_sim_new` simulates correctly.
+#[test]
+fn test_is_simulatable_queue_model() {
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse queue_drain.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let is_sim =
+            simlin_project_is_simulatable(proj, ptr::null(), &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "should not have error");
+        assert!(is_sim, "queue model must be simulatable");
+
+        simlin_project_unref(proj);
+    }
+}
+
+/// F2 regression twin for a conveyor stock.
+#[test]
+fn test_is_simulatable_conveyor_model() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let is_sim =
+            simlin_project_is_simulatable(proj, ptr::null(), &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "should not have error");
+        assert!(is_sim, "conveyor model must be simulatable");
+
+        simlin_project_unref(proj);
+    }
+}
+
 #[test]
 fn test_is_simulatable_null_project() {
     unsafe {

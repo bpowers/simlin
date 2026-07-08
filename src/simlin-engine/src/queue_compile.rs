@@ -1222,6 +1222,49 @@ pub fn build_vm(
     Ok(vm)
 }
 
+/// Build a runnable [`Vm`](crate::vm::Vm) for `main_model`, transparently routing
+/// a model that contains a conveyor or a queue through the special expansion
+/// build path ([`build_vm`]) and an ordinary model through the incremental salsa
+/// compile ([`crate::db::compile_project_incremental`] + [`Vm::new`](crate::vm::Vm::new)).
+///
+/// This is the single "compile-and-build a simulation" entry point every caller
+/// OTHER than `simlin_sim_new` uses -- the CLI and serve simulators, libsimlin's
+/// `is_simulatable`/`get_errors`/`apply_patch` compilability checks, and the LTM
+/// analysis pipeline -- so the conveyor/queue expansion is applied uniformly
+/// instead of each caller reproducing (or forgetting) the dispatch. `simlin_sim_new`
+/// keeps its own hand-rolled dispatch only because it additionally threads the
+/// LTM loop-partition snapshots the analysis FFIs need.
+///
+/// The `db`/`source_project` pair drives the ordinary path, preserving both
+/// incremental caching and whatever `ltm_enabled` the caller set on
+/// `source_project`. `datamodel` -- the synced representation of the SAME project
+/// -- drives the cheap marker scan and, when a special stock is present, the
+/// special path (which builds its own private db and does NOT participate in LTM:
+/// conveyor/queue + LTM is a documented degradation, docs/design/conveyors.md
+/// §9, docs/design/queues.md §10).
+///
+/// The `ConveyorNotExpanded`/`QueueNotExpanded` guard in
+/// `compile_project_incremental` deliberately stays intact: it fires only when an
+/// un-expanded marker reaches the ordinary path WITHOUT having come through here
+/// (a genuine internal bug), which is exactly what it is meant to catch. A model
+/// with a special stock never reaches that guard from here because this function
+/// routes it to the expansion path first.
+pub fn build_sim(
+    db: &crate::db::SimlinDb,
+    source_project: crate::db::SourceProject,
+    datamodel: &datamodel::Project,
+    main_model: &str,
+) -> crate::common::Result<crate::vm::Vm> {
+    if crate::conveyor_compile::project_has_conveyor(datamodel, main_model)
+        || project_has_queue(datamodel, main_model)
+    {
+        build_vm(datamodel, main_model)
+    } else {
+        let compiled = crate::db::compile_project_incremental(db, source_project, main_model)?;
+        crate::vm::Vm::new(compiled)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1257,6 +1300,52 @@ mod tests {
         let mut vm = build_vm(project, &main).expect("build queue vm");
         vm.run_to_end().expect("run");
         vm
+    }
+
+    /// F2: `build_sim` is the caller-facing dispatch that routes a queue model
+    /// through the special expansion build path, while the ordinary
+    /// `compile_project_incremental` still (correctly) rejects an un-expanded
+    /// queue with the `QueueNotExpanded` guard. This pins that the dispatch --
+    /// not a weakened guard -- is what lets every non-`sim_new` caller simulate a
+    /// queue model.
+    #[test]
+    fn build_sim_routes_queue_around_the_guard() {
+        let project = parse(QUEUE_DRAIN);
+        let main = project.models[0].name.clone();
+
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+
+        // The ordinary incremental compile path MUST still reject the un-expanded
+        // queue -- the guard's whole purpose (docs/design/queues.md §10.3).
+        let guard_err = crate::db::compile_project_incremental(&db, sync.project, &main)
+            .expect_err("ordinary compile must reject an un-expanded queue");
+        assert_eq!(guard_err.code, crate::common::ErrorCode::QueueNotExpanded);
+
+        // `build_sim` routes around it via the special build path and produces a
+        // runnable VM whose queue stock simulates.
+        let mut vm = build_sim(&db, sync.project, &project, &main)
+            .expect("build_sim compiles a queue model");
+        vm.run_to_end().expect("queue model runs");
+        assert!(vm.get_series(&Ident::new("waiting")).is_some());
+    }
+
+    /// F2: `build_sim` on an ordinary model (no special stock) is exactly the
+    /// incremental compile path -- it succeeds and yields a runnable VM without
+    /// touching the special build.
+    #[test]
+    fn build_sim_ordinary_model_uses_incremental_path() {
+        let project = parse(
+            r#"<?xml version="1.0"?><xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+            <header><name>p</name><vendor>t</vendor><product version="1.0">t</product></header>
+            <sim_specs method="Euler"><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+            <model><variables><aux name="a"><eqn>1</eqn></aux></variables></model></xmile>"#,
+        );
+        let main = project.models[0].name.clone();
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+        let mut vm = build_sim(&db, sync.project, &project, &main).expect("ordinary model builds");
+        vm.run_to_end().expect("ordinary model runs");
     }
 
     #[test]

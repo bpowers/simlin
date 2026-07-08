@@ -503,6 +503,62 @@ unsafe fn any_detail_message_contains(all_errors: *const SimlinError, needle: &s
     })
 }
 
+/// F2 regression: `simlin_project_get_errors` must NOT report the
+/// `QueueNotExpanded` guard error for a valid queue model. The queue fixtures
+/// emit no Error-severity diagnostic, so `get_errors` returns NULL (no errors).
+/// Before the `build_sim` dispatch, `get_errors` computed `vm_error` via the
+/// ordinary `compile_project_incremental`, which hit the guard and produced a
+/// spurious error for a model that simulates fine.
+#[test]
+fn test_get_errors_queue_model_reports_none() {
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse queue_drain.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "out_error must be null");
+        assert!(
+            all_errors.is_null(),
+            "valid queue model must report no errors"
+        );
+
+        if !all_errors.is_null() {
+            simlin_error_free(all_errors);
+        }
+        simlin_project_unref(proj);
+    }
+}
+
+/// F2 regression: `simlin_project_get_errors` must NOT report the
+/// `ConveyorNotExpanded` guard error for a valid conveyor model. A conveyor
+/// fixture may still carry a separately-tracked phantom `empty_equation`
+/// diagnostic on its driven outflow (F15), so this asserts specifically that no
+/// error mentions the un-expanded guard rather than requiring zero errors.
+#[test]
+fn test_get_errors_conveyor_model_has_no_not_expanded() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "out_error must be null");
+        if !all_errors.is_null() {
+            assert!(
+                !any_detail_message_contains(all_errors, "un-expanded"),
+                "conveyor model must not report the ConveyorNotExpanded guard error"
+            );
+            simlin_error_free(all_errors);
+        }
+        simlin_project_unref(proj);
+    }
+}
+
 /// After creating an LTM-enabled simulation on a model that auto-flips to
 /// discovery mode, `simlin_project_get_errors` must surface the auto-flip
 /// Warning. Before GH #466 the warning was unreachable: `simlin_sim_new`
