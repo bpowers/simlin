@@ -82,6 +82,13 @@ pub struct LeakMeta {
     pub zone_start: f64,
     pub zone_end: f64,
     pub integers: bool,
+    /// Canonical name of the downstream conveyor whose belt this leak flow feeds
+    /// (for the arrested-destination skip, §4.3 step 2), resolved exactly like
+    /// [`ConveyorMeta::primary_dest_conveyor`]. `None` if the leak feeds an
+    /// ordinary stock/cloud, or its OWN conveyor (the same `owner != stock`
+    /// self-loop filter the primary applies -- an arrested conveyor never leaks
+    /// at all, so a self-leak can never hold against its own arrest).
+    pub dest_conveyor: Option<String>,
 }
 
 /// The container-access result a synthesized container variable publishes each
@@ -659,12 +666,21 @@ pub fn expand_conveyors(
                 let frac_aux = leak_frac_name(&out_c);
                 new_auxes.push(make_aux_eqn(&frac_aux, frac_eqn));
                 driven_flows.push(out_c.clone());
+                // Which conveyor (if any) does this leak flow feed? Resolved the
+                // same way as the primary's held-exit destination (below): a leak
+                // that is a downstream conveyor's inflow links to it, with the
+                // `owner != stock_name` self-loop filter mirrored deliberately.
+                let dest_conveyor = conveyor_inflow_owner
+                    .get(&out_c)
+                    .filter(|owner| **owner != stock_name)
+                    .cloned();
                 leak_metas.push(LeakMeta {
                     flow: out_c,
                     frac_aux,
                     zone_start,
                     zone_end,
                     integers,
+                    dest_conveyor,
                 });
             } else if primary.is_none() {
                 primary = Some(out_c);
@@ -1588,13 +1604,24 @@ pub fn resolve_plans(
                 .leaks
                 .iter()
                 .map(|l| {
+                    // A leak flow feeding a downstream conveyor links element `e`
+                    // to the same element of that conveyor (identical element-wise
+                    // linkage to the primary's held-exit destination below), so the
+                    // runtime can skip the leak while its destination is arrested
+                    // (§4.3 step 2). Mismatched shapes leave it unlinked.
+                    let dest_conveyor = l.dest_conveyor.as_deref().and_then(|stock| {
+                        match stock_to_range.get(stock) {
+                            Some(&(dest_base, dest_n)) if e < dest_n => Some(dest_base + e),
+                            _ => None,
+                        }
+                    });
                     Some(LeakPlan {
                         flow_off: eoff(&l.flow)?,
                         frac_off: eoff(&l.frac_aux)?,
                         zone_start: l.zone_start,
                         zone_end: l.zone_end,
                         integers: l.integers,
-                        dest_conveyor: None, // leak-fed chains are a later step
+                        dest_conveyor,
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
@@ -2564,6 +2591,177 @@ mod tests {
     }
 
     #[test]
+    fn leak_into_arrested_conveyor_is_skipped_no_stock_belt_divergence() {
+        // F6 regression (§4.3 step 2): conveyor `up` leaks flow `leaking` into
+        // conveyor `down` (`<inflow>leaking</inflow>` on down). While `down` is
+        // arrested the leak into it must be SKIPPED entirely (rate 0, `up` keeps
+        // the material). If it is not, `up` keeps leaking, the ordinary Stocks
+        // phase adds that rate to `down`'s stock slot, but `down`'s frozen belt
+        // never admits it -- so the reported stock permanently climbs above the
+        // true belt content (SUM(down)).
+        let model = |arrest: &str| {
+            wrap_model(&format!(
+                r#"
+        <stock name="up"><eqn>1000</eqn><inflow>src_in</inflow><outflow>up_out</outflow><outflow>leaking</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="src_in"><eqn>250</eqn></flow>
+        <flow name="up_out"><eqn>0</eqn></flow>
+        <flow name="leaking"><eqn>0.2</eqn><leak/></flow>
+        <stock name="down"><eqn>0</eqn><inflow>leaking</inflow><outflow>down_out</outflow>
+          <conveyor><len>4</len>{arrest}</conveyor></stock>
+        <flow name="down_out"><eqn>0</eqn></flow>
+        <aux name="down_belt"><eqn>SUM(down)</eqn></aux>
+        <aux name="up_belt"><eqn>SUM(up)</eqn></aux>"#
+            ))
+        };
+        let run = |xml: &str| -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+            let project = parse(xml);
+            let main = project.models[0].name.clone();
+            let mut vm = build_vm(&project, &main).expect("build");
+            vm.run_to_end().expect("run");
+            (
+                vm.get_series(&Ident::new("down")).expect("down"),
+                vm.get_series(&Ident::new("down_belt")).expect("down_belt"),
+                vm.get_series(&Ident::new("leaking")).expect("leaking"),
+                vm.get_series(&Ident::new("up_belt")).expect("up_belt"),
+            )
+        };
+
+        // Arrest `down` for t in [5, 8): STEP(1,5) - STEP(1,8) == 1 over that
+        // window. dt = 0.25, so those are steps [20, 32).
+        let (down, down_belt, leaking, up_belt) =
+            run(&model(r#"<arrest>STEP(1, 5) - STEP(1, 8)</arrest>"#));
+        // Baseline: `down` never arrested (so `up` leaks the whole run).
+        let (_bd, _bdb, _bl, base_up_belt) = run(&model(""));
+
+        // The invariant the bug breaks: a conveyor's reported stock equals its
+        // true belt content at EVERY step (conservation). The leak-into-arrested
+        // bug makes `down` climb above SUM(down) during and after the arrest.
+        for (i, (&s, &b)) in down.iter().zip(down_belt.iter()).enumerate() {
+            assert!(
+                (s - b).abs() < 1e-6,
+                "step {i}: down stock {s} diverged from belt {b}"
+            );
+        }
+        // During arrest the leak into `down` is skipped entirely (rate 0), so `up`
+        // does not shed it (the material stays on up's belt to advance normally).
+        // `i` is the semantic step index (arrest window t in [5, 8) == steps 20..32).
+        #[allow(clippy::needless_range_loop)]
+        for i in 20..32 {
+            assert!(
+                leaking[i].abs() < 1e-9,
+                "step {i} (t={}): leaking={} should be 0 while down arrested",
+                i as f64 * 0.25,
+                leaking[i]
+            );
+        }
+        // ... and resumes once `down` is released (t = 10, step 40).
+        assert!(
+            leaking[40] > 10.0,
+            "step 40: leaking={} should resume after release",
+            leaking[40]
+        );
+        // `up` retains the material it did NOT shed: at the last arrested step its
+        // belt holds strictly more than the never-arrested baseline.
+        assert!(
+            up_belt[31] > base_up_belt[31] + 1.0,
+            "up should retain un-leaked material: arrest {} vs baseline {}",
+            up_belt[31],
+            base_up_belt[31]
+        );
+    }
+
+    #[test]
+    fn leak_dest_conveyor_meta_mirrors_primary_linkage() {
+        // The leak's destination-conveyor linkage is resolved exactly like the
+        // primary's (§4.3 step 2): a leak feeding a downstream conveyor records
+        // that conveyor's stock name (so the runtime can skip it while the
+        // destination is arrested); a leak to a cloud records None.
+        let xml = wrap_model(
+            r#"
+        <stock name="up"><eqn>0</eqn><inflow>src_in</inflow><outflow>up_out</outflow><outflow>up_leak</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="src_in"><eqn>250</eqn></flow>
+        <flow name="up_out"><eqn>0</eqn></flow>
+        <flow name="up_leak"><eqn>0.2</eqn><leak/></flow>
+        <stock name="down"><eqn>0</eqn><inflow>up_leak</inflow><outflow>down_out</outflow><outflow>down_drain</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="down_out"><eqn>0</eqn></flow>
+        <flow name="down_drain"><eqn>0.1</eqn><leak/></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let (_expanded, metas) = expand_conveyors(&project, &main).expect("expand");
+        let up = metas.iter().find(|m| m.stock == "up").expect("up meta");
+        let down = metas.iter().find(|m| m.stock == "down").expect("down meta");
+        // up's leak feeds `down` (a conveyor) -> recorded.
+        assert_eq!(up.leaks.len(), 1);
+        assert_eq!(up.leaks[0].dest_conveyor.as_deref(), Some("down"));
+        // down's leak feeds a cloud (no conveyor lists it as an inflow) -> None.
+        assert_eq!(down.leaks.len(), 1);
+        assert_eq!(down.leaks[0].dest_conveyor, None);
+    }
+
+    #[test]
+    fn self_leak_flow_is_not_its_own_arrested_dest() {
+        // A leak flow that also feeds its OWN conveyor records no destination (the
+        // same `owner != stock` self-loop filter the primary uses): an arrested
+        // conveyor never leaks at all, so a self-leak can never hold against its
+        // own arrest.
+        let xml = wrap_model(
+            r#"
+        <stock name="a"><eqn>0</eqn><inflow>a_in</inflow><inflow>a_leak</inflow><outflow>a_out</outflow><outflow>a_leak</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="a_in"><eqn>250</eqn></flow>
+        <flow name="a_out"><eqn>0</eqn></flow>
+        <flow name="a_leak"><eqn>0.1</eqn><leak/></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let (_expanded, metas) = expand_conveyors(&project, &main).expect("expand");
+        let a = metas.iter().find(|m| m.stock == "a").expect("a meta");
+        assert_eq!(a.leaks.len(), 1);
+        assert_eq!(
+            a.leaks[0].dest_conveyor, None,
+            "a self-leak must not link to its own conveyor"
+        );
+    }
+
+    #[test]
+    fn leak_to_cloud_keeps_flowing_while_another_conveyor_is_arrested() {
+        // No false positive: a leak to a cloud (no downstream conveyor) must NOT
+        // be skipped just because some OTHER conveyor in the model is arrested --
+        // the skip is keyed on the leak's OWN destination (§4.3 step 2).
+        let xml = wrap_model(
+            r#"
+        <stock name="up"><eqn>1000</eqn><inflow>up_in</inflow><outflow>up_out</outflow><outflow>up_leak</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="up_in"><eqn>250</eqn></flow>
+        <flow name="up_out"><eqn>0</eqn></flow>
+        <flow name="up_leak"><eqn>0.2</eqn><leak/></flow>
+        <stock name="other"><eqn>1000</eqn><inflow>other_in</inflow><outflow>other_out</outflow>
+          <conveyor><len>4</len><arrest>STEP(1, 5) - STEP(1, 8)</arrest></conveyor></stock>
+        <flow name="other_in"><eqn>250</eqn></flow>
+        <flow name="other_out"><eqn>0</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build");
+        vm.run_to_end().expect("run");
+        let up_leak = vm.get_series(&Ident::new("up_leak")).expect("up_leak");
+        // `other` is arrested for steps 20..32; `up_leak` goes to a cloud, so it
+        // keeps flowing throughout. `i` is the semantic step index.
+        #[allow(clippy::needless_range_loop)]
+        for i in 20..32 {
+            assert!(
+                up_leak[i] > 10.0,
+                "step {i}: up_leak={} should keep flowing (cloud dest, not arrested)",
+                up_leak[i]
+            );
+        }
+    }
+
+    #[test]
     fn source_on_non_leak_inflow_falls_back_to_beginning() {
         // `source` on an ordinary equation-driven inflow (no upstream leak to
         // mirror) must not error: it degrades to `beginning`, so the belt fills
@@ -2744,6 +2942,74 @@ mod tests {
             "belt[b] steady leak {} (want 50)",
             leak_b[last]
         );
+    }
+
+    #[test]
+    fn arrayed_leak_into_arrested_conveyor_skips_per_element() {
+        // Element-wise wiring of the §4.3 step-2 skip: arrayed `up` leaks into
+        // arrayed `down` element-for-element (leak[e] -> down[e]); arrest only
+        // down[a] (a per-element arrest driver). During the window down[a]'s
+        // inbound leak (leaking[a]) is skipped while down[b]'s (leaking[b]) keeps
+        // flowing, and down[a]'s reported stock never diverges from its frozen
+        // belt.
+        let xml = wrap_model(
+            r#"
+        <stock name="up"><eqn>1000</eqn><inflow>src_in</inflow><outflow>up_out</outflow><outflow>leaking</outflow>
+          <dimensions><dim name="board"/></dimensions>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="src_in"><eqn>250</eqn><dimensions><dim name="board"/></dimensions></flow>
+        <flow name="up_out"><dimensions><dim name="board"/></dimensions></flow>
+        <flow name="leaking"><eqn>0.2</eqn><leak/><dimensions><dim name="board"/></dimensions></flow>
+        <stock name="down"><eqn>0</eqn><inflow>leaking</inflow><outflow>down_out</outflow>
+          <dimensions><dim name="board"/></dimensions>
+          <conveyor><len>4</len><arrest>arrest_drv</arrest></conveyor></stock>
+        <flow name="down_out"><dimensions><dim name="board"/></dimensions></flow>
+        <aux name="arrest_drv">
+          <element subscript="a"><eqn>STEP(1, 5) - STEP(1, 8)</eqn></element>
+          <element subscript="b"><eqn>0</eqn></element>
+          <dimensions><dim name="board"/></dimensions></aux>
+        <aux name="down_a_belt"><eqn>SUM(down[a])</eqn></aux>"#,
+        );
+        // wrap_model has no <dimensions>; inject the board dimension.
+        let xml = xml.replace(
+            "<model>",
+            "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build arrayed arrest vm");
+        vm.run_to_end().expect("run");
+        let leak_a = vm
+            .get_series(&Ident::new("leaking[a]"))
+            .expect("leaking[a]");
+        let leak_b = vm
+            .get_series(&Ident::new("leaking[b]"))
+            .expect("leaking[b]");
+        let down_a = vm.get_series(&Ident::new("down[a]")).expect("down[a]");
+        let down_a_belt = vm
+            .get_series(&Ident::new("down_a_belt"))
+            .expect("down_a_belt");
+        // Element a's destination (down[a]) is arrested for steps 20..32: its
+        // inbound leak is skipped; element b's is not.
+        for i in 20..32 {
+            assert!(
+                leak_a[i].abs() < 1e-9,
+                "step {i}: leaking[a]={} should be 0 (down[a] arrested)",
+                leak_a[i]
+            );
+            assert!(
+                leak_b[i] > 10.0,
+                "step {i}: leaking[b]={} should keep flowing (down[b] not arrested)",
+                leak_b[i]
+            );
+        }
+        // down[a]'s reported stock never diverges from its frozen belt.
+        for (i, (&s, &b)) in down_a.iter().zip(down_a_belt.iter()).enumerate() {
+            assert!(
+                (s - b).abs() < 1e-6,
+                "step {i}: down[a] stock {s} diverged from belt {b}"
+            );
+        }
     }
 
     // ----- container access (§10): native computation + residual rejection -----
