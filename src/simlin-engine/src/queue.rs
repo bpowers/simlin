@@ -243,6 +243,30 @@ impl QueueState {
         }
     }
 
+    /// The volume the batch policy alone would move to a downstream conveyor this
+    /// DT if the admission budget `req` were unbounded (docs/design/queues.md
+    /// §4.5): the "desire". The redirectable volume a queue `<overflow/>` may claim
+    /// is `desire − taken`, where `taken` is the ACTUAL take at the finite `req`
+    /// ([`take_for_conveyor`](QueueState::take_for_conveyor)) -- i.e. exactly the
+    /// front material a capacity / inflow-limit / arrest block prevented the primary
+    /// from taking. Non-mutating (so the caller measures it before serving).
+    ///
+    /// It depends ONLY on `one_at_a_time`; `batch_integrity` never changes the
+    /// desire, because with unbounded room every whole batch fits without a split:
+    /// - `one_at_a_time = true` -> the SINGLE front batch's volume (0 if empty). The
+    ///   batches BEHIND it are not part of the desire, so they are never
+    ///   redirectable -- they simply wait (§4.5).
+    /// - `one_at_a_time = false` -> the whole queue [`total`](QueueState::total)
+    ///   (every batch would be admitted), so everything the finite `req` left behind
+    ///   is redirectable.
+    pub fn conveyor_desire(&self, one_at_a_time: bool) -> f64 {
+        if one_at_a_time {
+            self.batches.front().copied().unwrap_or(0.0)
+        } else {
+            self.total()
+        }
+    }
+
     // ----- container access (§8, mirrors ConveyorState) -----
 
     /// The current batch-volume vector, front-to-back, for array builtins over a
@@ -654,5 +678,93 @@ mod tests {
                 "conservation: before − taken == after"
             );
         }
+    }
+
+    // ----- conveyor_desire (§4.5): the redirectable = desire − taken basis -----
+
+    #[test]
+    fn conveyor_desire_one_at_a_time_is_the_front_batch() {
+        // one_at_a_time: desire is the SINGLE front batch, independent of the
+        // batches behind it (they wait, never redirectable).
+        let q = queue_with_batches(&[5.0, 4.0, 6.0]);
+        assert!(approx_eq(q.conveyor_desire(true), 5.0));
+        // Empty queue -> 0 desire.
+        let q = QueueState::init_empty();
+        assert_eq!(q.conveyor_desire(true), 0.0);
+    }
+
+    #[test]
+    fn conveyor_desire_all_at_once_is_the_total() {
+        // !one_at_a_time: desire is the whole queue total.
+        let q = queue_with_batches(&[5.0, 4.0, 6.0]);
+        assert!(approx_eq(q.conveyor_desire(false), 15.0));
+        let q = QueueState::init_empty();
+        assert_eq!(q.conveyor_desire(false), 0.0);
+    }
+
+    #[test]
+    fn redirectable_is_desire_minus_taken_across_the_batch_rules() {
+        // The redirectable volume an overflow claims is `desire − taken`, and
+        // `take_from_front(redirectable)` on the post-take queue drains exactly the
+        // capacity/inflow/arrest-blocked FRONT material each rule leaves.
+        //
+        // (one_at_a_time, batch_integrity, req, want_redirectable, want_remaining)
+        for (oa, bi, req, want_redir, want_rem) in [
+            // one_at_a_time split: front 5 blocked to req 3 -> 2 of the front batch
+            // is redirectable; the batch behind (4) waits (NOT redirectable).
+            (true, false, 3.0, 2.0, vec![4.0]),
+            // one_at_a_time integrity: front 5 does not fit req 3 -> the WHOLE front
+            // batch (5) is redirectable; the batch behind waits.
+            (true, true, 3.0, 5.0, vec![4.0]),
+            // all-at-once split: total 9, took 3 -> everything beyond req (6) is
+            // redirectable; the queue fully clears.
+            (false, false, 3.0, 6.0, vec![]),
+            // all-at-once integrity: front 5 fits req 6, 4 does not (only 1 room) ->
+            // took 5, redirectable 4; the 4-batch fully drains via the overflow.
+            (false, true, 6.0, 4.0, vec![]),
+        ] {
+            let mut q = queue_with_batches(&[5.0, 4.0]);
+            let desire = q.conveyor_desire(oa);
+            let taken = q.take_for_conveyor(req, oa, bi);
+            let redirectable = (desire - taken).max(0.0);
+            assert!(
+                approx_eq(redirectable, want_redir),
+                "redirectable for ({oa},{bi},{req}) = {redirectable}, want {want_redir}"
+            );
+            // The overflow drains the redirectable front material.
+            let overflowed = q.take_from_front(redirectable);
+            assert!(
+                approx_eq(overflowed, want_redir),
+                "overflow drains redirectable"
+            );
+            assert_eq!(
+                q.batch_contents(),
+                want_rem,
+                "remaining after overflow for ({oa},{bi},{req})"
+            );
+        }
+    }
+
+    #[test]
+    fn arrested_req_redirects_the_whole_desire() {
+        // req = 0 (arrested / full conveyor): taken = 0, so redirectable = desire.
+        // one_at_a_time -> the front batch; all-at-once -> the whole queue.
+        let mut q = queue_with_batches(&[5.0, 4.0]);
+        let desire = q.conveyor_desire(true);
+        let taken = q.take_for_conveyor(0.0, true, false);
+        assert_eq!(taken, 0.0);
+        assert!(
+            approx_eq(desire - taken, 5.0),
+            "one_at_a_time arrest redirects front batch"
+        );
+
+        let mut q = queue_with_batches(&[5.0, 4.0]);
+        let desire = q.conveyor_desire(false);
+        let taken = q.take_for_conveyor(0.0, false, false);
+        assert_eq!(taken, 0.0);
+        assert!(
+            approx_eq(desire - taken, 9.0),
+            "all-at-once arrest redirects whole queue"
+        );
     }
 }

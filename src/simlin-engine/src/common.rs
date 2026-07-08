@@ -482,6 +482,13 @@ pub enum ErrorCode {
     /// here: a stock fed by the driven outflow via INTEG is correct (the Stocks
     /// phase runs after the pass).
     QueueDrivenFlowRead,
+    /// An `<overflow/>` marker appears on a flow that is NOT a queue outflow, or on
+    /// a queue's FIRST (highest-priority) outflow. XMILE (§4.3) allows `<overflow/>`
+    /// only on a queue outflow, and never on the first one: an overflow is by
+    /// definition a lower-priority sibling that activates when a higher-priority
+    /// outflow is blocked (docs/design/queues.md §3.3, §10.7). Rejected loudly at
+    /// queue-expansion time.
+    QueueOverflowNotOnQueue,
 }
 
 impl fmt::Display for ErrorCode {
@@ -558,6 +565,7 @@ impl fmt::Display for ErrorCode {
             QueueNotExpanded => "queue_not_expanded",
             QueueNonEulerMethod => "queue_non_euler_method",
             QueueDrivenFlowRead => "queue_driven_flow_read",
+            QueueOverflowNotOnQueue => "queue_overflow_not_on_queue",
         };
 
         write!(f, "{name}")

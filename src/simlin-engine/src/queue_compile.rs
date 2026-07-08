@@ -31,12 +31,20 @@
 //! (non-conveyor) stock empties the queue every DT (§4.3); a queue whose primary
 //! outflow feeds a discrete conveyor is COUPLED (§9), served under the batch rules
 //! in the combined pass ([`run_coupled_passes`]). Container access (§8) and
-//! arrayed queues (§6) are supported; overflow with a blocked primary (§4.5) is
-//! the remaining build-sequence step. An `<overflow/>` outflow to a cloud/stock
-//! with NO upstream conveyor is served here as an ordinary unconstrained sibling:
-//! with nothing to block the primary, the overflow drains nothing (§4.5), which
-//! the priority-order serve produces naturally (the first outflow empties the
-//! queue; the rest remove nothing, §4.3).
+//! arrayed queues (§6) are supported.
+//!
+//! MULTIPLE outflows, priority, and overflow (§4.5/§5) are supported: outflows are
+//! served in `<outflow>` declaration = priority order, each popping from the same
+//! front ([`serve_secondary_outflows`]). After the primary, an `<overflow/>` sibling
+//! drains only the REDIRECTABLE volume -- the front material a capacity / inflow-limit
+//! / arrest condition blocked the primary from taking, measured as `desire − taken`
+//! ([`crate::queue::QueueState::conveyor_desire`]) -- while an ordinary competing
+//! outflow drains the whole remainder (§5.4). An `<overflow/>` behind an UNCONSTRAINED
+//! primary (no upstream conveyor) drains nothing: the primary is never blocked, so
+//! redirectable = 0 (§4.5). A SECONDARY outflow bound to a conveyor (a constrained
+//! overflow or second constrained ordinary outflow) is a documented limitation:
+//! [`detect_coupling_specs`] couples only the primary, so such an outflow is not
+//! served under the batch rules.
 //!
 //! Queues and conveyors COEXIST and COUPLE: the unified [`build_compiled`] /
 //! [`build_vm`] here expand conveyors first, then queues, compile ONCE, resolve
@@ -105,6 +113,12 @@ pub struct QueueOutflowMeta {
     /// Canonical name of the driven outflow (its slot receives the served rate).
     pub flow: String,
     pub kind: QueueOutflowKind,
+    /// The `<overflow/>` marker (§3.3): an overflow outflow activates ONLY on the
+    /// redirectable volume a higher-priority sibling was blocked from taking
+    /// (§4.5), NOT on the remaining front at large. False for the primary (an
+    /// overflow may never be the first outflow, enforced by
+    /// [`validate_overflow_markers`]) and for an ordinary competing outflow (§5.4).
+    pub overflow: bool,
 }
 
 /// Per-queue synthesized metadata, produced by [`expand_queues`] and resolved to
@@ -140,6 +154,8 @@ pub struct QueueMeta {
 pub struct QueueOutflowPlan {
     pub flow_off: usize,
     pub kind: QueueOutflowKind,
+    /// The `<overflow/>` marker (§3.3/§4.5); see [`QueueOutflowMeta::overflow`].
+    pub overflow: bool,
 }
 
 /// A fully-resolved queue: data-buffer slot offsets for the VM's pass. Mirrors
@@ -219,6 +235,63 @@ fn equation_scalar_strings(v: &datamodel::Variable) -> Vec<String> {
     }
 }
 
+/// Validate every `<overflow/>` marker in `model` (docs/design/queues.md §3.3,
+/// §10.7). XMILE (§4.3) allows the marker ONLY on a queue outflow, and NEVER on a
+/// queue's FIRST (highest-priority) outflow: an overflow is by definition a
+/// lower-priority sibling that activates when a higher-priority outflow is blocked
+/// (§4.5). Both violations are a loud [`ErrorCode::QueueOverflowNotOnQueue`].
+///
+/// Runs before the no-queue fast path in [`expand_queues`], so a stray overflow on
+/// a flow that is not a queue outflow is caught even when the model has no queue at
+/// all (the queue-outflow sets are then empty and every overflow flag is rejected).
+fn validate_overflow_markers(model: &datamodel::Model) -> Result<(), (ErrorCode, String)> {
+    // Every queue outflow name, and specifically each queue's FIRST outflow.
+    let mut queue_outflows: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut first_outflows: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for v in &model.variables {
+        if let datamodel::Variable::Stock(s) = v
+            && s.compat.queue.is_some()
+        {
+            for (i, out) in s.outflows.iter().enumerate() {
+                let c = canon(out);
+                if i == 0 {
+                    first_outflows.insert(c.clone());
+                }
+                queue_outflows.insert(c);
+            }
+        }
+    }
+    for v in &model.variables {
+        if let datamodel::Variable::Flow(f) = v
+            && f.compat.overflow
+        {
+            let name = canon(&f.ident);
+            if !queue_outflows.contains(&name) {
+                return Err((
+                    ErrorCode::QueueOverflowNotOnQueue,
+                    format!(
+                        "flow '{}' is marked <overflow/> but is not a queue outflow; the overflow \
+                         property may appear only on an outflow of a queue stock (XMILE §4.3)",
+                        f.ident
+                    ),
+                ));
+            }
+            if first_outflows.contains(&name) {
+                return Err((
+                    ErrorCode::QueueOverflowNotOnQueue,
+                    format!(
+                        "flow '{}' is a queue's first (highest-priority) outflow and cannot be \
+                         marked <overflow/>; an overflow activates only when a higher-priority \
+                         outflow is blocked, so it may never be the first outflow (XMILE §4.3)",
+                        f.ident
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Expand every queue in `main_model` of `project` into an ordinary INTEG stock
 /// plus placeholder-equation driven outflows, returning the modified project and
 /// one [`QueueMeta`] per queue. A project with no queues is returned unchanged
@@ -247,14 +320,24 @@ pub fn expand_queues(
     main_model: &str,
 ) -> Result<(datamodel::Project, Vec<QueueMeta>), (ErrorCode, String)> {
     let main_canon = canon(main_model);
+    let Some(main) = project.models.iter().find(|m| canon(&m.name) == main_canon) else {
+        // No such model: nothing to expand (the caller's compile will report the
+        // missing model through the ordinary path).
+        return Ok((project.clone(), Vec::new()));
+    };
+
+    // Validate every `<overflow/>` marker BEFORE the no-queue fast path, so a stray
+    // overflow on a flow that is not a queue outflow (or on a queue's first,
+    // highest-priority outflow) is a loud error even in a model that would
+    // otherwise skip all queue machinery (§3.3/§10.7).
+    validate_overflow_markers(main)?;
+
     // Fast path: no queue anywhere in the main model. Return the project
     // unchanged so a conveyor-only or plain model compiles byte-identically.
-    let has_queue = project.models.iter().any(|m| {
-        canon(&m.name) == main_canon
-            && m.variables
-                .iter()
-                .any(|v| matches!(v, datamodel::Variable::Stock(s) if s.compat.queue.is_some()))
-    });
+    let has_queue = main
+        .variables
+        .iter()
+        .any(|v| matches!(v, datamodel::Variable::Stock(s) if s.compat.queue.is_some()));
     if !has_queue {
         return Ok((project.clone(), Vec::new()));
     }
@@ -275,6 +358,17 @@ pub fn expand_queues(
     let mut queue_stock_dims: HashMap<String, Vec<DimensionName>> = HashMap::new();
     let mut metas: Vec<QueueMeta> = Vec::new();
     let model = &project.models[model_idx];
+    // Canonical names of every flow carrying an `<overflow/>` marker (§3.3), so a
+    // queue outflow can record whether it is an overflow. Validated above, so an
+    // overflow name here is guaranteed to be a queue outflow (never the first one).
+    let overflow_flows: std::collections::HashSet<String> = model
+        .variables
+        .iter()
+        .filter_map(|v| match v {
+            datamodel::Variable::Flow(f) if f.compat.overflow => Some(canon(&f.ident)),
+            _ => None,
+        })
+        .collect();
     for v in &model.variables {
         let datamodel::Variable::Stock(stock) = v else {
             continue;
@@ -295,9 +389,11 @@ pub fn expand_queues(
             .iter()
             .map(|out| QueueOutflowMeta {
                 flow: canon(out),
-                // Every outflow is unconstrained this phase (§4.3). The coupling
-                // step (§9) resolves a conveyor target to a constrained kind.
+                // Every outflow starts unconstrained (§4.3). The coupling step (§9)
+                // resolves the PRIMARY outflow's conveyor target to a constrained
+                // kind; secondary outflows stay unconstrained (§5.4/§4.5).
                 kind: QueueOutflowKind::Unconstrained,
+                overflow: overflow_flows.contains(&canon(out)),
             })
             .collect();
         metas.push(QueueMeta {
@@ -503,6 +599,7 @@ pub fn resolve_plans(
                     Some(QueueOutflowPlan {
                         flow_off: eoff(&o.flow)?,
                         kind: o.kind,
+                        overflow: o.overflow,
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
@@ -549,19 +646,99 @@ pub fn init_queues(plans: &[QueuePlan], curr: &[f64]) -> Vec<crate::queue::Queue
         .collect()
 }
 
-/// The queue pass (§4.2), run once per Euler step between the Flows and Stocks
-/// phases. For each queue: admit `Σ inflow_rate · dt` (the inflow rates were
-/// computed in the Flows phase), then serve each outflow in priority order and
-/// write its driven rate = `removed / dt` back into `curr`, so ordinary stock
-/// integration then advances the queue stock (and any downstream stock) using
-/// the pass-computed rates.
+/// Serve a queue's SECONDARY outflows (every outflow after the primary) in
+/// priority order against the post-primary front (docs/design/queues.md §4.5, §5),
+/// writing each served rate = `removed / dt` into `curr`.
 ///
-/// Serve order is admit-then-serve (§4.2): the just-admitted batch can leave in
-/// the same DT when the downstream is unconstrained (§4.3, the pass-through). An
-/// unconstrained outflow empties the queue, so the FIRST outflow drains
-/// everything and every lower-priority outflow removes nothing (§4.3 degenerate
-/// case) -- which also makes an `<overflow/>` sibling drain nothing when the
-/// primary was not blocked (§4.5), the correct no-upstream-conveyor behavior.
+/// `redirectable` is the volume the PRIMARY was blocked from taking by a capacity /
+/// inflow-limit / arrest condition (`desire − taken`, §4.5) -- the ONLY volume an
+/// `<overflow/>` outflow may claim. It is 0 for an unconstrained primary (never
+/// blocked), so an overflow behind an unconstrained primary drains nothing (§4.5,
+/// the correct no-upstream-conveyor behavior). Each secondary pops from the same
+/// front:
+/// - an `<overflow/>` outflow to a cloud/regular stock drains up to the still-
+///   redirectable volume its higher-priority siblings left
+///   (`take_from_front(redirectable)`), decrementing the running budget. Overflow
+///   is NOT batch-integrity-bound: `take_from_front` splits freely (§4.5).
+/// - an ordinary (non-overflow) outflow to a cloud/regular stock drains the ENTIRE
+///   remaining front (§5.4, `serve_unconstrained`), which also zeroes the
+///   redirectable budget (nothing is left to redirect).
+///
+/// The primary (index 0) is served by the caller (`serve_unconstrained` for an
+/// uncoupled queue, `take_for_conveyor` for a coupled one), so this skips it. A
+/// SECONDARY outflow bound to a conveyor is a documented limitation: it is never
+/// coupled ([`detect_coupling_specs`] couples only the primary), so it appears here
+/// as `Unconstrained` and, when the primary is coupled and redirectable > 0, would
+/// drain the blocked volume to a cloud rather than onto its belt under the batch
+/// rules. In practice this only matters for a second CONSTRAINED overflow (a rare
+/// XMILE construct); an unconstrained primary leaves redirectable = 0 so the
+/// secondary is idle regardless.
+fn serve_secondary_outflows(
+    outflows: &[QueueOutflowPlan],
+    state: &mut crate::queue::QueueState,
+    redirectable: f64,
+    curr: &mut [f64],
+    dt: f64,
+) {
+    let mut redirectable = redirectable.max(0.0);
+    for outflow in outflows.iter().skip(1) {
+        // A Coupled secondary is never produced (only the primary couples), so this
+        // guard is defense-in-depth: it must not be drained to a cloud here.
+        if matches!(outflow.kind, QueueOutflowKind::Coupled { .. }) {
+            continue;
+        }
+        let removed = if outflow.overflow {
+            // Overflow: only the still-redirectable blocked front volume.
+            let took = state.take_from_front(redirectable);
+            redirectable -= took;
+            took
+        } else {
+            // Ordinary competing outflow to a cloud/regular stock: drains the whole
+            // remaining front (§5.4); the redirected budget is then moot.
+            redirectable = 0.0;
+            state.serve_unconstrained()
+        };
+        curr[outflow.flow_off] = removed / dt;
+    }
+}
+
+/// Serve one UNCOUPLED queue for this DT: admit `Σ inflow_rate · dt` (§4.2 step 1),
+/// then serve its outflows in priority order (§4.2 step 2). An uncoupled queue's
+/// primary outflow targets a cloud or regular stock and so is unconstrained: it
+/// EMPTIES the queue (§4.3), leaving redirectable = 0 for any secondary/overflow
+/// sibling (§4.5). Shared by [`run_queue_pass`] (fully uncoupled models) and the
+/// uncoupled tail of [`run_coupled_passes`].
+fn serve_uncoupled_queue(
+    plan: &QueuePlan,
+    state: &mut crate::queue::QueueState,
+    curr: &mut [f64],
+    dt: f64,
+) {
+    let inflow_rate: f64 = plan.inflow_offs.iter().map(|&o| curr[o]).sum();
+    state.admit(inflow_rate, dt);
+    if let Some(primary) = plan.outflows.first() {
+        // The primary of an uncoupled queue is Unconstrained (a coupled primary is
+        // served by the combined pass, and only the primary is ever coupled), so it
+        // drains the whole queue; redirectable = 0 (never blocked, §4.5).
+        let removed = state.serve_unconstrained();
+        curr[primary.flow_off] = removed / dt;
+        serve_secondary_outflows(&plan.outflows, state, 0.0, curr, dt);
+    }
+}
+
+/// The queue pass (§4.2), run once per Euler step between the Flows and Stocks
+/// phases. For each UNCOUPLED queue: admit `Σ inflow_rate · dt` (the inflow rates
+/// were computed in the Flows phase), then serve each outflow in priority order and
+/// write its driven rate = `removed / dt` back into `curr`, so ordinary stock
+/// integration then advances the queue stock (and any downstream stock) using the
+/// pass-computed rates.
+///
+/// Serve order is admit-then-serve (§4.2): the just-admitted batch can leave in the
+/// same DT when the downstream is unconstrained (§4.3, the pass-through). An
+/// unconstrained primary empties the queue, so it drains everything and every
+/// lower-priority outflow removes nothing (§4.3 degenerate case / §5.4) -- which
+/// also makes an `<overflow/>` sibling drain nothing when the primary was not
+/// blocked (§4.5), the correct no-upstream-conveyor behavior.
 pub fn run_queue_pass(
     plans: &[QueuePlan],
     states: &mut [crate::queue::QueueState],
@@ -569,7 +746,7 @@ pub fn run_queue_pass(
     dt: f64,
 ) {
     for (plan, state) in plans.iter().zip(states.iter_mut()) {
-        // A coupled queue (its outflow feeds a discrete conveyor) is served
+        // A coupled queue (its primary outflow feeds a discrete conveyor) is served
         // wholesale -- admit AND serve -- by the combined queue-conveyor pass
         // ([`run_coupled_passes`]), so skip it here to avoid a double admit (§9).
         // A conveyor-free queue has no coupled outflow, so this never fires on the
@@ -581,21 +758,7 @@ pub fn run_queue_pass(
         {
             continue;
         }
-        // Step 1: admit Σ inflow rates as one batch (each clamped >= 0 inside
-        // `admit`; multiple inflows sum, §4.2 step 1).
-        let inflow_rate: f64 = plan.inflow_offs.iter().map(|&o| curr[o]).sum();
-        state.admit(inflow_rate, dt);
-        // Step 2: serve outflows in priority order. `serve_unconstrained` drains
-        // the whole queue, so the first outflow takes everything and the rest
-        // take nothing (§4.3 / §4.5).
-        for outflow in &plan.outflows {
-            let removed = match outflow.kind {
-                QueueOutflowKind::Unconstrained => state.serve_unconstrained(),
-                // Unreachable: a plan with any Coupled outflow was skipped above.
-                QueueOutflowKind::Coupled { .. } => continue,
-            };
-            curr[outflow.flow_off] = removed / dt;
-        }
+        serve_uncoupled_queue(plan, state, curr, dt);
     }
 }
 
@@ -809,7 +972,13 @@ fn detect_coupling_specs(
 ) -> Result<Vec<CouplingSpec>, (ErrorCode, String)> {
     let mut specs = Vec::new();
     for qm in queue_metas {
-        for out in &qm.outflows {
+        // Only the PRIMARY (first, highest-priority) outflow couples to a conveyor
+        // (§4.4/§9). A secondary outflow feeding a conveyor -- a constrained
+        // overflow or a second constrained ordinary outflow -- is a documented
+        // limitation (§4.5/§5.4): it is not coupled here, so it is not served by the
+        // combined pass under the batch rules. Restricting to the primary also keeps
+        // one coupling per queue, so a queue is served exactly once per DT.
+        if let Some(out) = qm.outflows.first() {
             // A coupled shared flow is the conveyor's SINGLE equation-driven
             // inflow: a conveyor inflow that is not itself conveyor-driven.
             let Some(cm) = conv_metas.iter().find(|cm| {
@@ -817,7 +986,7 @@ fn detect_coupling_specs(
                     .iter()
                     .any(|inf| inf.flow == out.flow && !inf.conveyor_driven)
             }) else {
-                continue; // outflow to a cloud/regular stock: unconstrained
+                continue; // primary outflow to a cloud/regular stock: unconstrained
             };
             if !cm.discrete {
                 return Err((
@@ -997,22 +1166,34 @@ pub fn run_coupled_passes(
     // Per conveyor: interleave the coupled queue's serve between phase A and B.
     for i in 0..conv_plans.len() {
         if let Some(cs) = coupling_for_conveyor[i] {
+            let qi = cs.queue;
             // Size the budget from THIS conveyor's phase A (belt room), admit the
             // queue's inflow, then serve up to `req` under the batch rules.
             let req = cc::coupled_admission_budget(&conv_plans[i], &conveyors[i], &pa[i], curr, dt);
-            let inflow_rate: f64 = queue_plans[cs.queue]
-                .inflow_offs
-                .iter()
-                .map(|&o| curr[o])
-                .sum();
-            queues[cs.queue].admit(inflow_rate, dt);
-            let taken =
-                queues[cs.queue].take_for_conveyor(req, cs.one_at_a_time, cs.batch_integrity);
+            let inflow_rate: f64 = queue_plans[qi].inflow_offs.iter().map(|&o| curr[o]).sum();
+            queues[qi].admit(inflow_rate, dt);
+            // Measure the batch-policy desire BEFORE the finite-`req` take mutates
+            // the front (§4.5): the redirectable volume an <overflow/> sibling may
+            // claim is `desire − taken` -- exactly the front material capacity /
+            // inflow-limit / arrest blocked the primary from taking.
+            let desire = queues[qi].conveyor_desire(cs.one_at_a_time);
+            let taken = queues[qi].take_for_conveyor(req, cs.one_at_a_time, cs.batch_integrity);
+            let redirectable = (desire - taken).max(0.0);
             // Debit the discrete per-time-unit budget (the coupled volume bypasses
             // phase_b's equation-inflow accounting), then publish the shared rate:
             // BOTH the queue outflow and the conveyor inflow integrate from it.
             conveyors[i].consume_inflow_budget(taken);
             curr[cs.shared_flow_off] = taken / dt;
+            // Serve the queue's secondary outflows (overflow / ordinary) against the
+            // post-primary front (§4.5/§5). The coupled primary is `outflows[0]`
+            // (only the primary is coupled), so this skips index 0.
+            serve_secondary_outflows(
+                &queue_plans[qi].outflows,
+                &mut queues[qi],
+                redirectable,
+                curr,
+                dt,
+            );
         }
         cc::conveyor_phase_b_one(i, conv_plans, conveyors, &pa, curr, dt);
     }
@@ -1022,16 +1203,7 @@ pub fn run_coupled_passes(
         if queue_is_coupled[qi] {
             continue;
         }
-        let inflow_rate: f64 = plan.inflow_offs.iter().map(|&o| curr[o]).sum();
-        state.admit(inflow_rate, dt);
-        for outflow in &plan.outflows {
-            let removed = match outflow.kind {
-                QueueOutflowKind::Unconstrained => state.serve_unconstrained(),
-                // A queue with a Coupled outflow is masked out above.
-                QueueOutflowKind::Coupled { .. } => continue,
-            };
-            curr[outflow.flow_off] = removed / dt;
-        }
+        serve_uncoupled_queue(plan, state, curr, dt);
     }
 }
 
@@ -1932,5 +2104,490 @@ mod tests {
         for (i, (&a, &b)) in first.iter().zip(second.iter()).enumerate() {
             assert!((a - b).abs() < 1e-12, "reset diverged at {i}: {a} vs {b}");
         }
+    }
+
+    // ----- Part C: multiple outflows, priority, and overflow (§4.5/§5) -----
+
+    /// A queue feeding a capacity-limited discrete conveyor, with an `<overflow/>`
+    /// second outflow draining the rejected volume to a stock. Same geometry as
+    /// `QUEUE_TO_DISCRETE_CONVEYOR` (belt cap 10, transit 100, arrivals 4/time,
+    /// one_at_a_time=false), so the belt fills identically -- but the overflow
+    /// bleeds off the volume the belt cannot admit, so the queue does NOT grow
+    /// unboundedly (it stays empty) and the excess accumulates in `balked`.
+    const QUEUE_OVERFLOW_TO_STOCK: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>overflow</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>5</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow>
+      <outflow>into_belt</outflow><outflow>balk</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>4</eqn><non_negative/></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <flow name="balk"><eqn>0</eqn><overflow/></flow>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true" one_at_a_time="false" batch_integrity="false">
+        <len>100</len><capacity>10</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+    <stock name="balked"><eqn>0</eqn><inflow>balk</inflow></stock>
+  </variables></model>
+</xmile>"#;
+
+    #[test]
+    fn overflow_drains_the_capacity_rejected_volume_and_conserves() {
+        let project = parse(QUEUE_OVERFLOW_TO_STOCK);
+        let vm = build_run(&project);
+        let waiting = vm.get_series(&Ident::new("waiting")).unwrap();
+        let belt = vm.get_series(&Ident::new("belt")).unwrap();
+        let into_belt = vm.get_series(&Ident::new("into_belt")).unwrap();
+        let balk = vm.get_series(&Ident::new("balk")).unwrap();
+        let balked = vm.get_series(&Ident::new("balked")).unwrap();
+
+        // Hand-computed oracle (start-of-step stocks; step-t flow rate). The belt
+        // fills to capacity exactly as in the no-overflow twin; once req shrinks the
+        // rejected volume (desire − taken) overflows to `balk` instead of waiting.
+        //   step:      0    1    2    3    4    5
+        //   belt(0):   0    4    8   10   10   10
+        //   into_belt: 4    4    2    0    0    0
+        //   balk:      0    0    2    4    4    4   (= arrivals − into_belt)
+        //   waiting:   0    0    0    0    0    0   (never grows: overflow bleeds it)
+        //   balked(0): 0    0    0    2    6   10
+        let want_belt = [0.0, 4.0, 8.0, 10.0, 10.0, 10.0];
+        let want_into = [4.0, 4.0, 2.0, 0.0, 0.0, 0.0];
+        let want_balk = [0.0, 0.0, 2.0, 4.0, 4.0, 4.0];
+        let want_balked = [0.0, 0.0, 0.0, 2.0, 6.0, 10.0];
+        for i in 0..6 {
+            assert!(
+                (belt[i] - want_belt[i]).abs() < 1e-9,
+                "belt[{i}]={}",
+                belt[i]
+            );
+            assert!(
+                (into_belt[i] - want_into[i]).abs() < 1e-9,
+                "into_belt[{i}]={}",
+                into_belt[i]
+            );
+            assert!(
+                (balk[i] - want_balk[i]).abs() < 1e-9,
+                "balk[{i}]={}",
+                balk[i]
+            );
+            assert!(
+                (balked[i] - want_balked[i]).abs() < 1e-9,
+                "balked[{i}]={}",
+                balked[i]
+            );
+            assert!(
+                waiting[i].abs() < 1e-9,
+                "waiting[{i}]={} (must not grow)",
+                waiting[i]
+            );
+        }
+        // Conservation across queue + belt + overflow sink: nothing exits the belt
+        // (transit 100 >> sim), so belt + waiting + balked == cumulative arrivals.
+        for t in 0..6 {
+            let total = belt[t] + waiting[t] + balked[t];
+            assert!(
+                (total - 4.0 * t as f64).abs() < 1e-9,
+                "step {t}: belt+waiting+balked = {total}, arrived = {}",
+                4.0 * t as f64
+            );
+        }
+    }
+
+    #[test]
+    fn overflow_drains_whole_desire_while_arrested_then_primary_resumes() {
+        // While the belt is arrested (req=0) the whole desire overflows (§4.5); once
+        // un-arrested the primary resumes admitting and the overflow goes idle.
+        // arrest = 1 for TIME < 2, then 0; belt capacity is effectively unlimited.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>arrest</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>3</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow>
+      <outflow>into_belt</outflow><outflow>balk</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>5</eqn><non_negative/></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <flow name="balk"><eqn>0</eqn><overflow/></flow>
+    <aux name="arrest_sig"><eqn>IF TIME &lt; 2 THEN 1 ELSE 0</eqn></aux>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true" one_at_a_time="false" batch_integrity="false">
+        <len>100</len><capacity>1000</capacity><arrest>arrest_sig</arrest></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+    <stock name="balked"><eqn>0</eqn><inflow>balk</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let vm = build_run(&project);
+        let belt = vm.get_series(&Ident::new("belt")).unwrap();
+        let into_belt = vm.get_series(&Ident::new("into_belt")).unwrap();
+        let balk = vm.get_series(&Ident::new("balk")).unwrap();
+        let balked = vm.get_series(&Ident::new("balked")).unwrap();
+        let waiting = vm.get_series(&Ident::new("waiting")).unwrap();
+
+        //   step:      0    1    2    3
+        //   arrested:  y    y    n    n
+        //   into_belt: 0    0    5    5   (0 while arrested; 5 when free)
+        //   balk:      5    5    0    0   (whole desire redirects while arrested)
+        //   belt(0):   0    0    0    5
+        //   balked(0): 0    5   10   10
+        let want_into = [0.0, 0.0, 5.0, 5.0];
+        let want_balk = [5.0, 5.0, 0.0, 0.0];
+        let want_belt = [0.0, 0.0, 0.0, 5.0];
+        let want_balked = [0.0, 5.0, 10.0, 10.0];
+        for i in 0..4 {
+            assert!(
+                (into_belt[i] - want_into[i]).abs() < 1e-9,
+                "into_belt[{i}]={}",
+                into_belt[i]
+            );
+            assert!(
+                (balk[i] - want_balk[i]).abs() < 1e-9,
+                "balk[{i}]={}",
+                balk[i]
+            );
+            assert!(
+                (belt[i] - want_belt[i]).abs() < 1e-9,
+                "belt[{i}]={}",
+                belt[i]
+            );
+            assert!(
+                (balked[i] - want_balked[i]).abs() < 1e-9,
+                "balked[{i}]={}",
+                balked[i]
+            );
+            assert!(waiting[i].abs() < 1e-9, "waiting[{i}]={}", waiting[i]);
+        }
+        for t in 0..4 {
+            assert!(
+                (belt[t] + waiting[t] + balked[t] - 5.0 * t as f64).abs() < 1e-9,
+                "step {t}: conservation"
+            );
+        }
+    }
+
+    /// A queue SEEDED with one batch of 10 that admits a second batch of 3 on step 0
+    /// (so two batches coexist at the first serve), feeding a discrete conveyor with
+    /// room for only 4, plus an `<overflow/>` to `balked`. Parameterised on
+    /// `one_at_a_time`: it changes what the primary DESIRES and hence what the
+    /// overflow redirects.
+    fn overflow_two_batch_model(one_at_a_time: bool) -> datamodel::Project {
+        let oa = if one_at_a_time { "true" } else { "false" };
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>ovf</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>2</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>10</eqn><inflow>arrivals</inflow>
+      <outflow>into_belt</outflow><outflow>balk</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>3</eqn><non_negative/></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <flow name="balk"><eqn>0</eqn><overflow/></flow>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true" one_at_a_time="{oa}" batch_integrity="false">
+        <len>100</len><capacity>4</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+    <stock name="balked"><eqn>0</eqn><inflow>balk</inflow></stock>
+  </variables></model>
+</xmile>"#
+        );
+        parse(&xml)
+    }
+
+    #[test]
+    fn overflow_one_at_a_time_redirects_only_the_front_batch() {
+        // Step 0 front is [10, 3] (seed 10 + admit 3), belt room = 4.
+        //   one_at_a_time=true:  desire = front batch 10, taken 4, redirectable 6;
+        //     the overflow drains the 6 leftover of the FRONT batch, the 3-batch
+        //     WAITS -> waiting[1] = 3, balk[0] = 6.
+        //   one_at_a_time=false: desire = total 13, taken 4, redirectable 9; the
+        //     overflow drains the whole remainder [6,3] -> waiting[1] = 0, balk[0]=9.
+        let oaat = build_run(&overflow_two_batch_model(true));
+        let all = build_run(&overflow_two_batch_model(false));
+        let wait_oaat = oaat.get_series(&Ident::new("waiting")).unwrap();
+        let wait_all = all.get_series(&Ident::new("waiting")).unwrap();
+        let balk_oaat = oaat.get_series(&Ident::new("balk")).unwrap();
+        let balk_all = all.get_series(&Ident::new("balk")).unwrap();
+        let belt_oaat = oaat.get_series(&Ident::new("belt")).unwrap();
+
+        assert!(
+            (wait_oaat[1] - 3.0).abs() < 1e-9,
+            "one_at_a_time waiting[1]={}",
+            wait_oaat[1]
+        );
+        assert!(
+            wait_all[1].abs() < 1e-9,
+            "all-at-once waiting[1]={}",
+            wait_all[1]
+        );
+        assert!(
+            (balk_oaat[0] - 6.0).abs() < 1e-9,
+            "one_at_a_time balk[0]={}",
+            balk_oaat[0]
+        );
+        assert!(
+            (balk_all[0] - 9.0).abs() < 1e-9,
+            "all-at-once balk[0]={}",
+            balk_all[0]
+        );
+        assert!(
+            (belt_oaat[1] - 4.0).abs() < 1e-9,
+            "belt[1]={}",
+            belt_oaat[1]
+        );
+        // Conservation at step 1 for one_at_a_time: init 10 + arrived 3 == 13.
+        let balked_oaat = oaat.get_series(&Ident::new("balked")).unwrap();
+        assert!(
+            (belt_oaat[1] + wait_oaat[1] + balked_oaat[1] - 13.0).abs() < 1e-9,
+            "one_at_a_time conservation: {} + {} + {}",
+            belt_oaat[1],
+            wait_oaat[1],
+            balked_oaat[1]
+        );
+    }
+
+    #[test]
+    fn ordinary_secondary_drains_whole_remainder_not_just_redirectable() {
+        // Same two-batch setup as the overflow twin but the SECOND outflow is an
+        // ORDINARY (non-overflow) competing outflow to a stock (§5.4). one_at_a_time
+        // primary takes 4 of the front-10; the ordinary secondary then drains the
+        // ENTIRE remaining front [6,3] = 9 (not just the redirectable 6), so
+        // waiting[1] = 0 -- the crisp contrast with the overflow's waiting[1] = 3.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>ord</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>2</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>10</eqn><inflow>arrivals</inflow>
+      <outflow>into_belt</outflow><outflow>leftover</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>3</eqn><non_negative/></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <flow name="leftover"><eqn>0</eqn></flow>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true" one_at_a_time="true" batch_integrity="false">
+        <len>100</len><capacity>4</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+    <stock name="spilled"><eqn>0</eqn><inflow>leftover</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let vm = build_run(&project);
+        let waiting = vm.get_series(&Ident::new("waiting")).unwrap();
+        let leftover = vm.get_series(&Ident::new("leftover")).unwrap();
+        let belt = vm.get_series(&Ident::new("belt")).unwrap();
+        let spilled = vm.get_series(&Ident::new("spilled")).unwrap();
+        // Ordinary secondary drains the whole remainder: leftover[0] = 9, queue empty.
+        assert!(
+            (leftover[0] - 9.0).abs() < 1e-9,
+            "leftover[0]={}",
+            leftover[0]
+        );
+        assert!(
+            waiting[1].abs() < 1e-9,
+            "waiting[1]={} (ordinary drains all)",
+            waiting[1]
+        );
+        assert!((belt[1] - 4.0).abs() < 1e-9, "belt[1]={}", belt[1]);
+        // Conservation: init 10 + arrived 3 == belt 4 + waiting 0 + spilled 9.
+        assert!(
+            (belt[1] + waiting[1] + spilled[1] - 13.0).abs() < 1e-9,
+            "conservation"
+        );
+    }
+
+    #[test]
+    fn two_ordinary_unconstrained_outflows_first_drains_all_second_gets_zero() {
+        // §5.4 degenerate case on an UNCOUPLED queue: two ordinary outflows, both to
+        // stocks. The first (unconstrained) empties the queue every DT, so the second
+        // always removes nothing.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>two</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>1</stop><dt>0.25</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow>
+      <outflow>drain1</outflow><outflow>drain2</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>10</eqn><non_negative/></flow>
+    <flow name="drain1"><eqn>0</eqn></flow>
+    <flow name="drain2"><eqn>0</eqn></flow>
+    <stock name="sink1"><eqn>0</eqn><inflow>drain1</inflow></stock>
+    <stock name="sink2"><eqn>0</eqn><inflow>drain2</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let vm = build_run(&project);
+        let drain1 = vm.get_series(&Ident::new("drain1")).unwrap();
+        let drain2 = vm.get_series(&Ident::new("drain2")).unwrap();
+        let arrivals = vm.get_series(&Ident::new("arrivals")).unwrap();
+        for (i, ((&d1, &d2), &a)) in drain1
+            .iter()
+            .zip(drain2.iter())
+            .zip(arrivals.iter())
+            .enumerate()
+        {
+            assert!(
+                (d1 - a).abs() < 1e-9,
+                "drain1[{i}]={d1}, arrivals={a} (first drains all)"
+            );
+            assert!(d2.abs() < 1e-9, "drain2[{i}]={d2} (second gets nothing)");
+        }
+        // All throughput lands in sink1; sink2 stays empty.
+        assert!(
+            (*vm.get_series(&Ident::new("sink1")).unwrap().last().unwrap() - 10.0).abs() < 1e-6
+        );
+        for &v in vm.get_series(&Ident::new("sink2")).unwrap().iter() {
+            assert!(v.abs() < 1e-9, "sink2 must stay empty: {v}");
+        }
+    }
+
+    #[test]
+    fn overflow_chain_first_drains_redirectable_second_gets_the_remainder() {
+        // Two overflows to two stocks. The belt has capacity 0 (never admits, so
+        // req=0), so with one_at_a_time=false the whole desire is redirectable each
+        // DT. The FIRST overflow drains all of it; the SECOND sees the decremented
+        // (zero) budget and drains what the first left -- 0 here (both unconstrained).
+        // This pins the redirectable-budget threading through the overflow priority
+        // order. A chain where the second drains a NONZERO remainder requires the
+        // first overflow to be capacity-limited (a constrained/conveyor overflow --
+        // a documented limitation); the desire−taken budget mechanism is unit-tested
+        // in `queue::tests::redirectable_is_desire_minus_taken_across_the_batch_rules`.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>chain</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>2</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow>
+      <outflow>into_belt</outflow><outflow>balk1</outflow><outflow>balk2</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>6</eqn><non_negative/></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <flow name="balk1"><eqn>0</eqn><overflow/></flow>
+    <flow name="balk2"><eqn>0</eqn><overflow/></flow>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true" one_at_a_time="false" batch_integrity="false">
+        <len>100</len><capacity>0</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+    <stock name="spill1"><eqn>0</eqn><inflow>balk1</inflow></stock>
+    <stock name="spill2"><eqn>0</eqn><inflow>balk2</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let vm = build_run(&project);
+        let belt = vm.get_series(&Ident::new("belt")).unwrap();
+        let balk1 = vm.get_series(&Ident::new("balk1")).unwrap();
+        let balk2 = vm.get_series(&Ident::new("balk2")).unwrap();
+        let waiting = vm.get_series(&Ident::new("waiting")).unwrap();
+        for (i, ((&b1, &b2), &w)) in balk1
+            .iter()
+            .zip(balk2.iter())
+            .zip(waiting.iter())
+            .enumerate()
+        {
+            assert!(
+                (b1 - 6.0).abs() < 1e-9,
+                "balk1[{i}]={b1} (drains all redirectable)"
+            );
+            assert!(
+                b2.abs() < 1e-9,
+                "balk2[{i}]={b2} (nothing left after balk1)"
+            );
+            assert!(
+                w.abs() < 1e-9,
+                "waiting[{i}]={w} (nothing waits: all redirected)"
+            );
+        }
+        for &b in belt.iter() {
+            assert!(b.abs() < 1e-9, "belt must stay empty (capacity 0): {b}");
+        }
+        // Conservation: all arrivals land in spill1.
+        assert!(
+            (*vm.get_series(&Ident::new("spill1"))
+                .unwrap()
+                .last()
+                .unwrap()
+                - 12.0)
+                .abs()
+                < 1e-6
+        );
+    }
+
+    // ----- Part C: <overflow/> placement validation (§10.7) -----
+
+    #[test]
+    fn overflow_on_non_queue_flow_is_rejected() {
+        // A model WITH a queue but an <overflow/> on a flow that is not any queue's
+        // outflow -> loud QueueOverflowNotOnQueue (§3.3/§10.7).
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>2</stop><dt>0.5</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow><outflow>into_service</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>10</eqn><non_negative/></flow>
+    <flow name="into_service"><eqn>0</eqn></flow>
+    <stock name="served"><eqn>0</eqn><inflow>into_service</inflow></stock>
+    <aux name="src"><eqn>1</eqn></aux>
+    <flow name="stray"><eqn>src</eqn><overflow/></flow>
+    <stock name="junk"><eqn>0</eqn><inflow>stray</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let (code, msg) =
+            expand_queues(&project, &project.models[0].name).expect_err("stray overflow rejected");
+        assert_eq!(code, ErrorCode::QueueOverflowNotOnQueue);
+        assert!(
+            msg.contains("stray"),
+            "message names the offending flow: {msg}"
+        );
+    }
+
+    #[test]
+    fn overflow_on_first_outflow_is_rejected() {
+        // <overflow/> on a queue's FIRST (highest-priority) outflow -> loud error:
+        // an overflow may never be the first outflow (§3.3/§10.7).
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>2</stop><dt>0.5</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow><outflow>into_service</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>10</eqn><non_negative/></flow>
+    <flow name="into_service"><eqn>0</eqn><overflow/></flow>
+    <stock name="served"><eqn>0</eqn><inflow>into_service</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let (code, msg) = expand_queues(&project, &project.models[0].name)
+            .expect_err("first-outflow overflow rejected");
+        assert_eq!(code, ErrorCode::QueueOverflowNotOnQueue);
+        assert!(
+            msg.contains("into_service"),
+            "message names the first outflow: {msg}"
+        );
+    }
+
+    #[test]
+    fn overflow_with_no_queue_at_all_is_rejected() {
+        // Even a model with NO queue must reject a stray <overflow/> (validation runs
+        // before the no-queue fast path), since it cannot be a queue outflow.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>2</stop><dt>0.5</dt></sim_specs>
+  <model><variables>
+    <stock name="src"><eqn>100</eqn><outflow>drain</outflow></stock>
+    <flow name="drain"><eqn>1</eqn><overflow/></flow>
+    <stock name="sink"><eqn>0</eqn><inflow>drain</inflow></stock>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let (code, _msg) = expand_queues(&project, &project.models[0].name)
+            .expect_err("overflow without queue rejected");
+        assert_eq!(code, ErrorCode::QueueOverflowNotOnQueue);
     }
 }

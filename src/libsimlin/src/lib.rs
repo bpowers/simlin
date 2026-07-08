@@ -295,6 +295,7 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::QueueNotExpanded => SimlinErrorCode::Generic,
             engine::ErrorCode::QueueNonEulerMethod => SimlinErrorCode::Generic,
             engine::ErrorCode::QueueDrivenFlowRead => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueOverflowNotOnQueue => SimlinErrorCode::Generic,
         }
     }
 }
