@@ -1072,6 +1072,425 @@ fn test_diagnostics_stable_across_unrelated_input_change() {
     );
 }
 
+// ---- F15: pass-driven flows are permitted an empty equation ----
+//
+// A conveyor stock's primary/leak outflow and any queue stock's outflow are
+// DRIVEN by the native expansion pass (conveyor_compile / queue_compile),
+// which writes their slot each step (the expansion gives each such flow a
+// placeholder `0` equation). By XMILE design such a flow carries no <eqn>. The
+// salsa diagnostic path runs over the UN-expanded datamodel, so without a
+// marker-aware guard every driven flow was reported as an EmptyEquation Error
+// on a model that simulates correctly (F15). These tests pin that the guard
+// (a) suppresses EmptyEquation for a conveyor/queue driven flow, (b) leaves it
+// intact for an ordinary empty-equation variable, and (c) re-emits it when the
+// special-stock marker is removed (salsa invalidation of the flow's fragment,
+// which read the owning stock's compat).
+
+/// A minimal `<conveyor>` block (transit time only) for the F15 fixtures.
+fn f15_conveyor_block() -> datamodel::Conveyor {
+    datamodel::Conveyor {
+        transit_time: "4".to_string(),
+        capacity: None,
+        inflow_limit: None,
+        sample: None,
+        arrest: None,
+        discrete: false,
+        batch_integrity: false,
+        one_at_a_time: true,
+        exponential_leak: false,
+        ignore_earlier_zone_losses: false,
+    }
+}
+
+/// Whether the collected set carries an `EmptyEquation` Error for `name`.
+fn has_empty_equation(diags: &[Diagnostic], name: &str) -> bool {
+    diags.iter().any(|d| {
+        d.variable.as_deref() == Some(name)
+            && d.severity == DiagnosticSeverity::Error
+            && matches!(
+                &d.error,
+                DiagnosticError::Equation(crate::common::EquationError {
+                    code: crate::common::ErrorCode::EmptyEquation,
+                    ..
+                })
+            )
+    })
+}
+
+/// A one-model project with a conveyor stock `belt` whose primary outflow
+/// `out_f` and leak outflow `leak_f` both carry NO equation (the conveyor pass
+/// drives them), plus an inflow `in_f` with a real equation and an ordinary
+/// empty-equation aux `orphan` as the non-driven control.
+fn f15_conveyor_project() -> datamodel::Project {
+    datamodel::Project {
+        name: "conveyor_driven".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "belt".to_string(),
+                    equation: datamodel::Equation::Scalar("1000".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["in_f".to_string()],
+                    outflows: vec!["out_f".to_string(), "leak_f".to_string()],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        conveyor: Some(f15_conveyor_block()),
+                        ..Default::default()
+                    },
+                }),
+                // Primary outflow: NO equation (the conveyor pass drives it).
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "out_f".to_string(),
+                    equation: datamodel::Equation::Scalar(String::new()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // Leak outflow: NO equation, leak-marked (also pass-driven).
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "leak_f".to_string(),
+                    equation: datamodel::Equation::Scalar(String::new()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        leakage: Some(datamodel::Leakage {
+                            fraction: Some("0.1".to_string()),
+                            integers: false,
+                            zone_start: None,
+                            zone_end: None,
+                        }),
+                        ..Default::default()
+                    },
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "in_f".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // PRECISION CONTROL: a PLAIN INTEG stock coexisting in the same
+                // model, whose empty-equation outflow `tank_out` is NOT
+                // pass-driven. It must still be an EmptyEquation Error -- the
+                // guard against a future over-broad "the model contains any
+                // special stock" rewrite of `flow_is_special_stock_driven` (the
+                // `orphan` aux only exercises the kind==Flow gate, not the
+                // owning-stock-is-special gate).
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "tank".to_string(),
+                    equation: datamodel::Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec!["tank_out".to_string()],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "tank_out".to_string(),
+                    equation: datamodel::Equation::Scalar(String::new()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // CONTROL: an ordinary aux with an empty equation is NOT
+                // pass-driven, so it must still be an EmptyEquation Error.
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "orphan".to_string(),
+                    equation: datamodel::Equation::Scalar(String::new()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// A conveyor stock's primary outflow and leak outflow are pass-driven, so an
+/// empty equation on them is spec-sanctioned and must NOT surface as an
+/// EmptyEquation error -- while an ordinary empty-equation aux in the same
+/// model still does.
+#[test]
+fn test_conveyor_driven_flow_empty_equation_suppressed() {
+    let db = SimlinDb::default();
+    let project = f15_conveyor_project();
+
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert!(
+        !has_empty_equation(&diags, "out_f"),
+        "conveyor primary outflow must not get a phantom empty_equation; got: {diags:?}"
+    );
+    assert!(
+        !has_empty_equation(&diags, "leak_f"),
+        "conveyor leak outflow must not get a phantom empty_equation; got: {diags:?}"
+    );
+    assert!(
+        has_empty_equation(&diags, "tank_out"),
+        "an empty-equation outflow of a PLAIN stock coexisting in the same conveyor \
+         model must still be an EmptyEquation error; got: {diags:?}"
+    );
+    assert!(
+        has_empty_equation(&diags, "orphan"),
+        "an ordinary empty-equation aux must still be an EmptyEquation error; got: {diags:?}"
+    );
+}
+
+/// Scope guard: the suppression is for the empty-equation code ONLY. A
+/// pass-driven flow that carries a NON-empty but malformed equation (`1 +`)
+/// still surfaces its parse error -- the expansion pass overwrites the slot,
+/// but a syntactically broken equation is a genuine modeling error the
+/// diagnostics must report, not silently swallow. (Correct by construction --
+/// only `EmptyEquation` is filtered -- but unpinned before this.)
+#[test]
+fn test_conveyor_driven_flow_malformed_equation_still_errors() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "conveyor_malformed".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "belt".to_string(),
+                    equation: datamodel::Equation::Scalar("1000".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["in_f".to_string()],
+                    outflows: vec!["out_f".to_string()],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        conveyor: Some(f15_conveyor_block()),
+                        ..Default::default()
+                    },
+                }),
+                // Driven outflow with a NON-empty, malformed equation.
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "out_f".to_string(),
+                    equation: datamodel::Equation::Scalar("1 +".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "in_f".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    // The malformed equation must NOT be mislabeled as -- or swallowed like --
+    // an empty equation: it surfaces as a non-EmptyEquation parse error.
+    assert!(
+        !has_empty_equation(&diags, "out_f"),
+        "a malformed non-empty equation is not an empty equation; got: {diags:?}"
+    );
+    let has_parse_error = diags.iter().any(|d| {
+        d.variable.as_deref() == Some("out_f")
+            && d.severity == DiagnosticSeverity::Error
+            && matches!(
+                &d.error,
+                DiagnosticError::Equation(e) if e.code != crate::common::ErrorCode::EmptyEquation
+            )
+    });
+    assert!(
+        has_parse_error,
+        "a conveyor-driven outflow with a malformed equation must still report its \
+         parse error; got: {diags:?}"
+    );
+}
+
+/// Every outflow of a queue stock is pass-driven (queue_compile writes each
+/// served rate), so an empty-equation queue outflow is spec-sanctioned. The
+/// committed queue fixtures happen to use `<eqn>0</eqn>` placeholders, so this
+/// fixture uses genuinely empty outflow equations to exercise the queue branch
+/// of the guard.
+#[test]
+fn test_queue_driven_outflow_empty_equation_suppressed() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "queue_driven".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "waiting".to_string(),
+                    equation: datamodel::Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["arrivals".to_string()],
+                    outflows: vec!["into_service".to_string(), "balk".to_string()],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        queue: Some(datamodel::Queue {}),
+                        ..Default::default()
+                    },
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "arrivals".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // Primary outflow: NO equation (the queue pass drives it).
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "into_service".to_string(),
+                    equation: datamodel::Equation::Scalar(String::new()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // Overflow outflow: NO equation, also pass-driven.
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "balk".to_string(),
+                    equation: datamodel::Equation::Scalar(String::new()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        overflow: true,
+                        ..Default::default()
+                    },
+                }),
+                // CONTROL: an ordinary empty-equation aux still errors.
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "orphan".to_string(),
+                    equation: datamodel::Equation::Scalar(String::new()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert!(
+        !has_empty_equation(&diags, "into_service"),
+        "queue primary outflow must not get a phantom empty_equation; got: {diags:?}"
+    );
+    assert!(
+        !has_empty_equation(&diags, "balk"),
+        "queue overflow outflow must not get a phantom empty_equation; got: {diags:?}"
+    );
+    assert!(
+        has_empty_equation(&diags, "orphan"),
+        "an ordinary empty-equation aux must still be an EmptyEquation error; got: {diags:?}"
+    );
+}
+
+/// The suppression is marker-driven: removing the `<conveyor>` block makes
+/// `belt` an ordinary INTEG stock, so its outflow `out_f` is no longer
+/// pass-driven and its missing equation becomes a genuine EmptyEquation error.
+/// Salsa must invalidate `out_f`'s fragment (it read `belt.compat`) and re-emit
+/// the diagnostic on the incremental re-sync.
+#[test]
+fn test_conveyor_marker_removal_reinstates_empty_equation() {
+    let mut db = SimlinDb::default();
+    let project = f15_conveyor_project();
+
+    let state = sync_from_datamodel_incremental(&mut db, &project, None);
+    let before = collect_all_diagnostics(&db, state.project);
+    assert!(
+        !has_empty_equation(&before, "out_f"),
+        "with the <conveyor> marker present, the driven outflow has no empty_equation; \
+         got: {before:?}"
+    );
+
+    let mut changed = project.clone();
+    if let datamodel::Variable::Stock(s) = &mut changed.models[0].variables[0] {
+        s.compat.conveyor = None;
+    } else {
+        panic!("fixture's first variable must be the conveyor stock");
+    }
+    let state = sync_from_datamodel_incremental(&mut db, &changed, Some(&state));
+    let after = collect_all_diagnostics(&db, state.project);
+    assert!(
+        has_empty_equation(&after, "out_f"),
+        "removing the <conveyor> marker must reinstate the empty_equation error on out_f; \
+         got: {after:?}"
+    );
+}
+
 /// The same invariant via the production incremental-sync path, driving the
 /// exact input the `SetLoopName` patch touches: add a `loop_metadata` entry
 /// (which re-syncs `pinned_loops` and bumps the revision) and re-collect. The

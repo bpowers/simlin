@@ -532,11 +532,12 @@ fn test_get_errors_queue_model_reports_none() {
     }
 }
 
-/// F2 regression: `simlin_project_get_errors` must NOT report the
-/// `ConveyorNotExpanded` guard error for a valid conveyor model. A conveyor
-/// fixture may still carry a separately-tracked phantom `empty_equation`
-/// diagnostic on its driven outflow (F15), so this asserts specifically that no
-/// error mentions the un-expanded guard rather than requiring zero errors.
+/// F2 + F15 regression: `simlin_project_get_errors` must report NO errors for a
+/// valid conveyor model. F2 stopped the `ConveyorNotExpanded` guard error; F15
+/// stopped the phantom `empty_equation` diagnostics that the salsa diagnostic
+/// path emitted for each conveyor-driven outflow (the primary + leak flows carry
+/// no `<eqn>` by XMILE design). The minimal_conveyor fixture requests no LTM, so
+/// there is no LTM-degraded Warning either -- `get_errors` returns NULL.
 #[test]
 fn test_get_errors_conveyor_model_has_no_not_expanded() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
@@ -549,11 +550,18 @@ fn test_get_errors_conveyor_model_has_no_not_expanded() {
         let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
         assert!(err.is_null(), "out_error must be null");
         if !all_errors.is_null() {
-            assert!(
-                !any_detail_message_contains(all_errors, "un-expanded"),
-                "conveyor model must not report the ConveyorNotExpanded guard error"
-            );
+            let count = simlin_error_get_detail_count(all_errors);
+            let details = simlin_error_get_details(all_errors);
+            let messages: Vec<String> = std::slice::from_raw_parts(details, count)
+                .iter()
+                .filter_map(|d| {
+                    (!d.message.is_null())
+                        .then(|| CStr::from_ptr(d.message).to_str().ok().map(String::from))
+                        .flatten()
+                })
+                .collect();
             simlin_error_free(all_errors);
+            panic!("valid conveyor model must report no errors; got: {messages:?}");
         }
         simlin_project_unref(proj);
     }

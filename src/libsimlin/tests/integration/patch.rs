@@ -258,6 +258,71 @@ fn test_project_apply_patch_queue_model_accepts_benign_edit() {
     }
 }
 
+/// F15 regression: `simlin_project_apply_patch` with `allow_errors=false` must
+/// ACCEPT a benign edit to a CONVEYOR model. The minimal_conveyor fixture's
+/// `graduating` outflow carries no `<eqn>` (the conveyor pass drives it), which
+/// the salsa diagnostic path used to report as an Error-severity phantom
+/// `empty_equation`. `first_error_code` scans staged diagnostics BEFORE the sim
+/// error, so that phantom made `apply_patch` reject (and `db.restore` roll back)
+/// every edit to a valid conveyor model -- the conveyor twin of the queue
+/// `test_project_apply_patch_queue_model_accepts_benign_edit` above.
+#[test]
+fn test_project_apply_patch_conveyor_model_accepts_benign_edit() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse minimal_conveyor.xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    // A harmless new aux that neither reads a conveyor-driven flow nor otherwise
+    // breaks the model.
+    let patch_json = r#"{
+        "models": [
+            {
+                "name": "main",
+                "ops": [
+                    {
+                        "type": "upsertAux",
+                        "payload": {
+                            "aux": { "name": "probe", "equation": "1" }
+                        }
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let patch_bytes = patch_json.as_bytes();
+
+    unsafe {
+        let mut collected_errors: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false, // dry_run
+            false, // allow_errors: exercise the rejection/rollback path
+            &mut collected_errors,
+            &mut out_error,
+        );
+
+        assert!(
+            out_error.is_null(),
+            "benign edit to a conveyor model must not be rejected"
+        );
+        assert!(collected_errors.is_null(), "no errors expected");
+
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
+        assert!(
+            model.get_variable("probe").is_some(),
+            "edit must be committed, not rolled back"
+        );
+        drop(project_locked);
+
+        simlin_project_unref(proj);
+    }
+}
+
 #[test]
 fn test_project_apply_patch_upsert_module() {
     // Create a project with a submodel that the module can reference

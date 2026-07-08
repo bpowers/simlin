@@ -576,6 +576,41 @@ pub(crate) fn build_caller_module_refs(
     module_refs
 }
 
+/// Whether `flow_ident` names a flow that is DRIVEN by a special-stock
+/// expansion pass: an outflow of a stock carrying the `<conveyor>` or `<queue>`
+/// marker. Such a flow's value comes from the native pass (which writes its slot
+/// each step), not from an equation, so its absence of an `<eqn>` is
+/// spec-sanctioned rather than a modeling error (docs/design/conveyors.md,
+/// docs/design/queues.md).
+///
+/// Determined structurally over the model's stocks. In a VALID conveyor the
+/// outflow set is exactly {primary, leaks}; a queue drives every outflow. The
+/// only non-driven outflow a conveyor can carry is a rejected SECOND non-leak
+/// outflow (F11), whose model the expansion rejects loudly on the simulation
+/// channel regardless -- so treating every conveyor/queue outflow as driven
+/// never hides a real problem in an otherwise-valid model, and keeps the guard
+/// a simple, marker-only structural rule.
+///
+/// Reads each stock's `kind`/`outflows`/`compat` through salsa inputs, so the
+/// enclosing `compile_var_fragment` gains a dependency on the owning stock's
+/// marker: dropping the `<conveyor>`/`<queue>` block re-emits the flow's
+/// `EmptyEquation` diagnostic (pinned by
+/// `test_conveyor_marker_removal_reinstates_empty_equation`).
+fn flow_is_special_stock_driven(db: &dyn Db, model: SourceModel, flow_ident: &str) -> bool {
+    let flow_canon = canonicalize(flow_ident);
+    model.variables(db).values().any(|sv| {
+        sv.kind(db) == SourceVariableKind::Stock
+            && sv
+                .outflows(db)
+                .iter()
+                .any(|o| canonicalize(o) == flow_canon)
+            && {
+                let compat = sv.compat(db);
+                compat.conveyor.is_some() || compat.queue.is_some()
+            }
+    })
+}
+
 /// Lower a single source variable to its per-phase `Var` form.
 ///
 /// Performs parsing, equation lowering, minimal metadata/context
@@ -622,12 +657,34 @@ pub(crate) fn lower_var_fragment(
         }
     }
 
-    // Check for parse errors -- accumulate each one before bailing out
+    // Check for parse errors -- accumulate each one before bailing out.
+    //
+    // A pass-driven flow -- a conveyor stock's primary/leak outflow or ANY
+    // outflow of a queue stock -- is spec-sanctioned to carry no `<eqn>`: the
+    // native conveyor/queue expansion pass writes its slot each step (the
+    // expansion gives the flow a placeholder `0` equation, conveyor_compile.rs /
+    // queue_compile.rs). This diagnostic path runs over the UN-expanded
+    // datamodel, so without a marker-aware guard every driven flow was reported
+    // as a phantom `EmptyEquation` Error on a model that simulates correctly
+    // (docs/design/conveyors.md, docs/design/queues.md). Suppress ONLY the
+    // empty-equation code, and ONLY for such a flow -- a genuine parse error on
+    // a driven flow, or an empty equation on any non-driven variable, still
+    // surfaces. `flow_is_special_stock_driven` reads the owning stock's compat
+    // through salsa inputs, so removing the `<conveyor>`/`<queue>` marker
+    // invalidates this fragment and the `EmptyEquation` Error reappears.
     if let Some(errors) = parsed.variable.equation_errors()
         && !errors.is_empty()
     {
+        let suppress_empty = var.kind(db) == SourceVariableKind::Flow
+            && errors
+                .iter()
+                .any(|e| e.code == crate::common::ErrorCode::EmptyEquation)
+            && flow_is_special_stock_driven(db, model, &var_ident);
         let mut fatal_diags: Vec<Diagnostic> = Vec::new();
         for err in &errors {
+            if suppress_empty && err.code == crate::common::ErrorCode::EmptyEquation {
+                continue;
+            }
             fatal_diags.push(Diagnostic {
                 model: model.name(db).clone(),
                 variable: Some(var.ident(db).clone()),
