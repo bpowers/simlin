@@ -1,16 +1,26 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "baseUrl": ".",
     "rootDir": "src",
     "outDir": "lib",
     "tsBuildInfoFile": "./tsconfig.tsbuildinfo",
     "module": "commonjs",
-    "lib": ["es2020", "dom"],
+    // esnext.disposable declares Symbol.dispose, which sim/project/model use to
+    // support `using`. It used to arrive implicitly via @types/node's
+    // SymbolConstructor augmentation; now that "types" is explicit (and empty by
+    // default since TS6), name the lib that actually owns the symbol.
+    "lib": ["es2020", "dom", "esnext.disposable"],
+    // TS6 changed the default from "all installed @types" to []. These are the
+    // globals-only packages this program relies on; @types/katex and friends are
+    // still resolved through ordinary imports and need no entry here.
+    "types": ["node", "jest"],
+    // Self-referencing paths that swap in the Node flavor of the two
+    // platform-specific modules. They override the repo-wide "@simlin/*"
+    // mapping, so they resolve relative to this file (see tsconfig.base.json).
     "paths": {
-      "@simlin/engine/internal/wasm": ["src/internal/wasm.node.ts"],
-      "@simlin/engine/internal/backend-factory": ["src/backend-factory.node.ts"],
-      "@simlin/engine/*": ["src/*"]
+      "@simlin/engine/internal/wasm": ["./src/internal/wasm.node.ts"],
+      "@simlin/engine/internal/backend-factory": ["./src/backend-factory.node.ts"],
+      "@simlin/engine/*": ["./src/*"]
     }
   },
   "include": ["src/**/*.ts"],

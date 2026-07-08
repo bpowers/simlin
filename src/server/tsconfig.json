@@ -3,7 +3,11 @@
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "lib",
-    "module": "commonjs"
+    "module": "commonjs",
+    // Since TS6 "types" defaults to []. The vendored seshcookie tests sit beside
+    // their source and are part of this program (they are emitted into lib/), so
+    // this program genuinely needs Jest's globals.
+    "types": ["node", "jest"]
   },
   "include": [
     "**/*.ts",

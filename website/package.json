@@ -18,7 +18,7 @@
     "react-dom": "^19.0.0",
     "prettier": "^3.8.1",
     "rspress": "^1.44.0",
-    "typescript": "^5.7.2"
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
   },
   "browserslist": {
     "production": [

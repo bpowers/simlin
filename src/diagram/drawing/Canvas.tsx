@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-/// <reference types="resize-observer-browser" />
-
 import * as React from 'react';
 
 import clsx from 'clsx';

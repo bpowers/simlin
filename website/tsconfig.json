@@ -4,16 +4,18 @@
     "module": "ESNext",
     "lib": ["ES2020", "DOM"],
     "jsx": "react-jsx",
-    "moduleResolution": "node",
+    // "node"/"node10" was removed in TypeScript 7; rspress bundles this code.
+    "moduleResolution": "bundler",
     "esModuleInterop": true,
     "skipLibCheck": true,
     "strict": true,
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
     "forceConsistentCasingInFileNames": true,
-    "baseUrl": ".",
+    // "baseUrl" was removed in TypeScript 7. Without it these targets resolve
+    // relative to this file, so they must be written relative (TS5090).
     "paths": {
-      "@/*": ["src/*"],
+      "@/*": ["./src/*"],
       "@simlin/core": ["../src/core"],
       "@simlin/diagram": ["../src/diagram"],
       "@simlin/engine": ["../src/engine"]

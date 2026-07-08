@@ -4,6 +4,10 @@
     "rootDir": ".",
     "outDir": "lib",
     "module": "commonjs",
+    // Since TS6 "types" defaults to [] rather than every installed @types
+    // package. ts-jest type-checks tests/ against this config, so Jest's globals
+    // must stay reachable even though tests/ is excluded from the emit.
+    "types": ["jest"],
   },
   "include": [
     "**/*.ts",
