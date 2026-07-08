@@ -193,11 +193,31 @@ impl From<File> for datamodel::Project {
 
 impl From<datamodel::Project> for File {
     fn from(project: datamodel::Project) -> Self {
-        // Scan for queue stocks / overflow flows before we consume `models`, so
-        // the writer can re-emit the <uses_queue> header (docs/design/queues.md
-        // §3.1). The `<queue/>` block on the stock is the authoritative signal;
-        // the header is round-trip fidelity only, and carries overflow="true"
-        // when any queue outflow is an overflow.
+        // Scan for conveyor/queue stocks and their advisory sub-features before
+        // we consume `models`, so the writer can re-emit the <uses_conveyor>
+        // (docs/design/conveyors.md §3.1) and <uses_queue> (docs/design/queues.md
+        // §3.1) headers. The per-stock <conveyor>/<queue/> blocks are the
+        // authoritative signal; the headers are Stella/isee interop fidelity
+        // only. <uses_conveyor> carries arrest="true" when any conveyor has an
+        // <arrest> expression and leak="true" when any flow is leak-marked;
+        // <uses_queue> carries overflow="true" when any queue outflow is an
+        // overflow.
+        let has_conveyor = project.models.iter().any(|m| {
+            m.variables
+                .iter()
+                .any(|v| matches!(v, datamodel::Variable::Stock(s) if s.compat.conveyor.is_some()))
+        });
+        let has_arrest = project.models.iter().any(|m| {
+            m.variables.iter().any(|v| {
+                matches!(v, datamodel::Variable::Stock(s)
+                    if s.compat.conveyor.as_ref().is_some_and(|c| c.arrest.is_some()))
+            })
+        });
+        let has_leak = project.models.iter().any(|m| {
+            m.variables
+                .iter()
+                .any(|v| matches!(v, datamodel::Variable::Flow(f) if f.compat.leakage.is_some()))
+        });
         let has_queue = project.models.iter().any(|m| {
             m.variables
                 .iter()
@@ -233,14 +253,21 @@ impl From<datamodel::Project> for File {
 
         // Header <options>/<features>. <uses_macros> is emitted whenever the
         // project contains a macro (Simlin supports neither recursive macros nor
-        // option filters, so both attributes are fixed "false"); <uses_queue> is
-        // emitted whenever the project contains a queue. Emission is
-        // deterministic so the round-trip stays byte-stable.
+        // option filters, so both attributes are fixed "false"); <uses_conveyor>
+        // whenever the project contains a conveyor; <uses_queue> whenever it
+        // contains a queue. Emission is deterministic so the round-trip stays
+        // byte-stable.
         let mut features: Vec<Feature> = Vec::new();
         if !macros.is_empty() {
             features.push(Feature::UsesMacros {
                 recursive_macros: Some(false),
                 option_filters: Some(false),
+            });
+        }
+        if has_conveyor {
+            features.push(Feature::UsesConveyor {
+                arrest: if has_arrest { Some(true) } else { None },
+                leak: if has_leak { Some(true) } else { None },
             });
         }
         if has_queue {
@@ -753,10 +780,11 @@ impl ToXml<XmlWriter> for Header {
             write_tag_with_attrs(writer, "product", name, &attrs)?;
         }
 
-        // options / features. Today the only feature the writer emits is
-        // <uses_macros> (when the project contains a macro); the attributes
-        // are deterministic fixed "false" (Simlin supports neither recursive
-        // macros nor option filters), keeping the byte-stable round-trip
+        // options / features. The writer emits <uses_macros> (when the
+        // project contains a macro; its attributes are deterministic fixed
+        // "false" since Simlin supports neither recursive macros nor option
+        // filters), plus <uses_conveyor> / <uses_queue> re-derived from the
+        // per-stock compat markers, keeping the byte-stable round-trip
         // stable.
         if let Some(Options {
             features: Some(ref features),
@@ -797,6 +825,20 @@ impl ToXml<XmlWriter> for Feature {
                     ("option_filters", opt_filters),
                 ];
                 write_tag_empty_with_attrs(writer, "uses_macros", attrs)
+            }
+            Feature::UsesConveyor { arrest, leak } => {
+                // The attributes are advisory sub-feature declarations
+                // (docs/design/conveyors.md §3.1): announce each only when a
+                // conveyor actually uses it; a plain conveyor emits a bare
+                // <uses_conveyor/>, mirroring the <uses_queue/> rule below.
+                let mut attrs: Vec<(&str, &str)> = vec![];
+                if arrest.unwrap_or(false) {
+                    attrs.push(("arrest", "true"));
+                }
+                if leak.unwrap_or(false) {
+                    attrs.push(("leak", "true"));
+                }
+                write_tag_empty_with_attrs(writer, "uses_conveyor", &attrs)
             }
             Feature::UsesQueue { overflow } => {
                 // Announce overflow="true" only when a queue outflow is an
@@ -860,10 +902,18 @@ pub enum Feature {
         option_filters: Option<bool>,
     },
     UsesConveyor {
+        // Spec attributes (XMILE §2.2 / conveyors.md §3.1). Like UsesMacros
+        // above, without the `@` rename serde would (de)serialize these as
+        // child elements, so the reader would silently ignore the attribute
+        // form the writer emits and the round-trip would be lossy.
+        #[serde(rename = "@arrest")]
         arrest: Option<bool>,
+        #[serde(rename = "@leak")]
         leak: Option<bool>,
     },
     UsesQueue {
+        // Attribute form for the same reason as UsesMacros/UsesConveyor above.
+        #[serde(rename = "@overflow")]
         overflow: Option<bool>,
     },
     UsesEventPosters {

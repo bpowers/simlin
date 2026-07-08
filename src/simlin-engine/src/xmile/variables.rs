@@ -1579,6 +1579,115 @@ mod conveyor_tests {
         );
     }
 
+    /// The `test/conveyors/minimal_conveyor.xmile` fixture declares
+    /// `<uses_conveyor/>` in its header; a full read -> write -> read must
+    /// preserve that declaration (conveyors.md sections 3.1/9.7 -- Stella/isee
+    /// interop relies on the header advertising the feature). The fixture's
+    /// conveyor has no `<arrest>` and no leak flows, so the re-emitted header
+    /// must carry neither advisory attribute (mirroring the bare
+    /// `<uses_queue/>` rule for a plain queue).
+    #[test]
+    fn minimal_conveyor_fixture_header_roundtrips() {
+        let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+        let p = parse(xml);
+        let written = project_to_xmile(&p).expect("serialize");
+        assert!(
+            written.contains("<uses_conveyor/>"),
+            "writer must emit a bare <uses_conveyor/> header: {written}"
+        );
+        assert!(
+            !written.contains("arrest="),
+            "no conveyor uses arrest, so the header must not announce it: {written}"
+        );
+        assert!(
+            !written.contains("leak="),
+            "no flow carries leakage, so the header must not announce it: {written}"
+        );
+        // The header survives a SECOND generation too (read the writer's own
+        // output and write again), so the declaration never decays.
+        let p2 = parse(&written);
+        let written2 = project_to_xmile(&p2).expect("serialize");
+        assert!(
+            written2.contains("<uses_conveyor/>"),
+            "header lost on second-generation write: {written2}"
+        );
+    }
+
+    /// A conveyor using `<arrest>` plus a leak-marked outflow must advertise
+    /// both sub-features on the header (`arrest="true" leak="true"`,
+    /// conveyors.md section 3.1), and the emitted attributes must round-trip
+    /// through the actual reader into the parsed [`crate::xmile::Feature`] --
+    /// pinning that the writer spells the attributes the way the parser
+    /// deserializes them (attribute form, not child elements).
+    #[test]
+    fn conveyor_header_announces_arrest_and_leak() {
+        let xml = wrap(
+            r#"
+        <stock name="belt"><eqn>10</eqn><inflow>i</inflow>
+          <outflow>o</outflow><outflow>l</outflow>
+          <conveyor><len>4</len><arrest>0</arrest></conveyor>
+        </stock>
+        <flow name="i"><eqn>1</eqn></flow>
+        <flow name="o"><eqn>0</eqn></flow>
+        <flow name="l"><eqn>0.05</eqn><leak/></flow>"#,
+        );
+        let p = parse(&xml);
+        let written = project_to_xmile(&p).expect("serialize");
+        assert!(
+            written.contains(r#"<uses_conveyor arrest="true" leak="true"/>"#),
+            "writer must announce both sub-features: {written}"
+        );
+
+        // Round-trip the writer's output through the real reader at the
+        // xmile::File level: the datamodel does not carry header features
+        // (the per-stock block is authoritative), so parser fidelity is only
+        // observable on the deserialized Feature itself.
+        let file: crate::xmile::File =
+            quick_xml::de::from_reader(written.as_bytes()).expect("reparse written XML");
+        let features = file
+            .header
+            .expect("header")
+            .options
+            .expect("options")
+            .features
+            .expect("features");
+        assert!(
+            features.iter().any(|f| matches!(
+                f,
+                crate::xmile::Feature::UsesConveyor {
+                    arrest: Some(true),
+                    leak: Some(true),
+                }
+            )),
+            "parser must read back the arrest/leak attributes the writer emitted",
+        );
+    }
+
+    /// A leak flow alone (no `<arrest>`) announces only `leak="true"`; the
+    /// two advisory attributes are independent.
+    #[test]
+    fn conveyor_header_leak_only() {
+        let xml = wrap(
+            r#"
+        <stock name="belt"><eqn>10</eqn>
+          <outflow>o</outflow><outflow>l</outflow>
+          <conveyor><len>4</len></conveyor>
+        </stock>
+        <flow name="o"><eqn>0</eqn></flow>
+        <flow name="l"><eqn>0.05</eqn><leak/></flow>"#,
+        );
+        let p = parse(&xml);
+        let written = project_to_xmile(&p).expect("serialize");
+        assert!(
+            written.contains(r#"<uses_conveyor leak="true"/>"#),
+            "expected leak-only header: {written}"
+        );
+        assert!(
+            !written.contains("arrest="),
+            "no conveyor uses arrest: {written}"
+        );
+    }
+
     #[test]
     fn minimal_conveyor_fixture_parses() {
         let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
@@ -1686,6 +1795,28 @@ mod queue_tests {
         assert!(
             written.contains(r#"<uses_queue overflow="true"/>"#),
             "writer must emit the <uses_queue overflow=\"true\"/> header: {written}"
+        );
+
+        // Parser fidelity: the overflow attribute the writer emits must land
+        // in the deserialized Feature (attribute form, not a child element) --
+        // the same writer/reader agreement the conveyor twin pins.
+        let file: crate::xmile::File =
+            quick_xml::de::from_reader(written.as_bytes()).expect("reparse written XML");
+        let features = file
+            .header
+            .expect("header")
+            .options
+            .expect("options")
+            .features
+            .expect("features");
+        assert!(
+            features.iter().any(|f| matches!(
+                f,
+                crate::xmile::Feature::UsesQueue {
+                    overflow: Some(true),
+                }
+            )),
+            "parser must read back the overflow attribute the writer emitted",
         );
     }
 
