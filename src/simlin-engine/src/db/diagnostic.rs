@@ -69,12 +69,14 @@ pub enum DiagnosticError {
 ///    internally), and a compile-failure warning for any LTM synthetic
 ///    variable whose fragment fails to compile. Gated on `ltm_enabled` so
 ///    we don't run LTM synthesis on projects that never requested it.
-/// 4. When LTM is enabled, `emit_conveyor_ltm_degraded_warnings` -- one
-///    `Warning` per conveyor stock in THIS model, because LTM's flow-to-stock
-///    link-score formula assumes plain INTEG (docs/design/conveyors.md §9.6).
-///    Emitted here rather than inside `model_ltm_variables` so it fires
-///    exactly once per conveyor even for a module-referenced sub-model (see
-///    that function's rustdoc for the double-drain it avoids).
+/// 4. When LTM is enabled, `emit_conveyor_ltm_degraded_warnings` and
+///    `emit_queue_ltm_degraded_warnings` -- one `Warning` per conveyor stock
+///    and per queue stock in THIS model, because LTM's flow-to-stock link-score
+///    formula assumes plain INTEG but both are non-INTEG stock types
+///    (docs/design/conveyors.md §9.6, docs/design/queues.md §10.5). Emitted here
+///    rather than inside `model_ltm_variables` so each fires exactly once even
+///    for a module-referenced sub-model (see those functions' rustdoc for the
+///    double-drain they avoid).
 #[salsa::tracked]
 pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
     // Force this query to re-execute on every revision rather than being
@@ -154,6 +156,7 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     if project.ltm_enabled(db) {
         model_ltm_fragment_diagnostics(db, model, project);
         emit_conveyor_ltm_degraded_warnings(db, model);
+        emit_queue_ltm_degraded_warnings(db, model);
     }
 }
 
@@ -215,6 +218,60 @@ fn emit_conveyor_ltm_degraded_warnings(db: &dyn Db, model: SourceModel) {
             error: DiagnosticError::Model(Error::new(
                 ErrorKind::Model,
                 ErrorCode::ConveyorLtmDegraded,
+                Some(msg),
+            )),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    }
+}
+
+/// Emit one `QueueLtmDegraded` `Warning` per queue stock in `model`
+/// (docs/design/queues.md §10.5).
+///
+/// A queue, like a conveyor, is a stock with non-INTEG dynamics (a FIFO of
+/// batches whose outflow is demand-driven, not `dt * inflow(t-1)`), so LTM's
+/// flow-to-stock link-score numerator -- which assumes plain INTEG under Euler
+/// -- makes any score touching a queue stock silently wrong. The salsa
+/// diagnostic path never expands the queue (only `queue_compile::build_vm`
+/// does, clearing the marker), so `compat.queue` is still present here.
+///
+/// Emitted from this per-model trigger -- NOT `model_ltm_variables` -- for the
+/// same reason as the conveyor twin above: `model_all_diagnostics` is drained
+/// exactly once per model and is never invoked transitively across module
+/// edges, so a queue in a module-referenced sub-model warns exactly once rather
+/// than being double-reported (the cross-module double-drain that #866 tracks
+/// for the `model_ltm_variables` warnings). A `Model` error carrying the real
+/// `ErrorCode::QueueLtmDegraded` (not `Assembly`) keeps this advisory a Warning
+/// that never makes the project look non-simulatable; names are sorted for a
+/// deterministic accumulation order.
+fn emit_queue_ltm_degraded_warnings(db: &dyn Db, model: SourceModel) {
+    use crate::common::{Error, ErrorCode, ErrorKind};
+    use salsa::Accumulator;
+
+    let mut queue_names: Vec<String> = model
+        .variables(db)
+        .values()
+        .filter(|sv| sv.compat(db).queue.is_some())
+        .map(|sv| sv.ident(db).clone())
+        .collect();
+    queue_names.sort_unstable();
+
+    let model_name = model.name(db);
+    for name in queue_names {
+        let msg = format!(
+            "LTM (Loops That Matter) analysis over queue stock '{name}' is degraded: a queue is \
+             a stock with non-INTEG dynamics (a FIFO of batches), but the flow-to-stock \
+             link-score numerator `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` assumes plain INTEG \
+             under Euler, so any link or loop score touching '{name}' may be wrong.  Treat scores \
+             involving this queue as advisory (docs/design/queues.md \u{00A7}10.5)."
+        );
+        CompilationDiagnostic(Diagnostic {
+            model: model_name.clone(),
+            variable: Some(name),
+            error: DiagnosticError::Model(Error::new(
+                ErrorKind::Model,
+                ErrorCode::QueueLtmDegraded,
                 Some(msg),
             )),
             severity: DiagnosticSeverity::Warning,

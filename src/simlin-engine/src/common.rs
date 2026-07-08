@@ -489,6 +489,13 @@ pub enum ErrorCode {
     /// outflow is blocked (docs/design/queues.md §3.3, §10.7). Rejected loudly at
     /// queue-expansion time.
     QueueOverflowNotOnQueue,
+    /// LTM (Loops That Matter) analysis was requested on a model containing a
+    /// queue. A queue is a stock with non-INTEG dynamics (a FIFO of batches),
+    /// so the flow-to-stock link-score numerator assumes plain INTEG under
+    /// Euler and any score touching the queue may be wrong. Emitted as a
+    /// Warning naming the queue, mirroring `ConveyorLtmDegraded`
+    /// (docs/design/queues.md §10.5).
+    QueueLtmDegraded,
 }
 
 impl fmt::Display for ErrorCode {
@@ -566,6 +573,7 @@ impl fmt::Display for ErrorCode {
             QueueNonEulerMethod => "queue_non_euler_method",
             QueueDrivenFlowRead => "queue_driven_flow_read",
             QueueOverflowNotOnQueue => "queue_overflow_not_on_queue",
+            QueueLtmDegraded => "queue_ltm_degraded",
         };
 
         write!(f, "{name}")
