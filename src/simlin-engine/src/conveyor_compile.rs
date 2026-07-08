@@ -651,7 +651,11 @@ pub fn expand_conveyors(
             element_subscripts_for_dims(&project, &stock_dims, &stock.ident, "conveyor")?;
 
         // Partition outflows into the primary (first non-leak) and leaks.
+        // Any non-leak outflow beyond the first is an error (see the rejection
+        // after the loop): the slat model has exactly one primary outflow.
         let mut primary: Option<String> = None;
+        let mut primary_raw: Option<String> = None;
+        let mut extra_outflows_raw: Vec<String> = Vec::new();
         let mut leak_metas = Vec::new();
         for out in &stock.outflows {
             let out_c = canon(out);
@@ -697,10 +701,19 @@ pub fn expand_conveyors(
                 });
             } else if primary.is_none() {
                 primary = Some(out_c);
+                primary_raw = Some(out.clone());
+            } else {
+                // A second (or later) non-leak outflow. The conveyor slat model
+                // has exactly one primary (belt-end) outflow plus leak flows;
+                // an extra plain outflow has no slat-model meaning (§3.3).
+                // Collect it (declaration order is deterministic) and reject
+                // loudly after the loop, listing every extra. Leaving it as an
+                // ordinary equation-driven outflow would drain the expanded
+                // INTEG stock while the belt side table never sheds the
+                // material, diverging the reported stock from the belt total
+                // with no diagnostic.
+                extra_outflows_raw.push(out.clone());
             }
-            // A second non-leak outflow is unusual (the conveyor model is one
-            // primary + leaks); the first non-leak outflow wins as the primary
-            // and any extra is left as an ordinary flow (documented limitation).
         }
         let Some(primary_out) = primary else {
             return Err((
@@ -711,6 +724,30 @@ pub fn expand_conveyors(
                 ),
             ));
         };
+        if !extra_outflows_raw.is_empty() {
+            // `primary_raw` is Some whenever `primary` is (set together above).
+            let primary_name = primary_raw.as_deref().unwrap_or(primary_out.as_str());
+            let extras = extra_outflows_raw
+                .iter()
+                .map(|f| format!("'{f}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let (verb, noun) = if extra_outflows_raw.len() == 1 {
+                ("is", "outflow")
+            } else {
+                ("are", "outflows")
+            };
+            return Err((
+                ErrorCode::ConveyorMultipleNonLeakOutflows,
+                format!(
+                    "conveyor '{}' has more than one non-leak outflow: '{primary_name}' is the \
+                     primary (belt-end) outflow, but {extras} {verb} also a plain {noun}. A \
+                     conveyor has exactly one primary outflow plus leak flows; mark the extra \
+                     {noun} with <leak/> if leakage was intended",
+                    stock.ident
+                ),
+            ));
+        }
         driven_flows.push(primary_out.clone());
 
         // Synthesize the parameter auxes, arrayed over the stock's dimensions
@@ -3858,6 +3895,116 @@ mod tests {
             "plateaus at 600: {}",
             belt[belt.len() - 1]
         );
+    }
+
+    // ----- multiple non-leak outflows (§3.3): the conveyor slat model has
+    // exactly one primary (belt-end) outflow plus leak flows. A second (or
+    // later) NON-leak outflow has no slat-model meaning; leaving it as an
+    // ordinary equation-driven outflow drains the expanded INTEG stock without
+    // removing material from the belt side table, so the reported stock and the
+    // belt total diverge with no diagnostic. Expansion rejects it loudly.
+
+    #[test]
+    fn second_non_leak_outflow_is_rejected() {
+        // `graduating` is the primary (first non-leak, placeholder eqn 0);
+        // `dropping_out` is a second non-leak outflow with a real rate. Before
+        // the fix this simulated silently -- the Stocks phase drained `students`
+        // by `dropping_out` while the belt never lost that material, diverging
+        // permanently. It must be rejected, naming the conveyor and the extra.
+        let xml = wrap_model(
+            r#"
+        <stock name="students"><eqn>0</eqn><inflow>matriculating</inflow><outflow>graduating</outflow><outflow>dropping_out</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="matriculating"><eqn>0</eqn></flow>
+        <flow name="graduating"><eqn>0</eqn></flow>
+        <flow name="dropping_out"><eqn>50</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let err = build_vm(&project, &main)
+            .expect_err("a conveyor with two non-leak outflows must be rejected");
+        assert_eq!(err.code, ErrorCode::ConveyorMultipleNonLeakOutflows);
+        let msg = err.get_details().unwrap_or_default();
+        assert!(
+            msg.contains("students")
+                && msg.contains("graduating")
+                && msg.contains("dropping_out")
+                && msg.contains("<leak/>"),
+            "message should name the conveyor, the primary, the extra outflow, and the <leak/> fix: {msg}"
+        );
+    }
+
+    #[test]
+    fn primary_plus_leak_outflow_still_compiles() {
+        // Negative control: the SUPPORTED shape (one primary + one <leak/>
+        // outflow) must still build and simulate -- the rejection targets only
+        // extra NON-leak outflows. Mirrors `linear_leak_reaches_steady_state`.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>attriting</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <flow name="attriting"><eqn>0.2</eqn><leak/></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("primary + leak must still build");
+        vm.run_to_end().expect("run");
+    }
+
+    #[test]
+    fn primary_leak_and_extra_non_leak_rejects_naming_only_the_extra() {
+        // Three outflows: `out_f` primary, `attriting` a <leak/>, `dropping` a
+        // SECOND non-leak. The leak must NOT be misidentified as the extra: the
+        // message names `dropping` (the real extra) and never `attriting`.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>attriting</outflow><outflow>dropping</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <flow name="attriting"><eqn>0.2</eqn><leak/></flow>
+        <flow name="dropping"><eqn>10</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let err = build_vm(&project, &main)
+            .expect_err("primary + leak + extra non-leak must be rejected");
+        assert_eq!(err.code, ErrorCode::ConveyorMultipleNonLeakOutflows);
+        let msg = err.get_details().unwrap_or_default();
+        assert!(
+            msg.contains("dropping"),
+            "message should name the extra non-leak outflow `dropping`: {msg}"
+        );
+        assert!(
+            !msg.contains("attriting"),
+            "the <leak/> flow must NOT be listed as an extra outflow: {msg}"
+        );
+    }
+
+    #[test]
+    fn two_conveyors_each_with_one_primary_compile() {
+        // Negative control: two independent conveyors, each with a single
+        // primary outflow, must not cross-talk into a false multiple-outflow
+        // rejection. Both belts simulate.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt_a"><eqn>0</eqn><inflow>in_a</inflow><outflow>out_a</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_a"><eqn>250</eqn></flow>
+        <flow name="out_a"><eqn>0</eqn></flow>
+        <stock name="belt_b"><eqn>0</eqn><inflow>in_b</inflow><outflow>out_b</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_b"><eqn>100</eqn></flow>
+        <flow name="out_b"><eqn>0</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("two single-primary conveyors must build");
+        vm.run_to_end().expect("run");
+        assert!(vm.get_series(&Ident::new("belt_a")).is_some());
+        assert!(vm.get_series(&Ident::new("belt_b")).is_some());
     }
 
     // ----- slat-count bound (§4.1): a hostile/typo'd <len> must never

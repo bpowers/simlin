@@ -138,14 +138,19 @@ value ([§7](#7-initialization)); `<inflow>`/`<outflow>` name the flows.
 
 The **primary** (belt-end) outflow is the first `<outflow>` that is *not*
 marked as a leakage; every leak-marked outflow is a leakage regardless of list
-position. This implements both halves of XMILE §4.2.1: the first-is-primary
-*convention* (when nothing is marked, the first outflow is primary and the rest
-are leakages) and its explicit-override provision ("this behavior MAY be
-explicitly overridden by tagging each leakage flow with the `<leak/>`
-property") — so a model whose first listed outflow carries `<leak/>` gets a
-later primary. Compile **errors**: a conveyor with no outflows, or whose
+position. This implements the operative halves of XMILE §4.2.1: first-is-primary
+and its explicit-override provision ("this behavior MAY be explicitly
+overridden by tagging each leakage flow with the `<leak/>` property") — so a
+model whose first listed outflow carries `<leak/>` gets a later primary. The
+§4.2.1 *convention* that unmarked trailing outflows are implicitly leakages is
+deliberately NOT followed: real Stella exports always mark leaks, and silently
+leaking an unmarked flow would mis-simulate a typo, so unmarked extras are
+rejected instead (below). Compile **errors**: a conveyor with no outflows, or whose
 outflows are all leak-marked, cannot simulate (XMILE: at least one outflow MUST
-be the normal outflow).
+be the normal outflow); and, symmetrically, a conveyor with **more than one**
+non-leak outflow is rejected (`ConveyorMultipleNonLeakOutflows`) — the slat
+model exits material through exactly one primary outflow, so an extra plain
+outflow has no defined meaning (mark it `<leak/>` if leakage was intended).
 
 XMILE says a conveyor outflow MUST NOT carry a normal equation — the conveyor
 drives it — but real Stella exports put a **placeholder** `<eqn>0</eqn>` on
@@ -925,6 +930,7 @@ LTM-through-conveyor attribution is a separate enhancement.
 | Diagnostic | Severity | Trigger |
 |---|---|---|
 | `ConveyorWithoutOutflow` | Error | conveyor with no outflows, or all outflows leak-marked ([§3.3](#33-leakage-flows)) |
+| `ConveyorMultipleNonLeakOutflows` | Error | conveyor with more than one non-leak outflow; the slat model has exactly one primary outflow plus `<leak/>` flows ([§3.3](#33-leakage-flows)) |
 | `ConveyorNonEulerMethod` | Error | any conveyor present under RK2/RK4 ([§9.4](#94-integration-method)) |
 | `ConveyorQueueUpstreamNotDiscrete` | Error | queue directly upstream of a non-discrete conveyor ([§11](#11-queues-and-the-conveyor-side-of-queueconveyor-coupling)) |
 | `ConveyorTransitNotPositive` | Error | constant `<len>` ≤ 0 at compile time; non-finite/`≤ 0` initial latch at runtime ([§4.4](#44-runtime-expression-hygiene)) |

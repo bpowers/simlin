@@ -533,6 +533,17 @@ pub enum ErrorCode {
     /// its side table). Fires whether the destination conveyor is discrete or
     /// continuous, and whether the secondary is an overflow or an ordinary outflow.
     QueueSecondaryOutflowToConveyor,
+    /// A conveyor stock has more than one NON-leak outflow. The slat model has
+    /// exactly one primary (belt-end) outflow that the belt drives, plus any
+    /// number of `<leak/>`-marked leakage flows; a second plain outflow has no
+    /// place in the model (docs/design/conveyors.md §3.3). Left unhandled it
+    /// would stay an ordinary equation-driven outflow of the expanded INTEG
+    /// stock: the Stocks phase drains the stock by that rate while the belt side
+    /// table never sheds the material, so the reported stock diverges below the
+    /// belt total permanently. Rejected loudly at conveyor-expansion time,
+    /// naming the conveyor, its primary outflow, and every extra non-leak
+    /// outflow (mark the extras with `<leak/>` if leakage was intended).
+    ConveyorMultipleNonLeakOutflows,
 }
 
 impl fmt::Display for ErrorCode {
@@ -615,6 +626,7 @@ impl fmt::Display for ErrorCode {
             ConveyorInSubmodelUnsupported => "conveyor_in_submodel_unsupported",
             QueueInSubmodelUnsupported => "queue_in_submodel_unsupported",
             QueueSecondaryOutflowToConveyor => "queue_secondary_outflow_to_conveyor",
+            ConveyorMultipleNonLeakOutflows => "conveyor_multiple_non_leak_outflows",
         };
 
         write!(f, "{name}")
