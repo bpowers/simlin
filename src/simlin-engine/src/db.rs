@@ -1063,37 +1063,78 @@ pub fn compile_project_incremental(
     {
         return crate::sim_err!(NotSimulatable, msg.clone());
     }
-    // Conveyor stocks are simulated only through the conveyor build path
-    // (`conveyor_compile::build_vm`), which expands each belt into hidden
-    // parameter auxes + a native pass and CLEARS the conveyor marker. A conveyor
-    // marker surviving to this point means the model reached the ordinary
-    // compile path un-expanded; integrating it as a plain stock would silently
-    // mis-simulate, so reject it loudly (docs/design/conveyors.md §9.3).
+    // A conveyor/queue stock is simulated only through the special build path
+    // (`conveyor_compile`/`queue_compile`), which expands each belt/FIFO into
+    // hidden auxes + driven flows plus a native VM pass and CLEARS the marker
+    // BEFORE this point. A surviving marker means one of two things, told apart
+    // by which model the stock lives in:
+    //
+    //   * MAIN model: the model reached the ordinary compile path un-expanded --
+    //     a genuine internal invariant violation (`build_sim`/`simlin_sim_new`
+    //     should have routed it to the special path). Integrating it as a plain
+    //     stock would silently mis-simulate, so reject it with the internal
+    //     `ConveyorNotExpanded`/`QueueNotExpanded` guard code.
+    //   * NON-MAIN model (a module-referenced sub-model, or a model defined but
+    //     never instantiated): conveyor/queue support is deliberately main-model
+    //     only for now -- the expansion pass never touches a sub-model, so the
+    //     marker legitimately survives (docs/design/conveyors.md §9.3 "Conveyors
+    //     inside submodules ... are later build-sequence steps"). This is a
+    //     user-facing feature limitation, NOT an engine bug, so reject it with
+    //     the clear `ConveyorInSubmodelUnsupported`/`QueueInSubmodelUnsupported`
+    //     diagnostic naming the stock and its model.
+    //
+    // The scan covers every synced model. The salsa-synced stdlib models (SMOOTH
+    // etc.) are in this set but carry no conveyor/queue markers, so they never
+    // trip it; a genuine sub-model special stock is caught on EVERY compile
+    // surface, since the special path expands only the main model and then
+    // funnels its private-db compile through this same entry point.
+    let main_canon = canonicalize(main_model_name);
     for source_model in project.models(db).values() {
+        let in_main = canonicalize(source_model.name(db)) == main_canon;
         for source_var in source_model.variables(db).values() {
             if source_var.compat(db).conveyor.is_some() {
+                if in_main {
+                    return crate::sim_err!(
+                        ConveyorNotExpanded,
+                        format!(
+                            "conveyor stock '{}' reached the ordinary compile path un-expanded; \
+                             conveyor simulation must go through conveyor_compile::build_vm",
+                            source_var.ident(db)
+                        )
+                    );
+                }
                 return crate::sim_err!(
-                    ConveyorNotExpanded,
+                    ConveyorInSubmodelUnsupported,
                     format!(
-                        "conveyor stock '{}' reached the ordinary compile path un-expanded; \
-                         conveyor simulation must go through conveyor_compile::build_vm",
-                        source_var.ident(db)
+                        "conveyor stock '{}' is defined in model '{}', but conveyors are \
+                         currently supported only in the main model, not in a sub-model or \
+                         module; move the conveyor into the main model to simulate it \
+                         (docs/design/conveyors.md §9.3)",
+                        source_var.ident(db),
+                        source_model.name(db)
                     )
                 );
             }
-            // Queue stocks are likewise simulated only through the queue build
-            // path (`queue_compile::build_vm`), which expands each FIFO into an
-            // ordinary INTEG stock + driven outflows and CLEARS the queue marker.
-            // A surviving marker means the model reached the ordinary compile
-            // path un-expanded; integrating it as a plain stock would silently
-            // mis-simulate, so reject it loudly (docs/design/queues.md §10.3).
             if source_var.compat(db).queue.is_some() {
+                if in_main {
+                    return crate::sim_err!(
+                        QueueNotExpanded,
+                        format!(
+                            "queue stock '{}' reached the ordinary compile path un-expanded; \
+                             queue simulation must go through queue_compile::build_vm",
+                            source_var.ident(db)
+                        )
+                    );
+                }
                 return crate::sim_err!(
-                    QueueNotExpanded,
+                    QueueInSubmodelUnsupported,
                     format!(
-                        "queue stock '{}' reached the ordinary compile path un-expanded; \
-                         queue simulation must go through queue_compile::build_vm",
-                        source_var.ident(db)
+                        "queue stock '{}' is defined in model '{}', but queues are currently \
+                         supported only in the main model, not in a sub-model or module; move \
+                         the queue into the main model to simulate it \
+                         (docs/design/queues.md §10.3)",
+                        source_var.ident(db),
+                        source_model.name(db)
                     )
                 );
             }

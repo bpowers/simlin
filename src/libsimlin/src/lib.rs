@@ -297,6 +297,8 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::QueueDrivenFlowRead => SimlinErrorCode::Generic,
             engine::ErrorCode::QueueOverflowNotOnQueue => SimlinErrorCode::Generic,
             engine::ErrorCode::QueueLtmDegraded => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorInSubmodelUnsupported => SimlinErrorCode::Generic,
+            engine::ErrorCode::QueueInSubmodelUnsupported => SimlinErrorCode::Generic,
         }
     }
 }

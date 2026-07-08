@@ -1348,6 +1348,193 @@ mod tests {
         vm.run_to_end().expect("ordinary model runs");
     }
 
+    // ----- F3: conveyor/queue in a non-main model is a clear, user-facing
+    // rejection (support is main-model only for now), NOT the internal
+    // ConveyorNotExpanded/QueueNotExpanded guard error -----
+
+    /// Main model instantiates `sub` as a module; `sub` holds a `<conveyor>`
+    /// stock. The expansion pass rewrites only the main model, so the conveyor
+    /// marker survives to the ordinary compile path -- but this is a deferred
+    /// feature (main-model only), not an engine bug, so it must be rejected with
+    /// `ConveyorInSubmodelUnsupported` naming the stock and its model.
+    const CONVEYOR_IN_SUBMODEL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product>
+    <options><uses_conveyor/></options></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>0.25</dt></sim_specs>
+  <model>
+    <variables>
+      <module name="sub"/>
+    </variables>
+  </model>
+  <model name="sub">
+    <variables>
+      <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+        <conveyor><len>4</len></conveyor></stock>
+      <flow name="in_f"><eqn>10</eqn></flow>
+      <flow name="out_f"><eqn>0</eqn></flow>
+    </variables>
+  </model>
+</xmile>"#;
+
+    /// Same shape as [`CONVEYOR_IN_SUBMODEL`] but `sub` holds a `<queue/>` stock.
+    const QUEUE_IN_SUBMODEL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>0.25</dt></sim_specs>
+  <model>
+    <variables>
+      <module name="sub"/>
+    </variables>
+  </model>
+  <model name="sub">
+    <variables>
+      <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow><outflow>into_service</outflow>
+        <queue/></stock>
+      <flow name="arrivals"><eqn>10</eqn><non_negative/></flow>
+      <flow name="into_service"><eqn>0</eqn></flow>
+      <stock name="served"><eqn>0</eqn><inflow>into_service</inflow></stock>
+    </variables>
+  </model>
+</xmile>"#;
+
+    /// A `<conveyor>` stock in a model that is DEFINED but never instantiated as a
+    /// module (a "dead" model): the main model references nothing. The all-models
+    /// guard scans every synced model, so the dead model is rejected the same way
+    /// -- the deliberate, simplest behavior (a special stock anywhere but the main
+    /// model is unsupported, whether or not it is reachable).
+    const CONVEYOR_IN_DEAD_MODEL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product>
+    <options><uses_conveyor/></options></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>0.25</dt></sim_specs>
+  <model>
+    <variables>
+      <aux name="a"><eqn>1</eqn></aux>
+    </variables>
+  </model>
+  <model name="dead">
+    <variables>
+      <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+        <conveyor><len>4</len></conveyor></stock>
+      <flow name="in_f"><eqn>10</eqn></flow>
+      <flow name="out_f"><eqn>0</eqn></flow>
+    </variables>
+  </model>
+</xmile>"#;
+
+    /// Compile `project` through `build_sim` (the shared engine dispatch every
+    /// caller other than `simlin_sim_new` uses) and return the expected error.
+    fn build_sim_err(project: &datamodel::Project) -> crate::common::Error {
+        let main = project
+            .models
+            .iter()
+            .find(|m| m.name == "main")
+            .expect("a main model")
+            .name
+            .clone();
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, project, None);
+        build_sim(&db, sync.project, project, &main)
+            .expect_err("a special stock outside the main model must be rejected")
+    }
+
+    #[test]
+    fn conveyor_in_submodel_rejected_by_build_compiled() {
+        let project = parse(CONVEYOR_IN_SUBMODEL);
+        let err = build_compiled(&project, "main")
+            .expect_err("a conveyor in a sub-model must be rejected");
+        assert_eq!(err.code, ErrorCode::ConveyorInSubmodelUnsupported);
+        let details = err.details.expect("a diagnostic message");
+        assert!(details.contains("belt"), "names the stock: {details}");
+        assert!(details.contains("sub"), "names the model: {details}");
+    }
+
+    #[test]
+    fn conveyor_in_submodel_rejected_by_build_sim() {
+        let project = parse(CONVEYOR_IN_SUBMODEL);
+        let err = build_sim_err(&project);
+        assert_eq!(err.code, ErrorCode::ConveyorInSubmodelUnsupported);
+    }
+
+    #[test]
+    fn queue_in_submodel_rejected_by_build_compiled() {
+        let project = parse(QUEUE_IN_SUBMODEL);
+        let err =
+            build_compiled(&project, "main").expect_err("a queue in a sub-model must be rejected");
+        assert_eq!(err.code, ErrorCode::QueueInSubmodelUnsupported);
+        let details = err.details.expect("a diagnostic message");
+        assert!(details.contains("waiting"), "names the stock: {details}");
+        assert!(details.contains("sub"), "names the model: {details}");
+    }
+
+    #[test]
+    fn queue_in_submodel_rejected_by_build_sim() {
+        let project = parse(QUEUE_IN_SUBMODEL);
+        let err = build_sim_err(&project);
+        assert_eq!(err.code, ErrorCode::QueueInSubmodelUnsupported);
+    }
+
+    /// The SPECIAL build path (a main-model conveyor routes through
+    /// `build_compiled`/`build_vm`) must ALSO reject a conveyor in a sub-model.
+    /// `expand_conveyors` clears the MAIN belt's marker, so only the sub-model's
+    /// marker survives to the guard -- which reports the clear limitation naming
+    /// the SUB-model's stock, deterministically (the expanded main marker is
+    /// gone, so there is no ambiguity about which stock trips the guard).
+    #[test]
+    fn special_path_rejects_conveyor_in_submodel_alongside_main() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product>
+    <options><uses_conveyor/></options></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>0.25</dt></sim_specs>
+  <model>
+    <variables>
+      <module name="child"/>
+      <stock name="trunk"><eqn>0</eqn><inflow>t_in</inflow><outflow>t_out</outflow>
+        <conveyor><len>4</len></conveyor></stock>
+      <flow name="t_in"><eqn>10</eqn></flow>
+      <flow name="t_out"><eqn>0</eqn></flow>
+    </variables>
+  </model>
+  <model name="child">
+    <variables>
+      <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+        <conveyor><len>4</len></conveyor></stock>
+      <flow name="in_f"><eqn>10</eqn></flow>
+      <flow name="out_f"><eqn>0</eqn></flow>
+    </variables>
+  </model>
+</xmile>"#;
+        let project = parse(xml);
+        // `project_has_conveyor(main)` is true (main has `trunk`), so every
+        // dispatch takes the special path; it must still reject the sub-model belt.
+        assert!(crate::conveyor_compile::project_has_conveyor(
+            &project, "main"
+        ));
+        let err = build_compiled(&project, "main")
+            .expect_err("a sub-model conveyor must reject even via the special path");
+        assert_eq!(err.code, ErrorCode::ConveyorInSubmodelUnsupported);
+        let details = err.details.expect("a diagnostic message");
+        assert!(
+            details.contains("belt"),
+            "names the sub-model stock: {details}"
+        );
+        assert!(details.contains("child"), "names the sub-model: {details}");
+    }
+
+    #[test]
+    fn conveyor_in_dead_model_rejected() {
+        // A special stock in a defined-but-uninstantiated model is still caught:
+        // the guard scans every synced model, so it can never slip through as a
+        // silently-mis-simulated plain stock.
+        let project = parse(CONVEYOR_IN_DEAD_MODEL);
+        let err = build_sim_err(&project);
+        assert_eq!(err.code, ErrorCode::ConveyorInSubmodelUnsupported);
+        let details = err.details.expect("a diagnostic message");
+        assert!(details.contains("dead"), "names the dead model: {details}");
+    }
+
     #[test]
     fn project_has_queue_detects_marker() {
         let project = parse(QUEUE_DRAIN);

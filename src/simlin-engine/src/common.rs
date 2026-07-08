@@ -496,6 +496,21 @@ pub enum ErrorCode {
     /// Warning naming the queue, mirroring `ConveyorLtmDegraded`
     /// (docs/design/queues.md §10.5).
     QueueLtmDegraded,
+    /// A conveyor stock is defined in a model that is NOT the main model -- a
+    /// module-referenced sub-model, or a model defined but never instantiated.
+    /// Conveyor expansion (`conveyor_compile::expand_conveyors`) rewrites only the
+    /// main model, so a conveyor anywhere else can never be expanded and would
+    /// otherwise trip the internal [`ConveyorNotExpanded`] guard with an
+    /// engine-internal message. Support for conveyors inside sub-models is a
+    /// deferred build-sequence step (docs/design/conveyors.md §9.3 "Conveyors
+    /// inside submodules ... are later build-sequence steps"), so this is a
+    /// user-facing feature limitation, rejected up front with the offending
+    /// stock's name and model rather than the internal invariant error.
+    ConveyorInSubmodelUnsupported,
+    /// A queue stock is defined in a model that is NOT the main model. Queue
+    /// simulation is currently supported only in the main model (mirrors
+    /// [`ConveyorInSubmodelUnsupported`], docs/design/queues.md §10.3).
+    QueueInSubmodelUnsupported,
 }
 
 impl fmt::Display for ErrorCode {
@@ -574,6 +589,8 @@ impl fmt::Display for ErrorCode {
             QueueDrivenFlowRead => "queue_driven_flow_read",
             QueueOverflowNotOnQueue => "queue_overflow_not_on_queue",
             QueueLtmDegraded => "queue_ltm_degraded",
+            ConveyorInSubmodelUnsupported => "conveyor_in_submodel_unsupported",
+            QueueInSubmodelUnsupported => "queue_in_submodel_unsupported",
         };
 
         write!(f, "{name}")

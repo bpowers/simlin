@@ -559,6 +559,102 @@ fn test_get_errors_conveyor_model_has_no_not_expanded() {
     }
 }
 
+/// A two-model XMILE whose main model instantiates `sub` as a module and whose
+/// `sub` model holds a `<conveyor>` stock. Conveyor/queue support is main-model
+/// only for now (docs/design/conveyors.md §9.3), so this must be rejected with a
+/// clear, user-facing limitation naming the stock and its model -- NOT the
+/// engine-internal "reached the ordinary compile path un-expanded" guard text.
+const CONVEYOR_IN_SUBMODEL_XMILE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product>
+    <options><uses_conveyor/></options></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>0.25</dt></sim_specs>
+  <model>
+    <variables>
+      <module name="sub"/>
+    </variables>
+  </model>
+  <model name="sub">
+    <variables>
+      <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+        <conveyor><len>4</len></conveyor></stock>
+      <flow name="in_f"><eqn>10</eqn></flow>
+      <flow name="out_f"><eqn>0</eqn></flow>
+    </variables>
+  </model>
+</xmile>"#;
+
+/// F3: a conveyor stock in a NON-main (module-referenced) model is permanently
+/// un-simulatable (support is main-model only), and every FFI surface must
+/// surface a CLEAR, user-facing limitation rather than the engine-internal
+/// `ConveyorNotExpanded` guard text. Before the fix the all-models guard tripped
+/// with "reached the ordinary compile path un-expanded", which reads like an
+/// engine bug. This pins both `simlin_project_get_errors` (a sensible message
+/// naming the stock + model) and `simlin_sim_new` + run (surfaces the same error,
+/// never a panic or a silent success).
+#[test]
+fn test_submodel_conveyor_surfaces_clear_error() {
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(
+        CONVEYOR_IN_SUBMODEL_XMILE.as_bytes(),
+    ))
+    .expect("parse conveyor-in-submodel xmile");
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // get_errors: a real error, with a message naming the stock and its
+        // model, and NOT the internal un-expanded guard text.
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "out_error must be null");
+        assert!(
+            !all_errors.is_null(),
+            "a submodel conveyor must report an error"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "belt"),
+            "the error must name the offending stock"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "main model"),
+            "the error must state the main-model-only limitation"
+        );
+        assert!(
+            !any_detail_message_contains(all_errors, "un-expanded"),
+            "the error must NOT be the engine-internal un-expanded guard text"
+        );
+        simlin_error_free(all_errors);
+
+        // simlin_sim_new + run: the sim is created (a latent vm_error), and
+        // running it surfaces the clear error -- never a panic or silent success.
+        let mut merr: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut merr as *mut *mut SimlinError);
+        assert!(merr.is_null(), "get_model must succeed");
+        let mut serr: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut serr as *mut *mut SimlinError);
+        assert!(!sim.is_null(), "sim handle is created");
+
+        let mut rerr: *mut SimlinError = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut rerr as *mut *mut SimlinError);
+        assert!(
+            !rerr.is_null(),
+            "running a submodel-conveyor sim must surface an error"
+        );
+        let msg = CStr::from_ptr(simlin_error_get_message(rerr))
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            !msg.contains("un-expanded"),
+            "run error must be the clear limitation, not the internal guard: {msg}"
+        );
+        simlin_error_free(rerr);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// After creating an LTM-enabled simulation on a model that auto-flips to
 /// discovery mode, `simlin_project_get_errors` must surface the auto-flip
 /// Warning. Before GH #466 the warning was unreachable: `simlin_sim_new`
