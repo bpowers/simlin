@@ -851,6 +851,15 @@ impl Vm {
                         &self.conveyors,
                         curr,
                     );
+                    // Publish queue container-access values (§8) likewise at
+                    // step-start: the batch state as left by the previous step's
+                    // admit/serve, surviving the flows/stocks phases in a no-flow
+                    // stock so `SUM(queue)` etc. read start-of-step batches.
+                    crate::queue_compile::publish_queue_container_values(
+                        &self.queue_plans,
+                        &self.queues,
+                        curr,
+                    );
                     // Flows compute the pass inputs (belt transit/capacity/leak
                     // fractions and requested inflow rates; queue inflow rates),
                     // the passes advance the side tables and write the driven flow
@@ -1421,6 +1430,14 @@ impl Vm {
             let (curr, _next) =
                 borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
             self.queues = crate::queue_compile::init_queues(&self.queue_plans, curr);
+            // Publish container-access values (§8) for the initialized queues, so
+            // the t=0 slot holds the start-of-step value even before the first
+            // Euler step re-publishes it (mirrors the conveyor init publish).
+            crate::queue_compile::publish_queue_container_values(
+                &self.queue_plans,
+                &self.queues,
+                curr,
+            );
         }
 
         self.did_initials = true;

@@ -47,7 +47,11 @@
 
 use std::collections::HashMap;
 
-use crate::common::{Canonical, ErrorCode, Ident, canonicalize};
+use crate::common::{Canonical, DimensionName, ErrorCode, Ident, canonicalize};
+use crate::conveyor_compile::{
+    ContainerMeta, ContainerNaming, ContainerPlan, ContainerVarSpec, container_value_from_slice,
+    element_subscripts_for_dims, make_container_stock, rewrite_container_equation,
+};
 use crate::datamodel::{self, Equation};
 
 fn canon(name: &str) -> String {
@@ -84,10 +88,25 @@ pub struct QueueMeta {
     /// Canonical name of the queue stock.
     pub stock: String,
     /// Canonical names of the queue's inflows (summed into the admit rate, §4.2
-    /// step 1). Empty for a queue with no inflow (it only drains).
+    /// step 1). Empty for a queue with no inflow (it only drains, or -- with no
+    /// outflow either -- accumulates as a pure batch container).
     pub inflows: Vec<String>,
     /// The driven outflows in `<outflow>` declaration = priority order (§5.1).
     pub outflows: Vec<QueueOutflowMeta>,
+    /// Container-access variables reading this queue's batches (§8). Each is a
+    /// synthesized hidden stock whose slot the pass publishes at step-start. For
+    /// an arrayed queue the container variable is arrayed over the same dims, so
+    /// element `e` of the container aligns with queue element `e`. Reuses the
+    /// conveyor's [`ContainerMeta`] verbatim (only the source vector differs).
+    pub containers: Vec<ContainerMeta>,
+    /// Per-element subscript suffixes for an arrayed queue (§6), in the same
+    /// row-major order the compiled offset map lays out an arrayed variable's
+    /// elements (via the shared `element_subscripts_for_dims`/`SubscriptIterator`
+    /// helper). Each entry is the canonical `elem1,elem2` suffix so
+    /// [`resolve_plans`] can form the subscripted offset keys `name[elem]`. An
+    /// arrayed queue is N independent FIFOs, one per element; empty for a scalar
+    /// queue (the degenerate 1-element case).
+    pub element_subscripts: Vec<String>,
 }
 
 /// A resolved queue outflow: its data-buffer slot offset plus its target kind.
@@ -108,6 +127,10 @@ pub struct QueuePlan {
     pub inflow_offs: Vec<usize>,
     /// The driven outflows in priority order; the pass writes each served rate.
     pub outflows: Vec<QueueOutflowPlan>,
+    /// Container-access variables reading this queue's batches (§8): each carries a
+    /// resolved slot offset and access kind. The pass publishes each from this
+    /// queue's start-of-step batch state. Reuses the conveyor's [`ContainerPlan`].
+    pub containers: Vec<ContainerPlan>,
 }
 
 /// Does the named model in `project` contain any queue stock? A cheap predicate a
@@ -175,11 +198,24 @@ fn equation_scalar_strings(v: &datamodel::Variable) -> Vec<String> {
 /// one [`QueueMeta`] per queue. A project with no queues is returned unchanged
 /// with an empty meta list (the caller can then skip all queue machinery).
 ///
+/// An ARRAYED queue is N independent FIFOs, one per array element (§6): the
+/// driven-outflow placeholder keeps the flow's array shape (so each element gets
+/// its own writable slot) and [`resolve_plans`] flattens the one [`QueueMeta`]
+/// into one scalar [`QueuePlan`] per element -- exactly mirroring
+/// [`crate::conveyor_compile`]'s arrayed-conveyor flattening, reusing the same
+/// `element_subscripts_for_dims`/`SubscriptIterator` helper. The scalar
+/// admit-then-serve pass is the degenerate 1-element case.
+///
+/// Container access (`queue[k]`, `SUM/MEAN/MIN/MAX/STDDEV(queue)`, `SIZE(queue)`,
+/// §8) reuses the conveyor container-access rewrite verbatim (only the source
+/// vector differs): each supported subexpression is replaced by a reference to a
+/// synthesized hidden STOCK whose slot the queue pass publishes at step-start.
+///
 /// Errors (this phase's scope guards):
-/// - an arrayed queue is not yet supported (§6 is a later step), so it is
-///   rejected loudly rather than silently mis-simulated by the scalar pass.
 /// - an equation that READS a queue driven outflow by name is rejected with
 ///   [`ErrorCode::QueueDrivenFlowRead`] (see the scan below and §2).
+/// - a genuinely-unlowerable container-access residual is loud-rejected with the
+///   shared `ConveyorContainerAccessUnsupported` (§8).
 pub fn expand_queues(
     project: &datamodel::Project,
     main_model: &str,
@@ -205,6 +241,12 @@ pub fn expand_queues(
         .expect("main model present (checked above)");
 
     // Pass 1 (immutable): collect metadata and the set of driven outflow names.
+    // Canonical queue-stock name -> its array-dimension count (0 = scalar), used
+    // by the container-access rewrite to tell an ordinary array-element read of an
+    // arrayed queue apart from a batch read (§8). And -> its declared dimensions,
+    // so a synthesized container variable can be arrayed over the same dims.
+    let mut queue_dims: HashMap<String, usize> = HashMap::new();
+    let mut queue_stock_dims: HashMap<String, Vec<DimensionName>> = HashMap::new();
     let mut metas: Vec<QueueMeta> = Vec::new();
     let model = &project.models[model_idx];
     for v in &model.variables {
@@ -214,20 +256,14 @@ pub fn expand_queues(
         if stock.compat.queue.is_none() {
             continue;
         }
-        // Arrayed queues are a later build-sequence step (§6). Reject loudly:
-        // the scalar admit-then-serve pass would mis-handle per-element belts,
-        // and `resolve_plans`' bare-name offset lookup would not find the
-        // `name[elem]` slots anyway.
-        if !equation_dims(&stock.equation).is_empty() {
-            return Err((
-                ErrorCode::QueueNotExpanded,
-                format!(
-                    "queue '{}' is arrayed; arrayed queues are not yet supported \
-                     (docs/design/queues.md §6)",
-                    stock.ident
-                ),
-            ));
-        }
+        // An arrayed queue is N independent FIFOs (§6). The stock's dimensions
+        // drive the per-element offset enumeration; empty for a scalar queue.
+        let stock_name = canon(&stock.ident);
+        let stock_dims = equation_dims(&stock.equation);
+        queue_dims.insert(stock_name.clone(), stock_dims.len());
+        queue_stock_dims.insert(stock_name.clone(), stock_dims.clone());
+        let element_subscripts =
+            element_subscripts_for_dims(&project, &stock_dims, &stock.ident, "queue")?;
         let outflows = stock
             .outflows
             .iter()
@@ -239,9 +275,11 @@ pub fn expand_queues(
             })
             .collect();
         metas.push(QueueMeta {
-            stock: canon(&stock.ident),
+            stock: stock_name,
             inflows: stock.inflows.iter().map(|f| canon(f)).collect(),
             outflows,
+            containers: Vec::new(), // filled by the container-access rewrite below
+            element_subscripts,
         });
     }
 
@@ -292,14 +330,78 @@ pub fn expand_queues(
         }
     }
 
-    // Pass 2 (mutable): give every driven outflow a `0` placeholder equation so
-    // it compiles to a writable slot, and clear the queue/overflow markers so the
-    // expanded model compiles as a plain stock-and-flow model. Clearing the
-    // markers is what lets the ordinary compile path REJECT an un-expanded queue
-    // (the marker is still set) while accepting this expanded one -- exactly the
-    // `QueueNotExpanded` guard contract (§10.3).
+    // Rewrite each equation that uses a queue as a CONTAINER -- indexing into its
+    // batches (`queue[k]`, constant `k`) or reducing over its batch volumes
+    // (`SUM`/`SIZE`/`MEAN`/`MIN`/`MAX`/`STDDEV` of a single queue). This reuses
+    // the conveyor container-access machinery verbatim (§8): the batch vector
+    // lives in the VM's queue side table with a runtime-dynamic length, not in the
+    // fixed-dimension data buffer, so each supported access is replaced by a
+    // reference to a synthesized hidden no-flow STOCK whose slot the queue pass
+    // publishes at step-start. A driven outflow's equation becomes a `0`
+    // placeholder in Pass 2, so rewriting it would be discarded -- skip it.
+    // Unlike conveyors, queues synthesize no parameter auxes, so there is nothing
+    // extra to rewrite after this loop.
+    let mut container_specs: std::collections::BTreeMap<String, ContainerVarSpec> =
+        std::collections::BTreeMap::new();
+    let mut rewritten_equations: HashMap<String, Equation> = HashMap::new();
+    {
+        let model = &project.models[model_idx];
+        for v in &model.variables {
+            if driven.contains(&canon(v.get_ident())) {
+                continue;
+            }
+            let eqn = match v {
+                datamodel::Variable::Stock(s) => &s.equation,
+                datamodel::Variable::Flow(f) => &f.equation,
+                datamodel::Variable::Aux(a) => &a.equation,
+                datamodel::Variable::Module(_) => continue,
+            };
+            if let Some(new_eqn) = rewrite_container_equation(
+                eqn,
+                &queue_dims,
+                &ContainerNaming::QUEUE,
+                &mut container_specs,
+            )? {
+                rewritten_equations.insert(canon(v.get_ident()), new_eqn);
+            }
+        }
+    }
+
+    // Attach each container variable to its queue's meta and synthesize the hidden
+    // container stock (arrayed over the queue's dims when arrayed).
+    let mut container_stocks: Vec<datamodel::Stock> = Vec::new();
+    for (name, spec) in &container_specs {
+        let dims = queue_stock_dims
+            .get(&spec.owner_stock)
+            .cloned()
+            .unwrap_or_default();
+        container_stocks.push(make_container_stock(name, &dims));
+        if let Some(meta) = metas.iter_mut().find(|m| m.stock == spec.owner_stock) {
+            meta.containers.push(ContainerMeta {
+                name: name.clone(),
+                kind: spec.kind.clone(),
+            });
+        }
+    }
+
+    // Pass 2 (mutable): apply the container-rewritten equations, give every driven
+    // outflow a `0` placeholder equation so it compiles to a writable slot
+    // (preserving its array shape so an arrayed queue keeps its per-element
+    // slots), clear the queue/overflow markers so the expanded model compiles as a
+    // plain stock-and-flow model, and append the synthesized container stocks.
+    // Clearing the markers is what lets the ordinary compile path REJECT an
+    // un-expanded queue (the marker is still set) while accepting this expanded one
+    // -- exactly the `QueueNotExpanded` guard contract (§10.3).
     let model = &mut project.models[model_idx];
     for v in &mut model.variables {
+        if let Some(new_eqn) = rewritten_equations.remove(&canon(v.get_ident())) {
+            match v {
+                datamodel::Variable::Stock(s) => s.equation = new_eqn,
+                datamodel::Variable::Flow(f) => f.equation = new_eqn,
+                datamodel::Variable::Aux(a) => a.equation = new_eqn,
+                datamodel::Variable::Module(_) => {}
+            }
+        }
         match v {
             datamodel::Variable::Flow(f) if driven.contains(&canon(&f.ident)) => {
                 // The queue stock now drives this outflow via the pass; give it a
@@ -317,15 +419,32 @@ pub fn expand_queues(
             _ => {}
         }
     }
+    // Append the synthesized container stocks (no-flow INTEGs the pass drives).
+    for stock in container_stocks {
+        model.variables.push(datamodel::Variable::Stock(stock));
+    }
 
     Ok((project, metas))
 }
 
+/// The number of independent FIFOs a queue meta expands to: `N_elem` for an
+/// arrayed queue (§6), 1 for a scalar one (the degenerate case, whose
+/// `element_subscripts` is empty). Mirrors `conveyor_compile::n_belts`.
+fn n_queues(meta: &QueueMeta) -> usize {
+    meta.element_subscripts.len().max(1)
+}
+
 /// Resolve [`QueueMeta`] names to data-buffer offsets using the compiled
-/// simulation's offset map (docs/design/queues.md §10.3). Returns `None` if any
-/// required name is missing -- an internal inconsistency between expansion and
-/// compilation that [`build_compiled`] surfaces as a hard `NotSimulatable` error
-/// (there is no non-queue fallback: the model has queues). Mirrors
+/// simulation's offset map (docs/design/queues.md §10.3), flattening each arrayed
+/// queue into ONE [`QueuePlan`] per array element (§6). An arrayed variable's
+/// elements occupy contiguous slots keyed `name[elem1,elem2]` in the offset map
+/// (`calc_flattened_offsets_incremental`), so element `e` resolves via the
+/// subscripted key built from `meta.element_subscripts[e]`; a scalar queue
+/// resolves its bare name and yields a single plan (so the per-queue runtime pass
+/// is identical to before). Returns `None` if any required name is missing -- an
+/// internal inconsistency between expansion and compilation that
+/// [`build_compiled`] surfaces as a hard `NotSimulatable` error (there is no
+/// non-queue fallback: the model has queues). Mirrors
 /// [`crate::conveyor_compile::resolve_plans`].
 pub fn resolve_plans(
     metas: &[QueueMeta],
@@ -333,28 +452,54 @@ pub fn resolve_plans(
 ) -> Option<Vec<QueuePlan>> {
     let off =
         |name: &str| -> Option<usize> { offsets.get(&Ident::<Canonical>::new(name)).copied() };
-    let mut plans = Vec::with_capacity(metas.len());
+    let total: usize = metas.iter().map(n_queues).sum();
+    let mut plans = Vec::with_capacity(total);
     for meta in metas {
-        let inflow_offs = meta
-            .inflows
-            .iter()
-            .map(|f| off(f))
-            .collect::<Option<Vec<_>>>()?;
-        let outflows = meta
-            .outflows
-            .iter()
-            .map(|o| {
-                Some(QueueOutflowPlan {
-                    flow_off: off(&o.flow)?,
-                    kind: o.kind.clone(),
+        for e in 0..n_queues(meta) {
+            // Element-aware offset resolver: the bare name for a scalar queue, the
+            // `name[elem]` subscripted key for element `e` of an arrayed one.
+            let eoff = |name: &str| -> Option<usize> {
+                if meta.element_subscripts.is_empty() {
+                    off(name)
+                } else {
+                    off(&format!("{}[{}]", name, meta.element_subscripts[e]))
+                }
+            };
+            let inflow_offs = meta
+                .inflows
+                .iter()
+                .map(|f| eoff(f))
+                .collect::<Option<Vec<_>>>()?;
+            let outflows = meta
+                .outflows
+                .iter()
+                .map(|o| {
+                    Some(QueueOutflowPlan {
+                        flow_off: eoff(&o.flow)?,
+                        kind: o.kind.clone(),
+                    })
                 })
-            })
-            .collect::<Option<Vec<_>>>()?;
-        plans.push(QueuePlan {
-            stock_off: off(&meta.stock)?,
-            inflow_offs,
-            outflows,
-        });
+                .collect::<Option<Vec<_>>>()?;
+            // Container variables read this FIFO (§8). The container stock is
+            // arrayed over the queue's dims, so element `e` of the container
+            // resolves to FIFO `e` via the same element-aware offset lookup.
+            let containers = meta
+                .containers
+                .iter()
+                .map(|c| {
+                    Some(ContainerPlan {
+                        off: eoff(&c.name)?,
+                        kind: c.kind.clone(),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            plans.push(QueuePlan {
+                stock_off: eoff(&meta.stock)?,
+                inflow_offs,
+                outflows,
+                containers,
+            });
+        }
     }
     Some(plans)
 }
@@ -410,6 +555,40 @@ pub fn run_queue_pass(
                 QueueOutflowKind::Unconstrained => state.serve_unconstrained(),
             };
             curr[outflow.flow_off] = removed / dt;
+        }
+    }
+}
+
+/// Publish each queue's container-access results into their data-buffer slots
+/// (§8). Called at STEP-START -- before the Flows phase in the Euler loop and
+/// after queue initialization in `run_initials` -- so the published values
+/// reflect the batch state as left by the previous step's admit/serve (=
+/// start-of-step for THIS step). Each container variable is a hidden no-flow
+/// STOCK, so the Flows phase never recomputes its slot and the Stocks phase
+/// leaves it unchanged: the value is visible to Flows-phase readers (an aux
+/// reading `SUM(queue)` sees the batches BEFORE this step's admit/serve) and
+/// survives the whole step -- identical timing and mechanism to conveyor
+/// container access.
+///
+/// The container value is computed by the SHARED
+/// [`container_value_from_slice`](crate::conveyor_compile::container_value_from_slice)
+/// over the queue's front-to-back batch vector: `queue[k]` (1-based) maps to
+/// `batch_contents()[k-1]`, the reducers to the batch-volume vector, and
+/// `SIZE` to the batch count. `total == Σ batch_contents` and
+/// `batch_count == batch_contents.len()` hold exactly, so the published values
+/// agree with the queue's own accessors.
+pub fn publish_queue_container_values(
+    plans: &[QueuePlan],
+    states: &[crate::queue::QueueState],
+    curr: &mut [f64],
+) {
+    for (plan, state) in plans.iter().zip(states.iter()) {
+        if plan.containers.is_empty() {
+            continue;
+        }
+        let batches = state.batch_contents();
+        for c in &plan.containers {
+            curr[c.off] = container_value_from_slice(&batches, &c.kind);
         }
     }
 }
@@ -848,5 +1027,281 @@ mod tests {
             (second - first).abs() < 1e-12,
             "reset must reproduce the run: {first} vs {second}"
         );
+    }
+
+    // ----- Part A: arrayed queues (§6) -----
+
+    /// A 2-element arrayed queue draining to a stock, with element-specific
+    /// inflows. Each element is an INDEPENDENT FIFO: `board=a` admits 10/time and
+    /// `board=b` admits 25/time, both drain unconstrained (pass-through), so
+    /// `into_service[a] == 10`, `into_service[b] == 25`, each `waiting[elem]` stays
+    /// ~0, and `served[elem]` accumulates its own throughput independently. This
+    /// mirrors `conveyor_compile`'s `arrayed_*` tests: `resolve_plans` flattens the
+    /// one arrayed `QueueMeta` into one scalar plan per element.
+    const ARRAYED_QUEUE_DRAIN: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>arrayed queue</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>0.25</dt></sim_specs>
+  <dimensions><dim name="board"><elem name="a"/><elem name="b"/></dim></dimensions>
+  <model><variables>
+    <stock name="waiting">
+      <eqn>0</eqn>
+      <inflow>arrivals</inflow>
+      <outflow>into_service</outflow>
+      <dimensions><dim name="board"/></dimensions>
+      <queue/>
+    </stock>
+    <flow name="arrivals">
+      <element subscript="a"><eqn>10</eqn></element>
+      <element subscript="b"><eqn>25</eqn></element>
+      <dimensions><dim name="board"/></dimensions>
+      <non_negative/>
+    </flow>
+    <flow name="into_service"><dimensions><dim name="board"/></dimensions></flow>
+    <stock name="served"><eqn>0</eqn><inflow>into_service</inflow>
+      <dimensions><dim name="board"/></dimensions></stock>
+  </variables></model>
+</xmile>"#;
+
+    #[test]
+    fn arrayed_queue_drains_each_element_independently() {
+        let project = parse(ARRAYED_QUEUE_DRAIN);
+        let vm = build_run(&project);
+
+        let waiting_a = vm.get_series(&Ident::new("waiting[a]")).unwrap();
+        let waiting_b = vm.get_series(&Ident::new("waiting[b]")).unwrap();
+        let into_a = vm.get_series(&Ident::new("into_service[a]")).unwrap();
+        let into_b = vm.get_series(&Ident::new("into_service[b]")).unwrap();
+
+        // Each FIFO empties every step (pass-through) with its own inflow rate.
+        for (i, (&wa, &wb)) in waiting_a.iter().zip(waiting_b.iter()).enumerate() {
+            assert!(wa.abs() < 1e-9, "waiting[a] step {i} = {wa}");
+            assert!(wb.abs() < 1e-9, "waiting[b] step {i} = {wb}");
+        }
+        for (i, (&oa, &ob)) in into_a.iter().zip(into_b.iter()).enumerate() {
+            assert!((oa - 10.0).abs() < 1e-9, "into_service[a] step {i} = {oa}");
+            assert!((ob - 25.0).abs() < 1e-9, "into_service[b] step {i} = {ob}");
+        }
+        // Independent accumulation: element a's throughput 10/time, b's 25/time,
+        // over 4 time units -> 40 and 100.
+        let served_a = vm.get_series(&Ident::new("served[a]")).unwrap();
+        let served_b = vm.get_series(&Ident::new("served[b]")).unwrap();
+        assert!(
+            (*served_a.last().unwrap() - 40.0).abs() < 1e-6,
+            "served[a] final = {}",
+            served_a.last().unwrap()
+        );
+        assert!(
+            (*served_b.last().unwrap() - 100.0).abs() < 1e-6,
+            "served[b] final = {}",
+            served_b.last().unwrap()
+        );
+    }
+
+    // ----- Part B: container access (§8) -----
+
+    /// A pure-accumulator scalar queue (inflow, NO outflow) whose batches persist,
+    /// so container access has a multi-batch queue to read. With dt=1 and
+    /// `arrivals = 10*(TIME+1)`, step `t` admits a batch of `10*(t+1)`, so at the
+    /// START of step `t` (what container access publishes) the batch vector,
+    /// front-to-back (oldest-first), is `[10, 20, ..., 10*t]`. `reader` reads
+    /// `reader_eqn` over the queue; the returned series is start-of-step per §8.
+    fn accumulator_reader(reader_eqn: &str) -> Vec<f64> {
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q container</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow><queue/></stock>
+    <flow name="arrivals"><eqn>10 * (TIME + 1)</eqn><non_negative/></flow>
+    <aux name="reader"><eqn>{reader_eqn}</eqn></aux>
+  </variables></model>
+</xmile>"#
+        );
+        let project = parse(&xml);
+        let vm = build_run(&project);
+        vm.get_series(&Ident::new("reader")).expect("reader series")
+    }
+
+    #[test]
+    fn scalar_queue_container_size_sum_and_reducers() {
+        // Start-of-step batch vectors: t=0 [], t=1 [10], t=2 [10,20],
+        // t=3 [10,20,30], t=4 [10,20,30,40].
+        assert_eq!(
+            accumulator_reader("SIZE(waiting)"),
+            vec![0.0, 1.0, 2.0, 3.0, 4.0]
+        );
+        // SUM is the batch total (0 on an empty queue, matching the VM reducer).
+        assert_eq!(
+            accumulator_reader("SUM(waiting)"),
+            vec![0.0, 10.0, 30.0, 60.0, 100.0]
+        );
+        let mean = accumulator_reader("MEAN(waiting)");
+        assert!(mean[0].is_nan(), "MEAN of an empty queue is NaN");
+        assert_eq!(&mean[1..], &[10.0, 15.0, 20.0, 25.0]);
+        let min = accumulator_reader("MIN(waiting)");
+        assert!(min[0].is_nan());
+        assert_eq!(&min[1..], &[10.0, 10.0, 10.0, 10.0]); // front (oldest) is smallest
+        let max = accumulator_reader("MAX(waiting)");
+        assert!(max[0].is_nan());
+        assert_eq!(&max[1..], &[10.0, 20.0, 30.0, 40.0]); // back (newest) is largest
+        // Population STDDEV of [10,20,30,40]: mean 25, var 125, std sqrt(125).
+        let stddev = accumulator_reader("STDDEV(waiting)");
+        assert!(stddev[0].is_nan());
+        assert!(
+            (stddev[4] - 125.0_f64.sqrt()).abs() < 1e-9,
+            "STDDEV[4] = {}",
+            stddev[4]
+        );
+    }
+
+    #[test]
+    fn scalar_queue_batch_index_and_out_of_range_is_nan() {
+        // `queue[k]` is 1-based from the FRONT (oldest). k outside [1, count] -> NaN.
+        let front = accumulator_reader("waiting[1]");
+        assert!(front[0].is_nan(), "waiting[1] on empty queue -> NaN");
+        assert_eq!(&front[1..], &[10.0, 10.0, 10.0, 10.0]); // oldest batch
+        // waiting[count] is the newest batch: at t=4 (count 4) it is 40.
+        let second = accumulator_reader("waiting[2]");
+        assert!(second[0].is_nan() && second[1].is_nan(), "count<2 -> NaN");
+        assert_eq!(&second[2..], &[20.0, 20.0, 20.0]); // 2nd-from-front
+        // queue[0] is always out of range (1-based); queue[5] is out of range when
+        // the queue holds fewer than 5 batches.
+        for &v in accumulator_reader("waiting[0]").iter() {
+            assert!(v.is_nan(), "waiting[0] -> NaN");
+        }
+        for &v in accumulator_reader("waiting[5]").iter() {
+            assert!(v.is_nan(), "waiting[5] -> NaN (never 5 batches)");
+        }
+    }
+
+    #[test]
+    fn scalar_queue_container_is_start_of_step() {
+        // §8 start-of-step visibility: `SUM(waiting)` at step t sees the batches
+        // admitted in PRIOR steps only, NOT this step's admit. At t=1 that is a
+        // single batch of 10 (the step-0 admit), NOT 30 (which would include the
+        // step-1 admit of 20). This is the load-bearing timing assertion.
+        let sum = accumulator_reader("SUM(waiting)");
+        assert_eq!(
+            sum[1], 10.0,
+            "start-of-step: only the step-0 admit is visible"
+        );
+        // A container access nested in a larger expression is rewritten in place,
+        // so surrounding math is preserved: SUM(waiting)+1.
+        let plus = accumulator_reader("SUM(waiting) + 1");
+        assert_eq!(plus, vec![1.0, 11.0, 31.0, 61.0, 101.0]);
+    }
+
+    /// A 2-element pure-accumulator arrayed queue (per-element inflows a=10, b=25,
+    /// dt=1) with scalar readers over each element's batches (§8). At the last
+    /// saved step (t=4) each element holds 4 batches: a = [10,10,10,10],
+    /// b = [25,25,25,25].
+    const ARRAYED_QUEUE_CONTAINER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>arrayed q container</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <dimensions><dim name="board"><elem name="a"/><elem name="b"/></dim></dimensions>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow>
+      <dimensions><dim name="board"/></dimensions><queue/></stock>
+    <flow name="arrivals">
+      <element subscript="a"><eqn>10</eqn></element>
+      <element subscript="b"><eqn>25</eqn></element>
+      <dimensions><dim name="board"/></dimensions><non_negative/></flow>
+    <aux name="sum_a"><eqn>SUM(waiting[a])</eqn></aux>
+    <aux name="sum_b"><eqn>SUM(waiting[b])</eqn></aux>
+    <aux name="size_a"><eqn>SIZE(waiting[a])</eqn></aux>
+    <aux name="front_a"><eqn>waiting[a, 1]</eqn></aux>
+    <aux name="second_b"><eqn>waiting[b, 2]</eqn></aux>
+  </variables></model>
+</xmile>"#;
+
+    #[test]
+    fn arrayed_queue_container_access_reads_per_element() {
+        let project = parse(ARRAYED_QUEUE_CONTAINER);
+        let vm = build_run(&project);
+        let last = |name: &str| *vm.get_series(&Ident::new(name)).unwrap().last().unwrap();
+        // Independent per-element batch totals (start-of-step at t=4: 4 batches).
+        assert!((last("sum_a") - 40.0).abs() < 1e-9, "SUM(waiting[a])");
+        assert!((last("sum_b") - 100.0).abs() < 1e-9, "SUM(waiting[b])");
+        assert!((last("size_a") - 4.0).abs() < 1e-9, "SIZE(waiting[a])");
+        // waiting[a,1] is element a's front batch (10); waiting[b,2] is element b's
+        // 2nd-from-front batch (25) -- indexing one element's FIFO.
+        assert!((last("front_a") - 10.0).abs() < 1e-9, "waiting[a,1]");
+        assert!((last("second_b") - 25.0).abs() < 1e-9, "waiting[b,2]");
+    }
+
+    #[test]
+    fn residual_queue_container_access_is_rejected() {
+        // Genuinely-unlowerable container forms loud-reject with the shared
+        // `ConveyorContainerAccessUnsupported` (§8): a reducer over an EXPRESSION
+        // of the batches, a dynamic (non-constant) index, and a range/wildcard
+        // over batches all need the per-batch vector, which cannot lower to one
+        // native scalar.
+        for reader in [
+            "SUM(waiting / 2)",
+            "MEAN(waiting + 0)",
+            "waiting[k]",
+            "waiting[1:2]",
+            "waiting[*]",
+        ] {
+            let xml = format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>2</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow><queue/></stock>
+    <flow name="arrivals"><eqn>10</eqn><non_negative/></flow>
+    <aux name="reader"><eqn>{reader}</eqn></aux>
+  </variables></model>
+</xmile>"#
+            );
+            let project = parse(&xml);
+            let main = project.models[0].name.clone();
+            let err = build_vm(&project, &main)
+                .err()
+                .unwrap_or_else(|| panic!("residual '{reader}' should be rejected"));
+            assert_eq!(
+                err.code,
+                ErrorCode::ConveyorContainerAccessUnsupported,
+                "reader '{reader}'"
+            );
+        }
+    }
+
+    #[test]
+    fn arrayed_bare_non_sum_queue_reducer_is_rejected() {
+        // A bare arrayed-queue reducer other than SUM has no single-queue
+        // interpretation (it would read per-element TOTALS, not batches), so it
+        // stays loud-rejected -- mirroring the conveyor rule (§8).
+        for reader in ["MEAN(waiting)", "MIN(waiting)", "SIZE(waiting)"] {
+            let xml = format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>2</stop><dt>1</dt></sim_specs>
+  <dimensions><dim name="board"><elem name="a"/><elem name="b"/></dim></dimensions>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow>
+      <dimensions><dim name="board"/></dimensions><queue/></stock>
+    <flow name="arrivals"><eqn>10</eqn>
+      <dimensions><dim name="board"/></dimensions><non_negative/></flow>
+    <aux name="reader"><eqn>{reader}</eqn></aux>
+  </variables></model>
+</xmile>"#
+            );
+            let project = parse(&xml);
+            let main = project.models[0].name.clone();
+            let err = build_vm(&project, &main)
+                .err()
+                .unwrap_or_else(|| panic!("bare arrayed reducer '{reader}' should be rejected"));
+            assert_eq!(
+                err.code,
+                ErrorCode::ConveyorContainerAccessUnsupported,
+                "reader '{reader}'"
+            );
+        }
     }
 }
