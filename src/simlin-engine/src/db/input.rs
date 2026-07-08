@@ -184,6 +184,17 @@ pub struct SourceModel {
     pub variable_names: Vec<String>,
     #[returns(ref)]
     pub variables: HashMap<String, SourceVariable>,
+    /// The ordered, pre-dedup variable-ident list: one entry per datamodel
+    /// variable in declaration order, carrying the AS-WRITTEN ident. This is
+    /// the raw data `model_duplicate_variables` needs to detect two variables
+    /// whose names canonicalize to the same ident (GH #885) --
+    /// `variable_names`/`variables` are canonically keyed and collapse
+    /// exactly those twins, the same collapse
+    /// `SourceProject::macro_declarations` exists to undo for model names.
+    /// Declaration order is load-bearing: diagnostics list the colliding
+    /// spellings in document order.
+    #[returns(ref)]
+    pub declared_variable_idents: Vec<String>,
     /// Per-model sim_specs override (None means use project-level specs)
     #[returns(ref)]
     pub model_sim_specs: Option<datamodel::SimSpecs>,

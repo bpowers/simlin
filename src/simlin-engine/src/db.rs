@@ -1063,6 +1063,33 @@ pub fn compile_project_incremental(
     {
         return crate::sim_err!(NotSimulatable, msg.clone());
     }
+    // Two variables whose names canonicalize to the same ident silently
+    // collapse into one on the canonical-keyed sync maps (last-in-document-
+    // order wins), so the simulation would quietly run a DIFFERENT model than
+    // the user wrote (GH #885). Reject the whole project loudly, mirroring
+    // the macro-registry gate above: model integrity is project-level, and
+    // the diagnostic twin (`emit_duplicate_variable_diagnostics`) carries the
+    // identical message through `collect_all_diagnostics`. Models are scanned
+    // in sorted canonical-name order and each model's groups are in
+    // declaration order, so the reported error is deterministic. The synced
+    // stdlib models are included in the scan but are duplicate-free by
+    // construction.
+    {
+        let models = project.models(db);
+        let mut model_names: Vec<&String> = models.keys().collect();
+        model_names.sort_unstable();
+        for name in model_names {
+            let model = models[name];
+            if let Some((canonical, spellings)) =
+                crate::db::diagnostic::model_duplicate_variables(db, model).first()
+            {
+                return crate::sim_err!(
+                    DuplicateVariable,
+                    crate::common::duplicate_variable_message(model.name(db), canonical, spellings)
+                );
+            }
+        }
+    }
     // A conveyor/queue stock is simulated only through the unified special-stock
     // build path (`queue_compile::build_compiled`), which -- via
     // `conveyor_compile::expand_conveyors` / `queue_compile::expand_queues` --

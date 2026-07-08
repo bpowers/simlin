@@ -492,10 +492,17 @@ fn resolve_placement(
     model: &datamodel::Model,
     flow: &str,
 ) -> Result<ResolvedPlacement, (ErrorCode, String)> {
+    // Marker detection and flow fetch are one lookup, skipping canon-matching
+    // twins WITHOUT a spreadflow so the marker-carrying twin wins -- the same
+    // convention `find_leak_flow` established for `<leak/>` (GH #870).
+    // Duplicate canonical idents are rejected upstream at the build
+    // chokepoints (`build_compiled` / `compile_project_incremental`, GH #885),
+    // so twins are unreachable from production; this keeps expansion
+    // self-consistent for direct `expand_conveyors` callers. For a
+    // single-flow model the behavior is identical: an absent marker still
+    // yields `None` -> `Beginning`.
     let spread = model.variables.iter().find_map(|v| match v {
-        datamodel::Variable::Flow(f) if canon(&f.ident) == flow => {
-            Some(f.compat.spreadflow.clone())
-        }
+        datamodel::Variable::Flow(f) if canon(&f.ident) == flow => f.compat.spreadflow.clone(),
         _ => None,
     });
     let plain = |p: Placement| ResolvedPlacement {
@@ -503,7 +510,7 @@ fn resolve_placement(
         dist: None,
         source: false,
     };
-    match spread.flatten() {
+    match spread {
         None | Some(datamodel::SpreadFlow::Beginning) => Ok(plain(Placement::Beginning)),
         Some(datamodel::SpreadFlow::Even) => Ok(plain(Placement::Even)),
         Some(datamodel::SpreadFlow::Dest) => Ok(plain(Placement::Dest)),
@@ -3379,6 +3386,39 @@ mod tests {
             _ => None,
         });
         assert_eq!(frac_eqn, Some(Equation::Scalar("0.2".to_string())));
+    }
+
+    #[test]
+    fn duplicate_canonical_inflow_spreadflow_marker_twin_wins() {
+        // The spreadflow sibling of the two leak-twin tests above: two inflow
+        // flows canonicalize to the same ident and only the LATER twin carries
+        // `isee:spreadflow`. `resolve_placement` must select the marker-
+        // carrying twin -- the same convention `find_leak_flow` established
+        // for `<leak/>` (GH #870) -- not whichever twin sorts first. Duplicate
+        // idents are rejected upstream at the build chokepoints (GH #885), so
+        // this pins expansion's internal self-consistency for direct callers.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_flow</inflow><outflow>out_f</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="In Flow"><eqn>250</eqn></flow>
+        <flow name="in_flow" isee:spreadflow="even"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let (_expanded, metas) = expand_conveyors(&project, &main).expect("expand");
+        assert_eq!(metas.len(), 1);
+        let inflow = metas[0]
+            .inflows
+            .iter()
+            .find(|i| i.flow == "in_flow")
+            .expect("the duplicate-canonical inflow must be resolved");
+        assert_eq!(
+            inflow.placement,
+            Placement::Even,
+            "the spreadflow-marked twin must supply the placement"
+        );
     }
 
     #[test]

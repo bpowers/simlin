@@ -112,6 +112,15 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // report untracked reads will be re-executed in the next revision").
     db.report_untracked_read();
 
+    // Duplicate canonical variable idents (GH #885): two variables whose
+    // names canonicalize to the same identifier silently collapse into one on
+    // every canonical-keyed map downstream (last-in-document-order wins in
+    // sync), so the simulated model would not be the model the user wrote.
+    // Error severity -- and `compile_project_incremental` fails hard on the
+    // same query -- because a silently-wrong simulation is a model-integrity
+    // failure like a duplicate macro name, not a partial-result advisory.
+    emit_duplicate_variable_diagnostics(db, model);
+
     let source_vars = model.variables(db);
 
     // Trigger compile_var_fragment for each variable. This is a superset
@@ -174,6 +183,57 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
         model_ltm_fragment_diagnostics(db, model, project);
         emit_conveyor_ltm_degraded_warnings(db, model);
         emit_queue_ltm_degraded_warnings(db, model);
+    }
+}
+
+/// Per-model duplicate-canonical-ident groups (GH #885): for each canonical
+/// ident that more than one declared variable canonicalizes to, the canonical
+/// form plus every as-written spelling in declaration order.
+///
+/// Derived from the raw, pre-dedup `SourceModel::declared_variable_idents`
+/// input -- the canonical-keyed `variables` map cannot answer this, exactly
+/// like `SourceProject::macro_declarations` vs the `models` map (see
+/// `db::macro_registry`). Salsa-tracked so both consumers -- the diagnostic
+/// emission below and `compile_project_incremental`'s hard error -- share one
+/// memoized derivation that only invalidates when the declared-ident list
+/// changes.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn model_duplicate_variables(
+    db: &dyn Db,
+    model: SourceModel,
+) -> Vec<(String, Vec<String>)> {
+    crate::common::duplicate_variable_groups(
+        model
+            .declared_variable_idents(db)
+            .iter()
+            .map(|s| s.as_str()),
+    )
+}
+
+/// Emit one Error-severity `DuplicateVariable` diagnostic per colliding
+/// canonical-ident group in `model`, naming every original spelling and the
+/// model (GH #885). The message text is shared with the hard compile error
+/// via `common::duplicate_variable_message`, so every surface (diagnostics,
+/// `compile_project_incremental`, the special-stock build path) reports
+/// identically.
+fn emit_duplicate_variable_diagnostics(db: &dyn Db, model: SourceModel) {
+    use crate::common::{Error, ErrorCode, ErrorKind};
+    use salsa::Accumulator;
+
+    let model_name = model.name(db);
+    for (canonical, spellings) in model_duplicate_variables(db, model) {
+        let msg = crate::common::duplicate_variable_message(model_name, canonical, spellings);
+        CompilationDiagnostic(Diagnostic {
+            model: model_name.clone(),
+            variable: Some(canonical.clone()),
+            error: DiagnosticError::Model(Error::new(
+                ErrorKind::Model,
+                ErrorCode::DuplicateVariable,
+                Some(msg),
+            )),
+            severity: DiagnosticSeverity::Error,
+        })
+        .accumulate(db);
     }
 }
 

@@ -826,6 +826,35 @@ pub fn build_compiled(
 )> {
     use crate::common::{Error, ErrorKind};
 
+    // Duplicate canonical variable idents are rejected BEFORE any expansion
+    // (GH #885): `expand_conveyors`/`expand_queues` walk the raw datamodel
+    // variable list where both twins are still visible, and while each pass
+    // is individually robust against a twin pair (the GH #870 hardening),
+    // expansion may transform or consume one twin -- so the private-db
+    // compile below (`compile_project_incremental`, which re-checks the same
+    // condition) would report post-expansion names. Rejecting on the ORIGINAL
+    // project keeps the message in the user's own spellings and makes
+    // expansion self-consistency moot on every production path. Every model
+    // is checked (non-main models pass through expansion untouched), matching
+    // the project-level scan the ordinary compile path performs.
+    for model in &project.models {
+        if let Some((canonical, spellings)) =
+            crate::common::duplicate_variable_groups(model.variables.iter().map(|v| v.get_ident()))
+                .into_iter()
+                .next()
+        {
+            return Err(Error::new(
+                ErrorKind::Simulation,
+                ErrorCode::DuplicateVariable,
+                Some(crate::common::duplicate_variable_message(
+                    &model.name,
+                    &canonical,
+                    &spellings,
+                )),
+            ));
+        }
+    }
+
     // A stock cannot be both a conveyor and a queue (§10.7): reject a both-marked
     // stock BEFORE either expansion, since each expansion clears only its own
     // marker and the two passes would otherwise silently double-drive the shared
@@ -3892,5 +3921,53 @@ mod tests {
         for (i, &a) in arrivals.iter().enumerate().skip(3) {
             assert!(a.abs() < 1e-9, "arrivals[{i}] = {a} not clamped to 0");
         }
+    }
+    // ----- GH #885: duplicate canonical variable idents are rejected at the
+    // special-stock build chokepoint, BEFORE any expansion -----
+
+    /// The #870 fixture shape: a conveyor whose outflow list names a canonical
+    /// ident carried by TWO flows (`Attrition`/`attrition`, only the later
+    /// twin leak-marked). `expand_conveyors` itself stays robust against the
+    /// pair (the #870 fix, pinned by its direct-call tests), but the BUILD
+    /// path must never reach expansion: the duplicate is a model-integrity
+    /// error, rejected loudly before expansion self-consistency matters.
+    const DUPLICATE_FLOW_CONVEYOR: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product>
+    <options><uses_conveyor/></options></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>20</stop><dt>0.25</dt></sim_specs>
+  <model><variables>
+    <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow><outflow>Attrition</outflow>
+      <conveyor><len>4</len></conveyor></stock>
+    <flow name="in_f"><eqn>250</eqn></flow>
+    <flow name="out_f"><eqn>0</eqn></flow>
+    <flow name="Attrition"><eqn>1</eqn></flow>
+    <flow name="attrition"><eqn>0.2</eqn><leak/></flow>
+  </variables></model>
+</xmile>"#;
+
+    #[test]
+    fn duplicate_canonical_idents_rejected_by_build_compiled() {
+        let project = parse(DUPLICATE_FLOW_CONVEYOR);
+        let err = build_compiled(&project, "main")
+            .expect_err("a duplicate canonical ident pair must be rejected before expansion");
+        assert_eq!(err.code, crate::common::ErrorCode::DuplicateVariable);
+        let details = err.details.expect("a diagnostic message");
+        assert!(
+            details.contains("'Attrition'") && details.contains("'attrition'"),
+            "names both original spellings: {details}"
+        );
+        assert!(details.contains("main"), "names the model: {details}");
+    }
+
+    #[test]
+    fn duplicate_canonical_idents_rejected_by_build_sim() {
+        let project = parse(DUPLICATE_FLOW_CONVEYOR);
+        let main = project.models[0].name.clone();
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+        let err = build_sim(&db, sync.project, &project, &main)
+            .expect_err("build_sim must reject the duplicate pair");
+        assert_eq!(err.code, crate::common::ErrorCode::DuplicateVariable);
     }
 }

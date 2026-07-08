@@ -886,6 +886,107 @@ pub fn canonicalize(name: &str) -> Cow<'_, str> {
     Cow::Owned(canonicalized_name)
 }
 
+/// Group a variable-ident list by canonical form and return the colliding
+/// groups: for each canonical ident declared more than once, the canonical
+/// form plus every as-written spelling, in declaration order (GH #885).
+///
+/// [`canonicalize`] collapses case, whitespace, and underscores, so
+/// `Attrition`/`attrition` or `net flow`/`net_flow` are the SAME variable
+/// identifier -- every canonical-keyed map downstream (salsa sync, ModelStage0)
+/// silently keeps only one such twin. Callers use the returned groups to
+/// reject the model loudly instead. Group order follows the first occurrence
+/// of each colliding canonical so diagnostics are deterministic for a given
+/// declaration order.
+pub(crate) fn duplicate_variable_groups<'a, I>(idents: I) -> Vec<(String, Vec<String>)>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    for ident in idents {
+        let canonical = canonicalize(ident).into_owned();
+        let entry = groups.entry(canonical.clone()).or_default();
+        if entry.is_empty() {
+            order.push(canonical);
+        }
+        entry.push(ident.to_string());
+    }
+    order
+        .into_iter()
+        .filter_map(|canonical| {
+            let spellings = groups.remove(&canonical)?;
+            (spellings.len() > 1).then_some((canonical, spellings))
+        })
+        .collect()
+}
+
+/// The user-facing message for one duplicate-canonical-ident group, shared by
+/// the hard compile error (`compile_project_incremental`,
+/// `queue_compile::build_compiled`) and the accumulated diagnostic
+/// (`model_all_diagnostics`) so every surface reports identical text.
+pub(crate) fn duplicate_variable_message(
+    model_name: &str,
+    canonical: &str,
+    spellings: &[String],
+) -> String {
+    let list = spellings
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "variables {list} in model '{model_name}' all canonicalize to the same identifier \
+         '{canonical}' (variable names are case-, whitespace-, and underscore-insensitive); \
+         simulating would silently keep only one of them, so rename them to be distinct"
+    )
+}
+
+#[test]
+fn test_duplicate_variable_groups() {
+    // No collisions: distinct canonicals yield no groups.
+    assert!(duplicate_variable_groups(["a", "b", "c"]).is_empty());
+    assert!(duplicate_variable_groups([]).is_empty());
+
+    // Case, whitespace, and underscore variants collide; spellings are
+    // reported in declaration order.
+    let groups = duplicate_variable_groups(["Attrition", "x", "attrition"]);
+    assert_eq!(
+        groups,
+        vec![(
+            "attrition".to_string(),
+            vec!["Attrition".to_string(), "attrition".to_string()]
+        )]
+    );
+    let groups = duplicate_variable_groups(["net flow", "net_flow"]);
+    assert_eq!(
+        groups,
+        vec![(
+            "net_flow".to_string(),
+            vec!["net flow".to_string(), "net_flow".to_string()]
+        )]
+    );
+
+    // Byte-identical twins (the shape an MDL space/underscore pair imports
+    // as) are also a collision.
+    let groups = duplicate_variable_groups(["net_flow", "net_flow"]);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].1.len(), 2);
+
+    // Multiple groups keep first-occurrence order; a three-way collision is
+    // one group with all three spellings.
+    let groups = duplicate_variable_groups(["B b", "a", "A", "b_B", "B_B"]);
+    assert_eq!(
+        groups,
+        vec![
+            (
+                "b_b".to_string(),
+                vec!["B b".to_string(), "b_B".to_string(), "B_B".to_string()]
+            ),
+            ("a".to_string(), vec!["a".to_string(), "A".to_string()]),
+        ]
+    );
+}
+
 #[test]
 fn test_canonicalize() {
     // A literal period inside a quoted identifier canonicalizes to the

@@ -2047,3 +2047,229 @@ fn test_conveyor_leak_fraction_non_constant_excluded() {
         "a non-constant fraction must be excluded from the compile-time sum; got: {diags:?}"
     );
 }
+
+// ---- Duplicate canonical variable idents (GH #885) ----
+//
+// Canonicalization collapses case, whitespace, and underscores, so two
+// variables like `Attrition`/`attrition` or `net flow`/`net_flow` are the
+// same canonical ident. The canonical-keyed sync maps silently collapse such
+// twins (last-in-document-order wins), so a model containing them would
+// simulate a DIFFERENT model than the one the user wrote. These tests pin the
+// loud rejection: a hard `DuplicateVariable` compile error naming both
+// original spellings and the model, plus an Error-severity diagnostic on the
+// accumulator path (so `collect_all_diagnostics` / `get_errors` surface it).
+
+fn dup_sim_specs() -> datamodel::SimSpecs {
+    datamodel::SimSpecs {
+        start: 0.0,
+        stop: 10.0,
+        dt: datamodel::Dt::Dt(1.0),
+        save_step: None,
+        sim_method: datamodel::SimMethod::Euler,
+        time_units: None,
+    }
+}
+
+/// Compile `project`'s `main` model through the production incremental
+/// pipeline, returning the result.
+fn compile_main(project: &datamodel::Project) -> crate::Result<crate::vm::CompiledSimulation> {
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    compile_project_incremental(&db, sync.project, "main")
+}
+
+/// All `DuplicateVariable` diagnostics in `diags`.
+fn duplicate_var_diags(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
+    diags
+        .iter()
+        .filter(|d| {
+            matches!(&d.error, DiagnosticError::Model(e)
+                if e.code == crate::common::ErrorCode::DuplicateVariable)
+        })
+        .collect()
+}
+
+#[test]
+fn test_duplicate_case_variant_idents_fail_compile() {
+    use crate::common::ErrorCode;
+    use crate::testutils::{x_aux, x_model, x_project};
+
+    let project = x_project(
+        dup_sim_specs(),
+        &[x_model(
+            "main",
+            vec![x_aux("Attrition", "1", None), x_aux("attrition", "2", None)],
+        )],
+    );
+    let err = compile_main(&project).expect_err("case-variant duplicate pair must fail compile");
+    assert_eq!(err.code, ErrorCode::DuplicateVariable);
+    let details = err.details.expect("the error must carry a message");
+    assert!(
+        details.contains("'Attrition'") && details.contains("'attrition'"),
+        "message must name both original spellings: {details}"
+    );
+    assert!(
+        details.contains("main"),
+        "message must name the model: {details}"
+    );
+}
+
+#[test]
+fn test_duplicate_whitespace_underscore_idents_fail_compile() {
+    use crate::common::ErrorCode;
+    use crate::testutils::{x_aux, x_model, x_project};
+
+    let project = x_project(
+        dup_sim_specs(),
+        &[x_model(
+            "main",
+            vec![x_aux("net flow", "1", None), x_aux("net_flow", "2", None)],
+        )],
+    );
+    let err =
+        compile_main(&project).expect_err("whitespace/underscore variant pair must fail compile");
+    assert_eq!(err.code, ErrorCode::DuplicateVariable);
+    let details = err.details.expect("the error must carry a message");
+    assert!(
+        details.contains("'net flow'") && details.contains("'net_flow'"),
+        "message must name both original spellings: {details}"
+    );
+}
+
+#[test]
+fn test_duplicate_idents_surface_error_diagnostic() {
+    use crate::testutils::{x_aux, x_model, x_project};
+
+    let project = x_project(
+        dup_sim_specs(),
+        &[x_model(
+            "main",
+            vec![x_aux("Attrition", "1", None), x_aux("attrition", "2", None)],
+        )],
+    );
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let dups = duplicate_var_diags(&diags);
+    assert_eq!(
+        dups.len(),
+        1,
+        "exactly one diagnostic per colliding group; got: {diags:?}"
+    );
+    let d = dups[0];
+    assert_eq!(d.severity, DiagnosticSeverity::Error);
+    assert_eq!(d.model, "main");
+    let DiagnosticError::Model(e) = &d.error else {
+        unreachable!()
+    };
+    let msg = e.details.as_deref().unwrap_or_default();
+    assert!(
+        msg.contains("'Attrition'") && msg.contains("'attrition'"),
+        "diagnostic must name both spellings: {msg}"
+    );
+}
+
+#[test]
+fn test_clean_model_unaffected_by_duplicate_check() {
+    use crate::testutils::{x_aux, x_flow, x_model, x_project, x_stock};
+
+    let project = x_project(
+        dup_sim_specs(),
+        &[x_model(
+            "main",
+            vec![
+                x_stock("population", "100", &["births"], &[], None),
+                x_flow("births", "population * birth_rate", None),
+                x_aux("birth_rate", "0.1", None),
+            ],
+        )],
+    );
+    compile_main(&project).expect("a clean model must still compile");
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+    assert!(
+        duplicate_var_diags(&diags).is_empty(),
+        "no DuplicateVariable diagnostics for distinct idents; got: {diags:?}"
+    );
+}
+
+#[test]
+fn test_cross_model_same_canonical_idents_allowed() {
+    use crate::testutils::{x_aux, x_model, x_project};
+
+    // Models are namespaces: the same canonical ident in TWO DIFFERENT models
+    // is not a collision.
+    let project = x_project(
+        dup_sim_specs(),
+        &[
+            x_model("main", vec![x_aux("attrition", "1", None)]),
+            x_model("other", vec![x_aux("Attrition", "2", None)]),
+        ],
+    );
+    compile_main(&project).expect("cross-model same-canonical idents must be allowed");
+}
+
+#[test]
+fn test_incremental_sync_detects_newly_added_duplicate() {
+    use crate::common::ErrorCode;
+    use crate::testutils::{x_aux, x_model, x_project};
+
+    // Pin the INCREMENTAL sync path (existing-model branch, salsa setters):
+    // a re-sync that introduces a case twin must invalidate the duplicate
+    // check and fail the next compile.
+    let clean = x_project(
+        dup_sim_specs(),
+        &[x_model("main", vec![x_aux("attrition", "1", None)])],
+    );
+    let mut db = SimlinDb::default();
+    let state1 = sync_from_datamodel_incremental(&mut db, &clean, None);
+    compile_project_incremental(&db, state1.project, "main")
+        .expect("the clean project must compile");
+
+    let dup = x_project(
+        dup_sim_specs(),
+        &[x_model(
+            "main",
+            vec![x_aux("attrition", "1", None), x_aux("Attrition", "2", None)],
+        )],
+    );
+    let state2 = sync_from_datamodel_incremental(&mut db, &dup, Some(&state1));
+    let err = compile_project_incremental(&db, state2.project, "main")
+        .expect_err("the re-synced duplicate must fail compile");
+    assert_eq!(err.code, ErrorCode::DuplicateVariable);
+}
+
+#[test]
+fn test_xmile_duplicate_pair_rejected_end_to_end() {
+    use crate::common::ErrorCode;
+    use std::io::BufReader;
+
+    // The XMILE reader stable-sorts by canonical ident but never dedups; the
+    // engine-side gate must reject the parsed project at compile time.
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>10</stop><dt>1</dt></sim_specs>
+  <model>
+    <variables>
+      <aux name="Attrition"><eqn>1</eqn></aux>
+      <aux name="attrition"><eqn>2</eqn></aux>
+    </variables>
+  </model>
+</xmile>"#;
+    let project = crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
+        .expect("the reader itself tolerates duplicates");
+    let main = project.models[0].name.clone();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let err = compile_project_incremental(&db, sync.project, &main)
+        .expect_err("XMILE duplicate pair must fail compile");
+    assert_eq!(err.code, ErrorCode::DuplicateVariable);
+    let details = err.details.expect("the error must carry a message");
+    assert!(
+        details.contains("'Attrition'") && details.contains("'attrition'"),
+        "message must name both original spellings: {details}"
+    );
+}

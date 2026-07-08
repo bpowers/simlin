@@ -1319,3 +1319,61 @@ fn test_conveyor_and_queue_ltm_sim_report_disabled_ltm_mode() {
         }
     }
 }
+
+// GH #885: two variables whose names canonicalize to the same identifier
+// (case/whitespace/underscore variants) must surface a loud DuplicateVariable
+// error through `simlin_project_get_errors` -- previously one twin was
+// silently dropped and the project simulated a different model than written.
+#[test]
+fn test_duplicate_canonical_idents_surface_through_get_errors() {
+    let datamodel = TestProject::new("dup_idents")
+        .aux("Attrition", "1", None)
+        .aux("attrition", "2", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "a duplicate canonical ident pair must produce errors"
+        );
+
+        let count = simlin_error_get_detail_count(all_errors);
+        assert!(count > 0);
+        let details = simlin_error_get_details(all_errors);
+        let detail_slice = std::slice::from_raw_parts(details, count);
+        let dup = detail_slice
+            .iter()
+            .find(|d| d.code == SimlinErrorCode::DuplicateVariable)
+            .expect("a DuplicateVariable detail must be reported");
+        assert_eq!(
+            dup.severity,
+            SimlinErrorSeverity::Error,
+            "a silently-wrong simulation is an Error, not a Warning"
+        );
+        let msg = CStr::from_ptr(dup.message).to_str().unwrap();
+        assert!(
+            msg.contains("Attrition") && msg.contains("attrition"),
+            "message must name both original spellings: {msg}"
+        );
+
+        // The project must not be simulatable: compile fails hard.
+        let model_name = std::ffi::CString::new("main").unwrap();
+        let mut sim_err: *mut SimlinError = ptr::null_mut();
+        let simulatable = simlin_project_is_simulatable(
+            proj,
+            model_name.as_ptr(),
+            &mut sim_err as *mut *mut SimlinError,
+        );
+        assert!(!simulatable, "duplicate idents must block simulation");
+        if !sim_err.is_null() {
+            simlin_error_free(sim_err);
+        }
+
+        simlin_error_free(all_errors);
+        simlin_project_unref(proj);
+    }
+}
