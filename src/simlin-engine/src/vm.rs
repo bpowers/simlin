@@ -883,7 +883,12 @@ impl Vm {
                         next,
                     );
                     let t = curr[TIME_OFF];
-                    crate::queue_compile::run_coupled_passes(
+                    // A mid-run <sample> re-latch that would exceed the belt's
+                    // slat-count bound (§4.1) surfaces here as a loud simulation
+                    // error rather than a silent geometry clamp or an OOM/abort;
+                    // restore the data buffer before propagating (as init_belts
+                    // does), so the Vm stays reusable.
+                    if let Err((code, msg)) = crate::queue_compile::run_coupled_passes(
                         &self.conveyor_plans,
                         &mut self.conveyors,
                         &self.queue_plans,
@@ -892,7 +897,10 @@ impl Vm {
                         dt,
                         t,
                         &mut self.conveyor_last_unit,
-                    );
+                    ) {
+                        self.data = Some(data);
+                        return Err(Error::new(ErrorKind::Simulation, code, Some(msg)));
+                    }
                     Self::eval(
                         &self.sliced_sim,
                         &mut state,

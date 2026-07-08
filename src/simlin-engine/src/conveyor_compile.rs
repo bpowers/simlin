@@ -325,6 +325,10 @@ pub struct InflowPlan {
 /// A fully-resolved conveyor: data-buffer slot offsets for the VM's pass.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConveyorPlan {
+    /// The conveyor stock's canonical name (base name for an arrayed conveyor),
+    /// used only to name the belt in a runtime error (e.g.
+    /// [`ErrorCode::ConveyorTransitTooLong`]).
+    pub name: String,
     pub stock_off: usize,
     pub len_off: usize,
     pub cap_off: Option<usize>,
@@ -1665,6 +1669,7 @@ pub fn resolve_plans(
                 }
             });
             plans.push(ConveyorPlan {
+                name: meta.stock.clone(),
                 stock_off: eoff(&meta.stock)?,
                 len_off: eoff(&meta.len_aux)?,
                 cap_off: meta.cap_aux.as_deref().and_then(&eoff),
@@ -1834,6 +1839,32 @@ fn conv_inflow_placement(
     }
 }
 
+/// §4.1 slat-count bound. `round(transit/dt)` sizes the belt `Vec`; an enormous
+/// `transit/dt` (a hostile or typo'd `<len>`) would request an unbounded
+/// allocation -- a `usize`-saturating count panics `vec![0.0; usize::MAX]`
+/// ("capacity overflow" -> host abort under `panic = "abort"`), a merely-huge
+/// finite one OOMs. A latched transit whose slat count exceeds
+/// [`crate::conveyor::slat_bound`] is rejected loudly (naming the belt, the
+/// computed count, and the bound) rather than silently saturating the geometry.
+/// Enforced at BOTH latch sites -- belt init ([`init_belts`]) and the mid-run
+/// `<sample>` re-latch ([`run_phase_a`]) -- so `latched_transit` always yields a
+/// slat count within the bound and every downstream `n_slats()` allocation is
+/// safe.
+fn check_slat_bound(name: &str, transit: f64, dt: f64) -> Result<(), (ErrorCode, String)> {
+    let n = crate::conveyor::slat_count(transit, dt);
+    let bound = crate::conveyor::slat_bound();
+    if n > bound {
+        return Err((
+            ErrorCode::ConveyorTransitTooLong,
+            format!(
+                "conveyor '{name}' transit time {transit} at dt {dt} needs {n} belt slats, \
+                 exceeding the maximum of {bound}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Build the conveyor side table from the initials-populated data buffer
 /// (`curr`), initializing each belt to its steady-state fill (§7.1) from the
 /// stock's initial value. The stock `<eqn>` was evaluated by the initials pass,
@@ -1849,9 +1880,15 @@ pub fn init_belts(
         if !transit.is_finite() || transit <= 0.0 {
             return Err((
                 ErrorCode::ConveyorTransitNotPositive,
-                format!("conveyor transit time must be positive and finite, got {transit}"),
+                format!(
+                    "conveyor '{}' transit time must be positive and finite, got {transit}",
+                    plan.name
+                ),
             ));
         }
+        // Reject an over-bound slat count before init_steady allocates the belt
+        // (§4.1): a saturating/enormous count would otherwise panic/OOM here.
+        check_slat_bound(&plan.name, transit, dt)?;
         let leaks: Vec<LeakConfig> = plan
             .leaks
             .iter()
@@ -1955,11 +1992,12 @@ pub fn run_pass(
     dt: f64,
     time: f64,
     last_unit: &mut i64,
-) {
-    let pa = run_phase_a(plans, states, curr, dt, time, last_unit);
+) -> Result<(), (ErrorCode, String)> {
+    let pa = run_phase_a(plans, states, curr, dt, time, last_unit)?;
     for i in 0..plans.len() {
         conveyor_phase_b_one(i, plans, states, &pa, curr, dt);
     }
+    Ok(())
 }
 
 /// Phase A over all conveyors (§4.3 steps 0-3): reset the discrete inflow budget
@@ -1969,6 +2007,11 @@ pub fn run_pass(
 /// [`PhaseAResult`]s (indexed by plan). No phase reads another conveyor's
 /// same-phase result, so this is order-free (conveyor chains/cycles need no
 /// topological ordering).
+///
+/// Errors ([`ErrorCode::ConveyorTransitTooLong`]) when a belt's mid-run
+/// `<sample>` re-latch would need more slats than `conveyor::slat_bound()` --
+/// checked BEFORE `phase_a` applies the latch, so the belt geometry never grows
+/// past the bound (§4.1). The caller aborts the simulation run.
 pub fn run_phase_a(
     plans: &[ConveyorPlan],
     states: &mut [ConveyorState],
@@ -1976,7 +2019,7 @@ pub fn run_phase_a(
     dt: f64,
     time: f64,
     last_unit: &mut i64,
-) -> Vec<PhaseAResult> {
+) -> Result<Vec<PhaseAResult>, (ErrorCode, String)> {
     // Discrete per-time-unit in_limit budget resets at integer time boundaries.
     let unit = time.floor() as i64;
     if unit != *last_unit {
@@ -2013,6 +2056,15 @@ pub fn run_phase_a(
         // Default <sample> is 1 (re-latch every DT) when the tag is absent.
         let sample = plan.sample_off.map(|o| is_nonzero(curr[o])).unwrap_or(true);
         let transit = clamp_transit(curr[plan.len_off], dt);
+        // phase_a re-latches the transit iff the belt is NOT arrested and
+        // `sample && transit.is_finite()` (§4.3 steps 0-1); enforce the
+        // slat-count bound under exactly that condition, before the latch
+        // changes `n_slats()` and phase_b grows the belt (§4.1). An arrested,
+        // non-sampling, or non-finite step keeps the prior latched transit,
+        // already bounded, so no check is needed.
+        if !arrested[i] && sample && transit.is_finite() {
+            check_slat_bound(&plan.name, transit, dt)?;
+        }
         let r = states[i].phase_a(PhaseAInputs {
             arrested: arrested[i],
             sample,
@@ -2029,7 +2081,7 @@ pub fn run_phase_a(
         }
         pa.push(r);
     }
-    pa
+    Ok(pa)
 }
 
 /// Phase B for conveyor `i` (§4.3 steps 4-6): admit inflows (conveyor-driven and
@@ -3453,5 +3505,104 @@ mod tests {
         let main = project.models[0].name.clone();
         let err = build_vm(&project, &main).expect_err("reading a driven flow must be rejected");
         assert_eq!(err.code, ErrorCode::ConveyorDrivenFlowRead);
+    }
+
+    // ----- slat-count bound (§4.1): a hostile/typo'd <len> must never
+    // panic/OOM the engine; it is rejected loudly at belt init / latch time.
+    // The tests shrink the bound with a `SlatBoundGuard` so a tiny fixture trips
+    // the gate without allocating a production-sized belt. At dt=0.25,
+    // `slat_count(transit) = round(transit/0.25)`: transit 1.0 -> 4 slats,
+    // transit 1.25 -> 5 slats.
+
+    /// A conveyor whose initial `<len>` needs more slats than the bound is
+    /// rejected at init (`init_belts`) with the new code, naming the belt.
+    #[test]
+    fn slat_bound_rejects_over_bound_transit_at_init() {
+        let _guard = crate::conveyor::SlatBoundGuard::new(4);
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>1.25</len></conveyor></stock>
+        <flow name="in_f"><eqn>10</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build");
+        let err = vm
+            .run_to_end()
+            .expect_err("a transit needing 5 slats must be rejected against a bound of 4");
+        assert_eq!(err.code, ErrorCode::ConveyorTransitTooLong);
+        let msg = err.get_details().unwrap_or_default();
+        assert!(
+            msg.contains("belt") && msg.contains('5') && msg.contains('4'),
+            "message should name the belt, the slat count, and the bound: {msg}"
+        );
+    }
+
+    /// A conveyor whose initial `<len>` lands exactly ON the bound is admitted
+    /// (the gate rejects only counts strictly above the bound).
+    #[test]
+    fn slat_bound_admits_at_bound_transit_at_init() {
+        let _guard = crate::conveyor::SlatBoundGuard::new(4);
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>1</len></conveyor></stock>
+        <flow name="in_f"><eqn>10</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build");
+        vm.run_to_end()
+            .expect("a transit needing exactly 4 slats is at the bound, not over it");
+    }
+
+    /// The finding's exact abort case: a `<len>` of 1e300 whose `transit/dt`
+    /// saturates `usize`. The gate rejects it (loud error) instead of
+    /// `init_steady` panicking `vec![0.0; usize::MAX]` -- and, because the check
+    /// precedes the allocation, nothing near `usize::MAX` is ever allocated.
+    #[test]
+    fn slat_bound_rejects_saturating_transit_without_allocating() {
+        let _guard = crate::conveyor::SlatBoundGuard::new(4);
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>1e300</len></conveyor></stock>
+        <flow name="in_f"><eqn>10</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build");
+        let err = vm
+            .run_to_end()
+            .expect_err("a usize-saturating transit must be rejected, not panic");
+        assert_eq!(err.code, ErrorCode::ConveyorTransitTooLong);
+    }
+
+    /// A time-varying `<len>` (default `<sample>` re-latches every DT) that is
+    /// under the bound at init but grows over it mid-run must be rejected LOUDLY
+    /// from the runtime pass -- not silently clamp the belt geometry (repo rule:
+    /// a loud error beats a silently-wrong simulation). STEP raises `<len>` from
+    /// 1.0 (4 slats, at the bound) to 1.25 (5 slats, over it) at t=2.
+    #[test]
+    fn slat_bound_rejects_over_bound_latch_mid_run() {
+        let _guard = crate::conveyor::SlatBoundGuard::new(4);
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>1 + STEP(0.25, 2)</len></conveyor></stock>
+        <flow name="in_f"><eqn>10</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build");
+        let err = vm
+            .run_to_end()
+            .expect_err("a mid-run relatch needing 5 slats must be rejected against a bound of 4");
+        assert_eq!(err.code, ErrorCode::ConveyorTransitTooLong);
     }
 }

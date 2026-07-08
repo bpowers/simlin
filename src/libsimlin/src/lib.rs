@@ -284,6 +284,7 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::ConveyorNonEulerMethod => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorQueueUpstreamNotDiscrete => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorTransitNotPositive => SimlinErrorCode::Generic,
+            engine::ErrorCode::ConveyorTransitTooLong => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorTransitNotDtMultiple => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorLeakFractionsExceedOne => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorLtmDegraded => SimlinErrorCode::Generic,

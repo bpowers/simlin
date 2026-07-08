@@ -1152,6 +1152,11 @@ fn apply_couplings(
 /// uncoupled queues their ordinary admit-then-serve. When there is NO coupling
 /// this delegates to the two independent passes, byte-identical to the
 /// pre-coupling behavior.
+///
+/// Errors ([`ErrorCode::ConveyorTransitTooLong`](crate::common::ErrorCode::ConveyorTransitTooLong))
+/// when a conveyor's mid-run `<sample>` re-latch would exceed the slat-count
+/// bound (§4.1, surfaced from [`crate::conveyor_compile::run_phase_a`]); the VM
+/// aborts the run with a simulation error.
 // The two side-table sets (plans + states), `curr`, `dt`, and the two clock
 // inputs (`time`, `last_unit`) are all independent per-step inputs the VM already
 // holds separately; bundling them into a struct would only add an indirection.
@@ -1165,7 +1170,7 @@ pub fn run_coupled_passes(
     dt: f64,
     time: f64,
     last_unit: &mut i64,
-) {
+) -> Result<(), (crate::common::ErrorCode, String)> {
     use crate::conveyor_compile as cc;
 
     /// A coupled queue serve wired to one conveyor (derived from the plans).
@@ -1232,13 +1237,13 @@ pub fn run_coupled_passes(
 
     // Fast path: no coupling -> the two independent passes, byte-identical.
     if !any {
-        cc::run_pass(conv_plans, conveyors, curr, dt, time, last_unit);
+        cc::run_pass(conv_plans, conveyors, curr, dt, time, last_unit)?;
         run_queue_pass(queue_plans, queues, curr, dt);
-        return;
+        return Ok(());
     }
 
     // Phase A over every conveyor (frees belt room, writes driven outflow rates).
-    let pa = cc::run_phase_a(conv_plans, conveyors, curr, dt, time, last_unit);
+    let pa = cc::run_phase_a(conv_plans, conveyors, curr, dt, time, last_unit)?;
 
     // Per conveyor: interleave each coupled queue's serve between phase A and B,
     // in the belt's <inflow> declaration order. `prior_coupled_vol` accumulates the
@@ -1297,6 +1302,7 @@ pub fn run_coupled_passes(
         }
         serve_uncoupled_queue(plan, state, curr, dt);
     }
+    Ok(())
 }
 
 /// Build a runnable [`Vm`](crate::vm::Vm) for `project`, wiring up conveyor AND

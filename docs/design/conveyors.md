@@ -223,6 +223,12 @@ For a conveyor with transit time `T` (the latched value — [§6](#6-variable-tr
 
 `T ≤ 0` is a compile **error** (a conveyor needs a positive transit time).
 
+`N` is also bounded above defensively (`MAX_SLATS_PER_BELT`, 1,000,000 slats
+per belt): a transit/DT ratio beyond the bound — a typo'd or hostile `<len>`
+— is a loud **error** naming the conveyor, the computed slat count, and the
+bound, at initialization and at any mid-run re-latch. Without the bound the
+belt allocation itself would abort the host process.
+
 ### 4.2 Conveyor runtime state
 
 Each conveyor instance owns side state, held in a table parallel to the VM's

@@ -418,6 +418,15 @@ pub enum ErrorCode {
     /// A conveyor's transit time (`<len>`) is not positive at compile time
     /// (docs/design/conveyors.md §4.1).
     ConveyorTransitNotPositive,
+    /// A conveyor's latched transit time implies more belt slats
+    /// (`round(transit/dt)`) than the engine will allocate. The slat count sizes
+    /// the belt `Vec`; an enormous `transit/dt` (a hostile or typo'd `<len>`)
+    /// would otherwise request an unbounded allocation -- a `usize`-saturating
+    /// count panics `vec![0.0; usize::MAX]` -> host abort under `panic = "abort"`,
+    /// and a merely-huge finite one OOMs. Rejected loudly at belt init / latch
+    /// time rather than silently saturating the belt geometry (see
+    /// `conveyor::MAX_SLATS_PER_BELT`, docs/design/conveyors.md §4.1).
+    ConveyorTransitTooLong,
     /// A conveyor's transit time is not an integer multiple of DT; the belt is
     /// DT-quantized to the nearest whole slat count. Warning-level
     /// (docs/design/conveyors.md §4.1).
@@ -576,6 +585,7 @@ impl fmt::Display for ErrorCode {
             ConveyorNonEulerMethod => "conveyor_non_euler_method",
             ConveyorQueueUpstreamNotDiscrete => "conveyor_queue_upstream_not_discrete",
             ConveyorTransitNotPositive => "conveyor_transit_not_positive",
+            ConveyorTransitTooLong => "conveyor_transit_too_long",
             ConveyorTransitNotDtMultiple => "conveyor_transit_not_dt_multiple",
             ConveyorLeakFractionsExceedOne => "conveyor_leak_fractions_exceed_one",
             ConveyorLtmDegraded => "conveyor_ltm_degraded",

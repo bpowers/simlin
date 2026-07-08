@@ -22,17 +22,87 @@
 
 use std::collections::VecDeque;
 
+/// Upper bound on a single belt's slat count (§4.1). The slat count
+/// `round(transit/dt)` sizes the belt `Vec` (and its per-leak inner vecs); with
+/// no bound a hostile or typo'd `<len>` blows up the allocation two ways: a
+/// `usize`-saturating count (e.g. `1e300 / dt`) panics `vec![0.0; usize::MAX]`
+/// with "capacity overflow" -- a host-process abort under libsimlin's
+/// `panic = "abort"` release profile (wasm, pysimlin, serve) -- and a merely
+/// enormous finite count (`1e12 / dt` -> ~4e12 slats -> ~32 TB) OOMs when
+/// committed. 1,000,000 slats is far beyond any physically meaningful
+/// `transit/dt` ratio yet trivially cheap to reject below, so a latched transit
+/// exceeding it is rejected LOUDLY at belt init / latch time (see
+/// `conveyor_compile::{init_belts, run_phase_a}` and
+/// [`ErrorCode::ConveyorTransitTooLong`]) rather than silently saturating the
+/// belt geometry.
+///
+/// [`ErrorCode::ConveyorTransitTooLong`]: crate::common::ErrorCode::ConveyorTransitTooLong
+pub(crate) const MAX_SLATS_PER_BELT: usize = 1_000_000;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`MAX_SLATS_PER_BELT`], scoped by an active
+    /// [`SlatBoundGuard`]. Lets a test trip the slat-count gate with a tiny
+    /// fixture instead of a production-sized belt (docs/dev/rust.md
+    /// test-time budgets).
+    static SLAT_BOUND_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The per-belt slat-count bound for the current thread. Production returns
+/// [`MAX_SLATS_PER_BELT`]; in a `#[cfg(test)]` build an active
+/// [`SlatBoundGuard`] override takes precedence.
+pub(crate) fn slat_bound() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(b) = SLAT_BOUND_OVERRIDE.with(|c| c.get()) {
+            return b;
+        }
+    }
+    MAX_SLATS_PER_BELT
+}
+
+/// RAII guard (test-only) that overrides [`slat_bound`] for the current thread
+/// for the guard's lifetime, restoring the previous value on drop -- so a
+/// panicking test never leaks the override to the next test reusing the thread.
+#[cfg(test)]
+pub(crate) struct SlatBoundGuard {
+    prev: Option<usize>,
+}
+
+#[cfg(test)]
+impl SlatBoundGuard {
+    pub(crate) fn new(bound: usize) -> Self {
+        let prev = SLAT_BOUND_OVERRIDE.with(|c| c.replace(Some(bound)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for SlatBoundGuard {
+    fn drop(&mut self) {
+        SLAT_BOUND_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
 /// Round `transit / dt` to the nearest slat count, half **away from zero**
 /// (§4.1), clamped to at least one slat. `f64::floor(x + 0.5)` gives
 /// away-from-zero rounding for the non-negative arguments a positive transit
 /// time and DT produce (Rust `f64::round` is already half-away, but the
 /// prototype pins `floor(x + 0.5)` and we match it bit-for-bit).
+///
+/// The result is unbounded above (a saturating `n as usize` for an enormous
+/// `transit/dt`); callers that allocate a belt from it MUST first reject a
+/// count exceeding `MAX_SLATS_PER_BELT` (the production path does so at every
+/// latch site -- see that const's docs). This function stays a pure rounding
+/// primitive so the bound can live in the imperative shell with the other §4.4
+/// hygiene.
 pub fn slat_count(transit: f64, dt: f64) -> usize {
     let n = (transit / dt + 0.5).floor();
     // `NaN as usize` is 0, which would later underflow a `d - 1` slat index.
     // A non-finite or sub-1 count clamps to a single slat (the VM enforces a
     // positive, finite transit time upstream, §4.4/§9.4; this is defense in
-    // depth). Very large finite counts are the VM's concern to bound.
+    // depth).
     if !n.is_finite() || n < 1.0 {
         1
     } else {
