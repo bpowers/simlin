@@ -1689,6 +1689,58 @@ mod queue_tests {
         );
     }
 
+    /// A stock carrying BOTH a `<conveyor>` block and a `<queue/>` marker is a
+    /// type conflict the COMPILER rejects (F12,
+    /// [`crate::common::ErrorCode::StockBothConveyorAndQueue`]), but the READER
+    /// must stay faithful: it parses both markers onto the stock and the writer
+    /// re-emits both. Rejection is deliberately a compile-time concern, not a
+    /// parse-time one, so the reader never silently drops one marker (which would
+    /// mask the conflict and turn an invalid model into a plausible-looking one).
+    /// This pins that layering: both markers survive read -> write -> read.
+    #[test]
+    fn both_conveyor_and_queue_markers_roundtrip_faithfully() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product>
+    <options><uses_conveyor/></options></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="belt"><eqn>10</eqn><outflow>out</outflow>
+      <conveyor><len>4</len></conveyor><queue/></stock>
+    <flow name="out"><eqn>0</eqn></flow>
+  </variables></model>
+</xmile>"#;
+        let p = parse(xml);
+        // The reader sets BOTH fields independently -- neither shadows the other.
+        assert!(
+            find_stock(&p, "belt").compat.conveyor.is_some(),
+            "the <conveyor> block must set compat.conveyor"
+        );
+        assert!(
+            find_stock(&p, "belt").compat.queue.is_some(),
+            "the <queue/> marker must set compat.queue"
+        );
+
+        // Read -> write -> read preserves both markers (the writer emits both).
+        let (written, p2) = roundtrip(&p);
+        assert!(
+            written.contains("<conveyor"),
+            "writer must emit <conveyor>: {written}"
+        );
+        assert!(
+            written.contains("<queue"),
+            "writer must emit <queue/>: {written}"
+        );
+        assert!(
+            find_stock(&p2, "belt").compat.conveyor.is_some(),
+            "conveyor marker lost on round-trip"
+        );
+        assert!(
+            find_stock(&p2, "belt").compat.queue.is_some(),
+            "queue marker lost on round-trip"
+        );
+    }
+
     /// A plain queue (no overflow outflow) emits a bare `<uses_queue/>` header,
     /// never `overflow="true"`.
     #[test]

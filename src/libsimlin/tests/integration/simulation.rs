@@ -1804,3 +1804,70 @@ fn test_queue_model_simulates_via_ffi() {
         simlin_project_unref(proj);
     }
 }
+
+/// End-to-end FFI proof (F12) that a stock marked as BOTH a conveyor and a queue
+/// is rejected -- loudly, naming the stock -- through the production
+/// `simlin_sim_new` path, rather than silently building both a conveyor and a
+/// queue plan over the same stock+outflow and mis-simulating. This exercises the
+/// full round-trip: the XMILE reader preserves both markers, protobuf carries them
+/// side by side, and the unified special-stock build path rejects the conflict up
+/// front. `simlin_sim_new` defers a compile error into the sim's `vm_error` (it
+/// returns a non-null sim), so the rejection surfaces on the first run. The wire
+/// error code collapses to `Generic` (the wire enum does not track the engine's
+/// growing conveyor/queue tail), so we assert on the message naming the stock.
+#[test]
+fn test_stock_with_both_conveyor_and_queue_rejected_via_ffi() {
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>both markers</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>0.25</dt></sim_specs>
+  <model><variables>
+    <stock name="belt">
+      <eqn>10</eqn>
+      <inflow>into_belt</inflow>
+      <outflow>out</outflow>
+      <conveyor><len>4</len></conveyor>
+      <queue/>
+    </stock>
+    <flow name="into_belt"><eqn>5</eqn><non_negative/></flow>
+    <flow name="out"><eqn>0</eqn></flow>
+    <stock name="done"><eqn>0</eqn><inflow>out</inflow></stock>
+  </variables></model>
+</xmile>"#;
+    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("parse both-markers xmile");
+    unsafe {
+        let proj = open_project_from_datamodel(&datamodel);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "get_model failed");
+        assert!(!model.is_null());
+
+        // sim_new defers the compile error; it returns a non-null sim.
+        err = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut err as *mut *mut SimlinError);
+        assert!(!sim.is_null(), "sim_new returns a sim (error is deferred)");
+
+        // The rejection surfaces on the first run, naming the offending stock.
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err as *mut *mut SimlinError);
+        assert!(
+            !err.is_null(),
+            "running a both-marked-stock model must surface the rejection"
+        );
+        let msg_ptr = simlin_error_get_message(err);
+        let msg = if !msg_ptr.is_null() {
+            CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
+        } else {
+            ""
+        };
+        assert!(
+            msg.contains("belt"),
+            "error message names the offending stock: {msg}"
+        );
+        simlin_error_free(err);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

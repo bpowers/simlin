@@ -302,6 +302,7 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::QueueInSubmodelUnsupported => SimlinErrorCode::Generic,
             engine::ErrorCode::QueueSecondaryOutflowToConveyor => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorMultipleNonLeakOutflows => SimlinErrorCode::Generic,
+            engine::ErrorCode::StockBothConveyorAndQueue => SimlinErrorCode::Generic,
         }
     }
 }

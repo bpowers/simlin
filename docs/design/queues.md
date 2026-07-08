@@ -386,6 +386,7 @@ New / reused diagnostics (`ErrorCode`):
 | `ConveyorQueueUpstreamNotDiscrete` | Error | queue directly upstream of a non-discrete conveyor (already defined; now reachable) |
 | `QueueOverflowNotOnQueue` | Error | `<overflow/>` on a non-queue-outflow, or on a queue's first outflow |
 | `QueueSecondaryOutflowToConveyor` | Error | a queue outflow other than the first feeds a conveyor (constrained secondary/overflow service is deferred; only the primary may couple) |
+| `StockBothConveyorAndQueue` | Error | one stock carries BOTH a `<conveyor>` block and a `<queue/>` marker -- a stock has exactly one type (also applies to conveyors.md §9.8). The reader preserves both markers faithfully; the conflict is rejected before expansion in the unified build path, since each expansion clears only its own marker and the two passes would otherwise silently double-drive the shared outflow slot |
 | `QueueLtmDegraded` | Warning | LTM requested on a model containing a queue |
 
 **Unit checking.** A queue outflow carries `S/t` like any flow; the queue stock

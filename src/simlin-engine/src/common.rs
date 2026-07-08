@@ -544,6 +544,19 @@ pub enum ErrorCode {
     /// naming the conveyor, its primary outflow, and every extra non-leak
     /// outflow (mark the extras with `<leak/>` if leakage was intended).
     ConveyorMultipleNonLeakOutflows,
+    /// One stock carries BOTH a `<conveyor>` block and a `<queue/>` marker. XMILE
+    /// defines conveyors and queues as distinct stock TYPES; a stock has exactly
+    /// one type (docs/design/queues.md §10.7). The two markers are independent
+    /// optional fields the reader/proto carry side by side, and the two expansion
+    /// passes each clear only their OWN marker
+    /// ([`crate::conveyor_compile::expand_conveyors`] clears the conveyor block,
+    /// [`crate::queue_compile::expand_queues`] clears the queue marker), so a
+    /// both-marked stock would be expanded TWICE -- given both a `ConveyorPlan`
+    /// AND a `QueuePlan` over the same stock and shared outflow slot -- and the two
+    /// runtime passes would each drive the shared flow (the last writer winning
+    /// while belt and FIFO advance under different rates): silent garbage with no
+    /// diagnostic. Rejected loudly BEFORE either expansion, naming the stock.
+    StockBothConveyorAndQueue,
 }
 
 impl fmt::Display for ErrorCode {
@@ -627,6 +640,7 @@ impl fmt::Display for ErrorCode {
             QueueInSubmodelUnsupported => "queue_in_submodel_unsupported",
             QueueSecondaryOutflowToConveyor => "queue_secondary_outflow_to_conveyor",
             ConveyorMultipleNonLeakOutflows => "conveyor_multiple_non_leak_outflows",
+            StockBothConveyorAndQueue => "stock_both_conveyor_and_queue",
         };
 
         write!(f, "{name}")

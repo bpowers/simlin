@@ -840,6 +840,59 @@ pub fn publish_queue_container_values(
 
 // ----- unified build path (queues + conveyors coexist) -----
 
+/// Reject any stock in `main_model` of `project` carrying BOTH a `<conveyor>`
+/// block and a `<queue/>` marker (docs/design/queues.md §10.7). XMILE defines a
+/// conveyor and a queue as distinct stock TYPES; a stock has exactly one type. The
+/// two markers are independent optional fields the reader/proto/serde carry side
+/// by side (so the reader deliberately preserves both -- rejection is a compile-,
+/// not parse-, time concern), and the two expansion passes each clear only their
+/// OWN marker: [`crate::conveyor_compile::expand_conveyors`] clears the conveyor
+/// block, [`expand_queues`] then re-sees the still-queue-marked stock and clears
+/// the queue marker. A both-marked stock would therefore be expanded TWICE --
+/// given both a [`crate::conveyor_compile::ConveyorPlan`] AND a [`QueuePlan`] over
+/// the same stock and shared outflow slot -- and [`run_coupled_passes`] would
+/// drive that slot from both passes (the last writer winning while belt and FIFO
+/// advance under different rates): silent garbage with no diagnostic, and both
+/// markers cleared so the [`crate::db`] `ConveyorNotExpanded`/`QueueNotExpanded`
+/// guard can never see it.
+///
+/// This scan runs BEFORE either expansion (so no clone is mutated) at the single
+/// shared chokepoint every production caller funnels through -- [`build_sim`] ->
+/// [`build_vm`] -> [`build_compiled`], and libsimlin's `simlin_sim_new` ->
+/// [`build_compiled`] -- so no per-path twin is needed. It scans the MAIN model
+/// only, because expansion touches only the main model: a both-marked stock in a
+/// sub-model never double-expands (the pass leaves it untouched) and is already
+/// rejected loudly by the `db` guard's per-marker submodel arm
+/// ([`ErrorCode::ConveyorInSubmodelUnsupported`], which fires first on the surviving
+/// conveyor block).
+fn reject_conveyor_queue_conflict(
+    project: &datamodel::Project,
+    main_model: &str,
+) -> Result<(), (ErrorCode, String)> {
+    let main_canon = canon(main_model);
+    let Some(main) = project.models.iter().find(|m| canon(&m.name) == main_canon) else {
+        // No such model: the caller's ordinary compile reports the missing model.
+        return Ok(());
+    };
+    for v in &main.variables {
+        if let datamodel::Variable::Stock(s) = v
+            && s.compat.conveyor.is_some()
+            && s.compat.queue.is_some()
+        {
+            return Err((
+                ErrorCode::StockBothConveyorAndQueue,
+                format!(
+                    "stock '{}' is marked as BOTH a conveyor and a queue, but a stock has \
+                     exactly one type; remove either the <conveyor> block or the <queue/> \
+                     marker (XMILE defines conveyors and queues as distinct stock types)",
+                    s.ident
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Compile `project` and resolve BOTH its conveyor and queue plans, returning the
 /// compiled simulation plus the two plan sets (either empty when the model has
 /// none of that kind). This is the unified special-stock-type build path: a model
@@ -867,6 +920,15 @@ pub fn build_compiled(
     Vec<QueuePlan>,
 )> {
     use crate::common::{Error, ErrorKind};
+
+    // A stock cannot be both a conveyor and a queue (§10.7): reject a both-marked
+    // stock BEFORE either expansion, since each expansion clears only its own
+    // marker and the two passes would otherwise silently double-drive the shared
+    // outflow slot. This is the single shared chokepoint every production caller
+    // funnels through, so no per-path twin (e.g. in the db guard, which can't see
+    // the then-cleared markers anyway) is needed.
+    reject_conveyor_queue_conflict(project, main_model)
+        .map_err(|(code, msg)| Error::new(ErrorKind::Simulation, code, Some(msg)))?;
 
     // Expand conveyors first, then queues on the result. The expansions are
     // order-independent (neither reads the other's marker); the coupling is
@@ -1937,6 +1999,57 @@ mod tests {
         for (i, &o) in into_service.iter().enumerate() {
             assert!((o - 10.0).abs() < 1e-9, "into_service[{i}] = {o}");
         }
+    }
+
+    /// F12: a SINGLE stock carrying BOTH a `<conveyor>` block and a `<queue/>`
+    /// marker is a type conflict (a stock has exactly one type, §10.7). Nothing
+    /// downstream reconciles the two markers: `expand_conveyors` clears only the
+    /// conveyor block and `expand_queues` then re-expands the still-queue-marked
+    /// stock, so the stock and its shared outflow slot end up with BOTH a
+    /// `ConveyorPlan` and a `QueuePlan` and the two passes silently fight over the
+    /// slot. `build_compiled` must reject it up front (before either expansion),
+    /// naming the stock.
+    ///
+    /// This differs from `conveyor_and_queue_coexist_in_one_model` (two DISTINCT
+    /// stocks), which is the legitimate coexistence case and still compiles.
+    const BOTH_MARKERS_STOCK: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>both markers</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>4</stop><dt>0.25</dt></sim_specs>
+  <model><variables>
+    <stock name="belt">
+      <eqn>10</eqn>
+      <inflow>into_belt</inflow>
+      <outflow>out</outflow>
+      <conveyor><len>4</len></conveyor>
+      <queue/>
+    </stock>
+    <flow name="into_belt"><eqn>5</eqn><non_negative/></flow>
+    <flow name="out"><eqn>0</eqn></flow>
+    <stock name="done"><eqn>0</eqn><inflow>out</inflow></stock>
+  </variables></model>
+</xmile>"#;
+
+    #[test]
+    fn stock_with_both_conveyor_and_queue_markers_rejected_by_build_compiled() {
+        let project = parse(BOTH_MARKERS_STOCK);
+        let main = project.models[0].name.clone();
+        let err = build_compiled(&project, &main)
+            .expect_err("a stock marked as both a conveyor and a queue must be rejected");
+        assert_eq!(err.code, ErrorCode::StockBothConveyorAndQueue);
+        let details = err.details.expect("a diagnostic message");
+        assert!(details.contains("belt"), "names the stock: {details}");
+    }
+
+    #[test]
+    fn stock_with_both_conveyor_and_queue_markers_rejected_by_build_sim() {
+        let project = parse(BOTH_MARKERS_STOCK);
+        let main = project.models[0].name.clone();
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+        let err = build_sim(&db, sync.project, &project, &main)
+            .expect_err("build_sim must reject a both-marked stock");
+        assert_eq!(err.code, ErrorCode::StockBothConveyorAndQueue);
     }
 
     #[test]
