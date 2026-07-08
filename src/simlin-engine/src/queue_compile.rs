@@ -2058,6 +2058,45 @@ mod tests {
     }
 
     #[test]
+    fn queue_container_init_reads_start_of_run_not_placeholder() {
+        // A queue seeded with an initial batch of 40 (so the FIFO starts
+        // non-empty), pure accumulator (arrivals, no outflow). SUM(waiting) grows
+        // over the run, but INIT(SUM(waiting)) must be the START-OF-RUN batch total
+        // (40) at every step -- not the hidden container stock's '0' placeholder.
+        // The rewrite turns both SUM(waiting) and INIT(SUM(waiting)) into the
+        // hidden stock $queue$sum$waiting; its initial_values snapshot must be
+        // patched to the seeded FIFO's total (pre-fix INIT read the frozen 0).
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q init</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>40</eqn><inflow>arrivals</inflow><queue/></stock>
+    <flow name="arrivals"><eqn>10</eqn><non_negative/></flow>
+    <aux name="init_sum"><eqn>INIT(SUM(waiting))</eqn></aux>
+    <aux name="init_size"><eqn>INIT(SIZE(waiting))</eqn></aux>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let vm = build_run(&project);
+        let init_sum = vm.get_series(&Ident::new("init_sum")).expect("init_sum");
+        for (i, &v) in init_sum.iter().enumerate() {
+            assert!(
+                (v - 40.0).abs() < 1e-9,
+                "step {i}: INIT(SUM(waiting)) = {v} (want 40; pre-fix 0)"
+            );
+        }
+        // The seeded queue starts with exactly one batch, so INIT(SIZE)==1.
+        let init_size = vm.get_series(&Ident::new("init_size")).expect("init_size");
+        for (i, &v) in init_size.iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "step {i}: INIT(SIZE(waiting)) = {v} (want 1; pre-fix 0)"
+            );
+        }
+    }
+
+    #[test]
     fn scalar_queue_batch_index_and_out_of_range_is_nan() {
         // `queue[k]` is 1-based from the FRONT (oldest). k outside [1, count] -> NaN.
         let front = accumulator_reader("waiting[1]");

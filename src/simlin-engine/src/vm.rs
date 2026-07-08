@@ -1419,7 +1419,8 @@ impl Vm {
             }
             // Publish container-access values (§10) for the initialized belts, so
             // the t=0 slot holds the start-of-step value even before the first
-            // Euler step re-publishes it.
+            // Euler step re-publishes it. (The container-reading initials are
+            // re-run against these published values below.)
             crate::conveyor_compile::publish_container_values(
                 &self.conveyor_plans,
                 &self.conveyors,
@@ -1446,6 +1447,69 @@ impl Vm {
                 &self.queues,
                 curr,
             );
+        }
+
+        // Reconcile INIT(<container access>) with the published start-of-run
+        // container values. The `initial_values` snapshot above deliberately
+        // precedes the belt/queue init (belt init needs the Flows-phase belt
+        // params AND the stock's initial value, so it cannot run before the
+        // snapshot -- and keeping the snapshot first is what makes INIT() of
+        // ordinary variables pure). But that means the snapshot captured each
+        // container stock's frozen '0' <eqn> placeholder, not the belt/FIFO's
+        // start-of-run total. Any initials-phase reader of a container slot --
+        // INIT(SUM(belt)) directly, INIT(SUM(belt[a])) via its synthesized
+        // per-element helper aux, or a stock initialized from SUM(belt) -- thus
+        // captured 0 (yielding inf/NaN in ratios like SUM(belt)/INIT(SUM(belt))).
+        //
+        // The belt/queue passes just published the true container values into
+        // `curr`, so re-run the initials runlist over `curr` and re-snapshot: every
+        // container-dependent initial now recomputes from the published values.
+        // The container stocks themselves are SKIPPED (their init is the '0'
+        // placeholder; re-running it would clobber the published value before the
+        // dependent reads run), so the published `curr` slots survive the pass and
+        // feed the reads. This is idempotent for every other variable (the initials
+        // runlist is deterministic and topologically complete, so a second pass
+        // recomputes identical values), and re-running with an empty skip set for a
+        // container-free model would be a no-op -- so the pass is gated on the
+        // presence of container slots. `prev_values` needs no analogous fix:
+        // PREVIOUS() returns its fallback on the first step (use_prev_fallback --
+        // correct, no prior step exists), and thereafter prev_values is seeded only
+        // by run_to's end-of-step copy_from_slice, which already captures the
+        // no-flow container slot.
+        let container_offsets: std::collections::HashSet<usize> = self
+            .conveyor_plans
+            .iter()
+            .flat_map(|p| p.containers.iter())
+            .chain(self.queue_plans.iter().flat_map(|p| p.containers.iter()))
+            .map(|c| c.off)
+            .collect();
+        if !container_offsets.is_empty() {
+            let root_idx = self.sliced_sim.root_idx;
+            let mut init_state = EvalState {
+                stack: &mut self.stack,
+                temp_storage: &mut self.temp_storage,
+                view_stack: &mut self.view_stack,
+                iter_stack: &mut self.iter_stack,
+                broadcast_stack: &mut self.broadcast_stack,
+                initial_values: &self.initial_values,
+                prev_values: &mut self.prev_values,
+                use_prev_fallback: true,
+            };
+            let (curr, next) =
+                borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
+            Self::eval_initials_skipping(
+                &self.sliced_sim,
+                &mut init_state,
+                root_idx,
+                0,
+                module_inputs,
+                curr,
+                next,
+                &container_offsets,
+            );
+            let curr_start = self.curr_chunk * self.n_slots;
+            self.initial_values
+                .copy_from_slice(&data[curr_start..curr_start + self.n_slots]);
         }
 
         self.did_initials = true;
@@ -1494,6 +1558,54 @@ impl Vm {
         let module = &sliced_sim.modules[module_idx];
         let context = &module.context;
         for compiled_initial in module.initials.iter() {
+            Self::eval_bytecode(
+                sliced_sim,
+                state,
+                context,
+                &compiled_initial.bytecode,
+                StepPart::Initials,
+                module_off,
+                module_idx,
+                module_inputs,
+                curr,
+                next,
+            );
+        }
+    }
+
+    /// Re-evaluate the initials runlist, skipping every variable whose
+    /// AssignCurr targets are ALL in `skip_offsets`. Used to reconcile
+    /// INIT(<container access>) with the belt/queue values published into `curr`
+    /// AFTER the primary initials snapshot (see `run_initials`): re-running the
+    /// runlist recomputes any container-dependent initial from the published
+    /// values, while skipping the container stocks themselves preserves those
+    /// published `curr` slots (their init is the frozen '0' placeholder, which
+    /// would otherwise clobber the published value before the dependent reads).
+    /// A CompiledInitial's `offsets` are exactly the slots it writes, so a
+    /// container stock -- which writes only its own slot(s) -- is the one whose
+    /// offsets are wholly contained in the container-slot set.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_initials_skipping(
+        sliced_sim: &CompiledSlicedSimulation,
+        state: &mut EvalState<'_>,
+        module_idx: usize,
+        module_off: usize,
+        module_inputs: &[f64],
+        curr: &mut [f64],
+        next: &mut [f64],
+        skip_offsets: &std::collections::HashSet<usize>,
+    ) {
+        let module = &sliced_sim.modules[module_idx];
+        let context = &module.context;
+        for compiled_initial in module.initials.iter() {
+            if !compiled_initial.offsets.is_empty()
+                && compiled_initial
+                    .offsets
+                    .iter()
+                    .all(|off| skip_offsets.contains(off))
+            {
+                continue;
+            }
             Self::eval_bytecode(
                 sliced_sim,
                 state,

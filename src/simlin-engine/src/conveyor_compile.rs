@@ -3154,6 +3154,146 @@ mod tests {
     }
 
     #[test]
+    fn container_init_reads_start_of_run_value_not_placeholder() {
+        // INIT(<container access>) must read the belt's START-OF-RUN value, not
+        // the hidden container stock's '0' <eqn> placeholder. The rewrite turns
+        // both SUM(belt) and INIT(SUM(belt)) into the hidden stock $conv$sum$belt;
+        // its initial_values snapshot must be patched to the initialized belt's
+        // total. On the steady belt SUM(belt)==1000 every step, so the ratio is
+        // 1.0; before the fix INIT read the frozen 0 and the ratio was +inf.
+        let ratio = steady_reader_series("SUM(belt) / INIT(SUM(belt))");
+        for (i, &v) in ratio.iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "step {i}: SUM(belt)/INIT(SUM(belt)) = {v} (want 1.0; pre-fix +inf)"
+            );
+        }
+        // INIT of a reducer, SIZE, and a slat index all read the start-of-run
+        // belt (16 slats of 62.5): pre-fix every one read the frozen 0.
+        for (eqn, want) in [
+            ("INIT(SUM(belt))", 1000.0),
+            ("INIT(SIZE(belt))", 16.0),
+            ("INIT(belt[1])", 62.5),
+        ] {
+            let series = steady_reader_series(eqn);
+            for (i, &v) in series.iter().enumerate() {
+                assert!(
+                    (v - want).abs() < 1e-9,
+                    "'{eqn}' step {i}: got {v}, want {want} (pre-fix 0)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stock_initialized_from_container_access_reads_start_of_run() {
+        // A plain stock whose <eqn> is a container access (no INIT wrapper) must
+        // also start from the belt's start-of-run total: the belt/queue init runs
+        // after the initials snapshot, so the initials pass first sees the '0'
+        // placeholder, and the reconciliation re-run recomputes the stock's initial
+        // value from the published belt. `accum` starts at SUM(belt)=1000 and, with
+        // no flows, holds flat -- pre-fix it started at 0.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>1000</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <stock name="accum"><eqn>SUM(belt)</eqn></stock>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build stock-init vm");
+        vm.run_to_end().expect("run");
+        let accum = vm.get_series(&Ident::new("accum")).expect("accum");
+        assert!(
+            (accum[0] - 1000.0).abs() < 1e-9,
+            "accum[0] = {} (want 1000; pre-fix 0)",
+            accum[0]
+        );
+        for (i, &v) in accum.iter().enumerate() {
+            assert!(
+                (v - 1000.0).abs() < 1e-9,
+                "step {i}: accum = {v} (a no-flow stock initialized to 1000 stays flat)"
+            );
+        }
+    }
+
+    #[test]
+    fn container_init_survives_reset_and_rerun() {
+        // libsimlin's reset recreates the belt side table and re-runs
+        // run_initials, so the container-value reconciliation must be idempotent:
+        // INIT(SUM(belt)) must still read the start-of-run 1000 after a reset,
+        // not accumulate or drift. The re-run derives only from freshly published
+        // belt state, so it is idempotent by construction.
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>1000</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>
+        <aux name="reader"><eqn>INIT(SUM(belt))</eqn></aux>"#,
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build reset vm");
+        vm.run_to_end().expect("first run");
+        let first = vm.get_series(&Ident::new("reader")).expect("reader");
+        vm.reset();
+        vm.run_to_end().expect("second run");
+        let second = vm.get_series(&Ident::new("reader")).expect("reader");
+        assert_eq!(first, second, "reset+rerun must reproduce INIT(SUM(belt))");
+        for (i, &v) in second.iter().enumerate() {
+            assert!(
+                (v - 1000.0).abs() < 1e-9,
+                "step {i}: INIT(SUM(belt)) = {v} after reset (want 1000)"
+            );
+        }
+    }
+
+    #[test]
+    fn arrayed_container_init_patches_every_element_slot() {
+        // An arrayed conveyor's container stock is arrayed over the owner's dims,
+        // so the initial_values patch-up must reach EVERY element slot, not just
+        // the first. Both belts start at steady 1000 (inflow 250, transit 4), so
+        // SUM(belt[a])==SUM(belt[b])==1000 every step and INIT(SUM(belt[a]))==1000
+        // for each element (pre-fix 0 -> ratio +inf for both).
+        let xml = wrap_model(
+            r#"
+        <stock name="belt"><eqn>1000</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <dimensions><dim name="board"/></dimensions>
+          <conveyor><len>4</len></conveyor></stock>
+        <flow name="in_f"><eqn>250</eqn><dimensions><dim name="board"/></dimensions></flow>
+        <flow name="out_f"><dimensions><dim name="board"/></dimensions></flow>
+        <aux name="ratio_a"><eqn>SUM(belt[a]) / INIT(SUM(belt[a]))</eqn></aux>
+        <aux name="init_b"><eqn>INIT(SUM(belt[b]))</eqn></aux>"#,
+        );
+        // wrap_model has no <dimensions>; inject the board dimension.
+        let xml = xml.replace(
+            "<model>",
+            "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+        );
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build arrayed init vm");
+        vm.run_to_end().expect("run");
+        let ratio_a = vm.get_series(&Ident::new("ratio_a")).expect("ratio_a");
+        for (i, &v) in ratio_a.iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "step {i}: SUM(belt[a])/INIT(SUM(belt[a])) = {v} (want 1.0; pre-fix +inf)"
+            );
+        }
+        let init_b = vm.get_series(&Ident::new("init_b")).expect("init_b");
+        for (i, &v) in init_b.iter().enumerate() {
+            assert!(
+                (v - 1000.0).abs() < 1e-9,
+                "step {i}: INIT(SUM(belt[b])) = {v} (want 1000; pre-fix 0 -- second element slot)"
+            );
+        }
+    }
+
+    #[test]
     fn container_reducer_on_filling_belt_tracks_min_max_stddev() {
         // A belt filling from empty exercises MIN/MAX/STDDEV over a non-uniform
         // and briefly-empty belt. Insert-at-entry (default `beginning`) means an
