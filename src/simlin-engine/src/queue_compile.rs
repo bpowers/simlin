@@ -702,20 +702,59 @@ fn serve_secondary_outflows(
     }
 }
 
-/// Serve one UNCOUPLED queue for this DT: admit `Σ inflow_rate · dt` (§4.2 step 1),
-/// then serve its outflows in priority order (§4.2 step 2). An uncoupled queue's
-/// primary outflow targets a cloud or regular stock and so is unconstrained: it
-/// EMPTIES the queue (§4.3), leaving redirectable = 0 for any secondary/overflow
-/// sibling (§4.5). Shared by [`run_queue_pass`] (fully uncoupled models) and the
-/// uncoupled tail of [`run_coupled_passes`].
+/// Admit this DT's inflow into `state` while keeping the flat queue stock in
+/// lockstep with the FIFO side table (docs/design/queues.md §3.4/§4.1/§4.2 step 1).
+///
+/// §4.2 step 1 admits one batch of `Σ max(f_i, 0) · dt` -- each inflow clamped at
+/// zero INDEPENDENTLY, then summed (sum-of-clamps, NOT clamp-of-sum; §3.4: "a
+/// negative inflow contributes no batch"). The flat queue stock is integrated by
+/// the ordinary Stocks phase from the SAME inflow slots (§4.1's conservation
+/// identity `Δqueue = Σ inflow − Σ outflow`), so unless the clamped value is
+/// written BACK into each slot the Stocks phase folds the raw (possibly negative)
+/// rate into the stock and it drifts away from `Σ batches` -- the invariant §4.1
+/// pins. We therefore clamp each inflow slot IN PLACE before summing, exactly as
+/// [`crate::conveyor_compile::conveyor_phase_b_one`] writes its admitted/clamped
+/// equation-inflow rates back, so the admitted volume and the integrated Δstock
+/// are equal by construction for every sign combination:
+/// - all inflows ≥ 0: every slot is unchanged and `Σ slots == admit rate` exactly;
+/// - a negative inflow: its slot is zeroed, so neither the batch nor the stock
+///   sees it -- a modeler-visible inflow's saved series then reads 0 for that step,
+///   matching how a clamped conveyor equation inflow is published;
+/// - a NaN inflow: `NaN.max(0.0) == 0.0` zeroes the slot (the same defensive
+///   hygiene [`crate::queue::QueueState::take_for_conveyor`] / `clamp_cap` apply),
+///   so one poisoned inflow does not silently poison the flat stock.
+///
+/// This is the single admit path both the uncoupled ([`serve_uncoupled_queue`]) and
+/// coupled ([`run_coupled_passes`]) queue serves call, so the write-back can never
+/// drift between them.
+fn admit_inflows(
+    inflow_offs: &[usize],
+    state: &mut crate::queue::QueueState,
+    curr: &mut [f64],
+    dt: f64,
+) {
+    let mut rate = 0.0;
+    for &off in inflow_offs {
+        let clamped = curr[off].max(0.0);
+        curr[off] = clamped;
+        rate += clamped;
+    }
+    state.admit(rate, dt);
+}
+
+/// Serve one UNCOUPLED queue for this DT: admit `Σ max(inflow, 0) · dt` (§4.2 step 1,
+/// via [`admit_inflows`]), then serve its outflows in priority order (§4.2 step 2).
+/// An uncoupled queue's primary outflow targets a cloud or regular stock and so is
+/// unconstrained: it EMPTIES the queue (§4.3), leaving redirectable = 0 for any
+/// secondary/overflow sibling (§4.5). Shared by [`run_queue_pass`] (fully uncoupled
+/// models) and the uncoupled tail of [`run_coupled_passes`].
 fn serve_uncoupled_queue(
     plan: &QueuePlan,
     state: &mut crate::queue::QueueState,
     curr: &mut [f64],
     dt: f64,
 ) {
-    let inflow_rate: f64 = plan.inflow_offs.iter().map(|&o| curr[o]).sum();
-    state.admit(inflow_rate, dt);
+    admit_inflows(&plan.inflow_offs, state, curr, dt);
     if let Some(primary) = plan.outflows.first() {
         // The primary of an uncoupled queue is Unconstrained (a coupled primary is
         // served by the combined pass, and only the primary is ever coupled), so it
@@ -1170,8 +1209,7 @@ pub fn run_coupled_passes(
             // Size the budget from THIS conveyor's phase A (belt room), admit the
             // queue's inflow, then serve up to `req` under the batch rules.
             let req = cc::coupled_admission_budget(&conv_plans[i], &conveyors[i], &pa[i], curr, dt);
-            let inflow_rate: f64 = queue_plans[qi].inflow_offs.iter().map(|&o| curr[o]).sum();
-            queues[qi].admit(inflow_rate, dt);
+            admit_inflows(&queue_plans[qi].inflow_offs, &mut queues[qi], curr, dt);
             // Measure the batch-policy desire BEFORE the finite-`req` take mutates
             // the front (§4.5): the redirectable volume an <overflow/> sibling may
             // claim is `desire − taken` -- exactly the front material capacity /
@@ -2865,5 +2903,200 @@ mod tests {
         let (code, _msg) = expand_queues(&project, &project.models[0].name)
             .expect_err("overflow without queue rejected");
         assert_eq!(code, ErrorCode::QueueOverflowNotOnQueue);
+    }
+
+    // ----- Part D: non-negative inflow clamp keeps the flat stock == Σ batches
+    // (§3.4/§4.1/§4.2 step 1). A queue inflow is clamped at zero (a negative
+    // inflow contributes no batch); the clamped rate MUST be written back into the
+    // inflow's slot so the ordinary Stocks phase integrates the SAME volume the
+    // FIFO admitted, exactly as `conveyor_phase_b_one` writes admitted equation
+    // inflows back. Without the write-back the Stocks phase folds the raw negative
+    // rate into the flat queue stock while the batch side table stays empty -- a
+    // silent divergence between the stock's saved series and Σ batches. -----
+
+    #[test]
+    fn uncoupled_negative_inflow_freezes_stock_and_clamps_inflow_series() {
+        // A pass-through queue whose single inflow goes negative mid-run: 10 until
+        // t<2, then -10 (no <non_negative/>, so the raw rate reaches the queue). The
+        // queue empties every DT, so after the clamp the flat stock must hold at 0
+        // and equal Σ batches (published via SUM(waiting)); before the write-back
+        // the Stocks phase drove `waiting` to -10, -20, ... while SUM(waiting)
+        // stayed 0.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow><outflow>into_service</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>IF TIME >= 2 THEN -10 ELSE 10</eqn></flow>
+    <flow name="into_service"><eqn>0</eqn></flow>
+    <stock name="served"><eqn>0</eqn><inflow>into_service</inflow></stock>
+    <aux name="q_sum"><eqn>SUM(waiting)</eqn></aux>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let vm = build_run(&project);
+        let waiting = vm.get_series(&Ident::new("waiting")).unwrap();
+        let q_sum = vm.get_series(&Ident::new("q_sum")).unwrap();
+        let arrivals = vm.get_series(&Ident::new("arrivals")).unwrap();
+
+        for (i, &w) in waiting.iter().enumerate() {
+            assert!(w >= -1e-9, "waiting[{i}] = {w} drifted below zero");
+            assert!(
+                (w - q_sum[i]).abs() < 1e-9,
+                "Σ batches == stock broken at {i}: waiting = {w}, SUM = {}",
+                q_sum[i]
+            );
+        }
+        // The negative inflow's slot is written back to 0 (§3.4: a negative inflow
+        // contributes no batch), like the conveyor's admitted/clamped equation
+        // inflow. dt=1/start=0 so index == TIME: steps 2..4 are the negative arm.
+        assert!(
+            (arrivals[0] - 10.0).abs() < 1e-9,
+            "arrivals[0] = {}",
+            arrivals[0]
+        );
+        for (i, &a) in arrivals.iter().enumerate().skip(2) {
+            assert!(a.abs() < 1e-9, "arrivals[{i}] = {a} not clamped to 0");
+        }
+    }
+
+    #[test]
+    fn uncoupled_all_negative_inflow_freezes_seeded_queue() {
+        // A queue seeded with a batch of 30 and NO outflow, fed a wholly-negative
+        // inflow (-5): §3.4 admits nothing, so the seeded batch is frozen. The flat
+        // stock must hold at 30 (== Σ batches) every step and the inflow slot must
+        // read 0; before the fix the Stocks phase drained the stock by 5 per DT
+        // (30, 25, 20, ...) while the single 30-batch sat untouched in the FIFO.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>3</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>30</eqn><inflow>bleed</inflow><queue/></stock>
+    <flow name="bleed"><eqn>-5</eqn></flow>
+    <aux name="q_sum"><eqn>SUM(waiting)</eqn></aux>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let vm = build_run(&project);
+        let waiting = vm.get_series(&Ident::new("waiting")).unwrap();
+        let q_sum = vm.get_series(&Ident::new("q_sum")).unwrap();
+        let bleed = vm.get_series(&Ident::new("bleed")).unwrap();
+
+        for (i, &w) in waiting.iter().enumerate() {
+            assert!(
+                (w - 30.0).abs() < 1e-9,
+                "waiting[{i}] = {w} not frozen at 30"
+            );
+            assert!(
+                (w - q_sum[i]).abs() < 1e-9,
+                "Σ batches == stock broken at {i}: waiting = {w}, SUM = {}",
+                q_sum[i]
+            );
+        }
+        for (i, &b) in bleed.iter().enumerate() {
+            assert!(b.abs() < 1e-9, "bleed[{i}] = {b} not clamped to 0");
+        }
+    }
+
+    #[test]
+    fn mixed_sign_multi_inflow_admits_sum_of_per_flow_clamps() {
+        // Two inflows into one accumulator queue (no outflow): in_pos=10, in_neg=-3.
+        // §4.2 step 1 clamps EACH inflow at zero independently, THEN appends one
+        // batch of the summed volume -- so 10 is admitted per DT (sum-of-clamps),
+        // NOT max(10-3, 0)=7 (clamp-of-sum). The flat stock and Σ batches must both
+        // equal 10·t, only the negative inflow's slot is zeroed, and the positive
+        // inflow's series is untouched.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>in_pos</inflow><inflow>in_neg</inflow><queue/></stock>
+    <flow name="in_pos"><eqn>10</eqn></flow>
+    <flow name="in_neg"><eqn>-3</eqn></flow>
+    <aux name="q_sum"><eqn>SUM(waiting)</eqn></aux>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let vm = build_run(&project);
+        let waiting = vm.get_series(&Ident::new("waiting")).unwrap();
+        let q_sum = vm.get_series(&Ident::new("q_sum")).unwrap();
+        let in_pos = vm.get_series(&Ident::new("in_pos")).unwrap();
+        let in_neg = vm.get_series(&Ident::new("in_neg")).unwrap();
+
+        for (i, &w) in waiting.iter().enumerate() {
+            let want = 10.0 * i as f64;
+            assert!(
+                (w - want).abs() < 1e-9,
+                "waiting[{i}] = {w}, want {want} (sum-of-clamps admits 10, not 7)"
+            );
+            assert!(
+                (w - q_sum[i]).abs() < 1e-9,
+                "Σ batches == stock broken at {i}: waiting = {w}, SUM = {}",
+                q_sum[i]
+            );
+        }
+        for (i, &n) in in_neg.iter().enumerate() {
+            assert!(n.abs() < 1e-9, "in_neg[{i}] = {n} not clamped to 0");
+        }
+        for (i, &p) in in_pos.iter().enumerate() {
+            assert!((p - 10.0).abs() < 1e-9, "in_pos[{i}] = {p} was altered");
+        }
+    }
+
+    #[test]
+    fn coupled_queue_negative_inflow_conserves_and_clamps() {
+        // A queue feeding a discrete conveyor (cap 10, transit 100 >> sim length)
+        // whose inflow goes negative at t>=3 (8 until then, -8 after). The COMBINED
+        // pass must clamp the negative inflow too: the queue stock stays == Σ batches
+        // and belt+waiting holds at the cumulative admitted volume (8 per step for
+        // the first three steps = 24). Before the fix the coupled admit site folded
+        // the raw -8 into the flat queue stock while the FIFO ignored it, breaking
+        // conservation and the Σ-batches invariant.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>c</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>5</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="waiting"><eqn>0</eqn><inflow>arrivals</inflow><outflow>into_belt</outflow><queue/></stock>
+    <flow name="arrivals"><eqn>IF TIME >= 3 THEN -8 ELSE 8</eqn></flow>
+    <flow name="into_belt"><eqn>0</eqn></flow>
+    <stock name="belt"><eqn>0</eqn><inflow>into_belt</inflow><outflow>graduating</outflow>
+      <conveyor discrete="true" one_at_a_time="false" batch_integrity="false">
+        <len>100</len><capacity>10</capacity></conveyor></stock>
+    <flow name="graduating"><eqn>0</eqn></flow>
+    <stock name="alumni"><eqn>0</eqn><inflow>graduating</inflow></stock>
+    <aux name="q_sum"><eqn>SUM(waiting)</eqn></aux>
+  </variables></model>
+</xmile>"#;
+        let project = parse(xml);
+        let vm = build_run(&project);
+        let waiting = vm.get_series(&Ident::new("waiting")).unwrap();
+        let belt = vm.get_series(&Ident::new("belt")).unwrap();
+        let q_sum = vm.get_series(&Ident::new("q_sum")).unwrap();
+        let arrivals = vm.get_series(&Ident::new("arrivals")).unwrap();
+
+        // Cumulative admitted at start-of-step t: 8 per step, clamped to 0 once
+        // arrivals go negative -> 8·min(t, 3). Nothing exits the belt (transit 100).
+        for (i, &w) in waiting.iter().enumerate() {
+            assert!(w >= -1e-9, "waiting[{i}] = {w} drifted negative");
+            assert!(
+                (w - q_sum[i]).abs() < 1e-9,
+                "Σ batches == stock broken at {i}: waiting = {w}, SUM = {}",
+                q_sum[i]
+            );
+            let in_system = belt[i] + w;
+            let want = 8.0 * (i.min(3) as f64);
+            assert!(
+                (in_system - want).abs() < 1e-9,
+                "step {i}: belt+waiting = {in_system}, want {want}"
+            );
+        }
+        // The negative inflow's slot is written back to 0 in the coupled path too.
+        for (i, &a) in arrivals.iter().enumerate().skip(3) {
+            assert!(a.abs() < 1e-9, "arrivals[{i}] = {a} not clamped to 0");
+        }
     }
 }

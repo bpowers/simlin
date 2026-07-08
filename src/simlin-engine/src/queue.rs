@@ -95,8 +95,13 @@ impl QueueState {
     /// `max(inflow_rate, 0) * dt` at the BACK. A negative inflow contributes no
     /// batch (§3.4), and a zero (or negative) clamped volume appends nothing at
     /// all -- so the queue never accumulates spurious empty batches that would
-    /// pollute the batch count and container access. Multiple inflows are summed
-    /// by the caller into one `inflow_rate` before calling this (§4.2).
+    /// pollute the batch count and container access. Multiple inflows are clamped
+    /// at zero INDEPENDENTLY and summed into one non-negative `inflow_rate` by the
+    /// pass caller (`queue_compile::admit_inflows`, sum-of-clamps per §4.2 step 1),
+    /// which also writes each clamped rate back into its flow slot so the ordinary
+    /// Stocks phase integrates the same volume; the internal `max(0.0)` here is then
+    /// a no-op for that caller but keeps `admit` total for a direct (test) caller
+    /// passing a raw signed rate.
     pub fn admit(&mut self, inflow_rate: f64, dt: f64) {
         let in_vol = inflow_rate.max(0.0) * dt;
         if in_vol > 0.0 {
