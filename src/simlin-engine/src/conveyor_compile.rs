@@ -2114,13 +2114,39 @@ pub fn run_pass(
     curr: &mut [f64],
     dt: f64,
     time: f64,
+    start: f64,
     last_unit: &mut i64,
 ) -> Result<(), (ErrorCode, String)> {
-    let pa = run_phase_a(plans, states, curr, dt, time, last_unit)?;
+    let pa = run_phase_a(plans, states, curr, dt, time, start, last_unit)?;
     for i in 0..plans.len() {
         conveyor_phase_b_one(i, plans, states, &pa, curr, dt);
     }
     Ok(())
+}
+
+/// The integer time unit a modeled clock `time` falls in, for the discrete
+/// conveyor per-time-unit `in_limit` budget reset (§6.3).
+///
+/// The VM advances TIME additively (`next[TIME] = curr[TIME] + dt`), so for a dt
+/// that is not exactly representable in binary the running clock accumulates
+/// rounding error and sits a few ULPs off each ideal grid time -- ten 0.1 steps
+/// sum to 0.999...9, whose `floor` is 0, not 1. Flooring that drifted clock would
+/// fire the budget reset one dt late: the step that models t = k.0 would still
+/// see the previous unit's exhausted budget and admit nothing, and the admission
+/// pulse would land at t ~= k.1. Instead recover the exact step index from the
+/// clock -- the accumulated error is far below dt/2, so `(time - start) / dt`
+/// rounds back to the true integer step count -- and take the boundary from the
+/// ideal grid time `start + k*dt`, formed with a single multiply (correctly
+/// rounded to within 0.5 ULP, so e.g. `10 * 0.1` is exactly 1.0). This mirrors
+/// [`crate::conveyor`]'s `block_of`, which likewise derives `floor(index * dt)`
+/// from an integer index rather than from an accumulated sum.
+///
+/// At the first step (`time == start`) this returns `floor(start)`, matching the
+/// `conveyor_last_unit` seed the VM sets in `run_initials` / `set_conveyor_plans`,
+/// so the reset never spuriously fires on step 0.
+fn conveyor_time_unit(time: f64, start: f64, dt: f64) -> i64 {
+    let k = ((time - start) / dt).round();
+    (start + k * dt).floor() as i64
 }
 
 /// Phase A over all conveyors (§4.3 steps 0-3): reset the discrete inflow budget
@@ -2130,6 +2156,10 @@ pub fn run_pass(
 /// [`PhaseAResult`]s (indexed by plan). No phase reads another conveyor's
 /// same-phase result, so this is order-free (conveyor chains/cycles need no
 /// topological ordering).
+///
+/// `start` is the run's start time; together with `dt` it lets the boundary
+/// detection recover the ideal grid time from the drift-accumulated `time` (see
+/// [`conveyor_time_unit`]).
 ///
 /// Errors ([`ErrorCode::ConveyorTransitTooLong`]) when a belt's mid-run
 /// `<sample>` re-latch would need more slats than `conveyor::slat_bound()` --
@@ -2141,10 +2171,13 @@ pub fn run_phase_a(
     curr: &mut [f64],
     dt: f64,
     time: f64,
+    start: f64,
     last_unit: &mut i64,
 ) -> Result<Vec<PhaseAResult>, (ErrorCode, String)> {
     // Discrete per-time-unit in_limit budget resets at integer time boundaries.
-    let unit = time.floor() as i64;
+    // Derive the boundary from the ideal grid time, not the drift-accumulated
+    // clock, so a non-dyadic dt does not fire the reset one dt late.
+    let unit = conveyor_time_unit(time, start, dt);
     if unit != *last_unit {
         *last_unit = unit;
         for s in states.iter_mut() {
@@ -4104,5 +4137,192 @@ mod tests {
             .run_to_end()
             .expect_err("a mid-run relatch needing 5 slats must be rejected against a bound of 4");
         assert_eq!(err.code, ErrorCode::ConveyorTransitTooLong);
+    }
+
+    // ----- discrete per-time-unit in_limit reset (v13 / §6.3) -----
+
+    #[test]
+    fn conveyor_time_unit_recovers_ideal_grid_boundary() {
+        // Non-dyadic dt: ten 0.1 steps accumulate to 0.999...9 (floor 0), but the
+        // per-time-unit boundary is 1 -- taken from the recovered ideal grid time,
+        // not the drift-accumulated clock.
+        let mut acc: f64 = 0.0;
+        for _ in 0..10 {
+            acc += 0.1;
+        }
+        assert_eq!(
+            acc.floor() as i64,
+            0,
+            "precondition: additive drift floors to 0"
+        );
+        assert_eq!(conveyor_time_unit(acc, 0.0, 0.1), 1);
+
+        // dt = 1/3: six steps sum to 1.9999999999999998 (floor 1), but the ideal
+        // grid time 6*dt is exactly 2.0. (Three steps happen to round to exactly
+        // 1.0, so the drift only bites at the k=6 boundary here.)
+        let dt = 1.0 / 3.0;
+        let mut acc: f64 = 0.0;
+        for _ in 0..6 {
+            acc += dt;
+        }
+        assert!(
+            acc < 2.0,
+            "precondition: additive sixths-of-a-third drift below 2.0"
+        );
+        assert_eq!(conveyor_time_unit(acc, 0.0, dt), 2);
+
+        // Dyadic dt is exact: boundary detection is unchanged.
+        assert_eq!(conveyor_time_unit(1.0, 0.0, 0.25), 1);
+        assert_eq!(conveyor_time_unit(0.75, 0.0, 0.25), 0);
+
+        // Step 0 returns floor(start): no spurious reset, matches the VM's
+        // conveyor_last_unit seed.
+        assert_eq!(conveyor_time_unit(0.0, 0.0, 0.1), 0);
+        assert_eq!(conveyor_time_unit(2.5, 2.5, 0.1), 2);
+
+        // A non-grid-aligned start whose grid points straddle (never hit) the
+        // integers must NOT fire early: start=0.05, dt=0.1 -> t~=0.95 is unit 0,
+        // t~=1.05 is unit 1.
+        let start = 0.05;
+        let mut acc = start;
+        for _ in 0..9 {
+            acc += 0.1;
+        }
+        assert_eq!(
+            conveyor_time_unit(acc, start, 0.1),
+            0,
+            "t~=0.95 is still unit 0"
+        );
+        acc += 0.1;
+        assert_eq!(conveyor_time_unit(acc, start, 0.1), 1, "t~=1.05 is unit 1");
+    }
+
+    #[test]
+    fn conveyor_time_unit_no_drift_over_long_run() {
+        // The additive clock drifts both below and above the integers as it
+        // accumulates; recovering the step index keeps every boundary on its ideal
+        // grid step across a long run (500 steps).
+        let dt = 0.1;
+        let mut acc: f64 = 0.0;
+        for step in 0..=500 {
+            let want = (step as f64 * dt).floor() as i64;
+            assert_eq!(
+                conveyor_time_unit(acc, 0.0, dt),
+                want,
+                "step {step}: accumulated {acc} misdetects the time unit"
+            );
+            acc += dt;
+        }
+    }
+
+    fn wrap_model_specs(vars: &str, start: f64, stop: f64, dt: f64) -> String {
+        // `{start}`/`{stop}`/`{dt}` format via f64 Display, i.e. the shortest
+        // round-trippable decimal, so the parsed dt is bit-identical to the f64
+        // the assertions use (1.0/3.0 -> "0.3333333333333333" -> 1.0/3.0).
+        format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product>
+    <options><uses_conveyor/></options></header>
+  <sim_specs method="Euler" time_units="Months"><start>{start}</start><stop>{stop}</stop><dt>{dt}</dt></sim_specs>
+  <model><variables>{vars}</variables></model>
+</xmile>"#
+        )
+    }
+
+    /// Build and run one discrete conveyor whose per-time-unit `in_limit` is 5,
+    /// fed by an abundant (100/unit) equation inflow that exhausts the budget in a
+    /// single step. The `in_f` slot holds the ADMITTED rate (admitted volume / dt)
+    /// after Phase B, so the returned series is a pulse of `5/dt` on the first step
+    /// of each integer time unit and 0 while that unit's budget is spent.
+    fn run_discrete_in_limit_series(start: f64, stop: f64, dt: f64) -> Vec<f64> {
+        let vars = r#"
+        <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+          <conveyor discrete="true"><len>2</len><in_limit>5</in_limit></conveyor></stock>
+        <flow name="in_f"><eqn>100</eqn></flow>
+        <flow name="out_f"><eqn>0</eqn></flow>"#;
+        let xml = wrap_model_specs(vars, start, stop, dt);
+        let project = parse(&xml);
+        let main = project.models[0].name.clone();
+        let mut vm = build_vm(&project, &main).expect("build discrete in_limit vm");
+        vm.run_to_end().expect("run discrete in_limit");
+        vm.get_series(&Ident::new("in_f")).expect("in_f series")
+    }
+
+    /// Assert a discrete `in_limit=5` admission series (from
+    /// [`run_discrete_in_limit_series`], start = 0) is a pulse of `5/dt` on the
+    /// first step of each integer time unit and 0 elsewhere, admitting exactly 5
+    /// per unit. Step `k` models ideal time `k*dt`, so unit `u`'s first step is at
+    /// index `round(u/dt)`.
+    fn assert_discrete_pulses(series: &[f64], dt: f64, n_units: usize) {
+        let pulse_rate = 5.0 / dt;
+        for u in 0..n_units {
+            let first = (u as f64 / dt).round() as usize;
+            let next = ((u as f64 + 1.0) / dt).round() as usize;
+            assert!(
+                next <= series.len(),
+                "unit {u} window [{first},{next}) exceeds series length {}",
+                series.len()
+            );
+            let mut unit_vol = 0.0;
+            for (offset, &rate) in series[first..next].iter().enumerate() {
+                let k = first + offset;
+                unit_vol += rate * dt;
+                if k == first {
+                    assert!(
+                        (rate - pulse_rate).abs() < 1e-6,
+                        "unit {u} step {k} (t~={:.4}): admitted rate {rate}, want pulse {pulse_rate}",
+                        k as f64 * dt
+                    );
+                } else {
+                    assert!(
+                        rate.abs() < 1e-9,
+                        "unit {u} step {k} (t~={:.4}): admitted rate {rate}, want 0 (budget spent)",
+                        k as f64 * dt
+                    );
+                }
+            }
+            assert!(
+                (unit_vol - 5.0).abs() < 1e-6,
+                "unit {u}: admitted {unit_vol} over the unit, want exactly in_limit=5 (no double-fire)"
+            );
+        }
+    }
+
+    #[test]
+    fn discrete_in_limit_pulse_lands_on_integer_step_non_dyadic_dt() {
+        // v13: with dt=0.1 the additive TIME clock sits just below each integer, so
+        // the pre-fix floor(TIME) reset fired one dt late -- the step modeling
+        // t=k.0 still saw the previous unit's exhausted budget and admitted 0, the
+        // pulse instead landing at t~=k.1. The pulse must land on the t=k.0 step.
+        let series = run_discrete_in_limit_series(0.0, 6.0, 0.1);
+        assert_discrete_pulses(&series, 0.1, 6);
+    }
+
+    #[test]
+    fn discrete_in_limit_pulse_dyadic_dt_unchanged() {
+        // A dyadic dt (0.25) is exactly representable: TIME never drifts and the
+        // boundary detection is unchanged by the fix -- a no-regression guard.
+        let series = run_discrete_in_limit_series(0.0, 4.0, 0.25);
+        assert_discrete_pulses(&series, 0.25, 4);
+    }
+
+    #[test]
+    fn discrete_in_limit_reset_thirds_dt_lands_on_grid() {
+        // dt=1/3: three steps sum to 0.999...9 (floor 0), but the ideal grid time
+        // at k=3 is exactly 1.0, so the reset lands on step 3 (t=1), step 6 (t=2),
+        // ... -- the first grid step at or past each integer.
+        let dt = 1.0 / 3.0;
+        let series = run_discrete_in_limit_series(0.0, 6.0, dt);
+        assert_discrete_pulses(&series, dt, 6);
+    }
+
+    #[test]
+    fn discrete_in_limit_no_drift_over_long_run() {
+        // Drift grows with the step count: run to t=50 (500 steps at dt=0.1) and
+        // assert every time unit still admits exactly in_limit=5 on its first step
+        // -- the reset never slips a dt late nor double-fires.
+        let series = run_discrete_in_limit_series(0.0, 50.0, 0.1);
+        assert_discrete_pulses(&series, 0.1, 50);
     }
 }

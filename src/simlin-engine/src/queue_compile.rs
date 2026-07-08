@@ -1259,9 +1259,10 @@ fn apply_couplings(
 /// when a conveyor's mid-run `<sample>` re-latch would exceed the slat-count
 /// bound (§4.1, surfaced from [`crate::conveyor_compile::run_phase_a`]); the VM
 /// aborts the run with a simulation error.
-// The two side-table sets (plans + states), `curr`, `dt`, and the two clock
-// inputs (`time`, `last_unit`) are all independent per-step inputs the VM already
-// holds separately; bundling them into a struct would only add an indirection.
+// The two side-table sets (plans + states), `curr`, `dt`, and the clock inputs
+// (`time`, `start`, `last_unit`) are all independent per-step inputs the VM
+// already holds separately; bundling them into a struct would only add an
+// indirection.
 #[allow(clippy::too_many_arguments)]
 pub fn run_coupled_passes(
     conv_plans: &[crate::conveyor_compile::ConveyorPlan],
@@ -1271,6 +1272,7 @@ pub fn run_coupled_passes(
     curr: &mut [f64],
     dt: f64,
     time: f64,
+    start: f64,
     last_unit: &mut i64,
 ) -> Result<(), (crate::common::ErrorCode, String)> {
     use crate::conveyor_compile as cc;
@@ -1339,13 +1341,13 @@ pub fn run_coupled_passes(
 
     // Fast path: no coupling -> the two independent passes, byte-identical.
     if !any {
-        cc::run_pass(conv_plans, conveyors, curr, dt, time, last_unit)?;
+        cc::run_pass(conv_plans, conveyors, curr, dt, time, start, last_unit)?;
         run_queue_pass(queue_plans, queues, curr, dt);
         return Ok(());
     }
 
     // Phase A over every conveyor (frees belt room, writes driven outflow rates).
-    let pa = cc::run_phase_a(conv_plans, conveyors, curr, dt, time, last_unit)?;
+    let pa = cc::run_phase_a(conv_plans, conveyors, curr, dt, time, start, last_unit)?;
 
     // Per conveyor: interleave each coupled queue's serve between phase A and B,
     // in the belt's <inflow> declaration order. `prior_coupled_vol` accumulates the

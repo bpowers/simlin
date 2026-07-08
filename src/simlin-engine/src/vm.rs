@@ -896,6 +896,7 @@ impl Vm {
                         curr,
                         dt,
                         t,
+                        spec_start,
                         &mut self.conveyor_last_unit,
                     ) {
                         self.data = Some(data);
