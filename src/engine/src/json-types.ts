@@ -46,7 +46,65 @@ export interface JsonDataSource {
 }
 
 /**
- * Vensim compatibility options for a variable.
+ * A conveyor stock. Mirrors the Rust `json::Conveyor` serializer
+ * (`#[serde(rename_all = "camelCase")]`); string fields hold XMILE expressions
+ * and an absent optional field means the documented default applies.
+ */
+export interface JsonConveyor {
+  transitTime: string;
+  capacity?: string;
+  inflowLimit?: string;
+  sample?: string;
+  arrest?: string;
+  discrete?: boolean;
+  batchIntegrity?: boolean;
+  /**
+   * Take only the front queue batch per DT. Absent means `false` here (matching
+   * the Rust `json::Conveyor` serializer and the protobuf `bool` default). NOTE:
+   * the XMILE/spec default for this option is `true`, but that default is
+   * applied when *reading XMILE*, not in this serialization layer -- so a
+   * hand-authored `.sd.json` that omits `oneAtATime` yields `false`, whereas the
+   * same conveyor authored in XMILE with the attribute absent yields `true`.
+   */
+  oneAtATime?: boolean;
+  exponentialLeak?: boolean;
+  ignoreEarlierZoneLosses?: boolean;
+}
+
+/**
+ * Marks a flow as a conveyor leakage outflow. Mirrors the Rust `json::Leakage`
+ * serializer (`#[serde(rename_all = "camelCase")]`).
+ */
+export interface JsonLeakage {
+  fraction?: string;
+  integers?: boolean;
+  zoneStart?: string;
+  zoneEnd?: string;
+}
+
+/**
+ * Conveyor inflow-placement method. Mirrors the Rust `json::SpreadFlow`
+ * serializer, which is adjacently tagged (`#[serde(tag = "type", content =
+ * "distribution")]`): unit variants serialize as `{ type }`, and `dist` carries
+ * its distribution equation in `distribution`.
+ */
+export type JsonSpreadFlow =
+  | { type: 'beginning' }
+  | { type: 'even' }
+  | { type: 'dest' }
+  | { type: 'dist'; distribution: string }
+  | { type: 'source' };
+
+/**
+ * A queue stock: a bare marker with no options (XMILE §4.2), matching the Rust
+ * `json::Queue` which serializes to `{}`.
+ */
+export interface JsonQueue {}
+
+/**
+ * Vensim compatibility options for a variable. The conveyor/queue/leakage/
+ * spreadflow/overflow fields are XMILE stock/flow options: conveyor and queue
+ * ride on stocks, leakage/spreadflow/overflow on flows.
  */
 export interface JsonCompat {
   activeInitial?: string;
@@ -54,6 +112,11 @@ export interface JsonCompat {
   canBeModuleInput?: boolean;
   isPublic?: boolean;
   dataSource?: JsonDataSource;
+  conveyor?: JsonConveyor;
+  leakage?: JsonLeakage;
+  spreadflow?: JsonSpreadFlow;
+  queue?: JsonQueue;
+  overflow?: boolean;
 }
 
 /**

@@ -86,6 +86,21 @@ pub struct Compat {
     pub is_public: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub data_source: Option<JsonDataSource>,
+    /// Present on a stock iff it is a conveyor. Mirrors [`datamodel::Compat::conveyor`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub conveyor: Option<Conveyor>,
+    /// Present on a flow iff it is a conveyor leakage outflow. Mirrors [`datamodel::Compat::leakage`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub leakage: Option<Leakage>,
+    /// Present on a conveyor inflow that selects a non-default placement. Mirrors [`datamodel::Compat::spreadflow`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub spreadflow: Option<SpreadFlow>,
+    /// Present on a stock iff it is a queue. Mirrors [`datamodel::Compat::queue`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub queue: Option<Queue>,
+    /// True on a queue outflow marked overflow. Mirrors [`datamodel::Compat::overflow`].
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub overflow: bool,
 }
 
 impl Compat {
@@ -95,8 +110,91 @@ impl Compat {
             && !self.can_be_module_input
             && !self.is_public
             && self.data_source.is_none()
+            && self.conveyor.is_none()
+            && self.leakage.is_none()
+            && self.spreadflow.is_none()
+            && self.queue.is_none()
+            && !self.overflow
     }
 }
+
+/// A conveyor stock. Mirrors [`datamodel::Conveyor`]; the fields hold XMILE
+/// expression strings, and `None`/`false` means the option was absent (the
+/// documented default applies). New optional fields are additive to the Go `sd`
+/// package schema.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Conveyor {
+    pub transit_time: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub capacity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub inflow_limit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sample: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub arrest: Option<String>,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub discrete: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub batch_integrity: bool,
+    // Absent means `false` here, matching the protobuf `bool` default. The
+    // XMILE/spec default for this option is `true`, but that default is applied
+    // when reading XMILE, not in this serialization layer -- so a hand-authored
+    // `.sd.json` omitting `oneAtATime` yields `false` where the same XMILE
+    // conveyor with the attribute absent would yield `true`. Making the JSON
+    // default `true` would put json out of sync with protobuf for the absent
+    // case, so the plain-bool mapping is kept deliberately.
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub one_at_a_time: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub exponential_leak: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub ignore_earlier_zone_losses: bool,
+}
+
+/// Marks a flow as a conveyor leakage outflow. Mirrors [`datamodel::Leakage`].
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Leakage {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fraction: Option<String>,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub integers: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub zone_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub zone_end: Option<String>,
+}
+
+/// Conveyor inflow-placement method. Mirrors [`datamodel::SpreadFlow`].
+/// Adjacently tagged (`{"type": "...", "distribution": "..."}`) because the
+/// `Dist` variant carries a payload the internally-tagged style this file uses
+/// for its other enums cannot represent.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(tag = "type", content = "distribution", rename_all = "snake_case")]
+pub enum SpreadFlow {
+    Beginning,
+    Even,
+    Dest,
+    Dist(String),
+    Source,
+}
+
+/// A queue stock. Mirrors [`datamodel::Queue`]: a bare marker with no options
+/// (XMILE §4.2). Kept a struct rather than a bool so a future vendor attribute
+/// does not churn every construction site.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Queue {}
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -745,12 +843,16 @@ impl From<Stock> for datamodel::Stock {
             } else {
                 datamodel::Visibility::Private
             },
-            data_source: stock
-                .compat
-                .as_ref()
+            data_source: c
                 .and_then(|c| c.data_source.clone())
                 .map(data_source_from_json),
-            ..Default::default()
+            conveyor: c.and_then(|c| c.conveyor.clone()).map(conveyor_from_json),
+            leakage: c.and_then(|c| c.leakage.clone()).map(leakage_from_json),
+            spreadflow: c
+                .and_then(|c| c.spreadflow.clone())
+                .map(spreadflow_from_json),
+            queue: c.and_then(|c| c.queue.clone()).map(queue_from_json),
+            overflow: c.map(|c| c.overflow).unwrap_or(false),
         };
         let equation = match stock.arrayed_equation {
             Some(arrayed) => {
@@ -831,12 +933,16 @@ impl From<Flow> for datamodel::Flow {
             } else {
                 datamodel::Visibility::Private
             },
-            data_source: flow
-                .compat
-                .as_ref()
+            data_source: c
                 .and_then(|c| c.data_source.clone())
                 .map(data_source_from_json),
-            ..Default::default()
+            conveyor: c.and_then(|c| c.conveyor.clone()).map(conveyor_from_json),
+            leakage: c.and_then(|c| c.leakage.clone()).map(leakage_from_json),
+            spreadflow: c
+                .and_then(|c| c.spreadflow.clone())
+                .map(spreadflow_from_json),
+            queue: c.and_then(|c| c.queue.clone()).map(queue_from_json),
+            overflow: c.map(|c| c.overflow).unwrap_or(false),
         };
         let equation = match flow.arrayed_equation {
             Some(arrayed) => {
@@ -910,12 +1016,16 @@ impl From<Auxiliary> for datamodel::Aux {
             } else {
                 datamodel::Visibility::Private
             },
-            data_source: aux
-                .compat
-                .as_ref()
+            data_source: c
                 .and_then(|c| c.data_source.clone())
                 .map(data_source_from_json),
-            ..Default::default()
+            conveyor: c.and_then(|c| c.conveyor.clone()).map(conveyor_from_json),
+            leakage: c.and_then(|c| c.leakage.clone()).map(leakage_from_json),
+            spreadflow: c
+                .and_then(|c| c.spreadflow.clone())
+                .map(spreadflow_from_json),
+            queue: c.and_then(|c| c.queue.clone()).map(queue_from_json),
+            overflow: c.map(|c| c.overflow).unwrap_or(false),
         };
         let equation = match aux.arrayed_equation {
             Some(arrayed) => {
@@ -996,7 +1106,14 @@ impl From<Module> for datamodel::Module {
             } else {
                 Some(module.uid)
             },
+            // Fields listed exhaustively (no `..Default::default()`) so a future
+            // datamodel::Compat field is compiler-forced to be handled here. A
+            // module is never a conveyor/queue/leak/spread flow, so those stay
+            // None/false, preserving the datamodel invariant that only
+            // stocks/flows carry them.
             compat: datamodel::Compat {
+                active_initial: None,
+                non_negative: false,
                 can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false)
                     || module.can_be_module_input,
                 visibility: if c.map(|c| c.is_public).unwrap_or(false) || module.is_public {
@@ -1004,12 +1121,14 @@ impl From<Module> for datamodel::Module {
                 } else {
                     datamodel::Visibility::Private
                 },
-                data_source: module
-                    .compat
-                    .as_ref()
+                data_source: c
                     .and_then(|c| c.data_source.clone())
                     .map(data_source_from_json),
-                ..Default::default()
+                conveyor: None,
+                leakage: None,
+                spreadflow: None,
+                queue: None,
+                overflow: false,
             },
         }
     }
@@ -1443,6 +1562,82 @@ fn data_source_from_json(ds: JsonDataSource) -> datamodel::DataSource {
     }
 }
 
+fn conveyor_to_json(c: &datamodel::Conveyor) -> Conveyor {
+    Conveyor {
+        transit_time: c.transit_time.clone(),
+        capacity: c.capacity.clone(),
+        inflow_limit: c.inflow_limit.clone(),
+        sample: c.sample.clone(),
+        arrest: c.arrest.clone(),
+        discrete: c.discrete,
+        batch_integrity: c.batch_integrity,
+        one_at_a_time: c.one_at_a_time,
+        exponential_leak: c.exponential_leak,
+        ignore_earlier_zone_losses: c.ignore_earlier_zone_losses,
+    }
+}
+
+fn conveyor_from_json(c: Conveyor) -> datamodel::Conveyor {
+    datamodel::Conveyor {
+        transit_time: c.transit_time,
+        capacity: c.capacity,
+        inflow_limit: c.inflow_limit,
+        sample: c.sample,
+        arrest: c.arrest,
+        discrete: c.discrete,
+        batch_integrity: c.batch_integrity,
+        one_at_a_time: c.one_at_a_time,
+        exponential_leak: c.exponential_leak,
+        ignore_earlier_zone_losses: c.ignore_earlier_zone_losses,
+    }
+}
+
+fn leakage_to_json(l: &datamodel::Leakage) -> Leakage {
+    Leakage {
+        fraction: l.fraction.clone(),
+        integers: l.integers,
+        zone_start: l.zone_start.clone(),
+        zone_end: l.zone_end.clone(),
+    }
+}
+
+fn leakage_from_json(l: Leakage) -> datamodel::Leakage {
+    datamodel::Leakage {
+        fraction: l.fraction,
+        integers: l.integers,
+        zone_start: l.zone_start,
+        zone_end: l.zone_end,
+    }
+}
+
+fn spreadflow_to_json(s: &datamodel::SpreadFlow) -> SpreadFlow {
+    match s {
+        datamodel::SpreadFlow::Beginning => SpreadFlow::Beginning,
+        datamodel::SpreadFlow::Even => SpreadFlow::Even,
+        datamodel::SpreadFlow::Dest => SpreadFlow::Dest,
+        datamodel::SpreadFlow::Dist(eq) => SpreadFlow::Dist(eq.clone()),
+        datamodel::SpreadFlow::Source => SpreadFlow::Source,
+    }
+}
+
+fn spreadflow_from_json(s: SpreadFlow) -> datamodel::SpreadFlow {
+    match s {
+        SpreadFlow::Beginning => datamodel::SpreadFlow::Beginning,
+        SpreadFlow::Even => datamodel::SpreadFlow::Even,
+        SpreadFlow::Dest => datamodel::SpreadFlow::Dest,
+        SpreadFlow::Dist(eq) => datamodel::SpreadFlow::Dist(eq),
+        SpreadFlow::Source => datamodel::SpreadFlow::Source,
+    }
+}
+
+fn queue_to_json(_q: &datamodel::Queue) -> Queue {
+    Queue {}
+}
+
+fn queue_from_json(_q: Queue) -> datamodel::Queue {
+    datamodel::Queue {}
+}
+
 fn compat_to_json(compat: &datamodel::Compat) -> Compat {
     Compat {
         active_initial: compat.active_initial.clone(),
@@ -1450,6 +1645,11 @@ fn compat_to_json(compat: &datamodel::Compat) -> Compat {
         can_be_module_input: compat.can_be_module_input,
         is_public: matches!(compat.visibility, datamodel::Visibility::Public),
         data_source: compat.data_source.as_ref().map(data_source_to_json),
+        conveyor: compat.conveyor.as_ref().map(conveyor_to_json),
+        leakage: compat.leakage.as_ref().map(leakage_to_json),
+        spreadflow: compat.spreadflow.as_ref().map(spreadflow_to_json),
+        queue: compat.queue.as_ref().map(queue_to_json),
+        overflow: compat.overflow,
     }
 }
 
