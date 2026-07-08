@@ -5548,13 +5548,13 @@ fn test_conveyor_ltm_degraded_warning_emitted_once_across_module_boundary() {
 }
 
 /// The warning is advisory, not a hard error: the same conveyor model still
-/// compiles and simulates through the conveyor build path (which expands the
-/// belt and clears the marker), independent of the LTM diagnostic overlay.
+/// compiles and simulates through the special-stock build path (which expands
+/// the belt and clears the marker), independent of the LTM diagnostic overlay.
 #[test]
 fn test_conveyor_still_simulates_despite_ltm_degraded_warning() {
     let project = minimal_conveyor_datamodel();
     let main = project.models[0].name.clone();
-    let mut vm = crate::conveyor_compile::build_vm(&project, &main).expect("build conveyor vm");
+    let mut vm = crate::queue_compile::build_vm(&project, &main).expect("build conveyor vm");
     vm.run_to_end().expect("run conveyor sim");
 
     let students = vm

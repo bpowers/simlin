@@ -1063,10 +1063,11 @@ pub fn compile_project_incremental(
     {
         return crate::sim_err!(NotSimulatable, msg.clone());
     }
-    // A conveyor/queue stock is simulated only through the special build path
-    // (`conveyor_compile`/`queue_compile`), which expands each belt/FIFO into
-    // hidden auxes + driven flows plus a native VM pass and CLEARS the marker
-    // BEFORE this point. A surviving marker means one of two things, told apart
+    // A conveyor/queue stock is simulated only through the unified special-stock
+    // build path (`queue_compile::build_compiled`), which -- via
+    // `conveyor_compile::expand_conveyors` / `queue_compile::expand_queues` --
+    // expands each belt/FIFO into hidden auxes + driven flows plus a native VM
+    // pass and CLEARS the marker BEFORE this point. A surviving marker means one of two things, told apart
     // by which model the stock lives in:
     //
     //   * MAIN model: the model reached the ordinary compile path un-expanded --
@@ -1098,7 +1099,8 @@ pub fn compile_project_incremental(
                         ConveyorNotExpanded,
                         format!(
                             "conveyor stock '{}' reached the ordinary compile path un-expanded; \
-                             conveyor simulation must go through conveyor_compile::build_vm",
+                             conveyor simulation must go through the special-stock build path \
+                             (queue_compile::build_vm)",
                             source_var.ident(db)
                         )
                     );

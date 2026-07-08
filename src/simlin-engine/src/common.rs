@@ -445,7 +445,7 @@ pub enum ErrorCode {
     /// (docs/design/conveyors.md §4.3 "Visibility to other equations").
     ConveyorDrivenFlowRead,
     /// A conveyor stock reached the ordinary compile path without being expanded
-    /// by the conveyor build path (`conveyor_compile::build_vm`). Conveyor
+    /// by the special-stock build path (`queue_compile::build_vm`). Conveyor
     /// simulation is only wired through that entry point; any other path would
     /// integrate the belt as a plain stock and silently mis-simulate, so it is
     /// rejected (docs/design/conveyors.md §9.3).

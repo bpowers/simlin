@@ -470,7 +470,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 
 /// Unit-check a model's conveyor block parameters (docs/design/conveyors.md
 /// §9.8). Best-effort/advisory: every mismatch is a `Warning`, never a hard
-/// error, so the model still simulates through `conveyor_compile::build_vm`.
+/// error, so the model still simulates through `queue_compile::build_vm`.
 ///
 /// A conveyor's `<len>`/`<capacity>`/`<in_limit>` and its leak flows' fractions
 /// are expression STRINGS on the stock/flow `datamodel::Compat`, not

@@ -748,7 +748,7 @@ impl Vm {
     }
 
     /// Attach resolved conveyor plans (docs/design/conveyors.md §9.3). Called by
-    /// the conveyor-aware build path ([`crate::conveyor_compile::build_vm`])
+    /// the unified special-stock build path ([`crate::queue_compile::build_vm`])
     /// after ordinary compilation resolves the belt parameter/flow slots. A
     /// plain `Vm::new` leaves the plan list empty, so ordinary models are
     /// unaffected.

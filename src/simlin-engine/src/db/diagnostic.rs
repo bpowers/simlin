@@ -186,8 +186,9 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
 /// numerator (`PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))`) assumes plain INTEG
 /// under Euler, so any link or loop score touching a conveyor stock would be
 /// silently wrong. The salsa DIAGNOSTIC path never expands the conveyor into
-/// its hidden auxes + native pass (only `conveyor_compile::build_vm` does,
-/// which CLEARS the marker), so `compat.conveyor` is still present here and
+/// its hidden auxes + native pass (only the special-stock build path
+/// `queue_compile::build_vm` does, which CLEARS the marker), so
+/// `compat.conveyor` is still present here and
 /// the stock would be scored as plain INTEG. Degrade LOUDLY rather than emit a
 /// silently-wrong score.
 ///

@@ -20,6 +20,13 @@
 //! 2. [`resolve_plans`] looks each name up in the compiled simulation's offset
 //!    map to produce [`ConveyorPlan`]s the VM's conveyor pass reads.
 //!
+//! The build entry points that drive these steps live in
+//! [`crate::queue_compile`] (`build_compiled`/`build_vm`/`build_sim`): a stock
+//! may be a conveyor, a queue, or the two may couple, so ONE unified build path
+//! runs both expansions and resolves both plan sets against the same compiled
+//! offsets. This module supplies the conveyor half -- the expansion, plan
+//! resolution, and VM-native pass helpers that path composes.
+//!
 //! Because the conveyor stock's inflows/outflows carry the pass-computed rates
 //! before stock integration, the stock integrates to `Σ belt contents` through
 //! the ordinary Stocks phase -- no special-casing of stock integration is
@@ -62,7 +69,8 @@
 //! ranges/wildcards over slats, a bare arrayed-conveyor reducer other than SUM)
 //! stay loud-rejected with `ConveyorContainerAccessUnsupported`.
 //!
-//! Conveyors inside submodules and queue coupling are later build-sequence steps.
+//! Conveyors inside submodules are a later build-sequence step; queue coupling
+//! is handled by the unified build path in [`crate::queue_compile`].
 
 use std::collections::HashMap;
 
@@ -395,8 +403,9 @@ fn canon(name: &str) -> String {
 }
 
 /// Does the named model in `project` contain any conveyor stock? A cheap
-/// predicate a caller uses to decide whether to route through [`build_vm`]
-/// (the conveyor path) instead of the ordinary incremental compile.
+/// predicate a caller uses to decide whether to route through the special
+/// build path ([`crate::queue_compile::build_vm`]) instead of the ordinary
+/// incremental compile.
 pub fn project_has_conveyor(project: &datamodel::Project, main_model: &str) -> bool {
     let main_canon = canon(main_model);
     project.models.iter().any(|m| {
@@ -2196,7 +2205,7 @@ fn n_belts(meta: &ConveyorMeta) -> usize {
 /// range, so a held-exit destination (§4.3 step 3) links element `e` of one
 /// conveyor to element `e` of the downstream conveyor. Returns `None` if any
 /// required name is missing -- an internal inconsistency between expansion and
-/// compilation that [`build_compiled`] surfaces as a hard `NotSimulatable`
+/// compilation that [`crate::queue_compile::build_compiled`] surfaces as a hard `NotSimulatable`
 /// error (there is no non-conveyor fallback: the model has conveyors).
 pub fn resolve_plans(
     metas: &[ConveyorMeta],
@@ -2900,73 +2909,13 @@ pub fn coupled_admission_budget(
     state.admission_budget(pa, capacity, in_limit, other_conv_vol)
 }
 
-/// Compile `project` and resolve its conveyor plans, returning the compiled
-/// simulation plus the resolved plans (empty for a non-conveyor model). This is
-/// the reusable core of [`build_vm`]; a caller that needs to rebuild the VM
-/// later (e.g. libsimlin's reset, which recreates the VM from the cached
-/// compiled sim) keeps both halves so it can re-attach the plans. Enforces the
-/// Euler-only rule (§9.4).
-pub fn build_compiled(
-    project: &datamodel::Project,
-    main_model: &str,
-) -> crate::common::Result<(crate::vm::CompiledSimulation, Vec<ConveyorPlan>)> {
-    use crate::common::{Error, ErrorKind};
-    let (expanded, metas) = expand_conveyors(project, main_model)
-        .map_err(|(code, msg)| Error::new(ErrorKind::Simulation, code, Some(msg)))?;
-    // The gate reads the EFFECTIVE root specs (model override preferred, like
-    // the runtime), not just the project's -- a model-level RK override must
-    // not evade the Euler-only rule.
-    if !metas.is_empty()
-        && effective_sim_specs(&expanded, main_model).sim_method != datamodel::SimMethod::Euler
-    {
-        return Err(Error::new(
-            ErrorKind::Simulation,
-            ErrorCode::ConveyorNonEulerMethod,
-            Some("conveyors require Euler integration".to_string()),
-        ));
-    }
-    let mut db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel_incremental(&mut db, &expanded, None);
-    let mut compiled = crate::db::compile_project_incremental(&db, sync.project, main_model)?;
-    let plans = if metas.is_empty() {
-        Vec::new()
-    } else {
-        resolve_plans(&metas, &compiled.offsets).ok_or_else(|| {
-            Error::new(
-                ErrorKind::Simulation,
-                ErrorCode::NotSimulatable,
-                Some("internal error: conveyor plan references an unresolved slot".to_string()),
-            )
-        })?
-    };
-    // Retract the pass-written slots from the overridable-constant set, for
-    // the same reason (and with the same caller contract) as the unified
-    // [`crate::queue_compile::build_compiled`] -- see the comment there
-    // (GH #871).
-    for plan in &plans {
-        compiled.exclude_overridable_offsets(plan.pass_written_offsets());
-    }
-    Ok((compiled, plans))
-}
-
-/// Build a runnable [`Vm`](crate::vm::Vm) for `project`, wiring up conveyor
-/// support when the main model contains conveyors. For a project with no
-/// conveyors this is exactly the ordinary compile-and-build path (the expansion
-/// is a no-op), so callers can route every simulation through it.
-pub fn build_vm(
-    project: &datamodel::Project,
-    main_model: &str,
-) -> crate::common::Result<crate::vm::Vm> {
-    let (compiled, plans) = build_compiled(project, main_model)?;
-    let mut vm = crate::vm::Vm::new(compiled)?;
-    vm.set_conveyor_plans(plans);
-    Ok(vm)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::Ident;
+    // The build entry points live in queue_compile (the unified conveyor+queue
+    // build path); these tests pin the conveyor half of its behavior.
+    use crate::queue_compile::{build_compiled, build_vm};
     use std::io::BufReader;
 
     fn parse(xml: &str) -> datamodel::Project {
@@ -3889,7 +3838,12 @@ mod tests {
         let xml = include_str!("../../../test/conveyors/arrayed_conveyor.xmile");
         let project = parse(xml);
         let main = project.models[0].name.clone();
-        let (compiled, plans) = build_compiled(&project, &main).expect("build_compiled");
+        let (compiled, plans, queue_plans) =
+            build_compiled(&project, &main).expect("build_compiled");
+        assert!(
+            queue_plans.is_empty(),
+            "a pure-conveyor model must synthesize zero queue plans"
+        );
         assert_eq!(plans.len(), 2, "two elements -> two flattened plans");
         assert_ne!(
             plans[0].stock_off, plans[1].stock_off,
