@@ -2277,3 +2277,95 @@ describe('display-only annotations never serialize', () => {
     expectNoAnnotationKeys(flowToJson({ ...flowFromJson({ name: 'f', equation: '1' }), ...annotations }));
   });
 });
+
+describe('display-name preservation (rawName)', () => {
+  // The engine stores display spellings verbatim and matches canonically
+  // (issue #890); the TS layer must not erode them on the fromJson -> toJson
+  // path the editor's full upserts take (issue #906). `ident` stays canonical
+  // (it is the Map key and must match engine-canonical idents in results and
+  // errors); `rawName` carries the presentation.
+
+  it('preserves a stock display name through fromJson -> toJson', () => {
+    const stock = stockFromJson({ name: 'Total Students', inflows: [], outflows: [], initialEquation: '0' });
+    expect(stock.ident).toBe('total_students');
+    expect(stock.rawName).toBe('Total Students');
+    expect(stockToJson(stock).name).toBe('Total Students');
+  });
+
+  it('preserves a flow display name through fromJson -> toJson', () => {
+    const flow = flowFromJson({ name: 'Graduation Rate', equation: '1' });
+    expect(flow.ident).toBe('graduation_rate');
+    expect(flow.rawName).toBe('Graduation Rate');
+    expect(flowToJson(flow).name).toBe('Graduation Rate');
+  });
+
+  it('preserves an aux display name through fromJson -> toJson', () => {
+    const aux = auxFromJson({ name: 'testing\\nassymptomatic', equation: '2' });
+    expect(aux.ident).toBe('testing_assymptomatic');
+    expect(aux.rawName).toBe('testing\\nassymptomatic');
+    expect(auxToJson(aux).name).toBe('testing\\nassymptomatic');
+  });
+
+  it('preserves a module display name through fromJson -> toJson', () => {
+    const mod = moduleFromJson({ name: 'Hares Instance', modelName: 'hares' });
+    expect(mod.ident).toBe('hares_instance');
+    expect(mod.rawName).toBe('Hares Instance');
+    expect(moduleToJson(mod).name).toBe('Hares Instance');
+  });
+
+  it('falls back to the canonical ident when rawName is absent', () => {
+    // Variable literals constructed in code (tests, editor scaffolding) may
+    // omit rawName; serialization must still produce a usable name.
+    const stock: Stock = {
+      type: 'stock',
+      ident: 'population',
+      equation: { type: 'scalar', equation: '100' },
+      documentation: '',
+      units: '',
+      inflows: [],
+      outflows: [],
+      nonNegative: false,
+      canBeModuleInput: false,
+      isPublic: false,
+      activeInitial: undefined,
+      dataSource: undefined,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: 1,
+    };
+    expect(stockToJson(stock).name).toBe('population');
+  });
+
+  it('keys the model variables Map canonically while preserving rawName', () => {
+    const model = modelFromJson({
+      name: 'main',
+      stocks: [{ name: 'Total Students', inflows: [], outflows: [], initialEquation: '0' }],
+      flows: [],
+      auxiliaries: [{ name: 'Enrollment Rate', equation: '1' }],
+      views: [
+        {
+          elements: [
+            // View elements reference variables by display name; the canonical
+            // Map key is what makes this lookup resolve.
+            { type: 'stock', uid: 1, name: 'Total Students', x: 10, y: 10 },
+          ],
+        },
+      ],
+    });
+
+    const stock = model.variables.get('total_students');
+    expect(stock?.type).toBe('stock');
+    expect(stock?.rawName).toBe('Total Students');
+    expect(model.variables.get('enrollment_rate')?.rawName).toBe('Enrollment Rate');
+    // The display-named view element bound to its variable via canonical ident.
+    const el = model.views[0].elements[0];
+    expect(el.type).toBe('stock');
+    expect((el as StockViewElement).var).toBe(stock);
+
+    // Round-tripping the model emits display names, not canonical idents.
+    const json = modelToJson(model);
+    expect(json.stocks.map((s) => s.name)).toEqual(['Total Students']);
+    expect(json.auxiliaries.map((a) => a.name)).toEqual(['Enrollment Rate']);
+  });
+});

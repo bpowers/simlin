@@ -549,6 +549,18 @@ function auxEquationToJson(equation: Equation): { equation?: string; arrayedEqua
 export interface Stock {
   readonly type: 'stock';
   readonly ident: string;
+  // The display spelling of the variable's name as it arrived on the wire
+  // (`json.name`, e.g. "Total Students"). The engine stores display spellings
+  // verbatim and canonicalizes only at lookup/matching sites (issue #890), so
+  // `ident` holds the canonical form -- it is load-bearing as the
+  // `Model.variables` Map key and must match engine-canonical idents in sim
+  // results, error details, and view-element lookups -- while `rawName`
+  // preserves presentation. `*ToJson` emits `rawName` back as `name` so the
+  // editor's full-upsert paths do not downgrade an imported model's display
+  // names one edit at a time (issue #906). Optional (like connectorErrors) so
+  // the many Variable literals that predate it stay valid; absent falls back
+  // to `ident` on serialization.
+  readonly rawName?: string | undefined;
   readonly equation: Equation;
   readonly documentation: string;
   readonly units: string;
@@ -586,6 +598,8 @@ export interface Stock {
 export interface Flow {
   readonly type: 'flow';
   readonly ident: string;
+  // Display spelling from the wire `name`; see the rawName note on Stock.
+  readonly rawName?: string | undefined;
   readonly equation: Equation;
   readonly documentation: string;
   readonly units: string;
@@ -621,6 +635,8 @@ export interface Flow {
 export interface Aux {
   readonly type: 'aux';
   readonly ident: string;
+  // Display spelling from the wire `name`; see the rawName note on Stock.
+  readonly rawName?: string | undefined;
   readonly equation: Equation;
   readonly documentation: string;
   readonly units: string;
@@ -655,6 +671,8 @@ export function moduleReferenceToJson(ref: ModuleReference): JsonModuleReference
 export interface Module {
   readonly type: 'module';
   readonly ident: string;
+  // Display spelling from the wire `name`; see the rawName note on Stock.
+  readonly rawName?: string | undefined;
   readonly modelName: string;
   readonly documentation: string;
   readonly units: string;
@@ -705,6 +723,7 @@ export function stockFromJson(json: JsonStock): Stock {
   return {
     type: 'stock',
     ident: canonicalize(json.name),
+    rawName: json.name,
     equation: stockEquationFromJson(json.initialEquation, json.arrayedEquation),
     documentation: json.documentation ?? '',
     units: json.units ?? '',
@@ -733,7 +752,8 @@ export function stockFromJson(json: JsonStock): Stock {
 export function stockToJson(stock: Stock): JsonStock {
   const eqJson = stockEquationToJson(stock.equation);
   const result: JsonStock = {
-    name: stock.ident,
+    // Emit the preserved display spelling; the engine matches canonically.
+    name: stock.rawName ?? stock.ident,
     inflows: [...stock.inflows],
     outflows: [...stock.outflows],
   };
@@ -807,6 +827,7 @@ export function flowFromJson(json: JsonFlow): Flow {
   return {
     type: 'flow',
     ident: canonicalize(json.name),
+    rawName: json.name,
     equation,
     documentation: json.documentation ?? '',
     units: json.units ?? '',
@@ -837,7 +858,8 @@ export function flowFromJson(json: JsonFlow): Flow {
 export function flowToJson(flow: Flow): JsonFlow {
   const eqJson = auxEquationToJson(flow.equation);
   const result: JsonFlow = {
-    name: flow.ident,
+    // Emit the preserved display spelling; the engine matches canonically.
+    name: flow.rawName ?? flow.ident,
   };
   if (flow.uid !== undefined) {
     result.uid = flow.uid;
@@ -917,6 +939,7 @@ export function auxFromJson(json: JsonAuxiliary): Aux {
   return {
     type: 'aux',
     ident: canonicalize(json.name),
+    rawName: json.name,
     equation,
     documentation: json.documentation ?? '',
     units: json.units ?? '',
@@ -940,7 +963,8 @@ export function auxFromJson(json: JsonAuxiliary): Aux {
 export function auxToJson(aux: Aux): JsonAuxiliary {
   const eqJson = auxEquationToJson(aux.equation);
   const result: JsonAuxiliary = {
-    name: aux.ident,
+    // Emit the preserved display spelling; the engine matches canonically.
+    name: aux.rawName ?? aux.ident,
   };
   if (aux.uid !== undefined) {
     result.uid = aux.uid;
@@ -991,6 +1015,7 @@ export function moduleFromJson(json: JsonModule): Module {
   return {
     type: 'module',
     ident: canonicalize(json.name),
+    rawName: json.name,
     modelName: json.modelName,
     documentation: json.documentation ?? '',
     units: json.units ?? '',
@@ -1010,7 +1035,8 @@ export function moduleFromJson(json: JsonModule): Module {
 
 export function moduleToJson(mod: Module): JsonModule {
   const result: JsonModule = {
-    name: mod.ident,
+    // Emit the preserved display spelling; the engine matches canonically.
+    name: mod.rawName ?? mod.ident,
     modelName: mod.modelName,
   };
   if (mod.uid !== undefined) {

@@ -100,6 +100,15 @@ const BASE_PROJECT = JSON.stringify({
           // [7] queue stock: the marker is a bare empty object.
           compat: { queue: {} },
         },
+        {
+          // [11] display-spelling stock name (issue #906): the engine stores
+          // names verbatim, so a TS-side canonicalization to `reservoir_level`
+          // would surface as a changed name below.
+          name: 'Reservoir Level',
+          inflows: [],
+          outflows: [],
+          initialEquation: '0',
+        },
       ],
       flows: [
         {
@@ -121,6 +130,8 @@ const BASE_PROJECT = JSON.stringify({
           // [10] queue overflow outflow.
           compat: { overflow: true },
         },
+        // [11] display-spelling flow name (issue #906).
+        { name: 'Fill Rate', equation: '1' },
       ],
       auxiliaries: [
         {
@@ -155,6 +166,10 @@ const BASE_PROJECT = JSON.stringify({
             ],
           },
         },
+        // [11] display-spelling aux names (issue #906), including the encoded
+        // line-break form imported Stella models carry.
+        { name: 'Total Students', equation: '2' },
+        { name: 'testing\\nassymptomatic', equation: '3' },
       ],
       modules: [
         {
@@ -173,6 +188,8 @@ const BASE_PROJECT = JSON.stringify({
             },
           },
         },
+        // [11] display-spelling module name (issue #906).
+        { name: 'Sub Copy', modelName: 'sub' },
       ],
     },
     {
@@ -300,6 +317,16 @@ function assertAllFieldsPresent(parsed: ParsedProject): void {
   expect(north?.graphicalFunction?.yPoints).toEqual([0, 1, 2]);
   expect(north?.compat?.activeInitial).toBe('3');
 
+  // [11] Display spellings survive verbatim (issues #890/#906): the engine
+  // stores the payload's `name` as-is and matches canonically, so a TS-side
+  // canonicalization anywhere on the load -> upsert path shows up here as a
+  // downgraded name (e.g. `total_students`).
+  expect(parsed.models[0].stocks.some((s) => s.name === 'Reservoir Level')).toBe(true);
+  expect(parsed.models[0].flows.some((f) => f.name === 'Fill Rate')).toBe(true);
+  expect(parsed.models[0].auxiliaries.some((a) => a.name === 'Total Students')).toBe(true);
+  expect(parsed.models[0].auxiliaries.some((a) => a.name === 'testing\\nassymptomatic')).toBe(true);
+  expect(parsed.models[0].modules?.some((m) => m.name === 'Sub Copy')).toBe(true);
+
   const module = parsed.models[0].modules?.find((m) => m.name === 'sub_inst');
   expect(module?.compat?.canBeModuleInput).toBe(true);
   expect(module?.compat?.isPublic).toBe(true);
@@ -352,6 +379,12 @@ describeIfEngine('datamodel round-trip through the real engine serializer', () =
       const imported = model.variables.get('imported');
       const arrayed = model.variables.get('arrayed');
       const subInst = model.variables.get('sub_inst');
+      // Display-named variables live under their CANONICAL Map keys.
+      const reservoir = model.variables.get('reservoir_level');
+      const fillRate = model.variables.get('fill_rate');
+      const totalStudents = model.variables.get('total_students');
+      const testingAssym = model.variables.get('testing_assymptomatic');
+      const subCopy = model.variables.get('sub_copy');
       if (
         level?.type !== 'stock' ||
         belt?.type !== 'stock' ||
@@ -361,7 +394,12 @@ describeIfEngine('datamodel round-trip through the real engine serializer', () =
         spill?.type !== 'flow' ||
         imported?.type !== 'aux' ||
         arrayed?.type !== 'aux' ||
-        subInst?.type !== 'module'
+        subInst?.type !== 'module' ||
+        reservoir?.type !== 'stock' ||
+        fillRate?.type !== 'flow' ||
+        totalStudents?.type !== 'aux' ||
+        testingAssym?.type !== 'aux' ||
+        subCopy?.type !== 'module'
       ) {
         throw new Error('expected variables missing');
       }
@@ -383,6 +421,13 @@ describeIfEngine('datamodel round-trip through the real engine serializer', () =
               { type: 'upsertAux', payload: { aux: auxToJson(imported) } },
               { type: 'upsertAux', payload: { aux: auxToJson(arrayed) } },
               { type: 'upsertModule', payload: { module: moduleToJson(subInst) } },
+              // The issue #906 erosion: before rawName, these upserts sent the
+              // canonical ident as `name`, downgrading the display spelling.
+              { type: 'upsertStock', payload: { stock: stockToJson(reservoir) } },
+              { type: 'upsertFlow', payload: { flow: flowToJson(fillRate) } },
+              { type: 'upsertAux', payload: { aux: auxToJson(totalStudents) } },
+              { type: 'upsertAux', payload: { aux: auxToJson(testingAssym) } },
+              { type: 'upsertModule', payload: { module: moduleToJson(subCopy) } },
             ],
           },
         ],

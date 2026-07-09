@@ -300,6 +300,16 @@ describe('buildModuleReferencePayload', () => {
     expect(payload.documentation).toBe('doc');
   });
 
+  it('keeps the module display spelling instead of restamping the canonical ident (issue #906)', () => {
+    // Callers pass the canonical ident the module was looked up under; the
+    // payload must carry the preserved display spelling (rawName) so the
+    // full-replace upsert does not downgrade it.
+    const existing = makeModule({ rawName: 'Hares Instance' });
+    const payload = buildModuleReferencePayload(existing, 'hares_inst', 'hares_copy');
+    expect(payload.name).toBe('Hares Instance');
+    expect(payload.modelName).toBe('hares_copy');
+  });
+
   it('returns a bare {name, modelName} when there is no existing module', () => {
     const payload = buildModuleReferencePayload(undefined, 'new_inst', 'new_model');
     expect(payload).toEqual({ name: 'new_inst', modelName: 'new_model' });
