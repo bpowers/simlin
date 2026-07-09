@@ -21,6 +21,16 @@ use std::collections::{HashMap, HashSet};
 
 use crate::db::RefShape;
 
+/// The implicit WITH-LOOKUP rules (GH #910), in their own file only to keep this
+/// one under the project line-count lint. Re-exported below so callers keep
+/// naming them `crate::ltm_augment::*`.
+#[path = "ltm_augment_with_lookup.rs"]
+mod with_lookup;
+
+pub(crate) use with_lookup::{
+    WithLookupSlotRefs, WithLookupWrap, with_lookup_reducer_owner_wrap, with_lookup_table_ref,
+};
+
 /// Context for recognizing GH #511 iterated-dimension source references in
 /// the partial-equation builder: the live source's declared dimension names
 /// (canonical, in declaration order; same length as `source_dim_elements`),
@@ -1719,6 +1729,16 @@ fn wrap_live_shaped_in_previous(
 ///    silently score a constant 0): the caller skips the score variable
 ///    and surfaces a `Warning` -- loud degradation, never the
 ///    silently-stubbed-helper garbage the pre-fix path produced.
+///
+/// `gf_table_ref` is the implicit WITH-LOOKUP wrap (GH #910): when the
+/// target is a value-bearing tables-carrying variable, its compiled value
+/// is `LOOKUP(self_gf, input)` while `equation_text` is only the RAW
+/// input, so both the changed-first partial and the changed-last frozen
+/// evaluation are fed through `LOOKUP({gf_table_ref}, ...)` to keep the
+/// numerator commensurable with the (gf-output-units) target deltas. The
+/// reference is a *layout* reference (`classify_dependencies` records it
+/// in `referenced_tables`, not `all`), so it adds no causal edge. `None`
+/// leaves the partial unwrapped (an ordinary target).
 #[allow(clippy::too_many_arguments)] // threads the link-score generation context
 fn shaped_guard_form_text(
     equation_text: &str,
@@ -1730,7 +1750,14 @@ fn shaped_guard_form_text(
     iter_ctx: Option<&IteratedDimCtx<'_>>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
     target_ref: &str,
+    gf_table_ref: Option<&str>,
 ) -> Result<String, PartialEquationError> {
+    let gf_wrap = |partial: String| -> String {
+        match gf_table_ref {
+            Some(table_ref) => format!("LOOKUP({table_ref}, {partial})"),
+            None => partial,
+        }
+    };
     let (changed_first, out) = wrap_changed_first_ast(
         equation_text,
         deps,
@@ -1749,7 +1776,7 @@ fn shaped_guard_form_text(
             source_dim_elements,
         );
         return Ok(link_score_guard_form(
-            &print_eqn(&changed_first),
+            &gf_wrap(print_eqn(&changed_first)),
             target_ref,
             &source_ref,
         ));
@@ -1813,7 +1840,10 @@ fn shaped_guard_form_text(
         source_dim_names,
         source_dim_elements,
     );
-    let numerator = format!("({target_ref} - ({}))", print_eqn(&changed_last));
+    // The frozen evaluation is a re-computation of the target's equation,
+    // so it needs the same implicit WITH-LOOKUP application the target's
+    // own compiled value gets (GH #910).
+    let numerator = format!("({target_ref} - ({}))", gf_wrap(print_eqn(&changed_last)));
     Ok(link_score_guard_form_with_numerator(
         &numerator,
         target_ref,
@@ -1934,16 +1964,27 @@ fn wrap_matching_in_previous(expr: Expr0, target: &Ident<Canonical>) -> Expr0 {
 ///
 /// Returns `Err` when `agg_equation_text` does not parse -- same loud-failure
 /// contract as [`build_partial_equation_shaped`] (GH #311).
+/// `gf_table_ref` is the implicit WITH-LOOKUP wrap (GH #910). `frozen` is a
+/// full re-evaluation of the agg's own equation, i.e. gf-INPUT units, while
+/// the numerator subtracts it from the agg's (gf-OUTPUT) current value --
+/// so a variable-backed agg that is itself a with-lookup target feeds the
+/// frozen evaluation through its table. A synthetic `$⁚ltm⁚agg⁚{n}` carries
+/// no gf, so its caller passes `None`.
 pub(crate) fn generate_scalar_feeder_to_agg_equation(
     feeder: &str,
     agg_name: &str,
     agg_equation_text: &str,
+    gf_table_ref: Option<&str>,
 ) -> Result<String, PartialEquationError> {
     let Ok(Some(ast)) = Expr0::new(agg_equation_text, LexerType::Equation) else {
         return Err(PartialEquationError::new(agg_equation_text));
     };
     let feeder_ident = Ident::<Canonical>::new(feeder);
     let frozen = print_eqn(&wrap_matching_in_previous(ast, &feeder_ident));
+    let frozen = match gf_table_ref {
+        Some(table_ref) => format!("LOOKUP({table_ref}, {frozen})"),
+        None => frozen,
+    };
     let agg_q = quote_ident(agg_name);
     let feeder_q = quote_ident(feeder);
     let numerator = format!("({agg_q} - ({frozen}))");
@@ -1988,12 +2029,17 @@ pub(crate) fn generate_scalar_feeder_to_agg_equation(
 /// degenerate square-source agg, PR #784 review) makes the by-name index
 /// resolution unable to tell which slot part an index means, so a pinned
 /// equation could freeze the wrong source row (a silently wrong score).
+///
+/// `gf_table_ref` is the implicit WITH-LOOKUP wrap (GH #910), applied to the
+/// frozen re-evaluation exactly as in
+/// [`generate_scalar_feeder_to_agg_equation`].
 pub(crate) fn generate_iterated_feeder_to_agg_equation(
     feeder: &str,
     agg_name: &str,
     agg_equation_text: &str,
     iterated_dims: &[String],
     slot_parts_qualified: &[String],
+    gf_table_ref: Option<&str>,
 ) -> Result<String, PartialEquationError> {
     let Ok(Some(ast)) = Expr0::new(agg_equation_text, LexerType::Equation) else {
         return Err(PartialEquationError::new(agg_equation_text));
@@ -2011,6 +2057,10 @@ pub(crate) fn generate_iterated_feeder_to_agg_equation(
         // equal the agg slot itself and the score a silent constant 0.
         return Err(PartialEquationError::unfreezable(agg_equation_text));
     }
+    let frozen = match gf_table_ref {
+        Some(table_ref) => format!("LOOKUP({table_ref}, {frozen})"),
+        None => frozen,
+    };
     let slot = slot_parts_qualified.join(",");
     let agg_ref = format!("{}[{}]", quote_ident(agg_name), slot);
     // The feeder's row equals the slot 1:1 (unmapped projection acceptance),
@@ -2347,6 +2397,12 @@ fn subscript_idents_in_expr0(
 /// (GH #528). For the diagonal case (`result_dims` == `to`'s dims) the
 /// projection IS the full tuple, so the equation is unchanged. A SCALAR
 /// co-agg needs no entry: its bare `PREVIOUS(name)` freeze compiles as-is.
+///
+/// `gf_table_ref` is the implicit WITH-LOOKUP wrap for THIS target element
+/// (GH #910): the partial is a full re-evaluation of the target's element
+/// equation, i.e. gf-INPUT units, while the guard form ratios it against
+/// gf-OUTPUT target deltas. `None` for an ordinary (gf-less) target. See
+/// [`WithLookupSlotRefs`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_scalar_to_element_equation(
     from: &str,
@@ -2358,6 +2414,7 @@ pub(crate) fn generate_scalar_to_element_equation(
     source_ref_override: Option<&str>,
     source_pins: &[(Ident<Canonical>, String)],
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    gf_table_ref: Option<&str>,
 ) -> Result<String, PartialEquationError> {
     let from_canonical = Ident::new(from);
     let from_q = quote_ident(from);
@@ -2387,6 +2444,14 @@ pub(crate) fn generate_scalar_to_element_equation(
     for (ident, slot) in source_pins {
         let one: HashSet<Ident<Canonical>> = std::iter::once(ident.clone()).collect();
         partial = subscript_idents_at_element(&partial, &one, slot)?;
+    }
+    // The wrap goes on LAST because it is not part of the target's equation:
+    // everything above rewrites that equation within its own (gf-input) domain
+    // -- freezing, element pinning, slot projection -- while the `LOOKUP` is the
+    // compiler's implicit lowering (`apply_implicit_with_lookup`) applied to the
+    // finished input expression. It belongs outside those passes, not before them.
+    if let Some(table_ref) = gf_table_ref {
+        partial = format!("LOOKUP({table_ref}, {partial})");
     }
     let source_ref = source_ref_override.unwrap_or(&from_q);
     Ok(link_score_guard_form(&partial, &to_elem, source_ref))
@@ -2684,6 +2749,12 @@ fn rewrite_per_element_source_refs(
 /// `row_parts_bare` is the row [`per_element_row_for_target`] derives for
 /// `site_axes` at this element -- the caller computes it once and uses it
 /// for the variable NAME too, so name and equation cannot disagree.
+///
+/// `gf_table_ref` is this target element's implicit WITH-LOOKUP table
+/// reference (`None` when the element applies no gf); the partial is a full
+/// re-evaluation of the element's equation, so it must be fed through the
+/// table to reach the same units as the `to[{element}]` deltas it is
+/// ratioed against (GH #910; see [`with_lookup::is_implicit_with_lookup`]).
 #[allow(clippy::too_many_arguments)] // threads the per-(site, element) emission context
 pub(crate) fn generate_per_element_link_equation(
     from: &str,
@@ -2698,6 +2769,7 @@ pub(crate) fn generate_per_element_link_equation(
     target_elem_by_dim: &HashMap<String, (String, usize)>,
     target_iterated_dims: &[String],
     dims_ctx: &crate::dimensions::DimensionsContext,
+    gf_table_ref: Option<&str>,
 ) -> Result<String, PartialEquationError> {
     let from_canonical = Ident::<Canonical>::new(from);
     let source_dim_elements: Vec<Vec<String>> =
@@ -2744,7 +2816,11 @@ pub(crate) fn generate_per_element_link_equation(
         None,
         Some(dims_ctx),
     )?;
-    let partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element_qualified)?;
+    let mut partial =
+        subscript_idents_at_element(&partial, to_deps_to_subscript, element_qualified)?;
+    if let Some(table_ref) = gf_table_ref {
+        partial = format!("LOOKUP({table_ref}, {partial})");
+    }
     let row_qualified: String = row_parts_bare
         .iter()
         .zip(from_dims)
@@ -2766,18 +2842,25 @@ pub(crate) fn generate_per_element_link_equation(
 ///
 /// For an *arrayed* target the per-target-element form is produced by
 /// [`generate_scalar_to_element_equation`] instead (with `from = agg_name`).
+///
+/// `gf_table_ref` is the target's implicit WITH-LOOKUP table reference
+/// ([`with_lookup_table_ref`], `None` when the target applies no gf): the
+/// partial re-evaluates `to_eqn_text`, which is the gf's *input*, so it must
+/// be fed through the table to be commensurable with the `PREVIOUS(to)`
+/// anchor the guard form subtracts (GH #910).
 pub(crate) fn generate_agg_to_scalar_target_equation(
     agg_name: &str,
     to_name: &str,
     to_eqn_text: &str,
     to_deps: &HashSet<Ident<Canonical>>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    gf_table_ref: Option<&str>,
 ) -> Result<String, PartialEquationError> {
     let agg_canonical = Ident::new(agg_name);
     let agg_q = quote_ident(agg_name);
     let to_q = quote_ident(to_name);
     // The agg node is a scalar -- referenced bare, no iterated-dim context.
-    let partial = build_partial_equation_shaped(
+    let mut partial = build_partial_equation_shaped(
         to_eqn_text,
         to_deps,
         &agg_canonical,
@@ -2786,6 +2869,9 @@ pub(crate) fn generate_agg_to_scalar_target_equation(
         None,
         dims_ctx,
     )?;
+    if let Some(table_ref) = gf_table_ref {
+        partial = format!("LOOKUP({table_ref}, {partial})");
+    }
     Ok(link_score_guard_form(&partial, &to_q, &agg_q))
 }
 
@@ -3524,6 +3610,7 @@ fn build_arrayed_link_score_equation(
     default_expr: Option<&crate::ast::Expr2>,
     apply_default_to_missing: bool,
     target_ref: &str,
+    to_var: &Variable,
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
 ) -> Result<Equation, PartialEquationError> {
@@ -3555,7 +3642,9 @@ fn build_arrayed_link_score_equation(
         .map(String::as_str)
         .chain(source_dim_names.iter().map(String::as_str))
         .collect();
-    let slot_equation = |expr: &crate::ast::Expr2| -> Result<String, PartialEquationError> {
+    let slot_equation = |expr: &crate::ast::Expr2,
+                         gf_table_ref: Option<&str>|
+     -> Result<String, PartialEquationError> {
         let elem_eqn_text = crate::patch::expr2_to_string(expr);
         // Per-element dependency set: walk *only this slot's* expression
         // (the union over all elements -- what `identifier_set` on the
@@ -3582,12 +3671,18 @@ fn build_arrayed_link_score_equation(
             Some(&iter_ctx),
             dim_ctx,
             target_ref,
+            gf_table_ref,
         )
     };
 
     // Sort the slots by element name so the resulting `Vec` -- which lands
     // in a salsa-tracked `LtmVariablesResult` -- is deterministic
     // regardless of `HashMap` iteration order across runs.
+    // The implicit WITH-LOOKUP slot wraps (GH #910): each element's own table,
+    // the shared variable-level table, or no wrap for a gf-less element.
+    // Resolved once for the whole target -- see `WithLookupSlotRefs`.
+    let slot_refs = WithLookupSlotRefs::new(to_var, target_ast_dims);
+
     let mut elements: Vec<(
         String,
         String,
@@ -3595,11 +3690,22 @@ fn build_arrayed_link_score_equation(
         Option<datamodel::GraphicalFunction>,
     )> = per_elem
         .iter()
-        .map(|(elem, expr)| Ok((elem.as_str().to_string(), slot_equation(expr)?, None, None)))
+        .map(|(elem, expr)| {
+            let gf_table_ref = slot_refs.for_element(elem);
+            Ok((
+                elem.as_str().to_string(),
+                slot_equation(expr, gf_table_ref.as_deref())?,
+                None,
+                None,
+            ))
+        })
         .collect::<Result<_, PartialEquationError>>()?;
     elements.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let default_slot = default_expr.map(slot_equation).transpose()?;
+    let default_gf_table_ref = slot_refs.for_default();
+    let default_slot = default_expr
+        .map(|expr| slot_equation(expr, default_gf_table_ref.as_deref()))
+        .transpose()?;
 
     Ok(Equation::Arrayed(
         target_dim_names,
@@ -3740,6 +3846,7 @@ fn generate_auxiliary_to_auxiliary_equation(
             default_expr.as_ref(),
             *apply_default,
             &to_q,
+            to_var,
             dim_ctx,
             dep_dims,
         );
@@ -3775,6 +3882,9 @@ fn generate_auxiliary_to_auxiliary_equation(
         Some(&iter_ctx),
         dim_ctx,
         &to_q,
+        // The implicit WITH-LOOKUP wrap for a tables-carrying target
+        // (GH #910); `None` for an ordinary aux.
+        with_lookup_table_ref(to_var).as_deref(),
     )?;
     Ok(link_score_equation_for_target(text, to_var))
 }
@@ -4036,6 +4146,7 @@ fn generate_stock_to_flow_equation(
             default_expr.as_ref(),
             *apply_default,
             target_ref,
+            flow_var,
             dim_ctx,
             dep_dims,
         );
@@ -4079,6 +4190,8 @@ fn generate_stock_to_flow_equation(
         Some(&iter_ctx),
         dim_ctx,
         target_ref,
+        // A flow can be an implicit WITH-LOOKUP variable too (GH #910).
+        with_lookup_table_ref(flow_var).as_deref(),
     )?;
     Ok(link_score_equation_for_target(text, flow_var))
 }
@@ -5116,6 +5229,126 @@ fn pinned_body_references_live(expr: &Expr0, live_source: &str) -> bool {
     }
 }
 
+/// The per-co-reduced-row body terms of a reducer's changed-first partial:
+/// the body pinned to each row, live at the scored row and fully frozen
+/// elsewhere. `BareSource` reports the degenerate case where the pinned
+/// body is exactly the source reference, so a caller can keep its legacy
+/// bare-element builder byte-identical.
+///
+/// Shared by the nonlinear body partial ([`generate_nonlinear_body_partial`],
+/// which combines the terms with MIN/MAX/STDDEV) and the GH #910 linear
+/// INNER partial ([`linear_inner_partial`], which sums them) -- so the two
+/// can never disagree about what "row `e` live, other rows frozen" means.
+///
+/// `None` when some row's body cannot be safely pinned (see
+/// [`pin_body_to_row`]) or the pinned body does not reference the live
+/// source at all; the caller degrades to the delta-ratio fallback.
+enum PinnedRowTerms {
+    BareSource,
+    Terms(Vec<String>),
+}
+
+fn pinned_body_row_terms(
+    ctx: &ReducerBodyCtx<'_>,
+    current_element: &str,
+    all_elements: &[String],
+) -> Option<PinnedRowTerms> {
+    let Ok(Some(ast)) = Expr0::new(ctx.body_text, LexerType::Equation) else {
+        return None;
+    };
+    let row_parts_of =
+        |elem: &str| -> Vec<String> { elem.split(',').map(|p| p.trim().to_string()).collect() };
+    let current_parts = row_parts_of(current_element);
+    if current_parts.len() != ctx.row_dim_names.len() {
+        return None;
+    }
+    let pinned_current = pin_body_to_row(ast.clone(), ctx, &current_parts)?;
+    if pinned_body_is_bare_source(&pinned_current, ctx.live_source, &current_parts) {
+        return Some(PinnedRowTerms::BareSource);
+    }
+    if !pinned_body_references_live(&pinned_current, ctx.live_source) {
+        return None;
+    }
+    // One term per co-reduced row: live at the scored row, fully frozen
+    // elsewhere. Terms are parenthesized -- they are compound expressions
+    // landing inside call arguments and `+`/`-`/`^` contexts.
+    let mut terms = Vec::with_capacity(all_elements.len());
+    for elem in all_elements {
+        let term = if elem == current_element {
+            freeze_pinned_body(
+                pinned_current.clone(),
+                ctx.model_deps,
+                Some(ctx.live_source),
+            )
+        } else {
+            let parts = row_parts_of(elem);
+            if parts.len() != ctx.row_dim_names.len() {
+                return None;
+            }
+            let pinned = pin_body_to_row(ast.clone(), ctx, &parts)?;
+            freeze_pinned_body(pinned, ctx.model_deps, None)
+        };
+        terms.push(format!("({})", print_eqn(&term)));
+    }
+    Some(PinnedRowTerms::Terms(terms))
+}
+
+/// The changed-first partial of a LINEAR reducer expressed in the reducer's
+/// OWN (pre-graphical-function) units -- a FULL re-evaluation of the reducer
+/// over its co-reduced rows, with the scored row live and every other row
+/// frozen at `PREVIOUS` (GH #910).
+///
+/// The ordinary linear builders ([`generate_linear_partial`] /
+/// [`generate_linear_body_partial`]) express the same quantity INCREMENTALLY,
+/// anchored on `PREVIOUS(target)`. That anchor is the target's *value*, so
+/// when the target is an implicit WITH-LOOKUP variable it is in gf-OUTPUT
+/// units while the delta added to it is in gf-INPUT units -- the two cannot
+/// be mixed, and the resulting numerator can even carry the wrong sign. The
+/// enumerated form here has no anchor, so it can be fed through the target's
+/// gf to land back in gf-output units. It is exactly equal to the incremental
+/// form when no gf is applied, so it is used ONLY on the gf path (the
+/// gf-less emission stays byte-identical, and the enumeration's `O(N)` text
+/// is paid only where it is needed).
+///
+/// `None` when the body cannot be pinned per row; the caller degrades to the
+/// delta-ratio fallback (which needs no wrap).
+fn linear_inner_partial(
+    body: Option<&ReducerBodyCtx<'_>>,
+    source_q: &str,
+    current_element: &str,
+    all_elements: &[String],
+    reducer_upper: &str,
+) -> Option<String> {
+    let bare_terms = || -> Vec<String> {
+        all_elements
+            .iter()
+            .map(|elem| {
+                if elem == current_element {
+                    format!("({source_q}[{elem}])")
+                } else {
+                    format!("(PREVIOUS({source_q}[{elem}]))")
+                }
+            })
+            .collect()
+    };
+    let terms = match body {
+        Some(ctx) => match pinned_body_row_terms(ctx, current_element, all_elements)? {
+            PinnedRowTerms::BareSource => bare_terms(),
+            PinnedRowTerms::Terms(terms) => terms,
+        },
+        None => bare_terms(),
+    };
+    if terms.is_empty() {
+        return None;
+    }
+    let sum = terms.join(" + ");
+    match reducer_upper {
+        "MEAN" => Some(format!("(({sum}) / {})", terms.len())),
+        // SUM is the default linear case.
+        _ => Some(format!("({sum})")),
+    }
+}
+
 /// The body-aware changed-first per-row partial for a linear reducer
 /// (SUM/MEAN) -- GH #744.
 ///
@@ -5253,51 +5486,20 @@ fn generate_nonlinear_body_partial(
             reducer_name,
         ));
     }
-    let Ok(Some(ast)) = Expr0::new(ctx.body_text, LexerType::Equation) else {
-        return None;
+    let terms = match pinned_body_row_terms(ctx, current_element, all_elements)? {
+        PinnedRowTerms::BareSource => {
+            // The legacy per-element expansion is exact for a bare body; keep
+            // its emission byte-identical to the pre-body-aware form.
+            return Some(generate_nonlinear_partial(
+                source_q,
+                target_ref,
+                current_element,
+                all_elements,
+                reducer_name,
+            ));
+        }
+        PinnedRowTerms::Terms(terms) => terms,
     };
-    let row_parts_of =
-        |elem: &str| -> Vec<String> { elem.split(',').map(|p| p.trim().to_string()).collect() };
-    let current_parts = row_parts_of(current_element);
-    if current_parts.len() != ctx.row_dim_names.len() {
-        return None;
-    }
-    let pinned_current = pin_body_to_row(ast.clone(), ctx, &current_parts)?;
-    if pinned_body_is_bare_source(&pinned_current, ctx.live_source, &current_parts) {
-        // The legacy per-element expansion is exact for a bare body; keep
-        // its emission byte-identical to the pre-body-aware form.
-        return Some(generate_nonlinear_partial(
-            source_q,
-            target_ref,
-            current_element,
-            all_elements,
-            reducer_name,
-        ));
-    }
-    if !pinned_body_references_live(&pinned_current, ctx.live_source) {
-        return None;
-    }
-    // One term per co-reduced row: live at the scored row, fully frozen
-    // elsewhere. Terms are parenthesized -- they are compound expressions
-    // landing inside call arguments and `+`/`-`/`^` contexts.
-    let mut terms = Vec::with_capacity(all_elements.len());
-    for elem in all_elements {
-        let term = if elem == current_element {
-            freeze_pinned_body(
-                pinned_current.clone(),
-                ctx.model_deps,
-                Some(ctx.live_source),
-            )
-        } else {
-            let parts = row_parts_of(elem);
-            if parts.len() != ctx.row_dim_names.len() {
-                return None;
-            }
-            let pinned = pin_body_to_row(ast.clone(), ctx, &parts)?;
-            freeze_pinned_body(pinned, ctx.model_deps, None)
-        };
-        terms.push(format!("({})", print_eqn(&term)));
-    }
     match upper.as_str() {
         "MIN" | "MAX" => {
             // Nest binary calls right-to-left, mirroring the bare builder:
@@ -5356,6 +5558,10 @@ fn generate_nonlinear_body_partial(
 /// is the `body` context's job (GH #744): without it the Linear arm asserts
 /// ∂target/∂source[e] = 1, which is wrong-magnitude (and wrong-signed for a
 /// negative coefficient) whenever the body is not the bare source.
+///
+/// `gf_table_ref` is the implicit WITH-LOOKUP wrap when the reducer's OWNER
+/// (`target_var_name`) is a tables-carrying value-bearing variable
+/// (GH #910); see [`with_lookup::is_implicit_with_lookup`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_element_to_scalar_equation(
     source_var_name: &str,
@@ -5366,6 +5572,7 @@ pub(crate) fn generate_element_to_scalar_equation(
     reducer_name: &str,
     is_bare: bool,
     body: Option<&ReducerBodyCtx<'_>>,
+    gf_table_ref: Option<&str>,
 ) -> String {
     let source_q = quote_ident(source_var_name);
     let target_ref = quote_ident(target_var_name);
@@ -5378,6 +5585,7 @@ pub(crate) fn generate_element_to_scalar_equation(
         reducer_name,
         is_bare,
         body,
+        gf_table_ref,
     )
 }
 
@@ -5416,6 +5624,7 @@ pub(crate) fn generate_element_to_reduced_equation(
     reducer_name: &str,
     is_bare: bool,
     body: Option<&ReducerBodyCtx<'_>>,
+    gf_table_ref: Option<&str>,
 ) -> String {
     let source_q = quote_ident(source_var_name);
     let target_ref = format!("{}[{}]", quote_ident(target_var_name), result_element);
@@ -5428,6 +5637,7 @@ pub(crate) fn generate_element_to_reduced_equation(
         reducer_name,
         is_bare,
         body,
+        gf_table_ref,
     )
 }
 
@@ -5451,8 +5661,10 @@ fn build_element_reducer_link_score(
     reducer_name: &str,
     is_bare: bool,
     body: Option<&ReducerBodyCtx<'_>>,
+    gf_table_ref: Option<&str>,
 ) -> String {
     let source_elem = format!("{source_q}[{current_element}]");
+    let upper = reducer_name.to_uppercase();
 
     let partial_eq = match reducer_kind {
         ReducerKind::Constant => {
@@ -5469,7 +5681,26 @@ fn build_element_reducer_link_score(
             // measures the ratio of actual target change to source element
             // change. This is approximate (like STDDEV/RANK) but avoids the
             // wrong-multiplier bug the shortcut would introduce.
+            //
+            // This partial is the target's own (already gf-applied) value,
+            // so it needs no implicit WITH-LOOKUP wrap -- wrapping it would
+            // feed a gf-output value back through the gf.
             target_ref.to_string()
+        }
+        // GH #910: an implicit WITH-LOOKUP owner's compiled value is
+        // `gf(reducer)`, so the linear ANCHORED partial (which adds a
+        // gf-input delta to the gf-output `PREVIOUS(target)`) is
+        // dimensionally incoherent -- and can invert the score's sign
+        // relative to the composed link polarity. Rebuild the partial as a
+        // full re-evaluation of the reducer (gf-input units) and feed it
+        // through the target's own table.
+        ReducerKind::Linear if gf_table_ref.is_some() => {
+            match linear_inner_partial(body, source_q, current_element, all_elements, &upper) {
+                Some(inner) => format!("LOOKUP({}, {inner})", gf_table_ref.unwrap()),
+                // Un-pinnable body: the delta-ratio fallback, which is
+                // already in gf-output units.
+                None => target_ref.to_string(),
+            }
         }
         // GH #744: with a body context, build the changed-first partial from
         // the reducer's BODY at this row (exact for any body linear in the
@@ -5502,24 +5733,38 @@ fn build_element_reducer_link_score(
         // degrades to the same delta-ratio fallback. Without a context
         // (test-only callers) the bare-element expansion is used as
         // before.
-        ReducerKind::Nonlinear => match body {
-            Some(ctx) => generate_nonlinear_body_partial(
-                ctx,
-                source_q,
-                target_ref,
-                current_element,
-                all_elements,
-                reducer_name,
-            )
-            .unwrap_or_else(|| target_ref.to_string()),
-            None => generate_nonlinear_partial(
-                source_q,
-                target_ref,
-                current_element,
-                all_elements,
-                reducer_name,
-            ),
-        },
+        ReducerKind::Nonlinear => {
+            let raw = match body {
+                Some(ctx) => generate_nonlinear_body_partial(
+                    ctx,
+                    source_q,
+                    target_ref,
+                    current_element,
+                    all_elements,
+                    reducer_name,
+                ),
+                None => Some(generate_nonlinear_partial(
+                    source_q,
+                    target_ref,
+                    current_element,
+                    all_elements,
+                    reducer_name,
+                )),
+            };
+            // MIN/MAX/STDDEV partials ARE a full re-evaluation of the
+            // reducer (gf-input units), so a WITH-LOOKUP owner wraps them
+            // (GH #910). RANK's stand-in is the delta-ratio -- the target
+            // itself, already gf-output -- and must never be wrapped, and
+            // neither must the un-pinnable-body degradation to the same
+            // stand-in.
+            match (gf_table_ref, raw) {
+                (Some(table_ref), Some(inner)) if upper != "RANK" => {
+                    format!("LOOKUP({table_ref}, {inner})")
+                }
+                (_, Some(partial)) => partial,
+                (_, None) => target_ref.to_string(),
+            }
+        }
     };
 
     // Standard link score formula wrapping the partial equation, in the
