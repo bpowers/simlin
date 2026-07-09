@@ -1966,16 +1966,13 @@ fn simulates_getdata_mdl() {
 /// `Converter 1[Product]` carries one per-element gf per Product element plus
 /// a top-level `<eqn>TIME</eqn>`. The reader maps the absent per-element eqns
 /// to empty element equations and the top-level eqn to the EXCEPT default, so
-/// every element evaluates TIME.
+/// every element's INPUT equation is TIME.
 ///
-/// NOTE (pinned divergence): Stella itself additionally applies each
-/// element's gf to that shared input (value = gf_elem(TIME)); the engine does
-/// not yet auto-apply graphical functions on value-bearing ARRAYED variables
-/// (the WITH-LOOKUP `LOOKUP(self, input)` wrap in `compiler/mod.rs` is
-/// scalar-only), so the per-element tables stay latent, reachable via
-/// explicit `LOOKUP(converter_1[elem], x)` calls. This test pins the current
-/// open-compile-simulate behavior; auto-application is tracked as GH #909
-/// (update this test when fixing it).
+/// A value-bearing arrayed variable with per-element gfs is the arrayed
+/// WITH LOOKUP shape: like Stella, the engine applies each element's own gf
+/// to that shared input, so `Converter 1[elem] == gf_elem(TIME)` -- linear
+/// interpolation over the element's `<ypts>` on the uniform x-grid 1..13
+/// (`<xscale min="1" max="13">` with 13 points).
 #[test]
 fn opens_and_simulates_non_a2a_gf() {
     let path = "../../test/test-models/samples/arrays/non-a2a/non-a2a-gf.stmx";
@@ -2000,16 +1997,50 @@ fn opens_and_simulates_non_a2a_gf() {
             .unwrap_or_else(|| panic!("missing {name}; have {:?}", results.offsets.keys()))
             .1
     };
+
+    // Ground truth: the fixture's per-element <ypts>, sampled on the uniform
+    // x-grid 1..13 (13 points), linearly interpolated -- the XMILE continuous
+    // graphical-function semantics. Time runs 1..13 at dt = 1/4, so every
+    // simulated time falls inside the table's x-range.
+    let pizza_y = [
+        97.3, 91.4, 86.5, 78.4, 71.9, 65.9, 57.8, 50.3, 43.8, 33.0, 20.0, 2.7, 0.0,
+    ];
+    let salad_y = [
+        2.2, 5.9, 10.3, 14.9, 19.5, 30.8, 45.4, 53.5, 62.2, 68.6, 80.0, 92.4, 100.0,
+    ];
+    let interp = |y: &[f64; 13], t: f64| -> f64 {
+        let pos = (t - 1.0).clamp(0.0, 12.0);
+        let i = pos.floor() as usize;
+        if i >= 12 {
+            y[12]
+        } else {
+            y[i] + (pos - i as f64) * (y[i + 1] - y[i])
+        }
+    };
+
     let time_off = offset_of("time");
-    for elem in ["pizza", "salad"] {
+    for (elem, ys) in [("pizza", &pizza_y), ("salad", &salad_y)] {
         let conv_off = offset_of(&format!("converter_1[{elem}]"));
         for row in results.iter() {
-            assert_eq!(
-                row[time_off], row[conv_off],
-                "converter_1[{elem}] must evaluate the EXCEPT-default TIME"
+            let t = row[time_off];
+            let expected = interp(ys, t);
+            assert!(
+                (row[conv_off] - expected).abs() < 1e-9,
+                "converter_1[{elem}] at t={t} must be gf_{elem}(TIME) = {expected}, \
+                 got {} (raw TIME would mean the per-element gf was dropped)",
+                row[conv_off]
             );
         }
     }
+
+    // wasm-backend parity: the implicit arrayed WITH LOOKUP wrap lowers to the
+    // same scalar Lookup opcode the wasm backend already implements; assert
+    // the blob runs and matches the VM series exactly.
+    let outcome = ensure_wasm_matches(&project, "main", &results, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "non-a2a-gf must run through the wasm backend, got {outcome:?}"
+    );
 }
 
 #[test]

@@ -146,6 +146,15 @@ fn arrayed_gf_project_with_elem_eqn(
 /// `out` (keyed `out[<elem>]`, canonicalized) -- the result of applying each
 /// element's own per-element table.
 fn simulate_out(project: &datamodel::Project) -> std::collections::HashMap<String, f64> {
+    simulate_final_values(project, "out")
+}
+
+/// Run a project and return the t=1 (final) value of each per-element key of
+/// `var` (keyed `<var>[<elem>]`, canonicalized).
+fn simulate_final_values(
+    project: &datamodel::Project,
+    var: &str,
+) -> std::collections::HashMap<String, f64> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     let compiled = compile_project_incremental(&db, sync.project, "main")
@@ -154,10 +163,10 @@ fn simulate_out(project: &datamodel::Project) -> std::collections::HashMap<Strin
     vm.run_to_end().expect("VM run should succeed");
     let results = vm.into_results();
     let series = crate::test_common::collect_results(&results);
-    // collect the t=1 (final) value of each per-element key of `out`.
+    let prefix = format!("{var}[");
     series
         .iter()
-        .filter(|(k, _)| k.starts_with("out["))
+        .filter(|(k, _)| k.starts_with(&prefix))
         .map(|(k, v)| (k.clone(), *v.last().expect("at least one save step")))
         .collect()
 }
@@ -789,6 +798,307 @@ fn gf_only_elements_form_a_lookup_only_table_holder() {
         "M -> 3000, got {}",
         get("m")
     );
+}
+
+/// GH #909: a VALUE-BEARING arrayed variable (real per-element input
+/// equations) carrying per-element gfs is the arrayed WITH LOOKUP shape --
+/// Stella evaluates each element to `gf_elem(input)`, applying each element's
+/// OWN table to that element's input equation. The engine must auto-apply the
+/// gf, exactly as it does for the scalar WITH LOOKUP wrap. Uses the same
+/// non-sorted declared order (Z, A, M; alphabetical elems Vec) as the layout
+/// tests so a positional table mis-map in the wrap would also be caught.
+#[test]
+fn value_bearing_per_element_gf_applies_to_own_equation() {
+    // Each element's input equation is `time` (== 1 at t=1); each element's
+    // own table maps 1 -> its identifying constant (Z=1000, A=2000, M=3000).
+    let project = arrayed_gf_project(
+        "Dim",
+        &["Z", "A", "M"],
+        vec![
+            ("A", Some(ramp_gf(0.0, 2000.0))),
+            ("M", Some(ramp_gf(0.0, 3000.0))),
+            ("Z", Some(ramp_gf(0.0, 1000.0))),
+        ],
+    );
+
+    let values = simulate_final_values(&project, "g");
+    let get = |elem: &str| {
+        *values
+            .get(&format!("g[{elem}]"))
+            .unwrap_or_else(|| panic!("missing g[{elem}]; have {:?}", values.keys()))
+    };
+
+    assert!(
+        (get("z") - 1000.0).abs() < 1e-9,
+        "g[Z] must evaluate gf_Z(time) = 1000, got {} -- the raw input \
+         equation (time = 1) means the gf was silently dropped (GH #909)",
+        get("z")
+    );
+    assert!(
+        (get("a") - 2000.0).abs() < 1e-9,
+        "g[A] must evaluate gf_A(time) = 2000, got {}",
+        get("a")
+    );
+    assert!(
+        (get("m") - 3000.0).abs() < 1e-9,
+        "g[M] must evaluate gf_M(time) = 3000, got {}",
+        get("m")
+    );
+}
+
+/// GH #909 (mixed elements): only elements that HAVE a gf get the implicit
+/// WITH LOOKUP wrap; an element without a gf (an empty placeholder table in
+/// the compiled layout) keeps its raw input equation -- Stella has nothing to
+/// apply there. This also pins that the wrap keys tables by the element's
+/// DECLARED dimension index, not elems Vec position: with declared order
+/// (Z, A, M) and A missing its gf, a positional wrap would feed Z or M the
+/// empty placeholder.
+#[test]
+fn value_bearing_mixed_elements_apply_gf_only_where_present() {
+    let project = arrayed_gf_project(
+        "Dim",
+        &["Z", "A", "M"],
+        vec![
+            ("A", None),
+            ("M", Some(ramp_gf(0.0, 3000.0))),
+            ("Z", Some(ramp_gf(0.0, 1000.0))),
+        ],
+    );
+
+    let values = simulate_final_values(&project, "g");
+    let get = |elem: &str| {
+        *values
+            .get(&format!("g[{elem}]"))
+            .unwrap_or_else(|| panic!("missing g[{elem}]; have {:?}", values.keys()))
+    };
+
+    assert!(
+        (get("z") - 1000.0).abs() < 1e-9,
+        "g[Z] (declared index 0) must evaluate ITS OWN gf: gf_Z(time) = 1000, got {}",
+        get("z")
+    );
+    assert!(
+        (get("a") - 1.0).abs() < 1e-9,
+        "g[A] has NO gf: it must evaluate the raw input equation (time = 1), \
+         NOT an empty placeholder lookup (NaN), got {}",
+        get("a")
+    );
+    assert!(
+        (get("m") - 3000.0).abs() < 1e-9,
+        "g[M] (declared index 2) must evaluate ITS OWN gf: gf_M(time) = 3000, got {}",
+        get("m")
+    );
+}
+
+/// GH #909 (apply-to-all shape): an A2A arrayed variable with a VARIABLE-level
+/// gf and a real input equation is the arrayed WITH LOOKUP with one shared
+/// table -- every element must evaluate `gf(input)` against that single table
+/// (`tables.len() == 1`, table index 0 for every element).
+#[test]
+fn a2a_variable_level_gf_applies_to_equation() {
+    let project = datamodel::Project {
+        name: "a2a_gf".to_string(),
+        sim_specs: one_step_specs(),
+        dimensions: vec![datamodel::Dimension::named(
+            "Dim".to_string(),
+            vec!["A".to_string(), "B".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "h".to_string(),
+                equation: datamodel::Equation::ApplyToAll(
+                    vec!["Dim".to_string()],
+                    "time".to_string(),
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: Some(ramp_gf(0.0, 500.0)),
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let values = simulate_final_values(&project, "h");
+    for elem in ["a", "b"] {
+        let v = *values
+            .get(&format!("h[{elem}]"))
+            .unwrap_or_else(|| panic!("missing h[{elem}]; have {:?}", values.keys()));
+        assert!(
+            (v - 500.0).abs() < 1e-9,
+            "h[{elem}] must evaluate the shared variable-level gf at the input \
+             equation: gf(time) = 500 at t=1, got {v} (GH #909)"
+        );
+    }
+}
+
+/// GH #909 (degenerate zero-point gf, scalar): a gf with NO points is
+/// treated as ABSENT -- the variable evaluates its raw input equation. The
+/// pre-#909 scalar wrap keyed only on `tables` being non-empty, so a
+/// zero-point gf produced NaN (the empty-table lookup result); the
+/// deliberate rule now matches the arrayed empty-placeholder handling
+/// (see `apply_implicit_with_lookup`).
+#[test]
+fn zero_point_gf_on_scalar_keeps_raw_input_equation() {
+    let empty_gf = datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![]),
+        y_points: vec![],
+        x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+    };
+    let project = datamodel::Project {
+        name: "zero_point_gf".to_string(),
+        sim_specs: one_step_specs(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "s".to_string(),
+                equation: datamodel::Equation::Scalar("time".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: Some(empty_gf),
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .unwrap_or_else(|e| panic!("zero-point-gf project should compile: {e:?}"));
+    let mut vm = Vm::new(compiled).expect("VM creation should succeed");
+    vm.run_to_end().expect("VM run should succeed");
+    let results = vm.into_results();
+    let series = crate::test_common::collect_results(&results);
+    let v = *series
+        .get("s")
+        .unwrap_or_else(|| panic!("missing s; have {:?}", series.keys()))
+        .last()
+        .expect("at least one save step");
+    assert!(
+        (v - 1.0).abs() < 1e-9,
+        "a zero-point gf is treated as absent: s must evaluate its raw input \
+         equation (time = 1), NOT NaN (the empty-table lookup result), got {v}"
+    );
+}
+
+/// GH #909 x GH #907 (gf-only element among real-eqn siblings, no EXCEPT
+/// default): the element's MISSING input equation gets the arrayed
+/// expansion's fabricated `Const(0.0)`, and the wrap applies uniformly, so
+/// the element evaluates `gf(0)` (pre-#909 it evaluated the bare fabricated
+/// 0). Both are silent fabrications -- Stella rejects this element shape --
+/// and the zero-fill diagnostic is the open remainder of GH #905; this pins
+/// the uniform-wrap choice.
+#[test]
+fn gf_only_element_without_default_evaluates_gf_of_fabricated_zero() {
+    // Z has a real input equation (time); A is gf-only (empty eqn) with NO
+    // EXCEPT default. gf_A = ramp from 100 at x=0 to 2100 at x=1, so
+    // gf_A(0) = 100 -- distinguishable from both the fabricated 0 and any
+    // raw-input value.
+    let project = arrayed_gf_project_with_mixed_eqns(
+        "Dim",
+        &["Z", "A"],
+        vec![
+            ("Z", "time", Some(ramp_gf(0.0, 1000.0))),
+            ("A", "", Some(ramp_gf(100.0, 2000.0))),
+        ],
+    );
+
+    let values = simulate_final_values(&project, "g");
+    let get = |elem: &str| {
+        *values
+            .get(&format!("g[{elem}]"))
+            .unwrap_or_else(|| panic!("missing g[{elem}]; have {:?}", values.keys()))
+    };
+
+    assert!(
+        (get("z") - 1000.0).abs() < 1e-9,
+        "g[Z] has a real input equation: gf_Z(time) = 1000 at t=1, got {}",
+        get("z")
+    );
+    assert!(
+        (get("a") - 100.0).abs() < 1e-9,
+        "g[A] is gf-only with no default: the fabricated 0 input feeds its \
+         gf, so gf_A(0) = 100, got {} (0 would mean the gf was dropped; NaN \
+         would mean an empty placeholder was consulted)",
+        get("a")
+    );
+}
+
+/// Like [`arrayed_gf_project_with_elem_eqn`] but with a PER-element equation
+/// text, so gf-only (empty-eqn) elements can be mixed with real-equation
+/// siblings in one variable.
+fn arrayed_gf_project_with_mixed_eqns(
+    dim_name: &str,
+    dim_elements: &[&str],
+    elems: Vec<(&str, &str, Option<datamodel::GraphicalFunction>)>,
+) -> datamodel::Project {
+    let arrayed_elements: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<datamodel::GraphicalFunction>,
+    )> = elems
+        .into_iter()
+        .map(|(name, eqn, gf)| (name.to_string(), eqn.to_string(), None, gf))
+        .collect();
+
+    datamodel::Project {
+        name: "per_element_gf_mixed".to_string(),
+        sim_specs: one_step_specs(),
+        dimensions: vec![datamodel::Dimension::named(
+            dim_name.to_string(),
+            dim_elements.iter().map(|s| s.to_string()).collect(),
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "g".to_string(),
+                equation: datamodel::Equation::Arrayed(
+                    vec![dim_name.to_string()],
+                    arrayed_elements,
+                    None,
+                    false,
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
 }
 
 /// TEST (extract_tables_from_source_var, non-sorted declared order): the
