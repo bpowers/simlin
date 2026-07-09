@@ -91,10 +91,21 @@ Two OPTIONAL boolean attributes advertise sub-features: `arrest="true|false"`
 (default false) and `leak="true|false"` (default false). They are advisory; the
 authoritative source is the per-stock `<conveyor>` block.
 
-The reader accepts **three** encodings of the header option: the
-`<uses_conveyor/>` element, the `<uses_conveyors/>` spelling, and the attribute
-form Stella actually writes on the root element — `uses_conveyor=""` on
-`<smile>`/`<xmile>` (both vendored `.stmx` fixtures use the attribute form).
+Three encodings of the header option exist in the wild; the reader treats
+them as follows:
+
+1. The `<uses_conveyor/>` element — parsed into the header feature set.
+2. The `<uses_conveyors/>` plural spelling (the spec's own §2.2.1 sample
+   uses it) — parsed identically, attributes preserved.
+3. The attribute form Stella actually writes — `uses_conveyor=""` on the
+   `<smile>` header element (both vendored `.stmx` fixtures use this form;
+   the same spelling on the `<xmile>` root is treated identically) — is
+   **deliberately not mapped** onto the feature set: it is ignored,
+   harmlessly. The header option is advisory only and the per-stock
+   `<conveyor>` block is authoritative, so such files open and simulate
+   normally (pinned by reader/simulation regression tests).
+
+On export the header is re-canonicalized regardless of the input encoding:
 simlin emits the element form `<uses_conveyor/>` whenever any stock in the
 project is a conveyor, setting `arrest`/`leak` to reflect whether any conveyor
 uses those features.
@@ -769,6 +780,19 @@ by list length:
 Each filled slat gets the linear-leak schedule of a cohort that entered at the
 belt entry and traveled to its position, as in [§7.1](#71-scalar-initial-value-steady-state-fill)
 step 3.
+
+On an **arrayed** conveyor the list follows the array equation form
+([§10](#10-arrayed-conveyors-and-container-access)): an apply-to-all `<eqn>`
+list is shared by every element belt, while in the non-apply-to-all form each
+`<element>` equation that is a list initializes **that element's** belt (XMILE
+§4.5.2: each element MAY define its own equation, and a conveyor stock's
+equation is its initial value). Mixing forms is well-defined because each
+element belt is independent: an element whose equation is not a list keeps
+the ordinary [§7.1](#71-scalar-initial-value-steady-state-fill) steady fill
+from its own initial, and an EXCEPT-default equation that is itself a list
+applies to every element without an explicit `<element>` entry. Each
+element's list is normalized independently, and the compile-time placeholder
+(below) carries each element's own normalized total.
 
 Beware thousands separators: under comma-list semantics `1,000` is a two-entry
 list (`1` and `000`), never the number one thousand — write `1000`. simlin

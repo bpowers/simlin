@@ -315,7 +315,7 @@ pub fn datamodel_variable_from_source(db: &dyn Db, var: SourceVariable) -> datam
             // conveyor marker before using this equation.
             let equation = if compat.conveyor.is_some() {
                 match crate::conveyor_compile::explicit_init_list(&ident, &equation) {
-                    Ok(Some((_values, placeholder))) => placeholder,
+                    Ok(Some((_spec, placeholder))) => placeholder,
                     _ => equation,
                 }
             } else {

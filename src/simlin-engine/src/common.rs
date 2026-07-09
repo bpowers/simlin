@@ -560,11 +560,12 @@ pub enum ErrorCode {
     /// A conveyor stock's initial `<eqn>` is a §7.2 explicit comma-separated
     /// init list that cannot be used as written: an entry is not a numeric
     /// constant (the list is evaluated once at belt-init time, so only
-    /// compile-time constants are supported), or the list appears in a
-    /// per-element `<element>` equation of an arrayed conveyor (only a scalar
-    /// or shared apply-to-all list is supported). Rejected loudly at
-    /// conveyor-expansion time rather than surfacing as an opaque equation
-    /// parse error on the stock (docs/design/conveyors.md §7.2).
+    /// compile-time constants are supported), or the list-initialized
+    /// conveyor's `<len>` is not a compile-time constant (the list-length
+    /// interpretation and the initial total depend on the slat count).
+    /// Rejected loudly at conveyor-expansion time rather than surfacing as
+    /// an opaque equation parse error on the stock
+    /// (docs/design/conveyors.md §7.2).
     ConveyorInitListUnsupported,
 }
 

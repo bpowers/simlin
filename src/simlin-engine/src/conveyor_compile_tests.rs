@@ -2791,17 +2791,417 @@ fn arrayed_a2a_explicit_list_shared_across_belts() {
 }
 
 #[test]
-fn arrayed_per_element_explicit_list_rejected() {
-    // A per-element <element> equation carrying a list is rejected loudly:
-    // only the scalar and shared apply-to-all list forms are supported
-    // (never a silent parse error or a steady-init fallback).
+fn arrayed_per_element_explicit_lists_fill_each_belt() {
+    // A non-apply-to-all arrayed conveyor gives each element its own <eqn>
+    // (XMILE 4.5.2: element equations "are allowed to vary between
+    // elements"), and a conveyor stock's <eqn> is its initial -- so a
+    // per-element list initializes THAT element's belt directly (§7.2).
+    // transit 2, dt 1 -> 2 slats: belt[a] = [10, 20] drains 30 -> 20 -> 0
+    // (outflow 10 then 20); belt[b] = [5, 40] drains 45 -> 40 -> 0.
     let xml = wrap_model_init(
         r#"
     <stock name="belt">
       <inflow>in_f</inflow><outflow>out_f</outflow>
       <dimensions><dim name="board"/></dimensions>
       <element subscript="a"><eqn>10, 20</eqn></element>
-      <element subscript="b"><eqn>5</eqn></element>
+      <element subscript="b"><eqn>5, 40</eqn></element>
+      <conveyor><len>2</len></conveyor></stock>
+    <flow name="in_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <flow name="out_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>"#,
+        1.0,
+        4.0,
+    )
+    .replace(
+        "<model>",
+        "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+    );
+    let series = run_series(&xml, &["belt[a]", "belt[b]", "out_f[a]", "out_f[b]"]);
+    for (name, belt, wants) in [
+        ("belt[a]", &series[0], [30.0, 20.0, 0.0]),
+        ("belt[b]", &series[1], [45.0, 40.0, 0.0]),
+    ] {
+        for (i, want) in wants.iter().enumerate() {
+            assert!(
+                (belt[i] - want).abs() < 1e-9,
+                "{name}[{i}] = {} (want {want})",
+                belt[i]
+            );
+        }
+    }
+    for (name, out, wants) in [
+        ("out_f[a]", &series[2], [10.0, 20.0, 0.0]),
+        ("out_f[b]", &series[3], [5.0, 40.0, 0.0]),
+    ] {
+        for (i, want) in wants.iter().enumerate() {
+            assert!(
+                (out[i] - want).abs() < 1e-9,
+                "{name}[{i}] = {} (want {want})",
+                out[i]
+            );
+        }
+    }
+}
+
+#[test]
+fn arrayed_mixed_list_and_scalar_elements() {
+    // Mixing forms is well-defined because each element belt is independent:
+    // element a's list [10, 20] fills its belt directly (§7.2) while element
+    // b's ordinary scalar 40 steady-fills [20, 20] over the 2 slats (§7.1).
+    let xml = wrap_model_init(
+        r#"
+    <stock name="belt">
+      <inflow>in_f</inflow><outflow>out_f</outflow>
+      <dimensions><dim name="board"/></dimensions>
+      <element subscript="a"><eqn>10, 20</eqn></element>
+      <element subscript="b"><eqn>40</eqn></element>
+      <conveyor><len>2</len></conveyor></stock>
+    <flow name="in_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <flow name="out_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>"#,
+        1.0,
+        4.0,
+    )
+    .replace(
+        "<model>",
+        "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+    );
+    let series = run_series(&xml, &["belt[a]", "belt[b]"]);
+    for (name, belt, wants) in [
+        ("belt[a]", &series[0], [30.0, 20.0, 0.0]),
+        ("belt[b]", &series[1], [40.0, 20.0, 0.0]),
+    ] {
+        for (i, want) in wants.iter().enumerate() {
+            assert!(
+                (belt[i] - want).abs() < 1e-9,
+                "{name}[{i}] = {} (want {want})",
+                belt[i]
+            );
+        }
+    }
+}
+
+#[test]
+fn arrayed_per_element_lists_match_by_subscript_not_position() {
+    // The dimension declares its elements as (b, a), so belt[b] is row-major
+    // element 0 -- while the <element> blocks are written a-first. The lists
+    // must land by canonical SUBSCRIPT match, never by Vec position.
+    let xml = wrap_model_init(
+        r#"
+    <stock name="belt">
+      <inflow>in_f</inflow><outflow>out_f</outflow>
+      <dimensions><dim name="board"/></dimensions>
+      <element subscript="a"><eqn>10, 20</eqn></element>
+      <element subscript="b"><eqn>1, 2</eqn></element>
+      <conveyor><len>2</len></conveyor></stock>
+    <flow name="in_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <flow name="out_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>"#,
+        1.0,
+        4.0,
+    )
+    .replace(
+        "<model>",
+        "<dimensions><dim name=\"board\"><elem name=\"b\"/><elem name=\"a\"/></dim></dimensions><model>",
+    );
+    let series = run_series(&xml, &["belt[a]", "belt[b]"]);
+    for (name, belt, wants) in [
+        ("belt[a]", &series[0], [30.0, 20.0, 0.0]),
+        ("belt[b]", &series[1], [3.0, 2.0, 0.0]),
+    ] {
+        for (i, want) in wants.iter().enumerate() {
+            assert!(
+                (belt[i] - want).abs() < 1e-9,
+                "{name}[{i}] = {} (want {want})",
+                belt[i]
+            );
+        }
+    }
+}
+
+#[test]
+fn arrayed_per_element_lists_normalize_independently() {
+    // §7.2 per-time-unit normalization runs per belt: transit 4, dt 1 ->
+    // N = U = 4, so a's short list [10, 20] extends to [10, 20, 20, 20]
+    // (total 70) and b's [1, 2] to [1, 2, 2, 2] (total 7). Each element's
+    // placeholder must carry ITS OWN normalized total, so an init-time
+    // consumer (a no-flow mirror stock) sees 70 / 7, not raw sums 30 / 3.
+    let xml = wrap_model_init(
+        r#"
+    <stock name="belt">
+      <inflow>in_f</inflow><outflow>out_f</outflow>
+      <dimensions><dim name="board"/></dimensions>
+      <element subscript="a"><eqn>10, 20</eqn></element>
+      <element subscript="b"><eqn>1, 2</eqn></element>
+      <conveyor><len>4</len></conveyor></stock>
+    <flow name="in_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <flow name="out_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <stock name="mirror_a"><eqn>belt[a]</eqn></stock>
+    <stock name="mirror_b"><eqn>belt[b]</eqn></stock>"#,
+        1.0,
+        6.0,
+    )
+    .replace(
+        "<model>",
+        "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+    );
+    let series = run_series(&xml, &["belt[a]", "belt[b]", "mirror_a", "mirror_b"]);
+    assert!(
+        (series[0][0] - 70.0).abs() < 1e-9,
+        "belt[a][0] = {} (want the normalized 70, not the raw sum 30)",
+        series[0][0]
+    );
+    assert!(
+        (series[1][0] - 7.0).abs() < 1e-9,
+        "belt[b][0] = {} (want the normalized 7, not the raw sum 3)",
+        series[1][0]
+    );
+    assert!(
+        (series[2][0] - 70.0).abs() < 1e-9,
+        "mirror_a[0] = {} (an init-time consumer must see element a's total 70)",
+        series[2][0]
+    );
+    assert!(
+        (series[3][0] - 7.0).abs() < 1e-9,
+        "mirror_b[0] = {} (an init-time consumer must see element b's total 7)",
+        series[3][0]
+    );
+}
+
+#[test]
+fn arrayed_list_chained_consumers_see_per_element_normalized_totals() {
+    // The arrayed twin of the scalar placeholder-leak regressions above
+    // (`chained_conveyor_initialized_from_list_stock_sees_normalized_total`
+    // etc.): transit 4, dt 1 normalizes a's [10, 20] to [10, 20, 20, 20]
+    // (70) and b's [1, 2] to [1, 2, 2, 2] (7), and every init-time consumer
+    // must see the PER-ELEMENT normalized totals, never the raw sums
+    // 30 / 3:
+    // - a downstream CONVEYOR seeded from belt[a] steady-fills 70 over its
+    //   2 slats ([35, 35]) and returns the full 70 through its outflow;
+    // - a downstream QUEUE seeded from belt[b] holds a 7 batch that agrees
+    //   with SUM(waiting);
+    // - SUM(belt[*]) captured at init is 70 + 7 = 77.
+    let vars = r#"
+    <stock name="belt">
+      <inflow>in_f</inflow><outflow>out_f</outflow>
+      <dimensions><dim name="board"/></dimensions>
+      <element subscript="a"><eqn>10, 20</eqn></element>
+      <element subscript="b"><eqn>1, 2</eqn></element>
+      <conveyor><len>4</len></conveyor></stock>
+    <flow name="in_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <flow name="out_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <stock name="chain"><eqn>belt[a]</eqn><inflow>in_c</inflow><outflow>out_c</outflow>
+      <conveyor><len>2</len></conveyor></stock>
+    <flow name="in_c"><eqn>0</eqn></flow>
+    <flow name="out_c"><eqn>0</eqn></flow>
+    <stock name="waiting"><eqn>belt[b]</eqn><inflow>arrivals</inflow><outflow>into_service</outflow>
+      <queue/></stock>
+    <flow name="arrivals"><eqn>0</eqn><non_negative/></flow>
+    <flow name="into_service"><eqn>0</eqn></flow>
+    <aux name="q_total"><eqn>SUM(waiting)</eqn></aux>
+    <stock name="total0"><eqn>SUM(belt[*])</eqn></stock>"#;
+    let xml = wrap_model_init(vars, 1.0, 6.0).replace(
+        "<model>",
+        "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+    );
+    let project = parse(&xml);
+    let main = project.models[0].name.clone();
+    let mut vm = build_vm(&project, &main).expect("build");
+    vm.run_to_end().expect("run");
+    let chain = vm.get_series(&Ident::new("chain")).expect("chain");
+    let out_c = vm.get_series(&Ident::new("out_c")).expect("out_c");
+    let waiting = vm.get_series(&Ident::new("waiting")).expect("waiting");
+    let q_total = vm.get_series(&Ident::new("q_total")).expect("q_total");
+    let total0 = vm.get_series(&Ident::new("total0")).expect("total0");
+    for (i, want) in [70.0, 35.0, 0.0, 0.0].iter().enumerate() {
+        assert!(
+            (chain[i] - want).abs() < 1e-9,
+            "chain[{i}] = {} (want {want}; a chained conveyor must fill from \
+             element a's normalized 70, not the raw 30)",
+            chain[i]
+        );
+    }
+    let drained: f64 = out_c[0] + out_c[1];
+    assert!(
+        (drained - 70.0).abs() < 1e-9,
+        "chain outflow must return the full normalized 70, got {drained}"
+    );
+    assert!(
+        (waiting[0] - 7.0).abs() < 1e-9,
+        "waiting[0] = {} (want element b's normalized 7, not the raw 3)",
+        waiting[0]
+    );
+    assert!(
+        (q_total[0] - 7.0).abs() < 1e-9,
+        "SUM(waiting)[0] = {} (want 7; the FIFO batch must match the stock)",
+        q_total[0]
+    );
+    assert!(
+        (total0[0] - 77.0).abs() < 1e-9,
+        "SUM(belt[*]) at init = {} (want 70 + 7 = 77)",
+        total0[0]
+    );
+}
+
+#[test]
+fn arrayed_2d_per_element_lists_match_by_subscript_across_dims() {
+    // 2-D canonical-subscript matching: BOTH dimensions declare their
+    // elements in an order different from the <element> block order (row =
+    // (r2, r1), col = (cb, ca), while the blocks are written r1-first and
+    // ca-first), so a positional match would misassign every belt. transit
+    // 2, dt 1: each belt must hold exactly its own list's total and drain
+    // its own second entry.
+    let xml = wrap_model_init(
+        r#"
+    <stock name="belt">
+      <inflow>in_f</inflow><outflow>out_f</outflow>
+      <dimensions><dim name="row"/><dim name="col"/></dimensions>
+      <element subscript="r1,ca"><eqn>10, 20</eqn></element>
+      <element subscript="r1,cb"><eqn>1, 2</eqn></element>
+      <element subscript="r2,ca"><eqn>100, 200</eqn></element>
+      <element subscript="r2,cb"><eqn>4, 5</eqn></element>
+      <conveyor><len>2</len></conveyor></stock>
+    <flow name="in_f"><eqn>0</eqn><dimensions><dim name="row"/><dim name="col"/></dimensions></flow>
+    <flow name="out_f"><eqn>0</eqn><dimensions><dim name="row"/><dim name="col"/></dimensions></flow>"#,
+        1.0,
+        4.0,
+    )
+    .replace(
+        "<model>",
+        "<dimensions>\
+         <dim name=\"row\"><elem name=\"r2\"/><elem name=\"r1\"/></dim>\
+         <dim name=\"col\"><elem name=\"cb\"/><elem name=\"ca\"/></dim>\
+         </dimensions><model>",
+    );
+    let series = run_series(
+        &xml,
+        &["belt[r1,ca]", "belt[r1,cb]", "belt[r2,ca]", "belt[r2,cb]"],
+    );
+    for (name, belt, wants) in [
+        ("belt[r1,ca]", &series[0], [30.0, 20.0, 0.0]),
+        ("belt[r1,cb]", &series[1], [3.0, 2.0, 0.0]),
+        ("belt[r2,ca]", &series[2], [300.0, 200.0, 0.0]),
+        ("belt[r2,cb]", &series[3], [9.0, 5.0, 0.0]),
+    ] {
+        for (i, want) in wants.iter().enumerate() {
+            assert!(
+                (belt[i] - want).abs() < 1e-9,
+                "{name}[{i}] = {} (want {want})",
+                belt[i]
+            );
+        }
+    }
+}
+
+#[test]
+fn arrayed_default_list_applies_to_unlisted_elements() {
+    // A top-level <eqn> coexisting with <element> blocks is the EXCEPT
+    // default equation; when it is itself a list it initializes every
+    // element WITHOUT an explicit entry (b here), while a's own list wins
+    // for a. transit 2, dt 1: belt[a] = [10, 20], belt[b] = [1, 2].
+    let xml = wrap_model_init(
+        r#"
+    <stock name="belt">
+      <eqn>1, 2</eqn>
+      <inflow>in_f</inflow><outflow>out_f</outflow>
+      <dimensions><dim name="board"/></dimensions>
+      <element subscript="a"><eqn>10, 20</eqn></element>
+      <conveyor><len>2</len></conveyor></stock>
+    <flow name="in_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <flow name="out_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>"#,
+        1.0,
+        4.0,
+    )
+    .replace(
+        "<model>",
+        "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+    );
+    let series = run_series(&xml, &["belt[a]", "belt[b]"]);
+    for (name, belt, wants) in [
+        ("belt[a]", &series[0], [30.0, 20.0, 0.0]),
+        ("belt[b]", &series[1], [3.0, 2.0, 0.0]),
+    ] {
+        for (i, want) in wants.iter().enumerate() {
+            assert!(
+                (belt[i] - want).abs() < 1e-9,
+                "{name}[{i}] = {} (want {want})",
+                belt[i]
+            );
+        }
+    }
+}
+
+#[test]
+fn arrayed_per_element_list_bad_entry_rejected() {
+    // A per-element list with a non-constant entry is still rejected loudly,
+    // and the diagnostic names both the offending entry and the element.
+    let xml = wrap_model_init(
+        r#"
+    <stock name="belt">
+      <inflow>in_f</inflow><outflow>out_f</outflow>
+      <dimensions><dim name="board"/></dimensions>
+      <element subscript="a"><eqn>10, some_var</eqn></element>
+      <element subscript="b"><eqn>5, 5</eqn></element>
+      <conveyor><len>2</len></conveyor></stock>
+    <flow name="in_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <flow name="out_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <aux name="some_var"><eqn>20</eqn></aux>"#,
+        1.0,
+        4.0,
+    )
+    .replace(
+        "<model>",
+        "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+    );
+    let project = parse(&xml);
+    let main = project.models[0].name.clone();
+    let err = build_vm(&project, &main).expect_err("non-constant per-element entry rejected");
+    assert_eq!(err.code, ErrorCode::ConveyorInitListUnsupported);
+    let details = err.get_details().unwrap_or_default();
+    assert!(
+        details.contains("some_var") && details.contains("belt[a]"),
+        "diagnostic should name the entry and the element: {details}"
+    );
+}
+
+#[test]
+fn arrayed_per_element_list_with_non_constant_transit_rejected() {
+    // The literal-<len> requirement (§7.2) applies to per-element lists
+    // exactly as it does to shared ones: the per-belt normalization needs
+    // the slat count at expansion time.
+    let xml = wrap_model_init(
+        r#"
+    <stock name="belt">
+      <inflow>in_f</inflow><outflow>out_f</outflow>
+      <dimensions><dim name="board"/></dimensions>
+      <element subscript="a"><eqn>10, 20</eqn></element>
+      <element subscript="b"><eqn>5, 5</eqn></element>
+      <conveyor><len>tt</len></conveyor></stock>
+    <flow name="in_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <flow name="out_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
+    <aux name="tt"><eqn>2</eqn></aux>"#,
+        1.0,
+        4.0,
+    )
+    .replace(
+        "<model>",
+        "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
+    );
+    let project = parse(&xml);
+    let main = project.models[0].name.clone();
+    let err = build_vm(&project, &main).expect_err("non-literal transit must be rejected");
+    assert_eq!(err.code, ErrorCode::ConveyorInitListUnsupported);
+}
+
+#[test]
+fn arrayed_per_element_list_produces_no_error_diagnostics() {
+    // The editor diagnostic path parses the UN-expanded project; a valid
+    // per-element list initial must not surface as a spurious parse error
+    // (the runtime path accepts it, so diagnostics must too).
+    let xml = wrap_model_init(
+        r#"
+    <stock name="belt">
+      <inflow>in_f</inflow><outflow>out_f</outflow>
+      <dimensions><dim name="board"/></dimensions>
+      <element subscript="a"><eqn>10, 20</eqn></element>
+      <element subscript="b"><eqn>5, 40</eqn></element>
       <conveyor><len>2</len></conveyor></stock>
     <flow name="in_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>
     <flow name="out_f"><eqn>0</eqn><dimensions><dim name="board"/></dimensions></flow>"#,
@@ -2813,9 +3213,51 @@ fn arrayed_per_element_explicit_list_rejected() {
         "<dimensions><dim name=\"board\"><elem name=\"a\"/><elem name=\"b\"/></dim></dimensions><model>",
     );
     let project = parse(&xml);
-    let main = project.models[0].name.clone();
-    let err = build_vm(&project, &main).expect_err("per-element list must be rejected");
-    assert_eq!(err.code, ErrorCode::ConveyorInitListUnsupported);
+    let mut db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+    let diags = crate::db::collect_all_diagnostics(&db, sync.project);
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "a valid per-element list initial must not produce Error diagnostics: {errors:?}"
+    );
+}
+
+#[test]
+fn stella_attribute_form_header_simulates_from_per_stock_block() {
+    // Stella writes NO <options> block: both vendored .stmx fixtures declare
+    // conveyor usage only as attributes on the <smile> header element
+    // (`uses_conveyor=""`). The reader deliberately ignores that advisory
+    // form (conveyors.md 3.1) -- the per-stock <conveyor> block is
+    // authoritative -- so such a file must open and simulate as a conveyor:
+    // initial 10 == inflow 5 x transit 2 holds the belt steady at 10 with a
+    // steady outflow of 5.
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" uses_conveyor="">
+  <header>
+    <smile version="1.0" namespace="std, isee" uses_arrays="1" uses_conveyor="" uses_submodels=""/>
+    <name>t</name><vendor>isee systems, inc.</vendor>
+    <product version="2.0" lang="en">Stella Architect</product>
+  </header>
+  <sim_specs method="Euler" time_units="Months"><start>0</start><stop>6</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <stock name="belt"><eqn>10</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
+      <conveyor><len>2</len></conveyor></stock>
+    <flow name="in_f"><eqn>5</eqn></flow>
+    <flow name="out_f"><eqn>0</eqn></flow>
+  </variables></model>
+</xmile>"#;
+    let series = run_series(xml, &["belt", "out_f"]);
+    let (belt, out) = (&series[0], &series[1]);
+    for (i, &b) in belt.iter().enumerate() {
+        assert!((b - 10.0).abs() < 1e-9, "belt[{i}] = {b} (want steady 10)");
+    }
+    for (i, &o) in out.iter().enumerate().skip(1) {
+        assert!((o - 5.0).abs() < 1e-9, "out_f[{i}] = {o} (want steady 5)");
+    }
 }
 
 #[test]

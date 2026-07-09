@@ -296,15 +296,20 @@ pub struct ConveyorMeta {
     /// arrayed conveyor is `N_elem` independent belts, one per element; this is
     /// empty for a scalar conveyor (the degenerate 1-belt case).
     pub element_subscripts: Vec<String>,
-    /// §7.2 explicit init list parsed from the stock's `<eqn>` (front first),
-    /// `None` for an ordinary §7.1 scalar init. An arrayed conveyor shares one
-    /// list across every element belt (the apply-to-all form; per-element
-    /// distinct lists are rejected at expansion). The expanded stock's `<eqn>`
-    /// was rewritten to a constant placeholder carrying the NORMALIZED belt
-    /// total ([`normalized_init_total`]); [`init_belts`] fills the belt from
-    /// these values and defensively re-writes the (identical) total into the
-    /// stock slot.
-    pub init_values: Option<Vec<f64>>,
+    /// §7.2 explicit init lists parsed from the stock's `<eqn>`: one entry
+    /// per element belt, aligned with `element_subscripts` (a single entry
+    /// for a scalar conveyor); EMPTY when the stock has no list init at all.
+    /// `Some(list)` fills that belt directly (front first, via
+    /// [`ConveyorState::init_explicit`] in [`init_belts`]); `None` keeps the
+    /// §7.1 steady fill from that element's own compiled initial. A scalar
+    /// or apply-to-all list is replicated across every belt; a
+    /// non-apply-to-all `<element>` list applies to its own element only
+    /// (XMILE §4.5.2: element equations vary between elements). The expanded
+    /// stock's `<eqn>` was rewritten to a constant placeholder carrying each
+    /// list-initialized element's NORMALIZED belt total
+    /// ([`normalized_init_total`]); [`init_belts`] defensively re-writes the
+    /// (identical) total into the stock slot.
+    pub init_values: Vec<Option<Vec<f64>>>,
 }
 
 /// A resolved leak flow: slot offsets plus static config.
@@ -771,41 +776,81 @@ pub(crate) fn probe_init_list(eqn: &str) -> InitListProbe {
     }
 }
 
-/// A resolved §7.2 explicit init list: the parsed values (front first) plus
-/// the constant raw-sum placeholder equation the expanded stock compiles with.
-pub(crate) type InitListRewrite = (Vec<f64>, Equation);
+/// The parsed §7.2 explicit init list(s) of a conveyor stock's `<eqn>`,
+/// resolved from the equation's array shape: which belts get a direct list
+/// fill, and from which list.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub(crate) enum InitListSpec {
+    /// One list shared by every element belt: a scalar stock's list, or an
+    /// apply-to-all arrayed list (one equation for the whole array, so every
+    /// belt fills identically).
+    Shared(Vec<f64>),
+    /// A non-apply-to-all arrayed stock: XMILE §4.5.2 lets each `<element>`
+    /// carry its own equation, and a conveyor stock's equation is its
+    /// initial -- so a list element equation initializes THAT element's belt.
+    /// `elems` maps every element with an explicit `<element>` entry
+    /// (canonical comma-joined subscript, [`canonical_subscript_key`]) to its
+    /// list, `None` when that element's equation is an ordinary non-list
+    /// initial (it keeps the §7.1 steady fill -- mixing is well-defined
+    /// because each belt is independent). `default` is the EXCEPT-default
+    /// equation's list when that default is itself a list; it applies to
+    /// every element without an explicit entry.
+    PerElement {
+        elems: HashMap<String, Option<Vec<f64>>>,
+        default: Option<Vec<f64>>,
+    },
+}
 
-/// The scalar-string half of [`InitListRewrite`]: parsed values plus the
+/// A resolved §7.2 explicit init list: the parsed list spec plus the constant
+/// raw-sum placeholder equation the diagnostic path substitutes.
+pub(crate) type InitListRewrite = (InitListSpec, Equation);
+
+/// The scalar-string half of a single probed list: parsed values plus the
 /// raw-sum placeholder text (shaped into an [`Equation`] by the caller).
 type InitListValues = (Vec<f64>, String);
 
+/// Canonical comma-joined subscript key for matching an `Equation::Arrayed`
+/// element entry against the row-major [`element_subscripts_for_dims`]
+/// suffixes. Each comma-separated part is canonicalized independently (the
+/// XMILE reader already stores element keys this way -- `xmile/variables.rs`
+/// `convert_equation` -- but MDL-sourced or hand-built datamodels may not),
+/// so both sides normalize identically regardless of case or whitespace.
+pub(crate) fn canonical_subscript_key(subscript: &str) -> String {
+    subscript
+        .split(',')
+        .map(canon)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Resolve a conveyor stock's initial equation against the §7.2 explicit-list
-/// form. Returns `Ok(Some((values, placeholder)))` when the equation is a
-/// list: `values` is the parsed list (front first) for
-/// [`ConveyorState::init_explicit`], and `placeholder` is a constant RAW-SUM
-/// equation that merely makes the stock's `<eqn>` parseable (a comma list is
-/// not a scalar expression). The raw sum is fine for the parse-only salsa
-/// diagnostic path (`db::input::datamodel_variable_from_source` -- that
-/// equation is never simulated, and the LaTeX surface returns NULL for list
-/// stocks rather than rendering it); [`expand_conveyors`] does NOT use this
-/// placeholder value -- it swaps in the NORMALIZED belt total from
-/// [`normalized_init_total`], because init-time consumers evaluated before
-/// `init_belts` read the placeholder as the stock's initial value. `Ok(None)`
-/// when the equation is an ordinary §7.1 scalar init. `Err` when the list
-/// cannot be used as written: a non-constant entry, or a list inside a
-/// per-element `<element>` equation of an arrayed conveyor (per-element
-/// DISTINCT lists are not supported; only the scalar and shared apply-to-all
-/// forms are -- the same one-expression-per-attribute rule the conveyor block
-/// follows, §10). Shared by [`expand_conveyors`] and the diagnostic path so
-/// the editor's parse diagnostics accept exactly the lists the runtime
-/// accepts.
+/// form. Returns `Ok(Some((spec, placeholder)))` when the equation carries a
+/// list anywhere: `spec` says which belts fill from which parsed list (front
+/// first, for [`ConveyorState::init_explicit`]), and `placeholder` is the
+/// equation with every list replaced by its constant RAW SUM, merely making
+/// the stock's `<eqn>` parseable (a comma list is not a scalar expression).
+/// The raw sum is fine for the parse-only salsa diagnostic path
+/// (`db::input::datamodel_variable_from_source` -- that equation is never
+/// simulated, and the LaTeX surface returns NULL for list stocks rather than
+/// rendering it); [`expand_conveyors`] does NOT use this placeholder value --
+/// it swaps in the NORMALIZED belt total from [`normalized_init_total`]
+/// (per element for a non-apply-to-all array), because init-time consumers
+/// evaluated before `init_belts` read the placeholder as the stock's initial
+/// value. `Ok(None)` when the equation is an ordinary §7.1 initial (no list
+/// in any element). `Err` when a list cannot be used as written (a
+/// non-constant entry). Shared by [`expand_conveyors`] and the diagnostic
+/// path so the editor's parse diagnostics accept exactly the lists the
+/// runtime accepts.
 pub(crate) fn explicit_init_list(
     stock: &str,
     equation: &Equation,
 ) -> Result<Option<InitListRewrite>, (ErrorCode, String)> {
-    // Probe one scalar equation string: the parsed values plus the raw-sum
-    // placeholder text, `None` for a non-list, `Err` for a malformed list.
-    let scalar = |s: &str| -> Result<Option<InitListValues>, (ErrorCode, String)> {
+    // Probe one scalar equation string under the display name `name` (the
+    // bare stock, or `stock[element]` for a per-element equation): the
+    // parsed values plus the raw-sum placeholder text, `None` for a
+    // non-list, `Err` for a malformed list.
+    let scalar = |name: &str, s: &str| -> Result<Option<InitListValues>, (ErrorCode, String)> {
         match probe_init_list(s) {
             InitListProbe::NotAList => Ok(None),
             InitListProbe::List(values) => {
@@ -814,7 +859,7 @@ pub(crate) fn explicit_init_list(
                     return Err((
                         ErrorCode::ConveyorInitListUnsupported,
                         format!(
-                            "conveyor '{stock}' has an explicit init list whose sum is not \
+                            "conveyor '{name}' has an explicit init list whose sum is not \
                              finite; the initial belt contents must be finite"
                         ),
                     ));
@@ -824,7 +869,7 @@ pub(crate) fn explicit_init_list(
             InitListProbe::BadEntry(i, text) => Err((
                 ErrorCode::ConveyorInitListUnsupported,
                 format!(
-                    "conveyor '{stock}' has an explicit init list whose entry {} ('{text}') is \
+                    "conveyor '{name}' has an explicit init list whose entry {} ('{text}') is \
                      not a plain numeric literal; init-list entries must be plain numeric \
                      literals (they are evaluated once at belt initialization, \
                      docs/design/conveyors.md §7.2)",
@@ -834,29 +879,51 @@ pub(crate) fn explicit_init_list(
         }
     };
     match equation {
-        Equation::Scalar(s) => Ok(scalar(s)?.map(|(v, sum)| (v, Equation::Scalar(sum)))),
-        Equation::ApplyToAll(dims, s) => {
-            Ok(scalar(s)?.map(|(v, sum)| (v, Equation::ApplyToAll(dims.clone(), sum))))
+        Equation::Scalar(s) => {
+            Ok(scalar(stock, s)?.map(|(v, sum)| (InitListSpec::Shared(v), Equation::Scalar(sum))))
         }
-        Equation::Arrayed(_, elems, default, _) => {
-            let element_eqns = elems
-                .iter()
-                .map(|(_, eqn, _, _)| eqn.as_str())
-                .chain(default.as_deref());
-            for eqn in element_eqns {
-                if !matches!(probe_init_list(eqn), InitListProbe::NotAList) {
-                    return Err((
-                        ErrorCode::ConveyorInitListUnsupported,
-                        format!(
-                            "arrayed conveyor '{stock}' uses an explicit init list in a \
-                             per-element <element> equation; per-element init lists are not \
-                             supported -- use a scalar initial per element, or one shared \
-                             apply-to-all list for the whole array"
-                        ),
-                    ));
-                }
+        Equation::ApplyToAll(dims, s) => Ok(scalar(stock, s)?.map(|(v, sum)| {
+            (
+                InitListSpec::Shared(v),
+                Equation::ApplyToAll(dims.clone(), sum),
+            )
+        })),
+        Equation::Arrayed(dims, elems, default, has_except_default) => {
+            let mut any_list = false;
+            let mut spec_elems: HashMap<String, Option<Vec<f64>>> = HashMap::new();
+            let mut ph_elems = Vec::with_capacity(elems.len());
+            for (subscript, eqn, initial_eqn, gf) in elems {
+                let probed = scalar(&format!("{stock}[{subscript}]"), eqn)?;
+                let (values, ph_eqn) = match probed {
+                    Some((v, sum)) => {
+                        any_list = true;
+                        (Some(v), sum)
+                    }
+                    None => (None, eqn.clone()),
+                };
+                spec_elems.insert(canonical_subscript_key(subscript), values);
+                ph_elems.push((subscript.clone(), ph_eqn, initial_eqn.clone(), gf.clone()));
             }
-            Ok(None)
+            let (spec_default, ph_default) = match default {
+                Some(d) => match scalar(stock, d)? {
+                    Some((v, sum)) => {
+                        any_list = true;
+                        (Some(v), Some(sum))
+                    }
+                    None => (None, Some(d.clone())),
+                },
+                None => (None, None),
+            };
+            if !any_list {
+                return Ok(None);
+            }
+            Ok(Some((
+                InitListSpec::PerElement {
+                    elems: spec_elems,
+                    default: spec_default,
+                },
+                Equation::Arrayed(dims.clone(), ph_elems, ph_default, *has_except_default),
+            )))
         }
     }
 }
@@ -1109,29 +1176,6 @@ pub fn expand_conveyors(
         };
         let stock_name = canon(&stock.ident);
 
-        // §7.2 explicit init list on the stock's <eqn>: record the parsed
-        // values for belt init and queue the placeholder rewrite for Pass 2.
-        // A malformed list (non-constant entry, per-element placement,
-        // non-constant transit) is rejected loudly here rather than surfacing
-        // as an opaque parse error. The placeholder value is the NORMALIZED
-        // belt total, not the raw list sum -- see `normalized_init_total` for
-        // why (the raw sum leaked into every pre-init_belts consumer).
-        let init_values = match explicit_init_list(&stock.ident, &stock.equation)? {
-            Some((values, _raw_sum_placeholder)) => {
-                let dt = sim_specs_dt(effective_sim_specs(&project, main_model))?;
-                let total = normalized_init_total(&stock.ident, conv, &values, dt)?;
-                let placeholder = match &stock.equation {
-                    Equation::ApplyToAll(dims, _) => {
-                        Equation::ApplyToAll(dims.clone(), format!("{total}"))
-                    }
-                    _ => Equation::Scalar(format!("{total}")),
-                };
-                init_list_rewrites.insert(stock_name.clone(), placeholder);
-                Some(values)
-            }
-            None => None,
-        };
-
         // An arrayed conveyor is N_elem independent belts (§10). The stock's
         // dimensions drive the synthesized auxes' shape and the per-element
         // offset enumeration; empty for a scalar conveyor.
@@ -1140,6 +1184,87 @@ pub fn expand_conveyors(
         conveyor_stock_dims.insert(stock_name.clone(), stock_dims.clone());
         let element_subscripts =
             element_subscripts_for_dims(&project, &stock_dims, &stock.ident, "conveyor")?;
+
+        // §7.2 explicit init list(s) on the stock's <eqn>: record the parsed
+        // values for belt init and queue the placeholder rewrite for Pass 2.
+        // A malformed list (non-constant entry, non-constant transit) is
+        // rejected loudly here rather than surfacing as an opaque parse
+        // error. The placeholder value is the NORMALIZED belt total, not the
+        // raw list sum -- see `normalized_init_total` for why (the raw sum
+        // leaked into every pre-init_belts consumer); for a non-apply-to-all
+        // array each list element carries ITS OWN normalized total.
+        let init_values: Vec<Option<Vec<f64>>> =
+            match explicit_init_list(&stock.ident, &stock.equation)? {
+                Some((spec, _raw_sum_placeholder)) => {
+                    let dt = sim_specs_dt(effective_sim_specs(&project, main_model))?;
+                    let (placeholder, per_belt) = match spec {
+                        InitListSpec::Shared(values) => {
+                            let total = normalized_init_total(&stock.ident, conv, &values, dt)?;
+                            let placeholder = match &stock.equation {
+                                Equation::ApplyToAll(dims, _) => {
+                                    Equation::ApplyToAll(dims.clone(), format!("{total}"))
+                                }
+                                _ => Equation::Scalar(format!("{total}")),
+                            };
+                            let per_belt = vec![Some(values); n_elements(&element_subscripts)];
+                            (placeholder, per_belt)
+                        }
+                        InitListSpec::PerElement { elems, default } => {
+                            let Equation::Arrayed(dims, elem_eqns, default_eqn, has_except) =
+                                &stock.equation
+                            else {
+                                unreachable!("PerElement spec only comes from Arrayed equations");
+                            };
+                            // Rebuild the Arrayed equation with each LIST
+                            // element's eqn replaced by its own normalized
+                            // total; non-list element equations compile
+                            // untouched (their §7.1 initial).
+                            let mut ph_elems = Vec::with_capacity(elem_eqns.len());
+                            for (subscript, eqn, initial_eqn, gf) in elem_eqns {
+                                let new_eqn = match elems.get(&canonical_subscript_key(subscript)) {
+                                    Some(Some(values)) => {
+                                        let display = format!("{}[{}]", stock.ident, subscript);
+                                        normalized_init_total(&display, conv, values, dt)?
+                                            .to_string()
+                                    }
+                                    _ => eqn.clone(),
+                                };
+                                ph_elems.push((
+                                    subscript.clone(),
+                                    new_eqn,
+                                    initial_eqn.clone(),
+                                    gf.clone(),
+                                ));
+                            }
+                            let ph_default = match (&default, default_eqn) {
+                                (Some(values), Some(_)) => Some(
+                                    normalized_init_total(&stock.ident, conv, values, dt)?
+                                        .to_string(),
+                                ),
+                                _ => default_eqn.clone(),
+                            };
+                            let placeholder =
+                                Equation::Arrayed(dims.clone(), ph_elems, ph_default, *has_except);
+                            // One list per belt, matched by canonical
+                            // subscript; an element without an explicit
+                            // <element> entry falls back to the EXCEPT
+                            // default's list (None when the default is not a
+                            // list -- that element keeps its §7.1 fill).
+                            let per_belt = element_subscripts
+                                .iter()
+                                .map(|sub| match elems.get(&canonical_subscript_key(sub)) {
+                                    Some(v) => v.clone(),
+                                    None => default.clone(),
+                                })
+                                .collect();
+                            (placeholder, per_belt)
+                        }
+                    };
+                    init_list_rewrites.insert(stock_name.clone(), placeholder);
+                    per_belt
+                }
+                None => Vec::new(),
+            };
 
         // Partition outflows into the primary (first non-leak) and leaks.
         // Any non-leak outflow beyond the first is an error (see the rejection
@@ -2429,9 +2554,10 @@ pub fn resolve_plans(
                 inflows,
                 containers,
                 primary_dest_conveyor,
-                // Every element belt of an arrayed conveyor shares the one
-                // apply-to-all list (§10 one-expression-per-attribute).
-                init_values: meta.init_values.clone(),
+                // Element `e`'s own §7.2 list (expansion replicated a shared
+                // scalar/apply-to-all list per belt, and matched per-element
+                // lists by canonical subscript); `None` = §7.1 steady fill.
+                init_values: meta.init_values.get(e).cloned().flatten(),
             });
         }
     }

@@ -2802,6 +2802,59 @@ mod options_tests {
             .expect("a file copying the spec's own sample options block must open");
     }
 
+    /// Stella writes no `<options>` block at all: both vendored `.stmx`
+    /// fixtures declare conveyor usage as ATTRIBUTES on the `<smile>` header
+    /// element (`<smile version="1.0" namespace="std, isee" uses_arrays="1"
+    /// uses_conveyor=""/>`). The reader has no mapping for that form (no
+    /// `smile` field on `Header`, no feature-attribute fields on `File`), so
+    /// serde drops it as an unknown element/attribute. That must stay
+    /// HARMLESS -- never a parse failure -- because the header option is
+    /// advisory and the per-stock `<conveyor>` block is authoritative
+    /// (conveyors.md section 3.1 documents this contract): the file opens,
+    /// the stock's conveyor block survives, and the writer re-canonicalizes
+    /// the header to the element form. The root-element attribute spelling
+    /// (`uses_conveyor=""` on `<xmile>`) rides along under the same rule.
+    #[test]
+    fn stella_smile_attribute_form_is_ignored_but_harmless() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" uses_conveyor="">
+  <header>
+    <smile version="1.0" namespace="std, isee" uses_arrays="1" uses_conveyor="" uses_submodels=""/>
+    <name>t</name><vendor>isee systems, inc.</vendor>
+    <product version="2.0" lang="en">Stella Architect</product>
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start><stop>12</stop><dt>0.25</dt>
+  </sim_specs>
+  <model><variables>
+    <stock name="belt"><eqn>0</eqn><inflow>i</inflow><outflow>o</outflow>
+      <conveyor><len>4</len></conveyor>
+    </stock>
+    <flow name="i"><eqn>1</eqn></flow>
+    <flow name="o"><eqn>0</eqn></flow>
+  </variables></model>
+</xmile>"#;
+        let project = project_from_reader(&mut BufReader::new(xml.as_bytes()))
+            .expect("the Stella attribute-form header must not reject the file");
+        let stock = project.models[0]
+            .variables
+            .iter()
+            .find_map(|v| match v {
+                crate::datamodel::Variable::Stock(s) if s.ident == "belt" => Some(s),
+                _ => None,
+            })
+            .expect("belt stock");
+        assert!(
+            stock.compat.conveyor.is_some(),
+            "the authoritative per-stock <conveyor> block must survive"
+        );
+        let written = project_to_xmile(&project).expect("serialize");
+        assert!(
+            written.contains("<uses_conveyor/>"),
+            "the writer re-canonicalizes the header to the element form: {written}"
+        );
+    }
+
     /// A genuinely unknown (vendor-extension / future-spec) option element
     /// -- even one carrying attributes and children -- must not reject the
     /// file. It parses to the tolerated `Unknown` variant, the model opens,
