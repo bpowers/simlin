@@ -7,6 +7,7 @@ import { defineConfig, defineInlineProject } from '@rstest/core';
 
 const here = import.meta.dirname;
 const engineSrc = path.resolve(here, '../engine/src');
+const coreSrc = path.resolve(here, '../core');
 
 // Jest let each file pick its environment with an `@jest-environment` docblock;
 // rstest has no such pragma, so the split is declared once, here. These run
@@ -31,16 +32,26 @@ const NODE_ENV_TESTS = [
 ];
 
 const resolve = {
-  // These tests drive the engine's *source*, as jest's moduleNameMapper did.
-  // Rsbuild prefers tsconfig `paths` over `alias` by default, and those paths
-  // resolve @simlin/engine to the package directory (i.e. its built output).
-  // @simlin/core needs no entry: tsconfig `paths` already lands on its source.
+  // These tests drive the engine's and core's *source*, as jest's
+  // moduleNameMapper did. `prefer-alias` does not merely reorder alias ahead of
+  // tsconfig `paths` -- Rsbuild wires rspack's tsconfig-paths resolver ONLY under
+  // `prefer-tsconfig`, so here `paths` is off entirely. Every @simlin/* specifier
+  // that should resolve to source therefore needs an explicit alias; anything
+  // missed falls through package.json "exports" to built lib/ output, where a
+  // stale build silently passes the tests.
   aliasStrategy: 'prefer-alias' as const,
   alias: {
     // Trailing `$` is an exact match, so specific entries precede prefixes.
     '@simlin/engine/internal/wasm$': path.join(engineSrc, 'internal/wasm.node.ts'),
     '@simlin/engine/internal/backend-factory$': path.join(engineSrc, 'backend-factory.node.ts'),
     '@simlin/engine$': path.join(engineSrc, 'index.ts'),
+    // Bare `@simlin/core` would otherwise resolve the directory through its
+    // package.json "main", i.e. back to lib/.
+    '@simlin/core$': path.join(coreSrc, 'index.ts'),
+    // Prefix entry: every `@simlin/core/<name>` lands on `../core/<name>.ts`.
+    // jest listed datamodel/common/collections one by one and so quietly left
+    // canonicalize and base64 on the built output; a prefix cannot rot that way.
+    '@simlin/core': coreSrc,
   },
 };
 

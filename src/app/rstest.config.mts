@@ -34,17 +34,23 @@ export default defineConfig({
       },
       resolve: {
         // The app's tests drive engine/core *sources* (not their built output),
-        // as jest's moduleNameMapper did. Rsbuild prefers tsconfig `paths` over
-        // `alias` by default, and those paths point at package directories.
+        // as jest's moduleNameMapper did. `prefer-alias` switches rsbuild's
+        // tsconfig-paths resolution off entirely (it is wired only under
+        // `prefer-tsconfig`), so anything not aliased here resolves through
+        // package.json "exports" to built lib/ output instead.
         aliasStrategy: 'prefer-alias',
         alias: {
           // Trailing `$` is an exact match, so specific entries precede prefixes.
           '@simlin/engine/internal/wasm$': path.join(engineSrc, 'internal/wasm.node.ts'),
           '@simlin/engine/internal/backend-factory$': path.join(engineSrc, 'backend-factory.node.ts'),
           '@simlin/engine$': path.join(engineSrc, 'index.ts'),
-          '@simlin/core/datamodel$': path.join(coreSrc, 'datamodel.ts'),
-          '@simlin/core/common$': path.join(coreSrc, 'common.ts'),
-          '@simlin/core/collections$': path.join(coreSrc, 'collections.ts'),
+          // Bare `@simlin/core` would otherwise resolve the directory through its
+          // package.json "main", i.e. back to lib/.
+          '@simlin/core$': path.join(coreSrc, 'index.ts'),
+          // Prefix entry: every `@simlin/core/<name>` lands on `../core/<name>.ts`.
+          // jest listed subpaths one by one and so quietly left base64 on the
+          // built output; a prefix cannot rot that way.
+          '@simlin/core': coreSrc,
         },
       },
     }),
