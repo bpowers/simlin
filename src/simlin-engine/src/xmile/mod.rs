@@ -850,9 +850,11 @@ impl ToXml<XmlWriter> for Feature {
                 }
                 write_tag_empty_with_attrs(writer, "uses_queue", &attrs)
             }
-            // The other features are not emitted by the writer today; the
-            // round-trip never produces them, so this is unreachable in
-            // practice. Emit nothing rather than panic.
+            // The other features (including tolerated-and-dropped
+            // `Feature::Unknown` options, GH #888) are not emitted by the
+            // writer today; the round-trip never produces them because the
+            // header is re-canonicalized from the model contents. Emit
+            // nothing rather than panic.
             _ => Ok(()),
         }
     }
@@ -883,8 +885,18 @@ pub struct Product {
     pub version: Option<String>,
 }
 
+/// One `<options>` child element (XMILE §2.2.1). Deserialization is manual
+/// (below) so that (a) the spelling variants the spec itself uses -- the
+/// sample block's plural `<uses_conveyors/>`, plus `uses_array`/
+/// `uses_annotations` in the spec text -- map onto the canonical variants,
+/// and (b) an unrecognized option element parses to [`Feature::Unknown`]
+/// instead of hard-failing the whole file (GH #888). The attributes live in
+/// the `FeatureAttrs` helper structs next to the `Deserialize` impl; the
+/// `Serialize` derive here is unused for output (the writer is the manual
+/// `ToXml` impl above, which re-derives the header from the per-stock
+/// markers).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize, Hash)]
+#[derive(Clone, PartialEq, Eq, Serialize, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
     UsesArrays {
@@ -892,30 +904,17 @@ pub enum Feature {
         invalid_index_value: Option<String>, // e.g. "NaN" or "0"; string for Eq + Hash},
     },
     UsesMacros {
-        // Spec-required attributes (XMILE §2.2). Without the `@` rename
-        // serde would (de)serialize these as child elements, so the reader
-        // and the Task 2 writer (which emits the spec-correct attribute
-        // form) would disagree and the round-trip would be lossy.
-        #[serde(rename = "@recursive_macros")]
         recursive_macros: Option<bool>,
-        #[serde(rename = "@option_filters")]
         option_filters: Option<bool>,
     },
     UsesConveyor {
-        // Spec attributes (XMILE §2.2 / conveyors.md §3.1). Like UsesMacros
-        // above, without the `@` rename serde would (de)serialize these as
-        // child elements, so the reader would silently ignore the attribute
-        // form the writer emits and the round-trip would be lossy.
-        #[serde(rename = "@arrest")]
         arrest: Option<bool>,
-        #[serde(rename = "@leak")]
         leak: Option<bool>,
     },
     UsesQueue {
-        // Attribute form for the same reason as UsesMacros/UsesConveyor above.
-        #[serde(rename = "@overflow")]
         overflow: Option<bool>,
     },
+    UsesSubmodels,
     UsesEventPosters {
         messages: Option<bool>,
     },
@@ -931,11 +930,217 @@ pub enum Feature {
         graphical_input: Option<bool>,
     },
     UsesAnnotation,
+    /// An option element we don't recognize (vendor extension or a future
+    /// spec revision). Options are declarative capability hints -- the
+    /// authoritative data is the per-stock/per-flow blocks -- so the element
+    /// is tolerated and dropped: the writer never re-emits it (the header is
+    /// re-canonicalized from the model contents), and the reader has no
+    /// warnings channel to report it through, so the drop is silent by
+    /// design.
+    Unknown,
+}
+
+/// Attribute-carrying payloads for the [`Feature`] variants. Each field uses
+/// the `@` rename because the XMILE spec (§2.2.1) defines these as XML
+/// *attributes* (the spec's own sample block writes
+/// `<uses_arrays maximum_dimensions="2"/>`); without the `@`, quick-xml's
+/// serde support would look for child elements and silently parse every
+/// attribute as `None`.
+mod feature_attrs {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub(super) struct UsesArrays {
+        #[serde(rename = "@maximum_dimensions")]
+        pub(super) maximum_dimensions: Option<i64>,
+        #[serde(rename = "@invalid_index_value")]
+        pub(super) invalid_index_value: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct UsesMacros {
+        #[serde(rename = "@recursive_macros")]
+        pub(super) recursive_macros: Option<bool>,
+        #[serde(rename = "@option_filters")]
+        pub(super) option_filters: Option<bool>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct UsesConveyor {
+        #[serde(rename = "@arrest")]
+        pub(super) arrest: Option<bool>,
+        #[serde(rename = "@leak")]
+        pub(super) leak: Option<bool>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct UsesQueue {
+        #[serde(rename = "@overflow")]
+        pub(super) overflow: Option<bool>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct UsesEventPosters {
+        #[serde(rename = "@messages")]
+        pub(super) messages: Option<bool>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct UsesOutputs {
+        #[serde(rename = "@numeric_display")]
+        pub(super) numeric_display: Option<bool>,
+        #[serde(rename = "@lamp")]
+        pub(super) lamp: Option<bool>,
+        #[serde(rename = "@gauge")]
+        pub(super) gauge: Option<bool>,
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct UsesInputs {
+        #[serde(rename = "@numeric_input")]
+        pub(super) numeric_input: Option<bool>,
+        #[serde(rename = "@list")]
+        pub(super) list: Option<bool>,
+        #[serde(rename = "@graphical_input")]
+        pub(super) graphical_input: Option<bool>,
+    }
+}
+
+impl<'de> Deserialize<'de> for Feature {
+    /// Tolerant `<options>`-child deserialization (GH #888). Known element
+    /// names (including the spec's own alternate spellings) dispatch to the
+    /// derived `feature_attrs` helpers via `newtype_variant`, which
+    /// quick-xml deserializes from the element itself (attributes
+    /// included); anything else is consumed wholesale (attributes, children
+    /// and all) and mapped to [`Feature::Unknown`], so an unrecognized
+    /// advisory option can never reject the file.
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // The canonical spellings, for serde's "unknown variant" error
+        // message only -- unknown names never error, they map to `Unknown`.
+        const VARIANTS: &[&str] = &[
+            "uses_arrays",
+            "uses_macros",
+            "uses_conveyor",
+            "uses_queue",
+            "uses_submodels",
+            "uses_event_posters",
+            "has_model_view",
+            "uses_outputs",
+            "uses_inputs",
+            "uses_annotation",
+        ];
+
+        struct FeatureVisitor;
+
+        impl<'de> Visitor<'de> for FeatureVisitor {
+            type Value = Feature;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an XMILE <options> feature element")
+            }
+
+            fn visit_enum<A>(self, data: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: serde::de::EnumAccess<'de>,
+            {
+                use serde::de::VariantAccess;
+
+                let (name, variant) = data.variant::<String>()?;
+                let feature = match name.as_str() {
+                    // §9 conformance text says `<uses_array>`; §2.2.1 says
+                    // `<uses_arrays>`. Accept both.
+                    "uses_arrays" | "uses_array" => {
+                        let attrs: feature_attrs::UsesArrays = variant.newtype_variant()?;
+                        Feature::UsesArrays {
+                            maximum_dimensions: attrs.maximum_dimensions,
+                            invalid_index_value: attrs.invalid_index_value,
+                        }
+                    }
+                    "uses_macros" => {
+                        let attrs: feature_attrs::UsesMacros = variant.newtype_variant()?;
+                        Feature::UsesMacros {
+                            recursive_macros: attrs.recursive_macros,
+                            option_filters: attrs.option_filters,
+                        }
+                    }
+                    // The spec's §2.2.1 sample block spells this plural
+                    // (`<uses_conveyors leak="true"/>`); conveyors.md §3.1
+                    // promises we accept both spellings.
+                    "uses_conveyor" | "uses_conveyors" => {
+                        let attrs: feature_attrs::UsesConveyor = variant.newtype_variant()?;
+                        Feature::UsesConveyor {
+                            arrest: attrs.arrest,
+                            leak: attrs.leak,
+                        }
+                    }
+                    // Same singular/plural tolerance as the conveyor option.
+                    "uses_queue" | "uses_queues" => {
+                        let attrs: feature_attrs::UsesQueue = variant.newtype_variant()?;
+                        Feature::UsesQueue {
+                            overflow: attrs.overflow,
+                        }
+                    }
+                    "uses_submodels" => {
+                        variant.unit_variant()?;
+                        Feature::UsesSubmodels
+                    }
+                    "uses_event_posters" => {
+                        let attrs: feature_attrs::UsesEventPosters = variant.newtype_variant()?;
+                        Feature::UsesEventPosters {
+                            messages: attrs.messages,
+                        }
+                    }
+                    "has_model_view" => {
+                        variant.unit_variant()?;
+                        Feature::HasModelView
+                    }
+                    "uses_outputs" => {
+                        let attrs: feature_attrs::UsesOutputs = variant.newtype_variant()?;
+                        Feature::UsesOutputs {
+                            numeric_display: attrs.numeric_display,
+                            lamp: attrs.lamp,
+                            gauge: attrs.gauge,
+                        }
+                    }
+                    "uses_inputs" => {
+                        let attrs: feature_attrs::UsesInputs = variant.newtype_variant()?;
+                        Feature::UsesInputs {
+                            numeric_input: attrs.numeric_input,
+                            list: attrs.list,
+                            graphical_input: attrs.graphical_input,
+                        }
+                    }
+                    // The spec text uses both spellings of this one, too.
+                    "uses_annotation" | "uses_annotations" => {
+                        variant.unit_variant()?;
+                        Feature::UsesAnnotation
+                    }
+                    // Unrecognized advisory option: consume the whole
+                    // element so the parse position stays consistent, and
+                    // tolerate it (see `Feature::Unknown`).
+                    _ => {
+                        variant.newtype_variant::<serde::de::IgnoredAny>()?;
+                        Feature::Unknown
+                    }
+                };
+                Ok(feature)
+            }
+        }
+
+        deserializer.deserialize_enum("Feature", VARIANTS, FeatureVisitor)
+    }
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Options {
+    // namespace is an XML ATTRIBUTE on <options> (XMILE 2.2.1, e.g.
+    // <options namespace="std, isee">); without the @ rename it only matched
+    // a child <namespace> element and silently parsed as None (GH #902).
+    #[serde(rename = "@namespace")]
     pub namespace: Option<String>, // string of comma separated namespaces
     #[serde(rename = "$value")]
     pub features: Option<Vec<Feature>>,
@@ -2423,5 +2628,287 @@ mod macro_tests {
             scalar_eq(total.expect("total survives")),
             format!("{}.add3", module.ident)
         );
+    }
+}
+
+/// Tests for the header `<options>` feature list (GH #888): spec-listed
+/// option elements (including the spellings the spec itself uses in its
+/// sample block) must parse, and genuinely unknown option elements must be
+/// tolerated and dropped -- never abort the whole file. The `<options>`
+/// block is advisory metadata; the per-stock blocks are authoritative.
+#[cfg(test)]
+mod options_tests {
+    use super::*;
+    use std::io::BufReader;
+
+    /// Wrap an `<options>` block in a minimal, valid XMILE document with a
+    /// conveyor stock (so the writer's re-canonicalized header is non-empty
+    /// and observable).
+    fn wrap(options: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product>
+    {options}
+  </header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start><stop>12</stop><dt>0.25</dt>
+  </sim_specs>
+  <model><variables>
+    <stock name="belt"><eqn>0</eqn><inflow>i</inflow><outflow>o</outflow>
+      <conveyor><len>4</len></conveyor>
+    </stock>
+    <flow name="i"><eqn>1</eqn></flow>
+    <flow name="o"><eqn>0</eqn></flow>
+  </variables></model>
+</xmile>"#
+        )
+    }
+
+    fn parse_features(xml: &str) -> Vec<Feature> {
+        let file: File = quick_xml::de::from_reader(xml.as_bytes()).expect("XMILE must parse");
+        file.header
+            .expect("header")
+            .options
+            .expect("options")
+            .features
+            .expect("features")
+    }
+
+    /// The OASIS spec's own sample block (section 2.2.1) spells the option
+    /// `<uses_conveyors/>` (plural); conveyors.md section 3.1 promises we
+    /// accept both spellings. Attributes must survive the alias.
+    #[test]
+    fn plural_uses_conveyors_parses_with_attributes() {
+        let xml = wrap(r#"<options><uses_conveyors arrest="true" leak="true"/></options>"#);
+        let features = parse_features(&xml);
+        assert!(
+            features.iter().any(|f| matches!(
+                f,
+                Feature::UsesConveyor {
+                    arrest: Some(true),
+                    leak: Some(true),
+                }
+            )),
+            "plural <uses_conveyors/> must parse as UsesConveyor with its attributes: {features:?}"
+        );
+    }
+
+    /// `<uses_queues/>` gets the same singular/plural tolerance as the
+    /// conveyor option -- the spec's sample block shows the plural spelling
+    /// is out there in the wild for this family of elements.
+    #[test]
+    fn plural_uses_queues_parses_with_attributes() {
+        let xml = wrap(r#"<options><uses_queues overflow="true"/></options>"#);
+        let features = parse_features(&xml);
+        assert!(
+            features.iter().any(|f| matches!(
+                f,
+                Feature::UsesQueue {
+                    overflow: Some(true)
+                }
+            )),
+            "plural <uses_queues/> must parse as UsesQueue with its attributes: {features:?}"
+        );
+    }
+
+    /// `<uses_submodels/>` is a spec-listed option (XMILE section 2.2.1)
+    /// that previously had no variant at all, hard-failing the file.
+    #[test]
+    fn uses_submodels_parses() {
+        let xml = wrap(r#"<options><uses_submodels/></options>"#);
+        let features = parse_features(&xml);
+        assert!(
+            features.iter().any(|f| matches!(f, Feature::UsesSubmodels)),
+            "spec-listed <uses_submodels/> must parse: {features:?}"
+        );
+    }
+
+    /// The spec text also spells `<uses_annotation>` as `uses_annotations`
+    /// and `<uses_arrays>` as `uses_array` in places; tolerate all of them.
+    #[test]
+    fn alternate_spec_spellings_parse() {
+        let xml =
+            wrap(r#"<options><uses_annotations/><uses_array maximum_dimensions="3"/></options>"#);
+        let features = parse_features(&xml);
+        assert!(
+            features
+                .iter()
+                .any(|f| matches!(f, Feature::UsesAnnotation)),
+            "<uses_annotations/> must parse as UsesAnnotation: {features:?}"
+        );
+        assert!(
+            features.iter().any(|f| matches!(
+                f,
+                Feature::UsesArrays {
+                    maximum_dimensions: Some(3),
+                    ..
+                }
+            )),
+            "<uses_array/> must parse as UsesArrays with its attributes: {features:?}"
+        );
+    }
+
+    /// The spec's section 2.2.1 sample options block, verbatim (modulo the
+    /// smart quotes in the HTML rendering). A file copying the spec's own
+    /// example must open.
+    #[test]
+    fn spec_sample_options_block_parses() {
+        let xml = wrap(
+            r#"<options namespace="std, isee">
+   <uses_conveyors leak="true"/>
+   <uses_arrays maximum_dimensions="2"/>
+   <has_model_view/>
+</options>"#,
+        );
+        let features = parse_features(&xml);
+        assert!(
+            features.iter().any(|f| matches!(
+                f,
+                Feature::UsesConveyor {
+                    arrest: None,
+                    leak: Some(true),
+                }
+            )),
+            "sample <uses_conveyors leak=\"true\"/> must parse: {features:?}"
+        );
+        assert!(
+            features.iter().any(|f| matches!(
+                f,
+                Feature::UsesArrays {
+                    maximum_dimensions: Some(2),
+                    invalid_index_value: None,
+                }
+            )),
+            "sample <uses_arrays maximum_dimensions=\"2\"/> must parse with its attribute: {features:?}"
+        );
+        assert!(
+            features.iter().any(|f| matches!(f, Feature::HasModelView)),
+            "sample <has_model_view/> must parse: {features:?}"
+        );
+
+        // The options element's namespace ATTRIBUTE must parse too (GH #902:
+        // without the @ rename it silently read as None).
+        let file: File = quick_xml::de::from_reader(xml.as_bytes()).expect("XMILE must parse");
+        let options = file.header.expect("header").options.expect("options");
+        assert_eq!(
+            options.namespace.as_deref(),
+            Some("std, isee"),
+            "the <options namespace=...> attribute must parse"
+        );
+
+        // ... and the whole file opens as a project.
+        project_from_reader(&mut BufReader::new(xml.as_bytes()))
+            .expect("a file copying the spec's own sample options block must open");
+    }
+
+    /// A genuinely unknown (vendor-extension / future-spec) option element
+    /// -- even one carrying attributes and children -- must not reject the
+    /// file. It parses to the tolerated `Unknown` variant, the model opens,
+    /// and the writer's re-canonicalized header (derived from the per-stock
+    /// markers) never re-emits it.
+    #[test]
+    fn unknown_option_element_is_tolerated_and_dropped() {
+        let xml = wrap(
+            r#"<options>
+  <uses_frobnicator power="11"><sub_option/></uses_frobnicator>
+  <uses_conveyor/>
+</options>"#,
+        );
+        let features = parse_features(&xml);
+        assert!(
+            features.iter().any(|f| matches!(f, Feature::Unknown)),
+            "the unknown element parses to the tolerated Unknown variant: {features:?}"
+        );
+        assert!(
+            features.iter().any(|f| matches!(
+                f,
+                Feature::UsesConveyor {
+                    arrest: None,
+                    leak: None,
+                }
+            )),
+            "known features after the unknown one still parse: {features:?}"
+        );
+
+        let project = project_from_reader(&mut BufReader::new(xml.as_bytes()))
+            .expect("an unknown option element must not reject the file");
+        let written = project_to_xmile(&project).expect("serialize");
+        assert!(
+            !written.contains("frobnicator"),
+            "the writer re-canonicalizes the header and drops the unknown option: {written}"
+        );
+        assert!(
+            written.contains("<uses_conveyor/>"),
+            "the conveyor stock still drives the re-canonicalized header: {written}"
+        );
+    }
+
+    /// Regression guard for the known-feature paths: the singular spellings
+    /// with their spec attributes parse exactly as before the tolerant
+    /// deserializer, and the writer's output is byte-stable across a second
+    /// generation (write -> read -> write).
+    #[test]
+    fn known_singular_forms_parse_and_roundtrip_byte_identically() {
+        let xml = wrap(
+            r#"<options>
+  <uses_arrays maximum_dimensions="2" invalid_index_value="NaN"/>
+  <uses_macros recursive_macros="false" option_filters="false"/>
+  <uses_conveyor arrest="true" leak="true"/>
+  <uses_queue overflow="true"/>
+  <uses_event_posters messages="true"/>
+  <has_model_view/>
+  <uses_outputs numeric_display="true" lamp="false" gauge="true"/>
+  <uses_inputs numeric_input="true" list="false" graphical_input="true"/>
+  <uses_annotation/>
+</options>"#,
+        );
+        let features = parse_features(&xml);
+        let expected = [
+            Feature::UsesArrays {
+                maximum_dimensions: Some(2),
+                invalid_index_value: Some("NaN".to_owned()),
+            },
+            Feature::UsesMacros {
+                recursive_macros: Some(false),
+                option_filters: Some(false),
+            },
+            Feature::UsesConveyor {
+                arrest: Some(true),
+                leak: Some(true),
+            },
+            Feature::UsesQueue {
+                overflow: Some(true),
+            },
+            Feature::UsesEventPosters {
+                messages: Some(true),
+            },
+            Feature::HasModelView,
+            Feature::UsesOutputs {
+                numeric_display: Some(true),
+                lamp: Some(false),
+                gauge: Some(true),
+            },
+            Feature::UsesInputs {
+                numeric_input: Some(true),
+                list: Some(false),
+                graphical_input: Some(true),
+            },
+            Feature::UsesAnnotation,
+        ];
+        for want in &expected {
+            assert!(
+                features.contains(want),
+                "expected {want:?} in parsed features: {features:?}"
+            );
+        }
+
+        // Byte-stability of the writer across generations: the header is
+        // re-derived from the per-stock markers, so gen1 == gen2 exactly.
+        let project = project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("parse");
+        let gen1 = project_to_xmile(&project).expect("serialize");
+        let project2 = project_from_reader(&mut BufReader::new(gen1.as_bytes())).expect("reparse");
+        let gen2 = project_to_xmile(&project2).expect("re-serialize");
+        assert_eq!(gen1, gen2, "second-generation write must be byte-identical");
     }
 }
