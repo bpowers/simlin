@@ -155,11 +155,24 @@ impl Project {
                 .into_iter()
                 .map(|v| (Ident::new(v.ident()), v))
                 .collect();
+            // Two declared variables whose names canonicalize identically
+            // already collapsed last-wins on the canonical-keyed sync maps
+            // this loop reads, so `variables` above cannot detect the twin.
+            // The production compile pipeline hard-errors upstream (GH #885);
+            // record the same DuplicateVariable model error here so this
+            // legacy path's consumers (TestProject::compile and other
+            // non-simulating surfaces) reject the model too instead of
+            // quietly building a different one (GH #891). The memoized salsa
+            // groups derive from the raw pre-dedup declared-ident list.
+            let errors = crate::common::duplicate_variable_errors_from_groups(
+                model_name,
+                crate::db::model_duplicate_variables(db, *src_model),
+            );
             all_s0.push(ModelStage0 {
                 ident: Ident::new(model_name),
                 display_name: model_name.clone(),
                 variables,
-                errors: None,
+                errors,
                 implicit: is_stdlib,
                 is_macro: src_model.macro_spec(db).is_some(),
                 macro_params: crate::model::macro_param_idents(src_model.macro_spec(db).as_ref()),
@@ -333,5 +346,57 @@ mod tests {
         // module_deps / topo_sort. Before the guards these panicked on the
         // dangling model_name; now construction returns without crashing.
         let _project = Project::from(dm);
+    }
+
+    /// GH #891: the legacy `from_salsa` path builds each model's variable map
+    /// from the canonical-keyed salsa sync maps, where two variables whose
+    /// names canonicalize identically already collapsed last-wins. The
+    /// production compile pipeline rejects such a project upstream (GH #885);
+    /// this path must record the same `DuplicateVariable` model-level error so
+    /// test-written models (via `TestProject::compile` and friends) are kept
+    /// honest too.
+    #[test]
+    fn from_datamodel_records_duplicate_variable_model_error() {
+        use crate::common::ErrorCode;
+        use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+
+        let model = x_model(
+            "main",
+            vec![x_aux("net flow", "1", None), x_aux("net_flow", "2", None)],
+        );
+        let dm = x_project(sim_specs_with_units("years"), &[model]);
+        let project = Project::from(dm);
+
+        let main = &project.models[&Ident::new("main")];
+        let errors = main
+            .errors
+            .as_ref()
+            .expect("duplicate canonical idents must record a model-level error");
+        let dup = errors
+            .iter()
+            .find(|e| e.code == ErrorCode::DuplicateVariable)
+            .unwrap_or_else(|| panic!("expected a DuplicateVariable error, got: {errors:?}"));
+        let msg = dup.details.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("'net flow'") && msg.contains("'net_flow'"),
+            "message should name both colliding spellings, got: {msg}"
+        );
+
+        // The TestProject::compile surface (the main test-helper consumer of
+        // this path) must report the failure rather than compiling a silently
+        // different model.
+        let result = crate::test_common::TestProject::new("dup")
+            .aux("net flow", "1", None)
+            .aux("net_flow", "2", None)
+            .compile();
+        let errs = match result {
+            Ok(_) => panic!("TestProject::compile must fail on duplicate canonical idents"),
+            Err(errs) => errs,
+        };
+        assert!(
+            errs.iter()
+                .any(|(loc, code)| loc == "main" && *code == ErrorCode::DuplicateVariable),
+            "expected a main-model DuplicateVariable, got: {errs:?}"
+        );
     }
 }

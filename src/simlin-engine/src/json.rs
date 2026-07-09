@@ -65,6 +65,14 @@ pub type Ident = String;
 pub struct ElementEquation {
     pub subscript: String,
     pub equation: String,
+    /// Per-element compat carries `active_initial` ONLY: the datamodel's
+    /// `Equation::Arrayed` element tuple has a slot for nothing else, and
+    /// every other `Compat` field is a variable-level concept (conveyor and
+    /// queue mark whole stocks, leakage/spreadflow/overflow whole flows,
+    /// data_source/is_public/can_be_module_input whole variables). The
+    /// datamodel conversions below deliberately read just `active_initial`
+    /// from an element's compat; other fields hand-authored here are
+    /// tolerated by serde and dropped.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub compat: Option<Compat>,
     #[serde(skip_serializing_if = "Option::is_none", default)]

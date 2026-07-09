@@ -48,6 +48,7 @@ mod units;
 mod var_fragment;
 
 mod diagnostic;
+pub(crate) use diagnostic::model_duplicate_variables;
 pub use diagnostic::{
     CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity,
     collect_all_diagnostics, collect_model_diagnostics, model_all_diagnostics,

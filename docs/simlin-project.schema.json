@@ -528,6 +528,7 @@
           "type": "string"
         },
         "compat": {
+          "description": "Per-element compat carries `active_initial` ONLY: the datamodel's\n`Equation::Arrayed` element tuple has a slot for nothing else, and\nevery other `Compat` field is a variable-level concept (conveyor and\nqueue mark whole stocks, leakage/spreadflow/overflow whole flows,\ndata_source/is_public/can_be_module_input whole variables). The\ndatamodel conversions below deliberately read just `active_initial`\nfrom an element's compat; other fields hand-authored here are\ntolerated by serde and dropped.",
           "anyOf": [
             {
               "$ref": "#/$defs/Compat"
