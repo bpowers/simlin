@@ -1290,6 +1290,29 @@ fn wasm_parity_hook(
     }
 }
 
+/// Load the reference series that sits beside a Vensim `.mdl` fixture.
+///
+/// The reference was produced by Vensim, so it is marked `is_vensim` whichever
+/// container it came from. That is also what the `.dat` branch below already
+/// does: `compat::load_dat` sets `is_vensim: true` unconditionally, while
+/// `compat::load_csv` sets `false` (it also reads Stella exports). Marking it
+/// here keeps the two branches of this one function consistent.
+///
+/// The flag selects `ensure_results`' relative epsilon, `max(5e-6 * magnitude,
+/// 2e-3)`, so it only ever LOOSENS the comparison, and only for values above
+/// ~400; below that the strict absolute 2e-3 bound still governs. Exactly one
+/// fixture needs it: `arithmetics_exp`, whose `expo[sub5]` is `(-1.3)^30` and
+/// whose Vensim `.tab` records `-2620` at ~6 significant figures where the true
+/// double is `-2619.995643649961`. (`arithmetics` has three columns above the
+/// threshold -- `262144`, `262144`, `4096` -- but all are exact powers of two, so
+/// they clear the absolute bound and never reach the relative arm.)
+///
+/// The sibling `.xmile` loader (`load_expected_results`) reads these SAME
+/// reference files and deliberately leaves `is_vensim = false`. Setting it there
+/// would loosen ~100 gates that today pass at the strict absolute bound -- a
+/// silent weakening in exchange for nothing, since none of them needs it. The
+/// flag is a tolerance knob, not a provenance record; it is turned on only where
+/// a fixture demonstrably requires it.
 fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
     let mdl_name = std::path::Path::new(mdl_path).file_name().unwrap();
     let dir_path = &mdl_path[0..(mdl_path.len() - mdl_name.len())];
@@ -1300,7 +1323,9 @@ fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
         if !output_path.exists() {
             continue;
         }
-        return Some(load_csv(&output_path.to_string_lossy(), *delimiter).unwrap());
+        let mut results = load_csv(&output_path.to_string_lossy(), *delimiter).unwrap();
+        results.is_vensim = true;
+        return Some(results);
     }
 
     let dat_file = mdl_path.replace(".mdl", ".dat");
@@ -1461,6 +1486,44 @@ fn simulates_lookup() {
 #[ignore]
 fn simulates_except_xmile() {
     simulate_path("../../test/sdeverywhere/models/except/except.xmile");
+}
+
+/// Vensim's operator-precedence and -associativity reference models. Neither was
+/// in any run set, which is why the XMILE parser's left-associative `^` silently
+/// disagreed with `output.tab` (`cons4^cons3^cons2` computed `4096` where Vensim
+/// records `262144 == 4^(3^2)`) and with the repo's own MDL reader. They are the
+/// regression guard for the whole "printed text re-parses to a different AST"
+/// class (#912/#913): every unary/`^`/parenthesization interaction Vensim
+/// distinguishes appears here as a separate `expo[subN]` / `product[subN]` slot
+/// with a checked-in expected value.
+#[test]
+fn simulates_arithmetics() {
+    simulate_mdl_path("../../test/test-models/tests/arithmetics/test_arithmetics.mdl");
+}
+
+#[test]
+fn simulates_arithmetics_exp() {
+    simulate_mdl_path("../../test/test-models/tests/arithmetics_exp/test_arithmetics_exp.mdl");
+}
+
+/// The `.mdl` twin of `tests_logicals_test_logicals` (which runs the `.xmile`).
+///
+/// Only the XMILE spelling was in the run set, so nothing carried `:AND:` /
+/// `:OR:` / `:NOT:` through the MDL importer's precedence-free `xmile_compat`
+/// re-emission at all -- the path where a disagreement between `mdl::parser` and
+/// the XMILE grammar silently changes an equation's meaning. Checked against
+/// Vensim's own `output.csv`.
+///
+/// It does NOT cover the precedence INTERACTION: `test_logicals.mdl` uses each of
+/// the three operators in isolation, never mixed with each other or with a
+/// relational, so it would pass with `and`/`or` sharing one level. The
+/// interaction is covered by the unit test
+/// `mdl::tests::logical_precedence_survives_the_mdl_to_xmile_laundering`. A
+/// corpus fixture with a Vensim reference for mixed logical/comparison
+/// precedence is wanted, and is tracked on #914.
+#[test]
+fn simulates_logicals_mdl() {
+    simulate_mdl_path("../../test/test-models/tests/logicals/test_logicals.mdl");
 }
 
 #[test]
@@ -5642,16 +5705,67 @@ fn corpus_clearn_macros_import() {
 /// flip of this number -- the #654 layout-slot ceiling (65,536 u16 slots)
 /// is the resource it protects.
 ///
-/// As-landed T6 numbers (vs parent `ad6bdeb8`): total LTM vars
-/// 6,605 -> 6,713 (+108, +1.64%) -- C-LEARN contains nine GH #525-family
-/// iterated+literal edges (`effective_target_year -> sorted_target_year`
-/// and friends), each flipping from ONE merged Bare-named conservative
-/// score to per-(row, full-target-element) scalars. The VAR count grows,
-/// but the LAYOUT (the #654 concern) shrinks: the per-step result-row
-/// width went 31,132 -> 30,928 slots (-204, -0.66%), because each retired
-/// merged score was a multi-slot A2A variable whose conservative partial
-/// also synthesized per-element capture-helper auxes, while the
-/// per-element scalars compile to direct LoadPrev reads.
+/// T6 numbers (vs parent `ad6bdeb8`): total LTM vars 6,605 -> 6,713
+/// (+108, +1.64%) -- C-LEARN contains nine GH #525-family iterated+literal
+/// edges (`effective_target_year -> sorted_target_year` and friends), each
+/// flipping from ONE merged Bare-named conservative score to per-(row,
+/// full-target-element) scalars. The VAR count grew, but the LAYOUT (the
+/// #654 concern) shrank: the per-step result-row width went 31,132 ->
+/// 30,928 slots (-204, -0.66%), because each retired merged score was a
+/// multi-slot A2A variable whose conservative partial also synthesized
+/// per-element capture-helper auxes, while the per-element scalars compile
+/// to direct LoadPrev reads.
+///
+/// **#912/#913 re-derivation, 6,713 -> 6,891 (+178).**
+///
+/// Read this as `+182 new` AND `448 corrected`, not as "nothing that was
+/// already emitted changed" -- because the far more serious half of #912/#913
+/// is that C-LEARN's existing link scores were WRONG. Measured by dumping
+/// every `model_ltm_variables` name+equation on clean HEAD and on this branch:
+/// 182 names new, 0 removed, and **448 of the 6,709 pre-existing variables now
+/// carry a different equation**. All 448 diverge at an inserted `(`, and all
+/// 448 contain an `if (`.
+///
+/// The mechanism for both halves is one printer defect. `print_eqn` emitted
+/// text the equation grammar reads differently (or not at all): `!a` for
+/// `Op1(Not, ..)` (the lexer has no `!`), `a != b` for `Neq` (only `<>`
+/// lexes), and -- the silent one -- an unparenthesized `If` under an operator,
+/// where the `if` swallows the trailing operator on re-parse. Every LTM link
+/// score is a *ceteris-paribus partial* built by re-parsing `print_eqn`
+/// output, so:
+///
+/// * The two unlexable spellings raised `PartialEquationError` and the
+///   variable was SKIPPED with a warning rather than emitted
+///   (`link_scores.rs`'s "did not parse" arm -- the deliberate refusal to emit
+///   a partial that would silently score a constant magnitude of 1). C-LEARN
+///   had **50** such failing edges (across ~8 target variables; a PerElement
+///   edge warns ONCE while dropping all 21 of its per-element siblings, so the
+///   78 -> 28 warning count under-reported the damage by 132). Those 50 edges
+///   are the +182 recovered link-score variables.
+/// * The `If` regrouping produced text that parses FINE and means something
+///   else, so those 448 variables compiled clean and scored the wrong
+///   function. `relative_target_for_equity[COP] = IF THEN ELSE(...) /
+///   Reference emissions[COP]` is `Div(If(..), C)`; HEAD's partial reads
+///   `... else (previous(B) / previous(C))` -- the division migrated INTO the
+///   else branch -- where this branch reads
+///   `(... else (previous(B))) / previous(C)`.
+///
+/// Nothing under `test/` pins the corrected values either way, so this exact
+/// count is the only tripwire for the recovery. It is a weak one: any emission
+/// change landing on 6,891 satisfies it. The real guard is the sibling
+/// `clearn_ltm_partials_all_parse`, which asserts the MECHANISM (zero
+/// `PartialEquationErrorKind::Parse` warnings) rather than a total.
+///
+/// Also folded into this number: `-4`, PRE-EXISTING. Some earlier
+/// `conveyor-engine` commit already moved the count to 6,709 without updating
+/// this pin. This gate is `#[ignore]`d, so neither pre-commit nor CI caught it
+/// (tracked separately -- an `#[ignore]`d exact-value pin that nothing runs is
+/// not a guardrail).
+///
+/// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
+/// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
+/// per-step result-row width goes 30,800 -> 31,198 slots (+398, +1.29%), still
+/// far below the ceiling.
 // Run with: cargo test --release -- --ignored clearn_ltm_var_count_guardrail
 #[test]
 #[ignore]
@@ -5677,10 +5791,57 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6713,
+        total, 6891,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"
+    );
+}
+
+/// The other half of the #912/#913 story on C-LEARN, and the one that is
+/// actually load-bearing: **no** LTM link score may be dropped because
+/// `print_eqn` emitted text the engine's own parser rejects.
+///
+/// The var-count pin above would be satisfied by any emission change that
+/// happened to land on 6,891. This asserts the *mechanism*: zero
+/// `PartialEquationErrorKind::Parse` warnings. A regression in the printer
+/// (an operator spelled with a token the lexer lacks, a missing
+/// parenthesization) silently re-drops link scores, and the ceteris-paribus
+/// partial is skipped rather than emitted wrong -- so the failure mode is a
+/// hole in the attribution, with no numeric test to catch it.
+///
+/// C-LEARN had 50 such failures before #912/#913; the remaining 28
+/// partial-equation warnings are the separately-tracked non-parse kinds.
+// Run with: cargo test --release -- --ignored clearn_ltm_partials_all_parse
+#[test]
+#[ignore]
+fn clearn_ltm_partials_all_parse() {
+    use simlin_engine::db::{collect_all_diagnostics, set_project_ltm_enabled};
+
+    let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+
+    let unparseable: Vec<String> = collect_all_diagnostics(&db, sync.project)
+        .iter()
+        .map(|d| format!("{:?}", d.error))
+        .filter(|msg| msg.contains("did not parse"))
+        .collect();
+
+    assert!(
+        unparseable.is_empty(),
+        "{} LTM ceteris-paribus partial(s) were dropped because print_eqn \
+         emitted text the equation parser rejects. print_eqn's output is \
+         re-parsed all over the engine; every operator it emits must lex. \
+         First few: {:#?}",
+        unparseable.len(),
+        &unparseable[..unparseable.len().min(3)]
     );
 }
 

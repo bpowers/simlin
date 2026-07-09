@@ -638,3 +638,176 @@ fn single_word_group_without_doc_does_not_warn() {
         "a single-word group with no doc round-trips losslessly"
     );
 }
+
+// ---- #912: unparseable-equation fallback ----
+
+/// The writer's last-resort fallback emits the raw XMILE equation text when
+/// `Expr0::new` cannot parse it. XMILE syntax is not MDL syntax, so that text
+/// means something different on re-import (the builtin-rename table -- `int` ->
+/// `INTEGER`, `smth1` -> `SMOOTH` -- is exactly what gets skipped, and Vensim
+/// reads an unknown call as a lookup of an undefined table). The writer cannot
+/// vouch for it, so it must say so rather than degrade silently.
+#[test]
+fn unparseable_equation_warns_and_names_the_variable() {
+    let project = make_project(vec![make_model(vec![make_aux("target", "1 +", None, "")])]);
+    let warnings = warnings_of(&project);
+    let w = message_mentioning(&warnings, "'target'").expect("unparseable-equation warning");
+    assert!(
+        w.message.contains("1 +"),
+        "warning should quote the offending equation: {}",
+        w.message
+    );
+    assert!(
+        w.message.contains("could not be parsed"),
+        "warning should say the equation could not be parsed: {}",
+        w.message
+    );
+}
+
+/// Warnings are a side channel: the emitted text is byte-identical with and
+/// without them, so this cannot perturb the corpus round-trip ratchets.
+#[test]
+fn unparseable_equation_warning_does_not_change_emitted_text() {
+    let project = make_project(vec![make_model(vec![make_aux("target", "1 +", None, "")])]);
+    let text_only = crate::mdl::project_to_mdl(&project).expect("plain write");
+    let (text_warn, warnings) = project_to_mdl_with_warnings(&project).expect("warn write");
+    assert_eq!(text_only, text_warn);
+    assert!(!warnings.is_empty());
+}
+
+/// A stacked unary minus is what the MDL importer produces for the legal Vensim
+/// `x = - -3` (#912). Once the equation grammar accepts it, the writer parses it
+/// like any other equation -- no fallback, no warning, and `INTEGER` is properly
+/// restored from the XMILE `int`.
+#[test]
+fn stacked_unary_equation_parses_and_does_not_warn() {
+    let project = make_project(vec![make_model(vec![make_aux(
+        "target",
+        "--(0 ^ int(0))",
+        None,
+        "",
+    )])]);
+    let (text, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    assert!(
+        warnings.is_empty(),
+        "a parseable equation must not warn: {warnings:?}"
+    );
+    assert!(
+        text.contains("INTEGER(0)"),
+        "the builtin-rename table must have run (no raw-text fallback):\n{text}"
+    );
+    assert!(
+        !text.contains("INT(0)"),
+        "the raw XMILE `int` must not leak into the MDL:\n{text}"
+    );
+}
+
+/// Opaque data equations (GET DIRECT DATA, GET XLS, ...) are unparseable *by
+/// design* -- the writer emits them verbatim and that is correct, so they take
+/// the early-return path and must not warn.
+#[test]
+fn data_equation_does_not_warn() {
+    let project = make_project(vec![make_model(vec![make_aux(
+        "imported",
+        "{GET DIRECT DATA('data.csv', ',', 'A', '2')}",
+        None,
+        "",
+    )])]);
+    assert!(
+        warnings_of(&project).is_empty(),
+        "a GET DIRECT data equation is opaque by design and must not warn"
+    );
+}
+
+/// The warning fires for every equation-bearing shape the writer renders, not
+/// just the scalar aux path: a stock's INITIAL, an arrayed element equation.
+#[test]
+fn unparseable_equation_warns_from_stock_and_arrayed_paths() {
+    let mut stock = make_stock("level", "1 +", None, "");
+    if let Variable::Stock(s) = &mut stock {
+        s.inflows = vec!["filling".to_owned()];
+    }
+    let flow = make_flow("filling", "3");
+    let project = make_project(vec![make_model(vec![stock, flow])]);
+    assert!(
+        message_mentioning(&warnings_of(&project), "'level'").is_some(),
+        "a stock's unparseable INITIAL must warn"
+    );
+
+    let arrayed = Variable::Aux(Aux {
+        ident: "arr".to_owned(),
+        equation: Equation::Arrayed(
+            vec!["DimA".to_owned()],
+            vec![("a1".to_owned(), "1 +".to_owned(), None, None)],
+            None,
+            false,
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    });
+    let mut project = make_project(vec![make_model(vec![arrayed])]);
+    project.dimensions = vec![datamodel::Dimension {
+        name: "DimA".to_owned(),
+        elements: datamodel::DimensionElements::Named(vec!["a1".to_owned()]),
+        mappings: vec![],
+        parent: None,
+    }];
+    assert!(
+        message_mentioning(&warnings_of(&project), "'arr'").is_some(),
+        "an arrayed element's unparseable equation must warn"
+    );
+}
+
+// ---- #913: transpose has no Vensim equivalent ----
+
+/// Vensim has no transpose operator -- `mdl::parser` has no token for `'` and no
+/// `Transpose` AST node -- so an equation carrying one CANNOT be represented in
+/// MDL. The export is degraded no matter what text we emit, and the writer's job
+/// in that situation is to say so.
+///
+/// It is also grouped, so the text at least denotes the tree the model has: the
+/// postfix `'` binds tighter than any infix, so the bare `a + b'` reads as
+/// transposing `b` alone.
+#[test]
+fn transpose_warns_and_is_grouped() {
+    let project = make_project(vec![make_model(vec![make_aux(
+        "moved", "(a + b)'", None, "",
+    )])]);
+    let (text, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    let w = message_mentioning(&warnings, "'moved'").expect("transpose warning");
+    assert!(
+        w.message.contains("transpose"),
+        "warning should name the construct: {}",
+        w.message
+    );
+    assert!(
+        text.contains("(a + b)'"),
+        "the transpose operand must stay grouped, got:\n{text}"
+    );
+}
+
+/// The grouping rule is the same one `ast::paren_if_necessary` applies: any
+/// non-atomic operand, including a prefix unary.
+#[test]
+fn transpose_of_a_prefix_unary_is_grouped() {
+    let project = make_project(vec![make_model(vec![make_aux("moved", "(-a)'", None, "")])]);
+    let (text, _) = project_to_mdl_with_warnings(&project).expect("write");
+    assert!(
+        text.contains("(-a)'"),
+        "a negated transpose operand must stay grouped, got:\n{text}"
+    );
+}
+
+/// An equation with no transpose must not warn.
+#[test]
+fn no_transpose_does_not_warn() {
+    let project = make_project(vec![make_model(vec![make_aux("plain", "a + b", None, "")])]);
+    assert!(
+        warnings_of(&project).is_empty(),
+        "an ordinary equation must not warn"
+    );
+}

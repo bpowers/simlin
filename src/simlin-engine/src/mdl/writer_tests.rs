@@ -651,7 +651,12 @@ fn long_equation_variable_entry_uses_continuation() {
         "long equation should use multiline format: {buf}"
     );
     // The equation body should have a continuation if the MDL form exceeds 80 chars
-    let mdl_eqn = equation_to_mdl(long_eqn, &WriterContext::default());
+    let mdl_eqn = equation_to_mdl(
+        long_eqn,
+        "some computed value",
+        &WriterContext::default(),
+        &mut Vec::new(),
+    );
     if mdl_eqn.len() > 80 {
         assert!(
             buf.contains("\\\n\t\t"),

@@ -685,14 +685,42 @@ fn reorder_args(mdl_name: &str, mut args: Vec<String>) -> Vec<String> {
     }
 }
 
-/// Parenthesize `eqn` when the child's precedence requires it.
+/// Parenthesize `eqn` when the child's precedence or associativity requires it,
+/// for text that **Vensim** will read back.
 ///
-/// For left children: parenthesize only when the parent has strictly higher
+/// Note the operand here: this keys on `ast::BinaryOp::precedence()`, the
+/// XMILE/Vensim table, NOT on the precedence `mdl::parser` actually implements --
+/// which is inverted for the binary operators (it puts `+`/`-` at the lowest
+/// level and `:AND:` above the comparisons; GH #914). Vensim's table is the
+/// correct target, since Vensim is who reads the file. But `writer_proptest` then
+/// re-reads the writer's output with `mdl::parser`, so its fixpoint property is
+/// only sound over the operators where the two tables agree. That holds today
+/// because `expr0_strategy` generates no comparisons and no logical operators --
+/// see the note there.
+///
+/// For left children: parenthesize when the parent has strictly higher
 /// precedence (lower-precedence child needs grouping).
 ///
-/// For right children of non-commutative operators (`-`, `/`, `MOD`):
-/// also parenthesize when the child has equal precedence, because these
-/// operators are not associative -- `a - (b - c)` != `(a - b) - c`.
+/// At equal precedence, the operator's associativity picks the side to group --
+/// always the side the reader would NOT have chosen on its own:
+///
+/// * every left-to-right operator groups its RIGHT child -- `a - (b - c)` !=
+///   `(a - b) - c`, and (floating-point addition being non-associative)
+///   `a + (b + c)` != `(a + b) + c`;
+/// * `^` is RIGHT-associative in Vensim (`mdl::parser::parse_power`), so it
+///   groups its LEFT child. Emitting `(a^b)^c` as the bare `a^b^c` re-imports as
+///   `a^(b^c)` -- a silent value change (`(4^3)^2 = 4096` becomes `262144`).
+///
+/// A prefix unary binds LOOSER than `^` in MDL too, so a prefixed BASE must be
+/// grouped: `(-a)^b` emitted bare re-imports as `-(a^b)`, flipping the sign. The
+/// exponent needs no parens (`mdl::parser::parse_power` reads it with
+/// `parse_unary`, so `a^-b` is already correct).
+///
+/// The postfix transpose groups ANY non-atomic operand, like [`ast::paren_if_necessary`].
+/// Vensim has no transpose, so such an equation is degraded regardless (the
+/// writer warns -- see `transpose_warning`); grouping at least makes the emitted
+/// text denote the tree the model actually has, instead of the silently different
+/// `a + b'`.
 fn mdl_paren_if_necessary(
     parent: &Expr0,
     child: &Expr0,
@@ -702,6 +730,10 @@ fn mdl_paren_if_necessary(
     let needs = match parent {
         Expr0::Const(_, _, _) | Expr0::Var(_, _) => false,
         Expr0::App(_, _) | Expr0::Subscript(_, _, _) => false,
+        Expr0::Op1(UnaryOp::Transpose, _, _) => !matches!(
+            child,
+            Expr0::Const(_, _, _) | Expr0::Var(_, _) | Expr0::Subscript(_, _, _)
+        ),
         Expr0::Op1(_, _, _) => matches!(child, Expr0::Op2(_, _, _, _)),
         Expr0::Op2(parent_op, _, _, _) => match child {
             Expr0::Op2(child_op, _, _, _) => {
@@ -709,11 +741,20 @@ fn mdl_paren_if_necessary(
                 let child_prec = child_op.precedence();
                 if parent_prec > child_prec {
                     true
-                } else if is_right_child && parent_prec == child_prec {
-                    matches!(parent_op, BinaryOp::Sub | BinaryOp::Div | BinaryOp::Mod)
+                } else if parent_prec == child_prec {
+                    if matches!(parent_op, BinaryOp::Exp) {
+                        !is_right_child
+                    } else {
+                        is_right_child
+                    }
                 } else {
                     false
                 }
+            }
+            Expr0::Op1(child_op, _, _) => {
+                matches!(parent_op, BinaryOp::Exp)
+                    && !is_right_child
+                    && !matches!(child_op, UnaryOp::Transpose)
             }
             _ => false,
         },
@@ -1188,22 +1229,18 @@ impl Visitor<String> for MdlPrintVisitor<'_> {
                     .collect();
                 format!("{}[{}]", format_mdl_ident(id.as_str()), args.join(", "))
             }
-            Expr0::Op1(op, l, _) => match op {
-                UnaryOp::Transpose => {
-                    let l = self.walk(l);
-                    format!("{l}'")
+            Expr0::Op1(op, l, _) => {
+                // The operand groups through the shared rule in every arm; the
+                // transpose case is explained on `mdl_paren_if_necessary`.
+                let l = mdl_paren_if_necessary(expr, l, false, self.walk(l));
+                match op {
+                    UnaryOp::Transpose => format!("{l}'"),
+                    UnaryOp::Positive => format!("+{l}"),
+                    UnaryOp::Negative => format!("-{l}"),
+                    // MDL uses the keyword form with a trailing space before the operand
+                    UnaryOp::Not => format!(":NOT: {l}"),
                 }
-                _ => {
-                    let l = mdl_paren_if_necessary(expr, l, false, self.walk(l));
-                    match op {
-                        UnaryOp::Positive => format!("+{l}"),
-                        UnaryOp::Negative => format!("-{l}"),
-                        // MDL uses the keyword form with a trailing space before the operand
-                        UnaryOp::Not => format!(":NOT: {l}"),
-                        UnaryOp::Transpose => unreachable!(),
-                    }
-                }
-            },
+            }
             Expr0::Op2(op, l, r, _) => {
                 // Vensim uses MODULO(a, b) function form rather than the
                 // binary MOD operator that the XMILE equation parser
@@ -1262,10 +1299,29 @@ pub fn expr0_to_mdl_ctx(expr: &Expr0, ctx: &WriterContext) -> String {
 }
 
 /// Convert an XMILE equation string to MDL text via Expr0 round-trip.
-/// Falls back to the raw string (with underscores->spaces) on parse failure
-/// or empty input. `ctx` supplies the model's variable/dimension knowledge so
-/// wildcard subscripts and shadowed builtins render correctly.
-fn equation_to_mdl(xmile_eqn: &str, ctx: &WriterContext) -> String {
+///
+/// `ctx` supplies the model's variable/dimension knowledge so wildcard
+/// subscripts and shadowed builtins render correctly. `name` is the display name
+/// of the variable the equation belongs to, used only for the warning below.
+///
+/// # The fallback arm warns (#912)
+///
+/// When `Expr0::new` cannot parse the stored equation there is no AST to render,
+/// so all the writer can do is emit the raw XMILE text with underscores turned
+/// back into spaces. That text is *not* MDL: it skips the builtin-rename table
+/// (`int` -> `INTEGER`, `smth1` -> `SMOOTH`, `safediv` -> `ZIDZ`, ...), and
+/// Vensim has no such builtins -- so on re-import an unmapped call reads as a
+/// **lookup invocation of an undefined table** (`INT(0)` -> `LOOKUP(INT, 0)`).
+/// The meaning changes silently, and compounds across passes. The writer cannot
+/// vouch for that text, so it records an [`ExportWarning`] rather than degrade
+/// quietly. (An opaque data equation is a *legitimate* verbatim path and returns
+/// before this point.)
+fn equation_to_mdl(
+    xmile_eqn: &str,
+    name: &str,
+    ctx: &WriterContext,
+    warnings: &mut Vec<ExportWarning>,
+) -> String {
     if xmile_eqn.is_empty() {
         return String::new();
     }
@@ -1280,9 +1336,70 @@ fn equation_to_mdl(xmile_eqn: &str, ctx: &WriterContext) -> String {
         return stripped.to_string();
     }
     match Expr0::new(xmile_eqn, LexerType::Equation) {
-        Ok(Some(ast)) => expr0_to_mdl_ctx(&ast, ctx),
-        // Fallback for unparseable equations; best-effort space conversion.
-        _ => underbar_to_space(xmile_eqn),
+        Ok(Some(ast)) => {
+            if expr0_contains_transpose(&ast) {
+                warnings.push(transpose_warning(name, xmile_eqn));
+            }
+            expr0_to_mdl_ctx(&ast, ctx)
+        }
+        // A non-empty equation that lexes to NOTHING (whitespace, or a bare
+        // comment) parsed fine; it just has no AST and no content to mis-render.
+        // Passing it through is exact, so it is not a degradation.
+        Ok(None) => underbar_to_space(xmile_eqn),
+        Err(_) => {
+            warnings.push(unparseable_equation_warning(name, xmile_eqn));
+            underbar_to_space(xmile_eqn)
+        }
+    }
+}
+
+/// The [`ExportWarning`] for the [`equation_to_mdl`] raw-text fallback (#912).
+fn unparseable_equation_warning(name: &str, xmile_eqn: &str) -> ExportWarning {
+    ExportWarning::new(format!(
+        "the equation for '{name}' could not be parsed ({xmile_eqn:?}), so it was \
+         written to MDL as raw text; builtin renames were not applied and the \
+         equation may mean something different when re-imported"
+    ))
+}
+
+/// The [`ExportWarning`] for an equation using the transpose operator (#913).
+fn transpose_warning(name: &str, xmile_eqn: &str) -> ExportWarning {
+    ExportWarning::new(format!(
+        "the equation for '{name}' uses the transpose operator ({xmile_eqn:?}), which \
+         Vensim has no equivalent for; the `'` was written through as-is and will not \
+         re-import"
+    ))
+}
+
+/// Does this AST contain a transpose anywhere?
+///
+/// A pure predicate rather than a flag threaded through [`MdlPrintVisitor`]: the
+/// visitor returns `String`, so a side channel would mean giving it interior
+/// mutability just to report a fact the AST already carries.
+fn expr0_contains_transpose(expr: &Expr0) -> bool {
+    fn index_has(idx: &IndexExpr0) -> bool {
+        match idx {
+            IndexExpr0::Wildcard(_)
+            | IndexExpr0::StarRange(_, _)
+            | IndexExpr0::DimPosition(_, _) => false,
+            IndexExpr0::Range(l, r, _) => {
+                expr0_contains_transpose(l) || expr0_contains_transpose(r)
+            }
+            IndexExpr0::Expr(e) => expr0_contains_transpose(e),
+        }
+    }
+    match expr {
+        Expr0::Const(_, _, _) | Expr0::Var(_, _) => false,
+        Expr0::App(UntypedBuiltinFn(_, args), _) => args.iter().any(expr0_contains_transpose),
+        Expr0::Subscript(_, indices, _) => indices.iter().any(index_has),
+        Expr0::Op1(UnaryOp::Transpose, _, _) => true,
+        Expr0::Op1(_, l, _) => expr0_contains_transpose(l),
+        Expr0::Op2(_, l, r, _) => expr0_contains_transpose(l) || expr0_contains_transpose(r),
+        Expr0::If(c, t, f, _) => {
+            expr0_contains_transpose(c)
+                || expr0_contains_transpose(t)
+                || expr0_contains_transpose(f)
+        }
     }
 }
 
@@ -1373,10 +1490,14 @@ fn format_f64(v: f64) -> String {
 
 /// Write a single MDL variable entry, without model context.
 ///
-/// Back-compat wrapper (empty [`WriterContext`]); production emission uses
-/// [`write_variable_entry_ctx`] with a real context so wildcard subscripts and
-/// shadowed builtins in the equation render correctly.
-pub fn write_variable_entry(
+/// Test-only: an empty [`WriterContext`], and the [`ExportWarning`]s are
+/// discarded. Production emission goes through [`write_variable_entry_ctx_warn`]
+/// so wildcard subscripts / shadowed builtins render correctly AND lossy
+/// constructs are surfaced. This is deliberately NOT public: a caller handed a
+/// silently-discarded warning channel cannot tell a faithful export from a
+/// degraded one (#912).
+#[cfg(test)]
+fn write_variable_entry(
     buf: &mut String,
     var: &datamodel::Variable,
     display_names: &HashMap<String, String>,
@@ -1384,17 +1505,16 @@ pub fn write_variable_entry(
     write_variable_entry_ctx(buf, var, display_names, &WriterContext::default());
 }
 
-/// Write a single MDL variable entry using model context.
+/// Write a single MDL variable entry using model context, discarding warnings.
 ///
 /// The standard MDL format for a variable entry is:
 /// ```text
 /// Name=\n\tequation\n\t~\tunits\n\t~\tcomment\n\t|
 /// ```
 ///
-/// Back-compat wrapper that discards any [`ExportWarning`]s; production
-/// emission uses [`write_variable_entry_ctx_warn`] so lossy constructs are
-/// surfaced (#856).
-pub fn write_variable_entry_ctx(
+/// Test-only, for the same reason as [`write_variable_entry`].
+#[cfg(test)]
+fn write_variable_entry_ctx(
     buf: &mut String,
     var: &datamodel::Variable,
     display_names: &HashMap<String, String>,
@@ -1463,6 +1583,7 @@ fn write_variable_entry_ctx_warn(
                 doc,
                 effective_gf,
                 ctx,
+                warnings,
             );
         }
         Equation::ApplyToAll(dims, eqn) => {
@@ -1479,6 +1600,7 @@ fn write_variable_entry_ctx_warn(
                 doc,
                 effective_gf,
                 ctx,
+                warnings,
             );
         }
         Equation::Arrayed(dims, elements, default_eq, has_except_default) => {
@@ -1772,30 +1894,34 @@ fn write_stock_variable(
     // an ACTIVE INITIAL wrap. The result is XMILE-form text (or the brace-
     // stripped GET DIRECT form) that `equation_to_mdl` renders to MDL.
     let data_source_eqn = compat_get_direct_equation(&stock.compat);
-    let stock_initial = |eqn: &str| -> String {
+    let stock_initial = |eqn: &str, warnings: &mut Vec<ExportWarning>| -> String {
         let initial_src = data_source_eqn
             .clone()
             .unwrap_or_else(|| wrap_active_initial(eqn, &stock.compat));
-        equation_to_mdl(&initial_src, ctx)
+        equation_to_mdl(&initial_src, &name, ctx, warnings)
     };
 
     match &stock.equation {
-        Equation::Scalar(eqn) => write_stock_entry(
-            buf,
-            &name,
-            &net_flow,
-            &stock_initial(eqn),
-            &[],
-            &stock.units,
-            &stock.documentation,
-        ),
-        Equation::ApplyToAll(dims, eqn) => {
-            let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
+        Equation::Scalar(eqn) => {
+            let initial = stock_initial(eqn, warnings);
             write_stock_entry(
                 buf,
                 &name,
                 &net_flow,
-                &stock_initial(eqn),
+                &initial,
+                &[],
+                &stock.units,
+                &stock.documentation,
+            )
+        }
+        Equation::ApplyToAll(dims, eqn) => {
+            let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
+            let initial = stock_initial(eqn, warnings);
+            write_stock_entry(
+                buf,
+                &name,
+                &net_flow,
+                &initial,
                 &dim_names,
                 &stock.units,
                 &stock.documentation,
@@ -1883,7 +2009,7 @@ fn write_arrayed_stock_entries(
         // Wrap the per-element INITIAL with ACTIVE INITIAL when the stock
         // carries that compat (#857), mirroring the scalar stock path.
         let initial_src = wrap_active_initial(raw_eqn, compat);
-        let initial = normalized_stock_initial(&equation_to_mdl(&initial_src, ctx));
+        let initial = normalized_stock_initial(&equation_to_mdl(&initial_src, name, ctx, warnings));
 
         write!(buf, "{name}[{elem_display}]=").unwrap();
         buf.push_str("\n\t");
@@ -2048,6 +2174,7 @@ fn write_single_entry(
     doc: &str,
     gf: Option<&GraphicalFunction>,
     ctx: &WriterContext,
+    warnings: &mut Vec<ExportWarning>,
 ) {
     let dim_suffix = if dims.is_empty() {
         String::new()
@@ -2067,7 +2194,7 @@ fn write_single_entry(
             // Embedded lookup: name=\n\tWITH LOOKUP(input, (body))
             let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
             write!(buf, "{name}{dim_suffix}{assign_op}").unwrap();
-            let mdl_eqn = equation_to_mdl(eqn, ctx);
+            let mdl_eqn = equation_to_mdl(eqn, name, ctx, warnings);
             buf.push_str("\n\tWITH LOOKUP(");
             buf.push_str(&mdl_eqn);
             buf.push_str(", ");
@@ -2076,7 +2203,7 @@ fn write_single_entry(
         }
     } else {
         let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-        let mdl_eqn = equation_to_mdl(eqn, ctx);
+        let mdl_eqn = equation_to_mdl(eqn, name, ctx, warnings);
 
         // Short, single-line equations use inline format with spaces around
         // the operator (e.g. `average repayment rate = 0.03`).  Longer or
@@ -2134,7 +2261,7 @@ fn write_arrayed_entries(
         ctx,
         warnings,
     );
-    write_arrayed_element_entries(buf, name, &entries, compat, units, doc, ctx);
+    write_arrayed_element_entries(buf, name, &entries, compat, units, doc, ctx, warnings);
 }
 
 /// Apply the EXCEPT-default plan and return the element list to emit: either
@@ -2183,6 +2310,7 @@ fn resolve_arrayed_entries(
 /// Emit one MDL entry per arrayed element. A per-variable ACTIVE INITIAL wrap
 /// (`compat.active_initial`) is applied to every element equation (#857), the
 /// same way the Scalar / Apply-to-All paths wrap it.
+#[allow(clippy::too_many_arguments)]
 fn write_arrayed_element_entries(
     buf: &mut String,
     name: &str,
@@ -2191,6 +2319,7 @@ fn write_arrayed_element_entries(
     units: &Option<String>,
     doc: &str,
     ctx: &WriterContext,
+    warnings: &mut Vec<ExportWarning>,
 ) {
     let last_idx = elements.len().saturating_sub(1);
     for (i, (elem_name, raw_eqn, _comment, elem_gf)) in elements.iter().enumerate() {
@@ -2207,7 +2336,7 @@ fn write_arrayed_element_entries(
             } else {
                 let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
                 write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-                let mdl_eqn = equation_to_mdl(eqn, ctx);
+                let mdl_eqn = equation_to_mdl(eqn, name, ctx, warnings);
                 buf.push_str("\n\tWITH LOOKUP(");
                 buf.push_str(&mdl_eqn);
                 buf.push_str(", ");
@@ -2217,7 +2346,7 @@ fn write_arrayed_element_entries(
         } else {
             let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
             write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-            let mdl_eqn = equation_to_mdl(eqn, ctx);
+            let mdl_eqn = equation_to_mdl(eqn, name, ctx, warnings);
             let wrapped = wrap_equation_with_continuations(&mdl_eqn, 80);
             buf.push_str("\n\t");
             buf.push_str(&wrapped);
@@ -2620,9 +2749,12 @@ fn build_multi_output_reconstructions(
 /// Indexed: `DimName: (1-N) ~~|`
 /// Mapped:  `DimName: Elem1, Elem2 -> MappedDim ~~|`
 /// Element-mapped: `DimName: A1, A2 -> MappedDim: B2, B1 ~~|`
-/// Back-compat wrapper that discards any [`ExportWarning`]s; production
-/// emission uses [`write_dimension_def_warn`] (#856).
-pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
+///
+/// Test-only wrapper that discards any [`ExportWarning`]s; production emission
+/// uses [`write_dimension_def_warn`] (#856). Not public, so no caller can lose
+/// the warning channel by accident.
+#[cfg(test)]
+fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
     write_dimension_def_warn(buf, dim, &mut Vec::new());
 }
 

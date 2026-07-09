@@ -638,6 +638,36 @@ impl XmileFormatter {
         }
     }
 
+    /// Format `left <op> right` as XMILE equation text.
+    ///
+    /// **No general precedence-aware parenthesization, deliberately.** The
+    /// emitted text is the stored datamodel equation, re-read by the XMILE
+    /// parser, and the two grammars' *binary* precedence tables disagree:
+    /// `mdl::parser` puts `+`/`-` at the LOWEST level and `:AND:` above the
+    /// comparisons, so it builds `1 + (2 > 2)` and `2 > (1 :AND: 0)` where Vensim
+    /// means `(1 + 2) > 2` and `(2 > 1) :AND: 0`. Emitting the operands *without*
+    /// parentheses lets the XMILE grammar re-establish the intended grouping,
+    /// which is why the C-LEARN corpus reproduces `Ref.vdf` today. Faithfully
+    /// parenthesizing the MDL AST would preserve the wrong grouping. (The MDL
+    /// precedence table is the real bug; tracked as GH #914. Until it is fixed,
+    /// precedence-free emission is load-bearing, not an oversight.)
+    ///
+    /// This laundering is only sound where the XMILE grammar's precedence matches
+    /// Vensim's, and it is NOT universally true that it does -- only that it does
+    /// for the operators reached here. It was found to be false once: the XMILE
+    /// parser gave `and`/`or` a single shared level, so the correct MDL tree
+    /// `Or(1, And(0, 0))` was flattened to `1 or 0 and 0` and re-read as
+    /// `And(Or(1, 0), 0)`. Fixed in `parser::parse_logical`. Two known residuals:
+    ///
+    /// * `:NOT:` binds tighter than a relational operator in BOTH parsers, so
+    ///   `:NOT: 1 > 2` is `(:NOT: 1) > 2` in each -- laundering cannot fix a case
+    ///   where both grammars agree with each other and disagree with Vensim.
+    /// * Anything else #914 turns up. Adding an operator to this match is a
+    ///   commitment that the two grammars agree on its precedence.
+    ///
+    /// `^` is the exception to the flat-emission rule, handled by
+    /// [`paren_exponent_operand`]: its grouping is NOT recoverable from the flat
+    /// text, and it does not depend on the disputed binary table.
     fn format_binary_ctx(
         &self,
         op: BinaryOp,
@@ -645,7 +675,7 @@ impl XmileFormatter {
         right: &Expr<'_>,
         ctx: Option<&ElementContext>,
     ) -> String {
-        let left_str = self.format_expr_ctx(left, ctx);
+        let left_str = paren_exponent_operand(op, left, self.format_expr_ctx(left, ctx));
         let right_str = self.format_expr_ctx(right, ctx);
 
         let op_str = match op {
@@ -671,6 +701,36 @@ impl XmileFormatter {
     #[allow(dead_code)]
     pub fn format_lookup_table(&self, table: &LookupTable) -> (Vec<f64>, Vec<f64>) {
         (table.x_vals.clone(), table.y_vals.clone())
+    }
+}
+
+/// Group the BASE of a `^` when the flat text would not re-parse to the same
+/// tree. Both hazards come from `^` binding tighter than every prefix and
+/// associating right-to-left, in the XMILE grammar that reads this output:
+///
+/// * `Op2(Exp, Op2(Exp, a, b), c)` printed bare is `a ^ b ^ c`, which re-parses
+///   right-associatively as `a ^ (b ^ c)` -- `(4^3)^2 = 4096` becomes `262144`;
+/// * `Op2(Exp, Op1(Negative, a), b)` printed bare is `-a ^ b`, which re-parses as
+///   `-(a ^ b)` -- a sign flip, `(-2)^2 = 4` becomes `-4`.
+///
+/// The exponent needs nothing (`a ^ -b` and `a ^ b ^ c` are already right), and
+/// no other operator is touched -- see [`XmileFormatter::format_binary_ctx`] for
+/// why a general precedence rule would be actively wrong here.
+///
+/// `mdl::parser::parse_power` takes its base from `parse_atom`, so neither shape
+/// can reach this function without an intervening `Expr::Paren` (which prints its
+/// own parentheses and shields the operand). The guard therefore never fires on
+/// reader output -- it exists so the round-trip guarantee is structural rather
+/// than a property of the reader that happens to feed it.
+fn paren_exponent_operand(parent_op: BinaryOp, base: &Expr<'_>, formatted: String) -> String {
+    if !matches!(parent_op, BinaryOp::Exp) {
+        return formatted;
+    }
+    let needs = matches!(base, Expr::Op2(BinaryOp::Exp, _, _, _) | Expr::Op1(_, _, _));
+    if needs {
+        format!("({formatted})")
+    } else {
+        formatted
     }
 }
 
@@ -945,6 +1005,70 @@ mod tests {
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "a + b");
+    }
+
+    /// The `^` base must be grouped when the flat text would re-parse to a
+    /// different tree. `mdl::parser` cannot build either shape without an
+    /// intervening `Expr::Paren`, so this pins a structural guarantee rather than
+    /// a live repro -- and the corpus text is unchanged.
+    #[test]
+    fn test_format_exponent_base_is_grouped() {
+        let formatter = XmileFormatter::new();
+        let v = |n: &'static str| Expr::Var(Cow::Borrowed(n), vec![], loc());
+        let op2 = |op, l, r| Expr::Op2(op, Box::new(l), Box::new(r), loc());
+
+        // `^` associates right-to-left, so a LEFT `^` operand needs parens.
+        assert_eq!(
+            formatter.format_expr(&op2(
+                BinaryOp::Exp,
+                op2(BinaryOp::Exp, v("a"), v("b")),
+                v("c")
+            )),
+            "(a ^ b) ^ c"
+        );
+        assert_eq!(
+            formatter.format_expr(&op2(
+                BinaryOp::Exp,
+                v("a"),
+                op2(BinaryOp::Exp, v("b"), v("c"))
+            )),
+            "a ^ b ^ c"
+        );
+        // A prefixed BASE needs parens (a prefix binds looser than `^`); the
+        // exponent does not.
+        let neg = |e| Expr::Op1(UnaryOp::Negative, Box::new(e), loc());
+        assert_eq!(
+            formatter.format_expr(&op2(BinaryOp::Exp, neg(v("a")), v("b"))),
+            "(-a) ^ b"
+        );
+        assert_eq!(
+            formatter.format_expr(&op2(BinaryOp::Exp, v("a"), neg(v("b")))),
+            "a ^ -b"
+        );
+        // No other operator is parenthesized: the precedence-free emission is
+        // load-bearing (see `format_binary_ctx`). A stacked prefix stays bare
+        // (#912 -- the XMILE parser accepts `--a`).
+        assert_eq!(
+            formatter.format_expr(&op2(
+                BinaryOp::Add,
+                v("a"),
+                op2(BinaryOp::Add, v("b"), v("c"))
+            )),
+            "a + b + c"
+        );
+        assert_eq!(
+            formatter.format_expr(&op2(
+                BinaryOp::Gt,
+                v("a"),
+                op2(BinaryOp::And, v("b"), v("c"))
+            )),
+            "a > b and c"
+        );
+        assert_eq!(formatter.format_expr(&neg(neg(v("a")))), "--a");
+        assert_eq!(
+            formatter.format_expr(&neg(op2(BinaryOp::Exp, v("a"), v("b")))),
+            "-a ^ b"
+        );
     }
 
     #[test]

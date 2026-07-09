@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 250a03c2936a26621a2bd89e4ff19d2ccc03f3bf6c1e2c0b64a22f0db71515a9 # shrinks to expr = Op1(Negative, Op2(Exp, Op1(Negative, Const("0", 0.0, ..)), App(UntypedBuiltinFn("int", [Const("0", 0.0, ..)]))))
+cc d86dae8a2939beed64d07140bbe31bec24a72112611044b3d39e3246b8df797c # shrinks to expr = Op2(Add, Const("0", 0.0, Loc { start: 0, end: 0 }), Op2(Add, Const("0", 0.0, Loc { start: 0, end: 0 }), Const("0", 0.0, Loc { start: 0, end: 0 }), Loc { start: 0, end: 0 }), Loc { start: 0, end: 0 })

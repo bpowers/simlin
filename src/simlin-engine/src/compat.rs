@@ -232,7 +232,25 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
         let mut row = vec![0.0; step_size];
         for (i, field) in record.iter().enumerate() {
             use std::str::FromStr;
-            row[i] = match f64::from_str(field.trim()) {
+            let field = field.trim();
+            if field.is_empty() {
+                // Vensim's `.tab` / `.csv` export writes a constant's value on
+                // the first data row and leaves the cell EMPTY on every row
+                // after, so an empty cell means "unchanged from the previous
+                // step" -- not 0, and not a parse error. Carrying the previous
+                // value forward is the only reading that reproduces the run.
+                // An empty cell on the FIRST row has nothing to carry and stays
+                // a hard error.
+                let Some(prev) = step_data.last() else {
+                    return Err(format!(
+                        "{file_path}: empty value for column {i} on the first data row"
+                    )
+                    .into());
+                };
+                row[i] = prev[i];
+                continue;
+            }
+            row[i] = match f64::from_str(field) {
                 Ok(n) => n,
                 Err(err) => {
                     return Err(Box::new(err));
@@ -311,5 +329,88 @@ mod tests {
             "valid .dat file should succeed: {:?}",
             result.err()
         );
+    }
+
+    /// Write `contents` to a temp `.tab` and load it. Returns the temp dir so the
+    /// caller keeps it alive for the duration of the assertions.
+    fn load_tab(contents: &str) -> (tempfile::TempDir, StdResult<Results, Box<dyn Error>>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.tab");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+        drop(f);
+        let result = load_csv(path.to_str().unwrap(), b'\t');
+        (dir, result)
+    }
+
+    fn column(results: &Results, name: &str) -> Vec<f64> {
+        let off = results.offsets[&Ident::new(name)];
+        (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + off])
+            .collect()
+    }
+
+    /// Vensim writes a CONSTANT's value on the first data row and leaves the cell
+    /// empty on every row after. An empty cell therefore means "unchanged", so it
+    /// carries the previous step's value forward -- reading it as `0` (or as a
+    /// parse error) misreports the run.
+    #[test]
+    fn load_csv_carries_an_empty_cell_forward() {
+        let (_dir, result) = load_tab("Time\tvarying\tconstant\n0\t1.0\t7.5\n1\t2.0\t\n2\t3.0\t\n");
+        let results = result.expect("elided constants must load");
+
+        assert_eq!(vec![0.0, 1.0, 2.0], column(&results, "time"));
+        assert_eq!(vec![1.0, 2.0, 3.0], column(&results, "varying"));
+        assert_eq!(
+            vec![7.5, 7.5, 7.5],
+            column(&results, "constant"),
+            "an empty cell means unchanged, not 0"
+        );
+    }
+
+    /// Whitespace is not a value either: the cell is trimmed before the emptiness
+    /// test, so a `.tab` padded with spaces carries forward the same way.
+    #[test]
+    fn load_csv_carries_a_whitespace_only_cell_forward() {
+        let (_dir, result) = load_tab("Time\tconstant\n0\t7.5\n1\t   \n");
+        let results = result.expect("whitespace-padded constants must load");
+        assert_eq!(vec![7.5, 7.5], column(&results, "constant"));
+    }
+
+    /// The FIRST data row has nothing to carry forward, so an empty cell there is
+    /// a genuinely missing value and must be loud rather than silently 0.
+    #[test]
+    fn load_csv_rejects_an_empty_cell_on_the_first_row() {
+        let (_dir, result) = load_tab("Time\tconstant\n0\t\n1\t7.5\n");
+        let err = result.expect_err("an empty first-row cell must be an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("first data row"),
+            "the error should say which row, got: {msg}"
+        );
+        assert!(
+            msg.contains("column 1"),
+            "the error should say which column, got: {msg}"
+        );
+    }
+
+    /// A row with a different field count than the header is a corrupt file. The
+    /// csv reader's default `flexible(false)` catches it -- pinned here because the
+    /// carry-forward branch indexes `prev[i]` and would panic on a longer row.
+    #[test]
+    fn load_csv_rejects_a_ragged_row() {
+        let (_dir, result) = load_tab("Time\ta\tb\n0\t1.0\t2.0\n1\t3.0\n");
+        assert!(
+            result.is_err(),
+            "a row with too few fields must be an error, not a silent short row"
+        );
+    }
+
+    /// A non-numeric cell is still a hard error; the carry-forward branch only
+    /// fires on an EMPTY cell.
+    #[test]
+    fn load_csv_rejects_a_non_numeric_cell() {
+        let (_dir, result) = load_tab("Time\ta\n0\t1.0\n1\tnope\n");
+        assert!(result.is_err(), "a non-numeric cell must be an error");
     }
 }

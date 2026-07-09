@@ -248,6 +248,20 @@ fn expr0_strategy() -> BoxedStrategy<Expr0> {
     ];
 
     leaf.prop_recursive(4, 48, 4, move |inner| {
+        // DELIBERATELY narrow: arithmetic only, no comparisons and no `and`/`or`.
+        //
+        // This generator drives an MDL write -> `mdl::parser` re-read fixpoint, and
+        // `mdl::parser`'s BINARY precedence table is inverted relative to Vensim and
+        // XMILE (GH #914): it puts `+`/`-` at the lowest level and `:AND:` above the
+        // comparisons. `mdl_paren_if_necessary` correctly targets *Vensim's* table,
+        // so widening this generator to comparisons or logical operators would fail
+        // the fixpoint against our own reader -- a true finding about #914, but not
+        // one this property can act on. Widen it when #914 lands.
+        //
+        // The full-operator-set `print_eqn` round trip (`Not`, `Neq`, `Transpose`,
+        // `Mod`, comparisons, `and`/`or`) lives in `ast::mod`'s
+        // `print_eqn_roundtrips_over_the_full_operator_set`, which re-parses with
+        // the XMILE grammar and so is not blocked on #914.
         let bin_op = prop_oneof![
             Just(BinaryOp::Add),
             Just(BinaryOp::Sub),
@@ -304,27 +318,7 @@ fn expr0_strategy() -> BoxedStrategy<Expr0> {
             )),
         ]
     })
-    // Restrict to ASTs whose `print_eqn` serialization is a valid datamodel
-    // equation -- i.e. one `Expr0::new` accepts. A real datamodel equation
-    // always came from the parser, so this is the exact domain the MDL writer
-    // must handle. It filters out the `print_eqn` <-> parser asymmetry (a stacked
-    // unary `- -x` prints but does not re-parse), which is a separate concern
-    // from MDL writing; without the filter, `equation_to_mdl` falls back to raw
-    // text and leaks unparseable XMILE into the MDL.
-    .prop_filter(
-        "print_eqn output must re-parse as a datamodel equation",
-        |e| xmile_equation_roundtrips(&print_eqn(e)),
-    )
     .boxed()
-}
-
-/// True when `xeq` re-parses to a non-empty `Expr0` -- the invariant every
-/// stored datamodel equation satisfies (it came from `Expr0::new`).
-fn xmile_equation_roundtrips(xeq: &str) -> bool {
-    matches!(
-        Expr0::new(xeq, crate::lexer::LexerType::Equation),
-        Ok(Some(_))
-    )
 }
 
 /// The fixed scaffold every property-2 case shares: the grammar's referenced
@@ -456,10 +450,37 @@ proptest! {
 
     /// #846/#847/#850/#852: the context-aware printer's output must re-parse as
     /// MDL and be a re-write fixpoint.
+    ///
+    /// A `prop_filter` used to restrict this generator to ASTs whose `print_eqn`
+    /// serialization re-parses, on the theory that the `print_eqn` <-> parser
+    /// asymmetry was a separate concern. It was not: it masked #912. Every stored
+    /// datamodel equation came from `Expr0::new`, so the printer's output must be
+    /// text the parser accepts -- that is now asserted, not assumed away.
+    ///
+    /// The assertion is `parse(print_eqn(e)) == e` on the **AST**, not merely
+    /// `is_ok()`. The weak form is satisfied by text that parses to a DIFFERENT
+    /// expression -- a silent semantic corruption, strictly worse than a loud
+    /// parse error. It is what the left-associative `^` printing (`(a^b)^c` as
+    /// the bare `a^b^c`) and the un-parenthesized negated base (`(-a)^b` as
+    /// `-a^b`, a sign flip) both slipped through.
     #[test]
     fn equation_write_reparse_is_fixpoint(expr in expr0_strategy()) {
+        let xmile_eqn = print_eqn(&expr);
+        let reparsed = Expr0::new(&xmile_eqn, crate::lexer::LexerType::Equation);
+        prop_assert!(
+            matches!(reparsed, Ok(Some(_))),
+            "print_eqn output is not a valid datamodel equation: {}",
+            xmile_eqn
+        );
+        prop_assert_eq!(
+            expr.clone().strip_loc(),
+            reparsed.unwrap().unwrap().strip_loc(),
+            "print_eqn output re-parsed to a DIFFERENT AST: {}",
+            xmile_eqn
+        );
+
         let mut vars = scaffold_vars();
-        vars.push(scalar_aux("target", &print_eqn(&expr), None, ""));
+        vars.push(scalar_aux("target", &xmile_eqn, None, ""));
         let project = project_of(model_of(vars), vec![named_dim("DimA", &["A1", "A2"])]);
 
         let mdl1 = project_to_mdl(&project);

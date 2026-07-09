@@ -40,23 +40,30 @@ pub enum BinaryOp {
 impl BinaryOp {
     /// higher the precedence, the tighter the binding.
     /// e.g. Mul.precedence() > Add.precedence()
+    ///
+    /// This is the XMILE 3.3.1 table (which is also Vensim's), and it must stay
+    /// in lockstep with `crate::parser`'s recursive-descent chain: each level
+    /// below corresponds to one `parse_*` function, and the printers
+    /// (`ast::print_eqn`, `mdl::writer`) decide parenthesization by comparing
+    /// these numbers. Every operator here is left-associative EXCEPT `Exp`,
+    /// which is right-to-left; the printers special-case that rather than
+    /// encoding it in the table.
     pub(crate) fn precedence(&self) -> u8 {
-        // matches equation.lalrpop
         match self {
-            BinaryOp::Add => 4,
-            BinaryOp::Sub => 4,
-            BinaryOp::Exp => 6,
-            BinaryOp::Mul => 5,
-            BinaryOp::Div => 5,
-            BinaryOp::Mod => 5,
-            BinaryOp::Gt => 3,
-            BinaryOp::Lt => 3,
-            BinaryOp::Gte => 3,
-            BinaryOp::Lte => 3,
-            BinaryOp::Eq => 2,
-            BinaryOp::Neq => 2,
-            BinaryOp::And => 1,
             BinaryOp::Or => 1,
+            BinaryOp::And => 2,
+            BinaryOp::Eq => 3,
+            BinaryOp::Neq => 3,
+            BinaryOp::Gt => 4,
+            BinaryOp::Lt => 4,
+            BinaryOp::Gte => 4,
+            BinaryOp::Lte => 4,
+            BinaryOp::Add => 5,
+            BinaryOp::Sub => 5,
+            BinaryOp::Mul => 6,
+            BinaryOp::Div => 6,
+            BinaryOp::Mod => 6,
+            BinaryOp::Exp => 7,
         }
     }
 }
