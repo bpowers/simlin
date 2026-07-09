@@ -101,12 +101,18 @@ impl ToXml<XmlWriter> for DataSourceElement {
     }
 }
 
+/// One `<element>` block of a non-apply-to-all arrayed variable. XMILE 4.5.2
+/// does NOT require an `<eqn>` child: an element may carry just a graphical
+/// function (Stella's non-A2A gf export) or other per-element attributes, so
+/// `eqn` is optional (GH #907). An absent eqn converts to an empty element
+/// equation in the datamodel -- the same "no functional input" encoding a
+/// whole lookup-only variable uses (`variable::is_lookup_only`).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct VarElement {
     #[serde(rename = "@subscript")]
     pub subscript: String,
-    pub eqn: String,
+    pub eqn: Option<String>,
     #[serde(rename = "init_eqn")]
     pub initial_eqn: Option<String>,
     pub gf: Option<Gf>,
@@ -116,7 +122,9 @@ impl ToXml<XmlWriter> for VarElement {
     fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let attrs = &[("subscript", self.subscript.as_str())];
         write_tag_start_with_attrs(writer, "element", attrs)?;
-        write_tag(writer, "eqn", self.eqn.as_str())?;
+        if let Some(eqn) = &self.eqn {
+            write_tag(writer, "eqn", eqn.as_str())?;
+        }
         if let Some(init_eqn) = &self.initial_eqn {
             write_tag(writer, "init_eqn", init_eqn.as_str())?;
         }
@@ -344,7 +352,10 @@ macro_rules! convert_equation(
             };
             let elements = elements.into_iter().map(|e| {
                 let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).into_owned()).collect();
-                (canonical_subscripts.join(","), e.eqn, e.initial_eqn, e.gf.map(datamodel::GraphicalFunction::from))
+                // An eqn-less element (e.g. gf-only, GH #907) gets an empty
+                // equation: with a gf that makes the element a per-element
+                // lookup table; the writer re-emits it without an <eqn> tag.
+                (canonical_subscripts.join(","), e.eqn.unwrap_or_default(), e.initial_eqn, e.gf.map(datamodel::GraphicalFunction::from))
             }).collect();
             // When a top-level <eqn> coexists with <element> entries, the
             // top-level eqn is the EXCEPT default equation.
@@ -508,7 +519,10 @@ impl From<datamodel::Stock> for Stock {
                         .into_iter()
                         .map(|(subscript, eqn, _, gf)| VarElement {
                             subscript,
-                            eqn,
+                            // an empty element equation (gf-only element)
+                            // round-trips as NO <eqn> tag, mirroring the
+                            // whole-variable empty-eqn handling above
+                            eqn: if eqn.is_empty() { None } else { Some(eqn) },
                             initial_eqn: None,
                             gf: gf.map(Gf::from),
                         })
@@ -803,7 +817,8 @@ impl From<datamodel::Flow> for Flow {
                         .into_iter()
                         .map(|(subscript, eqn, initial_eqn, gf)| VarElement {
                             subscript,
-                            eqn,
+                            // empty element equation -> no <eqn> tag (gf-only)
+                            eqn: if eqn.is_empty() { None } else { Some(eqn) },
                             initial_eqn,
                             gf: gf.map(Gf::from),
                         })
@@ -979,7 +994,8 @@ impl From<datamodel::Aux> for Aux {
                         .into_iter()
                         .map(|(subscript, eqn, initial_eqn, gf)| VarElement {
                             subscript,
-                            eqn,
+                            // empty element equation -> no <eqn> tag (gf-only)
+                            eqn: if eqn.is_empty() { None } else { Some(eqn) },
                             initial_eqn,
                             gf: gf.map(Gf::from),
                         })
@@ -1266,6 +1282,62 @@ fn test_per_element_gf_parsing() {
         assert_eq!(Some("20,30".to_string()), gf_a2.y_pts);
     } else {
         panic!("not an aux");
+    }
+}
+
+#[test]
+fn test_gf_only_element_parsing() {
+    // XMILE 4.5.2 permits an <element> with no <eqn> child -- e.g. the
+    // gf-only per-element definitions Stella exports for non-A2A graphical
+    // functions (GH #907). The reader must not fail the whole-file parse on
+    // them; an absent per-element eqn maps to an empty element equation in
+    // the datamodel (the same "no functional input" encoding a whole
+    // lookup-only variable uses).
+    let input = r#"<aux name="c">
+        <element subscript="A1">
+            <gf>
+                <xpts>0,1</xpts>
+                <ypts>10,20</ypts>
+            </gf>
+        </element>
+        <element subscript="A2">
+            <gf>
+                <xpts>0,1</xpts>
+                <ypts>20,30</ypts>
+            </gf>
+        </element>
+        <dimensions>
+            <dim name="DimA"/>
+        </dimensions>
+    </aux>"#;
+
+    use quick_xml::de;
+    let aux: Var = de::from_reader(input.as_bytes())
+        .expect("a gf-only <element> (no <eqn>) must deserialize (GH #907)");
+
+    let aux = if let Var::Aux(aux) = aux {
+        aux
+    } else {
+        panic!("not an aux");
+    };
+
+    let aux = datamodel::Aux::from(aux);
+    match &aux.equation {
+        Equation::Arrayed(dims, elements, default_eq, has_except) => {
+            assert_eq!(&vec!["dima".to_string()], dims);
+            assert_eq!(&None, default_eq);
+            assert!(!*has_except);
+            assert_eq!(2, elements.len());
+            for (subscript, eqn, initial_eqn, gf) in elements {
+                assert!(
+                    eqn.is_empty(),
+                    "absent <eqn> on element {subscript} must map to an empty equation"
+                );
+                assert_eq!(&None, initial_eqn);
+                assert!(gf.is_some(), "element {subscript} must keep its gf");
+            }
+        }
+        _ => panic!("expected an Arrayed equation"),
     }
 }
 
@@ -1895,5 +1967,139 @@ mod queue_tests {
             !written.contains("overflow"),
             "a queue with no overflow outflow must not announce overflow: {written}"
         );
+    }
+}
+
+#[cfg(test)]
+mod gf_element_tests {
+    //! Round-trip tests for gf-only `<element>` blocks (GH #907): an
+    //! `<element>` may legally carry just a `<gf>` (XMILE 4.5.2). The reader
+    //! maps the absent per-element `<eqn>` to an empty element equation; the
+    //! writer must re-emit such elements WITHOUT a spurious empty `<eqn>` so
+    //! the round-trip is stable at both the datamodel and the XML level.
+
+    use crate::datamodel;
+    use crate::xmile::{project_from_reader, project_to_xmile};
+    use std::io::BufReader;
+
+    /// Wrap variable XML in a minimal, valid XMILE project with one dimension.
+    fn wrap(vars: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>t</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start><stop>12</stop><dt>0.25</dt>
+  </sim_specs>
+  <dimensions>
+    <dim name="Product"><elem name="Pizza"/><elem name="Salad"/></dim>
+  </dimensions>
+  <model><variables>{vars}</variables></model>
+</xmile>"#
+        )
+    }
+
+    fn parse(xml: &str) -> datamodel::Project {
+        project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("parse")
+    }
+
+    fn find_aux<'a>(p: &'a datamodel::Project, name: &str) -> &'a datamodel::Aux {
+        p.models[0]
+            .variables
+            .iter()
+            .find_map(|v| match v {
+                datamodel::Variable::Aux(a) if a.ident == name => Some(a),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("aux {name} not found"))
+    }
+
+    /// A pure per-element table holder: gf-only elements, no top-level eqn.
+    const GF_ONLY_AUX: &str = r#"
+        <aux name="tables">
+          <dimensions><dim name="Product"/></dimensions>
+          <element subscript="Pizza">
+            <gf><xscale min="0" max="1"/><ypts>0,10</ypts></gf>
+          </element>
+          <element subscript="Salad">
+            <gf><xscale min="0" max="1"/><ypts>0,20</ypts></gf>
+          </element>
+        </aux>"#;
+
+    #[test]
+    fn gf_only_elements_parse_to_empty_equations() {
+        let p = parse(&wrap(GF_ONLY_AUX));
+        let aux = find_aux(&p, "tables");
+        match &aux.equation {
+            datamodel::Equation::Arrayed(dims, elements, default_eq, has_except) => {
+                assert_eq!(&vec!["product".to_string()], dims);
+                assert_eq!(&None, default_eq);
+                assert!(!*has_except);
+                assert_eq!(2, elements.len());
+                for (subscript, eqn, initial_eqn, gf) in elements {
+                    assert!(
+                        eqn.is_empty(),
+                        "gf-only element {subscript} must get an empty equation"
+                    );
+                    assert_eq!(&None, initial_eqn);
+                    assert!(gf.is_some(), "element {subscript} must keep its gf");
+                }
+            }
+            _ => panic!("expected an Arrayed equation"),
+        }
+    }
+
+    #[test]
+    fn gf_only_elements_write_without_empty_eqn_tag() {
+        let p = parse(&wrap(GF_ONLY_AUX));
+        let written = project_to_xmile(&p).expect("serialize");
+        assert!(
+            !written.contains("<eqn></eqn>") && !written.contains("<eqn/>"),
+            "the writer must re-emit a gf-only element with NO <eqn> tag, got: {written}"
+        );
+        // and the round-trip is stable at the datamodel level
+        let p2 = parse(&written);
+        assert_eq!(
+            find_aux(&p, "tables").equation,
+            find_aux(&p2, "tables").equation
+        );
+    }
+
+    /// The non-a2a-gf.stmx shape: a top-level `<eqn>` coexisting with gf-only
+    /// elements. The top-level eqn is the EXCEPT default (applied to every
+    /// element, since none carries its own equation) and must survive the
+    /// round-trip; the per-element gfs stay attached to their elements.
+    #[test]
+    fn gf_only_elements_with_top_level_eqn_keep_except_default() {
+        let aux_xml = r#"
+        <aux name="c">
+          <dimensions><dim name="Product"/></dimensions>
+          <element subscript="Pizza">
+            <gf><xscale min="0" max="1"/><ypts>0,10</ypts></gf>
+          </element>
+          <element subscript="Salad">
+            <gf><xscale min="0" max="1"/><ypts>0,20</ypts></gf>
+          </element>
+          <eqn>TIME</eqn>
+        </aux>"#;
+        let p = parse(&wrap(aux_xml));
+        let check = |p: &datamodel::Project| {
+            let aux = find_aux(p, "c");
+            match &aux.equation {
+                datamodel::Equation::Arrayed(_, elements, default_eq, has_except) => {
+                    assert_eq!(Some("TIME"), default_eq.as_deref());
+                    assert!(*has_except);
+                    assert_eq!(2, elements.len());
+                    for (subscript, eqn, _, gf) in elements {
+                        assert!(eqn.is_empty(), "element {subscript} has no eqn of its own");
+                        assert!(gf.is_some());
+                    }
+                }
+                _ => panic!("expected an Arrayed equation"),
+            }
+        };
+        check(&p);
+        let written = project_to_xmile(&p).expect("serialize");
+        check(&parse(&written));
     }
 }

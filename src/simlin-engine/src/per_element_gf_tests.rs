@@ -68,6 +68,18 @@ fn arrayed_gf_project(
     dim_elements: &[&str],
     elems: Vec<(&str, Option<datamodel::GraphicalFunction>)>,
 ) -> datamodel::Project {
+    arrayed_gf_project_with_elem_eqn(dim_name, dim_elements, elems, "time")
+}
+
+/// Like [`arrayed_gf_project`] but with a caller-chosen per-element equation
+/// text. `""` models what a gf-only XMILE `<element>` (no `<eqn>` child, GH
+/// #907) imports as: an empty per-element equation alongside the element's gf.
+fn arrayed_gf_project_with_elem_eqn(
+    dim_name: &str,
+    dim_elements: &[&str],
+    elems: Vec<(&str, Option<datamodel::GraphicalFunction>)>,
+    elem_eqn: &str,
+) -> datamodel::Project {
     let arrayed_elements: Vec<(
         String,
         String,
@@ -75,7 +87,7 @@ fn arrayed_gf_project(
         Option<datamodel::GraphicalFunction>,
     )> = elems
         .into_iter()
-        .map(|(name, gf)| (name.to_string(), "time".to_string(), None, gf))
+        .map(|(name, gf)| (name.to_string(), elem_eqn.to_string(), None, gf))
         .collect();
 
     datamodel::Project {
@@ -711,6 +723,71 @@ fn two_dim_non_sorted_axis_per_element_gf_row_major_flatten() {
         (get("x", "q") - 40.0).abs() < 1e-9,
         "(X,Q) flat offset 3 must read its OWN cell (40), got {}",
         get("x", "q")
+    );
+}
+
+/// GH #907 semantic pin: a gf-only XMILE `<element>` (a `<gf>` with no
+/// `<eqn>`) imports as an EMPTY per-element equation. When EVERY element
+/// equation is empty and there is no EXCEPT default, the variable is a pure
+/// per-element table holder -- lookup-only (`var_is_lookup_only`, #606): it
+/// is excluded from the results (it produces NO series of its own), and each
+/// element's table is reachable from consumers via `LOOKUP(g[elem], x)`.
+/// This is the arrayed analogue of a whole-variable empty-eqn-with-gf static
+/// table, and is what makes an eqn-less `<element>` useful rather than inert.
+#[test]
+fn gf_only_elements_form_a_lookup_only_table_holder() {
+    // Same non-sorted declared order as the value-bearing tests (Z, A, M with
+    // an alphabetical elems Vec) so the declared-order table layout is also
+    // covered on the lookup-only path.
+    let project = arrayed_gf_project_with_elem_eqn(
+        "Dim",
+        &["Z", "A", "M"],
+        vec![
+            ("A", Some(ramp_gf(0.0, 2000.0))),
+            ("M", Some(ramp_gf(0.0, 3000.0))),
+            ("Z", Some(ramp_gf(0.0, 1000.0))),
+        ],
+        "",
+    );
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .unwrap_or_else(|e| panic!("a gf-only table holder must compile: {e:?}"));
+    let mut vm = Vm::new(compiled).expect("VM creation should succeed");
+    vm.run_to_end().expect("VM run should succeed");
+    let results = vm.into_results();
+    let series = crate::test_common::collect_results(&results);
+
+    // the table holder itself produces no series (it is not value-bearing)
+    assert!(
+        !series.keys().any(|k| k == "g" || k.starts_with("g[")),
+        "a lookup-only table holder must be excluded from results; have {:?}",
+        series.keys()
+    );
+
+    // each consumer element reads its OWN element's table at x=time
+    let get = |elem: &str| {
+        *series
+            .get(&format!("out[{elem}]"))
+            .unwrap_or_else(|| panic!("missing out[{elem}]; have {:?}", series.keys()))
+            .last()
+            .expect("at least one save step")
+    };
+    assert!(
+        (get("z") - 1000.0).abs() < 1e-9,
+        "Z -> 1000, got {}",
+        get("z")
+    );
+    assert!(
+        (get("a") - 2000.0).abs() < 1e-9,
+        "A -> 2000, got {}",
+        get("a")
+    );
+    assert!(
+        (get("m") - 3000.0).abs() < 1e-9,
+        "M -> 3000, got {}",
+        get("m")
     );
 }
 

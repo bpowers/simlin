@@ -45,6 +45,8 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/chained_initialization/test_chained_initialization.xmile",
     "test/test-models/tests/exp/test_exp.xmile",
     "test/test-models/tests/builtin_min/builtin_min.xmile",
+    // gf-only <element> blocks (per-element <gf> with no <eqn>) -- GH #907
+    "test/test-models/samples/arrays/non-a2a/non-a2a-gf.stmx",
 ];
 
 #[test]

@@ -1960,6 +1960,58 @@ fn simulates_getdata_mdl() {
     simulate_mdl_path("../../test/sdeverywhere/models/getdata/getdata.mdl");
 }
 
+/// GH #907: an XMILE `<element>` without an `<eqn>` child (gf-only, as Stella
+/// exports for non-A2A graphical functions) is spec-legal (XMILE 4.5.2) and
+/// must not fail the whole-file parse. This vendored fixture's
+/// `Converter 1[Product]` carries one per-element gf per Product element plus
+/// a top-level `<eqn>TIME</eqn>`. The reader maps the absent per-element eqns
+/// to empty element equations and the top-level eqn to the EXCEPT default, so
+/// every element evaluates TIME.
+///
+/// NOTE (pinned divergence): Stella itself additionally applies each
+/// element's gf to that shared input (value = gf_elem(TIME)); the engine does
+/// not yet auto-apply graphical functions on value-bearing ARRAYED variables
+/// (the WITH-LOOKUP `LOOKUP(self, input)` wrap in `compiler/mod.rs` is
+/// scalar-only), so the per-element tables stay latent, reachable via
+/// explicit `LOOKUP(converter_1[elem], x)` calls. This test pins the current
+/// open-compile-simulate behavior; auto-application is tracked as GH #909
+/// (update this test when fixing it).
+#[test]
+fn opens_and_simulates_non_a2a_gf() {
+    let path = "../../test/test-models/samples/arrays/non-a2a/non-a2a-gf.stmx";
+    let f = File::open(path).unwrap();
+    let mut f = BufReader::new(f);
+    let project = xmile::project_from_reader(&mut f)
+        .expect("gf-only <element> blocks must not fail the whole-file parse (GH #907)");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main").expect("non-a2a-gf must compile");
+    let mut vm = Vm::new(compiled).expect("VM creation");
+    vm.run_to_end().expect("simulation must not panic or error");
+    let results = vm.into_results();
+
+    let offset_of = |name: &str| -> usize {
+        *results
+            .offsets
+            .iter()
+            .find(|(k, _)| k.as_str() == name)
+            .unwrap_or_else(|| panic!("missing {name}; have {:?}", results.offsets.keys()))
+            .1
+    };
+    let time_off = offset_of("time");
+    for elem in ["pizza", "salad"] {
+        let conv_off = offset_of(&format!("converter_1[{elem}]"));
+        for row in results.iter() {
+            assert_eq!(
+                row[time_off], row[conv_off],
+                "converter_1[{elem}] must evaluate the EXCEPT-default TIME"
+            );
+        }
+    }
+}
+
 #[test]
 fn bad_model_name() {
     let f = File::open(format!("../../{}", TEST_MODELS[0])).unwrap();
