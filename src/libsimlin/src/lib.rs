@@ -304,6 +304,10 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::ConveyorMultipleNonLeakOutflows => SimlinErrorCode::Generic,
             engine::ErrorCode::StockBothConveyorAndQueue => SimlinErrorCode::Generic,
             engine::ErrorCode::ConveyorInitListUnsupported => SimlinErrorCode::Generic,
+            // Unknown-element-subscript advisories likewise collapse to the
+            // wire Generic code; the specific engine code and the message
+            // carry the detail (GH #905).
+            engine::ErrorCode::UnknownElementSubscript => SimlinErrorCode::Generic,
         }
     }
 }

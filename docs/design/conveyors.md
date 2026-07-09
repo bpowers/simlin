@@ -999,11 +999,33 @@ does.)
 ## 10. Arrayed conveyors and container access
 
 An arrayed conveyor is `N_elem` **independent** conveyors, one per array element,
-each with its own `ConveyorState`, transit time, leak flows, capacity, and inflow
-limit. Non-apply-to-all arrays (`<element>` blocks) may give each element its own
-`<len>` and other per-element attributes; shared properties (units, the
-conveyor/leak markers) apply to all elements (XMILE §4.5.2). Each element's belt
-updates by [§4.3](#43-per-dt-update) independently.
+each with its own `ConveyorState` and belt. Each element's belt updates by
+[§4.3](#43-per-dt-update) independently.
+
+XMILE §4.5.2 allows a non-apply-to-all array's `<element>` blocks to carry
+per-element simulation attributes such as a per-element `<len>`. Simlin does
+**not** implement this: the `<conveyor>` block (transit time, capacity, inflow
+limit, sample/arrest, leak markers) is a single shared block per stock
+(`datamodel::Conveyor`), and every element evaluates the same shared
+expressions. A per-element `<conveyor>`/`<len>` inside an `<element>` block has
+no representation (tracked as GH #904); today's reader behavior is:
+
+- `<element>` with both `<eqn>` and `<len>`: the `<len>` is **silently
+  dropped** — the reader's `<element>` struct carries only
+  `eqn`/`init_eqn`/`gf`, so the sub-tag is never parsed and no diagnostic
+  fires.
+- `<element>` with `<len>` but no `<eqn>`: the whole file fails to open with
+  an opaque `xml_deserialization: missing field 'eqn'` error (the `<eqn>`
+  field is required), not a targeted diagnostic.
+
+The shared expressions can still **vary per element**, because each is
+evaluated per element (apply-to-all over the stock's dimensions): a `<len>` of
+`base_transit[board]` gives each element its own transit time via an arrayed
+aux. Only a distinct per-element attribute *inside* `<element>` blocks is
+unsupported. Per-element **initial values** are supported — an `<element>`'s
+`<eqn>` (including a §7.2 explicit init list per element, GH #889) initializes
+that element's belt. Shared properties (units, the conveyor/leak markers)
+apply to all elements as XMILE requires.
 
 **Container access** (XMILE §3.7.1: conveyors are containers, so `[]` and the
 array builtins MUST work over their contents when arrays are supported):

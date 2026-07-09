@@ -2273,3 +2273,407 @@ fn test_xmile_duplicate_pair_rejected_end_to_end() {
         "message must name both original spellings: {details}"
     );
 }
+
+// ---- Unknown element subscripts on non-apply-to-all arrays (GH #905) ----
+
+/// A project with one arrayed aux over the given dimensions, defined
+/// element-by-element with the given `(subscript, equation)` entries.
+fn arrayed_elements_project(
+    dimensions: Vec<datamodel::Dimension>,
+    dim_names: &[&str],
+    entries: &[(&str, &str)],
+) -> datamodel::Project {
+    let elements = entries
+        .iter()
+        .map(|(sub, eqn)| (sub.to_string(), eqn.to_string(), None, None))
+        .collect();
+    datamodel::Project {
+        name: "arrayed_elements".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions,
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "plain".to_string(),
+                equation: datamodel::Equation::Arrayed(
+                    dim_names.iter().map(|s| s.to_string()).collect(),
+                    elements,
+                    None,
+                    false,
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+fn unknown_element_warnings(diags: &[Diagnostic]) -> Vec<Diagnostic> {
+    conveyor_spec_warnings(diags, crate::common::ErrorCode::UnknownElementSubscript)
+}
+
+/// The typo case from GH #905: an `<element subscript="c">` entry on a
+/// variable over `board{a,b}` names no declared element. The equation is
+/// silently dropped by every consumer; a Warning must surface it, naming the
+/// variable and the subscript.
+#[test]
+fn test_unknown_element_subscript_warns() {
+    let db = SimlinDb::default();
+    let project = arrayed_elements_project(
+        vec![datamodel::Dimension::named(
+            "board".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        )],
+        &["board"],
+        &[("a", "30"), ("c", "45")],
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = unknown_element_warnings(&diags);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one unknown-element warning; got: {diags:?}"
+    );
+    let w = &warnings[0];
+    assert_eq!(w.severity, DiagnosticSeverity::Warning);
+    assert_eq!(w.model, "main");
+    assert_eq!(
+        w.variable.as_deref(),
+        Some("plain"),
+        "the warning must be attributed to the arrayed variable"
+    );
+    let details = model_diag_details(w);
+    assert!(
+        details.contains("plain") && details.contains("'c'"),
+        "the message must name the variable and the unmatched subscript: {details}"
+    );
+}
+
+/// Negative: element entries that match declared elements up to case and
+/// surrounding whitespace (the canonical form) must not warn.
+#[test]
+fn test_unknown_element_subscript_no_warning_for_canonical_variants() {
+    let db = SimlinDb::default();
+    let project = arrayed_elements_project(
+        vec![datamodel::Dimension::named(
+            "board".to_string(),
+            vec!["alpha".to_string(), "beta".to_string()],
+        )],
+        &["board"],
+        &[("Alpha", "1"), (" beta ", "2")],
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert!(
+        unknown_element_warnings(&diags).is_empty(),
+        "case/whitespace variants of declared elements must not warn; got: {diags:?}"
+    );
+}
+
+/// Adversarial counterexample 1: an element NAME containing a comma. The
+/// compiler matches the whole canonicalized subscript string against the
+/// declared combination's comma-joined key, so an entry for the literal
+/// element "a,b" of a one-dimensional variable RESOLVES and its equation is
+/// used by the simulation. The per-part matcher alone would mis-split it
+/// into two parts and flag it -- with a message falsely claiming the
+/// equation is ignored. Must not warn.
+#[test]
+fn test_unknown_element_subscript_comma_element_name_not_flagged() {
+    let db = SimlinDb::default();
+    let project = arrayed_elements_project(
+        vec![datamodel::Dimension::named(
+            "board".to_string(),
+            vec!["a,b".to_string(), "c".to_string()],
+        )],
+        &["board"],
+        &[("a,b", "7"), ("c", "1")],
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert!(
+        unknown_element_warnings(&diags).is_empty(),
+        "an entry naming a comma-containing element resolves whole-string and must not warn; \
+         got: {diags:?}"
+    );
+}
+
+/// Adversarial counterexample 2: a QUOTED whole subscript on a
+/// two-dimensional variable. `canonicalize` strips balanced quotes, so the
+/// whole-string key of `"a1,b1"` equals the declared combination `a1,b1`
+/// and the compiler resolves the entry. The per-part split would leave
+/// unbalanced quote characters on each half and flag it. Must not warn.
+/// (Only reachable from API-built datamodels -- both file readers normalize
+/// per-part on import.)
+#[test]
+fn test_unknown_element_subscript_quoted_whole_subscript_not_flagged() {
+    let db = SimlinDb::default();
+    let project = arrayed_elements_project(
+        vec![
+            datamodel::Dimension::named(
+                "dim_a".to_string(),
+                vec!["a1".to_string(), "a2".to_string()],
+            ),
+            datamodel::Dimension::named(
+                "dim_b".to_string(),
+                vec!["b1".to_string(), "b2".to_string()],
+            ),
+        ],
+        &["dim_a", "dim_b"],
+        &[("\"a1,b1\"", "5"), ("a2, b2", "6")],
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert!(
+        unknown_element_warnings(&diags).is_empty(),
+        "a quoted whole subscript resolves whole-string and must not warn; got: {diags:?}"
+    );
+}
+
+/// Multi-dimensional entries: a full match is accepted; a typo in one
+/// position warns, and an entry with the wrong number of subscript parts
+/// (one part for a two-dimensional variable) warns too.
+#[test]
+fn test_unknown_element_subscript_multi_dim() {
+    let dims = vec![
+        datamodel::Dimension::named(
+            "dim_a".to_string(),
+            vec!["a1".to_string(), "a2".to_string()],
+        ),
+        datamodel::Dimension::named(
+            "dim_b".to_string(),
+            vec!["b1".to_string(), "b2".to_string()],
+        ),
+    ];
+    let db = SimlinDb::default();
+    let project = arrayed_elements_project(
+        dims,
+        &["dim_a", "dim_b"],
+        &[("a1, b1", "1"), ("a1, zz", "2"), ("a2", "3")],
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = unknown_element_warnings(&diags);
+    assert_eq!(
+        warnings.len(),
+        2,
+        "expected warnings for the typo'd and the partial entry only; got: {diags:?}"
+    );
+    let details: Vec<String> = warnings.iter().map(model_diag_details).collect();
+    assert!(
+        details.iter().any(|d| d.contains("'a1, zz'")),
+        "must warn on the typo'd second position: {details:?}"
+    );
+    assert!(
+        details.iter().any(|d| d.contains("'a2'")),
+        "must warn on the wrong-arity entry: {details:?}"
+    );
+}
+
+/// Indexed dimensions: numeric subscripts within `1..=size` match; an
+/// out-of-range index warns.
+#[test]
+fn test_unknown_element_subscript_indexed_dimension() {
+    let db = SimlinDb::default();
+    let project = arrayed_elements_project(
+        vec![datamodel::Dimension::indexed("slots".to_string(), 2)],
+        &["slots"],
+        &[("1", "10"), ("2", "20"), ("3", "30")],
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = unknown_element_warnings(&diags);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "only the out-of-range index must warn; got: {diags:?}"
+    );
+    assert!(
+        model_diag_details(&warnings[0]).contains("'3'"),
+        "the message must name the out-of-range index"
+    );
+}
+
+/// An unresolvable dimension NAME is a separate diagnostic's concern
+/// (BadDimensionName on the equation); the element check must stay silent
+/// rather than cascade a second warning per entry.
+#[test]
+fn test_unknown_element_subscript_skips_unresolved_dimension() {
+    let db = SimlinDb::default();
+    let project = arrayed_elements_project(
+        vec![datamodel::Dimension::named(
+            "board".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        )],
+        &["no_such_dim"],
+        &[("a", "1"), ("zz", "2")],
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert!(
+        unknown_element_warnings(&diags).is_empty(),
+        "an unresolved dimension name must not cascade element warnings; got: {diags:?}"
+    );
+}
+
+/// Duplicate entries with the same unknown subscript warn once, not once per
+/// occurrence (real corpus files carry duplicated element lists).
+#[test]
+fn test_unknown_element_subscript_deduplicates() {
+    let db = SimlinDb::default();
+    let project = arrayed_elements_project(
+        vec![datamodel::Dimension::named(
+            "board".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        )],
+        &["board"],
+        &[("a", "1"), ("c", "2"), ("c", "3")],
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    assert_eq!(
+        unknown_element_warnings(&diags).len(),
+        1,
+        "the same unknown subscript must warn once; got: {diags:?}"
+    );
+}
+
+/// The conveyor per-element init lists (GH #889) inherit the same silence:
+/// a typo'd per-element init-list subscript leaves that belt steady-filling
+/// from 0. The sync path substitutes a constant placeholder equation for
+/// list entries but preserves the subscript keys, so the generic check must
+/// still see and flag the typo.
+#[test]
+fn test_unknown_element_subscript_warns_on_conveyor_init_list() {
+    let db = SimlinDb::default();
+    let dims = vec![datamodel::Dimension::named(
+        "board".to_string(),
+        vec!["a".to_string(), "b".to_string()],
+    )];
+    let project = datamodel::Project {
+        name: "conveyor_init".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: dims,
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "belt".to_string(),
+                    equation: datamodel::Equation::Arrayed(
+                        vec!["board".to_string()],
+                        vec![
+                            ("a".to_string(), "5,3,2".to_string(), None, None),
+                            ("c".to_string(), "1,1,1".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["in_f".to_string()],
+                    outflows: vec!["out_f".to_string()],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        conveyor: Some(datamodel::Conveyor {
+                            transit_time: "3".to_string(),
+                            capacity: None,
+                            inflow_limit: None,
+                            sample: None,
+                            arrest: None,
+                            discrete: false,
+                            batch_integrity: false,
+                            one_at_a_time: true,
+                            exponential_leak: false,
+                            ignore_earlier_zone_losses: false,
+                        }),
+                        ..Default::default()
+                    },
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "out_f".to_string(),
+                    equation: datamodel::Equation::ApplyToAll(
+                        vec!["board".to_string()],
+                        String::new(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "in_f".to_string(),
+                    equation: datamodel::Equation::ApplyToAll(
+                        vec!["board".to_string()],
+                        "10".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+
+    let warnings = unknown_element_warnings(&diags);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the typo'd init-list subscript must warn; got: {diags:?}"
+    );
+    let w = &warnings[0];
+    assert_eq!(w.variable.as_deref(), Some("belt"));
+    assert!(
+        model_diag_details(w).contains("'c'"),
+        "the message must name the unmatched subscript"
+    );
+}

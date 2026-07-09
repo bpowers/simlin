@@ -74,6 +74,11 @@ pub enum DiagnosticError {
 ///    time that is not an integer multiple of dt) and
 ///    `ConveyorLeakFractionsExceedOne` (constant linear leak fractions
 ///    summing above 1), docs/design/conveyors.md §4.1 / §5.1.
+/// 4b. `emit_unknown_element_subscript_warnings` -- the unconditional
+///    `UnknownElementSubscript` advisory: a non-apply-to-all arrayed
+///    variable's `<element>` entry whose subscript names no declared
+///    element combination is silently dropped everywhere downstream, so a
+///    typo'd subscript simulates plausibly-but-wrong with no signal (GH #905).
 /// 5. When LTM is enabled, `emit_conveyor_ltm_degraded_warnings` and
 ///    `emit_queue_ltm_degraded_warnings` -- one `Warning` per conveyor stock
 ///    and per queue stock in THIS model, because LTM's flow-to-stock link-score
@@ -165,6 +170,13 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // conveyor Warning can take to `collect_all_diagnostics` /
     // `simlin_project_get_errors` (GH #873).
     emit_conveyor_spec_warnings(db, model, project);
+
+    // Unknown element subscripts on non-apply-to-all arrays (GH #905):
+    // an `<element>` entry naming no declared element is silently dropped
+    // by every downstream consumer; surface it as a Warning here so the
+    // typo'd equation does not vanish without a trace. Unconditional, like
+    // the conveyor spec advisories above.
+    emit_unknown_element_subscript_warnings(db, model, project);
 
     // When LTM is enabled, also trigger the LTM diagnostic pass so that
     // diagnostics accumulated by the LTM pipeline surface through
@@ -537,6 +549,184 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
                     ),
                 );
             }
+        }
+    }
+}
+
+/// Emit one Warning-severity [`crate::common::ErrorCode::UnknownElementSubscript`]
+/// diagnostic per distinct non-apply-to-all `<element>` entry in `model` whose
+/// subscript names no declared element combination of the variable's
+/// dimensions (GH #905).
+///
+/// Every consumer of a per-element equation list matches entries against the
+/// declared elements by canonical key and SILENTLY DROPS an unmatched entry:
+/// the compiler's arrayed expansion (`compiler::expand_arrayed_with_hoisting`
+/// falls back to the default equation or a constant 0 for a combination with
+/// no entry, and never visits an entry matching no combination), the
+/// per-element graphical-function table layout
+/// (`variable::reorder_arrayed_element_tables` leaves an empty placeholder
+/// table), and the conveyor per-element init lists
+/// (`conveyor_compile::expand_conveyors` steady-fills the belt from 0). A
+/// one-character typo therefore produces a plausible-looking but wrong
+/// simulation with no signal anywhere.
+///
+/// An entry is flagged only when BOTH production matching rules fail, i.e.
+/// this check accepts the UNION of what any consumer accepts:
+///
+/// 1. **Per-part** (the conveyor init-list matcher,
+///    [`crate::conveyor_compile::canonical_subscript_key`] semantics): split
+///    on `,`, canonicalize each part, and resolve it against the
+///    corresponding dimension via `Dimension::get_offset` (named elements by
+///    canonical name; indexed dimensions by parsed `1..=size`). This accepts
+///    whitespace-around-comma variants ("a1, b1") that rule 2 mangles.
+/// 2. **Whole-string** (the plain compiler's rule -- `variable.rs`
+///    `parse_equation` keys entries by
+///    `CanonicalElementName::from_raw(subscript)` and
+///    `compiler::expand_arrayed_with_hoisting` looks up
+///    `from_raw(combination.join(","))` -- and equally the per-element
+///    GF-table layout, `variable::build_tables` /
+///    `reorder_arrayed_element_tables`): the entry's whole canonicalized
+///    subscript equals some declared combination's comma-joined key. This
+///    accepts comma-CONTAINING element names (`board{"a,b", "c"}`, entry
+///    `a,b`) and quoted whole subscripts (`"a1,b1"`, whose balanced quotes
+///    `canonicalize` strips) that rule 1 mis-splits -- entries the compiler
+///    genuinely resolves and simulates.
+///
+/// So an entry that ANY consumer resolves is never flagged; when this warns,
+/// every consumer really does drop the entry and "the equation is ignored"
+/// is accurate. (The rule-1-vs-rule-2 split is a pre-existing inconsistency
+/// between the conveyor path and the compiler/GF paths; XMILE/MDL-sourced
+/// keys are normalized per-part by their readers, so the divergent spellings
+/// are only reachable from API-built datamodels.)
+///
+/// Indexed-dimension nuance: rule 1's `get_offset` PARSES the part as an
+/// integer, so alternate numeric spellings like `"01"` are accepted here
+/// while every consumer matches the exact `SubscriptIterator` string key
+/// (`"1"`) and silently drops them. On indexed dimensions this diagnostic is
+/// therefore deliberately MORE forgiving than all consumers -- an `"01"`
+/// entry is silently dropped and NOT warned. That is the accepted lenient
+/// direction: a missed warning (false negative), never a false claim that a
+/// used equation is ignored.
+///
+/// Warning -- not Error -- severity, deliberately: the vendored corpus
+/// contains real imported models that currently rely on the silent drop
+/// (e.g. `test/metasd/beer-game/RealBeer4-Sterman13.mdl`, where the MDL
+/// importer's synthesized net-flow variable for a stock defined piecewise
+/// over subranges carries parent-range element entries against
+/// subrange-typed dimensions), so an Error would newly reject previously
+/// loadable projects. The complementary GH #905 shape -- a DECLARED element
+/// with no entry and no default, which silently evaluates to 0 -- remains
+/// undiagnosed here.
+///
+/// An unresolvable dimension NAME is skipped entirely: the equation already
+/// surfaces `BadDimensionName` through `compile_var_fragment`, and cascading
+/// one warning per entry on top of it would be noise. Variables are visited
+/// in sorted-name order and duplicate unknown keys deduplicated so
+/// accumulation is deterministic.
+fn emit_unknown_element_subscript_warnings(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) {
+    use crate::common::{CanonicalElementName, Error, ErrorCode, ErrorKind};
+    use crate::dimensions::Dimension;
+    use salsa::Accumulator;
+    use std::collections::HashSet;
+
+    let source_vars = model.variables(db);
+    let mut var_names: Vec<&String> = source_vars.keys().collect();
+    var_names.sort_unstable();
+
+    let project_dims = project.dimensions(db);
+    let model_name = model.name(db);
+
+    for var_name in var_names {
+        let svar = &source_vars[var_name];
+        let crate::datamodel::Equation::Arrayed(dim_names, elements, _, _) = svar.equation(db)
+        else {
+            continue;
+        };
+        if dim_names.is_empty() || elements.is_empty() {
+            continue;
+        }
+
+        // Resolve the variable's dimension names against the project's
+        // dimension definitions by canonical name (the same rule as
+        // `variable::get_dimensions`). Any unresolved name means the
+        // equation already carries BadDimensionName -- skip.
+        let dims: Option<Vec<Dimension>> = dim_names
+            .iter()
+            .map(|name| {
+                let canonical = crate::canonicalize(name);
+                project_dims
+                    .iter()
+                    .find(|d| crate::canonicalize(d.name()) == canonical)
+                    .map(Dimension::from)
+            })
+            .collect();
+        let Some(dims) = dims else {
+            continue;
+        };
+
+        // Rule-2 declared-combination key set (see the rustdoc), materialized
+        // lazily: only a variable with at least one rule-1 failure pays the
+        // cross-product cost, and the compiler expands the same product for
+        // every arrayed variable anyway.
+        let mut whole_string_keys: Option<HashSet<CanonicalElementName>> = None;
+
+        let mut warned: HashSet<String> = HashSet::new();
+        for (subscript, _, _, _) in elements {
+            // Rule 1 (per-part, the conveyor matcher): membership in the
+            // cross product of the dimensions' elements is per-position
+            // membership, so no combination set needs materializing.
+            let parts: Vec<CanonicalElementName> = subscript
+                .split(',')
+                .map(CanonicalElementName::from_raw)
+                .collect();
+            let per_part_matches = parts.len() == dims.len()
+                && parts
+                    .iter()
+                    .zip(dims.iter())
+                    .all(|(part, dim)| dim.get_offset(part).is_some());
+            if per_part_matches {
+                continue;
+            }
+            // Rule 2 (whole-string, the compiler/GF matcher): the entry's
+            // whole canonicalized subscript equals some declared
+            // combination's comma-joined key -- exactly how
+            // `compiler::expand_arrayed_with_hoisting` resolves entries, so
+            // e.g. a comma-containing element name or a quoted whole
+            // subscript that rule 1 mis-splits is recognized as resolved.
+            let whole_string_keys = whole_string_keys.get_or_insert_with(|| {
+                crate::dimensions::SubscriptIterator::new(&dims)
+                    .map(|combination| CanonicalElementName::from_raw(&combination.join(",")))
+                    .collect()
+            });
+            if whole_string_keys.contains(&CanonicalElementName::from_raw(subscript)) {
+                continue;
+            }
+            let canonical_key = crate::conveyor_compile::canonical_subscript_key(subscript);
+            if !warned.insert(canonical_key) {
+                continue;
+            }
+            let dims_display = dim_names.join(", ");
+            let msg = format!(
+                "array variable '{var_name}' has an equation for element '{subscript}', but \
+                 '{subscript}' does not name an element of its dimension(s) [{dims_display}]; \
+                 the equation is ignored, and any declared element without its own equation \
+                 silently evaluates to 0"
+            );
+            CompilationDiagnostic(Diagnostic {
+                model: model_name.clone(),
+                variable: Some(var_name.clone()),
+                error: DiagnosticError::Model(Error::new(
+                    ErrorKind::Model,
+                    ErrorCode::UnknownElementSubscript,
+                    Some(msg),
+                )),
+                severity: DiagnosticSeverity::Warning,
+            })
+            .accumulate(db);
         }
     }
 }

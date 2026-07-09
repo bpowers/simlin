@@ -567,6 +567,14 @@ pub enum ErrorCode {
     /// an opaque equation parse error on the stock
     /// (docs/design/conveyors.md §7.2).
     ConveyorInitListUnsupported,
+    /// A non-apply-to-all arrayed variable has an `<element>` entry whose
+    /// subscript names no declared element combination of the variable's
+    /// dimensions. Every consumer of the per-element list (the compiler's
+    /// arrayed expansion, per-element graphical-function table layout, and
+    /// conveyor per-element init lists) matches entries by exact canonical
+    /// key and silently DROPS an unmatched one, so a one-character typo
+    /// simulates plausibly-but-wrong with no signal. Warning-level (GH #905).
+    UnknownElementSubscript,
 }
 
 impl fmt::Display for ErrorCode {
@@ -652,6 +660,7 @@ impl fmt::Display for ErrorCode {
             ConveyorMultipleNonLeakOutflows => "conveyor_multiple_non_leak_outflows",
             StockBothConveyorAndQueue => "stock_both_conveyor_and_queue",
             ConveyorInitListUnsupported => "conveyor_init_list_unsupported",
+            UnknownElementSubscript => "unknown_element_subscript",
         };
 
         write!(f, "{name}")
