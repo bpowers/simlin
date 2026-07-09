@@ -467,11 +467,16 @@ impl<'input> ConversionContext<'input> {
                 // If the raw dimension names differ but normalized names match,
                 // the equations span different subranges of the same parent.
                 // Promote to the parent dimensions (but not through
-                // equivalences -- alias dimensions should keep their own name).
+                // equivalences -- alias dimensions should keep their own name)
+                // so the declared dims cover EVERY arm's per-element entries
+                // (#908). `dims` holds FORMATTED names (e.g. `Lower_Levels`)
+                // while `resolve_subrange_to_parent` is keyed on canonical
+                // names (`lower levels`), so canonicalize first -- exactly as
+                // the stock's own dims promotion in `variables.rs` does.
                 if *existing_dims != dims {
                     *existing_dims = existing_dims
                         .iter()
-                        .map(|d| self.resolve_subrange_to_parent(d))
+                        .map(|d| self.resolve_subrange_to_parent(&canonical_name(d)))
                         .collect();
                 }
             } else {
@@ -1487,6 +1492,85 @@ stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
             "the `upper`-subrange element rates must be per-element \
              distinct after resolution, got {upper_rates:?}"
         );
+    }
+
+    /// Issue #908: a stock defined PIECEWISE over subranges of a parent
+    /// dimension gets a synthesized `<stock>_net_flow` whose `Arrayed`
+    /// entries span elements from ALL arms, so its declared dims must be
+    /// widened to the common parent (mirroring the stock's own dims
+    /// resolution in `variables.rs`). The bug: the promotion in
+    /// `build_synthetic_flow_equation` passed the FORMATTED dimension name
+    /// (`Lower_Levels`) to `resolve_subrange_to_parent`, whose lookups are
+    /// keyed on canonical names (`lower levels`), so the promotion silently
+    /// no-op'd whenever the subrange name contained a space/underscore or
+    /// uppercase letter. The net flow then kept the first arm's subrange
+    /// dims while carrying entries (e.g. `Factory`) outside them -- entries
+    /// the compiler silently drops (the beer-game
+    /// `RealBeer4-Sterman13.mdl` repro: `Supply Line[Games,Lower Levels]`
+    /// + `Supply Line[Games,Factory]`).
+    #[test]
+    fn test_piecewise_subrange_net_flow_widens_dims_to_parent() {
+        let mdl = "Level: Retailer, Wholesaler, Factory
+~ ~|
+Lower Levels: Retailer, Wholesaler
+~ ~|
+stock[Lower Levels] = INTEG(10, 0)
+~ ~|
+stock[Factory] = INTEG(20, 0)
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).expect("conversion should succeed");
+        let main = &project.models[0];
+
+        // Control: the STOCK itself already widens to the parent dimension
+        // (the variables.rs path canonicalizes before resolving) -- the net
+        // flow must mirror it.
+        let Some(Variable::Stock(s)) = main.variables.iter().find(|v| v.get_ident() == "stock")
+        else {
+            panic!("expected `stock` as a Stock");
+        };
+        let Equation::Arrayed(stock_dims, _, _, _) = &s.equation else {
+            panic!("expected an Arrayed stock equation, got {:?}", s.equation);
+        };
+        assert_eq!(
+            stock_dims,
+            &["Level"],
+            "the stock's dims must be the parent dimension"
+        );
+
+        let net_flow = main
+            .variables
+            .iter()
+            .find(|v| v.get_ident().contains("net_flow"))
+            .expect("a synthetic net-flow must be created for the piecewise stock");
+        let Variable::Flow(f) = net_flow else {
+            panic!("expected the synthetic net-flow to be a Flow");
+        };
+        let Equation::Arrayed(dims, elements, _, _) = &f.equation else {
+            panic!(
+                "expected an Arrayed synthetic net-flow equation, got {:?}",
+                f.equation
+            );
+        };
+
+        // Pre-fix: dims == ["Lower_Levels"] (the first arm's subrange),
+        // while `elements` carries a `Factory` entry that names no element
+        // of it -- silently dropped downstream (implicit 0 net flow).
+        assert_eq!(
+            dims,
+            &["Level"],
+            "net-flow dims must widen to the parent dimension covering \
+             every arm's entries"
+        );
+        assert_eq!(elements.len(), 3, "one entry per parent element");
+        for (elem, rate) in [("Retailer", "10"), ("Wholesaler", "10"), ("Factory", "20")] {
+            let entry = elements
+                .iter()
+                .find(|(k, _, _, _)| k == elem)
+                .unwrap_or_else(|| panic!("missing net-flow entry for {elem}: {elements:?}"));
+            assert_eq!(entry.1, rate, "rate for {elem}");
+        }
     }
 
     #[test]

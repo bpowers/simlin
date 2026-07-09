@@ -3823,6 +3823,78 @@ TIME STEP = 1 ~~|
     );
 }
 
+/// Issue #908 (end-to-end): a stock defined PIECEWISE over subranges of a
+/// parent dimension whose synthesized `<stock>_net_flow` kept the FIRST
+/// arm's subrange dims while carrying `Arrayed` entries for every arm.
+/// On the 2-D beer-game shape the extra entries were silently dropped by
+/// the compiler (surfaced by the #905 UnknownElementSubscript warning), so
+/// those elements integrated an implicit 0 net flow -- plausible-looking
+/// but wrong results; on this minimal 1-D fixture the same too-narrow dims
+/// instead hard-fail compile with MismatchedDimensions, which the compile
+/// assert below catches first. The subrange name deliberately
+/// contains a space (`Lower Levels`): the dims promotion compared/resolved
+/// FORMATTED names (`Lower_Levels`) against canonical-keyed tables, so it
+/// only misfired for non-trivially-named subranges (why the all-lowercase
+/// #559 fixtures never caught it).
+#[test]
+fn simulates_piecewise_subrange_stock_net_flow() {
+    use simlin_engine::common::ErrorCode;
+    let mdl = "\
+{UTF-8}
+Level: Retailer, Wholesaler, Factory ~~|
+Lower Levels: Retailer, Wholesaler ~~|
+stk[Lower Levels] = INTEG(10, 1) ~~|
+stk[Factory] = INTEG(20, 2) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let (compile_err, diags) = compile_diags(mdl);
+    assert!(!compile_err, "must compile; diagnostics: {diags:#?}");
+    let unknown: Vec<_> = diags
+        .iter()
+        .filter(|d| diag_code(d) == Some(ErrorCode::UnknownElementSubscript))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "the net-flow dims must cover every arm's entries -- no entry may \
+         be dropped as an unknown element. Found: {unknown:#?}"
+    );
+
+    // Euler, dt=1: stk[lower levels] = 1 + t*10; stk[Factory] = 2 + t*20.
+    // Pre-fix the Factory net-flow entry is silently dropped (implicit 0),
+    // so stk[Factory] stays at its initial 2.
+    let r = run_inline_mdl(mdl);
+    assert_eq!(r.step_count, 3);
+    assert_eq!(element_series(&r, "stk[retailer]"), vec![1.0, 11.0, 21.0]);
+    assert_eq!(element_series(&r, "stk[wholesaler]"), vec![1.0, 11.0, 21.0]);
+    assert_eq!(element_series(&r, "stk[factory]"), vec![2.0, 22.0, 42.0]);
+}
+
+/// Issue #908 corpus verification: the beer-game model that exposed the
+/// piecewise-subrange net-flow bug (`Supply Line[Games,Lower Levels]` +
+/// `Supply Line[Games,Factory]` with `Lower Levels` a subrange of `Level`)
+/// must import with ZERO UnknownElementSubscript warnings -- every
+/// synthesized net-flow entry names a declared element combination.
+#[test]
+fn beer_game_import_has_no_unknown_element_subscripts() {
+    use simlin_engine::common::ErrorCode;
+    let mdl = std::fs::read_to_string("../../test/metasd/beer-game/RealBeer4-Sterman13.mdl")
+        .expect("beer-game model must be readable");
+    let (_compile_err, diags) = compile_diags(&mdl);
+    let unknown: Vec<_> = diags
+        .iter()
+        .filter(|d| diag_code(d) == Some(ErrorCode::UnknownElementSubscript))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "beer-game import must not drop any arrayed-equation entries \
+         (pre-fix: 13 GameN,Factory net-flow entries dropped). Found: \
+         {unknown:#?}"
+    );
+}
+
 /// All test models that the monolithic compiler can handle.
 /// The incremental path must also handle these.
 static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
