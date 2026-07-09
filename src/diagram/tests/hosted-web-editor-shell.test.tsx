@@ -19,9 +19,6 @@
 import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
 import type { MockInstance } from '@rstest/core';
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
-
 import * as React from 'react';
 import { render, act } from '@testing-library/react';
 

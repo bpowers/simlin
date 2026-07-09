@@ -6,7 +6,7 @@
     "module": "esnext",
     // wasm.browser.ts sniffs for Node at runtime (`typeof process !== 'undefined'`),
     // so this program needs @types/node even though it never targets Node. Tests
-    // are excluded here, so Jest's globals are not needed.
+    // are excluded here, so the test runner's types are not needed.
     "types": ["node"],
     "paths": {
       "@simlin/engine/internal/wasm": ["./src/internal/wasm.browser.ts"],

@@ -15,12 +15,7 @@
 // when latexEquation is undefined (loading, or no engine LaTeX); KaTeX renders
 // once a non-undefined LaTeX string has been committed.
 
-// jsdom does not provide TextEncoder/TextDecoder, but the engine's
-// memory module uses them at import time.  Polyfill from Node's util.
 import { describe, test, expect, rs } from '@rstest/core';
-
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
 
 import * as React from 'react';
 import { render, act } from '@testing-library/react';

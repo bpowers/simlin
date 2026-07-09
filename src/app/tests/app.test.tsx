@@ -93,28 +93,6 @@ rs.mock('../NewUser', () => {
   };
 });
 
-// fetch is called at module load by UserInfoSingleton's constructor and again
-// by getUserInfo / handleLogout. Per test we set the /api/user response that
-// drives the auth gate (401 = signed out, 200 + user = signed in). userInfo is
-// a module-level singleton that caches its first /api/user result and only
-// refetches on invalidate(); helpers below reset it via resetUserInfoFetch.
-function userResponse(status: number, body: unknown): Response {
-  return {
-    status,
-    async json() {
-      return body;
-    },
-  } as unknown as Response;
-}
-
-// Name the whole signature: rs.fn infers its type parameter from the initial
-// implementation (here, a zero-arg one), and every mockImplementation below takes
-// the real fetch arguments. jest.fn's loose `Mock<any, any>` hid the mismatch.
-type FetchImpl = (input: unknown, init?: { method?: string }) => Promise<Response>;
-
-const fetchMock = rs.fn<FetchImpl>(async () => userResponse(401, {}));
-(globalThis as unknown as { fetch: Mock }).fetch = fetchMock;
-
 import { describe, it, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
 import type { Mock, MockInstance } from '@rstest/core';
 
@@ -127,6 +105,25 @@ import { Router } from 'wouter';
 import { memoryLocation } from 'wouter/memory-location';
 import { signOut } from '@firebase/auth';
 import { App, InnerApp } from '../App';
+
+import { userResponse, type FetchImpl } from './fetch-stub';
+
+// fetch is called at module load by UserInfoSingleton's constructor and again by
+// getUserInfo / handleLogout. Per test we set the /api/user response that drives
+// the auth gate (401 = signed out, 200 + user = signed in). userInfo is a
+// module-level singleton that caches its first /api/user result and only
+// refetches on invalidate(); helpers below reset it via resetUserInfoCache.
+//
+// The stub itself is installed by tests/setup-fetch.ts, because the module-load
+// call happens while `../App` above is being evaluated -- before any statement
+// in this file runs. Read it back here; the mock's identity is stable.
+const fetchMock = (globalThis as unknown as { fetch: Mock<FetchImpl> }).fetch;
+
+// Sampled here, before any beforeEach resets the mock: `../App` was evaluated
+// above (imports run before this statement), so its UserInfoSingleton has already
+// issued its one /api/user request. If the stub ever stops being installed early
+// enough, this drops to 0 and App silently talks to the real fetch instead.
+const moduleLoadFetchCalls = fetchMock.mock.calls.length;
 
 // App.tsx holds a module-level UserInfoSingleton that caches its first
 // /api/user result and only refetches on invalidate(). Across tests that cache
@@ -268,6 +265,10 @@ async function signIn(userId: string) {
 // precedes any inner rs.useFakeTimers()).
 beforeEach(async () => {
   await resetUserInfoCache();
+});
+
+test('App.tsx fetches /api/user through the stub while it is being imported', () => {
+  expect(moduleLoadFetchCalls).toBe(1);
 });
 
 describe('App routing (Switch first-match semantics)', () => {

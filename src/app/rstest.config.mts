@@ -21,7 +21,10 @@ export default defineConfig({
       name: 'app',
       testEnvironment: 'jsdom',
       include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
-      setupFiles: ['./tests/setup-testing-library.ts'],
+      // Setup files run before a test module's imports are evaluated, which is
+      // the only point early enough for a stub that App.tsx's module body must
+      // observe (see tests/fetch-stub.ts).
+      setupFiles: ['./tests/setup-testing-library.ts', './tests/setup-fetch.ts'],
       output: {
         // Tests query rendered class names directly (`.breadcrumbLink`), which
         // worked under jest because a Proxy stub echoed each property name back.

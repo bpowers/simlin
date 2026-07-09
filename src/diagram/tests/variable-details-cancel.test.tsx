@@ -12,9 +12,6 @@
 import { describe, it, expect, beforeAll, rs } from '@rstest/core';
 import type { Mock } from '@rstest/core';
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
-
 beforeAll(() => {
   // slate-react's keyDown pipeline gates on ReactEditor.hasEditableTarget ->
   // element.isContentEditable before forwarding to our onKeyDown; jsdom lacks it.

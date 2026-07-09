@@ -13,9 +13,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, rs } from '@rstest/core';
 import type { MockInstance } from '@rstest/core';
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
-
 // jsdom does not implement isContentEditable, but slate-react's keyDown
 // pipeline gates on ReactEditor.hasEditableTarget -> element.isContentEditable
 // before forwarding to our onKeyDown. Without this polyfill the handler is

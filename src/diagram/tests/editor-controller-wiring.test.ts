@@ -21,9 +21,6 @@
 
 import { describe, it, expect, afterEach, rs } from '@rstest/core';
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
-
 import * as React from 'react';
 import { act, render, screen, RenderResult } from '@testing-library/react';
 

@@ -66,7 +66,9 @@ export default defineConfig({
       testEnvironment: 'jsdom',
       include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
       exclude: NODE_ENV_TESTS,
-      setupFiles: ['./tests/setup-testing-library.ts'],
+      // Setup files are the only hook that runs before a test module's imports
+      // are evaluated, which is what the engine's TextEncoder use demands.
+      setupFiles: ['./tests/setup-testing-library.ts', './tests/setup-text-encoder.ts'],
       output,
       resolve,
     }),

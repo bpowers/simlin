@@ -138,8 +138,8 @@ export async function deleteProject(endpoint: ProjectEndpoint): Promise<string> 
 // flow; it lives here (rather than inline in the shell) as a named, mockable
 // seam so a test can observe the post-delete navigation without driving a real
 // page transition (jsdom's window.location.assign is non-configurable and cannot
-// be spied directly). The shell calls it through the module namespace so a
-// a spy installed on this export is observed.
+// be spied directly). The shell calls it through the module namespace so a spy
+// installed on this export is observed.
 export function redirectToHome(url: string): void {
   window.location.assign(url);
 }
