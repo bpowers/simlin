@@ -31,7 +31,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
 ### Simulation lifecycle
 
 - **`src/simulation.rs`** - Create, run, and query simulations:
-  - `simlin_sim_new()` - Compile and create simulation via `compile_project_incremental` (both LTM and non-LTM use the same incremental pipeline; the `ltm_enabled` flag on `SourceProject` controls LTM variable generation)
+  - `simlin_sim_new()` - Compile and create a simulation. There are TWO build paths, chosen by the model's contents. An ordinary model compiles via `compile_project_incremental`, where LTM and non-LTM share one incremental salsa pipeline and the `ltm_enabled` flag on `SourceProject` controls LTM variable generation. A model that contains a conveyor or a queue (`conveyor_compile::project_has_conveyor` / `queue_compile::project_has_queue`) instead takes the special-stock build path `queue_compile::build_compiled`, which expands each belt/FIFO into hidden auxes plus driven flows and a native VM pass. That path builds on a PRIVATE db, so it bypasses incremental compilation entirely, and it does not participate in LTM -- conveyor/queue plus LTM is a documented degradation, not a supported combination. A model holding both a conveyor and a queue carries both plan sets out of the single build. The ordinary incremental path deliberately rejects an un-expanded conveyor or queue rather than silently simulating it as a plain stock
   - `simlin_sim_{ref,unref}()` - Reference counting
   - `simlin_sim_run_to()`, `simlin_sim_run_to_end()`, `simlin_sim_reset()`
   - `simlin_sim_get_value()`, `simlin_sim_set_value()`, `simlin_sim_get_series()`, `simlin_sim_get_initial_value()`
