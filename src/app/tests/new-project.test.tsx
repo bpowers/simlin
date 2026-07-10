@@ -6,27 +6,32 @@
 // graph doesn't pull in the WASM engine, datamodel, or the diagram component
 // library at test time. We exercise just the upload/leak behavior of
 // NewProject.uploadModel.
-
-const dispose = rs.fn().mockResolvedValue(undefined);
-const serializeProtobuf = rs.fn();
-const serializeJson = rs.fn();
-const open = rs.fn();
-const openVensim = rs.fn();
+//
+// A rs.mock factory runs the moment the module under test imports the mocked
+// specifier -- i.e. while the hoisted `../NewProject` import below is being
+// evaluated, before any statement in this file's body. A plain `const` declared
+// up here would still be in its temporal dead zone by then, so a factory that
+// dereferenced one would throw ReferenceError at module load. rs.hoisted is
+// lifted alongside the rs.mock calls, so these bindings exist before the
+// factories run and the factories can name them directly.
+//
+// projectFromJson is called by uploadModel after serializeJson resolves; we stub
+// it so we can assert dispose runs even on the happy path without pulling in the
+// real datamodel parsing.
+const { dispose, serializeProtobuf, serializeJson, open, openVensim, projectFromJson } = rs.hoisted(() => ({
+  dispose: rs.fn().mockResolvedValue(undefined),
+  serializeProtobuf: rs.fn(),
+  serializeJson: rs.fn(),
+  open: rs.fn(),
+  openVensim: rs.fn(),
+  projectFromJson: rs.fn(),
+}));
 
 rs.mock('@simlin/engine', () => ({
-  Project: {
-    open: (...args: unknown[]) => open(...args),
-    openVensim: (...args: unknown[]) => openVensim(...args),
-  },
+  Project: { open, openVensim },
 }));
 
-// projectFromJson is called by uploadModel after serializeJson resolves; we
-// stub it so we can assert dispose runs even on the happy path without
-// pulling in the real datamodel parsing.
-const projectFromJson = rs.fn();
-rs.mock('@simlin/core/datamodel', () => ({
-  projectFromJson: (...args: unknown[]) => projectFromJson(...args),
-}));
+rs.mock('@simlin/core/datamodel', () => ({ projectFromJson }));
 
 // The diagram package re-exports a large component library plus CSS modules
 // neither of which we exercise here.
