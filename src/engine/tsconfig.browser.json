@@ -4,10 +4,14 @@
     "outDir": "lib.browser",
     "tsBuildInfoFile": "./tsconfig.browser.tsbuildinfo",
     "module": "esnext",
+    // wasm.browser.ts sniffs for Node at runtime (`typeof process !== 'undefined'`),
+    // so this program needs @types/node even though it never targets Node. Tests
+    // are excluded here, so the test runner's types are not needed.
+    "types": ["node"],
     "paths": {
-      "@simlin/engine/internal/wasm": ["src/internal/wasm.browser.ts"],
-      "@simlin/engine/internal/backend-factory": ["src/backend-factory.browser.ts"],
-      "@simlin/engine/*": ["src/*"]
+      "@simlin/engine/internal/wasm": ["./src/internal/wasm.browser.ts"],
+      "@simlin/engine/internal/backend-factory": ["./src/backend-factory.browser.ts"],
+      "@simlin/engine/*": ["./src/*"]
     }
   },
   "exclude": ["lib", "lib.browser", "src/internal/wasm.node.ts", "src/backend-factory.node.ts", "tests", "eslint.config.js"]

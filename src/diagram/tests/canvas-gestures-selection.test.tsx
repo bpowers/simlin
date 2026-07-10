@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Reconciler-level gesture tests for selection behavior of the React `Canvas`
 // (Piece 1a of the canvas-interaction migration; see
@@ -15,6 +11,9 @@
 // They assert only on prop-callback payloads and rendered DOM -- never on Canvas
 // instance internals -- so they must survive Canvas becoming a function
 // component unchanged.
+
+import { describe, it, expect } from '@rstest/core';
+import type { Mock } from '@rstest/core';
 
 import {
   makeAux,
@@ -28,7 +27,7 @@ import {
 
 const DRAG_RECT = 'rect.dragRectOverlay';
 
-function lastSelection(fn: jest.Mock): number[] {
+function lastSelection(fn: Mock): number[] {
   const calls = fn.mock.calls;
   const last = calls[calls.length - 1];
   return last ? [...(last[0] as Set<number>)].sort((a, b) => a - b) : [];

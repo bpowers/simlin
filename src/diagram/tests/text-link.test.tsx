@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent, screen } from '@testing-library/react';
 import TextLink from '../components/TextLink';
@@ -20,7 +22,7 @@ describe('TextLink', () => {
   });
 
   test('calls onClick when clicked', () => {
-    const onClick = jest.fn();
+    const onClick = rs.fn();
     render(<TextLink onClick={onClick}>Click</TextLink>);
     fireEvent.click(screen.getByText('Click'));
     expect(onClick).toHaveBeenCalledTimes(1);

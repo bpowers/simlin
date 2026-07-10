@@ -1,10 +1,6 @@
-/**
- * @jest-environment node
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // saveProject() POSTs the serialized project and returns either the new server
 // version (success) or an error message (any non-2xx/3xx response). The
@@ -12,6 +8,9 @@
 // result onto its service-error list. The function is framework-free and calls the
 // global `fetch` directly (native fetch throws "Illegal invocation" when called as
 // a method of any object but the global), so these tests stub `globalThis.fetch`.
+
+import { describe, test, expect, afterEach, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
 
 import { saveProject, ProjectEndpoint } from '../hosted-web-editor-core';
 import type { ProtobufProjectData } from '../Editor';
@@ -23,8 +22,8 @@ function jsonResponse(status: number, body: unknown): Response {
 const endpoint: ProjectEndpoint = { base: '', username: 'alice', projectName: 'climate' };
 
 const originalFetch = globalThis.fetch;
-function installFetch(impl: (input: string, init?: RequestInit) => Promise<Response>): jest.Mock {
-  const mock = jest.fn(impl);
+function installFetch(impl: (input: string, init?: RequestInit) => Promise<Response>): Mock {
+  const mock = rs.fn(impl);
   (globalThis as unknown as { fetch: typeof fetch }).fetch = mock as unknown as typeof fetch;
   return mock;
 }

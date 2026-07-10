@@ -4,116 +4,111 @@
 
 // Mock @firebase/auth so we can drive the auth calls to resolve or reject
 // without involving the real Firebase SDK. The mock factory must not reference
-// outer-scope variables (jest hoists it), so we wire up per-test behavior via
-// jest.requireMock below.
+// outer-scope variables (it is hoisted above the imports), so we wire up
+// per-test behavior through the module namespace import below.
 //
 // fetchSignInMethodsForEmail is intentionally still mocked even though the
 // component no longer uses it: that lets us assert the redesigned flow never
 // reaches for the deprecated, enumeration-leaking API again (issue #692).
 
-jest.mock(
-  '@firebase/auth',
-  () => ({
-    signInWithRedirect: jest.fn(),
-    GoogleAuthProvider: class {
-      addScope() {}
-    },
-    OAuthProvider: class {
-      // mirrors firebase OAuthProvider just enough for the Login.appleProvider helper
-      constructor(_id: string) {}
-      addScope() {}
-    },
-    fetchSignInMethodsForEmail: jest.fn(),
-    createUserWithEmailAndPassword: jest.fn(),
-    updateProfile: jest.fn(),
-    sendPasswordResetEmail: jest.fn(),
-    signInWithEmailAndPassword: jest.fn(),
-  }),
-  { virtual: true },
-);
+rs.mock('@firebase/auth', () => ({
+  signInWithRedirect: rs.fn(),
+  GoogleAuthProvider: class {
+    addScope() {}
+  },
+  OAuthProvider: class {
+    // mirrors firebase OAuthProvider just enough for the Login.appleProvider helper
+    constructor(_id: string) {}
+    addScope() {}
+  },
+  fetchSignInMethodsForEmail: rs.fn(),
+  createUserWithEmailAndPassword: rs.fn(),
+  updateProfile: rs.fn(),
+  sendPasswordResetEmail: rs.fn(),
+  signInWithEmailAndPassword: rs.fn(),
+}));
 
 // The diagram package re-exports a sprawling component library; replace each
 // with a passthrough so we can render Login. We need real <button>s so
 // fireEvent.click hits a clickable element.
-jest.mock(
-  '@simlin/diagram',
-  () => {
-    const React = require('react');
-    const Button = ({
-      children,
-      onClick,
-      ...rest
-    }: { children?: React.ReactNode; onClick?: () => void } & Record<string, unknown>) => {
-      // Strip non-DOM props (variant, color, startIcon, etc.) before
-      // forwarding so React doesn't warn. We keep `type` so a test can assert
-      // the primary action stays a submit button (browser Enter-to-submit).
-      const dom: Record<string, unknown> = {};
-      const passthroughKeys = ['type', 'className', 'id', 'disabled'];
-      for (const k of passthroughKeys) {
-        if (k in rest) dom[k] = rest[k];
-      }
-      return React.createElement('button', { onClick, ...dom }, children);
-    };
-    // eslint-disable-next-line react/display-name
-    const Pass = (name: string) => (props: { children?: React.ReactNode }) =>
-      React.createElement('div', { 'data-component': name }, props.children);
-    // A TextField stub with a real <input> (so tests can type into it via
-    // its label) that renders helperText so error messages are queryable.
-    const TextField = ({
-      label,
-      value,
-      onChange,
-      helperText,
-    }: {
-      label?: string;
-      value?: string;
-      onChange?: (e: unknown) => void;
-      helperText?: string;
-    } & Record<string, unknown>) =>
-      React.createElement(
-        'div',
-        null,
-        React.createElement('input', { 'aria-label': label, value: value ?? '', onChange }),
-        helperText ? React.createElement('p', null, helperText) : null,
-      );
-    const TextLink = ({ children, onClick }: { children?: React.ReactNode; onClick?: () => void }) =>
-      React.createElement('a', { onClick, role: 'link' }, children);
-    return {
-      AppleIcon: () => null,
-      EmailIcon: () => null,
-      Button,
-      CircularProgress: () => React.createElement('div', { role: 'progressbar' }),
-      SvgIcon: Pass('SvgIcon'),
-      Card: Pass('Card'),
-      CardActions: Pass('CardActions'),
-      CardContent: Pass('CardContent'),
-      TextLink,
-      TextField,
-    };
-  },
-  { virtual: true },
-);
+rs.mock('@simlin/diagram', () => {
+  const React = require('react');
+  const Button = ({
+    children,
+    onClick,
+    ...rest
+  }: { children?: React.ReactNode; onClick?: () => void } & Record<string, unknown>) => {
+    // Strip non-DOM props (variant, color, startIcon, etc.) before
+    // forwarding so React doesn't warn. We keep `type` so a test can assert
+    // the primary action stays a submit button (browser Enter-to-submit).
+    const dom: Record<string, unknown> = {};
+    const passthroughKeys = ['type', 'className', 'id', 'disabled'];
+    for (const k of passthroughKeys) {
+      if (k in rest) dom[k] = rest[k];
+    }
+    return React.createElement('button', { onClick, ...dom }, children);
+  };
+  // eslint-disable-next-line react/display-name
+  const Pass = (name: string) => (props: { children?: React.ReactNode }) =>
+    React.createElement('div', { 'data-component': name }, props.children);
+  // A TextField stub with a real <input> (so tests can type into it via
+  // its label) that renders helperText so error messages are queryable.
+  const TextField = ({
+    label,
+    value,
+    onChange,
+    helperText,
+  }: {
+    label?: string;
+    value?: string;
+    onChange?: (e: unknown) => void;
+    helperText?: string;
+  } & Record<string, unknown>) =>
+    React.createElement(
+      'div',
+      null,
+      React.createElement('input', { 'aria-label': label, value: value ?? '', onChange }),
+      helperText ? React.createElement('p', null, helperText) : null,
+    );
+  const TextLink = ({ children, onClick }: { children?: React.ReactNode; onClick?: () => void }) =>
+    React.createElement('a', { onClick, role: 'link' }, children);
+  return {
+    AppleIcon: () => null,
+    EmailIcon: () => null,
+    Button,
+    CircularProgress: () => React.createElement('div', { role: 'progressbar' }),
+    SvgIcon: Pass('SvgIcon'),
+    Card: Pass('Card'),
+    CardActions: Pass('CardActions'),
+    CardContent: Pass('CardContent'),
+    TextLink,
+    TextField,
+  };
+});
 
-jest.mock(
-  '@simlin/diagram/ModelIcon',
-  () => ({
-    ModelIcon: () => null,
-  }),
-  { virtual: true },
-);
+rs.mock('@simlin/diagram/ModelIcon', () => ({
+  ModelIcon: () => null,
+}));
+
+import { describe, test, expect, beforeEach, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
 
 import * as React from 'react';
 import { render, fireEvent, screen, waitFor } from '@testing-library/react';
 
+import * as firebaseAuthModule from '@firebase/auth';
+
 import { Login, GoogleIcon } from '../Login';
 
-const firebaseAuth = jest.requireMock('@firebase/auth') as {
-  signInWithRedirect: jest.Mock;
-  fetchSignInMethodsForEmail: jest.Mock;
-  sendPasswordResetEmail: jest.Mock;
-  signInWithEmailAndPassword: jest.Mock;
-  createUserWithEmailAndPassword: jest.Mock;
-  updateProfile: jest.Mock;
+// rs.mock replaced the module above, so importing it normally yields the mock.
+// (jest.requireMock had no async equivalent -- rs.importMock returns a promise.)
+const firebaseAuth = firebaseAuthModule as unknown as {
+  signInWithRedirect: Mock;
+  fetchSignInMethodsForEmail: Mock;
+  sendPasswordResetEmail: Mock;
+  signInWithEmailAndPassword: Mock;
+  createUserWithEmailAndPassword: Mock;
+  updateProfile: Mock;
 };
 
 function makeAuth() {

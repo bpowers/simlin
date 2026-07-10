@@ -36,12 +36,11 @@ module.exports = mergeRsbuildConfig(
       // /static/js/* with no inline scripts, so they are not a
       // material XSS vector even without a CSP.
     },
+    // A single JS bundle with everything: all of this code is needed on initial
+    // load. Rsbuild 2 deprecated performance.chunkSplit; `splitChunks: false` is
+    // the replacement for the old `strategy: 'all-in-one'`.
+    splitChunks: false,
     performance: {
-      chunkSplit: {
-        strategy: 'all-in-one',
-        // This creates a single JS bundle with everything
-        // Better for apps where all code is needed on initial load
-      },
       bundleAnalyze: process.env.ANALYZE === 'true' ? {} : undefined,
     },
     tools: {

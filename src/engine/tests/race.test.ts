@@ -10,6 +10,8 @@
  * execution model.
  */
 
+import { describe, test, expect, beforeEach } from '@rstest/core';
+
 import { readFileSync } from 'fs';
 import { join } from 'path';
 

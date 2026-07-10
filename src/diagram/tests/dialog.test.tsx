@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions } from '../components/Dialog';
@@ -40,8 +42,18 @@ describe('Dialog', () => {
   // layer), so outside clicks must be fired a tick after render.
   const nextTick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+  // A primary-button press outside the layer does not dismiss on pointerdown:
+  // Radix waits for the matching `click` so a press that drags back inside (a
+  // text selection started on the backdrop) does not close the dialog. Fire the
+  // full sequence a real pointer produces, not just the pointer half of it.
+  const clickOutside = () => {
+    fireEvent.pointerDown(document.body);
+    fireEvent.pointerUp(document.body);
+    fireEvent.click(document.body);
+  };
+
   test('a pointer-down outside dismisses the dialog by default', async () => {
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <Dialog open={true} onClose={onClose}>
         <div>Content</div>
@@ -49,8 +61,7 @@ describe('Dialog', () => {
     );
     await nextTick();
 
-    fireEvent.pointerDown(document.body);
-    fireEvent.pointerUp(document.body);
+    clickOutside();
 
     expect(onClose).toHaveBeenCalled();
   });
@@ -59,7 +70,7 @@ describe('Dialog', () => {
     // A dialog like NewUser's mandatory onboarding must be genuinely modal:
     // blocking Escape but letting a backdrop click through routes onClose
     // anyway (and in NewUser's case triggered an implicit submit).
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <Dialog open={true} onClose={onClose} disableEscapeKeyDown disableBackdropClick>
         <div>Content</div>
@@ -67,8 +78,7 @@ describe('Dialog', () => {
     );
     await nextTick();
 
-    fireEvent.pointerDown(document.body);
-    fireEvent.pointerUp(document.body);
+    clickOutside();
 
     expect(onClose).not.toHaveBeenCalled();
   });

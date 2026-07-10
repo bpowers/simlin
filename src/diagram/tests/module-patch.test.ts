@@ -1,12 +1,10 @@
-/**
- * @jest-environment node
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // pattern: Imperative Shell (integration tests using real WASM engine)
+
+import { describe, it, expect, beforeEach } from '@rstest/core';
 
 import * as fs from 'fs';
 import * as path from 'path';

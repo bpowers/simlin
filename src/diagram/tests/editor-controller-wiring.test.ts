@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Thin integration tests for the Editor <-> ProjectController wiring.
 //
@@ -23,8 +19,7 @@
 // the rendered DOM. openInitialProject/dispose/scheduleSimRun are stubbed so the
 // test stays off WASM.
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
+import { describe, it, expect, afterEach, rs } from '@rstest/core';
 
 import * as React from 'react';
 import { act, render, screen, RenderResult } from '@testing-library/react';
@@ -49,13 +44,13 @@ function makeProps(overrides: Partial<EditorProps> = {}): EditorProps {
 // constructor. Stubs the engine-opening / dispose / sim-run methods so the
 // component mounts in jsdom without WASM.
 function renderAndCaptureConfig(props: EditorProps): { config: ControllerConfig; result: RenderResult } {
-  jest.spyOn(ProjectControllerModule.ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
-  jest.spyOn(ProjectControllerModule.ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-  jest.spyOn(ProjectControllerModule.ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
+  rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
+  rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
+  rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
 
   let captured: ControllerConfig | undefined;
   const real = ProjectControllerModule.ProjectController;
-  jest.spyOn(ProjectControllerModule, 'ProjectController').mockImplementation((config: ControllerConfig) => {
+  rs.spyOn(ProjectControllerModule, 'ProjectController').mockImplementation((config: ControllerConfig) => {
     captured = config;
     return new real(config);
   });
@@ -73,11 +68,11 @@ function renderAndCaptureConfig(props: EditorProps): { config: ControllerConfig;
 
 describe('Editor controller config wiring', () => {
   afterEach(() => {
-    jest.restoreAllMocks();
+    rs.restoreAllMocks();
   });
 
   it('forwards onSave as JsonProjectData when inputFormat is json', async () => {
-    const onSave = jest.fn(async () => 7);
+    const onSave = rs.fn(async () => 7);
     const { config } = renderAndCaptureConfig(makeProps({ onSave }));
 
     const version = await config.save({ format: 'json', data: '{"a":1}' }, 3);
@@ -87,7 +82,7 @@ describe('Editor controller config wiring', () => {
   });
 
   it('forwards onSave as ProtobufProjectData when inputFormat is protobuf', async () => {
-    const onSave = jest.fn(async () => 9);
+    const onSave = rs.fn(async () => 9);
     const bytes = new Uint8Array([1, 2, 3]);
     const { config } = renderAndCaptureConfig(
       makeProps({
@@ -121,9 +116,9 @@ describe('Editor controller config wiring', () => {
     // per-instance latch so React 18 StrictMode's mount/unmount/mount (state
     // preserved across the cycle) does not double-append. Render under
     // StrictMode and assert a single toast.
-    jest.spyOn(ProjectControllerModule.ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
-    jest.spyOn(ProjectControllerModule.ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    jest.spyOn(ProjectControllerModule.ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
+    rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
+    rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
+    rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
 
     act(() => {
       render(

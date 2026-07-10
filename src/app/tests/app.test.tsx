@@ -10,51 +10,39 @@
 // listener directly to simulate a Firebase auth-state change -- exactly what
 // the real SDK does from its event hub -- and assert each subscription's
 // unsubscribe ran on teardown.
-jest.mock(
-  '@firebase/app',
-  () => ({
-    initializeApp: jest.fn(() => ({})),
-  }),
-  { virtual: true },
-);
+rs.mock('@firebase/app', () => ({
+  initializeApp: rs.fn(() => ({})),
+}));
 
 interface AuthSubscription {
   listener: (user: unknown) => void | Promise<void>;
-  unsubscribe: jest.Mock;
+  unsubscribe: Mock;
 }
 // Every onAuthStateChanged subscribe pushes one entry; tests read the latest
 // listener (the live observer) and assert every entry's unsubscribe fired on
 // unmount (catching a leaked earlier StrictMode subscription).
 const authSubscriptions: AuthSubscription[] = [];
 
-jest.mock(
-  '@firebase/auth',
-  () => ({
-    getAuth: jest.fn(() => ({})),
-    connectAuthEmulator: jest.fn(),
-    // Record the listener and a fresh unsubscribe stub per subscribe so tests
-    // can drive the auth chain via the captured listener and verify teardown.
-    onAuthStateChanged: jest.fn((_auth: unknown, listener: (user: unknown) => void) => {
-      const unsubscribe = jest.fn();
-      authSubscriptions.push({ listener, unsubscribe });
-      return unsubscribe;
-    }),
-    signOut: jest.fn(async () => {}),
+rs.mock('@firebase/auth', () => ({
+  getAuth: rs.fn(() => ({})),
+  connectAuthEmulator: rs.fn(),
+  // Record the listener and a fresh unsubscribe stub per subscribe so tests
+  // can drive the auth chain via the captured listener and verify teardown.
+  onAuthStateChanged: rs.fn((_auth: unknown, listener: (user: unknown) => void) => {
+    const unsubscribe = rs.fn();
+    authSubscriptions.push({ listener, unsubscribe });
+    return unsubscribe;
   }),
-  { virtual: true },
-);
+  signOut: rs.fn(async () => {}),
+}));
 
 // Stub HostedWebEditor: pulls in Editor.tsx + tons of CSS modules.
-jest.mock(
-  '@simlin/diagram/HostedWebEditor',
-  () => {
-    const React = require('react');
-    return {
-      HostedWebEditor: () => React.createElement('div', { 'data-testid': 'hosted-editor' }, 'Editor'),
-    };
-  },
-  { virtual: true },
-);
+rs.mock('@simlin/diagram/HostedWebEditor', () => {
+  const React = require('react');
+  return {
+    HostedWebEditor: () => React.createElement('div', { 'data-testid': 'hosted-editor' }, 'Editor'),
+  };
+});
 
 // Stub Home/Login/NewUser to keep the test focused on App.tsx behavior. The
 // Home stub (1) bumps a module-level mount counter in a mount effect so a test
@@ -65,7 +53,7 @@ jest.mock(
 // button wired to its `onLogout` prop so handleLogout can be driven through a
 // real rendered affordance rather than an internal handle.
 const homeMountCount = { value: 0 };
-jest.mock('../Home', () => {
+rs.mock('../Home', () => {
   const React = require('react');
   return {
     __esModule: true,
@@ -86,7 +74,7 @@ jest.mock('../Home', () => {
 // The Login stub renders its `disabled` prop (= App's authUnknown) so a test
 // can observe authUnknown flipping false through the DOM rather than internal
 // state.
-jest.mock('../Login', () => {
+rs.mock('../Login', () => {
   const React = require('react');
   return {
     Login: (props: { disabled?: boolean; error?: string }) =>
@@ -98,29 +86,15 @@ jest.mock('../Login', () => {
   };
 });
 
-jest.mock('../NewUser', () => {
+rs.mock('../NewUser', () => {
   const React = require('react');
   return {
     NewUser: () => React.createElement('div', { 'data-testid': 'new-user' }, 'NewUser'),
   };
 });
 
-// fetch is called at module load by UserInfoSingleton's constructor and again
-// by getUserInfo / handleLogout. Per test we set the /api/user response that
-// drives the auth gate (401 = signed out, 200 + user = signed in). userInfo is
-// a module-level singleton that caches its first /api/user result and only
-// refetches on invalidate(); helpers below reset it via resetUserInfoFetch.
-function userResponse(status: number, body: unknown): Response {
-  return {
-    status,
-    async json() {
-      return body;
-    },
-  } as unknown as Response;
-}
-
-const fetchMock = jest.fn(async () => userResponse(401, {}));
-(globalThis as unknown as { fetch: jest.Mock }).fetch = fetchMock;
+import { describe, it, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
+import type { Mock, MockInstance } from '@rstest/core';
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -131,6 +105,25 @@ import { Router } from 'wouter';
 import { memoryLocation } from 'wouter/memory-location';
 import { signOut } from '@firebase/auth';
 import { App, InnerApp } from '../App';
+
+import { userResponse, type FetchImpl } from './fetch-stub';
+
+// fetch is called at module load by UserInfoSingleton's constructor and again by
+// getUserInfo / handleLogout. Per test we set the /api/user response that drives
+// the auth gate (401 = signed out, 200 + user = signed in). userInfo is a
+// module-level singleton that caches its first /api/user result and only
+// refetches on invalidate(); helpers below reset it via resetUserInfoCache.
+//
+// The stub itself is installed by tests/setup-fetch.ts, because the module-load
+// call happens while `../App` above is being evaluated -- before any statement
+// in this file runs. Read it back here; the mock's identity is stable.
+const fetchMock = (globalThis as unknown as { fetch: Mock<FetchImpl> }).fetch;
+
+// Sampled here, before any beforeEach resets the mock: `../App` was evaluated
+// above (imports run before this statement), so its UserInfoSingleton has already
+// issued its one /api/user request. If the stub ever stops being installed early
+// enough, this drops to 0 and App silently talks to the real fetch instead.
+const moduleLoadFetchCalls = fetchMock.mock.calls.length;
 
 // App.tsx holds a module-level UserInfoSingleton that caches its first
 // /api/user result and only refetches on invalidate(). Across tests that cache
@@ -144,8 +137,8 @@ import { App, InnerApp } from '../App';
 // user); if the cache is already signed-out, Login renders and there is nothing
 // to clear. Unmount and clear the captured subscriptions so the next test
 // starts clean.
-function makeFirebaseUser(): { getIdToken: jest.Mock } {
-  return { getIdToken: jest.fn(async () => 'tok') };
+function makeFirebaseUser(): { getIdToken: Mock } {
+  return { getIdToken: rs.fn(async () => 'tok') };
 }
 
 async function flushMacrotasks(times = 3): Promise<void> {
@@ -269,9 +262,13 @@ async function signIn(userId: string) {
 
 // Every test starts from a signed-out singleton cache so a prior test's sign-in
 // can't bleed into the next. Runs with real timers (the outer beforeEach
-// precedes any inner jest.useFakeTimers()).
+// precedes any inner rs.useFakeTimers()).
 beforeEach(async () => {
   await resetUserInfoCache();
+});
+
+test('App.tsx fetches /api/user through the stub while it is being imported', () => {
+  expect(moduleLoadFetchCalls).toBe(1);
 });
 
 describe('App routing (Switch first-match semantics)', () => {
@@ -373,13 +370,13 @@ describe('App routing (Switch first-match semantics)', () => {
 });
 
 describe('InnerApp auth-state-changed error handling', () => {
-  let consoleErrorSpy: jest.SpyInstance;
+  let consoleErrorSpy: MockInstance;
 
   beforeEach(() => {
     setFetchRoutes({});
     // The fix logs auth-flow errors via console.error so devs can see them
     // in the browser console; suppress in test output.
-    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    consoleErrorSpy = rs.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -396,7 +393,7 @@ describe('InnerApp auth-state-changed error handling', () => {
     const { unmount } = renderApp('/alice/widgets');
 
     const fakeUser = {
-      getIdToken: jest.fn().mockRejectedValue(new Error('token revoked')),
+      getIdToken: rs.fn().mockRejectedValue(new Error('token revoked')),
     };
 
     let threw: unknown = undefined;
@@ -442,13 +439,13 @@ describe('InnerApp mount / unmount lifecycle', () => {
   // data-disabled changes.
 
   beforeEach(() => {
-    jest.useFakeTimers();
+    rs.useFakeTimers();
     setFetchRoutes({});
   });
 
   afterEach(() => {
-    jest.useRealTimers();
-    jest.restoreAllMocks();
+    rs.useRealTimers();
+    rs.restoreAllMocks();
   });
 
   it('defers getUserInfo to the mount effect, not render (StrictMode safety)', async () => {
@@ -461,7 +458,7 @@ describe('InnerApp mount / unmount lifecycle', () => {
     expect(loginIsDisabled()).toBe('true');
 
     await act(async () => {
-      jest.runAllTimers();
+      rs.runAllTimers();
     });
 
     // The deferred getUserInfo ran and committed authUnknown: false (still
@@ -493,7 +490,7 @@ describe('InnerApp mount / unmount lifecycle', () => {
     expect(authSubscriptions[1].unsubscribe).not.toHaveBeenCalled();
 
     await act(async () => {
-      jest.runAllTimers();
+      rs.runAllTimers();
     });
 
     // getUserInfo ran on the surviving mount and committed authUnknown: false.
@@ -549,13 +546,13 @@ describe('InnerApp mount / unmount lifecycle', () => {
     // Spy on clearTimeout strictly around unmount: the effect cleanup must
     // clear the pending getUserInfo timer. Paired with the surviving-DOM check
     // below (getUserInfo never committed a user), this evidences cancellation.
-    const clearTimeoutSpy = jest.spyOn(globalThis, 'clearTimeout');
+    const clearTimeoutSpy = rs.spyOn(globalThis, 'clearTimeout');
     unmount();
     expect(clearTimeoutSpy).toHaveBeenCalled();
     clearTimeoutSpy.mockRestore();
 
     await act(async () => {
-      jest.runAllTimers();
+      rs.runAllTimers();
     });
 
     // The cancelled getUserInfo never ran: Home was never rendered, and the
@@ -571,7 +568,7 @@ describe('InnerApp logout', () => {
   // user in via the real auth/login flow so Home and its button render; then we
   // click the button.
   beforeEach(() => {
-    (signOut as jest.Mock).mockClear();
+    (signOut as unknown as Mock).mockClear();
   });
 
   test('clears the server session, firebase auth state, and the local user', async () => {
@@ -628,7 +625,7 @@ describe('InnerApp logout', () => {
       }
       return userResponse(401, {});
     });
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const consoleSpy = rs.spyOn(console, 'error').mockImplementation(() => {});
 
     renderApp('/');
     await waitFor(() => {
@@ -677,7 +674,7 @@ describe('InnerApp logout', () => {
     // the UI stuck signed in.
     await signIn('alice');
 
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const consoleSpy = rs.spyOn(console, 'error').mockImplementation(() => {});
     // After login, make every subsequent fetch reject.
     fetchMock.mockReset();
     fetchMock.mockRejectedValue(new Error('network down'));

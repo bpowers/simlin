@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, beforeEach } from '@rstest/core';
+
 import { readFileSync } from 'fs';
 import { join } from 'path';
 

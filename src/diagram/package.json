@@ -62,30 +62,29 @@
     "wouter": "^3.9.0"
   },
   "devDependencies": {
+    "@rstest/core": "^0.11.0",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
-    "@types/jest": "^30.0.0",
     "@types/katex": "^0.16.8",
     "@types/react": "^19.2.11",
     "@types/react-dom": "^19.2.3",
-    "@types/resize-observer-browser": "^0.1.11",
-    "@typescript-eslint/eslint-plugin": "^8.54.0",
-    "@typescript-eslint/parser": "^8.54.0",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
+    "@typescript-eslint/parser": "^8.63.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "eslint": "^9.39.2",
     "eslint-config-prettier": "^10.1.8",
-    "jest": "^30.2.0",
-    "jest-environment-jsdom": "^30.2.0",
+    "jsdom": "^29.1.1",
     "prettier": "^3.8.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "ts-jest": "^29.4.6",
-    "typescript": "^5.9.3"
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
   },
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
     "lint": "eslint --cache --cache-location node_modules/.cache/eslint/ .",
-    "test": "jest",
+    "test": "rstest run",
+    "test:watch": "rstest watch",
     "prepublishOnly": "pnpm build",
     "clean": "rm -rf ./lib ./lib.browser",
     "build": "tsc && tsc -p tsconfig.browser.json && bash build-css.sh"

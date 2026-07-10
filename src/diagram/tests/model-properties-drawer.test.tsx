@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 
@@ -55,12 +57,12 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('shows a delete action when onDelete is provided', () => {
-      renderDrawer({ onDelete: jest.fn() });
+      renderDrawer({ onDelete: rs.fn() });
       expect(screen.getByRole('button', { name: /delete project/i })).not.toBeNull();
     });
 
     test('confirming the delete dialog invokes onDelete', async () => {
-      const onDelete = jest.fn().mockResolvedValue(undefined);
+      const onDelete = rs.fn().mockResolvedValue(undefined);
       renderDrawer({ onDelete });
       fireEvent.click(screen.getByRole('button', { name: /delete project/i }));
       await waitFor(() => expect(screen.getByText(/delete this project\?/i)).not.toBeNull());
@@ -81,7 +83,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('typing does NOT commit per keystroke', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       renderDrawer({ onSimSpecCommit });
       const field = getField(/start time/i);
       focus(field);
@@ -93,7 +95,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('blur commits exactly once with the final numeric value', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       renderDrawer({ onSimSpecCommit });
       const field = getField(/start time/i);
       focus(field);
@@ -104,7 +106,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('Enter commits once', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       renderDrawer({ onSimSpecCommit });
       const field = getField(/stop time/i);
       focus(field);
@@ -115,7 +117,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('dt commits as a positive number', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       renderDrawer({ onSimSpecCommit });
       const field = getField(/^dt$/i);
       focus(field);
@@ -126,7 +128,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('a non-positive dt does not commit and reverts on blur', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       renderDrawer({ onSimSpecCommit });
       const field = getField(/^dt$/i);
       focus(field);
@@ -137,7 +139,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('time units commits the free string', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       renderDrawer({ onSimSpecCommit });
       const field = getField(/time units/i);
       focus(field);
@@ -148,7 +150,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('time units may be cleared to empty', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       renderDrawer({ onSimSpecCommit });
       const field = getField(/time units/i);
       focus(field);
@@ -159,7 +161,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('empty numeric input does not commit and reverts on blur', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       renderDrawer({ onSimSpecCommit });
       const field = getField(/start time/i);
       focus(field);
@@ -170,7 +172,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('an unchanged value on blur does not commit', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       renderDrawer({ onSimSpecCommit });
       const field = getField(/start time/i);
       focus(field);
@@ -180,7 +182,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('Escape reverts the draft without committing', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       renderDrawer({ onSimSpecCommit });
       const field = getField(/start time/i);
       focus(field);
@@ -195,7 +197,7 @@ describe('ModelPropertiesDrawer', () => {
       // Escape means "revert this field", not "close the drawer": the field
       // handler stops propagation so the Drawer's own Escape-close listener
       // never sees the key.
-      const onDrawerToggle = jest.fn();
+      const onDrawerToggle = rs.fn();
       renderDrawer({ onDrawerToggle });
       const field = getField(/start time/i);
       focus(field);
@@ -212,7 +214,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('a props refresh while focused does NOT clobber the draft', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       const { rerender } = renderDrawer({ onSimSpecCommit });
       const field = getField(/start time/i);
       focus(field);
@@ -224,7 +226,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('a valid commit keeps the typed value visible (no flash of the old value)', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       const { rerender } = renderDrawer({ onSimSpecCommit });
       const field = getField(/start time/i);
       focus(field);
@@ -239,7 +241,7 @@ describe('ModelPropertiesDrawer', () => {
     });
 
     test('committing one field then editing another commits each once', () => {
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       renderDrawer({ onSimSpecCommit });
       const start = getField(/start time/i);
       focus(start);
@@ -260,7 +262,7 @@ describe('ModelPropertiesDrawer', () => {
       // element, which is what blurs the focused field and drives the commit.
       // We assert that ordering explicitly: a blur commits, and whatever
       // teardown follows (here, unmount) fires nothing further.
-      const onSimSpecCommit = jest.fn();
+      const onSimSpecCommit = rs.fn();
       const { unmount } = renderDrawer({ onSimSpecCommit });
       const field = getField(/start time/i);
       focus(field);

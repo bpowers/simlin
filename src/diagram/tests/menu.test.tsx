@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, act, fireEvent, screen } from '@testing-library/react';
 
@@ -196,7 +198,7 @@ describe('Menu dismissal and keyboard', () => {
   it('Escape closes and returns focus to the anchor', () => {
     const anchor = document.createElement('button');
     document.body.appendChild(anchor);
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <Menu anchorEl={anchor} open onClose={onClose}>
         <MenuItem>One</MenuItem>
@@ -211,7 +213,7 @@ describe('Menu dismissal and keyboard', () => {
   it('a press on the anchor is not treated as an outside dismissal', () => {
     const anchor = document.createElement('button');
     document.body.appendChild(anchor);
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <Menu anchorEl={anchor} open onClose={onClose}>
         <MenuItem>One</MenuItem>
@@ -226,7 +228,7 @@ describe('Menu dismissal and keyboard', () => {
     const anchor = document.createElement('button');
     const outside = document.createElement('div');
     document.body.append(anchor, outside);
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <Menu anchorEl={anchor} open onClose={onClose}>
         <MenuItem>One</MenuItem>
@@ -244,7 +246,7 @@ describe('Menu dismissal and keyboard', () => {
     const anchor = document.createElement('button');
     const outside = document.createElement('button');
     document.body.append(anchor, outside);
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <Menu anchorEl={anchor} open onClose={onClose}>
         <MenuItem>One</MenuItem>
@@ -260,7 +262,7 @@ describe('Menu dismissal and keyboard', () => {
   it('dismisses when keyboard focus moves back to the trigger (shift+tab)', () => {
     const anchor = document.createElement('button');
     document.body.appendChild(anchor);
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <Menu anchorEl={anchor} open onClose={onClose}>
         <MenuItem>One</MenuItem>
@@ -277,7 +279,7 @@ describe('Menu dismissal and keyboard', () => {
   it('dismisses when focus leaves to browser chrome (null relatedTarget)', () => {
     const anchor = document.createElement('button');
     document.body.appendChild(anchor);
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <Menu anchorEl={anchor} open onClose={onClose}>
         <MenuItem>One</MenuItem>
@@ -298,7 +300,7 @@ describe('Menu dismissal and keyboard', () => {
     const anchor = document.createElement('button');
     const outside = document.createElement('div');
     document.body.append(anchor, outside);
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     const tree = (open: boolean) => (
       <Menu anchorEl={anchor} open={open} onClose={onClose}>
         <MenuItem>One</MenuItem>

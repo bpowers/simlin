@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Discarding in-progress equation edits (GitHub issue #86). All three fields
 // (equation, units, notes) save on blur, which is load-bearing: a canvas-driven
@@ -13,8 +9,8 @@
 // committed before the discard ran. These tests pin that Cancel/Escape now win
 // over the blur-save while a genuine blur-away still commits.
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
+import { describe, it, expect, beforeAll, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
 
 beforeAll(() => {
   // slate-react's keyDown pipeline gates on ReactEditor.hasEditableTarget ->
@@ -86,11 +82,11 @@ const noop = () => {};
 
 interface Harness {
   container: HTMLElement;
-  onEquationChange: jest.Mock;
+  onEquationChange: Mock;
 }
 
 function renderDetails(variable: Aux): Harness {
-  const onEquationChange = jest.fn();
+  const onEquationChange = rs.fn();
   const { container } = render(
     <VariableDetails
       variable={variable}

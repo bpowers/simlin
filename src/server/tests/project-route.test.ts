@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect, rs } from '@rstest/core';
+
 import { Request, Response } from 'express';
 
 import { createProjectRouteHandler, ProjectRecord, ProjectRouteHandlerDeps } from '../route-handlers';
@@ -27,7 +29,7 @@ function createMockProject(opts: {
 function createMockDb(project: ProjectRecord | undefined): ProjectRouteHandlerDeps['db'] {
   return {
     project: {
-      findOne: jest.fn().mockResolvedValue(project),
+      findOne: rs.fn().mockResolvedValue(project),
     },
   };
 }
@@ -65,19 +67,19 @@ function createMockResponse(): MockResponseResult {
   let statusCode: number | undefined;
 
   const res: Partial<Response> = {
-    status: jest.fn((code: number) => {
+    status: rs.fn((code: number) => {
       statusCode = code;
       return res as Response;
     }),
-    json: jest.fn().mockReturnThis(),
-    redirect: jest.fn((statusOrUrl: number | string, url?: string) => {
+    json: rs.fn().mockReturnThis(),
+    redirect: rs.fn((statusOrUrl: number | string, url?: string) => {
       if (typeof statusOrUrl === 'string') {
         redirectUrl = statusOrUrl;
       } else {
         redirectUrl = url;
       }
     }) as Response['redirect'],
-    set: jest.fn().mockReturnThis(),
+    set: rs.fn().mockReturnThis(),
   };
 
   return {
@@ -111,7 +113,7 @@ describe('createProjectRouteHandler', () => {
 
       const req = createMockRequest();
       const { res, getStatusCode } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -133,7 +135,7 @@ describe('createProjectRouteHandler', () => {
 
       const req = createMockRequest({ username: 'testuser', projectName: 'myproject' });
       const { res, getRedirectUrl } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -152,7 +154,7 @@ describe('createProjectRouteHandler', () => {
 
       const req = createMockRequest({ username: 'testuser', projectName: 'my project' });
       const { res, getRedirectUrl } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -177,7 +179,7 @@ describe('createProjectRouteHandler', () => {
         session: undefined,
       });
       const { res, getRedirectUrl } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -200,7 +202,7 @@ describe('createProjectRouteHandler', () => {
         session: {},
       });
       const { res, getRedirectUrl } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -223,7 +225,7 @@ describe('createProjectRouteHandler', () => {
         session: { passport: {} },
       });
       const { res, getRedirectUrl } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -247,7 +249,7 @@ describe('createProjectRouteHandler', () => {
         user: undefined,
       });
       const { res, getRedirectUrl } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -273,7 +275,7 @@ describe('createProjectRouteHandler', () => {
         user: createMockUser('otheruser'),
       });
       const { res, getRedirectUrl } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -302,7 +304,7 @@ describe('createProjectRouteHandler', () => {
         user: createMockUser('testuser'),
       });
       const { res, getRedirectUrl } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -328,7 +330,7 @@ describe('createProjectRouteHandler', () => {
         user: createMockUser('testuser'),
       });
       const { res } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -356,7 +358,7 @@ describe('createProjectRouteHandler', () => {
         user: createMockUser('testuser'),
       });
       const { res, getStatusCode } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -384,7 +386,7 @@ describe('createProjectRouteHandler', () => {
         user: createMockUser('testuser'),
       });
       const { res, getStatusCode } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 
@@ -410,7 +412,7 @@ describe('createProjectRouteHandler', () => {
         user: createMockUser('testuser'),
       });
       const { res } = createMockResponse();
-      const next = jest.fn();
+      const next = rs.fn();
 
       await handler(req as Request, res as Response, next);
 

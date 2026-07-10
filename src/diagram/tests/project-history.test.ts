@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect } from '@rstest/core';
+
 import { advanceProjectHistory } from '../project-history';
 
 const snap = (n: number): Uint8Array => new Uint8Array([n]);

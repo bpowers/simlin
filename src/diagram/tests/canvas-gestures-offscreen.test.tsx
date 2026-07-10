@@ -10,6 +10,9 @@
 // Canvas internals. The pure predicate + centering math are covered in
 // viewport.test.ts.
 
+import { describe, it, expect } from '@rstest/core';
+import type { Mock } from '@rstest/core';
+
 import { renderCanvas, makeAux, makeStock } from './canvas-gesture-harness';
 
 // The harness mounts with a jsdom canvas whose clientWidth/Height is 0, so the
@@ -17,7 +20,7 @@ import { renderCanvas, makeAux, makeStock } from './canvas-gesture-harness';
 // A resize from a known old size also runs the pre-existing quarter-delta
 // resize recenter (handleSvgResize), so onViewBoxChange can fire once for that
 // BEFORE our offscreen effect fires; our commit is always the LAST call.
-function lastViewBoxCall(onViewBoxChange: jest.Mock): {
+function lastViewBoxCall(onViewBoxChange: Mock): {
   viewBox: { x: number; y: number; width: number; height: number };
   zoom: number;
 } {

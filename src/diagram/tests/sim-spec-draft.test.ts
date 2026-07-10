@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect } from '@rstest/core';
+
 import { formatSimSpecValue, resolveSimSpecDraft } from '../sim-spec-draft';
 
 describe('formatSimSpecValue', () => {

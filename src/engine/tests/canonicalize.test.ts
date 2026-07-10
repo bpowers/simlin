@@ -17,6 +17,8 @@
  * function must reproduce exactly.
  */
 
+import { describe, it, expect } from '@rstest/core';
+
 import { canonicalizeIdent } from '../src/internal/canonicalize';
 
 describe('canonicalizeIdent', () => {

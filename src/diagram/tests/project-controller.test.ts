@@ -1,16 +1,14 @@
-/**
- * @jest-environment node
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Unit tests for ProjectController -- the headless coordination layer extracted
 // from Editor.tsx. These exercise the engine lifecycle, the apply-patch
 // pipeline, the optimistic-view race, undo/redo, the save queue, sim runs, the
 // error cache, navigation, and snapshot immutability/coalescing -- all against
 // the FakeEngineProject helper, with no jsdom or real WASM.
+
+import { describe, it, expect, rs } from '@rstest/core';
 
 import {
   projectFromJson,
@@ -474,7 +472,7 @@ describe('ProjectController save queue', () => {
     let resolveFirst: (v: number) => void = () => {};
     let callCount = 0;
     const engine = makeFakeEngine();
-    const save = jest.fn(async () => {
+    const save = rs.fn(async () => {
       callCount++;
       if (callCount === 1) {
         return await new Promise<number>((resolve) => {
@@ -505,7 +503,7 @@ describe('ProjectController save queue', () => {
   it('releases inSave and still flushes the queued save when onSave throws', async () => {
     let callCount = 0;
     const engine = makeFakeEngine();
-    const save = jest.fn(async () => {
+    const save = rs.fn(async () => {
       callCount++;
       if (callCount === 1) {
         await Promise.resolve();

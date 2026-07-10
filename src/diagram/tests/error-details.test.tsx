@@ -2,11 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// jsdom does not provide TextEncoder/TextDecoder, but the engine's memory
-// module (pulled in transitively via errorCodeDescription) uses them at import
-// time. Polyfill from Node's util before importing anything engine-backed.
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
+import { describe, test, expect } from '@rstest/core';
 
 import * as React from 'react';
 import { render, screen } from '@testing-library/react';

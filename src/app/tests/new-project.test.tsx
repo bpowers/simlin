@@ -6,59 +6,54 @@
 // graph doesn't pull in the WASM engine, datamodel, or the diagram component
 // library at test time. We exercise just the upload/leak behavior of
 // NewProject.uploadModel.
+//
+// A rs.mock factory runs the moment the module under test imports the mocked
+// specifier -- i.e. while the hoisted `../NewProject` import below is being
+// evaluated, before any statement in this file's body. A plain `const` declared
+// up here would still be in its temporal dead zone by then, so a factory that
+// dereferenced one would throw ReferenceError at module load. rs.hoisted is
+// lifted alongside the rs.mock calls, so these bindings exist before the
+// factories run and the factories can name them directly.
+//
+// projectFromJson is called by uploadModel after serializeJson resolves; we stub
+// it so we can assert dispose runs even on the happy path without pulling in the
+// real datamodel parsing.
+const { dispose, serializeProtobuf, serializeJson, open, openVensim, projectFromJson } = rs.hoisted(() => ({
+  dispose: rs.fn().mockResolvedValue(undefined),
+  serializeProtobuf: rs.fn(),
+  serializeJson: rs.fn(),
+  open: rs.fn(),
+  openVensim: rs.fn(),
+  projectFromJson: rs.fn(),
+}));
 
-const dispose = jest.fn().mockResolvedValue(undefined);
-const serializeProtobuf = jest.fn();
-const serializeJson = jest.fn();
-const open = jest.fn();
-const openVensim = jest.fn();
+rs.mock('@simlin/engine', () => ({
+  Project: { open, openVensim },
+}));
 
-jest.mock(
-  '@simlin/engine',
-  () => ({
-    Project: {
-      open: (...args: unknown[]) => open(...args),
-      openVensim: (...args: unknown[]) => openVensim(...args),
-    },
-  }),
-  { virtual: true },
-);
-
-// projectFromJson is called by uploadModel after serializeJson resolves; we
-// stub it so we can assert dispose runs even on the happy path without
-// pulling in the real datamodel parsing.
-const projectFromJson = jest.fn();
-jest.mock(
-  '@simlin/core/datamodel',
-  () => ({
-    projectFromJson: (...args: unknown[]) => projectFromJson(...args),
-  }),
-  { virtual: true },
-);
+rs.mock('@simlin/core/datamodel', () => ({ projectFromJson }));
 
 // The diagram package re-exports a large component library plus CSS modules
 // neither of which we exercise here.
-jest.mock(
-  '@simlin/diagram',
-  () => {
-    const React = require('react');
-    // eslint-disable-next-line react/display-name
-    const passthrough = (name: string) => (props: { children?: React.ReactNode }) =>
-      React.createElement('div', { 'data-component': name }, props.children);
-    return {
-      Accordion: passthrough('Accordion'),
-      AccordionDetails: passthrough('AccordionDetails'),
-      AccordionSummary: passthrough('AccordionSummary'),
-      Button: passthrough('Button'),
-      Checkbox: passthrough('Checkbox'),
-      FormControlLabel: passthrough('FormControlLabel'),
-      InputAdornment: passthrough('InputAdornment'),
-      TextField: passthrough('TextField'),
-      ExpandMoreIcon: passthrough('ExpandMoreIcon'),
-    };
-  },
-  { virtual: true },
-);
+rs.mock('@simlin/diagram', () => {
+  const React = require('react');
+  // eslint-disable-next-line react/display-name
+  const passthrough = (name: string) => (props: { children?: React.ReactNode }) =>
+    React.createElement('div', { 'data-component': name }, props.children);
+  return {
+    Accordion: passthrough('Accordion'),
+    AccordionDetails: passthrough('AccordionDetails'),
+    AccordionSummary: passthrough('AccordionSummary'),
+    Button: passthrough('Button'),
+    Checkbox: passthrough('Checkbox'),
+    FormControlLabel: passthrough('FormControlLabel'),
+    InputAdornment: passthrough('InputAdornment'),
+    TextField: passthrough('TextField'),
+    ExpandMoreIcon: passthrough('ExpandMoreIcon'),
+  };
+});
+
+import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
 
 import * as React from 'react';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
@@ -101,7 +96,7 @@ describe('NewProject.uploadModel', () => {
   // surface (the file input's onChange) rather than reaching into an instance.
   async function uploadFile(file: File): Promise<void> {
     const fakeUser = { id: 'tester', email: 't@example.com', displayName: 'tester' } as unknown as User;
-    const onProjectCreated = jest.fn();
+    const onProjectCreated = rs.fn();
     const { container } = render(<NewProject user={fakeUser} onProjectCreated={onProjectCreated} />);
 
     const input = container.querySelector('#xmile-model-file') as HTMLInputElement;

@@ -1,12 +1,10 @@
-/**
- * @jest-environment node
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // pattern: Functional Core (tests for pure functions)
+
+import { describe, it, expect } from '@rstest/core';
 
 import type { Variable, ModuleViewElement, Module as ModuleVar, Stock, Aux, Flow } from '@simlin/core/datamodel';
 import { canonicalize } from '@simlin/core/canonicalize';

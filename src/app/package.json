@@ -19,25 +19,25 @@
     "wouter": "^3.9.0"
   },
   "devDependencies": {
-    "@rsbuild/core": "^1.7.3",
-    "@rsbuild/plugin-react": "^1.4.5",
-    "@rsbuild/plugin-type-check": "^1.3.3",
+    "@rsbuild/core": "^2.1.5",
+    "@rsbuild/plugin-react": "^2.1.0",
+    "@rsbuild/plugin-type-check": "^1.5.0",
+    "@rstest/core": "^0.11.0",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^25.2.0",
     "@types/react": "^19.2.11",
     "@types/react-dom": "^19.2.3",
-    "@typescript-eslint/eslint-plugin": "^8.54.0",
-    "@typescript-eslint/parser": "^8.54.0",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
+    "@typescript-eslint/parser": "^8.63.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "eslint": "^9.39.2",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-react": "^7.37.5",
-    "jest": "^30.2.0",
-    "jest-environment-jsdom": "^30.2.0",
+    "jsdom": "^29.1.1",
     "picocolors": "^1.1.1",
     "prettier": "^3.8.1",
-    "ts-jest": "^29.4.6",
-    "typescript": "^5.9.3"
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
   },
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
@@ -52,7 +52,7 @@
     "build:webcomponent": "node scripts/build-component.js",
     "build:frontend": "node scripts/build.js",
     "start:frontend": "node scripts/start.js",
-    "test": "jest"
+    "test": "rstest run"
   },
   "browserslist": [
     "last 2 Chrome versions",

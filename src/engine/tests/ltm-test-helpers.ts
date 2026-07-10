@@ -8,6 +8,8 @@
 // contain spaces, so a literal space is a safe and human-readable separator
 // for composite link keys.
 
+import { expect } from '@rstest/core';
+
 import type { Link } from '../src/types';
 
 // LTM scores from VM-vs-wasm are produced by the same analysis function over

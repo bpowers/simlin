@@ -4,6 +4,10 @@
     "rootDir": ".",
     "outDir": "lib",
     "module": "commonjs",
+    // Since TS6 "types" defaults to [] rather than every installed @types
+    // package. Nothing here needs ambient globals: test helpers are imported
+    // explicitly from @rstest/core.
+    "types": [],
   },
   "include": [
     "**/*.ts",

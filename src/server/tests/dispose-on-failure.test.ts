@@ -2,6 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
+
 import { Project } from '@simlin/engine';
 
 import { emptyProject } from '../project-creation';
@@ -16,21 +19,23 @@ import { emptyProject } from '../project-creation';
 // the cleanup pattern matches render.ts.
 
 interface FakeEngineProject {
-  serializeProtobuf: jest.Mock<Promise<Uint8Array>, []>;
-  dispose: jest.Mock<Promise<void>, []>;
+  // jest.Mock's type arguments were <Return, Args>; rstest's Mock takes the
+  // whole function signature.
+  serializeProtobuf: Mock<() => Promise<Uint8Array>>;
+  dispose: Mock<() => Promise<void>>;
 }
 
 function fakeProject(serializeImpl: () => Promise<Uint8Array>): FakeEngineProject {
   return {
-    serializeProtobuf: jest.fn().mockImplementation(serializeImpl),
-    dispose: jest.fn().mockResolvedValue(undefined),
+    serializeProtobuf: rs.fn().mockImplementation(serializeImpl),
+    dispose: rs.fn().mockResolvedValue(undefined),
   };
 }
 
 describe('emptyProject', () => {
   it('disposes the engine handle when serializeProtobuf rejects', async () => {
     const fp = fakeProject(() => Promise.reject(new Error('boom')));
-    const openJsonSpy = jest.spyOn(Project, 'openJson').mockResolvedValue(fp as unknown as Project);
+    const openJsonSpy = rs.spyOn(Project, 'openJson').mockResolvedValue(fp as unknown as Project);
 
     try {
       await expect(emptyProject('test', 'bobby')).rejects.toThrow('boom');
@@ -43,7 +48,7 @@ describe('emptyProject', () => {
 
   it('still calls dispose on the happy path', async () => {
     const fp = fakeProject(() => Promise.resolve(new Uint8Array([1, 2, 3])));
-    const openJsonSpy = jest.spyOn(Project, 'openJson').mockResolvedValue(fp as unknown as Project);
+    const openJsonSpy = rs.spyOn(Project, 'openJson').mockResolvedValue(fp as unknown as Project);
 
     try {
       const result = await emptyProject('test', 'bobby');

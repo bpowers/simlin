@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 
@@ -9,20 +11,20 @@ import { DeleteProjectButton } from '../DeleteProjectButton';
 
 describe('DeleteProjectButton', () => {
   test('renders a Delete project button with the confirmation dialog initially closed', () => {
-    render(<DeleteProjectButton projectName="climate" onDelete={jest.fn()} />);
+    render(<DeleteProjectButton projectName="climate" onDelete={rs.fn()} />);
     expect(screen.getByRole('button', { name: /delete project/i })).not.toBeNull();
     expect(screen.queryByText(/delete this project\?/i)).toBeNull();
   });
 
   test('clicking the trigger opens a confirmation dialog naming the project', () => {
-    render(<DeleteProjectButton projectName="climate-101" onDelete={jest.fn()} />);
+    render(<DeleteProjectButton projectName="climate-101" onDelete={rs.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /delete project/i }));
     expect(screen.getByText(/delete this project\?/i)).not.toBeNull();
     expect(screen.getByText(/climate-101/)).not.toBeNull();
   });
 
   test('Cancel closes the dialog without calling onDelete', () => {
-    const onDelete = jest.fn();
+    const onDelete = rs.fn();
     render(<DeleteProjectButton projectName="climate" onDelete={onDelete} />);
     fireEvent.click(screen.getByRole('button', { name: /delete project/i }));
     fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
@@ -31,7 +33,7 @@ describe('DeleteProjectButton', () => {
   });
 
   test('confirming calls onDelete', async () => {
-    const onDelete = jest.fn().mockResolvedValue(undefined);
+    const onDelete = rs.fn().mockResolvedValue(undefined);
     render(<DeleteProjectButton projectName="climate" onDelete={onDelete} />);
     fireEvent.click(screen.getByRole('button', { name: /delete project/i }));
     await act(async () => {
@@ -41,7 +43,7 @@ describe('DeleteProjectButton', () => {
   });
 
   test('a rejected onDelete keeps the dialog open and shows the error', async () => {
-    const onDelete = jest.fn().mockRejectedValue(new Error('network is down'));
+    const onDelete = rs.fn().mockRejectedValue(new Error('network is down'));
     render(<DeleteProjectButton projectName="climate" onDelete={onDelete} />);
     fireEvent.click(screen.getByRole('button', { name: /delete project/i }));
     fireEvent.click(screen.getByRole('button', { name: /^delete$/i }));
@@ -57,7 +59,7 @@ describe('DeleteProjectButton', () => {
 
   test('the action buttons are disabled while the delete is in flight', async () => {
     // Never-resolving promise: the component should stay in its "deleting" state.
-    const onDelete = jest.fn().mockReturnValue(new Promise<void>(() => {}));
+    const onDelete = rs.fn().mockReturnValue(new Promise<void>(() => {}));
     render(<DeleteProjectButton projectName="climate" onDelete={onDelete} />);
     fireEvent.click(screen.getByRole('button', { name: /delete project/i }));
     act(() => {

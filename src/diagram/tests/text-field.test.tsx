@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent, screen } from '@testing-library/react';
 import TextField from '../components/TextField';
@@ -24,7 +26,7 @@ describe('TextField', () => {
   });
 
   test('chains inputProps.onFocus with internal focus handler', () => {
-    const externalOnFocus = jest.fn();
+    const externalOnFocus = rs.fn();
     render(<TextField label="Test" inputProps={{ onFocus: externalOnFocus }} data-testid="text-field" />);
 
     const input = screen.getByTestId('text-field');
@@ -35,7 +37,7 @@ describe('TextField', () => {
   });
 
   test('chains inputProps.onBlur with internal blur handler', () => {
-    const externalOnBlur = jest.fn();
+    const externalOnBlur = rs.fn();
     render(<TextField label="Test" inputProps={{ onBlur: externalOnBlur }} data-testid="text-field" />);
 
     const input = screen.getByTestId('text-field');
@@ -50,8 +52,8 @@ describe('TextField', () => {
     // Use a class component wrapper to access the TextField's state via ref inspection
     // Since we can't directly inspect isFocused state, we test the effect:
     // The label should shrink when focused even with external handlers
-    const externalOnFocus = jest.fn();
-    const externalOnBlur = jest.fn();
+    const externalOnFocus = rs.fn();
+    const externalOnBlur = rs.fn();
 
     render(
       <TextField
@@ -97,7 +99,7 @@ describe('TextField', () => {
   });
 
   test('handles value changes', () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     render(<TextField value="test" onChange={onChange} data-testid="text-field" />);
 
     const input = screen.getByTestId('text-field') as HTMLInputElement;

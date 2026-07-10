@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 
@@ -52,7 +54,7 @@ describe('NewProjectButton', () => {
   });
 
   test('shows a client-side error for an invalid name without calling fetch', () => {
-    const fetchMock = jest.fn();
+    const fetchMock = rs.fn();
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
     render(<NewProjectButton onCreated={() => {}} />);
 
@@ -68,7 +70,7 @@ describe('NewProjectButton', () => {
 
   test('calls onCreated with the server-returned path on a successful create', async () => {
     const response: CreateProjectResponse = { path: 'foo.stmx', version: 0 };
-    const fetchMock = jest.fn().mockResolvedValue(jsonResponse(response));
+    const fetchMock = rs.fn().mockResolvedValue(jsonResponse(response));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     const calls: Array<string> = [];
@@ -91,7 +93,7 @@ describe('NewProjectButton', () => {
   });
 
   test('respects the format dropdown selection', async () => {
-    const fetchMock = jest.fn().mockResolvedValue(jsonResponse({ path: 'foo.sd.json', version: 0 }));
+    const fetchMock = rs.fn().mockResolvedValue(jsonResponse({ path: 'foo.sd.json', version: 0 }));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     render(<NewProjectButton onCreated={() => {}} />);
@@ -109,7 +111,7 @@ describe('NewProjectButton', () => {
   });
 
   test('renders a server error message when fetch returns 409', async () => {
-    const fetchMock = jest.fn().mockResolvedValue(jsonResponse({ error: 'already_exists' }, 409));
+    const fetchMock = rs.fn().mockResolvedValue(jsonResponse({ error: 'already_exists' }, 409));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     const calls: Array<string> = [];

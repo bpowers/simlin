@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent, screen } from '@testing-library/react';
 import { BreadcrumbBar } from '../BreadcrumbBar';
@@ -26,9 +28,9 @@ describe('BreadcrumbBar', () => {
   // AC3.2: back arrow at root
   describe('at root level (empty stack)', () => {
     test('renders hamburger menu icon, not back arrow', () => {
-      const onBack = jest.fn();
-      const onNavigateToLevel = jest.fn();
-      const onShowDrawer = jest.fn();
+      const onBack = rs.fn();
+      const onNavigateToLevel = rs.fn();
+      const onShowDrawer = rs.fn();
 
       render(
         <BreadcrumbBar
@@ -47,9 +49,9 @@ describe('BreadcrumbBar', () => {
     });
 
     test('clicking menu button calls onShowDrawer', () => {
-      const onBack = jest.fn();
-      const onNavigateToLevel = jest.fn();
-      const onShowDrawer = jest.fn();
+      const onBack = rs.fn();
+      const onNavigateToLevel = rs.fn();
+      const onShowDrawer = rs.fn();
 
       render(
         <BreadcrumbBar
@@ -66,9 +68,9 @@ describe('BreadcrumbBar', () => {
     });
 
     test('does not render breadcrumb segments', () => {
-      const onBack = jest.fn();
-      const onNavigateToLevel = jest.fn();
-      const onShowDrawer = jest.fn();
+      const onBack = rs.fn();
+      const onNavigateToLevel = rs.fn();
+      const onShowDrawer = rs.fn();
 
       render(
         <BreadcrumbBar
@@ -88,9 +90,9 @@ describe('BreadcrumbBar', () => {
   describe('when nested (non-empty stack)', () => {
     test('renders back arrow, not hamburger menu', () => {
       const stack = [makeEntry('hares', 'hares')];
-      const onBack = jest.fn();
-      const onNavigateToLevel = jest.fn();
-      const onShowDrawer = jest.fn();
+      const onBack = rs.fn();
+      const onNavigateToLevel = rs.fn();
+      const onShowDrawer = rs.fn();
 
       render(
         <BreadcrumbBar
@@ -114,9 +116,9 @@ describe('BreadcrumbBar', () => {
         <BreadcrumbBar
           modelStack={stack}
           modelName="hares"
-          onBack={jest.fn()}
-          onNavigateToLevel={jest.fn()}
-          onShowDrawer={jest.fn()}
+          onBack={rs.fn()}
+          onNavigateToLevel={rs.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -126,15 +128,15 @@ describe('BreadcrumbBar', () => {
 
     test('clicking back arrow calls onBack', () => {
       const stack = [makeEntry('hares', 'hares')];
-      const onBack = jest.fn();
+      const onBack = rs.fn();
 
       render(
         <BreadcrumbBar
           modelStack={stack}
           modelName="hares"
           onBack={onBack}
-          onNavigateToLevel={jest.fn()}
-          onShowDrawer={jest.fn()}
+          onNavigateToLevel={rs.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -144,14 +146,14 @@ describe('BreadcrumbBar', () => {
 
     test('clicking settings icon calls onShowDrawer', () => {
       const stack = [makeEntry('hares', 'hares')];
-      const onShowDrawer = jest.fn();
+      const onShowDrawer = rs.fn();
 
       render(
         <BreadcrumbBar
           modelStack={stack}
           modelName="hares"
-          onBack={jest.fn()}
-          onNavigateToLevel={jest.fn()}
+          onBack={rs.fn()}
+          onNavigateToLevel={rs.fn()}
           onShowDrawer={onShowDrawer}
         />,
       );
@@ -170,9 +172,9 @@ describe('BreadcrumbBar', () => {
         <BreadcrumbBar
           modelStack={stack}
           modelName="hares"
-          onBack={jest.fn()}
-          onNavigateToLevel={jest.fn()}
-          onShowDrawer={jest.fn()}
+          onBack={rs.fn()}
+          onNavigateToLevel={rs.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -187,9 +189,9 @@ describe('BreadcrumbBar', () => {
         <BreadcrumbBar
           modelStack={stack}
           modelName="sub_pop"
-          onBack={jest.fn()}
-          onNavigateToLevel={jest.fn()}
-          onShowDrawer={jest.fn()}
+          onBack={rs.fn()}
+          onNavigateToLevel={rs.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -210,9 +212,9 @@ describe('BreadcrumbBar', () => {
         <BreadcrumbBar
           modelStack={stack}
           modelName="sub_pop"
-          onBack={jest.fn()}
-          onNavigateToLevel={jest.fn()}
-          onShowDrawer={jest.fn()}
+          onBack={rs.fn()}
+          onNavigateToLevel={rs.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -229,9 +231,9 @@ describe('BreadcrumbBar', () => {
         <BreadcrumbBar
           modelStack={stack}
           modelName="hares"
-          onBack={jest.fn()}
-          onNavigateToLevel={jest.fn()}
-          onShowDrawer={jest.fn()}
+          onBack={rs.fn()}
+          onNavigateToLevel={rs.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -252,9 +254,9 @@ describe('BreadcrumbBar', () => {
         <BreadcrumbBar
           modelStack={stack}
           modelName="sub_pop"
-          onBack={jest.fn()}
-          onNavigateToLevel={jest.fn()}
-          onShowDrawer={jest.fn()}
+          onBack={rs.fn()}
+          onNavigateToLevel={rs.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -270,15 +272,15 @@ describe('BreadcrumbBar', () => {
   describe('breadcrumb click navigation', () => {
     test('clicking "main" segment calls onNavigateToLevel(0)', () => {
       const stack = [makeEntry('hares', 'hares'), makeEntry('sub_pop', 'sub_pop')];
-      const onNavigateToLevel = jest.fn();
+      const onNavigateToLevel = rs.fn();
 
       render(
         <BreadcrumbBar
           modelStack={stack}
           modelName="sub_pop"
-          onBack={jest.fn()}
+          onBack={rs.fn()}
           onNavigateToLevel={onNavigateToLevel}
-          onShowDrawer={jest.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -292,15 +294,15 @@ describe('BreadcrumbBar', () => {
         makeEntry('hares', 'hares'),
         makeEntry('sub_pop', 'sub_pop'),
       ];
-      const onNavigateToLevel = jest.fn();
+      const onNavigateToLevel = rs.fn();
 
       render(
         <BreadcrumbBar
           modelStack={stack}
           modelName="sub_pop"
-          onBack={jest.fn()}
+          onBack={rs.fn()}
           onNavigateToLevel={onNavigateToLevel}
-          onShowDrawer={jest.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -311,15 +313,15 @@ describe('BreadcrumbBar', () => {
 
     test('clicking current segment does not trigger navigation', () => {
       const stack = [makeEntry('hares', 'hares')];
-      const onNavigateToLevel = jest.fn();
+      const onNavigateToLevel = rs.fn();
 
       const { container } = render(
         <BreadcrumbBar
           modelStack={stack}
           modelName="hares"
-          onBack={jest.fn()}
+          onBack={rs.fn()}
           onNavigateToLevel={onNavigateToLevel}
-          onShowDrawer={jest.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -340,9 +342,9 @@ describe('BreadcrumbBar', () => {
         <BreadcrumbBar
           modelStack={stack}
           modelName="delay1"
-          onBack={jest.fn()}
-          onNavigateToLevel={jest.fn()}
-          onShowDrawer={jest.fn()}
+          onBack={rs.fn()}
+          onNavigateToLevel={rs.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -356,9 +358,9 @@ describe('BreadcrumbBar', () => {
         <BreadcrumbBar
           modelStack={stack}
           modelName="hares"
-          onBack={jest.fn()}
-          onNavigateToLevel={jest.fn()}
-          onShowDrawer={jest.fn()}
+          onBack={rs.fn()}
+          onNavigateToLevel={rs.fn()}
+          onShowDrawer={rs.fn()}
         />,
       );
 
@@ -373,9 +375,9 @@ describe('BreadcrumbBar', () => {
           <BreadcrumbBar
             modelStack={stack}
             modelName={stdlibModel}
-            onBack={jest.fn()}
-            onNavigateToLevel={jest.fn()}
-            onShowDrawer={jest.fn()}
+            onBack={rs.fn()}
+            onNavigateToLevel={rs.fn()}
+            onShowDrawer={rs.fn()}
           />,
         );
 
@@ -388,9 +390,9 @@ describe('BreadcrumbBar', () => {
   // AC5.1: identical UI at any depth
   describe('consistent UI at different depths', () => {
     test('has same structural elements at depth 1 and depth 3', () => {
-      const onBack = jest.fn();
-      const onNavigateToLevel = jest.fn();
-      const onShowDrawer = jest.fn();
+      const onBack = rs.fn();
+      const onNavigateToLevel = rs.fn();
+      const onShowDrawer = rs.fn();
 
       // Depth 1
       const stack1 = [makeEntry('hares', 'hares')];

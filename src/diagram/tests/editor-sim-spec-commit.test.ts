@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // The Editor wires the model-properties drawer's onSimSpecCommit to a single
 // engine patch per settled field edit (issue #55): before the fix each typed
@@ -18,8 +14,8 @@
 // stub, Canvas is stubbed out, and the controller is stubbed so a seeded
 // snapshot supplies the project without WASM.
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
+import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
+import type { MockInstance } from '@rstest/core';
 
 import * as React from 'react';
 import { act, render } from '@testing-library/react';
@@ -30,7 +26,7 @@ import { ProjectController, type ProjectSnapshot } from '../project-controller';
 type DrawerProps = React.ComponentProps<typeof ModelPropertiesDrawerType>;
 let capturedDrawerProps: DrawerProps | undefined;
 
-jest.mock('../ModelPropertiesDrawer', () => ({
+rs.mock('../ModelPropertiesDrawer', () => ({
   __esModule: true,
   ModelPropertiesDrawer: (p: DrawerProps) => {
     capturedDrawerProps = p;
@@ -38,7 +34,7 @@ jest.mock('../ModelPropertiesDrawer', () => ({
   },
 }));
 
-jest.mock('../drawing/Canvas', () => ({
+rs.mock('../drawing/Canvas', () => ({
   __esModule: true,
   Canvas: () => null,
   inCreationUid: -2,
@@ -92,20 +88,20 @@ function makeProps(overrides: Partial<EditorProps> = {}): EditorProps {
 }
 
 describe('Editor sim-spec commit wiring (issue #55)', () => {
-  let applyPatch: jest.SpyInstance;
+  let applyPatch: MockInstance;
 
   beforeEach(() => {
     capturedDrawerProps = undefined;
-    jest.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
-    jest.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
-    jest.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
-    applyPatch = jest.spyOn(ProjectController.prototype, 'applyPatch').mockResolvedValue(true);
+    rs.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
+    rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
+    rs.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
+    applyPatch = rs.spyOn(ProjectController.prototype, 'applyPatch').mockResolvedValue(true);
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    rs.restoreAllMocks();
   });
 
   function render_(): void {

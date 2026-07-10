@@ -6,6 +6,8 @@
 // function takes already-resolved canvas-space numbers, so the behavior of
 // pan/zoom/pinch/momentum is exercised here without the DOM.
 
+import { describe, it, expect } from '@rstest/core';
+
 import {
   MAX_ZOOM,
   MIN_ZOOM,

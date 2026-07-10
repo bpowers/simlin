@@ -1,10 +1,6 @@
-/**
- * @jest-environment node
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Regression tests for loadProject() error handling. The deferred load in
 // HostedWebEditor is fire-and-forget, so loadProject must never reject: a network
@@ -14,6 +10,8 @@
 // state, so these tests assert that result directly. The core calls the global
 // `fetch` (not an injected one -- native fetch throws "Illegal invocation" when
 // called as a method of any object but the global), so the tests stub it.
+
+import { describe, it, expect, afterEach } from '@rstest/core';
 
 import { fromUint8Array } from '@simlin/core/base64';
 

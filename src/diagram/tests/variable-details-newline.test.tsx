@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Cmd+Enter (macOS "Apple enter") and Ctrl+Enter must insert a line break in
 // the multi-line equation and documentation editors, matching the Shift+Enter
@@ -14,8 +10,8 @@
 // wiring: the chord routes through insertSoftBreak, while plain Enter does not
 // (Slate splits the block via insertBreak instead).
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
+import { describe, it, expect, beforeAll, beforeEach, afterEach, rs } from '@rstest/core';
+import type { MockInstance } from '@rstest/core';
 
 // jsdom does not implement isContentEditable, but slate-react's keyDown
 // pipeline gates on ReactEditor.hasEditableTarget -> element.isContentEditable
@@ -96,12 +92,12 @@ function focusEditor(container: HTMLElement, selector: string): Element {
 }
 
 describe('VariableDetails newline chord', () => {
-  let softBreak: jest.SpyInstance;
+  let softBreak: MockInstance;
 
   beforeEach(() => {
     // Spy (not mock-through) so no-op splitNodes-without-selection never runs;
     // we only care that the chord routed here.
-    softBreak = jest.spyOn(Slate.Editor, 'insertSoftBreak').mockImplementation(() => {});
+    softBreak = rs.spyOn(Slate.Editor, 'insertSoftBreak').mockImplementation(() => {});
   });
 
   afterEach(() => {

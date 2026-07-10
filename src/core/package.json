@@ -54,15 +54,14 @@
     "@simlin/engine": "workspace:^"
   },
   "devDependencies": {
-    "@types/jest": "^30.0.0",
-    "@typescript-eslint/eslint-plugin": "^8.54.0",
-    "@typescript-eslint/parser": "^8.54.0",
+    "@rstest/core": "^0.11.0",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
+    "@typescript-eslint/parser": "^8.63.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "eslint": "^9.39.2",
     "eslint-config-prettier": "^10.1.8",
-    "jest": "^30.2.0",
     "prettier": "^3.8.1",
-    "ts-jest": "^29.4.6",
-    "typescript": "^5.9.3"
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
   },
   "scripts": {
     "needs-format": "prettier -l '*.ts'",
@@ -71,7 +70,7 @@
     "prepublishOnly": "pnpm build",
     "clean": "rm -rf ./lib ./lib.module",
     "build": "tsc && tsc -p tsconfig.browser.json",
-    "test": "jest",
-    "test:watch": "jest --watch"
+    "test": "rstest run",
+    "test:watch": "rstest watch"
   }
 }

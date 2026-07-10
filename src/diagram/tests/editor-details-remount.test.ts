@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Regression test for the details-panel remount key.
 //
@@ -26,8 +22,7 @@
 // a stub VariableDetails records each mount; a generation bump remounts it, a
 // version-only bump does not.
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
+import { describe, it, expect, beforeEach, afterEach, rs } from '@rstest/core';
 
 import * as React from 'react';
 import { act, render } from '@testing-library/react';
@@ -55,7 +50,7 @@ const projectJson = JSON.stringify({
 // (generation bump) unmounts the old instance and mounts a new one, so the
 // mount count distinguishes a remount from an in-place prop update.
 let variableDetailsMounts = 0;
-jest.mock('../VariableDetails', () => ({
+rs.mock('../VariableDetails', () => ({
   __esModule: true,
   VariableDetails: () => {
     React.useEffect(() => {
@@ -73,7 +68,7 @@ interface CapturedCanvasProps {
   onShowVariableDetails: () => void;
 }
 let capturedCanvasProps: CapturedCanvasProps | undefined;
-jest.mock('../drawing/Canvas', () => ({
+rs.mock('../drawing/Canvas', () => ({
   __esModule: true,
   Canvas: (p: CapturedCanvasProps) => {
     capturedCanvasProps = p;
@@ -120,20 +115,20 @@ describe('Editor details-panel remount on projectGeneration change', () => {
     capturedCanvasProps = undefined;
     listener = undefined;
     snapshot = makeSnapshot(0, 1);
-    jest.spyOn(ProjectController.prototype, 'getSnapshot').mockImplementation(() => snapshot);
-    jest.spyOn(ProjectController.prototype, 'subscribe').mockImplementation((l: () => void) => {
+    rs.spyOn(ProjectController.prototype, 'getSnapshot').mockImplementation(() => snapshot);
+    rs.spyOn(ProjectController.prototype, 'subscribe').mockImplementation((l: () => void) => {
       listener = l;
       return () => {
         listener = undefined;
       };
     });
-    jest.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    jest.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
+    rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    rs.restoreAllMocks();
   });
 
   // Publish a new snapshot through the controller subscription, the way the real

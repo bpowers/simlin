@@ -15,6 +15,9 @@
  * Worker is required.
  */
 
+import { describe, it, expect, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
+
 import {
   ENGINE_PUBLIC_PATH_GLOBAL,
   isCrossOrigin,
@@ -182,18 +185,20 @@ describe('spawnWithTrampoline', () => {
   }
 
   interface FakeUrlFactory {
-    createObjectURL: jest.Mock<string, [Blob]>;
-    revokeObjectURL: jest.Mock<void, [string]>;
+    // jest.Mock's first type argument was the return type; rstest's Mock takes
+    // the whole function signature.
+    createObjectURL: Mock<(blob: Blob) => string>;
+    revokeObjectURL: Mock<(url: string) => void>;
     lastBlob: () => Blob;
   }
 
   function makeUrlFactory(): FakeUrlFactory {
     let blob: Blob | null = null;
-    const createObjectURL = jest.fn((b: Blob) => {
+    const createObjectURL = rs.fn((b: Blob) => {
       blob = b;
       return 'blob:https://example.com/fake-uuid';
     });
-    const revokeObjectURL = jest.fn();
+    const revokeObjectURL = rs.fn();
     return {
       createObjectURL,
       revokeObjectURL,

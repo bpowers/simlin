@@ -2,9 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-/**
- * @jest-environment node
- */
+import { describe, it, expect } from '@rstest/core';
 
 import type { ModuleReference, Module, Aux } from '@simlin/core/datamodel';
 

@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Issue #820: a failed flow-attach patch must not silently discard the drawn
 // flow. handleFlowAttach used to early-return when the model-level patch failed,
@@ -22,8 +18,7 @@
 // is mocked to a null renderer that captures the props (notably onMoveFlow =
 // handleFlowAttach) so the flow-attach can be invoked directly.
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
+import { describe, it, expect, afterEach, rs } from '@rstest/core';
 
 import * as React from 'react';
 import { act, render, screen } from '@testing-library/react';
@@ -37,7 +32,7 @@ import { makeFakeEngine, validProjectJson } from './fake-engine';
 // Capture the props the Editor hands to Canvas so a test can invoke onMoveFlow
 // (handleFlowAttach) directly and read back the committed view/selection.
 let capturedCanvasProps: Record<string, unknown> | undefined;
-jest.mock('../drawing/Canvas', () => ({
+rs.mock('../drawing/Canvas', () => ({
   __esModule: true,
   Canvas: (props: Record<string, unknown>) => {
     capturedCanvasProps = props;
@@ -91,7 +86,7 @@ function inCreationFlow(): FlowViewElement {
 
 describe('Editor flow-attach patch failure (issue #820)', () => {
   afterEach(() => {
-    jest.restoreAllMocks();
+    rs.restoreAllMocks();
     capturedCanvasProps = undefined;
   });
 
@@ -99,7 +94,7 @@ describe('Editor flow-attach patch failure (issue #820)', () => {
     // A fake engine that rejects every applyPatch models the corrupt-project
     // failure mode the issue was observed against.
     const engine = makeFakeEngine({ applyPatchThrows: true, json: validProjectJson() });
-    jest.spyOn(EngineProject, 'openJson').mockResolvedValue(engine as unknown as EngineProject);
+    rs.spyOn(EngineProject, 'openJson').mockResolvedValue(engine as unknown as EngineProject);
 
     act(() => {
       render(React.createElement(Editor, makeProps()));

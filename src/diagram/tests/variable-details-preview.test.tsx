@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Regression tests for the equation preview in VariableDetails:
 //
@@ -17,8 +13,7 @@
 //    equation errors hide the chart).
 //  - Equation errors DO force the editor (so the highlight is visible).
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
+import { describe, it, expect } from '@rstest/core';
 
 import * as React from 'react';
 import { render, act } from '@testing-library/react';

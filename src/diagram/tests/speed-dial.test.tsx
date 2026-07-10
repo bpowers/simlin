@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent, screen, act } from '@testing-library/react';
 import SpeedDial, { SpeedDialAction, SpeedDialIcon, CloseReason } from '../components/SpeedDial';
@@ -89,7 +91,7 @@ describe('SpeedDial', () => {
   });
 
   test('calls onClick when FAB is clicked', () => {
-    const onClick = jest.fn();
+    const onClick = rs.fn();
     render(<SpeedDial ariaLabel="Test SpeedDial" open={false} onClick={onClick} icon={<span>+</span>} />);
 
     const fab = screen.getByRole('button', { name: 'Test SpeedDial' });
@@ -188,7 +190,7 @@ describe('SpeedDialAction', () => {
   });
 
   test('calls onClick when action button is clicked', () => {
-    const onClick = jest.fn();
+    const onClick = rs.fn();
     render(
       <SpeedDial ariaLabel="Test" open={true} icon={<span>+</span>}>
         <SpeedDialAction icon={<span>A</span>} title="Action A" onClick={onClick} />
@@ -202,7 +204,7 @@ describe('SpeedDialAction', () => {
   });
 
   test('action click does not trigger onClose', () => {
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <SpeedDial ariaLabel="Test" open={true} onClose={onClose} icon={<span>+</span>}>
         <SpeedDialAction icon={<span>A</span>} title="Action A" />

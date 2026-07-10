@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // EditableLabel key handling: plain Enter commits (and its keyDown is
 // prevented so Slate never inserts a line break for it), shift+Enter is the
@@ -12,6 +8,9 @@
 // chord), Escape cancels. This pins the standard-editor convention adopted
 // after the audit found the inverted mapping (commit only on modifier+Enter)
 // left every "type name, press Enter" edit staging a trailing newline.
+
+import { describe, it, expect, beforeAll, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
 
 import * as React from 'react';
 import { render, fireEvent } from '@testing-library/react';
@@ -34,9 +33,9 @@ beforeAll(() => {
 import { EditableLabel } from '../drawing/EditableLabel';
 import { plainDeserialize } from '../drawing/common';
 
-function renderLabel(): { editable: Element; onDone: jest.Mock; onChange: jest.Mock } {
-  const onDone = jest.fn();
-  const onChange = jest.fn();
+function renderLabel(): { editable: Element; onDone: Mock; onChange: Mock } {
+  const onDone = rs.fn();
+  const onChange = rs.fn();
   const value = plainDeserialize('label', 'some name');
   const { container } = render(
     <EditableLabel

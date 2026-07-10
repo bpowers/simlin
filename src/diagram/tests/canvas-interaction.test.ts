@@ -7,6 +7,8 @@
 // transitions and the pure geometry helpers the shell composes, asserting both
 // resulting state and emitted effects.
 
+import { describe, it, expect } from '@rstest/core';
+
 import {
   AuxViewElement,
   CloudViewElement,

@@ -20,8 +20,6 @@ if (!checkRequiredFiles([paths.appHtml, paths.appIndexJs])) {
   process.exit(1);
 }
 
-const DEFAULT_PORT = parseInt(process.env.PORT, 10) || 3000;
-
 async function startDevServer() {
   console.log(pc.cyan('Starting the development server...\n'));
 
@@ -38,9 +36,9 @@ async function startDevServer() {
   }
 
   try {
-    const { server } = await rsbuild.startDevServer({
-      port: DEFAULT_PORT,
-    });
+    // The port comes from server.port in the Rsbuild config (which honors PORT);
+    // startDevServer takes no port option.
+    const { server } = await rsbuild.startDevServer();
 
     ['SIGINT', 'SIGTERM'].forEach(function (sig) {
       process.on(sig, async function () {

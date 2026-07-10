@@ -1,10 +1,6 @@
-/**
- * @jest-environment node
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // deleteProject() issues DELETE /api/projects/:user/:name and, on success,
 // returns the home URL the caller should navigate to. On any non-2xx/3xx
@@ -15,6 +11,9 @@
 // The HostedWebEditor shell's only added behavior is calling window.location.assign
 // with the returned URL.
 
+import { describe, test, expect, afterEach, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
+
 import { deleteProject, ProjectEndpoint } from '../hosted-web-editor-core';
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -22,8 +21,8 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 const originalFetch = globalThis.fetch;
-function installFetch(impl: (input: string, init?: RequestInit) => Promise<Response>): jest.Mock {
-  const mock = jest.fn(impl);
+function installFetch(impl: (input: string, init?: RequestInit) => Promise<Response>): Mock {
+  const mock = rs.fn(impl);
   (globalThis as unknown as { fetch: typeof fetch }).fetch = mock as unknown as typeof fetch;
   return mock;
 }

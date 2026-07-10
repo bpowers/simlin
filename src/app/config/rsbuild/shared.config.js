@@ -82,7 +82,10 @@ const sharedConfig = defineConfig({
     },
   },
   server: {
-    port: 3000,
+    // `startDevServer()` has never accepted a `port` option (checked against
+    // both @rsbuild/core 1.x and 2.x type definitions), so passing one there was
+    // silently dropped and PORT was ignored. Read it here, where Rsbuild looks.
+    port: parseInt(process.env.PORT, 10) || 3000,
     publicDir: {
       name: resolveApp('../../public'),
       watch: true,
@@ -93,7 +96,12 @@ const sharedConfig = defineConfig({
     },
     proxy: [
       {
-        context: (pathname) => {
+        // Rsbuild 2 bundles http-proxy-middleware 4, which renamed `context` to
+        // `pathFilter` and dropped `logLevel`. Neither old key errors -- they are
+        // silently ignored -- and an array-style proxy entry with no pathFilter
+        // matches every request, so leaving `context` here would quietly send the
+        // whole SPA to the backend.
+        pathFilter: (pathname) => {
           // Only proxy specific API endpoints to backend
           // API endpoints that should be proxied
           if (pathname.startsWith('/api/') ||
@@ -109,8 +117,8 @@ const sharedConfig = defineConfig({
           return false;
         },
         target: 'http://localhost:3030',
+        // Default is now true in http-proxy-middleware 4; kept explicit.
         changeOrigin: true,
-        logLevel: 'debug',
       },
     ],
     historyApiFallback: true,

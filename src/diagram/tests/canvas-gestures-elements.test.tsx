@@ -1,16 +1,15 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Reconciler-level gesture tests for element-edge interactions of the React
 // `Canvas` (Piece 1a; see
 // docs/design-plans/2026-06-07-canvas-interaction-migration.md): flow-segment
 // drag, label drag, link/flow endpoint drag, creation tools, and name editing.
 // Assertions are on prop-callback payloads and rendered DOM only.
+
+import { describe, it, expect, rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
 
 import { fireEvent, act } from '@testing-library/react';
 
@@ -30,7 +29,7 @@ import {
 } from './canvas-gesture-harness';
 import { CloudRadius, StockWidth } from '../drawing/default';
 
-function lastSelection(fn: jest.Mock): number[] {
+function lastSelection(fn: Mock): number[] {
   const calls = fn.mock.calls;
   const last = calls[calls.length - 1];
   return last ? [...(last[0] as Set<number>)].sort((a, b) => a - b) : [];
@@ -823,7 +822,7 @@ describe('Canvas gestures: double-click name-edit reliability', () => {
     // Spy on the text node's setPointerCapture (the harness polyfills it as a
     // no-op on Element.prototype); the component captures on `e.currentTarget`,
     // which is this <text> node.
-    const captureSpy = jest.spyOn(text, 'setPointerCapture');
+    const captureSpy = rs.spyOn(text, 'setPointerCapture');
 
     // Capture must happen at press time, not once the drag starts: a short
     // label's tiny hit box means an edge grip can leave the bbox while still

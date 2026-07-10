@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, act } from '@testing-library/react';
 import Snackbar, { SnackbarContent } from '../components/Snackbar';
@@ -37,17 +39,17 @@ const ControlledSnackbar = React.forwardRef<ControlledSnackbarHandle, { autoHide
 
 describe('Snackbar', () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    rs.useFakeTimers();
   });
 
   afterEach(() => {
-    jest.useRealTimers();
+    rs.useRealTimers();
   });
 
   test('renders children when open', () => {
     render(
       <Snackbar open={true}>
-        <Toast message="Test message" onClose={jest.fn()} variant="info" />
+        <Toast message="Test message" onClose={rs.fn()} variant="info" />
       </Snackbar>,
     );
 
@@ -59,7 +61,7 @@ describe('Snackbar', () => {
   test('does not render children when closed', () => {
     render(
       <Snackbar open={false}>
-        <Toast message="Test message" onClose={jest.fn()} variant="info" />
+        <Toast message="Test message" onClose={rs.fn()} variant="info" />
       </Snackbar>,
     );
 
@@ -68,7 +70,7 @@ describe('Snackbar', () => {
   });
 
   test('auto-hides when duration is provided', () => {
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <Snackbar open={true} autoHideDuration={3000}>
         <Toast message="Test message" onClose={onClose} variant="info" />
@@ -78,7 +80,7 @@ describe('Snackbar', () => {
     expect(onClose).not.toHaveBeenCalled();
 
     act(() => {
-      jest.advanceTimersByTime(3000);
+      rs.advanceTimersByTime(3000);
     });
 
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -95,7 +97,7 @@ describe('Snackbar', () => {
     });
 
     act(() => {
-      jest.advanceTimersByTime(3000);
+      rs.advanceTimersByTime(3000);
     });
 
     expect(ref.current!.state.closeCount).toBe(1);
@@ -111,7 +113,7 @@ describe('Snackbar', () => {
     });
 
     act(() => {
-      jest.advanceTimersByTime(2000);
+      rs.advanceTimersByTime(2000);
     });
 
     act(() => {
@@ -119,7 +121,7 @@ describe('Snackbar', () => {
     });
 
     act(() => {
-      jest.advanceTimersByTime(5000);
+      rs.advanceTimersByTime(5000);
     });
 
     expect(ref.current!.state.closeCount).toBe(0);
@@ -135,7 +137,7 @@ describe('Snackbar', () => {
     });
 
     act(() => {
-      jest.advanceTimersByTime(500);
+      rs.advanceTimersByTime(500);
     });
 
     act(() => {
@@ -147,7 +149,7 @@ describe('Snackbar', () => {
     });
 
     act(() => {
-      jest.advanceTimersByTime(500);
+      rs.advanceTimersByTime(500);
     });
 
     act(() => {
@@ -159,7 +161,7 @@ describe('Snackbar', () => {
     });
 
     act(() => {
-      jest.advanceTimersByTime(3000);
+      rs.advanceTimersByTime(3000);
     });
 
     expect(ref.current!.state.closeCount).toBe(1);
@@ -204,7 +206,7 @@ describe('Snackbar', () => {
     render(<ReRenderWrapper ref={ref} />);
 
     act(() => {
-      jest.advanceTimersByTime(1000);
+      rs.advanceTimersByTime(1000);
     });
 
     act(() => {
@@ -212,7 +214,7 @@ describe('Snackbar', () => {
     });
 
     act(() => {
-      jest.advanceTimersByTime(1000);
+      rs.advanceTimersByTime(1000);
     });
 
     act(() => {
@@ -220,7 +222,7 @@ describe('Snackbar', () => {
     });
 
     act(() => {
-      jest.advanceTimersByTime(1000);
+      rs.advanceTimersByTime(1000);
     });
 
     expect(ref.current!.state.closeCount).toBe(1);
@@ -261,7 +263,7 @@ describe('Snackbar', () => {
     render(<DurationWrapper ref={ref} />);
 
     act(() => {
-      jest.advanceTimersByTime(1000);
+      rs.advanceTimersByTime(1000);
     });
 
     act(() => {
@@ -269,13 +271,13 @@ describe('Snackbar', () => {
     });
 
     act(() => {
-      jest.advanceTimersByTime(900);
+      rs.advanceTimersByTime(900);
     });
 
     expect(ref.current!.state.closeCount).toBe(0);
 
     act(() => {
-      jest.advanceTimersByTime(200);
+      rs.advanceTimersByTime(200);
     });
 
     expect(ref.current!.state.closeCount).toBe(1);
@@ -316,7 +318,7 @@ describe('Snackbar', () => {
     render(<MessageWrapper ref={ref} />);
 
     act(() => {
-      jest.advanceTimersByTime(1000);
+      rs.advanceTimersByTime(1000);
     });
 
     act(() => {
@@ -324,14 +326,14 @@ describe('Snackbar', () => {
     });
 
     act(() => {
-      jest.advanceTimersByTime(2000);
+      rs.advanceTimersByTime(2000);
     });
 
     expect(ref.current!.state.closeCount).toBe(1);
   });
 
   test('does not auto-hide when duration is omitted', () => {
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <Snackbar open={true}>
         <Toast message="Test message" onClose={onClose} variant="info" />
@@ -339,7 +341,7 @@ describe('Snackbar', () => {
     );
 
     act(() => {
-      jest.advanceTimersByTime(10000);
+      rs.advanceTimersByTime(10000);
     });
 
     expect(onClose).not.toHaveBeenCalled();
@@ -356,7 +358,7 @@ describe('Snackbar', () => {
     expect(initialContent).not.toBeNull();
 
     act(() => {
-      jest.advanceTimersByTime(5000);
+      rs.advanceTimersByTime(5000);
     });
 
     const content = document.querySelector('[id="client-snackbar"]');
@@ -364,7 +366,7 @@ describe('Snackbar', () => {
   });
 
   test('onClose reports the toast id, not the message, when an id is provided', () => {
-    const onClose = jest.fn();
+    const onClose = rs.fn();
     render(
       <Snackbar open={true} autoHideDuration={3000}>
         <Toast message="duplicate" id={42} onClose={onClose} variant="warning" />
@@ -372,7 +374,7 @@ describe('Snackbar', () => {
     );
 
     act(() => {
-      jest.advanceTimersByTime(3000);
+      rs.advanceTimersByTime(3000);
     });
 
     expect(onClose).toHaveBeenCalledTimes(1);

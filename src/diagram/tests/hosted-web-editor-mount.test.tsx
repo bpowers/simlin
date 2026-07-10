@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // HostedWebEditor defers the GET /api/projects/:user/:name that hydrates the
 // editor into a mount useEffect (not render), so the first paint is the empty
@@ -14,8 +10,7 @@
 // booting the heavyweight Editor, and assert the fetch is issued exactly once and
 // the post-unmount guard holds.
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
+import { describe, it, expect, afterEach, rs } from '@rstest/core';
 
 import * as React from 'react';
 import { render, screen, act } from '@testing-library/react';
@@ -56,7 +51,7 @@ describe('HostedWebEditor mount load', () => {
 
   it('issues the project GET exactly once on mount and renders the placeholder until it resolves', async () => {
     const deferred = createDeferred<Response>();
-    const fetchMock = jest.fn(() => deferred.promise);
+    const fetchMock = rs.fn(() => deferred.promise);
     (globalThis as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const { container } = render(<HostedWebEditor username="alice" projectName="climate" baseURL="" />);
@@ -86,7 +81,7 @@ describe('HostedWebEditor mount load', () => {
     // the throwaway first mount must not setState. A constructor-scheduled (or
     // otherwise un-guarded) load would fire twice here.
     const deferred = createDeferred<Response>();
-    const fetchMock = jest.fn(() => deferred.promise);
+    const fetchMock = rs.fn(() => deferred.promise);
     (globalThis as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const { container } = render(
@@ -114,7 +109,7 @@ describe('HostedWebEditor mount load', () => {
 
   it('does not throw when the load resolves after unmount', async () => {
     const deferred = createDeferred<Response>();
-    const fetchMock = jest.fn(() => deferred.promise);
+    const fetchMock = rs.fn(() => deferred.promise);
     (globalThis as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const { unmount } = render(<HostedWebEditor username="alice" projectName="climate" baseURL="" />);
@@ -138,7 +133,7 @@ describe('HostedWebEditor mount load', () => {
     // sd-model host element; a position:fixed `.center` would cover the whole
     // host page while a slow/failed embed loads.
     const deferred = createDeferred<Response>();
-    const fetchMock = jest.fn(() => deferred.promise);
+    const fetchMock = rs.fn(() => deferred.promise);
     (globalThis as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const { container } = render(<HostedWebEditor username="alice" projectName="climate" baseURL="" embedded={true} />);

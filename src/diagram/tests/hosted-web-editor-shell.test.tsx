@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Shell-glue tests for HostedWebEditor: the wiring between the functional core
 // (hosted-web-editor-core.ts, tested directly elsewhere) and React state /
@@ -20,8 +16,8 @@
 // HostedWebEditor hands it, so the test can invoke onSave / onDeleteProject /
 // readOnlyMode directly without booting the real editor (WASM/engine).
 
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
+import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
+import type { MockInstance } from '@rstest/core';
 
 import * as React from 'react';
 import { render, act } from '@testing-library/react';
@@ -40,7 +36,7 @@ interface CapturedEditorProps {
 
 let captured: CapturedEditorProps | undefined;
 
-jest.mock('../Editor', () => ({
+rs.mock('../Editor', () => ({
   __esModule: true,
   // Minimal stub: record the props and render a marker so the loaded branch is
   // distinguishable from the placeholder.
@@ -50,7 +46,7 @@ jest.mock('../Editor', () => ({
   },
 }));
 
-// jest.mock is hoisted above the imports, so HostedWebEditor binds to the stub
+// rs.mock is hoisted above the imports, so HostedWebEditor binds to the stub
 // Editor when it is imported here.
 import { HostedWebEditor } from '../HostedWebEditor';
 
@@ -76,7 +72,7 @@ async function renderLoaded(
   props: { readOnlyMode?: boolean } = {},
 ): Promise<void> {
   captured = undefined;
-  (globalThis as unknown as { fetch: typeof fetch }).fetch = jest.fn(fetchImpl) as unknown as typeof fetch;
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = rs.fn(fetchImpl) as unknown as typeof fetch;
   await act(async () => {
     render(<HostedWebEditor username="alice" projectName="climate" baseURL="" readOnlyMode={props.readOnlyMode} />);
   });
@@ -85,19 +81,19 @@ async function renderLoaded(
 
 describe('HostedWebEditor shell glue', () => {
   const originalFetch = globalThis.fetch;
-  let redirectSpy: jest.SpyInstance;
+  let redirectSpy: MockInstance;
 
   beforeEach(() => {
     // jsdom's window.location.assign is non-configurable and cannot be spied
     // directly, so the shell routes the post-delete navigation through the core's
     // redirectToHome export, which we intercept here to observe the call without a
     // real page transition.
-    redirectSpy = jest.spyOn(core, 'redirectToHome').mockImplementation(() => {});
+    redirectSpy = rs.spyOn(core, 'redirectToHome').mockImplementation(() => {});
   });
 
   afterEach(() => {
     (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
-    jest.restoreAllMocks();
+    rs.restoreAllMocks();
   });
 
   test('mounts the Editor with the loaded project version once the load resolves', async () => {
@@ -109,7 +105,7 @@ describe('HostedWebEditor shell glue', () => {
 
   describe('handleSave', () => {
     test('POSTs and returns the new version, committing it to state', async () => {
-      const fetchMock = jest.fn(async (_input: string, init?: RequestInit) => {
+      const fetchMock = rs.fn(async (_input: string, init?: RequestInit) => {
         if (init?.method === 'POST') {
           return { status: 200, json: async () => ({ version: 8 }) } as unknown as Response;
         }
@@ -130,7 +126,7 @@ describe('HostedWebEditor shell glue', () => {
     });
 
     test('is a no-op (no POST, returns undefined) in read-only mode', async () => {
-      const fetchMock = jest.fn(async () => loadedResponse(5));
+      const fetchMock = rs.fn(async () => loadedResponse(5));
       await renderLoaded(fetchMock, { readOnlyMode: true });
 
       let returned: number | undefined = 1;
@@ -146,7 +142,7 @@ describe('HostedWebEditor shell glue', () => {
 
   describe('handleDelete', () => {
     test('DELETEs and navigates to the project list on success', async () => {
-      const fetchMock = jest.fn(async (_input: string, init?: RequestInit) => {
+      const fetchMock = rs.fn(async (_input: string, init?: RequestInit) => {
         if (init?.method === 'DELETE') {
           return { status: 200, json: async () => ({}) } as unknown as Response;
         }

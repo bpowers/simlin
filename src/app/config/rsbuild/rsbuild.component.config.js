@@ -54,12 +54,11 @@ module.exports = mergeRsbuildConfig(
       // Web component doesn't need HTML output
       template: undefined,
     },
-    performance: {
-      // Force single chunk for web component
-      chunkSplit: {
-        strategy: 'all-in-one',
-      },
-    },
+    // Force a single chunk for the web component. Rsbuild 2 deprecated
+    // performance.chunkSplit; `splitChunks: false` replaces `strategy: 'all-in-one'`.
+    // This only disables the SplitChunksPlugin -- async chunks from dynamic
+    // import() still need LimitChunkCountPlugin below.
+    splitChunks: false,
     tools: {
       rspack: (config, { mergeConfig }) => {
         return mergeConfig(config, {

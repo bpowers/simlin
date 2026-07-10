@@ -31,6 +31,9 @@
  * moveDelta = A - B (see Canvas.handleSelectionMove).
  */
 
+import { rs } from '@rstest/core';
+import type { Mock } from '@rstest/core';
+
 import * as React from 'react';
 import { act, fireEvent, render, RenderResult } from '@testing-library/react';
 
@@ -373,37 +376,37 @@ function makeProject(model: Model): Project {
   };
 }
 
-// Every Canvas prop callback as a jest.fn, so tests assert on exactly which
+// Every Canvas prop callback as an rs.fn, so tests assert on exactly which
 // fired and with what payload.
 export interface CanvasCallbacks {
-  onRenameVariable: jest.Mock;
-  onSetSelection: jest.Mock;
-  onMoveSelection: jest.Mock;
-  onMoveFlow: jest.Mock;
-  onMoveLabel: jest.Mock;
-  onAttachLink: jest.Mock;
-  onCreateVariable: jest.Mock;
-  onClearSelectedTool: jest.Mock;
-  onDeleteSelection: jest.Mock;
-  onShowVariableDetails: jest.Mock;
-  onViewBoxChange: jest.Mock;
-  onDrillIntoModule: jest.Mock;
+  onRenameVariable: Mock;
+  onSetSelection: Mock;
+  onMoveSelection: Mock;
+  onMoveFlow: Mock;
+  onMoveLabel: Mock;
+  onAttachLink: Mock;
+  onCreateVariable: Mock;
+  onClearSelectedTool: Mock;
+  onDeleteSelection: Mock;
+  onShowVariableDetails: Mock;
+  onViewBoxChange: Mock;
+  onDrillIntoModule: Mock;
 }
 
 function makeCallbacks(): CanvasCallbacks {
   return {
-    onRenameVariable: jest.fn(),
-    onSetSelection: jest.fn(),
-    onMoveSelection: jest.fn(),
-    onMoveFlow: jest.fn(),
-    onMoveLabel: jest.fn(),
-    onAttachLink: jest.fn(),
-    onCreateVariable: jest.fn(),
-    onClearSelectedTool: jest.fn(),
-    onDeleteSelection: jest.fn(),
-    onShowVariableDetails: jest.fn(),
-    onViewBoxChange: jest.fn(),
-    onDrillIntoModule: jest.fn(),
+    onRenameVariable: rs.fn(),
+    onSetSelection: rs.fn(),
+    onMoveSelection: rs.fn(),
+    onMoveFlow: rs.fn(),
+    onMoveLabel: rs.fn(),
+    onAttachLink: rs.fn(),
+    onCreateVariable: rs.fn(),
+    onClearSelectedTool: rs.fn(),
+    onDeleteSelection: rs.fn(),
+    onShowVariableDetails: rs.fn(),
+    onViewBoxChange: rs.fn(),
+    onDrillIntoModule: rs.fn(),
   };
 }
 
@@ -492,7 +495,7 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
 
   const autoCommit = opts.autoCommitSelection ?? true;
   if (autoCommit) {
-    // The jest.fn still records every call for assertions; its implementation
+    // The rs.fn still records every call for assertions; its implementation
     // commits the selection and re-renders, mirroring the real host. The commit
     // runs inside the same React batch as the Canvas's own setState (we are
     // already inside the event's act()), so the resulting render sees both.

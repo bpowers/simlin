@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent, screen } from '@testing-library/react';
 import Checkbox from '../components/Checkbox';
@@ -13,7 +15,7 @@ describe('Checkbox', () => {
   });
 
   test('calls onChange when clicked', () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     render(<Checkbox onChange={onChange} />);
     fireEvent.click(screen.getByRole('checkbox'));
     expect(onChange).toHaveBeenCalledTimes(1);
@@ -21,7 +23,7 @@ describe('Checkbox', () => {
   });
 
   test('toggles checked state', () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     render(<Checkbox checked={true} onChange={onChange} />);
     fireEvent.click(screen.getByRole('checkbox'));
     expect(onChange).toHaveBeenCalledWith(false);
@@ -40,7 +42,7 @@ describe('Checkbox', () => {
   });
 
   test('respects disabled prop', () => {
-    const onChange = jest.fn();
+    const onChange = rs.fn();
     render(<Checkbox disabled onChange={onChange} />);
     const checkbox = screen.getByRole('checkbox');
     expect(checkbox).toHaveProperty('disabled', true);

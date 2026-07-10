@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, it, expect, beforeAll } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

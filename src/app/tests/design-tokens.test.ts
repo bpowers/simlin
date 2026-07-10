@@ -8,6 +8,8 @@
 // so the spacer can't drift from the dense Toolbar height and caption text
 // scales with the rem type scale.
 
+import { describe, it, expect } from '@rstest/core';
+
 import * as fs from 'fs';
 import * as path from 'path';
 

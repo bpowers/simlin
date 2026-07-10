@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, beforeEach, afterEach, rs } from '@rstest/core';
+
 import {
   createProject,
   encodeProjectPath,
@@ -47,7 +49,7 @@ describe('encodeProjectPath', () => {
 
 describe('fetchProjects', () => {
   test('hits /api/projects without an Authorization header', async () => {
-    const fetchMock = jest.fn().mockResolvedValue(
+    const fetchMock = rs.fn().mockResolvedValue(
       jsonResponse({
         projects: [],
         git_available: true,
@@ -67,7 +69,7 @@ describe('fetchProjects', () => {
 
 describe('fetchProject', () => {
   test('hits the encoded path without an Authorization header', async () => {
-    const fetchMock = jest.fn().mockResolvedValue(
+    const fetchMock = rs.fn().mockResolvedValue(
       jsonResponse({
         json: '{}',
         version: 0,
@@ -87,7 +89,7 @@ describe('fetchProject', () => {
 
 describe('saveProject', () => {
   test('POSTs JSON body and returns the new version + path on 200', async () => {
-    const fetchMock = jest.fn().mockResolvedValue(
+    const fetchMock = rs.fn().mockResolvedValue(
       jsonResponse({
         version: 3,
         path: 'teacup.stmx',
@@ -111,7 +113,7 @@ describe('saveProject', () => {
   });
 
   test('encodes the path before POSTing', async () => {
-    const fetchMock = jest.fn().mockResolvedValue(
+    const fetchMock = rs.fn().mockResolvedValue(
       jsonResponse({
         version: 1,
         path: 'sub dir/has space.xmile',
@@ -126,7 +128,7 @@ describe('saveProject', () => {
   });
 
   test('throws VersionConflictError on 409 carrying the actual version', async () => {
-    globalThis.fetch = jest.fn().mockResolvedValue(
+    globalThis.fetch = rs.fn().mockResolvedValue(
       jsonResponse(
         {
           error: 'version_mismatch',
@@ -148,7 +150,7 @@ describe('saveProject', () => {
   });
 
   test('throws ValidationError on 422 carrying the error list', async () => {
-    globalThis.fetch = jest.fn().mockResolvedValue(
+    globalThis.fetch = rs.fn().mockResolvedValue(
       jsonResponse(
         {
           error: 'validation_failed',
@@ -184,7 +186,7 @@ describe('saveProject', () => {
   });
 
   test('throws a generic Error on other non-OK statuses', async () => {
-    globalThis.fetch = jest
+    globalThis.fetch = rs
       .fn()
       .mockResolvedValue(jsonResponse({ error: 'forbidden' }, 403)) as unknown as typeof globalThis.fetch;
 
@@ -194,7 +196,7 @@ describe('saveProject', () => {
 
 describe('createProject', () => {
   test('POSTs JSON body with name+format and returns the response', async () => {
-    const fetchMock = jest.fn().mockResolvedValue(jsonResponse({ path: 'foo.stmx', version: 0 }));
+    const fetchMock = rs.fn().mockResolvedValue(jsonResponse({ path: 'foo.stmx', version: 0 }));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     const result = await createProject('foo', 'stmx');
@@ -210,7 +212,7 @@ describe('createProject', () => {
   });
 
   test('forwards the optional parent_dir to the server', async () => {
-    const fetchMock = jest.fn().mockResolvedValue(jsonResponse({ path: 'sub/foo.stmx', version: 0 }));
+    const fetchMock = rs.fn().mockResolvedValue(jsonResponse({ path: 'sub/foo.stmx', version: 0 }));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     await createProject('foo', 'stmx', 'sub');
@@ -223,7 +225,7 @@ describe('createProject', () => {
   });
 
   test('throws an Error carrying the server message on non-OK responses', async () => {
-    globalThis.fetch = jest
+    globalThis.fetch = rs
       .fn()
       .mockResolvedValue(jsonResponse({ error: 'already_exists' }, 409)) as unknown as typeof globalThis.fetch;
 

@@ -7,6 +7,8 @@
 // adaptive warmup/measure policy. Both `body` and `now` are injected, so these
 // tests are deterministic and never touch the wall clock or any model/WASM.
 
+import { describe, it, expect } from '@rstest/core';
+
 import { median, runTimed, runTimedAsync, seriesClose, type BenchOpts } from './bench-stats';
 
 describe('median', () => {

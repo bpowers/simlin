@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Reconciler-level gesture tests for the just-created-flow name-edit lifecycle
 // of the React `Canvas`. These replace the old internals-poking
@@ -23,6 +19,8 @@
 //
 // The third scenario is the load-bearing regression: a stale `true` latch would
 // make an ordinary Escape-cancel of an unrelated rename delete that variable.
+
+import { describe, it, expect } from '@rstest/core';
 
 import { act, fireEvent } from '@testing-library/react';
 

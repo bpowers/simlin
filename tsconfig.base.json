@@ -1,6 +1,5 @@
 {
   "compilerOptions": {
-    "baseUrl": ".",
     "rootDir": "src",
     "target": "ES2020",
     "lib": ["ES2020"],
@@ -9,7 +8,12 @@
     "allowJs": true,
     "sourceMap": true,
     "jsx": "react",
-    "moduleResolution": "node",
+    // TypeScript 7 removed "node"/"node10"; "bundler" is its closest analogue
+    // (extensionless relative imports, plus package.json "exports" support).
+    // Every consumer of these packages is a bundler or CJS Node, both of which
+    // resolve the same way. Pairing it with "module": "commonjs" only became
+    // legal in TypeScript 6.
+    "moduleResolution": "bundler",
     "declaration": true,
     "declarationMap": true,
     "removeComments": true,
@@ -22,9 +26,13 @@
     "strict": true,
     "strictNullChecks": true,
     "noUnusedLocals": true,
+    // "baseUrl" was removed in TypeScript 7. Without it, "paths" targets resolve
+    // relative to the config file that declares them -- this one, at the repo
+    // root -- so "./src/*" reproduces the old baseUrl:"." + "src/*" mapping.
+    // These must stay relative: TS7 rejects bare non-relative targets (TS5090).
     "paths": {
       "@simlin/*": [
-        "src/*"
+        "./src/*"
       ]
     }
   }

@@ -12,6 +12,8 @@
 // correctness; this asserts every model produced a positive finite median on
 // both engines.
 
+import { it, expect } from '@rstest/core';
+
 import { runBenchmark } from './backend-bench';
 
 const RUN = process.env.RUN_BENCH === '1';

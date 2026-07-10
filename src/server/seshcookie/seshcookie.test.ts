@@ -5,8 +5,10 @@
 // Vendored from https://github.com/bpowers/seshcookie-js at commit
 // 46aef15d1bb267dd17a680b5dbf657c12fbddad1 (relicensed from ISC with
 // the author's permission; see seshcookie.ts), with the node:test
-// runner imports adapted to jest's globals (before/after ->
+// runner imports adapted to the test runner's globals (before/after ->
 // beforeAll/afterAll); the node:assert assertions are unchanged.
+
+import { describe, it, beforeAll, afterAll } from '@rstest/core';
 
 import * as assert from 'node:assert/strict';
 import * as crypto from 'node:crypto';

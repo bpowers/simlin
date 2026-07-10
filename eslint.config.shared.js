@@ -86,22 +86,9 @@ const reactConfig = {
   },
 };
 
-const jestConfig = {
-  files: ['**/*.test.ts', '**/*.test.tsx', '**/tests/**/*.ts', '**/tests/**/*.tsx'],
-  languageOptions: {
-    globals: {
-      describe: 'readonly',
-      it: 'readonly',
-      test: 'readonly',
-      expect: 'readonly',
-      beforeEach: 'readonly',
-      afterEach: 'readonly',
-      beforeAll: 'readonly',
-      afterAll: 'readonly',
-      jest: 'readonly',
-    },
-  },
-};
+// Test files used to need a block declaring `describe`/`it`/`expect`/`jest` as
+// ambient globals. Rstest keeps test globals off, so every helper arrives as an
+// ordinary import and no test-runner entry belongs here.
 
 const createConfig = (options = {}) => {
   const configs = [];
@@ -120,11 +107,8 @@ const createConfig = (options = {}) => {
     configs.push(reactConfig);
   }
 
-  // Add jest config for test files
-  configs.push(jestConfig);
-
   if (options.project) {
-    configs[configs.length - (options.react ? 3 : 2)].languageOptions.parserOptions.project = options.project;
+    baseConfig.languageOptions.parserOptions.project = options.project;
   }
 
   return configs;

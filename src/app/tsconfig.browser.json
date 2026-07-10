@@ -10,7 +10,11 @@
       "dom.iterable",
       "scripthost"
     ],
-    "noEmit": true
+    "noEmit": true,
+    // Since TS6 "types" defaults to []. App.tsx reads process.env at build time.
+    // Test helpers are imported explicitly from @rstest/core, so no test-runner
+    // entry belongs here.
+    "types": ["node"]
   },
   "include": [
     "**/*.ts",

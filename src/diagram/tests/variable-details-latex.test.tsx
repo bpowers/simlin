@@ -1,10 +1,6 @@
-/**
- * @jest-environment jsdom
- *
- * Copyright 2026 The Simlin Authors. All rights reserved.
- * Use of this source code is governed by the Apache License,
- * Version 2.0, that can be found in the LICENSE file.
- */
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 // Regression tests for the loadLatex race guard in VariableDetails. Selecting a
 // new variable while the previous variable's getLatexEquation() promise is still
@@ -19,10 +15,7 @@
 // when latexEquation is undefined (loading, or no engine LaTeX); KaTeX renders
 // once a non-undefined LaTeX string has been committed.
 
-// jsdom does not provide TextEncoder/TextDecoder, but the engine's
-// memory module uses them at import time.  Polyfill from Node's util.
-import { TextEncoder, TextDecoder } from 'util';
-Object.assign(globalThis, { TextEncoder, TextDecoder });
+import { describe, test, expect, rs } from '@rstest/core';
 
 import * as React from 'react';
 import { render, act } from '@testing-library/react';
@@ -135,7 +128,7 @@ function plainText(container: HTMLElement): string | undefined {
 describe('VariableDetails latex loading', () => {
   test('loadLatex race condition: only the latest request commits its LaTeX', async () => {
     const calls: Array<{ ident: string; deferred: Deferred<string | undefined> }> = [];
-    const getLatexEquation = jest.fn((ident: string) => {
+    const getLatexEquation = rs.fn((ident: string) => {
       const deferred = createDeferred<string | undefined>();
       calls.push({ ident, deferred });
       return deferred.promise;
@@ -172,7 +165,7 @@ describe('VariableDetails latex loading', () => {
 
   test('loadLatex race condition: a stale error does not clear the current LaTeX', async () => {
     const calls: Array<{ ident: string; deferred: Deferred<string | undefined> }> = [];
-    const getLatexEquation = jest.fn((ident: string) => {
+    const getLatexEquation = rs.fn((ident: string) => {
       const deferred = createDeferred<string | undefined>();
       calls.push({ ident, deferred });
       return deferred.promise;
@@ -196,7 +189,7 @@ describe('VariableDetails latex loading', () => {
 
   test('rapid variable changes: only the final request commits', async () => {
     const calls: Array<{ ident: string; deferred: Deferred<string | undefined> }> = [];
-    const getLatexEquation = jest.fn((ident: string) => {
+    const getLatexEquation = rs.fn((ident: string) => {
       const deferred = createDeferred<string | undefined>();
       calls.push({ ident, deferred });
       return deferred.promise;
@@ -226,7 +219,7 @@ describe('VariableDetails latex loading', () => {
 
   test('switching variables clears stale LaTeX while the new request is in flight', async () => {
     const calls: Array<{ ident: string; deferred: Deferred<string | undefined> }> = [];
-    const getLatexEquation = jest.fn((ident: string) => {
+    const getLatexEquation = rs.fn((ident: string) => {
       const deferred = createDeferred<string | undefined>();
       calls.push({ ident, deferred });
       return deferred.promise;

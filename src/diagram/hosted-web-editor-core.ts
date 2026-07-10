@@ -7,7 +7,7 @@
 // directly. Tests stub `globalThis.fetch` rather than injecting it: the native
 // `fetch` throws "Illegal invocation" when called as a method of any object other
 // than the global (`endpoint.fetch(...)` rebinds `this` to `endpoint`), so the
-// dependency-injection variant worked under jest mocks but broke in real browsers.
+// dependency-injection variant worked under test mocks but broke in real browsers.
 // The component shell in HostedWebEditor.tsx maps these results onto React state
 // and the window navigation.
 
@@ -138,8 +138,8 @@ export async function deleteProject(endpoint: ProjectEndpoint): Promise<string> 
 // flow; it lives here (rather than inline in the shell) as a named, mockable
 // seam so a test can observe the post-delete navigation without driving a real
 // page transition (jsdom's window.location.assign is non-configurable and cannot
-// be spied directly). The shell calls it through the module namespace so a
-// jest.spyOn on this export is observed.
+// be spied directly). The shell calls it through the module namespace so a spy
+// installed on this export is observed.
 export function redirectToHome(url: string): void {
   window.location.assign(url);
 }

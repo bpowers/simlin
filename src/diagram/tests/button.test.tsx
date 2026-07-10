@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { describe, test, expect, rs } from '@rstest/core';
+
 import * as React from 'react';
 import { render, fireEvent, screen } from '@testing-library/react';
 import Button from '../components/Button';
@@ -26,14 +28,14 @@ describe('Button', () => {
   });
 
   test('calls onClick when clicked', () => {
-    const onClick = jest.fn();
+    const onClick = rs.fn();
     render(<Button onClick={onClick}>Click</Button>);
     fireEvent.click(screen.getByRole('button'));
     expect(onClick).toHaveBeenCalledTimes(1);
   });
 
   test('does not call onClick when disabled', () => {
-    const onClick = jest.fn();
+    const onClick = rs.fn();
     render(
       <Button onClick={onClick} disabled>
         Click
