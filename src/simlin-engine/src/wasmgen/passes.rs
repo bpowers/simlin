@@ -15,9 +15,12 @@
 //! `curr` data buffer and advances it once per Euler step, between the Flows and
 //! Stocks phases (`vm.rs`, the `run_coupled_passes` call). This module
 //! reproduces the QUEUE half of that machinery inside the emitted wasm blob, so
-//! a queue model simulates with no host imports and no VM fallback. The conveyor
-//! half lands in a later phase; [`reject_coupled_outflows`] is the guard that
-//! keeps a half-supported model from silently mis-simulating in the meantime.
+//! a queue model simulates with no host imports and no VM fallback. The CONVEYOR
+//! half lives in the sibling [`super::belt`], which reuses this module's bump
+//! allocator ([`emit_alloc`], [`G_HEAP`]) and its slab-addressing fragments;
+//! [`reject_coupled_outflows`] is the guard that keeps a queue-conveyor coupling
+//! -- served by the VM's *interleaved* pass, not by either module's independent
+//! one -- from silently mis-simulating.
 //!
 //! ## What is specialized, and what is not
 //!
@@ -91,6 +94,10 @@ use super::lower::{HelperFn, f64_const, i32_memarg, memarg};
 /// `super::errors::{G_ERR_CODE, G_ERR_BELT}`), and is emitted ONLY for a model
 /// that carries a special-stock pass -- so an ordinary model's blob pays nothing
 /// for the bump allocator.
+///
+/// One bump pointer serves BOTH side tables: a model with belts and FIFOs carves
+/// its slat rings and its batch rings out of the same region, and `reset` rewinds
+/// it once (`module::Passes::emit_heap_reset`).
 pub(super) const G_HEAP: u32 = 9;
 
 /// Bytes per queue descriptor, and the byte offset of each of its four i32
@@ -102,8 +109,9 @@ const D_CAP: u64 = 4;
 const D_HEAD: u64 = 8;
 const D_LEN: u64 = 12;
 
-/// Bytes per ring slot (one `f64` batch volume).
-const SLOT_BYTES: i32 = 8;
+/// Bytes per ring slot (one `f64` batch volume). Also the bump allocator's
+/// allocation unit, so [`super::belt`] sizes a slat ring in these units too.
+pub(super) const SLOT_BYTES: i32 = 8;
 
 /// Ring capacity a queue is born with. An uncoupled queue drains fully every
 /// step (`queues.md` §4.3), so it holds at most one batch; four slots absorb the
@@ -171,15 +179,14 @@ pub(super) struct QueuePassLocals {
     pub tmp: u32,
 }
 
-/// Byte bases of the queue pass's three regions within the static layout.
+/// Byte bases of the queue pass's two static regions. The bump region the rings
+/// live in is shared with [`super::belt`] and owned by `module.rs`.
 #[derive(Clone, Copy)]
 pub(super) struct QueuePassLayout {
     /// First descriptor; queue `i`'s descriptor is at `desc_base + i*16`.
     pub desc_base: u32,
     /// Descriptor save area for the mid-run preview (same stride).
     pub desc_save_base: u32,
-    /// Bump-region start. `reset` rewinds `G_HEAP` here.
-    pub heap_base: u32,
 }
 
 /// Everything the driver emitters (`run_initials` / `run_to` / `reset`) need to
@@ -224,6 +231,10 @@ impl<'a> QueuePass<'a> {
     /// `functions` (whose current length is their first index), and bundle them
     /// with the layout into a [`QueuePass`].
     ///
+    /// `alloc` is the shared bump allocator's function index ([`emit_alloc`]),
+    /// pushed by `module.rs` once for whichever side-table passes a model
+    /// carries -- so a belt-and-FIFO model has one allocator, not two.
+    ///
     /// Helpers are pushed in dependency order so each inter-helper `call`
     /// resolves against an already-assigned index, exactly as
     /// `lower::build_helpers` does.
@@ -231,6 +242,7 @@ impl<'a> QueuePass<'a> {
         plans: &'a [QueuePlan],
         layout: QueuePassLayout,
         dt: f64,
+        alloc: u32,
         functions: &mut Vec<HelperFn>,
     ) -> QueuePass<'a> {
         let mut push = |params: Vec<ValType>, results: Vec<ValType>, body: Function| -> u32 {
@@ -243,7 +255,6 @@ impl<'a> QueuePass<'a> {
             idx
         };
 
-        let alloc = push(vec![ValType::I32], vec![ValType::I32], emit_alloc());
         let grow = push(vec![ValType::I32], vec![], emit_grow(alloc));
         let push_back = push(
             vec![ValType::I32, ValType::F64],
@@ -537,18 +548,19 @@ impl<'a> QueuePass<'a> {
     /// step (e) reclaims both the clone and anything a `q_grow` inside the
     /// preview allocated, so repeated previews cannot leak.
     ///
-    /// This emits (a) and (b); [`emit_preview_epilogue`] emits (d) and (e). The
-    /// caller (`module.rs`) emits (c) between them, because a pass that can raise
-    /// a runtime error needs a `curr` snapshot/restore wrapped around the pass
-    /// body -- and that restore must happen BEFORE the epilogue, while the cloned
-    /// rings are still installed. The queue pass itself never raises, so a
-    /// queue-only model's preview carries neither the snapshot nor the guard.
+    /// This emits (a) and (b); [`emit_preview_restore`] emits (d). The heap
+    /// save/rewind (e) belongs to the CALLER (`module::Passes::emit_preview`),
+    /// because one bump pointer serves both side tables and must be saved once,
+    /// before either pass clones, and rewound once, after both have restored.
+    /// The caller also emits (c) between them, because a pass that can raise a
+    /// runtime error needs a `curr` snapshot/restore wrapped around the pass
+    /// body -- and that restore must happen BEFORE the descriptors are put back,
+    /// while the cloned rings are still installed. The queue pass itself never
+    /// raises, so a queue-only model's preview carries neither the snapshot nor
+    /// the guard.
     ///
-    /// [`emit_preview_epilogue`]: Self::emit_preview_epilogue
-    pub(super) fn emit_preview_prologue(&self, f: &mut Function, heap_save_local: u32) {
-        f.instruction(&Ins::GlobalGet(G_HEAP));
-        f.instruction(&Ins::LocalSet(heap_save_local));
-
+    /// [`emit_preview_restore`]: Self::emit_preview_restore
+    pub(super) fn emit_preview_save(&self, f: &mut Function) {
         for i in 0..self.plans.len() {
             let d = u64::from(self.layout.desc_base + (i as u32) * DESC_BYTES);
             let s = self.save_addr(i);
@@ -563,12 +575,13 @@ impl<'a> QueuePass<'a> {
         }
     }
 
-    /// Tear down the mid-run preview: restore each saved descriptor (dropping the
-    /// cloned ring) and rewind `G_HEAP`, reclaiming the clone plus anything a
-    /// `q_grow` inside the preview allocated. See [`emit_preview_prologue`].
+    /// Tear down the mid-run preview: restore each saved descriptor, dropping the
+    /// cloned ring. The caller rewinds `G_HEAP` afterwards, reclaiming the clone
+    /// plus anything a `q_grow` inside the preview allocated. See
+    /// [`emit_preview_save`].
     ///
-    /// [`emit_preview_prologue`]: Self::emit_preview_prologue
-    pub(super) fn emit_preview_epilogue(&self, f: &mut Function, heap_save_local: u32) {
+    /// [`emit_preview_save`]: Self::emit_preview_save
+    pub(super) fn emit_preview_restore(&self, f: &mut Function) {
         for i in 0..self.plans.len() {
             let d = u64::from(self.layout.desc_base + (i as u32) * DESC_BYTES);
             let s = self.save_addr(i);
@@ -579,32 +592,16 @@ impl<'a> QueuePass<'a> {
                 f.instruction(&Ins::I32Store(i32_memarg(d + field * 4)));
             }
         }
-
-        f.instruction(&Ins::LocalGet(heap_save_local));
-        f.instruction(&Ins::GlobalSet(G_HEAP));
-    }
-
-    // ── reset ───────────────────────────────────────────────────────────────
-
-    /// Rewind the bump pointer. Called from `reset`, which also clears
-    /// `G_DID_INITIALS`, so the next `run_initials` re-allocates every ring from
-    /// `heap_base` and re-seeds every descriptor. Nothing else is needed: a stale
-    /// descriptor is unobservable (only `run_initials` reads one before writing
-    /// it), and reclaiming the whole region wholesale is what makes repeated
-    /// resets leak-free even though `q_grow` abandons the ring it outgrew.
-    pub(super) fn emit_reset(&self, f: &mut Function) {
-        f.instruction(&Ins::I32Const(self.layout.heap_base as i32));
-        f.instruction(&Ins::GlobalSet(G_HEAP));
     }
 }
 
 /// Byte address of slab slot `off` within the `curr` chunk (whose base is 0).
-fn slot_addr(off: usize) -> u64 {
+pub(super) fn slot_addr(off: usize) -> u64 {
     off as u64 * SLOT_BYTES as u64
 }
 
 /// Push `curr[off]`.
-fn emit_load_curr(f: &mut Function, off: usize) {
+pub(super) fn emit_load_curr(f: &mut Function, off: usize) {
     f.instruction(&Ins::I32Const(0));
     f.instruction(&Ins::F64Load(memarg(slot_addr(off))));
 }
@@ -615,9 +612,11 @@ fn emit_load_curr(f: &mut Function, off: usize) {
 /// This is Rust's `x.max(0.0)`, NOT wasm's `f64.max`: the two disagree on NaN
 /// (Rust returns the non-NaN operand; wasm propagates). The queue pass depends on
 /// the Rust behavior so a NaN inflow zeroes its slot rather than poisoning the
-/// flat stock (`queue_compile.rs:696-698`). For every non-NaN `x` the two agree,
-/// including `-0.0` (both yield a zero, and the two zeros compare equal).
-fn emit_clamp_nonneg(f: &mut Function, scratch: u32) {
+/// flat stock (`queue_compile.rs:696-698`); so does the belt pass's
+/// `rate.max(0.0)` admission clamp (`conveyor.rs:935`). For every non-NaN `x` the
+/// two agree, including `-0.0` (both yield a zero, and the two zeros compare
+/// equal).
+pub(super) fn emit_clamp_nonneg(f: &mut Function, scratch: u32) {
     f.instruction(&Ins::LocalTee(scratch));
     f.instruction(&f64_const(0.0));
     f.instruction(&Ins::LocalGet(scratch));
@@ -667,7 +666,11 @@ const A_CUR: u32 = 3;
 ///
 /// The channel is reserved for *model* errors, i.e. the ones the VM turns into a
 /// `Result` a caller can act on by editing the model.
-fn emit_alloc() -> Function {
+///
+/// `module.rs` pushes exactly one of these per blob, for whichever side-table
+/// passes the model carries, and hands its index to both [`QueuePass::build`] and
+/// `super::belt::ConveyorPass::build`.
+pub(super) fn emit_alloc() -> Function {
     let mut f = Function::new([(3, ValType::I32)]);
 
     // p = G_HEAP; G_HEAP = p + n*8

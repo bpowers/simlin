@@ -929,8 +929,32 @@ rejection, `src/simlin-engine/src/db/assemble.rs`).
 The WebAssembly backend mirrors the VM opcode-for-opcode with **no silent VM
 fallback** (established rule, `src/simlin-engine/src/wasmgen`). The conveyor
 side table and update pass are lowered to wasm the same way the GF/snapshot
-regions are; until that lowering exists, a conveyor model returns
-`WasmGenError::Unsupported` (loud), never a silent fallback.
+regions are, by `src/simlin-engine/src/wasmgen/belt.rs`: each belt's slats live
+in a bump-allocated growable ring addressed by a static descriptor, and the
+per-DT phase A / phase B update is emitted as unrolled, plan-specialized code
+(the only runtime loops are over the dynamic slat count).
+
+**The public entries still reject every conveyor model.**
+`compile_datamodel_to_artifact` / `compile_datamodel_to_wasm` return
+`WasmGenError::Unsupported` for any model carrying a conveyor marker, and will
+until GH #924 lifts that gate. Until then the belt lowering is reachable only
+from an internal `#[cfg(test)]` seam, where it is pinned against the VM oracle;
+the bytecode VM remains the only backend that simulates a belt in production.
+
+Behind that gate, the lowering covers the CORE belt: continuous transport,
+capacity- and inflow-limited admission, both initial-fill forms (the §7.1 steady
+even fill and the §7.2 explicit list, per-slat and per-time-unit), and belt
+grow/shrink under a time-varying `<len>`. Everything else -- leaks,
+`<sample>`/`<arrest>`, discrete belts, conveyor-to-queue coupling, container
+access (§10), and non-`beginning` placements (`dist`/`source` included) --
+returns `WasmGenError::Unsupported` (loud), never a silent fallback or a
+mis-lowering.
+
+Both conveyor diagnostics travel out through the runtime error channel, so the
+two backends report byte-identical messages: `ConveyorTransitNotPositive` from
+`init_belts`, and `ConveyorTransitTooLong` from *two* sites -- `init_belts` and
+the per-DT phase A re-latch, since a time-varying `<len>` can exceed the slat
+bound mid-run.
 
 ### 9.6 LTM
 

@@ -150,7 +150,11 @@ fn assert_slab_matches_vm(project: &crate::datamodel::Project, artifact: &WasmAr
         for c in 0..n_chunks {
             let v = vm.data[c * vm.step_size + vm_off];
             let w = wasm_data[c * n_slots + *wasm_off];
-            if v.is_nan() && w.is_nan() {
+            // `v == w` first: it is the common case, and it is the ONLY way two
+            // infinities compare equal here -- `(INF - INF).abs() < EPS` is
+            // `NaN < EPS`, i.e. false, so a difference-only check would report a
+            // spurious mismatch on any model whose flows go infinite.
+            if v == w || (v.is_nan() && w.is_nan()) {
                 continue;
             }
             assert!(

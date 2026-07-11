@@ -22,22 +22,30 @@
 //! Status: the full scalar + array opcode set (every `Op2` operator, every
 //! `Apply` builtin, the view/reducer/iteration/vector ops, scalar/array
 //! lookups), Euler/RK2/RK4 integration, nested modules (incl. SMOOTH/DELAY
-//! stdlib expansions), and QUEUE models (whose per-step FIFO side-table pass is
-//! hand-lowered by `passes`) are in place. A genuine runtime view range
+//! stdlib expansions), QUEUE models (whose per-step FIFO side-table pass is
+//! hand-lowered by `passes`), and the CORE of CONVEYOR models (whose per-DT belt
+//! pass is hand-lowered by `belt`) are in place. A genuine runtime view range
 //! (`ViewRangeDynamic`), array unrolling past the per-function budget, or a
-//! CONVEYOR model (the belt pass is still implemented only in the bytecode VM,
-//! GH #884) returns `WasmGenError::Unsupported`.
+//! conveyor feature outside the core subset (leaks, `<sample>`/`<arrest>`,
+//! discrete belts, queue coupling -- see `belt::reject_unsupported`) returns
+//! `WasmGenError::Unsupported`.
+//!
+//! The PUBLIC entries (`compile_datamodel_to_artifact`/`compile_datamodel_to_wasm`)
+//! still reject every conveyor model up front, so this lowering is reachable only
+//! from the internal test seam until GH #924 lifts that gate.
 //!
 //! Two error channels, at two different times. `WasmGenError` is a COMPILE-time
 //! rejection: the backend refuses to emit a module it cannot lower correctly.
 //! `errors` is the emitted module's RUN-time channel (GH #921): every blob
 //! exports `get_error() -> i64`, which a host unpacks with [`decode_error_word`]
 //! and turns back into the bytecode VM's exact `(ErrorCode, String)` with
-//! [`reconstruct_error`]. Nothing in a shipped model can set it yet -- the queue
-//! pass has no per-step runtime error and the conveyor belt pass is not lowered --
-//! so the getter always reports 0 today.
+//! [`reconstruct_error`]. Nothing in a SHIPPED model can set it yet -- the queue
+//! pass has no per-step runtime error, and the conveyor belt pass (which does:
+//! `ConveyorTransitNotPositive`, `ConveyorTransitTooLong`) is not reachable from a
+//! public entry until GH #924 -- so the getter always reports 0 today.
 
 mod alloc;
+mod belt;
 mod errors;
 mod lookup;
 mod lower;
@@ -58,11 +66,12 @@ use std::fmt;
 /// Error from the WebAssembly code-generation backend.
 ///
 /// The backend covers the full scalar + array opcode set, Euler/RK2/RK4
-/// integration, nested modules (including SMOOTH/DELAY stdlib expansions), and
-/// queue models. A genuine runtime view range (`ViewRangeDynamic`), array
-/// unrolling past the per-function budget, or a conveyor model (the belt pass is
-/// still VM-only, GH #884) returns `Unsupported` rather than silently emitting an
-/// incorrect module.
+/// integration, nested modules (including SMOOTH/DELAY stdlib expansions), queue
+/// models, and core conveyor models. A genuine runtime view range
+/// (`ViewRangeDynamic`), array unrolling past the per-function budget, a conveyor
+/// feature outside the lowered core subset (`belt::reject_unsupported`), or -- from
+/// the public entries, until GH #924 -- any conveyor model at all returns
+/// `Unsupported` rather than silently emitting an incorrect module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WasmGenError {
     Unsupported(String),

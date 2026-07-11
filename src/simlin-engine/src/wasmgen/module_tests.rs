@@ -244,6 +244,7 @@ fn assembled_module_initializes_gf_regions_in_memory() {
         heap_base: None,
         gf_regions: &[&regions],
         const_init: &empty_const_init,
+        belt_init_data: &[],
     });
 
     let info = validate(&wasm).expect("module must validate");

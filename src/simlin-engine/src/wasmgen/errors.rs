@@ -240,13 +240,8 @@ impl ErrorScope {
     /// The scope one label deeper: what an emitter passes into the body of a
     /// `block`/`loop`/`if` it just opened.
     //
-    // No production caller yet: the conveyor belt pass (GH #922) is the only pass
-    // that raises, and it is not lowered. This and `raise` are the contract that
-    // pass is written against, so they belong with the channel rather than being
-    // invented alongside the belt. The test fault injector below exercises both.
-    // The allow is scoped to non-test builds so an item that goes unused *there
-    // too* still warns.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Production caller: the conveyor belt pass (`super::belt`), which opens an `if`
+    // around each bound check and raises from inside it.
     pub(super) fn entered(self) -> Self {
         ErrorScope {
             depth: self.depth + 1,
@@ -259,7 +254,6 @@ impl ErrorScope {
     /// [`reconstruct_error`] uses to recover the belt's name and its transit-time
     /// slot. Both operands are compile-time constants (a pass is unrolled per
     /// plan), so this is four instructions with no runtime arithmetic.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn raise(&self, f: &mut Function, code: ErrorCode, belt: usize) {
         f.instruction(&I::I32Const(code as i32));
         f.instruction(&I::GlobalSet(G_ERR_CODE));
@@ -276,10 +270,9 @@ impl ErrorScope {
 /// A loud emit-time panic is the whole point: the alternative (emitting the `br`
 /// anyway) validates and hangs. See [`ErrorScope`].
 //
-// Non-test callers arrive with GH #922's belt pass; the fault injector below is
-// today's only one. Scoped to non-test builds so it still warns if it goes unused
-// there too.
-#[cfg_attr(not(test), allow(dead_code))]
+// Production caller: `module::Passes`, which threads the driver's `Option<ErrorScope>`
+// into the conveyor belt pass's init and step bodies. The fault injector below is the
+// test-only second caller.
 pub(super) fn expect_scope(scope: Option<ErrorScope>) -> ErrorScope {
     scope.expect(
         "a pass that raises was emitted at a site with no unwind block: \
