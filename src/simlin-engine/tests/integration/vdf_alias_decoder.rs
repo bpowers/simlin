@@ -9,12 +9,6 @@
 //! cross-reference the file-order alias pairing against the parsed MDL.
 //! See `docs/design/vdf.md` under "Confirmed structural signals" for the
 //! hypothesis being validated.
-//!
-//! The test target gates on `file_io` via `required-features` in
-//! `src/simlin-engine/Cargo.toml` (mirroring the `simulate` pattern),
-//! so running `cargo test --features file_io -p simlin-engine` exercises
-//! these tests deterministically rather than silently compiling them
-//! into an empty binary.
 
 use std::fs;
 use std::path::Path;

@@ -12,9 +12,6 @@
 //! that the scalar LTM corpus lowers at or above the
 //! `MIN_LTM_MODELS_LOWERED` floor (the monotonically-rising count of LTM
 //! models that successfully lower to wasm).
-//!
-//! Required features: `file_io` (the corpus is loaded from XMILE files on
-//! disk via `xmile::project_from_reader`, mirroring `simulate_ltm.rs`).
 
 use std::fs::File;
 use std::io::BufReader;
@@ -647,9 +644,8 @@ fn discovery_arms_race_matches_vm() {
 /// `#[ignore]`); running it counts against the 3-minute
 /// `cargo test --workspace` cap if left in the default suite. Run
 /// explicitly with:
-///     cargo test --release -p simlin-engine \
-///         --features file_io --test integration -- --ignored \
-///         --nocapture discovery_clearn_matches_vm_wasm
+///     cargo test --release -p simlin-engine --test integration \
+///         -- --ignored --nocapture discovery_clearn_matches_vm_wasm
 ///
 /// The model lives outside the XMILE loader's `test/` root (it is a
 /// Vensim MDL under `test/xmutil_test_models/`), so it is loaded via
@@ -678,9 +674,8 @@ fn discovery_clearn_matches_vm_wasm() {
 /// agree on the discovered loop set and per-loop score series.
 ///
 /// Run explicitly with:
-///     cargo test --release -p simlin-engine \
-///         --features file_io --test integration -- --ignored \
-///         --nocapture discovery_world3_matches_vm_wasm
+///     cargo test --release -p simlin-engine --test integration \
+///         -- --ignored --nocapture discovery_world3_matches_vm_wasm
 #[test]
 #[ignore = "wasm compile of 166-var World3 is slow; VM discovery is also blocked on #540"]
 fn discovery_world3_matches_vm_wasm() {

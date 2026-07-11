@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 
-#[cfg(feature = "file_io")]
 use simlin_engine::FilesystemDataProvider;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::serde::{deserialize, serialize};
@@ -1460,7 +1459,6 @@ fn simulate_mdl_path(mdl_path: &str) {
 
 /// Simulate a Vensim MDL file that references external data files.
 /// Uses FilesystemDataProvider to resolve GET DIRECT references.
-#[cfg(feature = "file_io")]
 fn simulate_mdl_path_with_data(mdl_path: &str) {
     eprintln!("model (vensim mdl with data): {mdl_path}");
 
@@ -4113,7 +4111,6 @@ static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
 
 /// Verify that the salsa-based incremental compilation path successfully
 /// compiles every test model that the monolithic path handles.
-#[cfg(feature = "file_io")]
 #[test]
 fn incremental_compilation_covers_all_models() {
     let mut failures: Vec<(String, String)> = Vec::new();

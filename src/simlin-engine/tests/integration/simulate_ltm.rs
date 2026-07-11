@@ -9526,7 +9526,7 @@ fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
 ///
 /// `#[ignore]`d for runtime only (C-LEARN is ~53k lines / 1.4 MB and the LTM
 /// compile is heavy); run explicitly with:
-///   cargo test --release --features file_io --test integration -- --ignored clearn_with_ltm
+///   cargo test --release --test integration -- --ignored clearn_with_ltm
 #[test]
 #[ignore]
 fn clearn_with_ltm_simulates_model_vars_identically() {

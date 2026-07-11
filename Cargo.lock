@@ -3274,6 +3274,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "simlin-engine",
  "smallvec",
  "tempfile",
  "test-generator",
