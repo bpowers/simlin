@@ -720,11 +720,15 @@ fn run_and_stride(wasm: &[u8], layout: &ParsedLayout, off: usize) -> Vec<f64> {
 }
 
 /// Assert the FFI-compiled blob carries every original export (at its original
-/// kind) plus the two resumable functions added in Subcomponent A. The original
-/// set is `run`/`set_value`/`reset`/`clear_values` (funcs), `memory`, and the
-/// geometry globals `n_slots`/`n_chunks`/`results_offset`; the additions are
-/// `run_to`/`run_initials` (funcs) and `saved_steps` (the live saved-row counter
+/// kind) plus the functions added since. The original set is
+/// `run`/`set_value`/`reset`/`clear_values` (funcs), `memory`, and the geometry
+/// globals `n_slots`/`n_chunks`/`results_offset`; the additions are
+/// `run_to`/`run_initials` (Subcomponent A) and `get_error` (the runtime error
+/// channel, GH #921) as funcs, plus `saved_steps` (the live saved-row counter
 /// global). This pins the export-set growth as purely additive.
+///
+/// `get_error` is emitted for EVERY model, whether or not any of its passes can
+/// raise, so a host polls it unconditionally rather than feature-detecting.
 fn assert_blob_exports(wasm: &[u8]) {
     let info = validate(wasm).expect("validate");
     let mut store = Store::new(());
@@ -739,6 +743,7 @@ fn assert_blob_exports(wasm: &[u8]) {
         "clear_values",
         "run_to",
         "run_initials",
+        "get_error",
     ] {
         let exp = store
             .instance_export(inst, name)

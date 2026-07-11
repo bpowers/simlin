@@ -24,9 +24,10 @@ use simlin_engine::db::LtmSyntheticVar;
 use simlin_engine::float::approx_eq_eps;
 use simlin_engine::ltm::CausalGraph;
 use simlin_engine::wasmgen::{
-    WasmGenError, WasmLayout, compile_datamodel_to_artifact, compile_simulation,
+    WasmGenError, WasmLayout, compile_datamodel_to_artifact, compile_simulation, decode_error_word,
 };
 use simlin_engine::{Results, SimSpecs, Vm};
+use wasm::addrs::ModuleAddr;
 use wasm::validate;
 
 /// Tolerance for `$⁚ltm⁚*` series-parity assertions between the wasm backend
@@ -557,6 +558,41 @@ pub fn ensure_wasm_matches(
     WasmRunOutcome::Ran
 }
 
+/// Poll the blob's runtime error channel (GH #921) and panic if it is set.
+///
+/// A wasm export cannot return a `Result`, so a host learns a run failed only by
+/// asking. Every corpus path runs its blob through [`run_wasm_results`] or
+/// [`run_wasm_results_segmented`], so checking here covers all of them: a raised
+/// error can never masquerade as a short-but-valid results slab.
+///
+/// Nothing in the corpus can raise today (the queue pass has no per-step runtime
+/// error, and a conveyor model is still rejected at compile time), so this is a
+/// tripwire for the belt pass. It deliberately does NOT rebuild the VM's message:
+/// that needs the model's `ConveyorPlan` list, which neither `run_wasm_results`
+/// caller has to hand, and inventing a plan-threading path for a case no fixture
+/// reaches would be speculative. `simlin_engine::wasmgen::reconstruct_error` is the
+/// reconstruction (unit-tested against the VM's exact text in
+/// `wasmgen/errors_tests.rs`); GH #924, which first routes a conveyor fixture
+/// through the special-stock harness, is where it gets wired in.
+fn assert_no_runtime_error(store: &mut Store<()>, inst: checked::Stored<ModuleAddr>) {
+    let f = store
+        .instance_export(inst, "get_error")
+        .expect("get_error export must exist")
+        .as_func()
+        .expect("get_error export must be a function");
+    let word = store
+        .invoke_simple_typed::<(), i64>(f, ())
+        .expect("invoke get_error");
+    if let Some(err) = decode_error_word(word) {
+        panic!(
+            "the wasm blob raised a runtime error during this run: code {} (ErrorCode \
+             discriminant), belt/plan index {}. Rebuild the message with \
+             `simlin_engine::wasmgen::reconstruct_error` against the model's ConveyorPlan list.",
+            err.code, err.belt
+        );
+    }
+}
+
 /// Instantiate `wasm` under the DLR-FT `checked::Store`, invoke the exported
 /// `run`, and copy `n_chunks * n_slots` f64 out of the results region (located
 /// via `layout.results_offset`). This is the wasm-execution side effect of
@@ -577,6 +613,7 @@ fn run_wasm_results(wasm: &[u8], layout: &WasmLayout) -> Vec<f64> {
     store
         .invoke_simple_typed::<(), ()>(run, ())
         .expect("run wasm");
+    assert_no_runtime_error(&mut store, inst);
     let mem = store
         .instance_export(inst, "memory")
         .expect("memory export must exist")
@@ -620,6 +657,7 @@ pub fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f
     store
         .invoke_simple_typed::<(), ()>(run_initials, ())
         .expect("run_initials wasm");
+    assert_no_runtime_error(&mut store, inst);
     for &t in targets {
         let run_to = store
             .instance_export(inst, "run_to")
@@ -629,6 +667,9 @@ pub fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f
         store
             .invoke_simple_typed::<(f64,), ()>(run_to, (t,))
             .expect("run_to wasm");
+        // Poll after EVERY segment: the channel is sticky, but a later `run_to`
+        // that returns immediately would otherwise look like a clean no-op.
+        assert_no_runtime_error(&mut store, inst);
     }
     let mem = store
         .instance_export(inst, "memory")

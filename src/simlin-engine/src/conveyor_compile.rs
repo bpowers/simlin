@@ -1027,11 +1027,9 @@ fn normalized_init_total(
         ));
     };
     if !transit.is_finite() || transit <= 0.0 {
-        // Same code + message shape as the runtime latch in [`init_belts`].
-        return Err((
-            ErrorCode::ConveyorTransitNotPositive,
-            format!("conveyor '{stock}' transit time must be positive and finite, got {transit}"),
-        ));
+        // Same code + message as the runtime latch in [`init_belts`], via the
+        // shared constructor.
+        return Err(transit_not_positive_error(stock, transit));
     }
     // The probe belt allocates `slat_count` slats; enforce the same §4.1
     // bound the runtime latch enforces before allocating.
@@ -2778,6 +2776,41 @@ fn conv_inflow_placement(inf: &InflowPlan, pa: &[PhaseAResult], d: usize) -> Pla
     }
 }
 
+/// The `(code, message)` pair for a transit time that is not positive and finite.
+///
+/// Raised from two places with identical text: the compile-time explicit-init-list
+/// probe ([`normalized_init_total`]) and the runtime belt init ([`init_belts`]).
+/// It is a named constructor rather than an inline `format!` because the wasm
+/// backend's host-side message reconstruction
+/// ([`crate::wasmgen::reconstruct_error`]) must reproduce the VM's text
+/// byte-for-byte, and the blob itself carries no strings.
+pub fn transit_not_positive_error(name: &str, transit: f64) -> (ErrorCode, String) {
+    (
+        ErrorCode::ConveyorTransitNotPositive,
+        format!("conveyor '{name}' transit time must be positive and finite, got {transit}"),
+    )
+}
+
+/// The `(code, message)` pair for a latched transit time whose slat count exceeds
+/// [`crate::conveyor::slat_bound`] (§4.1).
+///
+/// The slat count and the bound are recomputed here from `(transit, dt)` rather
+/// than passed in, which is what lets a host holding only the belt's NAME and its
+/// transit-time slot rebuild the VM's message verbatim -- see
+/// [`crate::wasmgen::reconstruct_error`]. Reads the thread-local bound, so a test
+/// `SlatBoundGuard` applies to the reconstruction as well as to the check.
+pub fn transit_too_long_error(name: &str, transit: f64, dt: f64) -> (ErrorCode, String) {
+    let n = crate::conveyor::slat_count(transit, dt);
+    let bound = crate::conveyor::slat_bound();
+    (
+        ErrorCode::ConveyorTransitTooLong,
+        format!(
+            "conveyor '{name}' transit time {transit} at dt {dt} needs {n} belt slats, \
+             exceeding the maximum of {bound}"
+        ),
+    )
+}
+
 /// §4.1 slat-count bound. `round(transit/dt)` sizes the belt `Vec`; an enormous
 /// `transit/dt` (a hostile or typo'd `<len>`) would request an unbounded
 /// allocation -- a `usize`-saturating count panics `vec![0.0; usize::MAX]`
@@ -2790,16 +2823,8 @@ fn conv_inflow_placement(inf: &InflowPlan, pa: &[PhaseAResult], d: usize) -> Pla
 /// slat count within the bound and every downstream `n_slats()` allocation is
 /// safe.
 fn check_slat_bound(name: &str, transit: f64, dt: f64) -> Result<(), (ErrorCode, String)> {
-    let n = crate::conveyor::slat_count(transit, dt);
-    let bound = crate::conveyor::slat_bound();
-    if n > bound {
-        return Err((
-            ErrorCode::ConveyorTransitTooLong,
-            format!(
-                "conveyor '{name}' transit time {transit} at dt {dt} needs {n} belt slats, \
-                 exceeding the maximum of {bound}"
-            ),
-        ));
+    if crate::conveyor::slat_count(transit, dt) > crate::conveyor::slat_bound() {
+        return Err(transit_too_long_error(name, transit, dt));
     }
     Ok(())
 }
@@ -2824,13 +2849,7 @@ pub fn init_belts(
     for plan in plans {
         let transit = curr[plan.len_off];
         if !transit.is_finite() || transit <= 0.0 {
-            return Err((
-                ErrorCode::ConveyorTransitNotPositive,
-                format!(
-                    "conveyor '{}' transit time must be positive and finite, got {transit}",
-                    plan.name
-                ),
-            ));
+            return Err(transit_not_positive_error(&plan.name, transit));
         }
         // Reject an over-bound slat count before init_steady allocates the belt
         // (§4.1): a saturating/enormous count would otherwise panic/OOM here.

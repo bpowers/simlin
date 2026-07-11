@@ -230,6 +230,10 @@ fn assembled_module_initializes_gf_regions_in_memory() {
         // from the function section, and a no-op leaves the stack empty).
         run_to_fn: empty(),
         run_initials_fn: empty(),
+        // The real `get_error` body: it reads the two error globals, which the
+        // assembler emits unconditionally, so an empty body would not type-check
+        // against its `() -> i64` signature anyway.
+        get_error_fn: super::errors::emit_get_error(),
         // No queue pass: no container-skipping initials, no bump-pointer global.
         initials_skipping_fn: None,
         instance_input_counts: &[0],

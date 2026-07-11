@@ -53,7 +53,9 @@
 //! addressed by the mutable global `G_HEAP`. The `q_alloc` helper bumps `G_HEAP`
 //! and grows linear memory with `memory.grow` when the bump crosses the current
 //! memory end (the memory is declared with `maximum: None`, so growth is always
-//! legal; a `-1` failure return traps rather than silently corrupting the ring).
+//! legal; a `-1` failure return traps rather than silently corrupting the ring --
+//! see [`emit_alloc`] for why an OOM stays a trap now that the runtime error
+//! channel exists).
 //!
 //! On `push_back` into a full ring the capacity DOUBLES: a fresh, larger region
 //! is bump-allocated, the live batches are copied into it in ring order, and the
@@ -83,16 +85,13 @@ use crate::queue_compile::{QueueOutflowKind, QueuePlan};
 use super::WasmGenError;
 use super::lower::{HelperFn, f64_const, i32_memarg, memarg};
 
-/// Index of the bump-pointer global. It follows the seven globals `module.rs`
-/// already reserves (three immutable geometry globals, `use_prev_fallback`, and
-/// the three-word step cursor), and is emitted ONLY for a model that carries a
-/// special-stock pass -- so an ordinary model's blob is byte-identical to one
-/// built before this module existed.
-///
-/// Indices 8 and 9 are reserved for the runtime error channel (`G_ERR_CODE` /
-/// `G_ERR_BELT`) the conveyor pass needs for `ConveyorTransitTooLong`; the queue
-/// pass has no per-step runtime error, so neither exists yet.
-pub(super) const G_HEAP: u32 = 7;
+/// Index of the bump-pointer global. It follows the nine globals `module.rs`
+/// already reserves (three immutable geometry globals, `use_prev_fallback`, the
+/// three-word step cursor, and the two-word runtime error channel
+/// `super::errors::{G_ERR_CODE, G_ERR_BELT}`), and is emitted ONLY for a model
+/// that carries a special-stock pass -- so an ordinary model's blob pays nothing
+/// for the bump allocator.
+pub(super) const G_HEAP: u32 = 9;
 
 /// Bytes per queue descriptor, and the byte offset of each of its four i32
 /// fields. Sixteen bytes keeps every descriptor 8-byte-aligned, so the ring
@@ -526,8 +525,8 @@ impl<'a> QueuePass<'a> {
 
     // ── the mid-run preview (run_to's resting re-eval) ──────────────────────
 
-    /// Run the step pass as a side-effect-free PREVIEW, so the resting `curr` a
-    /// host reads mid-run holds the pass-driven flow rates the resumed step will
+    /// Set up the side-effect-free mid-run PREVIEW, so the resting `curr` a host
+    /// reads mid-run holds the pass-driven flow rates the resumed step will
     /// recompute -- without double-advancing the FIFOs (`vm.rs:1187-1216`).
     ///
     /// The VM clones its side tables; the blob does the same by (a) saving each
@@ -538,14 +537,15 @@ impl<'a> QueuePass<'a> {
     /// step (e) reclaims both the clone and anything a `q_grow` inside the
     /// preview allocated, so repeated previews cannot leak.
     ///
-    /// Unlike the VM there is no error to swallow (the queue pass has no per-step
-    /// runtime error), so `curr` needs no snapshot/restore.
-    pub(super) fn emit_preview_pass(
-        &self,
-        f: &mut Function,
-        locals: QueuePassLocals,
-        heap_save_local: u32,
-    ) {
+    /// This emits (a) and (b); [`emit_preview_epilogue`] emits (d) and (e). The
+    /// caller (`module.rs`) emits (c) between them, because a pass that can raise
+    /// a runtime error needs a `curr` snapshot/restore wrapped around the pass
+    /// body -- and that restore must happen BEFORE the epilogue, while the cloned
+    /// rings are still installed. The queue pass itself never raises, so a
+    /// queue-only model's preview carries neither the snapshot nor the guard.
+    ///
+    /// [`emit_preview_epilogue`]: Self::emit_preview_epilogue
+    pub(super) fn emit_preview_prologue(&self, f: &mut Function, heap_save_local: u32) {
         f.instruction(&Ins::GlobalGet(G_HEAP));
         f.instruction(&Ins::LocalSet(heap_save_local));
 
@@ -561,9 +561,14 @@ impl<'a> QueuePass<'a> {
             f.instruction(&Ins::I32Const(self.desc_addr(i)));
             f.instruction(&Ins::Call(self.fns.clone_ring));
         }
+    }
 
-        self.emit_step_pass(f, locals);
-
+    /// Tear down the mid-run preview: restore each saved descriptor (dropping the
+    /// cloned ring) and rewind `G_HEAP`, reclaiming the clone plus anything a
+    /// `q_grow` inside the preview allocated. See [`emit_preview_prologue`].
+    ///
+    /// [`emit_preview_prologue`]: Self::emit_preview_prologue
+    pub(super) fn emit_preview_epilogue(&self, f: &mut Function, heap_save_local: u32) {
         for i in 0..self.plans.len() {
             let d = u64::from(self.layout.desc_base + (i as u32) * DESC_BYTES);
             let s = self.save_addr(i);
@@ -636,11 +641,32 @@ const A_CUR: u32 = 3;
 /// `q_alloc(n_slots) -> ptr`: bump `n_slots * 8` bytes off `G_HEAP` and return
 /// the OLD pointer, growing linear memory to cover the new bump.
 ///
-/// `memory.grow` returns `-1` on failure. Nothing in the blob can report an
-/// out-of-memory condition to the host yet (the error channel is a later phase),
-/// so a failed grow traps: a trap is a loud, contained failure, whereas
-/// continuing would write batches outside linear memory's bounds -- which the
-/// wasm runtime would trap on anyway, just further from the cause.
+/// # A failed `memory.grow` traps, and keeps trapping
+///
+/// `memory.grow` returns `-1` on failure. The runtime error channel
+/// (`super::errors`, GH #921) now exists and could carry an OOM code, but this
+/// deliberately still emits `unreachable`. Three reasons:
+///
+/// 1. **It is what the VM does.** An OOM is not a model diagnostic; it is
+///    resource exhaustion. The VM's `VecDeque::push_back` on a failed allocation
+///    calls Rust's OOM handler, which aborts the process (`panic = "abort"` in
+///    libsimlin's release profile). A trap is the wasm-side abort. Reporting an
+///    OOM gracefully would make the wasm backend strictly *more* forgiving than
+///    its oracle -- a divergence, not a fix.
+/// 2. **The unwind contract does not reach here.** `ErrorScope::raise` branches
+///    to the enclosing pass block, and `br` cannot cross a call boundary.
+///    `q_alloc` is called from `q_init`/`q_push_back`/`q_grow`/`q_clone_ring`,
+///    themselves called from inside runtime loops. Propagating a failure would
+///    mean threading a status return through every FIFO primitive and testing it
+///    at every call site -- real code-size and complexity cost on the hot path,
+///    for a condition that means the host's 4 GiB wasm address space is gone.
+/// 3. **A trap is contained.** It unwinds the whole `run_to` and leaves the
+///    instance's memory intact for a host to inspect, whereas continuing would
+///    write batches past the memory bound -- which the runtime would trap on
+///    anyway, just further from the cause.
+///
+/// The channel is reserved for *model* errors, i.e. the ones the VM turns into a
+/// `Result` a caller can act on by editing the model.
 fn emit_alloc() -> Function {
     let mut f = Function::new([(3, ValType::I32)]);
 

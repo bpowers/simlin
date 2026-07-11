@@ -67,6 +67,7 @@ import {
   simlin_model_compile_to_wasm,
   parseWasmLayout,
   readStridedSeries,
+  decodeWasmError,
   WasmLayout,
   WasmBlobExports,
 } from './internal/wasmgen';
@@ -581,12 +582,42 @@ export class DirectBackend implements EngineBackend {
     return slot;
   }
 
+  /**
+   * Surface a runtime error the blob raised during the call that just returned.
+   *
+   * The VM reports a simulation error by returning `Err` from `run_to`; a wasm
+   * export cannot, so the blob abandons the failing step, records the error in its
+   * channel, and returns normally. Polling here is what keeps the two engines'
+   * observable behavior the same: a raising run throws instead of handing back a
+   * silently truncated series.
+   *
+   * The channel is sticky until `reset`, so a caller that swallows this throw gets
+   * it again on the next `run_to` rather than accumulating rows over a half-built
+   * side table.
+   *
+   * Nothing in the corpus can raise today -- the only raising pass is the conveyor
+   * belt pass, and a conveyor model is still rejected at wasm compile time (GH
+   * #922/#924) -- so this is always a no-op and a tripwire for when it is not.
+   */
+  private throwIfWasmRuntimeError(exports: WasmBlobExports): void {
+    const err = decodeWasmError(exports.get_error());
+    if (err === undefined) {
+      return;
+    }
+    // The model's ConveyorPlan list does not cross the FFI boundary, so unlike the
+    // Rust host this cannot rebuild the VM's message text (which names the belt).
+    // Report the raw channel; `wasmgen::errors::reconstruct_error` is the Rust-side
+    // reconstruction if this ever needs to name the belt.
+    throw new Error(`simulation error ${err.code} raised by the wasm engine (conveyor plan ${err.belt})`);
+  }
+
   simRunTo(handle: SimHandle, time: number): void {
     const entry = this.getEntry(handle as number, 'sim');
     if (entry.engine === 'wasm') {
       // The blob's run_to is resumable (calls run_initials internally and
       // resumes from the prior cursor); a time past the stop is clamped by the blob.
       entry.wasmExports!.run_to(time);
+      this.throwIfWasmRuntimeError(entry.wasmExports!);
       return;
     }
     simlin_sim_run_to(entry.ptr, time);
@@ -597,6 +628,7 @@ export class DirectBackend implements EngineBackend {
     if (entry.engine === 'wasm') {
       // Drive run_to(stop), mirroring the VM's run_to(specs.stop).
       entry.wasmExports!.run_to(entry.wasmStopTime!);
+      this.throwIfWasmRuntimeError(entry.wasmExports!);
       return;
     }
     simlin_sim_run_to_end(entry.ptr);

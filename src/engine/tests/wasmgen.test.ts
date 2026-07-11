@@ -4,8 +4,9 @@
 
 /**
  * Unit tests for the pure functions in internal/wasmgen: parseWasmLayout
- * (decode the little-endian WasmLayout wire format) and readStridedSeries
- * (strided f64 read of one variable's series out of a linear-memory buffer).
+ * (decode the little-endian WasmLayout wire format), readStridedSeries
+ * (strided f64 read of one variable's series out of a linear-memory buffer), and
+ * decodeWasmError (unpack the blob's runtime error channel).
  *
  * These are functional-core tests: hand-built byte buffers, no WASM instance
  * and no libsimlin. The imperative-shell FFI wrapper (simlin_model_compile_to_wasm)
@@ -14,7 +15,7 @@
 
 import { describe, it, expect, rs } from '@rstest/core';
 
-import { parseWasmLayout, readStridedSeries, WasmLayout } from '../src/internal/wasmgen';
+import { parseWasmLayout, readStridedSeries, decodeWasmError, WasmLayout } from '../src/internal/wasmgen';
 
 const textEncoder = new TextEncoder();
 
@@ -309,5 +310,34 @@ describe('readStridedSeries', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe('decodeWasmError', () => {
+  // The packing the blob performs: (belt << 32) | code, both halves zero-extended
+  // from i32 globals. Mirrors Rust `wasmgen::errors_tests::error_word`.
+  const errorWord = (code: number, belt: number): bigint => (BigInt(belt) << 32n) | BigInt(code);
+
+  it('returns undefined when no error was raised', () => {
+    expect(decodeWasmError(0n)).toBeUndefined();
+  });
+
+  it('treats a zero code with a stale belt index as no error', () => {
+    // A swallowed mid-run preview failure clears the code; a host must not read the
+    // leftover belt half as a failure. This is why the check is on the low word.
+    expect(decodeWasmError(errorWord(0, 7))).toBeUndefined();
+  });
+
+  it('unpacks the code and belt index', () => {
+    expect(decodeWasmError(errorWord(21, 1234))).toEqual({ code: 21, belt: 1234 });
+  });
+
+  it('zero-extends both halves rather than sign-extending', () => {
+    // The high bit of the code half must not smear into the belt half, and a belt
+    // index with its high bit set must not come back negative.
+    expect(decodeWasmError(errorWord(0x7fffffff, 0xffffffff))).toEqual({
+      code: 0x7fffffff,
+      belt: 0xffffffff,
+    });
   });
 });

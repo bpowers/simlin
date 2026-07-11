@@ -27,8 +27,18 @@
 //! (`ViewRangeDynamic`), array unrolling past the per-function budget, or a
 //! CONVEYOR model (the belt pass is still implemented only in the bytecode VM,
 //! GH #884) returns `WasmGenError::Unsupported`.
+//!
+//! Two error channels, at two different times. `WasmGenError` is a COMPILE-time
+//! rejection: the backend refuses to emit a module it cannot lower correctly.
+//! `errors` is the emitted module's RUN-time channel (GH #921): every blob
+//! exports `get_error() -> i64`, which a host unpacks with [`decode_error_word`]
+//! and turns back into the bytecode VM's exact `(ErrorCode, String)` with
+//! [`reconstruct_error`]. Nothing in a shipped model can set it yet -- the queue
+//! pass has no per-step runtime error and the conveyor belt pass is not lowered --
+//! so the getter always reports 0 today.
 
 mod alloc;
+mod errors;
 mod lookup;
 mod lower;
 mod math;
@@ -37,6 +47,7 @@ mod passes;
 mod vector;
 mod views;
 
+pub use errors::{BlobError, decode_error_word, reconstruct_error};
 pub use module::{
     WasmArtifact, WasmLayout, compile_datamodel_to_artifact, compile_datamodel_to_wasm,
     compile_simulation, compile_simulation_with_plans,

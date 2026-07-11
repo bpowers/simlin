@@ -57,6 +57,7 @@ use crate::results::{Method, Specs};
 use crate::vm::{CompiledSimulation, ModuleKey, StepPart};
 
 use super::WasmGenError;
+use super::errors;
 use super::lower::{self, BuiltHelpers, build_helpers, f64_const, max_condition_depth, memarg};
 use super::passes::{self, QueuePass, QueuePassLayout, QueuePassLocals};
 
@@ -96,9 +97,10 @@ const G_USE_PREV_FALLBACK: u32 = 3;
 const G_SAVED: u32 = 4; // saved-row counter (was the run-local `L_SAVED`)
 const G_STEP_ACCUM: u32 = 5; // save-cadence accumulator (was `L_STEP_ACCUM`)
 const G_DID_INITIALS: u32 = 6; // 0 until initials have run (cf. `Vm::did_initials`)
-// `passes::G_HEAP` (index 7) is the special-stock bump pointer, emitted ONLY for a
-// model that carries a side-table pass -- so an ordinary model's blob is unchanged
-// by GH #884. Indices 8/9 are reserved for the conveyor pass's error channel.
+// `errors::G_ERR_CODE`/`G_ERR_BELT` (indices 7/8) are the runtime error channel,
+// emitted for EVERY module so `get_error` is an unconditional export (GH #921).
+// `passes::G_HEAP` (index 9) is the special-stock bump pointer, emitted ONLY for a
+// model that carries a side-table pass.
 
 // `run_to`'s i32 locals. Its sole f64 *param* (the run target) occupies local 0,
 // so the i32 working locals start at index 1 and `L_DST` is index 2 -- the same
@@ -422,10 +424,11 @@ const FUNCS_PER_INSTANCE: u32 = 3;
 
 /// The function index of `run` (the first driver function, after the helpers and
 /// the per-instance triples). The driver functions follow in this fixed order:
-/// `run`, `set_value`, `reset`, `clear_values`, `run_to`, `run_initials` (the two
-/// resumable exports append last, keeping the original four at stable indices).
-/// Used both at emit time (`compile_simulation`, to resolve the delegation
-/// targets) and at assembly time (`assemble_simulation`), so the two never drift.
+/// `run`, `set_value`, `reset`, `clear_values`, `run_to`, `run_initials`,
+/// `get_error` -- each addition appending, so earlier indices stay stable. The
+/// optional container-skipping initials is last of all. Used both at emit time
+/// (`compile_with_passes`, to resolve the delegation targets) and at assembly time
+/// (`assemble_simulation`), so the two never drift.
 fn run_fn_index_of(n_helpers: u32, n_instances: u32) -> u32 {
     n_helpers + n_instances * FUNCS_PER_INSTANCE
 }
@@ -492,6 +495,19 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     compile_simulation_with_plans(sim, &[])
 }
 
+/// [`compile_simulation`] with a synthetic error-raising pass spliced into the
+/// same two hook points the conveyor belt pass will occupy (`run_initials`'s
+/// side-table init, and the between-Flows-and-Stocks step). Test-only: it is how
+/// the runtime error channel's unwind, driver guards, and preview swallow are
+/// exercised before GH #922 lands a production pass that can raise.
+#[cfg(test)]
+pub(super) fn compile_simulation_with_fault(
+    sim: &CompiledSimulation,
+    fault: errors::FaultInjection,
+) -> Result<WasmArtifact, WasmGenError> {
+    compile_with_passes(sim, &[], Some(fault))
+}
+
 /// [`compile_simulation`] for a special-stock `CompiledSimulation`: additionally
 /// lowers the per-step QUEUE side-table pass described by `queue_plans` (the same
 /// plans `queue_compile::compile_sim` hands the VM).
@@ -505,7 +521,48 @@ pub fn compile_simulation_with_plans(
     sim: &CompiledSimulation,
     queue_plans: &[QueuePlan],
 ) -> Result<WasmArtifact, WasmGenError> {
+    compile_with_passes(sim, queue_plans, None)
+}
+
+/// Whether a module's passes can raise a runtime error, i.e. whether the drivers
+/// need the error guards at all.
+///
+/// No production pass raises today: the queue pass has no per-step runtime error,
+/// and the conveyor belt pass is not lowered. GH #922 ORs in
+/// `!conveyor_plans.is_empty()`. Outside a test build `FaultInjection` is
+/// uninhabited, so this is statically `false` and every guard, block, and save
+/// region below is elided -- a queue or ordinary model's blob is unchanged.
+fn pass_can_error(fault: &Option<errors::FaultInjection>) -> bool {
+    fault.is_some()
+}
+
+/// Whether `run_initials` must evaluate the Flows phase before running the
+/// side-table init hook. See [`Passes::emit_init_body`] for the constraint.
+///
+/// False for a queue-only model, matching the VM, which runs the extra Flows
+/// evaluation only when `!conveyor_plans.is_empty()` (`vm.rs:1515`). GH #922 ORs
+/// that same condition in here.
+fn pass_needs_flows_before_init(fault: &Option<errors::FaultInjection>) -> bool {
+    fault
+        .as_ref()
+        .is_some_and(errors::FaultInjection::needs_flows_before_init)
+}
+
+/// The single whole-module assembly path. `fault` is the test-only
+/// error-injection knob (uninhabited outside a test build); production callers
+/// reach this through [`compile_simulation_with_plans`].
+fn compile_with_passes(
+    sim: &CompiledSimulation,
+    queue_plans: &[QueuePlan],
+    fault: Option<errors::FaultInjection>,
+) -> Result<WasmArtifact, WasmGenError> {
     passes::reject_coupled_outflows(queue_plans)?;
+    // Decides three things, all no-ops for a model whose passes are total: the
+    // driver guards (`errors::emit_return_if_error`), the `curr` save area the
+    // mid-run preview restores from, and the error clear in `reset`. Known before
+    // the layout is computed because it is a property of the plan sets, not of the
+    // emitted code.
+    let pass_can_error = pass_can_error(&fault);
     // `wasmgen` is in-crate, so it reads `CompiledSimulation`'s `pub(crate)`
     // fields directly rather than through accessors.
     let specs = &sim.specs;
@@ -717,6 +774,20 @@ pub fn compile_simulation_with_plans(
         .checked_add(queue_region_bytes)
         .ok_or_else(too_large)?;
 
+    // A whole-chunk save area for the mid-run preview, reserved only when a pass
+    // can raise a runtime error. `vm.rs:1195` snapshots `curr` before the preview
+    // pass so a preview-only failure (a `<sample>` re-latch over the slat bound)
+    // restores the plain post-Flows chunk instead of leaving half-written pass
+    // output -- driven flow rates and published container values the aborted pass
+    // got partway through. A pass that cannot fail needs no snapshot, so a queue
+    // model reserves nothing.
+    let preview_curr_save_base = align_up(total_bytes, u64::from(SLOT_SIZE))?;
+    if pass_can_error {
+        total_bytes = preview_curr_save_base
+            .checked_add(n_slots.checked_mul(SLOT_SIZE).ok_or_else(too_large)?)
+            .ok_or_else(too_large)?;
+    }
+
     // The bump region for the batch rings starts at the end of the static layout.
     // `reset` rewinds `G_HEAP` here; `q_alloc` grows linear memory past `pages`
     // whenever a ring pushes the bump beyond the last reserved page.
@@ -786,6 +857,7 @@ pub fn compile_simulation_with_plans(
         )
     });
     let n_helpers = helpers.functions.len() as u32;
+    let passes = Passes::new(queue_pass, fault);
 
     // Assemble the per-instance descriptors and the `(ModuleKey, StepPart) -> fn
     // index` map. The map is built for ALL instances before any function body is
@@ -824,7 +896,8 @@ pub fn compile_simulation_with_plans(
     // `Vm::eval_initials_skipping` (`vm.rs:1731`), which `run_initials` re-runs so
     // that `INIT(SUM(queue))` reconciles against the published start-of-run batch
     // totals instead of the container stock's frozen `0` placeholder.
-    let container_skip: std::collections::HashSet<usize> = queue_pass
+    let container_skip: std::collections::HashSet<usize> = passes
+        .queue
         .as_ref()
         .filter(|p| p.has_containers())
         .map(|p| p.container_offsets().collect())
@@ -917,21 +990,24 @@ pub fn compile_simulation_with_plans(
         prev_values_base,
         rk_saved_base,
         rk_accum_base,
+        preview_curr_save_base,
     };
 
     // Driver function indices, in the function-section order `assemble_simulation`
     // lays out after the per-instance triples: run, set_value, reset, clear_values,
-    // run_to, run_initials, and (queue models with containers only) the root's
-    // container-skipping initials. `run` and `run_to` delegate (`run` -> `reset` +
-    // `run_to`; `run_to` -> `run_initials`), so their indices must be known before
-    // their bodies are emitted -- the function section declares all indices up
-    // front, so this is sound. Keeping run/set_value/reset/clear_values at their
-    // original indices (everything since appends after) keeps the change additive.
+    // run_to, run_initials, get_error, and (queue models with containers only) the
+    // root's container-skipping initials. `run` and `run_to` delegate (`run` ->
+    // `reset` + `run_to`; `run_to` -> `run_initials`), so their indices must be
+    // known before their bodies are emitted -- the function section declares all
+    // indices up front, so this is sound. Keeping run/set_value/reset/clear_values
+    // at their original indices (everything since appends after) keeps the change
+    // additive. `get_error` is unconditional, so it sits at a fixed index ahead of
+    // the conditional container-skipping initials.
     let run_fn_index = run_fn_index_of(n_helpers, instances.len() as u32);
     let reset_fn_index = run_fn_index + 2;
     let run_to_fn_index = run_fn_index + 4;
     let run_initials_fn_index = run_fn_index + 5;
-    let initials_skipping_fn_index = run_fn_index + 6;
+    let initials_skipping_fn_index = run_fn_index + 7;
 
     // The resumable run ABI: `run_initials` (idempotent), `run_to(target)` (the
     // single shared stepping loop), and `run` (re-expressed as `reset;
@@ -940,7 +1016,7 @@ pub fn compile_simulation_with_plans(
         specs,
         regions,
         root_fn_base,
-        queue_pass.as_ref(),
+        &passes,
         initials_skipping_fn
             .as_ref()
             .map(|_| initials_skipping_fn_index),
@@ -952,7 +1028,7 @@ pub fn compile_simulation_with_plans(
         &stock_offsets,
         root_fn_base,
         run_initials_fn_index,
-        queue_pass.as_ref(),
+        &passes,
     );
     let run_fn = emit_run(
         specs,
@@ -974,12 +1050,7 @@ pub fn compile_simulation_with_plans(
         const_valid_base,
         const_override_set_base,
     );
-    let reset_fn = emit_reset(
-        n_slots,
-        const_region_base,
-        const_override_set_base,
-        queue_pass.as_ref(),
-    );
+    let reset_fn = emit_reset(n_slots, const_region_base, const_override_set_base, &passes);
     let clear_values_fn = emit_clear_values(
         const_region_base,
         const_override_set_base,
@@ -1006,13 +1077,14 @@ pub fn compile_simulation_with_plans(
         clear_values_fn,
         run_to_fn,
         run_initials_fn,
+        get_error_fn: errors::emit_get_error(),
         initials_skipping_fn,
         instance_input_counts: &instance_input_counts,
         pages,
         n_slots,
         n_chunks,
         results_base,
-        heap_base: queue_pass.as_ref().map(|_| heap_base),
+        heap_base: passes.queue.is_some().then_some(heap_base),
         gf_regions: &gf_images,
         const_init: &const_init,
     });
@@ -1295,6 +1367,11 @@ struct RunRegions {
     rk_saved_base: u32,
     /// Slot-0 byte base of the RK `accum[i]` scratch (one f64 per stock).
     rk_accum_base: u32,
+    /// Slot-0 byte base of the whole-chunk `curr` save area the mid-run preview
+    /// restores from when its pass raises. Reserved (and read) only when the
+    /// module's passes can raise; otherwise it aliases the end of the static
+    /// layout and is never touched.
+    preview_curr_save_base: u32,
 }
 
 // `run_to`'s f64 locals. The RK loops need a `saved_time` (the timestep's t,
@@ -1320,6 +1397,183 @@ struct RunFnIndices {
     reset: u32,
 }
 
+/// The special-stock side-table passes spliced into a module's drivers, plus the
+/// test-only fault injector that stands in for the not-yet-lowered conveyor belt
+/// pass (GH #921/#922).
+///
+/// It exists so the drivers (`run_initials`, `run_to`, `reset`) name ONE thing
+/// rather than juggling an `Option<&QueuePass>` and a fault knob, and so the two
+/// pass hook points -- the `run_initials` side-table init and the
+/// between-Flows-and-Stocks step -- have exactly one emitter each. GH #922's belt
+/// pass joins them here.
+struct Passes<'a> {
+    queue: Option<QueuePass<'a>>,
+    /// Whether any pass in this set can raise a runtime error, i.e. whether the
+    /// drivers must wrap the pass body in a block and guard on the channel. Held
+    /// rather than recomputed so the layout (which reserves the preview `curr`
+    /// save area before the passes are built) and the emitters cannot disagree.
+    ///
+    /// A pass that raises while this is false cannot emit: it would need an
+    /// [`errors::ErrorScope`], and only the block-opening drivers mint one.
+    can_error: bool,
+    /// Whether [`Self::emit_init_body`] reads slots the Flows phase alone writes,
+    /// obliging `run_initials` to evaluate Flows before the init hook. See that
+    /// method's docs for the constraint and `vm.rs:1508-1514` for the original.
+    needs_flows_before_init: bool,
+    /// Always `None` outside a test build, where `FaultInjection` is uninhabited
+    /// (see `errors`); every arm below is then statically dead.
+    fault: Option<errors::FaultInjection>,
+}
+
+impl<'a> Passes<'a> {
+    /// Both flags are DERIVED from `fault` (and, for GH #922, from the plan sets)
+    /// rather than passed in. The layout must know `pass_can_error` before the
+    /// passes exist -- it reserves the preview `curr` save area -- so it calls the
+    /// same free function. Taking the answer as a parameter here would let a caller
+    /// hand over a flag that disagrees with the passes it also handed over, and a
+    /// `debug_assert` comparing the parameter to the function that produced it pins
+    /// nothing.
+    fn new(queue: Option<QueuePass<'a>>, fault: Option<errors::FaultInjection>) -> Self {
+        Passes {
+            queue,
+            can_error: pass_can_error(&fault),
+            needs_flows_before_init: pass_needs_flows_before_init(&fault),
+            fault,
+        }
+    }
+
+    /// Does this module carry any side-table pass at all? A pass-free module emits
+    /// no hook, no block, and no guard, so its drivers stay byte-identical.
+    fn is_empty(&self) -> bool {
+        self.queue.is_none() && self.fault.is_none()
+    }
+
+    /// Step-start container publication (a hook point distinct from the pass
+    /// proper; see [`emit_euler_step`]). It never raises: reading a built side table
+    /// cannot fail. What matters is that it never runs over an UNBUILT one, which is
+    /// what the drivers' error guards secure.
+    ///
+    /// **Ordering (GH #922).** The VM publishes conveyor containers before queue
+    /// containers (`vm.rs:1553` then `vm.rs:1574`, and `vm.rs:916` then `vm.rs:925`).
+    /// The belt pass therefore goes FIRST here. The two write disjoint slots today,
+    /// so the order is not observable -- but a reader comparing the backends should
+    /// not have to prove that, and a future container that both passes touch would
+    /// make it load-bearing.
+    fn emit_publish_containers(&self, f: &mut Function) {
+        if let Some(q) = &self.queue {
+            q.emit_publish_containers(f);
+        }
+        if let Some(fault) = &self.fault {
+            fault.emit_publish(f);
+        }
+    }
+
+    /// The `run_initials` side-table init body, emitted inside the pass block when
+    /// [`Self::can_error`] -- so a raise abandons the remaining belts and returns
+    /// from `run_initials` without arming the cursor. `scope` is the capability to
+    /// do that unwinding, `None` exactly when no block was opened.
+    ///
+    /// **Two constraints GH #922 inherits.**
+    ///
+    /// 1. *Flows first.* A belt's parameters (transit, capacity, leak fractions) are
+    ///    synthesized auxes nothing depends on, so they are absent from the initials
+    ///    runlist and hold 0 until the Flows phase writes them. `init_belts` reads
+    ///    them, so the driver must evaluate Flows before calling in here -- which it
+    ///    does iff [`Self::needs_flows_before_init`]. A belt pass that forgets to set
+    ///    the flag reads a transit of 0 and raises a spurious
+    ///    `ConveyorTransitNotPositive`. The queue pass needs no such evaluation: its
+    ///    only dynamic input is the stock's `<eqn>`, already in the initials runlist.
+    /// 2. *Conveyors before queues*, matching `vm.rs:1542` / `vm.rs:1570` and
+    ///    [`Self::emit_publish_containers`].
+    fn emit_init_body(&self, f: &mut Function, scope: Option<errors::ErrorScope>) {
+        if let Some(q) = &self.queue {
+            q.emit_init(f);
+        }
+        if let Some(fault) = &self.fault {
+            fault.emit_initials(f, scope);
+        }
+    }
+
+    /// The pass body proper, emitted at BOTH the real step site and the mid-run
+    /// preview site. It must therefore be site-agnostic: a raise branches out of
+    /// the enclosing pass block (via `scope`) rather than returning, leaving each
+    /// driver free to react differently. See `errors::ErrorScope`.
+    fn emit_step_body(
+        &self,
+        f: &mut Function,
+        locals: QueuePassLocals,
+        scope: Option<errors::ErrorScope>,
+    ) {
+        if let Some(q) = &self.queue {
+            q.emit_step_pass(f, locals);
+        }
+        if let Some(fault) = &self.fault {
+            fault.emit_step(f, scope);
+        }
+    }
+
+    /// The between-Flows-and-Stocks hook: the pass body, wrapped in its unwind
+    /// block, followed by the guard that returns from `run_to` on a raise. The
+    /// guard sits before the Stocks call, the `prev_values` snapshot, and the
+    /// save/advance tail, so the failing step saves no row -- matching the VM,
+    /// whose `run_coupled_passes` error returns before the same three.
+    fn emit_step_hook(&self, f: &mut Function, locals: QueuePassLocals) {
+        if self.is_empty() {
+            return;
+        }
+        // Minting the scope IS opening the block, so a pass cannot raise here
+        // unless the guard below is also emitted.
+        let scope = self.can_error.then(|| errors::open_pass_block(f));
+        self.emit_step_body(f, locals, scope);
+        if let Some(scope) = scope {
+            errors::close_pass_block(f, scope);
+            errors::emit_return_if_error(f);
+        }
+    }
+
+    /// The mid-run preview: run the pass on a throwaway side table so the resting
+    /// `curr` holds what the resumed step will recompute, then undo everything.
+    ///
+    /// A raising pass is SWALLOWED here, exactly as `vm.rs:1187-1216` swallows it:
+    /// `curr` is restored from `curr_save_base` and the channel is cleared, so this
+    /// `run_to` -- which already completed everything the caller asked for --
+    /// still returns cleanly. The same error surfaces loudly from the step itself
+    /// if the run resumes without the inputs changing. The restore must precede the
+    /// queue epilogue: it undoes the pass's writes to `curr` while the cloned rings
+    /// are still installed, and the epilogue then drops them.
+    fn emit_preview(
+        &self,
+        f: &mut Function,
+        locals: QueuePassLocals,
+        heap_save_local: u32,
+        regions: &RunRegions,
+    ) {
+        if self.is_empty() {
+            return;
+        }
+        let (save_base, n_slots) = (regions.preview_curr_save_base, regions.n_slots);
+        if let Some(q) = &self.queue {
+            q.emit_preview_prologue(f, heap_save_local);
+        }
+        let scope = self.can_error.then(|| {
+            emit_copy_chunk(f, CURR_BASE, save_base, n_slots);
+            errors::open_pass_block(f)
+        });
+        self.emit_step_body(f, locals, scope);
+        if let Some(scope) = scope {
+            errors::close_pass_block(f, scope);
+            f.instruction(&I::GlobalGet(errors::G_ERR_CODE));
+            f.instruction(&I::If(BlockType::Empty));
+            emit_copy_chunk(f, save_base, CURR_BASE, n_slots);
+            errors::emit_clear(f);
+            f.instruction(&I::End);
+        }
+        if let Some(q) = &self.queue {
+            q.emit_preview_epilogue(f, heap_save_local);
+        }
+    }
+}
+
 /// Emit `run_initials() -> ()`: seed the reserved time slots, run the root
 /// initials, capture `initial_values`, build the queue side table, and arm the
 /// step cursor -- but only the first time per `reset`. Idempotent via the
@@ -1338,11 +1592,16 @@ struct RunFnIndices {
 /// stock's `0` placeholder, so once the pass has published the real start-of-run
 /// batch values, the initials runlist is re-run (skipping the container stocks
 /// themselves) and re-snapshotted, letting `INIT(SUM(queue))` see the true total.
+///
+/// A side-table init that raises a runtime error (GH #921) returns immediately --
+/// before the container publish, the reconciliation, and the cursor arming, and
+/// crucially without setting `G_DID_INITIALS`. That mirrors `vm.rs:1542-1548`,
+/// where `init_belts`' `Err` returns ahead of `self.did_initials = true`.
 fn emit_run_initials(
     specs: &Specs,
     regions: RunRegions,
     root_fn_base: u32,
-    queue_pass: Option<&QueuePass>,
+    passes: &Passes,
     run_initials_skipping_idx: Option<u32>,
 ) -> Function {
     let mut f = Function::new([]);
@@ -1352,6 +1611,14 @@ fn emit_run_initials(
     f.instruction(&I::If(BlockType::Empty));
     f.instruction(&I::Return);
     f.instruction(&I::End);
+
+    // A previously-raised runtime error is sticky until `reset` clears it: a fresh
+    // `run_initials` must not re-run the initials over a slab whose side table is
+    // half-built. (`run_to`'s own post-call guard catches the DID_INITIALS-short-
+    // circuited case, where this guard never runs.)
+    if passes.can_error {
+        errors::emit_return_if_error(&mut f);
+    }
 
     let f_initials = root_fn_base + F_INITIALS;
 
@@ -1383,11 +1650,25 @@ fn emit_run_initials(
         regions.n_slots,
     );
 
-    if let Some(pass) = queue_pass {
-        pass.emit_init(&mut f);
+    if !passes.is_empty() {
+        // A pass whose init reads Flows-only slots (the conveyor belt parameters)
+        // needs one Flows evaluation first. It goes AFTER the `initial_values`
+        // snapshot above -- exactly where `vm.rs:1530-1541` puts it -- so `INIT(x)`
+        // still sees the pure initials value of every ordinary variable.
+        if passes.needs_flows_before_init {
+            f.instruction(&I::I32Const(0));
+            f.instruction(&I::Call(root_fn_base + F_FLOWS));
+        }
+        // The side-table init, in its unwind block (see `errors::ErrorScope`).
+        let scope = passes.can_error.then(|| errors::open_pass_block(&mut f));
+        passes.emit_init_body(&mut f, scope);
+        if let Some(scope) = scope {
+            errors::close_pass_block(&mut f, scope);
+            errors::emit_return_if_error(&mut f);
+        }
         // Publish the initialized FIFOs' container values, so the t=0 slot holds
         // the start-of-step value even before the first Euler step re-publishes it.
-        pass.emit_publish_containers(&mut f);
+        passes.emit_publish_containers(&mut f);
         if let Some(skipping_idx) = run_initials_skipping_idx {
             f.instruction(&I::I32Const(0));
             f.instruction(&I::Call(skipping_idx));
@@ -1429,18 +1710,20 @@ fn emit_run_to(
     stock_offsets: &[usize],
     root_fn_base: u32,
     run_initials_idx: u32,
-    queue_pass: Option<&QueuePass>,
+    passes: &Passes,
 ) -> Function {
     // One f64 param (`target`, local 0) + two i32 locals (index 1 filler, `L_DST`
     // at 2) + two f64 locals (`saved_time`, `s` at 3/4). The cursor lives in
     // globals, not locals; the i32 at index 1 is unused filler that keeps `L_DST`
     // at the index the per-step emitters expect.
     //
-    // A special-stock model appends its four pass locals AFTER that fixed prefix
-    // (a second i32 group followed by a second f64 group -- the locals declaration
-    // is a list of `(count, type)` runs, not a per-type partition), so `L_SAVED_TIME`
-    // and `L_RK_S` keep indices 3/4 and the shared RK emitters need no change.
-    let mut f = if queue_pass.is_some() {
+    // A queue model appends its four pass locals AFTER that fixed prefix (a second
+    // i32 group followed by a second f64 group -- the locals declaration is a list
+    // of `(count, type)` runs, not a per-type partition), so `L_SAVED_TIME` and
+    // `L_RK_S` keep indices 3/4 and the shared RK emitters need no change. The
+    // error channel needs no locals (it is two globals), so a fault-injected or
+    // future belt-only model declares the plain prefix.
+    let mut f = if passes.queue.is_some() {
         Function::new([
             (2, ValType::I32),
             (2, ValType::F64),
@@ -1460,6 +1743,14 @@ fn emit_run_to(
     // Idempotent initials (seeds time slots, runs initials, arms the cursor on the
     // first call after a reset; a no-op otherwise).
     f.instruction(&I::Call(run_initials_idx));
+
+    // One guard covers both ways the channel can be live here: a side-table init
+    // that just raised, and a STICKY error from an earlier failed call (whose
+    // `run_initials` short-circuited on `G_DID_INITIALS` or on its own guard).
+    // Either way the run is over until `reset`.
+    if passes.can_error {
+        errors::emit_return_if_error(&mut f);
+    }
 
     f.instruction(&I::Block(BlockType::Empty)); // $break
     f.instruction(&I::Loop(BlockType::Empty)); // $continue
@@ -1489,7 +1780,7 @@ fn emit_run_to(
     // `curr` holding the full time-`t` state (aux/flows + time-`t` stocks), then
     // snapshot `prev_values := curr` and clear `use_prev_fallback`.
     match specs.method {
-        Method::Euler => emit_euler_step(&mut f, f_flows, f_stocks, &regions, queue_pass),
+        Method::Euler => emit_euler_step(&mut f, f_flows, f_stocks, &regions, passes),
         Method::RungeKutta4 => {
             emit_rk4_step(&mut f, f_flows, f_stocks, specs.dt, stock_offsets, &regions)
         }
@@ -1548,18 +1839,19 @@ fn emit_run_to(
     // Flows, then run the pass as a side-effect-free PREVIEW on a cloned side table
     // (`vm.rs:1147-1216`). Re-running the pass on the real state would
     // double-advance the FIFOs when the run resumes.
+    //
+    // This tail is unreachable on a raising step: the step hook's guard returns
+    // from `run_to` before the loop can even break, so a failed step never leaves a
+    // preview behind. A preview that raises on its own (the next step's `<sample>`
+    // re-latch trips the slat bound) is swallowed inside `emit_preview`.
     f.instruction(&I::GlobalGet(G_SAVED));
     f.instruction(&I::I32Const(regions.n_chunks as i32));
     f.instruction(&I::I32LtS);
     f.instruction(&I::If(BlockType::Empty));
-    if let Some(pass) = queue_pass {
-        pass.emit_publish_containers(&mut f);
-    }
+    passes.emit_publish_containers(&mut f);
     f.instruction(&I::I32Const(0));
     f.instruction(&I::Call(f_flows));
-    if let Some(pass) = queue_pass {
-        pass.emit_preview_pass(&mut f, PASS_LOCALS, L_PASS_HEAP_SAVE);
-    }
+    passes.emit_preview(&mut f, PASS_LOCALS, L_PASS_HEAP_SAVE, &regions);
     f.instruction(&I::End); // end if
 
     f.instruction(&I::End); // end function
@@ -1603,21 +1895,23 @@ fn emit_run(specs: &Specs, indices: RunFnIndices) -> Function {
 ///
 /// Collapsing the two would let a `SUM(queue)` reader see this step's post-serve
 /// batches instead of the start-of-step ones.
+///
+/// A pass that raises a runtime error returns from `run_to` at hook 2, so the
+/// Stocks phase, the `prev_values` snapshot, and the save/advance tail below all
+/// go unrun: the failing step contributes no results row and does not advance the
+/// clock. That is exactly the VM, whose `run_coupled_passes` error returns before
+/// the same three (`vm.rs:958-972`).
 fn emit_euler_step(
     f: &mut Function,
     f_flows: u32,
     f_stocks: u32,
     regions: &RunRegions,
-    queue_pass: Option<&QueuePass>,
+    passes: &Passes,
 ) {
-    if let Some(pass) = queue_pass {
-        pass.emit_publish_containers(f);
-    }
+    passes.emit_publish_containers(f);
     f.instruction(&I::I32Const(0));
     f.instruction(&I::Call(f_flows));
-    if let Some(pass) = queue_pass {
-        pass.emit_step_pass(f, PASS_LOCALS);
-    }
+    passes.emit_step_hook(f, PASS_LOCALS);
     f.instruction(&I::I32Const(0));
     f.instruction(&I::Call(f_stocks));
     emit_prev_snapshot(f, regions);
@@ -1867,13 +2161,21 @@ fn emit_set_value(
 ///    repeated `run`s, which delegate `reset; run_to(stop)`) reclaim every ring the
 ///    prior run's capacity doubling abandoned, and cannot leak.
 ///
+/// 4. **Runtime error channel** (error-capable passes only): `G_ERR_CODE` and
+///    `G_ERR_BELT` are cleared. The channel is sticky -- `run_initials`/`run_to`
+///    refuse to do anything while it is set (see `errors::emit_return_if_error`) --
+///    so `reset` is a host's only way to recover from a raised error, and `run`
+///    (which delegates `reset; run_to(stop)`) is therefore never blocked by a
+///    stale one. A model whose passes are total can never set the channel, so it
+///    emits no clear.
+///
 /// Like the VM, `reset` deliberately does NOT touch the constants-override region
 /// or its markers, so a `set_value` override persists across `reset`.
 fn emit_reset(
     n_slots: u32,
     const_region_base: u32,
     const_override_set_base: u32,
-    queue_pass: Option<&QueuePass>,
+    passes: &Passes,
 ) -> Function {
     let mut f = Function::new([]);
 
@@ -1908,8 +2210,13 @@ fn emit_reset(
     f.instruction(&I::GlobalSet(G_USE_PREV_FALLBACK));
 
     // Part 3: rewind the special-stock bump pointer.
-    if let Some(pass) = queue_pass {
+    if let Some(pass) = &passes.queue {
         pass.emit_reset(&mut f);
+    }
+
+    // Part 4: clear the runtime error channel, un-sticking the drivers.
+    if passes.can_error {
+        errors::emit_clear(&mut f);
     }
     f.instruction(&I::End);
     f
@@ -2311,6 +2618,9 @@ struct AssembleParts<'a> {
     run_to_fn: Function,
     /// `run_initials() -> ()`: idempotent initials for the resumable run.
     run_initials_fn: Function,
+    /// `get_error() -> i64`: the runtime error channel's sole export (GH #921).
+    /// Unconditional, so a host never feature-detects it.
+    get_error_fn: Function,
     /// The root instance's container-SKIPPING initials, `(module_off: i32) -> ()`.
     /// Present only for a queue model that publishes container values; `None`
     /// otherwise, in which case the module has no such function and no such index.
@@ -2341,7 +2651,7 @@ struct AssembleParts<'a> {
 /// functions ([`build_helpers`], plus the queue pass's FIFO primitives when the
 /// model has one) lead the function/code sections (indices `0..n_helpers`); then
 /// one `[initials, flows, stocks]` triple per module instance (in
-/// `instance_order`); then the six drivers, and last -- for a queue model with
+/// `instance_order`); then the seven drivers, and last -- for a queue model with
 /// container variables -- the root's container-skipping initials. Exports
 /// `memory`, `run`, and the three self-describing i32 geometry globals. Each
 /// GF-bearing instance contributes two active `DataSection` segments (its
@@ -2356,6 +2666,7 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         clear_values_fn,
         run_to_fn,
         run_initials_fn,
+        get_error_fn,
         initials_skipping_fn,
         instance_input_counts,
         pages,
@@ -2372,23 +2683,24 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     let n_instances = instance_input_counts.len() as u32;
     // Function layout: helpers, the per-instance triples, then the driver
     // functions in this fixed order: `run`, `set_value`, `reset`, `clear_values`,
-    // `run_to`, `run_initials`. The two resumable exports append last so the
-    // original four keep stable indices (the growth is purely additive). The
-    // emit-time index math in `compile_simulation` uses the same `run_fn_index_of`.
+    // `run_to`, `run_initials`, `get_error`. Each addition appends, so the earlier
+    // exports keep stable indices (the growth is purely additive). The emit-time
+    // index math in `compile_with_passes` uses the same `run_fn_index_of`.
     let run_fn_index = run_fn_index_of(n_helpers, n_instances);
     let set_value_fn_index = run_fn_index + 1;
     let reset_fn_index = run_fn_index + 2;
     let clear_values_fn_index = run_fn_index + 3;
     let run_to_fn_index = run_fn_index + 4;
     let run_initials_fn_index = run_fn_index + 5;
+    let get_error_fn_index = run_fn_index + 6;
 
     // Type section: `run`'s `() -> ()` first, then one opcode-program type per
     // *distinct* module-input count (`(i32, f64*k) -> ()`, sorted), then the
     // helper types, then the `set_value` type (`(i32, f64) -> i32`), then
-    // `run_to`'s `(f64) -> ()` type. `reset`/`clear_values`/`run_initials` reuse
-    // `TYPE_RUN_FN` (`() -> ()`). `opcode_type_for` maps an instance's `n_inputs`
-    // to its type index; a helper at function index `i` uses the type appended
-    // after those.
+    // `run_to`'s `(f64) -> ()` type, then `get_error`'s `() -> i64`.
+    // `reset`/`clear_values`/`run_initials` reuse `TYPE_RUN_FN` (`() -> ()`).
+    // `opcode_type_for` maps an instance's `n_inputs` to its type index; a helper
+    // at function index `i` uses the type appended after those.
     let mut distinct_inputs: Vec<u32> = instance_input_counts.to_vec();
     distinct_inputs.sort_unstable();
     distinct_inputs.dedup();
@@ -2400,6 +2712,7 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     let first_helper_type = TYPE_RUN_FN + 1 + distinct_inputs.len() as u32;
     let set_value_type = first_helper_type + helpers.functions.len() as u32;
     let run_to_type = set_value_type + 1;
+    let get_error_type = run_to_type + 1;
 
     let mut types = TypeSection::new();
     types.ty().function([], []); // TYPE_RUN_FN: () -> ()
@@ -2419,6 +2732,8 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         .function([ValType::I32, ValType::F64], [ValType::I32]);
     // `run_to(target: f64) -> ()`.
     types.ty().function([ValType::F64], []);
+    // `get_error() -> i64`.
+    types.ty().function([], [ValType::I64]);
     wasm.section(&types);
 
     // Function section: helpers first (indices `0..n_helpers`), then each
@@ -2441,6 +2756,7 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     functions.function(TYPE_RUN_FN); // clear_values
     functions.function(run_to_type); // run_to
     functions.function(TYPE_RUN_FN); // run_initials
+    functions.function(get_error_type); // get_error
     if initials_skipping_fn.is_some() {
         // The root's container-skipping initials shares the root's opcode-program
         // type `(module_off: i32) -> ()`; the root always takes 0 module inputs.
@@ -2482,7 +2798,21 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_SAVED
     globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_STEP_ACCUM
     globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_DID_INITIALS
-    // `passes::G_HEAP` (index 7), the special-stock bump pointer. Emitted only for
+    // The runtime error channel (indices 7/8), emitted for EVERY module so
+    // `get_error` is an unconditional export. Both init 0 -- "no error raised".
+    debug_assert_eq!(
+        globals.len(),
+        errors::G_ERR_CODE,
+        "G_ERR_CODE index drifted"
+    );
+    globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_ERR_CODE
+    debug_assert_eq!(
+        globals.len(),
+        errors::G_ERR_BELT,
+        "G_ERR_BELT index drifted"
+    );
+    globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_ERR_BELT
+    // `passes::G_HEAP` (index 9), the special-stock bump pointer. Emitted only for
     // a model with a side-table pass, and initialized to the same `heap_base`
     // `reset` rewinds to -- so a blob works even if the host never calls `reset`.
     if let Some(heap_base) = heap_base {
@@ -2502,6 +2832,12 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     // The resumable run ABI (purely additive to the export set above).
     exports.export("run_to", ExportKind::Func, run_to_fn_index);
     exports.export("run_initials", ExportKind::Func, run_initials_fn_index);
+    // The runtime error channel's sole export (GH #921): `(belt << 32) | code`,
+    // zero when the run raised nothing. A host that never checks it is no worse off
+    // than before it existed -- but a conveyor model's host must, since the blob
+    // cannot return a `Result`. See `errors::decode_error_word` /
+    // `errors::reconstruct_error`.
+    exports.export("get_error", ExportKind::Func, get_error_fn_index);
     exports.export("memory", ExportKind::Memory, 0);
     exports.export("n_slots", ExportKind::Global, G_N_SLOTS);
     exports.export("n_chunks", ExportKind::Global, G_N_CHUNKS);
@@ -2516,7 +2852,7 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     // Code section order must match the function section: helper bodies, then the
     // per-instance program functions (in `program_fns` order), then the driver
     // functions in index order: `run`, `set_value`, `reset`, `clear_values`,
-    // `run_to`, `run_initials`.
+    // `run_to`, `run_initials`, `get_error`.
     let mut code = CodeSection::new();
     for hf in &helpers.functions {
         code.function(&hf.body);
@@ -2530,6 +2866,7 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     code.function(&clear_values_fn);
     code.function(&run_to_fn);
     code.function(&run_initials_fn);
+    code.function(&get_error_fn);
     if let Some(skipping) = &initials_skipping_fn {
         code.function(skipping);
     }
