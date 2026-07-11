@@ -510,10 +510,17 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
             }
         }
 
+        // Enable LTM BEFORE harvesting diagnostics. `model_all_diagnostics` emits
+        // the `ConveyorLtmDegraded`/`QueueLtmDegraded` warnings only inside its
+        // `project.ltm_enabled(db)` gate (`db/diagnostic.rs:194`), so collecting
+        // first meant a conveyor/queue model silently returned results with no
+        // loop scores and no explanation of why. With `--ltm` requested, the
+        // LTM-enabled project is the one whose diagnostics the user wants.
+        set_project_ltm_enabled(&mut db, source_project, true);
+
         let formatted = collect_diagnostics_as_formatted(&db, source_project, &sync_state);
         report_formatted_errors(&formatted);
 
-        set_project_ltm_enabled(&mut db, source_project, true);
         match run_simulation(&mut db, source_project, project, "main") {
             Ok(results) => return results,
             Err(err) => {
