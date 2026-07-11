@@ -355,9 +355,21 @@ conveyors are (`QueueNonEulerMethod`, mirroring `ConveyorNonEulerMethod`).
 
 ### 10.4 wasmgen
 
-Like conveyors (conveyors.md §9.5), a queue model returns `Unsupported` (loud,
-no silent VM fallback) from the wasm backend until a lowering exists; the
-`QueueNotExpanded` guard firing on the wasmgen compile path enforces this.
+A queue model IS lowered by the wasm backend (`wasmgen/passes.rs`). The wasmgen
+datamodel entry point routes through the same `queue_compile::compile_sim`
+dispatch the VM takes, so it compiles the identical expanded project and resolves
+the identical plans; the pass is then emitted as unrolled, plan-specialized wasm
+(no runtime interpretation of a plan structure). Both hook points are preserved:
+containers publish at step start, and admit-then-serve runs between Flows and
+Stocks. The `QueueNotExpanded` guard still fires for any path that reaches
+`compile_project_incremental` with a live `<queue/>` marker, so a future caller
+that bypasses the dispatch cannot silently mis-simulate.
+
+Conveyors are still `Unsupported` from the wasm backend (loud, no silent VM
+fallback; conveyors.md §9.5), and a conveyor-bearing model is rejected up front
+before the dispatch. Conveyor-to-queue coupling therefore does not arise on the
+wasm path yet; a `QueueOutflowKind::Coupled` outflow is rejected explicitly
+rather than mis-lowered.
 
 ### 10.5 LTM
 

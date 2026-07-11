@@ -21,23 +21,25 @@
 //!
 //! Status: the full scalar + array opcode set (every `Op2` operator, every
 //! `Apply` builtin, the view/reducer/iteration/vector ops, scalar/array
-//! lookups), Euler/RK2/RK4 integration, and nested modules (incl. SMOOTH/DELAY
-//! stdlib expansions) are in place. A genuine runtime view range
+//! lookups), Euler/RK2/RK4 integration, nested modules (incl. SMOOTH/DELAY
+//! stdlib expansions), and QUEUE models (whose per-step FIFO side-table pass is
+//! hand-lowered by `passes`) are in place. A genuine runtime view range
 //! (`ViewRangeDynamic`), array unrolling past the per-function budget, or a
-//! conveyor/queue model (the per-step side-table passes are implemented only
-//! in the bytecode VM, GH #884) returns `WasmGenError::Unsupported`.
+//! CONVEYOR model (the belt pass is still implemented only in the bytecode VM,
+//! GH #884) returns `WasmGenError::Unsupported`.
 
 mod alloc;
 mod lookup;
 mod lower;
 mod math;
 mod module;
+mod passes;
 mod vector;
 mod views;
 
 pub use module::{
     WasmArtifact, WasmLayout, compile_datamodel_to_artifact, compile_datamodel_to_wasm,
-    compile_simulation,
+    compile_simulation, compile_simulation_with_plans,
 };
 
 use std::fmt;
@@ -45,10 +47,10 @@ use std::fmt;
 /// Error from the WebAssembly code-generation backend.
 ///
 /// The backend covers the full scalar + array opcode set, Euler/RK2/RK4
-/// integration, and nested modules (including SMOOTH/DELAY stdlib expansions).
-/// A genuine runtime view range (`ViewRangeDynamic`), array unrolling past the
-/// per-function budget, or a conveyor/queue model (the special-stock passes are
-/// VM-only, GH #884) returns `Unsupported` rather than silently emitting an
+/// integration, nested modules (including SMOOTH/DELAY stdlib expansions), and
+/// queue models. A genuine runtime view range (`ViewRangeDynamic`), array
+/// unrolling past the per-function budget, or a conveyor model (the belt pass is
+/// still VM-only, GH #884) returns `Unsupported` rather than silently emitting an
 /// incorrect module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WasmGenError {

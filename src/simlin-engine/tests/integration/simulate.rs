@@ -15,7 +15,7 @@ use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmil
 
 use crate::test_helpers::{
     WasmRunOutcome, ensure_results, ensure_results_excluding, ensure_wasm_matches,
-    wasm_results_for, wasm_results_for_segmented,
+    vm_results_for_special, wasm_results_for, wasm_results_for_segmented, wasm_results_for_special,
 };
 
 /// Generate one `#[test] fn` per corpus model so libtest (and nextest) schedule
@@ -1263,16 +1263,15 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
 /// stays out of scope. A supported-but-divergent model panics inside
 /// `ensure_wasm_matches`.
 ///
-/// Conveyor/queue fixtures (`test/conveyors/`, `test/queues/`) must NOT be
-/// routed through `simulate_path`/`simulate_mdl_path`: they simulate only via
-/// the VM special-stock build path (`queue_compile::build_sim`), and the wasm
-/// backend rejects them up front as `Unsupported` (GH #884) -- so a conveyor
-/// fixture added to this corpus would first panic in `compile_vm` (the
-/// `ConveyorNotExpanded`/`QueueNotExpanded` guard fires before this hook even
-/// runs), not fail mysteriously here. Their coverage lives in the
-/// `conveyor_compile`/`queue_compile` in-crate tests, and the wasm-side loud
-/// reject is pinned by `conveyor_and_queue_models_rejected_up_front`
-/// (wasmgen `module.rs` tests).
+/// Special-stock fixtures (`test/conveyors/`, `test/queues/`) must NOT be routed
+/// through `simulate_path`/`simulate_mdl_path`, because `compile_vm` calls
+/// `compile_project_incremental` directly and an un-expanded conveyor/queue
+/// marker reaching that pipeline trips the hard `ConveyorNotExpanded` /
+/// `QueueNotExpanded` guard -- the VM would panic before this hook ever runs.
+/// They go through [`simulate_special_path`] instead, which builds the VM side
+/// via the unified dispatch (`queue_compile::build_sim`). Queue fixtures run
+/// through BOTH backends there; conveyor fixtures are still wasm-`Unsupported`
+/// (GH #884 phases 2-4 lower the belt pass) and so have no corpus entry yet.
 fn wasm_parity_hook(
     datamodel: &simlin_engine::datamodel::Project,
     expected: &Results,
@@ -1288,6 +1287,103 @@ fn wasm_parity_hook(
              reaches this hook. Reason: {msg}"
         );
     }
+}
+
+/// Corpus entry point for a SPECIAL-STOCK (conveyor/queue) XMILE fixture: run it
+/// through the VM and the wasm backend and assert both agree, plus the protobuf
+/// and XMILE round-trips.
+///
+/// Three deliberate differences from [`simulate_path`]:
+///
+/// 1. **The VM side goes through the unified dispatch.** `compile_vm` calls
+///    `compile_project_incremental`, whose `ConveyorNotExpanded`/`QueueNotExpanded`
+///    guard exists precisely to catch an un-expanded marker reaching it. Special
+///    stocks compile via `queue_compile::build_sim`, which expands them into
+///    driven flows and ATTACHES the resolved plans to the `Vm`.
+/// 2. **The VM is the oracle.** No reference series is checked in beside these
+///    fixtures (no other SD tool writes the `simlin:`-flavoured queue XMILE we
+///    parse), so there is no cross-simulator gate to clear. The VM's queue pass
+///    is the reference implementation of `docs/design/queues.md`, unit-tested in
+///    `queue_compile.rs`; what this harness adds is that every OTHER path --
+///    protobuf round-trip, XMILE round-trip, wasm lowering -- reproduces it
+///    column-for-column, at the corpus comparator's existing epsilons.
+/// 3. **`ensure_results` iterates the VM baseline's offsets**, which for an
+///    expanded model include the synthetic container auxes and driven flows. So
+///    the pass-written slots -- the ones a plain stock-and-flow comparison would
+///    never see -- are themselves gated.
+///
+/// A wasm `Unsupported` here is a hard failure, exactly as in [`wasm_parity_hook`]:
+/// a fixture only earns a corpus entry once both backends run it. Conveyor
+/// fixtures therefore have no entry yet (GH #884 phases 2-4).
+///
+/// The comparator's bite was verified by fault injection during development:
+/// halving the emitted primary serve rate, and dropping the plan set on the wasm
+/// side, each make both queue entries fail. It is not a vacuous zeros-vs-zeros
+/// comparison.
+fn simulate_special_path(xmile_path: &str) {
+    eprintln!("model (special stocks): {xmile_path}");
+
+    let datamodel_project = {
+        let f = File::open(xmile_path).unwrap();
+        let mut f = BufReader::new(f);
+        xmile::project_from_reader(&mut f)
+            .unwrap_or_else(|e| panic!("failed to parse {xmile_path}: {e}"))
+    };
+
+    let baseline = vm_results_for_special(&datamodel_project, "main");
+
+    assert!(
+        baseline.step_count > 1,
+        "{xmile_path}: expected a multi-step baseline"
+    );
+
+    // protobuf round-trip: the queue/conveyor markers and the `<overflow/>` flag
+    // must survive serialization, or the re-compiled model silently loses its
+    // pass and drains as an ordinary stock.
+    let datamodel_proto = {
+        use simlin_engine::prost::Message;
+
+        let pb_project = serialize(&datamodel_project).unwrap();
+        let mut buf = Vec::with_capacity(pb_project.encoded_len());
+        pb_project.encode(&mut buf).unwrap();
+        deserialize(project_io::Project::decode(&*buf).unwrap())
+    };
+    assert_eq!(datamodel_project, datamodel_proto);
+    ensure_results(&baseline, &vm_results_for_special(&datamodel_proto, "main"));
+
+    // XMILE round-trip, then a byte-identical re-serialization.
+    let serialized_xmile = xmile::project_to_xmile(&datamodel_project).unwrap();
+    let roundtripped_project = {
+        let mut xmile_reader = BufReader::new(serialized_xmile.as_bytes());
+        xmile::project_from_reader(&mut xmile_reader).unwrap()
+    };
+    ensure_results(
+        &baseline,
+        &vm_results_for_special(&roundtripped_project, "main"),
+    );
+    let serialized_xmile2 = xmile::project_to_xmile(&roundtripped_project).unwrap();
+    assert_eq!(&serialized_xmile, &serialized_xmile2);
+
+    // wasm-backend parity, against the VM baseline.
+    match wasm_results_for_special(&datamodel_project, "main") {
+        Ok(wasm) => ensure_results(&baseline, &wasm),
+        Err(msg) => panic!(
+            "wasm parity gate: a VM-simulated special-stock fixture returned \
+             Unsupported from the wasm backend. A fixture earns a corpus entry \
+             only once both backends run it -- close the lowering gap or drop the \
+             entry. Reason: {msg}"
+        ),
+    }
+}
+
+#[test]
+fn simulates_queue_drain() {
+    simulate_special_path("../../test/queues/queue_drain.xmile");
+}
+
+#[test]
+fn simulates_minimal_queue() {
+    simulate_special_path("../../test/queues/minimal_queue.xmile");
 }
 
 /// Load the reference series that sits beside a Vensim `.mdl` fixture.

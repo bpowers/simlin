@@ -483,89 +483,173 @@ fn compile_to_wasm_unsupported_ltm_model_surfaces_error() {
     }
 }
 
-/// GH #884: a conveyor or queue model surfaces a clean typed `SimlinError`
-/// from `simlin_model_compile_to_wasm` whose message states the wasm-backend
+/// GH #884: a CONVEYOR model surfaces a clean typed `SimlinError` from
+/// `simlin_model_compile_to_wasm` whose message states the wasm-backend
 /// limitation ("not yet supported by the wasm backend") -- not the
-/// engine-internal `ConveyorNotExpanded`/`QueueNotExpanded` guard text, which
-/// directs the reader at a VM-only build entry point that produces no wasm
-/// blob. Both output buffers stay NULL, and there is no panic and no silent
-/// VM fallback. The same fixtures simulate fine through `simlin_sim_new`
-/// (pinned by the special-stock tests in `simulation.rs`), so this is a
-/// wasm-backend-only limitation. Engine-level twin:
-/// `conveyor_and_queue_models_rejected_up_front` (wasmgen `module.rs` tests).
+/// engine-internal `ConveyorNotExpanded` guard text, which directs the reader at
+/// a VM-only build entry point that produces no wasm blob. Both output buffers
+/// stay NULL, and there is no panic and no silent VM fallback. The same fixture
+/// simulates fine through `simlin_sim_new` (pinned by the special-stock tests in
+/// `simulation.rs`), so this is a wasm-backend-only limitation. Engine-level
+/// twin: `conveyor_models_rejected_up_front` (wasmgen `module.rs` tests).
+///
+/// The QUEUE half of GH #884 has landed -- see the sibling
+/// `compile_to_wasm_queue_model_runs` below.
 #[test]
-fn compile_to_wasm_conveyor_and_queue_models_surface_error() {
-    let fixtures: [(&str, &str); 2] = [
-        (
-            include_str!("../../../../test/conveyors/minimal_conveyor.xmile"),
-            "conveyor",
-        ),
-        (
-            include_str!("../../../../test/queues/queue_drain.xmile"),
-            "queue",
-        ),
-    ];
-    for (xml, what) in fixtures {
-        unsafe {
-            let mut err: *mut SimlinError = ptr::null_mut();
-            let project = simlin_project_open_xmile(xml.as_ptr(), xml.len(), &mut err);
-            assert!(
-                err.is_null(),
-                "open_xmile must succeed for the {what} fixture"
-            );
-            assert!(!project.is_null());
+fn compile_to_wasm_conveyor_model_surfaces_error() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let project = simlin_project_open_xmile(xml.as_ptr(), xml.len(), &mut err);
+        assert!(err.is_null(), "open_xmile must succeed");
+        assert!(!project.is_null());
 
-            let model_name = std::ffi::CString::new("main").unwrap();
-            let mut err: *mut SimlinError = ptr::null_mut();
-            let model = simlin_project_get_model(project, model_name.as_ptr(), &mut err);
-            assert!(
-                err.is_null(),
-                "get_model must succeed for the {what} fixture"
-            );
-            assert!(!model.is_null());
+        let model_name = std::ffi::CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(project, model_name.as_ptr(), &mut err);
+        assert!(err.is_null(), "get_model must succeed");
+        assert!(!model.is_null());
 
-            let mut out_wasm: *mut u8 = ptr::null_mut();
-            let mut out_wasm_len: usize = 0;
-            let mut out_layout: *mut u8 = ptr::null_mut();
-            let mut out_layout_len: usize = 0;
-            let mut err: *mut SimlinError = ptr::null_mut();
-            simlin_model_compile_to_wasm(
-                model,
-                false,
-                false,
-                &mut out_wasm,
-                &mut out_wasm_len,
-                &mut out_layout,
-                &mut out_layout_len,
+        let mut out_wasm: *mut u8 = ptr::null_mut();
+        let mut out_wasm_len: usize = 0;
+        let mut out_layout: *mut u8 = ptr::null_mut();
+        let mut out_layout_len: usize = 0;
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_model_compile_to_wasm(
+            model,
+            false,
+            false,
+            &mut out_wasm,
+            &mut out_wasm_len,
+            &mut out_layout,
+            &mut out_layout_len,
+            &mut err,
+        );
+
+        assert!(!err.is_null(), "a conveyor model must set out_error");
+        let msg_ptr = simlin_error_get_message(err);
+        assert!(!msg_ptr.is_null(), "the error must carry a message");
+        let msg = std::ffi::CStr::from_ptr(msg_ptr).to_str().unwrap();
+        assert!(
+            msg.contains("not yet supported by the wasm backend") && msg.contains("conveyor"),
+            "the error must state the wasm-backend conveyor limitation, got: {msg}"
+        );
+        assert!(
+            !msg.contains("build_vm") && !msg.contains("build_sim"),
+            "the wasm-path error must not direct the caller at a VM-only \
+             build entry point, got: {msg}"
+        );
+        assert!(
+            out_wasm.is_null() && out_wasm_len == 0,
+            "wasm buffer stays NULL on error"
+        );
+        assert!(
+            out_layout.is_null() && out_layout_len == 0,
+            "layout buffer stays NULL on error"
+        );
+
+        simlin_error_free(err);
+        simlin_model_unref(model);
+        simlin_project_unref(project);
+    }
+}
+
+/// GH #884 (queue half): a queue model compiles to wasm through the FFI, and the
+/// blob's series -- including the pass-driven outflow, whose equation is a
+/// placeholder `0` the FIFO pass overwrites every step -- match `simlin_sim_new`'s
+/// VM run. This is the FFI-level proof that the special-stock dispatch is wired
+/// through `simlin_model_compile_to_wasm`, not just through the engine's in-crate
+/// entry point.
+#[test]
+fn compile_to_wasm_queue_model_runs() {
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let project = simlin_project_open_xmile(xml.as_ptr(), xml.len(), &mut err);
+        assert!(
+            err.is_null(),
+            "open_xmile must succeed for the queue fixture"
+        );
+        assert!(!project.is_null());
+
+        let model_name = std::ffi::CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(project, model_name.as_ptr(), &mut err);
+        assert!(err.is_null(), "get_model must succeed");
+        assert!(!model.is_null());
+
+        let mut out_wasm: *mut u8 = ptr::null_mut();
+        let mut out_wasm_len: usize = 0;
+        let mut out_layout: *mut u8 = ptr::null_mut();
+        let mut out_layout_len: usize = 0;
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_model_compile_to_wasm(
+            model,
+            false,
+            false,
+            &mut out_wasm,
+            &mut out_wasm_len,
+            &mut out_layout,
+            &mut out_layout_len,
+            &mut err,
+        );
+        assert!(err.is_null(), "a queue model must compile to wasm");
+        assert!(!out_wasm.is_null() && out_wasm_len > 0);
+        assert!(!out_layout.is_null() && out_layout_len > 0);
+
+        let wasm = std::slice::from_raw_parts(out_wasm, out_wasm_len).to_vec();
+        let layout = parse_layout(std::slice::from_raw_parts(out_layout, out_layout_len));
+        let offset_of = |name: &str| -> usize {
+            layout
+                .var_offsets
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{name} in layout"))
+                .1
+        };
+
+        // The driven outflow carries the served rate (the constant inflow, 10),
+        // never the placeholder 0 its equation compiles to.
+        let served = run_and_stride(&wasm, &layout, offset_of("into_service"));
+        assert!(
+            served.iter().all(|v| (v - 10.0).abs() < 1e-9),
+            "into_service must be the pass-driven served rate, got {served:?}"
+        );
+
+        // Cross-check the queue stock and the downstream stock against the VM.
+        let sim = simlin_sim_new(model, false, &mut err);
+        assert!(err.is_null() && !sim.is_null(), "sim_new on a queue model");
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null(), "VM run of the queue model");
+        let mut n: usize = 0;
+        simlin_sim_get_stepcount(sim, &mut n, &mut err);
+        assert!(err.is_null());
+        assert_eq!(n, layout.n_chunks, "the two backends save the same rows");
+        for name in ["waiting", "served", "arrivals", "into_service"] {
+            let cname = std::ffi::CString::new(name).unwrap();
+            let mut vm_series = vec![0.0f64; n];
+            let mut written: usize = 0;
+            simlin_sim_get_series(
+                sim,
+                cname.as_ptr(),
+                vm_series.as_mut_ptr(),
+                n,
+                &mut written,
                 &mut err,
             );
-
-            assert!(!err.is_null(), "a {what} model must set out_error");
-            let msg_ptr = simlin_error_get_message(err);
-            assert!(!msg_ptr.is_null(), "the error must carry a message");
-            let msg = std::ffi::CStr::from_ptr(msg_ptr).to_str().unwrap();
-            assert!(
-                msg.contains("not yet supported by the wasm backend") && msg.contains(what),
-                "the error must state the wasm-backend {what} limitation, got: {msg}"
-            );
-            assert!(
-                !msg.contains("build_vm") && !msg.contains("build_sim"),
-                "the wasm-path error must not direct the caller at a VM-only \
-                 build entry point, got: {msg}"
-            );
-            assert!(
-                out_wasm.is_null() && out_wasm_len == 0,
-                "wasm buffer stays NULL on error"
-            );
-            assert!(
-                out_layout.is_null() && out_layout_len == 0,
-                "layout buffer stays NULL on error"
-            );
-
-            simlin_error_free(err);
-            simlin_model_unref(model);
-            simlin_project_unref(project);
+            assert!(err.is_null(), "VM series for {name}");
+            assert_eq!(written, n);
+            let wasm_series = run_and_stride(&wasm, &layout, offset_of(name));
+            for (i, (v, w)) in vm_series.iter().zip(&wasm_series).enumerate() {
+                assert!((v - w).abs() < 1e-9, "{name} at step {i}: vm={v} wasm={w}");
+            }
         }
+
+        simlin_free(out_wasm);
+        simlin_free(out_layout);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(project);
     }
 }
 

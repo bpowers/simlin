@@ -230,11 +230,14 @@ fn assembled_module_initializes_gf_regions_in_memory() {
         // from the function section, and a no-op leaves the stack empty).
         run_to_fn: empty(),
         run_initials_fn: empty(),
+        // No queue pass: no container-skipping initials, no bump-pointer global.
+        initials_skipping_fn: None,
         instance_input_counts: &[0],
         pages,
         n_slots: 0,
         n_chunks: 0,
         results_base: 0,
+        heap_base: None,
         gf_regions: &[&regions],
         const_init: &empty_const_init,
     });
@@ -315,63 +318,76 @@ fn compile_simulation_gf_lookup_modes_match_vm() {
     }
 }
 
-/// GH #884: a conveyor or queue model is rejected UP FRONT by the wasm
-/// datamodel entry points with a typed `WasmGenError::Unsupported` whose
-/// message honestly states the wasm-backend limitation -- not the
-/// engine-internal `ConveyorNotExpanded`/`QueueNotExpanded` guard text,
-/// which directs the reader at the VM-only special-stock build path (a
-/// path that produces no wasm blob). The LTM-enabled compile takes the
-/// same early exit. The companion `build_vm` oracle proves the same
-/// fixtures simulate fine on the bytecode VM, so the limitation is
-/// wasm-backend-specific, not a structural model error.
+/// GH #884: a CONVEYOR model is rejected UP FRONT by the wasm datamodel entry
+/// points with a typed `WasmGenError::Unsupported` whose message honestly
+/// states the wasm-backend limitation -- not the engine-internal
+/// `ConveyorNotExpanded` guard text, which directs the reader at the VM-only
+/// special-stock build path (a path that produces no wasm blob). The
+/// LTM-enabled compile takes the same early exit. The companion `build_vm`
+/// oracle proves the same fixture simulates fine on the bytecode VM, so the
+/// limitation is wasm-backend-specific, not a structural model error.
+///
+/// The QUEUE half of GH #884 has landed: a queue model now lowers, and its
+/// parity with the VM is pinned in `wasmgen::passes`'s tests. Only the belt
+/// pass is left.
 #[test]
-fn conveyor_and_queue_models_rejected_up_front() {
-    let fixtures: [(&str, &str); 2] = [
-        (
-            include_str!("../../../../test/conveyors/minimal_conveyor.xmile"),
-            "conveyor",
-        ),
-        (
-            include_str!("../../../../test/queues/queue_drain.xmile"),
-            "queue",
-        ),
-    ];
-    for (xml, what) in fixtures {
-        let datamodel = open_xmile(&mut BufReader::new(xml.as_bytes()))
-            .unwrap_or_else(|e| panic!("parse {what} fixture: {e}"));
-        let main = datamodel.models[0].name.clone();
+fn conveyor_models_rejected_up_front() {
+    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let datamodel =
+        open_xmile(&mut BufReader::new(xml.as_bytes())).expect("parse conveyor fixture");
+    let main = datamodel.models[0].name.clone();
 
-        for ltm_enabled in [false, true] {
-            match compile_datamodel_to_artifact(&datamodel, &main, ltm_enabled, false) {
-                Ok(_) => {
-                    panic!("a {what} model must not lower to wasm (ltm_enabled={ltm_enabled})")
-                }
-                Err(WasmGenError::Unsupported(msg)) => {
-                    assert!(
-                        msg.contains("not yet supported by the wasm backend"),
-                        "the error must state the wasm-backend limitation, got: {msg}"
-                    );
-                    assert!(
-                        msg.contains(what),
-                        "the error must name the {what} construct, got: {msg}"
-                    );
-                    assert!(
-                        !msg.contains("build_vm") && !msg.contains("build_sim"),
-                        "the wasm-path error must not direct the caller at a \
-                         VM-only build entry point, got: {msg}"
-                    );
-                }
+    for ltm_enabled in [false, true] {
+        match compile_datamodel_to_artifact(&datamodel, &main, ltm_enabled, false) {
+            Ok(_) => {
+                panic!("a conveyor model must not lower to wasm (ltm_enabled={ltm_enabled})")
+            }
+            Err(WasmGenError::Unsupported(msg)) => {
+                assert!(
+                    msg.contains("not yet supported by the wasm backend"),
+                    "the error must state the wasm-backend limitation, got: {msg}"
+                );
+                assert!(
+                    msg.contains("conveyor"),
+                    "the error must name the conveyor construct, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("build_vm") && !msg.contains("build_sim"),
+                    "the wasm-path error must not direct the caller at a \
+                     VM-only build entry point, got: {msg}"
+                );
             }
         }
-
-        // VM oracle: the same fixture simulates through the special-stock
-        // build path, proving the wasm reject is a backend gap, not a
-        // broken model (mirrors `unsupported_ltm_model_returns_wasmgen_error`).
-        let mut vm = crate::queue_compile::build_vm(&datamodel, &main)
-            .unwrap_or_else(|e| panic!("VM must build the {what} fixture: {e}"));
-        vm.run_to_end()
-            .unwrap_or_else(|e| panic!("VM must run the {what} fixture: {e}"));
     }
+
+    // VM oracle: the same fixture simulates through the special-stock
+    // build path, proving the wasm reject is a backend gap, not a
+    // broken model (mirrors `unsupported_ltm_model_returns_wasmgen_error`).
+    let mut vm = crate::queue_compile::build_vm(&datamodel, &main).expect("VM must build");
+    vm.run_to_end().expect("VM must run the conveyor fixture");
+}
+
+/// The queue fixture the sibling reject test used to carry now LOWERS. Kept here
+/// (rather than only in `wasmgen::passes`'s tests) so the two entry points'
+/// contract stays visible side by side: conveyor rejects, queue lowers, and both
+/// simulate on the VM.
+#[test]
+fn queue_models_lower_through_the_datamodel_entry_point() {
+    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    let datamodel = open_xmile(&mut BufReader::new(xml.as_bytes())).expect("parse queue fixture");
+    let main = datamodel.models[0].name.clone();
+
+    let artifact = compile_datamodel_to_artifact(&datamodel, &main, false, false)
+        .expect("a queue model must lower to wasm");
+    validate(&artifact.wasm).expect("the queue blob must validate under the interpreter");
+    assert!(
+        artifact
+            .layout
+            .var_offsets
+            .iter()
+            .any(|(n, _)| n == "waiting"),
+        "the queue stock must be in the layout"
+    );
 }
 
 /// The FFI entry point goes through the salsa pipeline + `compile_simulation`

@@ -36,10 +36,11 @@
 //! holds the full, correct state for the timestep it represents.
 //!
 //! Current scope: the full scalar + array opcode set, Euler/RK2/RK4 integration,
-//! and nested modules (incl. SMOOTH/DELAY stdlib expansions). A genuine runtime
-//! view range (`ViewRangeDynamic`), array unrolling past the per-function
-//! budget, or a conveyor/queue model (the special-stock passes are VM-only,
-//! GH #884) returns `WasmGenError::Unsupported`.
+//! nested modules (incl. SMOOTH/DELAY stdlib expansions), and QUEUE models (whose
+//! per-step FIFO side-table pass is lowered by [`super::passes`]). A genuine
+//! runtime view range (`ViewRangeDynamic`), array unrolling past the per-function
+//! budget, or a CONVEYOR model (the belt pass is still VM-only, GH #884) returns
+//! `WasmGenError::Unsupported`.
 
 use wasm_encoder::Instruction as I;
 use wasm_encoder::{
@@ -51,11 +52,13 @@ use wasm_encoder::{
 use std::collections::HashMap;
 
 use crate::bytecode::{ByteCode, CompiledModule, Opcode};
+use crate::queue_compile::QueuePlan;
 use crate::results::{Method, Specs};
 use crate::vm::{CompiledSimulation, ModuleKey, StepPart};
 
 use super::WasmGenError;
 use super::lower::{self, BuiltHelpers, build_helpers, f64_const, max_condition_depth, memarg};
+use super::passes::{self, QueuePass, QueuePassLayout, QueuePassLocals};
 
 // Reserved global slots, mirroring `crate::vm`.
 const TIME_OFF: usize = 0;
@@ -93,6 +96,9 @@ const G_USE_PREV_FALLBACK: u32 = 3;
 const G_SAVED: u32 = 4; // saved-row counter (was the run-local `L_SAVED`)
 const G_STEP_ACCUM: u32 = 5; // save-cadence accumulator (was `L_STEP_ACCUM`)
 const G_DID_INITIALS: u32 = 6; // 0 until initials have run (cf. `Vm::did_initials`)
+// `passes::G_HEAP` (index 7) is the special-stock bump pointer, emitted ONLY for a
+// model that carries a side-table pass -- so an ordinary model's blob is unchanged
+// by GH #884. Indices 8/9 are reserved for the conveyor pass's error channel.
 
 // `run_to`'s i32 locals. Its sole f64 *param* (the run target) occupies local 0,
 // so the i32 working locals start at index 1 and `L_DST` is index 2 -- the same
@@ -103,6 +109,22 @@ const G_DID_INITIALS: u32 = 6; // 0 until initials have run (cf. `Vm::did_initia
 // not locals, so it survives across `run_to` calls.
 const L_DST: u32 = 2;
 
+// The special-stock pass's `run_to` locals, appended AFTER the RK f64 pair so
+// `L_SAVED_TIME`/`L_RK_S` keep indices 3/4 and the shared RK emitters are
+// untouched. Declared only when the model carries a pass (`emit_run_to`'s locals
+// list), which is what keeps a pass-free blob byte-identical.
+const L_PASS_HEAP_SAVE: u32 = 5; // i32: `G_HEAP` across the mid-run preview
+const L_PASS_RATE: u32 = 6; // f64: Σ max(inflow, 0)
+const L_PASS_REDIRECTABLE: u32 = 7; // f64: the `<overflow/>` budget
+const L_PASS_TMP: u32 = 8; // f64: clamp / served-volume scratch
+
+/// The queue pass's f64 scratch locals inside `run_to`.
+const PASS_LOCALS: QueuePassLocals = QueuePassLocals {
+    rate: L_PASS_RATE,
+    redirectable: L_PASS_REDIRECTABLE,
+    tmp: L_PASS_TMP,
+};
+
 /// Compile the named model of a datamodel `Project` to a full [`WasmArtifact`]
 /// (the wasm blob plus its [`WasmLayout`]), through the salsa incremental
 /// pipeline and [`compile_simulation`].
@@ -112,43 +134,37 @@ const L_DST: u32 = 2;
 /// `Vm`/`SimlinSim`, returning both the blob and the name->offset layout. An
 /// incremental-compile failure or an unsupported construct surfaces as
 /// [`WasmGenError`] (the FFI maps it to a `SimlinError`, never a panic). A
-/// conveyor/queue model is rejected up front as `Unsupported` (GH #884): the
-/// conveyor/queue side-table passes exist only in the bytecode VM, so there is
-/// no wasm lowering for them -- and no silent VM fallback here.
+/// CONVEYOR model is still rejected up front as `Unsupported` (GH #884): the belt
+/// pass exists only in the bytecode VM, and there is no silent VM fallback here.
+/// A QUEUE model routes through the shared special-stock dispatch
+/// ([`crate::queue_compile::compile_sim`]) -- the same one the VM takes -- so the
+/// expanded project and the resolved [`QueuePlan`]s are byte-identical to the
+/// VM's, and [`super::passes`] lowers the FIFO pass into the blob.
 ///
 /// When `ltm_enabled` is true, the synthesized `$⁚ltm⁚*` link/loop score
 /// variables are included in the emitted layout and blob. `ltm_discovery_mode`
 /// flips the same flag `simlin_project_enable_ltm` sets on a `SimlinProject`,
-/// but locally for this compile only.
+/// but locally for this compile only. Neither flag reaches the special-stock
+/// branch: that path compiles a separate, always-`ltm_enabled == false`
+/// `SourceProject` (a documented degradation, `queues.md` §10).
 pub fn compile_datamodel_to_artifact(
     datamodel: &crate::datamodel::Project,
     model_name: &str,
     ltm_enabled: bool,
     ltm_discovery_mode: bool,
 ) -> Result<WasmArtifact, WasmGenError> {
-    // GH #884: the wasm backend does not lower the conveyor/queue side-table
-    // passes (`init_belts`/`run_coupled_passes` and belt state are VM-only), so
-    // detect the special-stock markers up front -- the same cheap predicates
-    // `queue_compile::compile_sim` dispatches on -- and reject with an honest
-    // wasm-caller-facing message. Without this, the model would fall through to
-    // `compile_project_incremental`, whose `ConveyorNotExpanded`/
-    // `QueueNotExpanded` guard text is written for the VM path. The early exit
-    // also guarantees `compile_simulation` never sees a special-build
-    // `CompiledSimulation` (whose overridable-constant set has been retracted;
-    // see the parity `debug_assert` below).
-    let has_conveyor = crate::conveyor_compile::project_has_conveyor(datamodel, model_name);
-    let has_queue = crate::queue_compile::project_has_queue(datamodel, model_name);
-    if has_conveyor || has_queue {
-        let what = match (has_conveyor, has_queue) {
-            (true, true) => "conveyor/queue",
-            (true, false) => "conveyor",
-            (false, _) => "queue",
-        };
-        return Err(WasmGenError::Unsupported(format!(
-            "wasmgen: {what} models are not yet supported by the wasm backend; \
-             the bytecode VM is the only backend that simulates conveyors and \
-             queues today"
-        )));
+    // GH #884: the conveyor half of the side-table machinery (`init_belts` /
+    // `run_phase_a` / `conveyor_phase_b_one` and the belt state they advance) is
+    // not lowered yet, so detect the conveyor marker up front -- the same cheap
+    // predicate `queue_compile::compile_sim` dispatches on -- and reject with an
+    // honest wasm-caller-facing message. Without this, the model would fall
+    // through to the dispatch and emit a blob whose belts never advance.
+    if crate::conveyor_compile::project_has_conveyor(datamodel, model_name) {
+        return Err(WasmGenError::Unsupported(
+            "wasmgen: conveyor models are not yet supported by the wasm backend; \
+             the bytecode VM is the only backend that simulates conveyors today"
+                .to_string(),
+        ));
     }
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, datamodel, None);
@@ -158,11 +174,15 @@ pub fn compile_datamodel_to_artifact(
     // function and dropped at return, so flag changes can never leak.
     crate::db::set_project_ltm_enabled(&mut db, sync.project, ltm_enabled);
     crate::db::set_project_ltm_discovery_mode(&mut db, sync.project, ltm_discovery_mode);
-    let sim =
-        crate::db::compile_project_incremental(&db, sync.project, model_name).map_err(|e| {
+    // The unified dispatch: an ordinary model goes to `compile_project_incremental`
+    // (with the LTM flags above), a queue model to the expansion build path. Going
+    // through it rather than reimplementing the dispatch is what guarantees the
+    // wasm blob simulates the SAME expanded project the VM does.
+    let build = crate::queue_compile::compile_sim(&mut db, sync.project, datamodel, model_name)
+        .map_err(|e| {
             WasmGenError::Unsupported(format!("wasmgen: incremental compile failed: {e:?}"))
         })?;
-    compile_simulation(&sim)
+    compile_simulation_with_plans(&build.compiled, &build.queue_plans)
 }
 
 /// Compile the named model of a datamodel `Project` to a self-contained wasm
@@ -463,10 +483,40 @@ struct PerInstance<'a> {
 /// Anything outside the supported set -- an unsupported opcode, or array
 /// unrolling past the per-function budget -- returns [`WasmGenError::Unsupported`]
 /// rather than emitting a wrong module.
+///
+/// This is the ORDINARY-model entry point: it asserts (in debug) that `sim` has
+/// not had its overridable-constant set retracted, i.e. that it did not come from
+/// the special conveyor/queue build path. A queue model must use
+/// [`compile_simulation_with_plans`], which carries the plans the pass needs.
 pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, WasmGenError> {
+    compile_simulation_with_plans(sim, &[])
+}
+
+/// [`compile_simulation`] for a special-stock `CompiledSimulation`: additionally
+/// lowers the per-step QUEUE side-table pass described by `queue_plans` (the same
+/// plans `queue_compile::compile_sim` hands the VM).
+///
+/// `queue_plans` empty == the ordinary path, byte-identical to before this
+/// existed: no bump-pointer global, no FIFO helpers, no pass hooks. Conveyor
+/// plans are not accepted yet (GH #884, phases 2-4); a queue coupled to a
+/// conveyor is rejected loudly by [`passes::reject_coupled_outflows`] rather than
+/// emitted as the uncoupled form it is not.
+pub fn compile_simulation_with_plans(
+    sim: &CompiledSimulation,
+    queue_plans: &[QueuePlan],
+) -> Result<WasmArtifact, WasmGenError> {
+    passes::reject_coupled_outflows(queue_plans)?;
     // `wasmgen` is in-crate, so it reads `CompiledSimulation`'s `pub(crate)`
     // fields directly rather than through accessors.
     let specs = &sim.specs;
+    // Conveyors and queues are Euler-only, enforced at plan-build time
+    // (`build_compiled`'s `effective_sim_specs` gate), so `emit_euler_step` is the
+    // only place the pass can hook. Belt-and-braces: an RK method reaching here
+    // with plans attached would silently drop the pass.
+    debug_assert!(
+        queue_plans.is_empty() || matches!(specs.method, Method::Euler),
+        "queues are Euler-only; a non-Euler special build should never reach wasmgen"
+    );
     // The run-loop shape is selected from `specs.method` below; all three
     // methods (`Euler`/`RungeKutta2`/`RungeKutta4`) are supported.
 
@@ -651,22 +701,49 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         .checked_add(n_slots)
         .ok_or_else(too_large)?;
 
-    let overridable_defaults = collect_overridable_defaults(&sim.modules, &sim.root, 0);
-    // Defense in depth: the offsets `collect_overridable_defaults` reports must
-    // be exactly the set the VM considers overridable (`constant_offsets`, the
-    // keys of `cached_constant_info`). Both walk the same flows-`AssignConstCurr`
-    // overridability rule, so any divergence is a bug -- a blob's `set_value`
-    // would then accept/reject a different set than the VM. Checked only in debug.
-    //
-    // Invariant: this comparison assumes `sim` is an ORDINARY-path
-    // `CompiledSimulation`. The special conveyor/queue build path
-    // (`queue_compile::build_compiled`) RETRACTS pass-written slots from the
-    // overridable set post-construction
-    // (`CompiledSimulation::exclude_overridable_offsets`, GH #871), which this
-    // scan cannot see -- but such a sim can never reach here: the datamodel
-    // entry points reject conveyor/queue models up front (GH #884) and
-    // `compile_project_incremental`'s NotExpanded guard backstops any other
-    // route, so only un-retracted sims are lowered.
+    // The queue pass's two fixed-size regions: one 16-byte descriptor per FIFO,
+    // and a same-shaped save area the mid-run preview stashes the live descriptors
+    // in. Both are 8-byte-aligned so the ring addresses they carry stay naturally
+    // aligned for `f64` access. A queue-free model reserves neither.
+    let queue_desc_base = align_up(total_bytes, u64::from(SLOT_SIZE))?;
+    let queue_region_bytes = u32::try_from(queue_plans.len())
+        .ok()
+        .and_then(|n| n.checked_mul(passes::DESC_BYTES))
+        .ok_or_else(too_large)?;
+    let queue_desc_save_base = queue_desc_base
+        .checked_add(queue_region_bytes)
+        .ok_or_else(too_large)?;
+    total_bytes = queue_desc_save_base
+        .checked_add(queue_region_bytes)
+        .ok_or_else(too_large)?;
+
+    // The bump region for the batch rings starts at the end of the static layout.
+    // `reset` rewinds `G_HEAP` here; `q_alloc` grows linear memory past `pages`
+    // whenever a ring pushes the bump beyond the last reserved page.
+    let heap_base = align_up(total_bytes, u64::from(SLOT_SIZE))?;
+    total_bytes = heap_base;
+
+    let mut overridable_defaults = collect_overridable_defaults(&sim.modules, &sim.root, 0);
+    // Pass-written slots (driven outflow rates, published container values) are NOT
+    // overridable: their placeholder `0` equation compiles to an `AssignConstCurr`
+    // the scan above sees, but the pass overwrites the slot every step, so an
+    // accepted override would be silently ineffective (GH #871). The VM retracts
+    // exactly this set in `queue_compile::build_compiled`; mirroring it here is
+    // what makes the blob's `set_value` (which validates against the validity
+    // region seeded from this list) reject the same offsets the VM does.
+    if !queue_plans.is_empty() {
+        let pass_written: std::collections::HashSet<usize> = queue_plans
+            .iter()
+            .flat_map(|p| p.pass_written_offsets())
+            .collect();
+        overridable_defaults.retain(|(off, _)| !pass_written.contains(off));
+    }
+    // Defense in depth: the offsets `collect_overridable_defaults` reports -- after
+    // the retraction above -- must be exactly the set the VM considers overridable
+    // (`constant_offsets`, the keys of `cached_constant_info`). Both walk the same
+    // flows-`AssignConstCurr` rule and then subtract the same pass-written set, so
+    // any divergence is a bug: a blob's `set_value` would accept/reject a different
+    // set than the VM. Checked only in debug.
     debug_assert!(
         {
             let mut ours: Vec<usize> = overridable_defaults.iter().map(|(off, _)| *off).collect();
@@ -690,8 +767,24 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     // for instance `i`), and `run` is last. Build the helpers up front so the
     // index registry threaded into each `EmitCtx` matches the assembled module's
     // layout, and so `emit_bytecode`'s `call`s resolve.
-    let helpers = build_helpers();
+    //
+    // The queue pass's FIFO primitives are appended to the SAME helper block (only
+    // for a queue model), so every downstream index -- the per-instance triples and
+    // the driver functions -- shifts automatically off `n_helpers`.
+    let mut helpers = build_helpers();
     let helper_fns = helpers.fns;
+    let queue_pass = (!queue_plans.is_empty()).then(|| {
+        QueuePass::build(
+            queue_plans,
+            QueuePassLayout {
+                desc_base: queue_desc_base,
+                desc_save_base: queue_desc_save_base,
+                heap_base,
+            },
+            specs.dt,
+            &mut helpers.functions,
+        )
+    });
     let n_helpers = helpers.functions.len() as u32;
 
     // Assemble the per-instance descriptors and the `(ModuleKey, StepPart) -> fn
@@ -725,8 +818,21 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     // and per-instance bases. `step_part` is per-program so `LoadInitial` picks
     // its `curr`-vs-snapshot branch at compile time (`vm.rs:1332-1340`), and an
     // `EvalModule` resolves the child's function for that same phase.
+    //
+    // The ROOT instance additionally gets a second, container-SKIPPING initials
+    // function when a queue publishes container values -- the wasm analogue of
+    // `Vm::eval_initials_skipping` (`vm.rs:1731`), which `run_initials` re-runs so
+    // that `INIT(SUM(queue))` reconciles against the published start-of-run batch
+    // totals instead of the container stock's frozen `0` placeholder.
+    let container_skip: std::collections::HashSet<usize> = queue_pass
+        .as_ref()
+        .filter(|p| p.has_containers())
+        .map(|p| p.container_offsets().collect())
+        .unwrap_or_default();
+    let mut initials_skipping_fn: Option<Function> = None;
+
     let mut program_fns: Vec<Function> = Vec::with_capacity(instances.len() * 3);
-    for inst in &instances {
+    for (inst_idx, inst) in instances.iter().enumerate() {
         // `module_off` is the function's i32 param 0; inputs are params
         // `1..=n_inputs`. The reverse-pop scratch f64 base sits past all other
         // declared locals; the index helpers shift everything by `n_inputs`.
@@ -763,7 +869,12 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
             module_fn_index: &module_fn_index,
             ctx: &inst.module.context,
         };
-        program_fns.push(emit_initials_fn(inst.module, inst.n_inputs, &make_ctx)?);
+        program_fns.push(emit_initials_fn(
+            inst.module,
+            inst.n_inputs,
+            &make_ctx,
+            None,
+        )?);
         program_fns.push(emit_opcode_fn(
             &inst.module.compiled_flows,
             inst.n_inputs,
@@ -776,6 +887,18 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
             StepPart::Stocks,
             &make_ctx,
         )?);
+        // Container stocks are variables of the MAIN model (queue expansion appends
+        // them there), so only the root instance can hold one; a child's initials
+        // are re-run in full through the root's `EvalModule`, exactly as the VM's
+        // recursion does.
+        if !container_skip.is_empty() && instance_order[inst_idx] == sim.root {
+            initials_skipping_fn = Some(emit_initials_fn(
+                inst.module,
+                inst.n_inputs,
+                &make_ctx,
+                Some(&container_skip),
+            )?);
+        }
     }
 
     // The root instance's initials/flows/stocks are driven with `module_off = 0`
@@ -798,20 +921,30 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
 
     // Driver function indices, in the function-section order `assemble_simulation`
     // lays out after the per-instance triples: run, set_value, reset, clear_values,
-    // run_to, run_initials. `run` and `run_to` delegate (`run` -> `reset` +
+    // run_to, run_initials, and (queue models with containers only) the root's
+    // container-skipping initials. `run` and `run_to` delegate (`run` -> `reset` +
     // `run_to`; `run_to` -> `run_initials`), so their indices must be known before
     // their bodies are emitted -- the function section declares all indices up
     // front, so this is sound. Keeping run/set_value/reset/clear_values at their
-    // original indices (the two new exports append after) keeps the change additive.
+    // original indices (everything since appends after) keeps the change additive.
     let run_fn_index = run_fn_index_of(n_helpers, instances.len() as u32);
     let reset_fn_index = run_fn_index + 2;
     let run_to_fn_index = run_fn_index + 4;
     let run_initials_fn_index = run_fn_index + 5;
+    let initials_skipping_fn_index = run_fn_index + 6;
 
     // The resumable run ABI: `run_initials` (idempotent), `run_to(target)` (the
     // single shared stepping loop), and `run` (re-expressed as `reset;
     // run_to(stop)`). The cursor lives in mutable globals so a run is resumable.
-    let run_initials_fn = emit_run_initials(specs, regions, root_fn_base);
+    let run_initials_fn = emit_run_initials(
+        specs,
+        regions,
+        root_fn_base,
+        queue_pass.as_ref(),
+        initials_skipping_fn
+            .as_ref()
+            .map(|_| initials_skipping_fn_index),
+    );
     let run_to_fn = emit_run_to(
         specs,
         regions,
@@ -819,6 +952,7 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         &stock_offsets,
         root_fn_base,
         run_initials_fn_index,
+        queue_pass.as_ref(),
     );
     let run_fn = emit_run(
         specs,
@@ -840,7 +974,12 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         const_valid_base,
         const_override_set_base,
     );
-    let reset_fn = emit_reset(n_slots, const_region_base, const_override_set_base);
+    let reset_fn = emit_reset(
+        n_slots,
+        const_region_base,
+        const_override_set_base,
+        queue_pass.as_ref(),
+    );
     let clear_values_fn = emit_clear_values(
         const_region_base,
         const_override_set_base,
@@ -867,11 +1006,13 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         clear_values_fn,
         run_to_fn,
         run_initials_fn,
+        initials_skipping_fn,
         instance_input_counts: &instance_input_counts,
         pages,
         n_slots,
         n_chunks,
         results_base,
+        heap_base: queue_pass.as_ref().map(|_| heap_base),
         gf_regions: &gf_images,
         const_init: &const_init,
     });
@@ -920,15 +1061,33 @@ fn collect_instance_input_counts(sim: &CompiledSimulation) -> HashMap<ModuleKey,
     counts
 }
 
+/// Round `v` up to the next multiple of `align` (a power of two), failing the
+/// layout rather than wrapping.
+fn align_up(v: u32, align: u64) -> Result<u32, WasmGenError> {
+    let align = align as u32;
+    v.checked_next_multiple_of(align)
+        .ok_or_else(|| WasmGenError::Unsupported("wasmgen: model too large to lower".to_string()))
+}
+
 /// Build an instance's `initials` function: every `CompiledInitial`'s bytecode
 /// in order, over the shared slab. The shared condition-local count is the max
 /// nesting depth across all the initials (they run sequentially in one function);
 /// the reverse-pop scratch covers the max `EvalModule { n_inputs }` over them.
 /// `n_inputs` is the instance's module-input parameter count (shifts the locals).
+///
+/// `skip_offsets`, when present, drops every `CompiledInitial` all of whose write
+/// offsets lie in the set -- reproducing `Vm::eval_initials_skipping`
+/// (`vm.rs:1743-1751`) exactly, including its "non-empty AND all-in-set" rule. It
+/// is used only for the root's queue-container reconciliation pass: re-running a
+/// container stock's `0` placeholder would clobber the value the pass published
+/// before the dependent initials read it. The locals declaration and condition
+/// depth are still sized over ALL initials (a superset), so the two functions
+/// share one frame shape.
 fn emit_initials_fn<'a>(
     module: &CompiledModule,
     n_inputs: u32,
     make_ctx: &impl Fn(usize, u32, StepPart) -> lower::EmitCtx<'a>,
+    skip_offsets: Option<&std::collections::HashSet<usize>>,
 ) -> Result<Function, WasmGenError> {
     let cond_depth = module
         .compiled_initials
@@ -955,6 +1114,12 @@ fn emit_initials_fn<'a>(
     let ctx = make_ctx(cond_depth, extra_i32, StepPart::Initials);
     let mut f = new_opcode_fn(n_inputs, cond_depth, extra_i32, module_input_scratch);
     for ci in module.compiled_initials.iter() {
+        if let Some(skip) = skip_offsets
+            && !ci.offsets.is_empty()
+            && ci.offsets.iter().all(|off| skip.contains(off))
+        {
+            continue;
+        }
         lower::emit_bytecode(&ci.bytecode, &ctx, &mut f)?;
     }
     f.instruction(&I::End);
@@ -1156,12 +1321,30 @@ struct RunFnIndices {
 }
 
 /// Emit `run_initials() -> ()`: seed the reserved time slots, run the root
-/// initials, capture `initial_values`, and arm the step cursor -- but only the
-/// first time per `reset`. Idempotent via the `G_DID_INITIALS` guard, mirroring
-/// `vm.rs:1080-1082` (`if self.did_initials { return Ok(()); }`), so a `run_to`
-/// after another `run_to` re-runs initials zero times and resumes the existing
-/// cursor instead.
-fn emit_run_initials(specs: &Specs, regions: RunRegions, root_fn_base: u32) -> Function {
+/// initials, capture `initial_values`, build the queue side table, and arm the
+/// step cursor -- but only the first time per `reset`. Idempotent via the
+/// `G_DID_INITIALS` guard, mirroring `vm.rs:1080-1082`
+/// (`if self.did_initials { return Ok(()); }`), so a `run_to` after another
+/// `run_to` re-runs initials zero times, does NOT rebuild the side table, and
+/// resumes the existing cursor instead. That single guard is the whole mechanism:
+/// there is deliberately no second "belts built" flag to keep in sync.
+///
+/// The queue init sits AFTER the `initial_values` snapshot, exactly where the VM
+/// places it (`vm.rs:1567`): a queue reads `curr[stock_off]` (its `<eqn>`, which
+/// the initials runlist already evaluated) and never mutates `curr`, so nothing
+/// forces it earlier -- and keeping the snapshot first is what makes `INIT()` of
+/// an ordinary variable pure. `run_initials_skipping_idx` then supplies the
+/// container reconciliation (`vm.rs:1581-1656`): the snapshot froze each container
+/// stock's `0` placeholder, so once the pass has published the real start-of-run
+/// batch values, the initials runlist is re-run (skipping the container stocks
+/// themselves) and re-snapshotted, letting `INIT(SUM(queue))` see the true total.
+fn emit_run_initials(
+    specs: &Specs,
+    regions: RunRegions,
+    root_fn_base: u32,
+    queue_pass: Option<&QueuePass>,
+    run_initials_skipping_idx: Option<u32>,
+) -> Function {
     let mut f = Function::new([]);
 
     // if G_DID_INITIALS != 0: return  (idempotency -- already initialized).
@@ -1200,6 +1383,23 @@ fn emit_run_initials(specs: &Specs, regions: RunRegions, root_fn_base: u32) -> F
         regions.n_slots,
     );
 
+    if let Some(pass) = queue_pass {
+        pass.emit_init(&mut f);
+        // Publish the initialized FIFOs' container values, so the t=0 slot holds
+        // the start-of-step value even before the first Euler step re-publishes it.
+        pass.emit_publish_containers(&mut f);
+        if let Some(skipping_idx) = run_initials_skipping_idx {
+            f.instruction(&I::I32Const(0));
+            f.instruction(&I::Call(skipping_idx));
+            emit_copy_chunk(
+                &mut f,
+                CURR_BASE,
+                regions.initial_values_base,
+                regions.n_slots,
+            );
+        }
+    }
+
     // Arm the cursor: nothing saved yet, accumulator cleared, initials done. The
     // first save happens in `run_to`'s loop (the forced t=start row), matching the
     // VM (`run_initials` does not save chunk 0).
@@ -1229,12 +1429,27 @@ fn emit_run_to(
     stock_offsets: &[usize],
     root_fn_base: u32,
     run_initials_idx: u32,
+    queue_pass: Option<&QueuePass>,
 ) -> Function {
     // One f64 param (`target`, local 0) + two i32 locals (index 1 filler, `L_DST`
     // at 2) + two f64 locals (`saved_time`, `s` at 3/4). The cursor lives in
     // globals, not locals; the i32 at index 1 is unused filler that keeps `L_DST`
     // at the index the per-step emitters expect.
-    let mut f = Function::new([(2, ValType::I32), (2, ValType::F64)]);
+    //
+    // A special-stock model appends its four pass locals AFTER that fixed prefix
+    // (a second i32 group followed by a second f64 group -- the locals declaration
+    // is a list of `(count, type)` runs, not a per-type partition), so `L_SAVED_TIME`
+    // and `L_RK_S` keep indices 3/4 and the shared RK emitters need no change.
+    let mut f = if queue_pass.is_some() {
+        Function::new([
+            (2, ValType::I32),
+            (2, ValType::F64),
+            (1, ValType::I32),
+            (3, ValType::F64),
+        ])
+    } else {
+        Function::new([(2, ValType::I32), (2, ValType::F64)])
+    };
 
     // Absolute function indices of the ROOT instance's three program functions:
     // its function-triple base + the per-phase offset. The root is driven with
@@ -1274,7 +1489,7 @@ fn emit_run_to(
     // `curr` holding the full time-`t` state (aux/flows + time-`t` stocks), then
     // snapshot `prev_values := curr` and clear `use_prev_fallback`.
     match specs.method {
-        Method::Euler => emit_euler_step(&mut f, f_flows, f_stocks, &regions),
+        Method::Euler => emit_euler_step(&mut f, f_flows, f_stocks, &regions, queue_pass),
         Method::RungeKutta4 => {
             emit_rk4_step(&mut f, f_flows, f_stocks, specs.dt, stock_offsets, &regions)
         }
@@ -1322,12 +1537,29 @@ fn emit_run_to(
     // does NOT snapshot `prev_values`, so a resume's `PREVIOUS` still sees the last
     // completed step. Unlike the VM there is no chunk aliasing: `curr` is always
     // the fixed `CURR_BASE` region.
+    //
+    // For a special-stock model the Flows re-eval alone would UNDO the
+    // self-consistency it exists to provide: each pass-driven flow compiles to a
+    // placeholder `AssignConstCurr 0` that the per-step pass overwrites, so
+    // re-running Flows would stamp 0 into those slots, and the container stocks
+    // would keep the value published at the START of the last completed step (one
+    // step stale relative to the side table). Mirror the step prologue instead --
+    // publish start-of-step container values from the real side table, re-eval
+    // Flows, then run the pass as a side-effect-free PREVIEW on a cloned side table
+    // (`vm.rs:1147-1216`). Re-running the pass on the real state would
+    // double-advance the FIFOs when the run resumes.
     f.instruction(&I::GlobalGet(G_SAVED));
     f.instruction(&I::I32Const(regions.n_chunks as i32));
     f.instruction(&I::I32LtS);
     f.instruction(&I::If(BlockType::Empty));
+    if let Some(pass) = queue_pass {
+        pass.emit_publish_containers(&mut f);
+    }
     f.instruction(&I::I32Const(0));
     f.instruction(&I::Call(f_flows));
+    if let Some(pass) = queue_pass {
+        pass.emit_preview_pass(&mut f, PASS_LOCALS, L_PASS_HEAP_SAVE);
+    }
     f.instruction(&I::End); // end if
 
     f.instruction(&I::End); // end function
@@ -1355,8 +1587,39 @@ fn emit_run(specs: &Specs, indices: RunFnIndices) -> Function {
 
 /// The Euler step: `flows`+`stocks` (the stocks program writes `next[off]`),
 /// then the `prev_values` snapshot. Mirrors `vm.rs:698-708`.
-fn emit_euler_step(f: &mut Function, f_flows: u32, f_stocks: u32, regions: &RunRegions) {
-    emit_eval_step(f, f_flows, f_stocks);
+///
+/// This is the ONLY hook site for the special-stock passes -- conveyors and queues
+/// are Euler-only, enforced at plan-build time (`conveyor_compile.rs:952-956`), so
+/// RK2/RK4 can never reach a model with plans attached. Two DISTINCT hook points
+/// live here, in the VM's order (`vm.rs:916-982`):
+///
+/// 1. **step-start**, before Flows: publish each container variable from the side
+///    table as the previous step's admit/serve left it. A container variable is a
+///    hidden no-flow stock, so the published value survives Flows and Stocks and is
+///    what a Flows-phase `SUM(queue)` reader sees.
+/// 2. **between Flows and Stocks**: advance the side table and write each driven
+///    flow's rate, so the ordinary Stocks phase integrates every stock -- the queue
+///    stock included -- from those rates.
+///
+/// Collapsing the two would let a `SUM(queue)` reader see this step's post-serve
+/// batches instead of the start-of-step ones.
+fn emit_euler_step(
+    f: &mut Function,
+    f_flows: u32,
+    f_stocks: u32,
+    regions: &RunRegions,
+    queue_pass: Option<&QueuePass>,
+) {
+    if let Some(pass) = queue_pass {
+        pass.emit_publish_containers(f);
+    }
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::Call(f_flows));
+    if let Some(pass) = queue_pass {
+        pass.emit_step_pass(f, PASS_LOCALS);
+    }
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::Call(f_stocks));
     emit_prev_snapshot(f, regions);
 }
 
@@ -1597,9 +1860,21 @@ fn emit_set_value(
 ///    `G_USE_PREV_FALLBACK` back to 1 (the analogue of the VM's `reset` clearing
 ///    `prev_values_valid`). Mirrors `vm.rs:989-1002`.
 ///
+/// 3. **Special-stock bump pointer** (queue models only): `G_HEAP` is rewound to
+///    `heap_base`. Together with the `G_DID_INITIALS` clear above, that makes the
+///    next `run_initials` re-allocate every batch ring from the top of the bump
+///    region and re-seed every descriptor -- so repeated `reset`s (and therefore
+///    repeated `run`s, which delegate `reset; run_to(stop)`) reclaim every ring the
+///    prior run's capacity doubling abandoned, and cannot leak.
+///
 /// Like the VM, `reset` deliberately does NOT touch the constants-override region
 /// or its markers, so a `set_value` override persists across `reset`.
-fn emit_reset(n_slots: u32, const_region_base: u32, const_override_set_base: u32) -> Function {
+fn emit_reset(
+    n_slots: u32,
+    const_region_base: u32,
+    const_override_set_base: u32,
+    queue_pass: Option<&QueuePass>,
+) -> Function {
     let mut f = Function::new([]);
 
     // Part 1: curr[slot] = override_set[slot] ? const_region[slot] : 0.0
@@ -1631,6 +1906,11 @@ fn emit_reset(n_slots: u32, const_region_base: u32, const_override_set_base: u32
     f.instruction(&I::GlobalSet(G_DID_INITIALS));
     f.instruction(&I::I32Const(1));
     f.instruction(&I::GlobalSet(G_USE_PREV_FALLBACK));
+
+    // Part 3: rewind the special-stock bump pointer.
+    if let Some(pass) = queue_pass {
+        pass.emit_reset(&mut f);
+    }
     f.instruction(&I::End);
     f
 }
@@ -2031,6 +2311,10 @@ struct AssembleParts<'a> {
     run_to_fn: Function,
     /// `run_initials() -> ()`: idempotent initials for the resumable run.
     run_initials_fn: Function,
+    /// The root instance's container-SKIPPING initials, `(module_off: i32) -> ()`.
+    /// Present only for a queue model that publishes container values; `None`
+    /// otherwise, in which case the module has no such function and no such index.
+    initials_skipping_fn: Option<Function>,
     /// Module-input parameter count per instance, in the same order the triples
     /// appear in `program_fns`. Drives the per-triple wasm type
     /// (`(i32, f64*k) -> ()`).
@@ -2039,6 +2323,10 @@ struct AssembleParts<'a> {
     n_slots: u32,
     n_chunks: u32,
     results_base: u32,
+    /// The special-stock bump-pointer global's initial value (`passes::G_HEAP`),
+    /// or `None` when the model carries no side-table pass -- in which case the
+    /// global is not emitted at all and a pass-free blob stays byte-identical.
+    heap_base: Option<u32>,
     /// Every GF-bearing instance's region image, for the active `DataSection`
     /// segments (each instance's directory + data sit at distinct bases).
     gf_regions: &'a [&'a GfRegions],
@@ -2050,12 +2338,14 @@ struct AssembleParts<'a> {
 
 /// Assemble the simulation module: types, functions, memory, globals, exports,
 /// code, and (when present) the GF data segments. Layout: the emitted helper
-/// functions ([`build_helpers`]) lead the function/code sections (indices
-/// `0..n_helpers`); then one `[initials, flows, stocks]` triple per module
-/// instance (in `instance_order`); then `run` last. Exports `memory`, `run`, and
-/// the three self-describing i32 geometry globals. Each GF-bearing instance
-/// contributes two active `DataSection` segments (its directory + data) at its
-/// own bases.
+/// functions ([`build_helpers`], plus the queue pass's FIFO primitives when the
+/// model has one) lead the function/code sections (indices `0..n_helpers`); then
+/// one `[initials, flows, stocks]` triple per module instance (in
+/// `instance_order`); then the six drivers, and last -- for a queue model with
+/// container variables -- the root's container-skipping initials. Exports
+/// `memory`, `run`, and the three self-describing i32 geometry globals. Each
+/// GF-bearing instance contributes two active `DataSection` segments (its
+/// directory + data) at its own bases.
 fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     let AssembleParts {
         helpers,
@@ -2066,11 +2356,13 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         clear_values_fn,
         run_to_fn,
         run_initials_fn,
+        initials_skipping_fn,
         instance_input_counts,
         pages,
         n_slots,
         n_chunks,
         results_base,
+        heap_base,
         gf_regions,
         const_init,
     } = parts;
@@ -2149,6 +2441,11 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     functions.function(TYPE_RUN_FN); // clear_values
     functions.function(run_to_type); // run_to
     functions.function(TYPE_RUN_FN); // run_initials
+    if initials_skipping_fn.is_some() {
+        // The root's container-skipping initials shares the root's opcode-program
+        // type `(module_off: i32) -> ()`; the root always takes 0 module inputs.
+        functions.function(opcode_type_index[&0]);
+    }
     wasm.section(&functions);
 
     let mut memories = MemorySection::new();
@@ -2185,6 +2482,16 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_SAVED
     globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_STEP_ACCUM
     globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_DID_INITIALS
+    // `passes::G_HEAP` (index 7), the special-stock bump pointer. Emitted only for
+    // a model with a side-table pass, and initialized to the same `heap_base`
+    // `reset` rewinds to -- so a blob works even if the host never calls `reset`.
+    if let Some(heap_base) = heap_base {
+        debug_assert_eq!(globals.len(), passes::G_HEAP, "G_HEAP index drifted");
+        globals.global(
+            mutable_i32_global(),
+            &ConstExpr::i32_const(heap_base as i32),
+        );
+    }
     wasm.section(&globals);
 
     let mut exports = ExportSection::new();
@@ -2223,6 +2530,9 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     code.function(&clear_values_fn);
     code.function(&run_to_fn);
     code.function(&run_initials_fn);
+    if let Some(skipping) = &initials_skipping_fn {
+        code.function(skipping);
+    }
     wasm.section(&code);
 
     // The GF directory + data regions and the constants-override init values

@@ -23,7 +23,9 @@ use simlin_engine::datamodel;
 use simlin_engine::db::LtmSyntheticVar;
 use simlin_engine::float::approx_eq_eps;
 use simlin_engine::ltm::CausalGraph;
-use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_simulation};
+use simlin_engine::wasmgen::{
+    WasmGenError, WasmLayout, compile_datamodel_to_artifact, compile_simulation,
+};
 use simlin_engine::{Results, SimSpecs, Vm};
 use wasm::validate;
 
@@ -274,6 +276,58 @@ pub fn wasm_results_for(
         .map_err(|e| format!("incremental compile failed: {e:?}"))?;
 
     let artifact = match compile_simulation(&sim) {
+        Ok(artifact) => artifact,
+        Err(WasmGenError::Unsupported(msg)) => return Err(msg),
+    };
+
+    let slab = run_wasm_results(&artifact.wasm, &artifact.layout);
+    let specs = SimSpecs::from(&datamodel.sim_specs);
+    Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
+}
+
+/// VM oracle for a SPECIAL-STOCK (conveyor/queue) fixture.
+///
+/// [`wasm_results_for`]'s VM twin (simulate.rs `compile_vm`) calls
+/// `compile_project_incremental` directly, which is exactly the hard
+/// `ConveyorNotExpanded`/`QueueNotExpanded` guard's trigger: an un-expanded
+/// special-stock marker reaching the ordinary pipeline. This routes through the
+/// unified dispatch [`simlin_engine::build_sim`] instead -- the same entry point
+/// `libsimlin::simlin_sim_new` uses -- so the belt/FIFO stocks are expanded into
+/// driven flows and the resolved plans are ATTACHED to the returned `Vm`. Both
+/// details matter: an un-attached plan set would simulate the driven outflows as
+/// their (empty) equations and silently produce zeros.
+///
+/// Imperative Shell: drives the salsa compile pipeline and the VM.
+#[allow(dead_code)]
+pub fn vm_results_for_special(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> Results {
+    use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    let mut vm = simlin_engine::build_sim(&mut db, sync.project, datamodel, model_name)
+        .expect("build_sim should compile a special-stock fixture");
+    vm.run_to_end()
+        .expect("Vm::run_to_end should succeed on a special-stock fixture");
+    vm.into_results()
+}
+
+/// wasm peer of [`vm_results_for_special`]: lower `datamodel` through the
+/// production datamodel entry point [`compile_datamodel_to_artifact`], which
+/// performs the SAME `queue_compile::compile_sim` dispatch, so the blob simulates
+/// the identical expanded project the VM does. `Err` carries the `Unsupported`
+/// message (a conveyor model today); the caller decides whether that is a skip.
+///
+/// Imperative Shell: drives the salsa compile pipeline and the wasm interpreter,
+/// delegating the reshape to the pure [`wasm_results_from_slab`].
+#[allow(dead_code)]
+pub fn wasm_results_for_special(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> Result<Results, String> {
+    let artifact = match compile_datamodel_to_artifact(datamodel, model_name, false, false) {
         Ok(artifact) => artifact,
         Err(WasmGenError::Unsupported(msg)) => return Err(msg),
     };
