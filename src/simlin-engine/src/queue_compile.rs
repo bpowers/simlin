@@ -50,9 +50,9 @@
 //! loud error rather than silently mis-accounted. Every secondary reaching
 //! [`serve_secondary_outflows`] therefore targets a cloud or regular stock.
 //!
-//! Queues and conveyors COEXIST and COUPLE: the unified [`build_compiled`] /
-//! [`build_vm`] here expand conveyors first, then queues, compile ONCE, resolve
-//! BOTH plan sets against the same offset map, and then [`apply_couplings`]
+//! Queues and conveyors COEXIST and COUPLE: the unified [`compile_sim`] /
+//! [`build_compiled`] here expand conveyors first, then queues, compile ONCE,
+//! resolve BOTH plan sets against the same offset map, and then [`apply_couplings`]
 //! detects each queue outflow that feeds a discrete conveyor (enforcing the
 //! `ConveyorQueueUpstreamNotDiscrete` requirement) and wires the coupling INTO the
 //! two plan sets (a `queue_coupled` conveyor inflow + a [`QueueOutflowKind::Coupled`]
@@ -201,69 +201,134 @@ impl QueuePlan {
     }
 }
 
-/// Does the named model in `project` contain any queue stock? A cheap predicate a
-/// caller uses to decide whether to route through [`build_vm`] (the special
-/// stock-type build path) instead of the ordinary incremental compile. Mirrors
+/// Does the named model in `project` contain any queue stock? The cheap predicate
+/// [`compile_sim`] uses to decide whether to route through the special stock-type
+/// build path instead of the ordinary incremental compile. Mirrors
 /// [`crate::conveyor_compile::project_has_conveyor`].
+///
+/// It scans for a marked STOCK, so it deliberately does NOT see an `<overflow/>`
+/// marker (which rides on a flow); [`compile_sim`] validates those separately on
+/// both branches.
 pub fn project_has_queue(project: &datamodel::Project, main_model: &str) -> bool {
     main_model_has_stock(project, main_model, |s| s.compat.queue.is_some())
 }
 
-/// Validate every `<overflow/>` marker in `model` (docs/design/queues.md §3.3,
-/// §10.7). XMILE (§4.3) allows the marker ONLY on a queue outflow, and NEVER on a
-/// queue's FIRST (highest-priority) outflow: an overflow is by definition a
-/// lower-priority sibling that activates when a higher-priority outflow is blocked
-/// (§4.5). Both violations are a loud [`ErrorCode::QueueOverflowNotOnQueue`].
+/// One model variable, projected down to just what `<overflow/>` marker validation
+/// reads. The projection exists so ONE algorithm
+/// ([`validate_overflow_markers_over`]) serves both representations of a model: the
+/// `datamodel::Model` that [`expand_queues`] holds, and the salsa `SourceModel`
+/// inputs that [`crate::db::compile_project_incremental`] holds. Two hand-written
+/// twins would be free to drift, and this rule is the sole thing standing between a
+/// stray overflow marker and a silently mis-simulated flow.
+pub(crate) struct MarkerVar<'a> {
+    /// The variable's AS-WRITTEN ident. Error messages quote it, so it must carry
+    /// the user's own spelling, not the canonical form.
+    pub ident: &'a str,
+    /// `Some(outflows)` iff this is a queue-marked STOCK, in declared order (the
+    /// first entry is the highest-priority outflow).
+    pub queue_outflows: Option<&'a [String]>,
+    /// True iff this is a FLOW carrying an `<overflow/>` marker.
+    pub overflow_flow: bool,
+}
+
+/// Validate every `<overflow/>` marker among `vars`, the variables of ONE model in
+/// declaration order (docs/design/queues.md §3.3, §10.7).
 ///
-/// Runs before the no-queue fast path in [`expand_queues`], so a stray overflow on
-/// a flow that is not a queue outflow is caught even when the model has no queue at
-/// all (the queue-outflow sets are then empty and every overflow flag is rejected).
-fn validate_overflow_markers(model: &datamodel::Model) -> Result<(), (ErrorCode, String)> {
+/// XMILE (§4.3) allows the marker ONLY on a queue outflow, and NEVER on a queue's
+/// FIRST (highest-priority) outflow: an overflow is by definition a lower-priority
+/// sibling that activates when a higher-priority outflow is blocked (§4.5). Both
+/// violations are a loud [`ErrorCode::QueueOverflowNotOnQueue`].
+///
+/// A model with no queue stock has an empty outflow set, so every overflow flag in
+/// it is rejected -- which is the point: the marker rides on a FLOW, so neither
+/// special-stock dispatch predicate can see it, and a model can carry a stray
+/// overflow with no queue anywhere. Declaration order is load-bearing only for
+/// WHICH offender a multi-offender model reports; both callers preserve it.
+pub(crate) fn validate_overflow_markers_over(
+    vars: &[MarkerVar<'_>],
+) -> Result<(), (ErrorCode, String)> {
     // Every queue outflow name, and specifically each queue's FIRST outflow.
     let mut queue_outflows: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut first_outflows: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for v in &model.variables {
-        if let datamodel::Variable::Stock(s) = v
-            && s.compat.queue.is_some()
-        {
-            for (i, out) in s.outflows.iter().enumerate() {
-                let c = canon(out);
-                if i == 0 {
-                    first_outflows.insert(c.clone());
-                }
-                queue_outflows.insert(c);
+    for v in vars {
+        let Some(outflows) = v.queue_outflows else {
+            continue;
+        };
+        for (i, out) in outflows.iter().enumerate() {
+            let c = canon(out);
+            if i == 0 {
+                first_outflows.insert(c.clone());
             }
+            queue_outflows.insert(c);
         }
     }
-    for v in &model.variables {
-        if let datamodel::Variable::Flow(f) = v
-            && f.compat.overflow
-        {
-            let name = canon(&f.ident);
-            if !queue_outflows.contains(&name) {
-                return Err((
-                    ErrorCode::QueueOverflowNotOnQueue,
-                    format!(
-                        "flow '{}' is marked <overflow/> but is not a queue outflow; the overflow \
-                         property may appear only on an outflow of a queue stock (XMILE §4.3)",
-                        f.ident
-                    ),
-                ));
-            }
-            if first_outflows.contains(&name) {
-                return Err((
-                    ErrorCode::QueueOverflowNotOnQueue,
-                    format!(
-                        "flow '{}' is a queue's first (highest-priority) outflow and cannot be \
-                         marked <overflow/>; an overflow activates only when a higher-priority \
-                         outflow is blocked, so it may never be the first outflow (XMILE §4.3)",
-                        f.ident
-                    ),
-                ));
-            }
+    for v in vars {
+        if !v.overflow_flow {
+            continue;
+        }
+        let name = canon(v.ident);
+        if !queue_outflows.contains(&name) {
+            return Err((
+                ErrorCode::QueueOverflowNotOnQueue,
+                format!(
+                    "flow '{}' is marked <overflow/> but is not a queue outflow; the overflow \
+                     property may appear only on an outflow of a queue stock (XMILE §4.3)",
+                    v.ident
+                ),
+            ));
+        }
+        if first_outflows.contains(&name) {
+            return Err((
+                ErrorCode::QueueOverflowNotOnQueue,
+                format!(
+                    "flow '{}' is a queue's first (highest-priority) outflow and cannot be \
+                     marked <overflow/>; an overflow activates only when a higher-priority \
+                     outflow is blocked, so it may never be the first outflow (XMILE §4.3)",
+                    v.ident
+                ),
+            ));
         }
     }
     Ok(())
+}
+
+/// [`validate_overflow_markers_over`] applied to a `datamodel::Model`.
+///
+/// Called from [`expand_queues`], before its no-queue fast path. This is NOT the
+/// guarantee that marker placement is checked everywhere -- `expand_queues` only
+/// ever sees a model the stock-marker dispatch routed to it. The program-wide
+/// guarantee comes from the salsa twin in
+/// [`crate::db::compile_project_incremental`]: `db::assemble_simulation` has a
+/// single production caller, so nothing compiles without passing that gate.
+///
+/// Both are kept because expansion CLEARS the overflow marker on the driven
+/// outflows it rewrites: the "overflow on a queue's first outflow" violation is
+/// invisible downstream, so it must be caught here, before the clear. The
+/// complementary "not a queue outflow at all" violation survives expansion (a
+/// stray flag is not on a driven flow, so nothing clears it) and is the twin's.
+fn validate_overflow_markers(model: &datamodel::Model) -> Result<(), (ErrorCode, String)> {
+    let vars: Vec<MarkerVar<'_>> = model
+        .variables
+        .iter()
+        .map(|v| match v {
+            datamodel::Variable::Stock(s) => MarkerVar {
+                ident: &s.ident,
+                queue_outflows: s.compat.queue.is_some().then_some(s.outflows.as_slice()),
+                overflow_flow: false,
+            },
+            datamodel::Variable::Flow(f) => MarkerVar {
+                ident: &f.ident,
+                queue_outflows: None,
+                overflow_flow: f.compat.overflow,
+            },
+            other => MarkerVar {
+                ident: other.get_ident(),
+                queue_outflows: None,
+                overflow_flow: false,
+            },
+        })
+        .collect();
+    validate_overflow_markers_over(&vars)
 }
 
 /// Expand every queue in `main_model` of `project` into an ordinary INTEG stock
@@ -762,14 +827,13 @@ pub fn publish_queue_container_values(
 /// guard can never see it.
 ///
 /// This scan runs BEFORE either expansion (so no clone is mutated) at the single
-/// shared chokepoint every production caller funnels through -- [`build_sim`] ->
-/// [`build_vm`] -> [`build_compiled`], and libsimlin's `simlin_sim_new` ->
-/// [`build_compiled`] -- so no per-path twin is needed. It scans the MAIN model
-/// only, because expansion touches only the main model: a both-marked stock in a
-/// sub-model never double-expands (the pass leaves it untouched) and is already
-/// rejected loudly by the `db` guard's per-marker submodel arm
-/// ([`ErrorCode::ConveyorInSubmodelUnsupported`], which fires first on the surviving
-/// conveyor block).
+/// shared chokepoint every production caller funnels through -- [`compile_sim`]
+/// (and hence [`build_sim`]) -> [`build_compiled`] -- so no per-path twin is
+/// needed. It scans the MAIN model only, because expansion touches only the main
+/// model: a both-marked stock in a sub-model never double-expands (the pass leaves
+/// it untouched) and is already rejected loudly by the `db` guard's per-marker
+/// submodel arm ([`ErrorCode::ConveyorInSubmodelUnsupported`], which fires first on
+/// the surviving conveyor block).
 fn reject_conveyor_queue_conflict(
     project: &datamodel::Project,
     main_model: &str,
@@ -804,19 +868,40 @@ fn reject_conveyor_queue_conflict(
 /// may contain conveyors, queues, or both, so it expands conveyors FIRST (via
 /// [`crate::conveyor_compile::expand_conveyors`]) then queues (on the
 /// conveyor-expanded project), compiles ONCE, and resolves both plan sets against
-/// the same offset map. It is the reusable core of [`build_vm`]; a caller that
-/// rebuilds the VM later (libsimlin's reset) keeps all three pieces so it can
-/// re-attach the plans.
+/// the same offset map. It is the reusable core of [`compile_sim`] and
+/// [`build_vm`]; a caller that rebuilds the VM later (libsimlin's reset) keeps all
+/// three pieces so it can re-attach the plans.
+///
+/// The expanded project is compiled INCREMENTALLY, in `db`'s second input slot
+/// (`SimlinDb::sync_expanded`): the expansion is a linear datamodel
+/// walk, so it is re-run on every build, but the per-variable re-sync onto the
+/// prior expanded handles means an unrelated edit invalidates one fragment rather
+/// than the whole project. (Expansion cannot be a salsa tracked function -- it
+/// creates variables, hence salsa *inputs*, which tracked functions may not do --
+/// which is why it runs here on the `&mut db` path rather than as a query.)
+///
+/// The expanded project is a SEPARATE `SourceProject` from the user's, so
+/// diagnostics -- which `collect_all_diagnostics` gathers from the user's handle
+/// -- never see a synthetic `$conv$`/`$queue$` ident. It carries `ltm_enabled ==
+/// false` (the sync path never sets the flag), so the expanded compile does not
+/// participate in LTM: conveyor/queue plus LTM is a documented degradation.
 ///
 /// Enforces the Euler-only rule for both stock types (§10.3): a conveyor present
 /// under non-Euler yields [`ErrorCode::ConveyorNonEulerMethod`] (behavior-
 /// identical to the pure conveyor path); a queue present under non-Euler yields
 /// [`ErrorCode::QueueNonEulerMethod`].
 ///
-/// For a project with NO conveyors and NO queues this is exactly the ordinary
-/// compile path (both expansions are no-ops), so callers can route every
-/// simulation through it.
+/// For a project with NO conveyors and NO queues both expansions are no-ops and
+/// this is the ordinary compile path applied to a verbatim copy of the project --
+/// correct, but it would pointlessly populate `db`'s expanded slot with a duplicate
+/// of the user's own inputs. Production callers therefore reach this only through
+/// [`compile_sim`]'s marker dispatch, which sends an ordinary model straight to
+/// `compile_project_incremental` against the caller's `SourceProject`. ([`build_vm`],
+/// whose db is throwaway, is the exception.) The slot, once populated, is never
+/// released -- see the `SimlinDb::expanded_state` field docs for why clearing it
+/// would cost rather than save.
 pub fn build_compiled(
+    db: &mut crate::db::SimlinDb,
     project: &datamodel::Project,
     main_model: &str,
 ) -> crate::common::Result<(
@@ -830,7 +915,7 @@ pub fn build_compiled(
     // (GH #885): `expand_conveyors`/`expand_queues` walk the raw datamodel
     // variable list where both twins are still visible, and while each pass
     // is individually robust against a twin pair (the GH #870 hardening),
-    // expansion may transform or consume one twin -- so the private-db
+    // expansion may transform or consume one twin -- so the expanded-project
     // compile below (`compile_project_incremental`, which re-checks the same
     // condition) would report post-expansion names. Rejecting on the ORIGINAL
     // project keeps the message in the user's own spellings and makes
@@ -904,9 +989,12 @@ pub fn build_compiled(
         }
     }
 
-    let mut db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel_incremental(&mut db, &expanded, None);
-    let mut compiled = crate::db::compile_project_incremental(&db, sync.project, main_model)?;
+    // Sync the expanded project into the db's SECOND input slot, reusing the
+    // prior expanded handles so the per-variable diff hits the salsa caches. The
+    // handle is re-derived here on every build, which is exactly what makes a
+    // rolled-back staged patch unable to leave stale expanded inputs behind.
+    let expanded_project = db.sync_expanded(&expanded);
+    let mut compiled = crate::db::compile_project_incremental(db, expanded_project, main_model)?;
 
     let mut conveyor_plans = if conv_metas.is_empty() {
         Vec::new()
@@ -1415,41 +1503,87 @@ pub fn run_coupled_passes(
     Ok(())
 }
 
-/// Build a runnable [`Vm`](crate::vm::Vm) for `project`, wiring up conveyor AND
-/// queue support when the main model contains either. For a project with neither
-/// this is exactly the ordinary compile-and-build path (both expansions are
-/// no-ops), so callers can route every simulation through it.
+/// Build a runnable [`Vm`](crate::vm::Vm) for `project` on a THROWAWAY database,
+/// wiring up conveyor AND queue support when the main model contains either.
+///
+/// A convenience for callers that hold no `SimlinDb`. It has NO production callers:
+/// every one goes through [`compile_sim`] / [`build_sim`], which compile inside the
+/// caller's db. This is a four-line wrapper over the production [`build_compiled`],
+/// so its ONLY difference is a cold memo cache -- semantically transparent, which is
+/// why the ~80 test call sites that use it still pin production behavior. It is not
+/// a parallel implementation to keep in sync.
 pub fn build_vm(
     project: &datamodel::Project,
     main_model: &str,
 ) -> crate::common::Result<crate::vm::Vm> {
-    let (compiled, conveyor_plans, queue_plans) = build_compiled(project, main_model)?;
+    let mut db = crate::db::SimlinDb::default();
+    let (compiled, conveyor_plans, queue_plans) = build_compiled(&mut db, project, main_model)?;
     let mut vm = crate::vm::Vm::new(compiled)?;
     vm.set_conveyor_plans(conveyor_plans);
     vm.set_queue_plans(queue_plans);
     Ok(vm)
 }
 
-/// Build a runnable [`Vm`](crate::vm::Vm) for `main_model`, transparently routing
-/// a model that contains a conveyor or a queue through the special expansion
-/// build path ([`build_vm`]) and an ordinary model through the incremental salsa
-/// compile ([`crate::db::compile_project_incremental`] + [`Vm::new`](crate::vm::Vm::new)).
+/// [`build_compiled`] on a throwaway database, for tests that build once and so
+/// have nothing to gain from the caller-db incremental slot. Production code must
+/// use [`compile_sim`]: a fresh db recompiles every fragment.
+#[cfg(test)]
+pub(crate) fn build_compiled_fresh(
+    project: &datamodel::Project,
+    main_model: &str,
+) -> crate::common::Result<(
+    crate::vm::CompiledSimulation,
+    Vec<crate::conveyor_compile::ConveyorPlan>,
+    Vec<QueuePlan>,
+)> {
+    let mut db = crate::db::SimlinDb::default();
+    build_compiled(&mut db, project, main_model)
+}
+
+/// Everything the unified dispatch ([`compile_sim`]) produces: the compiled
+/// simulation, both special-stock plan sets, and which branch was taken.
 ///
-/// This is the single "compile-and-build a simulation" entry point every caller
-/// OTHER than `simlin_sim_new` uses -- the CLI and serve simulators, libsimlin's
-/// `is_simulatable`/`get_errors`/`apply_patch` compilability checks, and the LTM
-/// analysis pipeline -- so the conveyor/queue expansion is applied uniformly
-/// instead of each caller reproducing (or forgetting) the dispatch. `simlin_sim_new`
-/// keeps its own hand-rolled dispatch only because it additionally threads the
-/// LTM loop-partition snapshots the analysis FFIs need.
+/// `special` is what a caller needs in order to reason about LTM: the expansion
+/// path compiles a different `SourceProject` (with `ltm_enabled == false`), so a
+/// special-stock model carries no LTM instrumentation. libsimlin's
+/// `simlin_sim_new` reads it to decide whether to snapshot the LTM
+/// loop-partition metadata.
+pub struct SimBuild {
+    pub compiled: crate::vm::CompiledSimulation,
+    /// One plan per conveyor belt (per array element for an arrayed conveyor).
+    /// Empty unless `special`.
+    pub conveyor_plans: Vec<crate::conveyor_compile::ConveyorPlan>,
+    /// One plan per queue FIFO (per array element for an arrayed queue). Empty
+    /// unless `special`.
+    pub queue_plans: Vec<QueuePlan>,
+    /// True when the main model carried a conveyor or a queue marker and took the
+    /// expansion path.
+    pub special: bool,
+}
+
+/// Compile `main_model`, transparently routing a model that contains a conveyor
+/// or a queue through the special expansion build path ([`build_compiled`]) and
+/// an ordinary model through the incremental salsa compile
+/// ([`crate::db::compile_project_incremental`]).
 ///
-/// The `db`/`source_project` pair drives the ordinary path, preserving both
+/// This is the single "compile a simulation" dispatch. Every VM-backed production
+/// caller funnels through it -- libsimlin's `simlin_sim_new` /
+/// `is_simulatable`/`get_errors`/`apply_patch`, the CLI and serve simulators, and
+/// the LTM analysis pipeline -- so the conveyor/queue expansion is applied uniformly
+/// instead of each caller reproducing (or forgetting) it.
+///
+/// It is NOT, however, where `<overflow/>` marker placement is validated. `wasmgen`
+/// compiles a datamodel without coming through here, so that check belongs one level
+/// down, in `compile_project_incremental`, which both branches below AND `wasmgen`
+/// funnel through. (The "never the FIRST outflow" half additionally runs
+/// pre-expansion in [`expand_queues`], the only place that evidence still exists.)
+///
+/// The `db`/`source_project` pair drives the ordinary branch, preserving both
 /// incremental caching and whatever `ltm_enabled` the caller set on
 /// `source_project`. `datamodel` -- the synced representation of the SAME project
-/// -- drives the cheap marker scan and, when a special stock is present, the
-/// special path (which builds its own private db and does NOT participate in LTM:
-/// conveyor/queue + LTM is a documented degradation, docs/design/conveyors.md
-/// §9, docs/design/queues.md §10).
+/// -- drives the marker scan and, on the special branch, the expansion. BOTH
+/// branches now compile inside `db`; the special branch simply compiles `db`'s
+/// expanded `SourceProject` instead of the user's.
 ///
 /// The `ConveyorNotExpanded`/`QueueNotExpanded` guard in
 /// `compile_project_incremental` deliberately stays intact: it fires only when an
@@ -1457,21 +1591,79 @@ pub fn build_vm(
 /// (a genuine internal bug), which is exactly what it is meant to catch. A model
 /// with a special stock never reaches that guard from here because this function
 /// routes it to the expansion path first.
+pub fn compile_sim(
+    db: &mut crate::db::SimlinDb,
+    source_project: crate::db::SourceProject,
+    datamodel: &datamodel::Project,
+    main_model: &str,
+) -> crate::common::Result<SimBuild> {
+    if crate::conveyor_compile::project_has_conveyor(datamodel, main_model)
+        || project_has_queue(datamodel, main_model)
+    {
+        let (compiled, conveyor_plans, queue_plans) = build_compiled(db, datamodel, main_model)?;
+        return Ok(SimBuild {
+            compiled,
+            conveyor_plans,
+            queue_plans,
+            special: true,
+        });
+    }
+
+    // No `<overflow/>` validation here. The dispatch above scans for a marked
+    // STOCK while the overflow marker rides on a FLOW, so a stray overflow reaches
+    // this branch -- but validating it HERE would still leave `wasmgen`, which
+    // calls `compile_project_incremental` directly and never comes through this
+    // dispatch. The check lives in `compile_project_incremental` instead: that is
+    // where `db::assemble_simulation`'s single production caller sits, so no compile
+    // of any kind can slip past it.
+    //
+    // The expanded input slot is deliberately NOT released for an ordinary model.
+    // Salsa never reclaims inputs, so dropping the handle map would not free the
+    // arena -- it would only force the NEXT conveyor build to mint a fresh input
+    // set. Keeping the handles means at most one expanded input set is ever created
+    // per db, and a model that regains a conveyor re-syncs onto them. A stale slot
+    // is unobservable: it is only ever read through `sync_expanded`'s return value.
+    let compiled = crate::db::compile_project_incremental(db, source_project, main_model)?;
+    Ok(SimBuild {
+        compiled,
+        conveyor_plans: Vec::new(),
+        queue_plans: Vec::new(),
+        special: false,
+    })
+}
+
+/// Build a runnable [`Vm`](crate::vm::Vm) for `main_model` through the unified
+/// [`compile_sim`] dispatch, attaching the conveyor/queue passes when the model
+/// took the special branch.
+///
+/// This is the "compile-and-build a simulation" entry point every caller other
+/// than `simlin_sim_new` uses (which needs the compiled sim and the plan sets
+/// themselves, so it calls [`compile_sim`] directly).
 pub fn build_sim(
-    db: &crate::db::SimlinDb,
+    db: &mut crate::db::SimlinDb,
     source_project: crate::db::SourceProject,
     datamodel: &datamodel::Project,
     main_model: &str,
 ) -> crate::common::Result<crate::vm::Vm> {
-    if crate::conveyor_compile::project_has_conveyor(datamodel, main_model)
-        || project_has_queue(datamodel, main_model)
-    {
-        build_vm(datamodel, main_model)
-    } else {
-        let compiled = crate::db::compile_project_incremental(db, source_project, main_model)?;
-        crate::vm::Vm::new(compiled)
+    let build = compile_sim(db, source_project, datamodel, main_model)?;
+    let mut vm = crate::vm::Vm::new(build.compiled)?;
+    // Attaching empty plan sets is semantically a no-op, but the ordinary path
+    // has never touched the plan setters; keep it that way so an ordinary VM is
+    // byte-identical to one built straight from `compile_project_incremental`.
+    if build.special {
+        vm.set_conveyor_plans(build.conveyor_plans);
+        vm.set_queue_plans(build.queue_plans);
     }
+    Ok(vm)
 }
+
+// The db-interaction half of the build path's tests (expanded-input reuse,
+// marker validation on the ordinary dispatch branch, diagnostics provenance,
+// staged-patch rollback) lives in a sibling file so this one stays under the
+// per-file line cap.
+#[cfg(test)]
+#[path = "queue_compile_db_tests.rs"]
+mod db_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1532,7 +1724,7 @@ mod tests {
 
         // `build_sim` routes around it via the special build path and produces a
         // runnable VM whose queue stock simulates.
-        let mut vm = build_sim(&db, sync.project, &project, &main)
+        let mut vm = build_sim(&mut db, sync.project, &project, &main)
             .expect("build_sim compiles a queue model");
         vm.run_to_end().expect("queue model runs");
         assert!(vm.get_series(&Ident::new("waiting")).is_some());
@@ -1634,7 +1826,8 @@ mod tests {
         let main = project.models[0].name.clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let mut vm = build_sim(&db, sync.project, &project, &main).expect("ordinary model builds");
+        let mut vm =
+            build_sim(&mut db, sync.project, &project, &main).expect("ordinary model builds");
         vm.run_to_end().expect("ordinary model runs");
     }
 
@@ -1725,14 +1918,14 @@ mod tests {
             .clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, project, None);
-        build_sim(&db, sync.project, project, &main)
+        build_sim(&mut db, sync.project, project, &main)
             .expect_err("a special stock outside the main model must be rejected")
     }
 
     #[test]
     fn conveyor_in_submodel_rejected_by_build_compiled() {
         let project = parse(CONVEYOR_IN_SUBMODEL);
-        let err = build_compiled(&project, "main")
+        let err = build_compiled_fresh(&project, "main")
             .expect_err("a conveyor in a sub-model must be rejected");
         assert_eq!(err.code, ErrorCode::ConveyorInSubmodelUnsupported);
         let details = err.details.expect("a diagnostic message");
@@ -1750,8 +1943,8 @@ mod tests {
     #[test]
     fn queue_in_submodel_rejected_by_build_compiled() {
         let project = parse(QUEUE_IN_SUBMODEL);
-        let err =
-            build_compiled(&project, "main").expect_err("a queue in a sub-model must be rejected");
+        let err = build_compiled_fresh(&project, "main")
+            .expect_err("a queue in a sub-model must be rejected");
         assert_eq!(err.code, ErrorCode::QueueInSubmodelUnsupported);
         let details = err.details.expect("a diagnostic message");
         assert!(details.contains("waiting"), "names the stock: {details}");
@@ -1802,7 +1995,7 @@ mod tests {
         assert!(crate::conveyor_compile::project_has_conveyor(
             &project, "main"
         ));
-        let err = build_compiled(&project, "main")
+        let err = build_compiled_fresh(&project, "main")
             .expect_err("a sub-model conveyor must reject even via the special path");
         assert_eq!(err.code, ErrorCode::ConveyorInSubmodelUnsupported);
         let details = err.details.expect("a diagnostic message");
@@ -2205,7 +2398,7 @@ mod tests {
     fn stock_with_both_conveyor_and_queue_markers_rejected_by_build_compiled() {
         let project = parse(BOTH_MARKERS_STOCK);
         let main = project.models[0].name.clone();
-        let err = build_compiled(&project, &main)
+        let err = build_compiled_fresh(&project, &main)
             .expect_err("a stock marked as both a conveyor and a queue must be rejected");
         assert_eq!(err.code, ErrorCode::StockBothConveyorAndQueue);
         let details = err.details.expect("a diagnostic message");
@@ -2218,7 +2411,7 @@ mod tests {
         let main = project.models[0].name.clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let err = build_sim(&db, sync.project, &project, &main)
+        let err = build_sim(&mut db, sync.project, &project, &main)
             .expect_err("build_sim must reject a both-marked stock");
         assert_eq!(err.code, ErrorCode::StockBothConveyorAndQueue);
     }
@@ -3317,7 +3510,8 @@ mod tests {
         for swap in [false, true] {
             let project = two_queue_shared_belt_model(swap, false);
             let main = project.models[0].name.clone();
-            let (compiled, conv_plans, queue_plans) = build_compiled(&project, &main).unwrap();
+            let (compiled, conv_plans, queue_plans) =
+                build_compiled_fresh(&project, &main).unwrap();
             let table = CouplingTable::build(&conv_plans, &queue_plans);
 
             assert!(table.any, "swap={swap}: couplings must be detected");
@@ -3358,7 +3552,7 @@ mod tests {
     fn coupling_table_uncoupled_model_is_empty_and_deterministic() {
         let project = parse(QUEUE_DRAIN);
         let main = project.models[0].name.clone();
-        let (_compiled, conv_plans, queue_plans) = build_compiled(&project, &main).unwrap();
+        let (_compiled, conv_plans, queue_plans) = build_compiled_fresh(&project, &main).unwrap();
         let table = CouplingTable::build(&conv_plans, &queue_plans);
         assert!(!table.any);
         assert_eq!(table.queue_is_coupled, vec![false]);
@@ -4073,7 +4267,7 @@ mod tests {
     #[test]
     fn duplicate_canonical_idents_rejected_by_build_compiled() {
         let project = parse(DUPLICATE_FLOW_CONVEYOR);
-        let err = build_compiled(&project, "main")
+        let err = build_compiled_fresh(&project, "main")
             .expect_err("a duplicate canonical ident pair must be rejected before expansion");
         assert_eq!(err.code, crate::common::ErrorCode::DuplicateVariable);
         let details = err.details.expect("a diagnostic message");
@@ -4090,7 +4284,7 @@ mod tests {
         let main = project.models[0].name.clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let err = build_sim(&db, sync.project, &project, &main)
+        let err = build_sim(&mut db, sync.project, &project, &main)
             .expect_err("build_sim must reject the duplicate pair");
         assert_eq!(err.code, crate::common::ErrorCode::DuplicateVariable);
     }

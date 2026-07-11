@@ -11,7 +11,7 @@ use super::*;
 use crate::common::Ident;
 // The build entry points live in queue_compile (the unified conveyor+queue
 // build path); these tests pin the conveyor half of its behavior.
-use crate::queue_compile::{build_compiled, build_vm};
+use crate::queue_compile::{build_compiled_fresh, build_vm};
 use std::io::BufReader;
 
 fn parse(xml: &str) -> datamodel::Project {
@@ -1209,7 +1209,8 @@ fn arrayed_conveyor_expands_to_one_plan_per_element() {
     let xml = include_str!("../../../test/conveyors/arrayed_conveyor.xmile");
     let project = parse(xml);
     let main = project.models[0].name.clone();
-    let (compiled, plans, queue_plans) = build_compiled(&project, &main).expect("build_compiled");
+    let (compiled, plans, queue_plans) =
+        build_compiled_fresh(&project, &main).expect("build_compiled");
     assert!(
         queue_plans.is_empty(),
         "a pure-conveyor model must synthesize zero queue plans"

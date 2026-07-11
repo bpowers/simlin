@@ -21,7 +21,7 @@
 //!    map to produce [`ConveyorPlan`]s the VM's conveyor pass reads.
 //!
 //! The build entry points that drive these steps live in
-//! [`crate::queue_compile`] (`build_compiled`/`build_vm`/`build_sim`): a stock
+//! [`crate::queue_compile`] (`compile_sim`/`build_compiled`/`build_sim`): a stock
 //! may be a conveyor, a queue, or the two may couple, so ONE unified build path
 //! runs both expansions and resolves both plan sets against the same compiled
 //! offsets. This module supplies the conveyor half -- the expansion, plan
@@ -439,10 +439,9 @@ pub(crate) fn main_model_has_stock(
     })
 }
 
-/// Does the named model in `project` contain any conveyor stock? A cheap
-/// predicate a caller uses to decide whether to route through the special
-/// build path ([`crate::queue_compile::build_vm`]) instead of the ordinary
-/// incremental compile.
+/// Does the named model in `project` contain any conveyor stock? The cheap
+/// predicate [`crate::queue_compile::compile_sim`] uses to decide whether to route
+/// through the special build path instead of the ordinary incremental compile.
 pub fn project_has_conveyor(project: &datamodel::Project, main_model: &str) -> bool {
     main_model_has_stock(project, main_model, |s| s.compat.conveyor.is_some())
 }

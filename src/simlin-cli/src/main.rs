@@ -454,7 +454,7 @@ fn collect_diagnostics_as_formatted(
 }
 
 fn run_simulation(
-    db: &SimlinDb,
+    db: &mut SimlinDb,
     source_project: SourceProject,
     project: &DatamodelProject,
     model_name: &str,
@@ -480,7 +480,7 @@ fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
     let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
     let formatted = collect_diagnostics_as_formatted(&db, sync_state.project, &sync_state);
     report_formatted_errors(&formatted);
-    match run_simulation(&db, sync_state.project, project, "main") {
+    match run_simulation(&mut db, sync_state.project, project, "main") {
         Ok(results) => results,
         Err(err) => {
             handle_simulation_error(&err, &formatted);
@@ -514,7 +514,7 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
         report_formatted_errors(&formatted);
 
         set_project_ltm_enabled(&mut db, source_project, true);
-        match run_simulation(&db, source_project, project, "main") {
+        match run_simulation(&mut db, source_project, project, "main") {
             Ok(results) => return results,
             Err(err) => {
                 handle_simulation_error(&err, &formatted);
@@ -525,7 +525,7 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
 
         // LTM failed, fall back to non-LTM incremental simulation.
         set_project_ltm_enabled(&mut db, source_project, false);
-        match run_simulation(&db, source_project, project, "main") {
+        match run_simulation(&mut db, source_project, project, "main") {
             Ok(results) => return results,
             Err(err) => {
                 handle_simulation_error(&err, &formatted);
@@ -772,7 +772,7 @@ mod open_vensim_model_tests {
     fn run_to_first_row(project: &DatamodelProject) -> Results {
         let mut db = SimlinDb::default();
         let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
-        run_simulation(&db, sync_state.project, project, "main")
+        run_simulation(&mut db, sync_state.project, project, "main")
             .unwrap_or_else(|e| panic!("simulation failed: {e}"))
     }
 

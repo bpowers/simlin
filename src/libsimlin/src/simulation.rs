@@ -62,44 +62,30 @@ pub unsafe extern "C" fn simlin_sim_new(
     let project_ptr = model_ref.project;
     let project_ref = &*project_ptr;
 
-    // Conveyor AND queue models compile through the dedicated special-stock-type
-    // build path (`queue_compile::build_compiled`), which expands each belt/FIFO
-    // into hidden auxes + driven flows plus a native VM pass. That path uses a
-    // private db (bypassing the incremental salsa db) and does not participate in
-    // LTM (conveyor/queue + LTM is a documented degradation), so it is taken ONLY
-    // when the model actually contains a conveyor or a queue. The ordinary
-    // incremental compile below deliberately rejects an un-expanded conveyor or
-    // queue. A model with both carries both plan sets from the single build.
-    type SpecialBuild = std::result::Result<
-        (
-            engine::CompiledSimulation,
-            Vec<engine::conveyor_compile::ConveyorPlan>,
-            Vec<engine::queue_compile::QueuePlan>,
-        ),
-        engine::Error,
-    >;
-    let conveyor_build: Option<SpecialBuild> = {
-        let datamodel = project_ref.datamodel.lock().unwrap();
-        let has_conveyor =
-            engine::conveyor_compile::project_has_conveyor(&datamodel, &model_ref.model_name);
-        let has_queue = engine::queue_compile::project_has_queue(&datamodel, &model_ref.model_name);
-        if has_conveyor || has_queue {
-            Some(engine::queue_compile::build_compiled(
-                &datamodel,
-                &model_ref.model_name,
-            ))
-        } else {
-            None
-        }
-    };
+    // Lock the datamodel before the db -- the order `get_errors`/`apply_patch`
+    // use, so no site can invert it and deadlock -- because the shared dispatch
+    // `queue_compile::compile_sim` needs both: the datamodel drives the
+    // conveyor/queue marker scan and the expansion, the db holds the salsa inputs
+    // both branches compile against.
+    //
+    // Holding BOTH for the whole compile is deliberate, not incidental. The prior
+    // code took them SEQUENTIALLY (datamodel for the marker scan, released, then db
+    // for the compile), so a concurrent `apply_patch` could commit in between and
+    // the build would proceed on a stale marker verdict -- a TOCTOU. The cost is
+    // that datamodel readers block for the length of a compile; the db lock was
+    // already held that long, and a compile is exactly what it exists to serialize.
+    let datamodel_locked = project_ref.datamodel.lock().unwrap();
+    let mut db_locked = project_ref.db.lock().unwrap();
 
-    // Salsa-based incremental compilation. Both LTM and non-LTM paths
-    // use the same pipeline; the only difference is the ltm_enabled flag
-    // on the SourceProject input. The DB is kept in sync by apply_patch
-    // and project constructors, so this is typically a cache hit when
-    // nothing changed since the last patch.
+    // Salsa-based incremental compilation. Both LTM and non-LTM paths use the same
+    // pipeline; the only difference is the ltm_enabled flag on the SourceProject
+    // input. A conveyor/queue model additionally routes through the special-stock
+    // expansion inside `compile_sim`, which compiles the db's EXPANDED
+    // `SourceProject` (also incrementally). The DB is kept in sync by apply_patch
+    // and project constructors, so this is typically a cache hit when nothing
+    // changed since the last patch.
     type CompileSnapshot = (
-        std::result::Result<engine::CompiledSimulation, engine::Error>,
+        std::result::Result<engine::queue_compile::SimBuild, engine::Error>,
         // An `IndexMap` (not a `HashMap`): the engine emits `loop_partitions`
         // in loop emission order and the post-sim rel-loop-score denominator
         // sums in that order, so the snapshot preserves it (GH #468).
@@ -112,53 +98,8 @@ pub unsafe extern "C" fn simlin_sim_new(
         captured_loop_partitions,
         captured_loop_element_index,
         captured_ltm_mode,
-    ): CompileSnapshot = if conveyor_build.is_some() {
-        // The conveyor/queue special build (below) supplies the VM from its own
-        // private db, bypassing the salsa incremental compile entirely -- so LTM
-        // instrumentation is never generated for these models and the sim is
-        // created WITHOUT it (captured_ltm_mode is None, get_ltm_mode reports
-        // Disabled). LTM over a conveyor/queue is a documented degradation
-        // (docs/design/conveyors.md §9.6, queues.md §10.5): the flow-to-stock
-        // link-score formula assumes plain INTEG under Euler, and neither
-        // special stock is INTEG.
-        //
-        // But enable_ltm=true must still be HONORED as a request: latch
-        // ltm_requested so simlin_project_get_errors re-enables LTM for its
-        // diagnostic harvest and surfaces the ConveyorLtmDegraded /
-        // QueueLtmDegraded warning explaining why scores are absent. Without the
-        // latch the caller asked for analysis and silently got nothing --
-        // indistinguishable from "no loops found" -- and the warnings that exist
-        // precisely for these models were unreachable through the FFI. The latch
-        // is stored under the db lock (the same lock get_errors takes for its
-        // transient LtmEnabledGuard re-enable) so it is ordered against a
-        // concurrent get_errors, mirroring the ordinary branch below.
-        //
-        // We intentionally do NOT call set_project_ltm_enabled here. The special
-        // build never consults the salsa ltm_enabled input, so setting it would
-        // instrument nothing; and the ordinary branch always resets that input
-        // to false before returning, so leaving it false is already the
-        // consistent post-sim_new db state across both branches. get_errors
-        // flips it transiently via LtmEnabledGuard based purely on the
-        // ltm_requested latch, so the persistent flag value at rest is
-        // irrelevant to whether the degraded warnings are harvested.
-        if enable_ltm {
-            let _db = project_ref.db.lock().unwrap();
-            project_ref
-                .ltm_requested
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
-        (
-            Err(engine::Error {
-                kind: engine::ErrorKind::Simulation,
-                code: engine::ErrorCode::NotSimulatable,
-                details: None,
-            }),
-            engine::indexmap::IndexMap::new(),
-            HashMap::new(),
-            None,
-        )
-    } else {
-        let mut db = project_ref.db.lock().unwrap();
+    ): CompileSnapshot = {
+        let db = &mut *db_locked;
         if let Some(source_project) = db.current_source_project() {
             // Latch that this project has requested LTM at least once. Done
             // while holding the db lock (the same lock get_errors takes for
@@ -171,9 +112,28 @@ pub unsafe extern "C" fn simlin_sim_new(
                     .ltm_requested
                     .store(true, std::sync::atomic::Ordering::Release);
             }
-            engine::db::set_project_ltm_enabled(&mut db, source_project, enable_ltm);
-            let result =
-                engine::db::compile_project_incremental(&db, source_project, &model_ref.model_name);
+            engine::db::set_project_ltm_enabled(db, source_project, enable_ltm);
+            // The unified dispatch: an ordinary model compiles `source_project`
+            // incrementally; a conveyor/queue model is expanded and its expanded
+            // twin compiled in the db's second input slot, also incrementally.
+            let result = engine::queue_compile::compile_sim(
+                db,
+                source_project,
+                &datamodel_locked,
+                &model_ref.model_name,
+            );
+            // A special-stock build never synthesizes LTM variables: it compiles a
+            // DIFFERENT `SourceProject` (the expanded one, whose `ltm_enabled` is
+            // always false), so the sim is created WITHOUT instrumentation and
+            // `get_ltm_mode` reports Disabled. LTM over a conveyor/queue is a
+            // documented degradation (docs/design/conveyors.md §9.6, queues.md
+            // §10.5): the flow-to-stock link-score formula assumes plain INTEG
+            // under Euler, and neither special stock is INTEG. `enable_ltm=true` is
+            // still HONORED as a request via the `ltm_requested` latch above, so
+            // `simlin_project_get_errors` surfaces the ConveyorLtmDegraded /
+            // QueueLtmDegraded warning that explains why scores are absent.
+            let special = result.as_ref().map(|b| b.special).unwrap_or(false);
+
             // Snapshot the LTM loop-partition mapping AND per-loop slot
             // metadata *while* the ltm_enabled flag is still set and the
             // db is still locked.  Post-sim relative-loop-score queries
@@ -184,7 +144,10 @@ pub unsafe extern "C" fn simlin_sim_new(
             // also lets the FFI accept subscripted IDs like `r1[Boston]`
             // and resolve them against the loop_score's actual slot
             // layout (issue #463).
-            let (loop_partitions, loop_element_index, ltm_mode) = if enable_ltm && result.is_ok() {
+            let (loop_partitions, loop_element_index, ltm_mode) = if enable_ltm
+                && !special
+                && result.is_ok()
+            {
                 let canonical = engine::canonicalize(&model_ref.model_name);
                 if let Some(sm) = source_project.models(&*db).get(canonical.as_ref()).copied() {
                     let ltm_vars = engine::db::model_ltm_variables(&*db, sm, source_project);
@@ -242,7 +205,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             // subsequent operations (e.g. patch validation) that share
             // the same SourceProject.
             if enable_ltm {
-                engine::db::set_project_ltm_enabled(&mut db, source_project, false);
+                engine::db::set_project_ltm_enabled(db, source_project, false);
             }
             (result, loop_partitions, loop_element_index, ltm_mode)
         } else {
@@ -259,44 +222,39 @@ pub unsafe extern "C" fn simlin_sim_new(
         }
     };
 
-    let (compiled, vm, vm_error, conveyor_plans, queue_plans) = if let Some(result) = conveyor_build
-    {
-        // Special-stock path: build the VM and attach BOTH plan sets. The
-        // compiled sim AND the plans are all cached so reset() can recreate the
-        // VM (which consumes itself via into_results on run) and re-attach the
-        // passes. Empty plan sets are harmless (the VM guards on non-empty).
-        match result {
-            Ok((compiled, conv_plans, q_plans)) => match Vm::new(compiled.clone()) {
+    // The plan sets are cached on the SimState (only for a special-stock model, so
+    // an ordinary sim's reset stays untouched) because reset() recreates the VM --
+    // it consumes itself via into_results on run -- and must re-attach the passes.
+    let (compiled, vm, vm_error, conveyor_plans, queue_plans) = match incremental_result {
+        Ok(build) => {
+            let engine::queue_compile::SimBuild {
+                compiled,
+                conveyor_plans,
+                queue_plans,
+                special,
+            } = build;
+            let (cached_conv, cached_queue) = if special {
+                (Some(conveyor_plans.clone()), Some(queue_plans.clone()))
+            } else {
+                (None, None)
+            };
+            match Vm::new(compiled.clone()) {
                 Ok(mut vm) => {
-                    vm.set_conveyor_plans(conv_plans.clone());
-                    vm.set_queue_plans(q_plans.clone());
-                    (
-                        Some(compiled),
-                        Some(vm),
-                        None,
-                        Some(conv_plans),
-                        Some(q_plans),
-                    )
+                    if special {
+                        vm.set_conveyor_plans(conveyor_plans);
+                        vm.set_queue_plans(queue_plans);
+                    }
+                    (Some(compiled), Some(vm), None, cached_conv, cached_queue)
                 }
-                Err(err) => (
-                    Some(compiled),
-                    None,
-                    Some(err),
-                    Some(conv_plans),
-                    Some(q_plans),
-                ),
-            },
-            Err(err) => (None, None, Some(err), None, None),
+                Err(err) => (Some(compiled), None, Some(err), cached_conv, cached_queue),
+            }
         }
-    } else {
-        match incremental_result {
-            Ok(compiled) => match Vm::new(compiled.clone()) {
-                Ok(vm) => (Some(compiled), Some(vm), None, None, None),
-                Err(err) => (Some(compiled), None, Some(err), None, None),
-            },
-            Err(err) => (None, None, Some(err), None, None),
-        }
+        Err(err) => (None, None, Some(err), None, None),
     };
+
+    // Release both locks before the (lock-free) handle construction below.
+    drop(db_locked);
+    drop(datamodel_locked);
 
     crate::model_ref(model);
     let sim = Box::new(SimlinSim {

@@ -194,6 +194,34 @@ pub struct SimlinDb {
     /// parallel query execution, which uses a shared `&`), so no interior
     /// mutability is required.
     sync_state: Option<PersistentSyncState>,
+    /// Salsa input handles for the CONVEYOR/QUEUE-EXPANDED twin of the synced
+    /// project. `None` until the first special-stock build; `Some` from then on,
+    /// even if the model is later edited into an ordinary one (see below).
+    ///
+    /// A conveyor/queue stock is not compiled directly. It is *expanded* -- a
+    /// pure `datamodel::Project -> datamodel::Project` rewrite into ordinary
+    /// stocks/flows/auxes plus a native per-step VM pass -- and it is that
+    /// rewritten project which is compiled. The rewrite creates variables, so it
+    /// creates salsa *inputs*, which a salsa tracked function may not do: it has
+    /// to run on an `&mut self` sync path. This second slot is where the result
+    /// lives, so the expanded compile is incremental exactly like every other
+    /// compile instead of starting from a cold, throwaway database.
+    ///
+    /// Two `SourceProject`s in one db roughly doubles the salsa *input* footprint
+    /// for a conveyor/queue model. That is the price of incrementality, and it is
+    /// bounded at exactly ONE extra input set per db: `sync_expanded` always
+    /// re-syncs onto the PRIOR handles, so the set is created once and reused
+    /// forever after. An ordinary model never allocates it at all.
+    ///
+    /// The slot is deliberately never cleared. Salsa 0.26 has no input reclamation,
+    /// so dropping these handles would free nothing -- the `SourceProject`/
+    /// `SourceModel`/`SourceVariable` inputs and their memos stay in the arena --
+    /// while forcing the next expanded sync down the `prev == None` path, which
+    /// mints a *second* input set. A conveyor model edited into an ordinary one and
+    /// back (or a dry-run patch that removes the belt, which `apply_patch` performs
+    /// on every editor keystroke) would allocate a fresh set each round trip. A
+    /// stale slot costs nothing instead: nothing reads it without re-syncing first.
+    expanded_state: Option<PersistentSyncState>,
     /// The immutable stdlib model inputs (SMOOTH/DELAY/TREND/systems_*),
     /// built EXACTLY ONCE per db session and reused by every sync.
     ///
@@ -287,6 +315,46 @@ impl SimlinDb {
     /// The `SourceProject` from the most recent sync, if any.
     pub fn current_source_project(&self) -> Option<SourceProject> {
         self.sync_state.as_ref().map(|s| s.project)
+    }
+
+    /// Sync the conveyor/queue-EXPANDED twin of the project into the db's second
+    /// input slot, returning its `SourceProject` handle.
+    ///
+    /// Threads the PRIOR expanded handles into `sync_from_datamodel_incremental`,
+    /// so an unrelated single-variable edit re-syncs one `SourceVariable` field
+    /// and leaves every other expanded fragment's salsa memo intact. Passing
+    /// `None` there (which is what the old throwaway-db build did) would defeat
+    /// the entire purpose.
+    ///
+    /// INVARIANT -- the reason no rollback bookkeeping is needed: this handle is
+    /// the ONLY way to reach the expanded inputs, and the sole caller
+    /// (`queue_compile::build_compiled`) re-syncs the caller's current datamodel
+    /// through here immediately before reading a single field. A patch that is
+    /// staged (`sync_staged`), expanded, and then rejected (`restore`) therefore
+    /// cannot leave a poisoned expanded project behind: the next build overwrites
+    /// every input field from the restored datamodel before compiling. Keeping
+    /// the handles across the rollback is deliberate -- re-creating them would
+    /// throw away every expanded fragment memo, which is the cost this slot
+    /// exists to avoid.
+    pub(crate) fn sync_expanded(&mut self, expanded: &datamodel::Project) -> SourceProject {
+        // `take()` for the same borrow reason `sync` takes: the `prev` argument
+        // cannot borrow `self.expanded_state` while `self` is borrowed mutably.
+        let prev = self.expanded_state.take();
+        let new = sync_from_datamodel_incremental(self, expanded, prev.as_ref());
+        let sp = new.project;
+        self.expanded_state = Some(new);
+        sp
+    }
+
+    /// The expanded project's `SourceProject`, if the last build expanded one.
+    ///
+    /// Test-only: production code reaches the expanded inputs exclusively through
+    /// `sync_expanded`'s return value, which is what makes the "never read
+    /// without a preceding re-sync" invariant above structural rather than
+    /// merely conventional.
+    #[cfg(test)]
+    pub(crate) fn expanded_source_project(&self) -> Option<SourceProject> {
+        self.expanded_state.as_ref().map(|s| s.project)
     }
 
     /// Get the one-shot stdlib model cache, building it the first time it is
@@ -1045,6 +1113,54 @@ impl<'a> Drop for LtmEnabledGuard<'a> {
     }
 }
 
+/// `queue_compile::validate_overflow_markers_over` applied to one salsa
+/// `SourceModel`: the twin of `queue_compile`'s `datamodel::Model` adapter, sharing
+/// the identical validation algorithm so the two representations can never drift.
+///
+/// Iterates `declared_variable_idents` -- the ordered, pre-dedup AS-WRITTEN ident
+/// list -- rather than the canonical-keyed `variables` map, whose iteration order is
+/// nondeterministic. Declaration order decides WHICH offender a multi-offender model
+/// reports, so it must match the `datamodel::Model` adapter's `model.variables`
+/// order. Duplicate canonical idents are rejected by `compile_project_incremental`
+/// before this runs, so the lookup is one-to-one and a miss can only mean the raw
+/// list and the map disagree -- skipped rather than panicked on.
+fn validate_model_overflow_markers(db: &SimlinDb, model: SourceModel) -> crate::Result<()> {
+    use crate::queue_compile::MarkerVar;
+
+    let vars = model.variables(db);
+    // Overwhelmingly the common case: no `<overflow/>` anywhere. This runs on every
+    // compile of every model in the project, the ~9 synced stdlib models included,
+    // so short-circuit before cloning `declared_variable_idents` and building the
+    // projection. Order-independent, so the `HashMap` walk is safe here.
+    if !vars.values().any(|sv| sv.compat(db).overflow) {
+        return Ok(());
+    }
+    let marker_vars: Vec<MarkerVar<'_>> = model
+        .declared_variable_idents(db)
+        .iter()
+        .filter_map(|raw| vars.get(canonicalize(raw).as_ref()))
+        .map(|sv| {
+            let compat = sv.compat(db);
+            let kind = sv.kind(db);
+            MarkerVar {
+                ident: sv.ident(db),
+                queue_outflows: (kind == SourceVariableKind::Stock && compat.queue.is_some())
+                    .then(|| sv.outflows(db).as_slice()),
+                overflow_flow: kind == SourceVariableKind::Flow && compat.overflow,
+            }
+        })
+        .collect();
+
+    match crate::queue_compile::validate_overflow_markers_over(&marker_vars) {
+        Ok(()) => Ok(()),
+        Err((code, msg)) => Err(crate::common::Error::new(
+            crate::common::ErrorKind::Simulation,
+            code,
+            Some(msg),
+        )),
+    }
+}
+
 /// Compile a project incrementally using salsa tracked functions.
 ///
 /// This is the production compilation entry point. Returns the assembled
@@ -1099,10 +1215,10 @@ pub fn compile_project_incremental(
     // by which model the stock lives in:
     //
     //   * MAIN model: the model reached the ordinary compile path un-expanded --
-    //     a genuine internal invariant violation (`build_sim`/`simlin_sim_new`
-    //     should have routed it to the special path). Integrating it as a plain
-    //     stock would silently mis-simulate, so reject it with the internal
-    //     `ConveyorNotExpanded`/`QueueNotExpanded` guard code.
+    //     a genuine internal invariant violation (`queue_compile::compile_sim`'s
+    //     marker dispatch should have routed it to the special path). Integrating
+    //     it as a plain stock would silently mis-simulate, so reject it with the
+    //     internal `ConveyorNotExpanded`/`QueueNotExpanded` guard code.
     //   * NON-MAIN model (a module-referenced sub-model, or a model defined but
     //     never instantiated): conveyor/queue support is deliberately main-model
     //     only for now -- the expansion pass never touches a sub-model, so the
@@ -1112,15 +1228,31 @@ pub fn compile_project_incremental(
     //     the clear `ConveyorInSubmodelUnsupported`/`QueueInSubmodelUnsupported`
     //     diagnostic naming the stock and its model.
     //
-    // The scan covers every synced model. The salsa-synced stdlib models (SMOOTH
-    // etc.) are in this set but carry no conveyor/queue markers, so they never
-    // trip it; a genuine sub-model special stock is caught on EVERY compile
-    // surface, since the special path expands only the main model and then
-    // funnels its private-db compile through this same entry point.
+    // The scan covers every synced model of the passed `project`, which on the
+    // special path is the db's EXPANDED `SourceProject` (the main model's markers
+    // are cleared there, the sub-models' are not). The salsa-synced stdlib models
+    // (SMOOTH etc.) are in this set but carry no conveyor/queue markers, so they
+    // never trip it; a genuine sub-model special stock is caught on EVERY compile
+    // surface, since the special path expands only the main model and then funnels
+    // its expanded-project compile through this same entry point.
+    //
+    // Both loops walk in sorted canonical order because `SourceProject::models` and
+    // `SourceModel::variables` are `HashMap`s: a project with marked stocks in two
+    // sub-models (or two marked stocks in one model) would otherwise name a
+    // different offender on each run of the same build. The `ErrorCode` would be
+    // stable but the user-facing message would not.
     let main_canon = canonicalize(main_model_name);
-    for source_model in project.models(db).values() {
+    let models = project.models(db);
+    let mut model_names: Vec<&String> = models.keys().collect();
+    model_names.sort_unstable();
+    for model_name in model_names {
+        let source_model = models[model_name];
         let in_main = canonicalize(source_model.name(db)) == main_canon;
-        for source_var in source_model.variables(db).values() {
+        let vars = source_model.variables(db);
+        let mut var_names: Vec<&String> = vars.keys().collect();
+        var_names.sort_unstable();
+        for var_name in var_names {
+            let source_var = vars[var_name];
             if source_var.compat(db).conveyor.is_some() {
                 if in_main {
                     return crate::sim_err!(
@@ -1171,6 +1303,54 @@ pub fn compile_project_incremental(
                     )
                 );
             }
+        }
+    }
+    // `<overflow/>` marker placement (docs/design/queues.md §3.3, §10.7). The check
+    // lives here, not in `queue_compile`'s dispatch, because `assemble_simulation`
+    // has exactly ONE production caller -- the line below -- so nothing compiles
+    // without passing this gate. The dispatch is not such a chokepoint: `wasmgen`
+    // reaches `compile_project_incremental` directly, so validating in the dispatch
+    // would leave the wasm backend accepting what the VM rejects. And the marker
+    // rides on a FLOW, so neither dispatch predicate (both scan for a marked STOCK)
+    // can even see it: a model may carry a stray overflow with no queue anywhere and
+    // take the ordinary branch.
+    //
+    // Placing it AFTER the marker guard above selects WHICH of two errors a
+    // sub-model queue reports; it is not what makes the check sound. Expansion never
+    // touches a sub-model, so a sub-model queue stock still carries `compat.queue`
+    // at this point -- but the guard has already claimed that model, so the marker is
+    // never examined and a sub-model queue reports `QueueInSubmodelUnsupported`
+    // whatever its overflow placement. Run this gate FIRST instead and one case
+    // changes: a sub-model queue whose overflow sits on its FIRST outflow would
+    // report the less actionable `QueueOverflowNotOnQueue`. Nothing invalid is
+    // accepted either way.
+    //
+    // What DOES reach this validator is therefore a project in which no model holds a
+    // queue marker at all: the main model's were either cleared by expansion or would
+    // have tripped the guard's main-model arm, and any sub-model's would have tripped
+    // its sub-model arm. Every surviving overflow flag thus
+    // names a flow that is not -- and, sub-model queues being unsupported, cannot be
+    // -- a queue outflow, so rejecting it is right for sub-models too, not a silent
+    // skip. The per-model outflow set the validator builds is consequently always
+    // empty today; it is computed rather than assumed so that lifting the guard's
+    // sub-model arm (a real sub-model-queue feature) makes legal non-first overflows
+    // start being accepted here with no change to this code.
+    //
+    // The expanded project reaches here with its main-model overflow markers
+    // already cleared by `expand_queues` (it clears every driven outflow, and its
+    // own pre-expansion validation guarantees each overflow flag WAS one), so a
+    // valid special-stock model passes. That pre-expansion check is not redundant
+    // with this one: it is the only place the "never the FIRST outflow" rule can be
+    // enforced, since expansion erases the evidence.
+    //
+    // Models are scanned in sorted canonical-name order so a multi-model project
+    // reports deterministically, mirroring the duplicate-variable gate above.
+    {
+        let models = project.models(db);
+        let mut model_names: Vec<&String> = models.keys().collect();
+        model_names.sort_unstable();
+        for name in model_names {
+            validate_model_overflow_markers(db, models[name])?;
         }
     }
     // `assemble_simulation` is salsa-tracked, returning an `Arc` so its return

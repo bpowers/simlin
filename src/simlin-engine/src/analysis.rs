@@ -340,8 +340,9 @@ fn run_ltm_pipeline(
     // the ordinary path's NotExpanded guard (which previously surfaced here as a
     // spurious `analysis_error`) -- while an ordinary model still compiles through
     // the incremental path with the caller's `ltm_enabled` intact. The special
-    // path does NOT synthesize LTM variables, so a conveyor/queue model's loop
-    // analysis degrades to empty loops (conveyor/queue + LTM is a documented
+    // path compiles the db's EXPANDED `SourceProject`, whose `ltm_enabled` is
+    // always false, so it synthesizes no LTM variables: a conveyor/queue model's
+    // loop analysis degrades to empty loops (conveyor/queue + LTM is a documented
     // degradation) but no longer reports a false error.
     //
     // A compile failure here is still the actionable GH #660 case: the GH #486
@@ -350,7 +351,7 @@ fn run_ltm_pipeline(
     // than collapsing into an empty "no loops" result. Format it the same way
     // regardless of origin: prefer the rich `details` (e.g. the Euler guidance),
     // fall back to the code's Display when a bare error carries none.
-    let mut vm = crate::build_sim(&*db, source_project, project, &canonical_name)
+    let mut vm = crate::build_sim(db, source_project, project, &canonical_name)
         .map_err(|e| e.details.unwrap_or_else(|| e.code.to_string()))?;
     vm.run_to_end()
         .map_err(|e| e.details.unwrap_or_else(|| e.code.to_string()))?;

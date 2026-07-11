@@ -129,7 +129,7 @@ pub fn compile_datamodel_to_artifact(
     // GH #884: the wasm backend does not lower the conveyor/queue side-table
     // passes (`init_belts`/`run_coupled_passes` and belt state are VM-only), so
     // detect the special-stock markers up front -- the same cheap predicates
-    // `queue_compile::build_sim` dispatches on -- and reject with an honest
+    // `queue_compile::compile_sim` dispatches on -- and reject with an honest
     // wasm-caller-facing message. Without this, the model would fall through to
     // `compile_project_incremental`, whose `ConveyorNotExpanded`/
     // `QueueNotExpanded` guard text is written for the VM path. The early exit

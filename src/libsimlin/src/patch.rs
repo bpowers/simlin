@@ -545,7 +545,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // staged conveyor/queue datamodel through its special expansion build path,
     // so a valid special-stock edit is not rejected (and rolled back) by the
     // ordinary compile path's NotExpanded guard.
-    let sim_error = engine::build_sim(&db, staged_sp, &staged_datamodel, "main").err();
+    let sim_error = engine::build_sim(&mut db, staged_sp, &staged_datamodel, "main").err();
 
     let all_errors =
         gather_error_details_with_db(&db, staged_sp, sim_error.as_ref(), &staged_datamodel);
