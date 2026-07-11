@@ -15,7 +15,7 @@ use std::time::Duration;
 use simlin_serve::events::{ChangeSource, EventBus, WsMessage};
 use simlin_serve::handlers::AppState;
 use simlin_serve::registry::ProjectRegistry;
-use simlin_serve::test_support::unavailable_git_probe;
+use simlin_serve::test_support::{OS_EVENT_TIMEOUT, unavailable_git_probe, wait_for_watcher_ready};
 use simlin_serve::watcher::{ShutdownSignal, spawn_watcher};
 use tempfile::TempDir;
 use tokio::sync::Notify;
@@ -71,10 +71,14 @@ async fn watcher_emits_project_changed_for_new_file() {
 
     let mut rx = state.events.subscribe();
 
-    let _handle = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let handle = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = handle.probe_sightings();
 
-    // Give the OS-level watch a moment to register before writing.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Prove the OS-level watch is live, then write immediately. See
+    // `wait_for_watcher_ready` for why a sleep here cannot work.
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // The minimal sd.json the watcher's parse path accepts.
     let content = r#"{"name":"smoke","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
@@ -83,11 +87,9 @@ async fn watcher_emits_project_changed_for_new_file() {
         .await
         .expect("write file");
 
-    // The debouncer window is 100ms; we wait up to 2s to be robust on
-    // slow CI machines.
-    let event = await_disk_changed(&mut rx, Duration::from_secs(2))
+    let event = await_disk_changed(&mut rx, OS_EVENT_TIMEOUT)
         .await
-        .expect("watcher must emit ProjectChanged{source: Disk} within 2s");
+        .expect("watcher must emit ProjectChanged{source: Disk} for the new file");
     match event {
         WsMessage::ProjectChanged { source, .. } => {
             assert_eq!(source, ChangeSource::Disk);
@@ -111,7 +113,7 @@ async fn watcher_shutdown_signal_terminates_actor() {
 
     // The actor should exit within a tick cycle (timeout/4 = 25ms);
     // 500ms is a generous bound for slow CI machines.
-    tokio::time::timeout(Duration::from_millis(500), handle)
+    tokio::time::timeout(Duration::from_millis(500), handle.into_join_handle())
         .await
         .expect("watcher actor did not exit within 500ms")
         .expect("watcher actor task panicked");

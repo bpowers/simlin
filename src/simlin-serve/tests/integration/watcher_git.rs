@@ -21,6 +21,7 @@ use simlin_serve::events::{ChangeSource, EventBus, WsMessage};
 use simlin_serve::git::{GitProbe, strip_git_path_env};
 use simlin_serve::handlers::AppState;
 use simlin_serve::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry};
+use simlin_serve::test_support::{OS_EVENT_TIMEOUT, wait_for_watcher_ready};
 use simlin_serve::watcher::{ShutdownSignal, spawn_watcher};
 use tempfile::TempDir;
 use tokio::sync::Notify;
@@ -170,9 +171,15 @@ async fn git_commit_flips_registry_entry_from_dirty_to_clean() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut sightings = watcher.probe_sightings();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The trigger below is a `git commit`, which cannot be replayed if its
+    // `.git/index` event is lost. Prove the watch is live first, then commit
+    // immediately -- no sleep in between.
+    wait_for_watcher_ready(&state.root, &mut sightings)
+        .await
+        .expect("watcher becomes ready");
 
     // Stage + commit. The commit rewrites .git/index, which the
     // watcher's GitInternal handler reacts to by invalidating the
@@ -181,12 +188,9 @@ async fn git_commit_flips_registry_entry_from_dirty_to_clean() {
     must_git(repo, &["add", "model.stmx"]);
     must_git(repo, &["commit", "-q", "-m", "v2"]);
 
-    // The watcher's debounce is 100ms; give the GitProbe cache + the
-    // registry-update pass enough wall-clock time to land. Polling
-    // because we don't want to assert wall-clock timing as part of
-    // the success criterion -- only that the eventual state is
-    // tracked+clean.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    // Poll rather than assert wall-clock timing: the success criterion is the
+    // eventual state, not how fast the OS delivered the index event.
+    let deadline = tokio::time::Instant::now() + OS_EVENT_TIMEOUT;
     let mut final_state = state.registry.get(&model_canonical).expect("entry").git;
     while final_state != (GitState::Tracked { dirty: false })
         && tokio::time::Instant::now() < deadline
@@ -209,7 +213,7 @@ async fn git_commit_flips_registry_entry_from_dirty_to_clean() {
     // receiver to find an event matching the model path with Disk
     // source. (Other Disk-source events from incidental file
     // modification may also fire; we just need to see at least one.)
-    let event = await_disk_event_for(&mut rx, "model.stmx", Duration::from_secs(2)).await;
+    let event = await_disk_event_for(&mut rx, "model.stmx", OS_EVENT_TIMEOUT).await;
     assert!(
         event.is_some(),
         "git-status change must produce a ProjectChanged{{Disk}} broadcast for the file"
